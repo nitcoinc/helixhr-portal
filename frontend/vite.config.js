@@ -27,4 +27,10 @@ export default defineConfig({
       '@': path.resolve(__dirname, 'src'),
     },
   },
+  test: {
+    // Playwright owns tests/e2e/**/*.spec.ts (real browser); vitest's
+    // default glob would otherwise also pick those up and crash with
+    // "test.describe() not expected here" (confirmed in CI on U3's push).
+    exclude: ['tests/e2e/**', 'node_modules/**'],
+  },
 })
