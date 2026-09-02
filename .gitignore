@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Build outputs
+dist/
+build/
+.next/
+out/
+*.egg-info/
+
+# Environment — MEM0_API_KEY and friends live here, never commit them
+.env
+.env.*
+!.env.example
+
+# CocoIndex semantic index — large, machine-local, rebuild with `ccc index .`
+.cocoindex_code/
+
+# Agent scratch
+_archive/
+.claude/audit.log
+
+# Note: .scratch/ is deliberately NOT ignored. If /to-tickets is configured for
+# the local-files tracker, your tickets live in .scratch/<feature>/issues/ and
+# should be committed. Ignore it only if you use a real tracker instead.
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+
+# Testing
+coverage/
+.coverage
+htmlcov/
+.pytest_cache/
+test-results/
+
+# Logs
+*.log
+logs/
+
+# Local-only scratch
+.local/
+.private/
