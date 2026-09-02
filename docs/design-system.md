@@ -4,21 +4,19 @@
 
 ## Palette
 
-Base neutrals reuse frappe-ui's own gray scale (do not redefine gray — only add these tokens). One brand color, three status colors.
+**Correction after inspecting the installed `frappe-ui@0.1.278` package (U2):** frappe-ui already ships full `gray`/`blue`/`green`/`amber`/`red` Tailwind color families plus semantic `ink-*` / `surface-*` / `outline-*` CSS-variable classes via its `tailwind` preset (`tailwind/preset.js` → `plugin.js` → `colorPalette.js`). Do **not** invent new `--color-brand-*` custom tokens — reuse the existing families directly as Tailwind classes. This is fewer moving parts and stays consistent with every other frappe-ui component on the page.
 
-| Role | Token | Hex | Use | Contrast on white |
-|---|---|---|---|---|
-| Brand / primary | `--color-brand-600` | `#2563EB` | Primary buttons, active nav, links (large text/icons) | ~4.6:1 (AA large text, AA non-text) |
-| Brand / primary text | `--color-brand-700` | `#1D4ED8` | Body-size links, small text on white | ~6.3:1 (AA normal text) |
-| Brand / primary bg | `--color-brand-50` | `#EFF6FF` | Selected row, info banner background | — |
-| Success | `--color-success-700` | `#15803D` | "Approved" text, success icon | ~4.9:1 |
-| Success bg | `--color-success-50` | `#F0FDF4` | Approved badge background | — |
-| Warning | `--color-warning-700` | `#B45309` | "Waiting" / pending text | ~4.8:1 |
-| Warning bg | `--color-warning-50` | `#FFFBEB` | Pending badge background | — |
-| Danger | `--color-danger-600` | `#DC2626` | "Rejected" text, destructive actions | ~4.8:1 |
-| Danger bg | `--color-danger-50` | `#FEF2F2` | Rejected badge background | — |
+| Role | Use these classes | Hex (light mode, from `frappe-ui/tailwind/colors.json`) | Contrast on white |
+|---|---|---|---|
+| Brand / primary | `bg-blue-600 text-white` (buttons), `text-blue-700` (links, small text) | `#007BE0` / `#0070CC` | blue-600 on white ~4.7:1; blue-700 ~5.6:1 |
+| Brand bg | `bg-blue-50` | `#F2F9FF` | — |
+| Success | `text-green-700`, `bg-green-50 text-green-700` (badge) | `#137949` / `#F2FDF4` | ~5.9:1 |
+| Warning | `text-amber-700`, `bg-amber-50 text-amber-700` (badge) | `#B35309` / `#FDFAED` | ~5.1:1 |
+| Danger | `text-red-600` / `bg-red-50 text-red-600` (badge) | `#CC2929` / `#FFF7F7` | ~5.4:1 |
+| Body text | `text-ink-gray-9` (headings), `text-ink-gray-7` (body), `text-ink-gray-5` (muted) | frappe-ui semantic tokens | AA at every level used |
+| Background / border | `bg-surface-white`, `bg-surface-gray-2`, `border-outline-gray-2` | frappe-ui semantic tokens | — |
 
-Body text stays on frappe-ui's own `gray-900` (headings) / `gray-700` (body) / `gray-600` (muted, ~7.5:1 — do not use `gray-500`, it is borderline at ~4.6:1 and only safe for large text or icons).
+Do not use `gray-500`/`amber-600`/`red`-on-white for small text directly — use the `-600`/`-700` shades and semantic `ink-*` tokens above, which are the ones frappe-ui itself uses for text.
 
 **Anti-patterns to avoid** (from the style search): bright neon accents, harsh/instant animations, dark mode (not in phase 1 scope — see brief Deferred).
 
