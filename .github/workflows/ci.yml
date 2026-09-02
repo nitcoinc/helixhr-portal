@@ -81,7 +81,11 @@ jobs:
         # "ModuleNotFoundError: No module named 'helixhr'" without this.
         run: |
           cp -r ${{ github.workspace }}/helixhr-src apps/helixhr
-          echo helixhr >> sites/apps.txt
+          # plain `echo >> apps.txt` previously glued onto the last line
+          # ("erpnexthelixhr") because that file has no trailing newline;
+          # this reflows it cleanly regardless.
+          { cat sites/apps.txt; echo; echo helixhr; } | awk 'NF' > sites/apps.txt.tmp
+          mv sites/apps.txt.tmp sites/apps.txt
           uv pip install -e apps/helixhr --python env/bin/python
         working-directory: frappe-bench
 
@@ -177,7 +181,11 @@ jobs:
           bench get-app erpnext --branch version-16
           bench get-app hrms --branch version-16
           cp -r ${{ github.workspace }}/helixhr-src apps/helixhr
-          echo helixhr >> sites/apps.txt
+          # plain `echo >> apps.txt` previously glued onto the last line
+          # ("erpnexthelixhr") because that file has no trailing newline;
+          # this reflows it cleanly regardless.
+          { cat sites/apps.txt; echo; echo helixhr; } | awk 'NF' > sites/apps.txt.tmp
+          mv sites/apps.txt.tmp sites/apps.txt
           uv pip install -e apps/helixhr --python env/bin/python
         working-directory: frappe-bench
       - name: Build frontend
