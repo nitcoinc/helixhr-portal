@@ -89,6 +89,14 @@ jobs:
           uv pip install -e apps/helixhr --python env/bin/python
         working-directory: frappe-bench
 
+      - name: Build frontend
+        # test_install.py's assertions need the real built shell
+        # (helixhr/www/helixhr.html, gitignored, only exists after this) --
+        # this job installed the app but never built it and failed with
+        # 404 on the first real run.
+        run: yarn install --frozen-lockfile && yarn build
+        working-directory: frappe-bench/apps/helixhr/frontend
+
       - name: New site, install apps
         run: |
           bench new-site test_site \
