@@ -1,0 +1,185 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# NOTE: written and structured against the standard Frappe bench CI recipe
+# and everything this plan's U1-U3 units verified by hand on the dev VM
+# (see docs/runbook.md), but has not yet run for real -- this repo has no
+# remote yet. Treat the first real run as the actual verification and fix
+# forward from whatever it finds, per U3's Verification Contract entry.
+
+jobs:
+  python-tests:
+    runs-on: ubuntu-latest
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: root
+        ports: ["3306:3306"]
+        options: >-
+          --health-cmd="mysqladmin ping -proot"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+      redis-cache:
+        image: redis:8-alpine
+        ports: ["13000:6379"]
+      redis-queue:
+        image: redis:8-alpine
+        ports: ["11000:6379"]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: helixhr-src
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install bench
+        run: pip install frappe-bench
+
+      - name: Init bench (frappe, erpnext, hrms v16)
+        run: |
+          bench init --skip-redis-config-generation frappe-bench \
+            --frappe-branch version-16 --python "$(which python)"
+        working-directory: ${{ github.workspace }}
+
+      - name: Point bench at the CI services
+        run: |
+          bench set-mariadb-host 127.0.0.1
+          bench set-redis-cache-host redis://127.0.0.1:13000
+          bench set-redis-queue-host redis://127.0.0.1:11000
+          bench set-redis-socketio-host redis://127.0.0.1:11000
+        working-directory: frappe-bench
+
+      - name: Get erpnext and hrms
+        run: |
+          bench get-app erpnext --branch version-16
+          bench get-app hrms --branch version-16
+        working-directory: frappe-bench
+
+      - name: Get helixhr (this checkout)
+        run: cp -r ${{ github.workspace }}/helixhr-src apps/helixhr
+        working-directory: frappe-bench
+
+      - name: New site, install apps
+        run: |
+          bench new-site test_site \
+            --db-root-username root --db-root-password root \
+            --admin-password admin \
+            --install-app erpnext --install-app hrms --install-app helixhr \
+            --no-mariadb-socket
+          bench --site test_site set-config allow_tests true
+        working-directory: frappe-bench
+
+      - name: Run helixhr tests
+        run: bench --site test_site run-tests --app helixhr
+        working-directory: frappe-bench
+
+      - name: Ruff
+        run: |
+          pip install ruff
+          ruff check helixhr-src/helixhr
+        working-directory: ${{ github.workspace }}
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: yarn install --frozen-lockfile
+        working-directory: frontend
+      - run: yarn lint
+        working-directory: frontend
+      - run: yarn test
+        working-directory: frontend
+      # yarn build needs a real bench (sites/apps siblings) to write its
+      # output into -- see vite.config.js and docs/runbook.md's Windows
+      # note. The e2e job below builds against a real bench instead.
+
+  e2e:
+    needs: [python-tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: helixhr-src
+      # Reruns the same bench setup as python-tests. GitHub Actions jobs
+      # don't share a filesystem, and the site this job needs to test
+      # against (with a *built frontend*) only exists inside a live bench.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install bench
+        run: pip install frappe-bench
+      - name: Init bench (frappe, erpnext, hrms v16)
+        run: |
+          bench init --skip-redis-config-generation frappe-bench \
+            --frappe-branch version-16 --python "$(which python)"
+        working-directory: ${{ github.workspace }}
+      - name: Point bench at the CI services
+        run: |
+          bench set-mariadb-host 127.0.0.1
+        working-directory: frappe-bench
+      - name: Get erpnext, hrms, helixhr
+        run: |
+          bench get-app erpnext --branch version-16
+          bench get-app hrms --branch version-16
+          cp -r ${{ github.workspace }}/helixhr-src apps/helixhr
+        working-directory: frappe-bench
+      - name: Build frontend
+        run: yarn install --frozen-lockfile && yarn build
+        working-directory: frappe-bench/apps/helixhr/frontend
+      - name: New site, install apps, enable tests
+        run: |
+          bench new-site test_site \
+            --db-root-username root --db-root-password root \
+            --admin-password admin \
+            --install-app erpnext --install-app hrms --install-app helixhr \
+            --no-mariadb-socket --set-default
+          bench --site test_site set-config allow_tests true
+        working-directory: frappe-bench
+      - name: Start bench
+        run: nohup bench start > bench-start.log 2>&1 &
+        working-directory: frappe-bench
+      - name: Wait for bench
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:8000/api/method/frappe.ping && exit 0
+            sleep 2
+          done
+          cat bench-start.log; exit 1
+        working-directory: frappe-bench
+      - name: Seed Playwright fixtures
+        run: |
+          curl -sf -c cookies.txt -X POST http://localhost:8000/api/method/login \
+            -d "usr=Administrator&pwd=admin"
+          curl -sf -b cookies.txt -X POST \
+            http://localhost:8000/api/method/helixhr.tests.utils.setup_playwright_fixtures
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: yarn install --frozen-lockfile
+        working-directory: frappe-bench/apps/helixhr/frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frappe-bench/apps/helixhr/frontend
+      - run: yarn test:e2e
+        working-directory: frappe-bench/apps/helixhr/frontend
+        env:
+          BASE_URL: http://localhost:8000
+          SITE_HOST: test_site

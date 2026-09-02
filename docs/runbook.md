@@ -1,0 +1,184 @@
+# HelixHR runbook (U3)
+
+Operational steps for a human. Filled in as each unit adds a step; U11 finishes it.
+
+## Install the app on a bench
+
+The app is not published anywhere yet. Until it is, copy the source in and register it:
+
+```bash
+# on the bench host, inside the backend container (or a real bench checkout)
+cp -r /path/to/HelixHR-Fronend/helixhr apps/helixhr/helixhr
+cp /path/to/HelixHR-Fronend/pyproject.toml /path/to/HelixHR-Fronend/README.md /path/to/HelixHR-Fronend/LICENSE apps/helixhr/
+uv pip install -e apps/helixhr --python env/bin/python
+bench --site <site> install-app helixhr
+```
+
+If the site's Frappe process was already running before you added the app, **restart it** —
+a long-running gunicorn worker does not pick up a newly added Python package on its own.
+Also make sure the `helixhr` app directory exists inside **every** container that serves the
+site (backend, and separately the frontend/nginx container if it is a distinct container from
+the same image) — each has its own filesystem copy of `apps/`, even when they share the
+`sites` data volume. If static assets 404 after install, check for a per-container missing
+`assets/helixhr -> apps/helixhr/helixhr/public` symlink (`ls -la <bench>/assets/`) and create
+it if absent, matching the symlinks already there for `frappe`/`erpnext`/`hrms`.
+
+After changing the frontend, **clear the site's cache** (`bench --site <site> clear-cache`) --
+website pages are cached, so a rebuilt `www/helixhr.html` can otherwise keep serving the old
+one.
+
+Build the frontend before or after installing the app (order doesn't matter, but the page
+404s / 500s until it's built at least once):
+
+```bash
+cd frontend
+yarn build
+```
+
+**Windows note:** building on Windows can hang indefinitely — `frappe-ui`'s Vite plugin walks
+up the directory tree looking for a bench (`sites/` + `apps/` siblings) using a Unix-only root
+check (`while (currentDir !== '/')`), which never terminates on a Windows drive root (`C:\`).
+Build on Linux/macOS, or inside a Linux container, instead.
+
+## Microsoft Entra ID login (production / staging only)
+
+1. In the Azure portal, register a new App registration.
+   - Platform: **Web**.
+   - Redirect URI: `https://<your-site>/api/method/frappe.integrations.oauth2_logins.login_via_office365`
+   - Token configuration → add optional claim → ID token → **email**.
+   - Certificates & secrets → create a client secret. Copy it now; it is not shown again.
+2. In Frappe Desk: **Social Login Key** → new → provider **Office 365**.
+   - Client ID = the app registration's Application (client) ID.
+   - Client Secret = the secret from step 1.
+   - Enable the key.
+3. **Website Settings → Disable Signup**: turn **on**. Without this, an unknown Entra email
+   gets a new Website User instead of the "contact HR" message the brief requires (D2/D3 in
+   the brief; R2 in the plan).
+4. **System Settings → Disable Username/Password Login**: turn on for **production only**.
+   Leave password login on for dev/test sites so local and automated testing doesn't need
+   Entra.
+5. Behind a reverse proxy (nginx, the frontend container here), make sure
+   `X-Forwarded-Proto` is set correctly so Frappe marks the session cookie `Secure`.
+
+### Known upstream issue: `redirect-to` can be lost on the OAuth round trip
+
+Frappe has an open bug (frappe/frappe#27672) where `redirect-to` sent to `/login` can come
+back empty after the Entra round trip. **Verify this on your own site before relying on it**:
+
+```
+https://<site>/login?redirect-to=/helixhr
+```
+
+Sign in and confirm you land on `/helixhr`, not the bare Desk/home page. If it fails, set
+**Website Settings → Home Page** to `/helixhr` as the fallback (KTD4) — every user then lands
+on the portal after login by default, `redirect-to` or not.
+
+_Verified so far: password-login `redirect-to` works correctly on this environment's dev site
+(confirmed both by hand and by the Playwright suite below). Entra isn't configured on the dev
+VM, so the OAuth round trip itself is **not yet verified** -- do this before go-live._
+
+## Test users, and the "how does a Guest get logged out" surprise
+
+`helixhr/tests/utils.py` creates three users, on demand, from Python tests or via a
+whitelisted HTTP method for Playwright (see below):
+
+- `employee@helixhr.test` — reports to the manager below.
+- `manager@helixhr.test`.
+- `no-employee@helixhr.test` — a logged-in user with no Employee record, for the "not linked"
+  page (R3).
+
+All three log in with the password in `helixhr/tests/utils.py`'s `TEST_PASSWORD` constant.
+**It is deliberately not `"password"`** -- any site with System Settings' password policy on
+(the dev VM does; a barebones fresh test site may not) rejects that as a top-10 common
+password.
+
+Each employee is created with `create_user_permission=1`, which gives them a **User
+Permission** scoping them to their own Employee record — this is the entire authorization
+boundary (brief D4, plan KTD5). A user without it can see every employee's data.
+
+**A logged-out visitor ("Guest") calling any of this app's whitelisted methods gets a `403
+PermissionError`, not a `401 AuthenticationError`.** Frappe has no separate "not authenticated"
+state — Guest is just another session — so `allow_guest=False` (the default, and what every
+method here uses) denies Guest with a `PermissionError` whose message contains "Login to
+access". `frontend/src/lib/api.js` matches on that phrase (in addition to a real
+`AuthenticationError`) to redirect to `/login`, specifically so it does **not** also redirect a
+logged-in user who is simply forbidden from a specific action (e.g. approving someone else's
+timesheet, R25/R26) — that case must stay an in-app error, not a forced logout.
+
+## Fixtures need a bit of seed data a headless install skips
+
+`bench new-site --install-app erpnext` never runs the interactive setup wizard, so a fresh
+site has **no Gender records and no "Transit" Warehouse Type** even though creating an
+Employee or a Company needs them. `helixhr/tests/utils.py` creates both on demand
+(`ensure_test_gender`, the `Warehouse Type` check in `ensure_test_company`) rather than
+assuming they exist. If a future fixture hits a similar `MandatoryError` or
+`LinkValidationError` for some other setup-wizard-seeded record, the fix is the same shape:
+create it once, idempotently, in this file — don't reach for erpnext's own test-suite helpers
+(`erpnext.setup.doctype.employee.test_employee.make_employee`) to sidestep it. That module's
+*import* runs `erpnext.tests.utils.ERPNextTestSuite`'s bootstrap as a side effect, which tries
+to create fiscal years and other master data unconditionally -- harmless on a pristine site,
+but it throws on any site (any dev site that's been used at all) that already has real
+Company/Fiscal Year records that overlap with what it tries to create.
+
+## Multi-site gotchas found while wiring up this VM (read before adding another site)
+
+This dev VM's nginx (`helixhr-platform`'s image) is built for **one fixed site**: it hardcodes
+`try_files /10.10.16.26/public/$uri ...` and `X-Frappe-Site-Name 10.10.16.26` regardless of
+what `Host` header a client sends. A second site (`test.localhost`, used for the Python
+integration test suite -- see below) is real and works fine via `bench --site test.localhost
+run-tests`, but it is **not reachable over HTTP through this nginx at all**. Two consequences:
+
+- **Python tests** (`bench --site <name> run-tests`) are unaffected -- they select the site
+  directly, bypassing HTTP host resolution entirely. Keep using a dedicated site
+  (`test.localhost` here) for these.
+- **Playwright** (real browser, needs real HTTP) runs against the dev site (`10.10.16.26`)
+  instead, using the three clearly-named test users above. `bench serve --port <n>` (Frappe's
+  own dev server, which *does* do Host-header-based multi-site routing) was tried as a way to
+  reach `test.localhost` over HTTP, but never resolved the header correctly in this
+  environment for a still-unconfirmed reason -- not worth chasing further given the dev site
+  works fine for this purpose. A from-scratch CI environment (one site, created fresh per run,
+  matching `frappe/hrms`'s own CI) won't have this problem: with only one site, Frappe's
+  `default_site` fallback picks it regardless of the `Host` header.
+
+**Do not set a `Host` header override on a Playwright *browser* context** (`use.extraHTTPHeaders`
+in `playwright.config.ts`). It breaks `page.goto()` outright with
+`net::ERR_INVALID_ARGUMENT` -- confirmed by testing a bare Playwright script with and without
+it, isolating it from every other variable (hostname vs IP, Docker networking, `--ipc=host`).
+An **API-only** request context (`request.newContext()`, used by `auth.setup.ts` to log in) is
+unaffected and can set `Host` freely.
+
+## Playwright
+
+Three identities log in once via `POST /api/method/login` (not the UI) and save
+`storageState` for reuse across specs — see `frontend/tests/e2e/auth.setup.ts`. The
+employee/manager `storageState` files back the `employee`/`manager` projects in
+`playwright.config.ts`; the "no active Employee" scenario logs in fresh inline instead (it
+isn't one of the two projects' identities).
+
+Create the fixtures over HTTP before running Playwright against a site that doesn't already
+have them (enable `allow_tests` first, same gate `bench run-tests` itself needs):
+
+```bash
+bench --site <site> set-config allow_tests true
+# log in as Administrator, then:
+curl -b <cookie-jar> -X POST https://<site>/api/method/helixhr.tests.utils.setup_playwright_fixtures
+```
+
+Run the suite (values below match this dev VM; adjust `BASE_URL`/`SITE_HOST` elsewhere):
+
+```bash
+cd frontend
+BASE_URL=http://<frontend-host>:8080 SITE_HOST=<site> \
+  TEST_USER_PASSWORD='<value of TEST_PASSWORD in helixhr/tests/utils.py>' \
+  yarn test:e2e
+```
+
+## Go-live checklist (grows through U11)
+
+- [ ] Confirm every Employee Self Service user has a User Permission on their own Employee
+      (query: Employee where `create_user_permission` was unchecked, or User Permission count
+      mismatched against active Employee count).
+- [ ] Disable Signup and Disable Username/Password Login are set (see above).
+- [ ] `X-Forwarded-Proto` reaches Frappe correctly behind the real proxy.
+- [ ] The real Entra OAuth round trip (not just password login) has been verified end to end,
+      including the `redirect-to` behavior above.
