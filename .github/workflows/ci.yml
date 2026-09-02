@@ -75,7 +75,14 @@ jobs:
         working-directory: frappe-bench
 
       - name: Get helixhr (this checkout)
-        run: cp -r ${{ github.workspace }}/helixhr-src apps/helixhr
+        # Copying the folder alone doesn't make it importable -- unlike
+        # `bench get-app`, a plain cp never runs the pip install that puts
+        # it on the venv's path. install-app below failed with
+        # "ModuleNotFoundError: No module named 'helixhr'" without this.
+        run: |
+          cp -r ${{ github.workspace }}/helixhr-src apps/helixhr
+          echo helixhr >> sites/apps.txt
+          uv pip install -e apps/helixhr --python env/bin/python
         working-directory: frappe-bench
 
       - name: New site, install apps
@@ -170,6 +177,8 @@ jobs:
           bench get-app erpnext --branch version-16
           bench get-app hrms --branch version-16
           cp -r ${{ github.workspace }}/helixhr-src apps/helixhr
+          echo helixhr >> sites/apps.txt
+          uv pip install -e apps/helixhr --python env/bin/python
         working-directory: frappe-bench
       - name: Build frontend
         run: yarn install --frozen-lockfile && yarn build
