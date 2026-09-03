@@ -159,6 +159,13 @@ turn, as the fixture code changed), taking ~50s per hang. It reproduced on the d
 after dropping and recreating the test site from scratch, which looked at the time like a
 VM/environment problem worth routing around by trusting CI instead.
 
+It also reproduced (same symptom, same ~50s stall, and the same "a second, otherwise-idle DB
+connection is holding something the real insert waits on" shape visible in
+`SHOW FULL PROCESSLIST`) on a completely fresh, from-scratch local Docker dev bench built for
+U5 (`frappe_docker`-style, KTD14 -- `apps.json`-driven `bench get-app` for `erpnext`/`hrms` on
+`version-16`, this repo bind-mounted as `apps/helixhr`), independently confirming this was never
+about that one VM.
+
 **Then the identical hang happened on a clean GitHub Actions runner**, on the real U4 code, one
 test after `test_guest_is_refused` -- which called `werkzeug.test.Client(application).get(...)`
 (a real nested WSGI request) from inside an `IntegrationTestCase` test to prove a whitelisted

@@ -19,6 +19,14 @@ out/
 helixhr/public/helixhr/
 helixhr/www/helixhr.html
 
+# unplugin-auto-import / unplugin-vue-components type declarations --
+# regenerated on every dev/build run from whatever's actually imported.
+frontend/auto-imports.d.ts
+frontend/components.d.ts
+
+# Playwright auth.setup.ts output (session cookies for the two test users)
+frontend/tests/.auth/
+
 # Environment — MEM0_API_KEY and friends live here, never commit them
 .env
 .env.*

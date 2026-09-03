@@ -2,6 +2,8 @@ import frappe
 from frappe.utils import get_first_day, get_last_day, today
 from hrms.api import get_attendance_calendar_events, get_current_employee, get_leave_balance_map
 
+from helixhr.utils import PROFILE_EDITABLE_FIELDS, rate_limit_per_user
+
 
 @frappe.whitelist()
 def get_dashboard(**kwargs):
@@ -24,6 +26,31 @@ def get_dashboard(**kwargs):
 		"pending": _safe(lambda: _get_pending_counts(employee)),
 		"unread_notifications": _safe(_get_unread_notification_count),
 	}
+
+
+@frappe.whitelist(methods=["POST"])
+def update_my_profile(**fields):
+	"""Save the caller's own contact fields on their Employee record (R9).
+
+	`fields` is dropped to the allow-list before it ever reaches the
+	document -- a caller passing `department` or any other key gets it
+	silently ignored here, on top of (not instead of) the permlevel lock
+	the U5 fixtures put on the field itself (KTD6: the fixture is the real
+	lock; this allow-list stops the write attempt one step earlier so a
+	rejected value never even reaches `validate()`). The employee is
+	resolved from the session, never from an argument, so nobody can name
+	another employee's record here (KTD5).
+	"""
+	rate_limit_per_user("update_my_profile", limit=20, seconds=60)
+	employee = get_current_employee()
+	updates = {field: value for field, value in fields.items() if field in PROFILE_EDITABLE_FIELDS}
+
+	doc = frappe.get_doc("Employee", employee)
+	for field, value in updates.items():
+		doc.set(field, value)
+	doc.save()
+
+	return {field: doc.get(field) for field in PROFILE_EDITABLE_FIELDS}
 
 
 def _safe(fn):

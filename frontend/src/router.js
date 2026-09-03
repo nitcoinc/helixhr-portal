@@ -43,8 +43,7 @@ const routes = [
   {
     path: '/profile',
     name: 'Profile',
-    component: () => import('@/pages/PageComingSoon.vue'),
-    props: { title: 'Profile' },
+    component: () => import('@/pages/Profile.vue'),
   },
 ]
 

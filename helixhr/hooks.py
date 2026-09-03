@@ -72,6 +72,23 @@ website_route_rules = [
 	{"from_route": "/helixhr/<path:app_path>", "to_route": "helixhr"},
 ]
 
+# Fixtures
+# --------
+# Configuration shipped as data, not code, per KTD15 -- filtered to this
+# app's own records so `bench migrate` never exports another app's Property
+# Setters or permission rows.
+
+fixtures = [
+	{"dt": "Property Setter", "filters": [["module", "=", "HelixHR"]]},
+	{
+		"dt": "Custom DocPerm",
+		"filters": [
+			["parent", "=", "Employee"],
+			["role", "in", ["Employee", "HR Manager", "HR User", "System Manager"]],
+		],
+	},
+]
+
 # Generators
 # ----------
 
