@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { createResource } from 'frappe-ui'
 import StatCard from '@/components/StatCard.vue'
 import QuickActions from '@/components/QuickActions.vue'
+import Bell from '@/components/Bell.vue'
 
 const dashboard = createResource({
   url: 'helixhr.api.get_dashboard',
@@ -20,28 +21,31 @@ const unreadNotifications = computed(() => dashboard.data?.unread_notifications)
 
 <template>
   <div class="min-h-screen bg-surface-gray-1 pb-24">
-    <header class="border-b border-outline-gray-2 bg-surface-white px-4 py-4">
-      <p
-        v-if="dashboard.loading"
-        class="text-ink-gray-5"
-      >
-        Loading…
-      </p>
-      <template v-else-if="employee">
-        <h1 class="font-heading text-xl font-semibold text-ink-gray-9">
-          {{ employee.employee_name }}
-        </h1>
+    <header class="flex items-start justify-between border-b border-outline-gray-2 bg-surface-white px-4 py-4">
+      <div>
         <p
-          v-if="roleLine"
-          class="text-ink-gray-6"
+          v-if="dashboard.loading"
+          class="text-ink-gray-5"
         >
-          {{ roleLine }}
+          Loading…
         </p>
-        <p class="mt-1 text-sm text-ink-gray-5">
-          <span v-if="employee.manager_name">Reports to {{ employee.manager_name }}</span>
-          <span v-if="employee.branch"> · {{ employee.branch }}</span>
-        </p>
-      </template>
+        <template v-else-if="employee">
+          <h1 class="font-heading text-xl font-semibold text-ink-gray-9">
+            {{ employee.employee_name }}
+          </h1>
+          <p
+            v-if="roleLine"
+            class="text-ink-gray-6"
+          >
+            {{ roleLine }}
+          </p>
+          <p class="mt-1 text-sm text-ink-gray-5">
+            <span v-if="employee.manager_name">Reports to {{ employee.manager_name }}</span>
+            <span v-if="employee.branch"> · {{ employee.branch }}</span>
+          </p>
+        </template>
+      </div>
+      <Bell />
     </header>
 
     <div class="px-4 py-4">

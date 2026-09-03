@@ -133,6 +133,7 @@ fixtures = [
 		"dt": "Activity Type",
 		"filters": [["name", "=", "General"]],
 	},
+	{"dt": "Notification", "filters": [["module", "=", "HelixHR"]]},
 ]
 
 # Document Events
