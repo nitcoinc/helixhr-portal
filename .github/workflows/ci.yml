@@ -237,3 +237,16 @@ jobs:
         env:
           BASE_URL: http://localhost:8000
           SITE_HOST: test_site
+      # Diagnostic only (screenshots/traces/videos from the failing run,
+      # plus the dev-server's own log) -- upload-artifact never fails the
+      # job, so this doesn't change pass/fail, it just stops the CI
+      # runner's only forensic evidence from being thrown away on exit.
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results
+          path: |
+            frappe-bench/apps/helixhr/frontend/test-results
+            frappe-bench/bench-start.log
+          retention-days: 7

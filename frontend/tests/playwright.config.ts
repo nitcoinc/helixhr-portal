@@ -20,6 +20,7 @@ export default defineConfig({
     // sets Host explicitly on its own request.newContext() for login,
     // which is an API-only context and unaffected by this.
     trace: 'on-first-retry',
+    screenshot: 'only-on-failure',
   },
   projects: [
     { name: 'setup', testMatch: /auth\.setup\.ts/ },
