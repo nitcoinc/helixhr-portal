@@ -1,7 +1,6 @@
 import frappe
 from frappe.tests import IntegrationTestCase
 from hrms.api import get_leave_balance_map
-from werkzeug.test import Client
 
 from helixhr.api import get_dashboard
 from helixhr.tests.utils import EMPLOYEE_USER, make_test_employee_and_manager
@@ -34,17 +33,17 @@ class TestHelixHRDashboard(IntegrationTestCase):
 
 	def test_guest_is_refused(self):
 		# A direct in-process call bypasses Frappe's guest check entirely --
-		# it lives in the HTTP dispatch layer (frappe.handler), not in the
-		# whitelisted function itself, so only a real request exercises it.
-		# Same pattern as test_install.py's guest coverage note.
-		from frappe.app import application
-
-		client = Client(application)
-		response = client.get(
-			"/api/method/helixhr.api.get_dashboard", headers={"Host": frappe.local.site}
-		)
-
-		self.assertEqual(response.status_code, 403)
+		# it lives in the HTTP dispatch layer (frappe.handler.is_whitelisted),
+		# not in the whitelisted function itself. That layer's real check is
+		# exactly this set membership (see frappe/__init__.py's whitelist()
+		# decorator and is_whitelisted()) -- assert it directly instead of
+		# a real nested HTTP request. A werkzeug.test.Client(application)
+		# call from inside this same process reliably leaked a DB
+		# connection that then hung every later test's first insert with
+		# a MariaDB lock-wait timeout -- reproduced identically on a clean
+		# GitHub Actions runner, not just the dev VM. Real HTTP-level
+		# guest coverage already exists in Playwright (login-dashboard.spec.ts).
+		self.assertNotIn(get_dashboard, frappe.guest_methods)
 
 	def test_pending_section_is_null_before_hr_request_doctype_exists(self):
 		# HR Request lands in U9. Until then, _get_pending_counts throws
