@@ -105,3 +105,42 @@ test.describe('not-linked page', () => {
     await expect(mainNav(page)).toHaveCount(0)
   })
 })
+
+test.describe('signing out', () => {
+  // A fresh session on purpose. Frappe's logout deletes the server-side
+  // session for that sid, and the two projects share one storageState -- so
+  // signing out of the shared session would break every spec that runs after
+  // this one. This test owns the session it destroys.
+  test.use({ storageState: { cookies: [], origins: [] } })
+
+  test('ends the session and lands on the login page, not a Desk error', async ({ page }) => {
+    const api = await request.newContext({
+      baseURL: process.env.BASE_URL || 'http://localhost:8000',
+      extraHTTPHeaders: { Host: process.env.SITE_HOST || 'test_site' },
+    })
+    const login = await api.post('/api/method/login', {
+      form: {
+        usr: 'employee@helixhr.test',
+        pwd: process.env.TEST_USER_PASSWORD || 'Helixhr-Test-Fixture-2026!',
+      },
+    })
+    expect(login.ok()).toBeTruthy()
+    const state = await api.storageState()
+    await api.dispose()
+    await page.context().addCookies(state.cookies)
+
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/helixhr')
+    await page.getByRole('button', { name: 'Sign out' }).click()
+
+    // The bug this guards: `logout` is POST-only, a GET is refused with
+    // PermissionError, and swallowing that left the session alive -- /login
+    // then bounced the user to the Desk, which an employee cannot open, so
+    // signing out ended on a Frappe "Not permitted" page.
+    await page.waitForURL(/\/login/)
+    await expect(page).not.toHaveURL(/\/(app|desk)/)
+
+    const after = await page.request.get('/api/method/frappe.auth.get_logged_user')
+    expect(after.status(), 'the server session must actually be gone').toBe(403)
+  })
+})

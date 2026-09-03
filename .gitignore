@@ -67,3 +67,10 @@ logs/
 # Local-only scratch
 .local/
 .private/
+
+# Impeccable working artifacts: review captures and decision logs are
+# regenerated per run; the surface briefs and PRODUCT.md are durable.
+.impeccable/review/
+.impeccable/questions/
+.impeccable/mocks/
+.impeccable/build/

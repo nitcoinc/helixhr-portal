@@ -28,6 +28,12 @@ def get_dashboard(**kwargs):
 		"timesheet_this_week": None,  # wired up in U8
 		"pending": _safe(lambda: _get_pending_counts(employee)),
 		"unread_notifications": _safe(_get_unread_notification_count),
+		# The two sections the week-spine dashboard is built on. Kept inside
+		# get_dashboard rather than split into their own endpoints so the home
+		# screen stays one request, and wrapped in _safe like every other
+		# section so a failure here blanks one region, not the page.
+		"week": _safe(lambda: _get_week_spine(employee)),
+		"needs_you": _safe(lambda: _get_needs_you(employee)),
 	}
 
 
@@ -78,7 +84,12 @@ def _get_employee_header(employee):
 
 
 def _get_attendance_summary():
-	start, end = get_first_day(today()), get_last_day(today())
+	# str(), not the date objects get_first_day/get_last_day return:
+	# hrms.api.get_attendance_calendar_events is annotated `from_date: str`
+	# and Frappe's typing validation raises FrappeTypeError on a date. _safe
+	# swallowed it, so this card returned null and rendered "Nothing recorded
+	# yet" for every employee regardless of their real attendance.
+	start, end = str(get_first_day(today())), str(get_last_day(today()))
 	events = get_attendance_calendar_events(start, end)
 	summary = {}
 	for status in events.values():
@@ -92,6 +103,253 @@ def _get_pending_counts(employee):
 		"my_open_requests": frappe.db.count("HR Request", {"employee": employee, "status": "Open"}),
 		"approvals_waiting_for_me": _count_leave_approvals_waiting(employee),
 	}
+
+
+def _get_week_spine(employee):
+	"""Monday..Sunday for the current week, one entry per day: the
+	attendance status Frappe recorded, the hours booked on that day's
+	timesheet rows, and whether approved leave covers it.
+
+	Same Monday-anchored week as the Timesheet screen (get_week_bounds,
+	KTD10), so "Thu" means the same day on both screens.
+	"""
+	from frappe.utils import add_days, getdate
+
+	monday, sunday = get_week_bounds(today())
+	attendance = get_attendance_calendar_events(str(monday), str(sunday)) or {}
+	hours = _hours_by_day(employee, monday)
+	leave_days = _leave_days(employee, monday, sunday)
+	current = getdate(today())
+
+	days = []
+	for offset in range(7):
+		date = add_days(monday, offset)
+		iso = str(date)
+		days.append(
+			{
+				"date": iso,
+				"weekday": date.strftime("%a"),
+				"day_of_month": date.day,
+				"is_today": date == current,
+				"is_future": date > current,
+				"attendance": attendance.get(iso),
+				"hours": hours.get(iso, 0),
+				"on_leave": iso in leave_days,
+			}
+		)
+
+	return {
+		"week_start": str(monday),
+		"week_end": str(sunday),
+		"days": days,
+		"total_hours": sum(hours.values()),
+		"timesheet_state": _week_timesheet_state(employee, monday),
+	}
+
+
+def _hours_by_day(employee, monday):
+	"""Booked hours per day from this week's Timesheet. Timesheet Detail
+	carries `from_time`, not a date column, so the day is derived the same
+	way get_my_week does it (_row_date)."""
+	name = frappe.db.get_value(
+		"Timesheet",
+		{"employee": employee, "start_date": str(monday), "docstatus": ["!=", 2]},
+		"name",
+		order_by="creation desc",
+	)
+	if not name:
+		return {}
+
+	totals = {}
+	for row in frappe.get_all(
+		"Timesheet Detail", filters={"parent": name}, fields=["from_time", "hours"]
+	):
+		if not row.from_time:
+			continue
+		day = str(get_datetime(row.from_time).date())
+		totals[day] = flt(totals.get(day, 0)) + flt(row.hours)
+	return totals
+
+
+def _week_timesheet_state(employee, monday):
+	return frappe.db.get_value(
+		"Timesheet",
+		{"employee": employee, "start_date": str(monday), "docstatus": ["!=", 2]},
+		"workflow_state",
+		order_by="creation desc",
+	)
+
+
+def _leave_days(employee, monday, sunday):
+	"""Set of ISO dates inside the week covered by an approved leave. Leave
+	Applications store a range, so each one is expanded across the days it
+	overlaps with this week."""
+	from frappe.utils import add_days, getdate
+
+	covered = set()
+	applications = frappe.get_all(
+		"Leave Application",
+		filters={
+			"employee": employee,
+			"status": "Approved",
+			"from_date": ["<=", str(sunday)],
+			"to_date": [">=", str(monday)],
+		},
+		fields=["from_date", "to_date"],
+	)
+	for leave in applications:
+		date = max(getdate(leave.from_date), monday)
+		last = min(getdate(leave.to_date), sunday)
+		while date <= last:
+			covered.add(str(date))
+			date = add_days(date, 1)
+	return covered
+
+
+# The action queue. Order is the screen's whole argument, so it lives here on
+# the server rather than in the component. Severity leads -- blocked work
+# (something sent back, waiting on this person) outranks an answered request,
+# which outranks a decision owed as an approver, which outranks this person's
+# own item waiting on somebody else -- and inside a tier the oldest comes
+# first. That last part is the direction's named risk: a three-week-old
+# rejection is more overdue than this week's, so it must not sort underneath
+# it. `day` ties a row to the spine above; `age_days` is what the row shows
+# when it falls outside the week, so an old item reads as old rather than
+# merely losing two words of context.
+def _get_needs_you(employee):
+	monday, sunday = get_week_bounds(today())
+	current = _as_date(today())
+	items = []
+
+	def day_for(date):
+		return str(date) if date and monday <= _as_date(date) <= sunday else None
+
+	def age_days(date):
+		"""How overdue this is, in days. None for rows with no date (an
+		approvals count is about now, not about a past date)."""
+		return (current - _as_date(date)).days if date else None
+
+	for row in frappe.get_all(
+		"Timesheet",
+		filters={"employee": employee, "workflow_state": "Rejected", "docstatus": ["!=", 2]},
+		fields=["name", "start_date", "end_date"],
+		order_by="start_date asc",
+		limit=_QUEUE_FETCH,
+	):
+		items.append(
+			{
+				"kind": "timesheet_rejected",
+				"title": "Your timesheet was sent back",
+				"detail": _last_rejection_comment(row.name),
+				"date": str(row.start_date),
+				"day": day_for(row.start_date),
+				"age_days": age_days(row.start_date),
+				"action": "Edit and resubmit",
+				"to": "/timesheet",
+				"tone": "danger",
+			}
+		)
+
+	# "HR has responded" is a closed request carrying a note -- HR Request has
+	# no Answered state, its options are Open/In Progress/Done/Rejected, and a
+	# closed one with no note has nothing for the employee to read.
+	for row in frappe.get_all(
+		"HR Request",
+		filters={
+			"employee": employee,
+			"status": ["in", ["Done", "Rejected"]],
+			"hr_note": ["is", "set"],
+		},
+		fields=["name", "subject", "hr_note", "status", "modified"],
+		order_by="modified asc",
+		limit=_QUEUE_FETCH,
+	):
+		items.append(
+			{
+				"kind": "request_answered",
+				"title": f"HR replied about {row.subject}",
+				"detail": row.hr_note,
+				"date": str(row.modified),
+				"day": None,
+				"age_days": age_days(row.modified),
+				"action": "Read",
+				"to": "/requests",
+				"tone": "info",
+			}
+		)
+
+	waiting = _count_leave_approvals_waiting(employee)
+	if waiting:
+		items.append(
+			{
+				"kind": "approvals",
+				"title": f"{waiting} request{'' if waiting == 1 else 's'} waiting for your approval",
+				"detail": None,
+				"date": None,
+				"day": None,
+				"age_days": None,
+				"action": "Review",
+				"to": "/approvals",
+				"tone": "action",
+			}
+		)
+
+	for row in frappe.get_all(
+		"Leave Application",
+		filters={"employee": employee, "status": "Open"},
+		fields=["name", "leave_type", "from_date", "to_date"],
+		order_by="from_date asc",
+		limit=_QUEUE_FETCH,
+	):
+		items.append(
+			{
+				"kind": "leave_waiting",
+				"title": f"{row.leave_type} waiting for your manager",
+				"detail": None,
+				"date": str(row.from_date),
+				"day": day_for(row.from_date),
+				"age_days": age_days(row.from_date),
+				"action": "View",
+				"to": "/leave",
+				"tone": "muted",
+			}
+		)
+
+	# Severity still leads -- blocked work outranks something merely waiting
+	# on somebody else -- but inside a tier the oldest item comes first, so
+	# a three-week-old rejection cannot hide under this week's.
+	items.sort(key=lambda item: (_TONE_RANK.get(item["tone"], 9), -(item["age_days"] or 0)))
+	shown = items[:_QUEUE_LIMIT]
+	return {"items": shown, "more": max(0, len(items) - len(shown))}
+
+
+# Shown on the screen, versus fetched per source. Fetching limit+1 would only
+# ever prove "at least one more exists"; a bounded window instead makes the
+# "and N more" count exact without a second COUNT query per source, and these
+# tables hold a handful of rows per employee.
+_QUEUE_LIMIT = 8
+_QUEUE_FETCH = 50
+# blocked work, then something answered and waiting to be read, then a
+# decision this person owes, then their own item waiting on somebody else
+_TONE_RANK = {"danger": 0, "info": 1, "action": 2, "muted": 3}
+
+
+def _as_date(value):
+	from frappe.utils import getdate
+
+	return getdate(value)
+
+
+def _last_rejection_comment(timesheet):
+	"""The manager's reason, shown inline so the employee doesn't have to
+	open the timesheet to find out what to change."""
+	comment = frappe.db.get_value(
+		"Comment",
+		{"reference_doctype": "Timesheet", "reference_name": timesheet, "comment_type": "Comment"},
+		"content",
+		order_by="creation desc",
+	)
+	return frappe.utils.strip_html(comment).strip() if comment else None
 
 
 def _count_leave_approvals_waiting(employee):

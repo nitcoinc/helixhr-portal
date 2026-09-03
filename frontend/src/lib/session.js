@@ -1,5 +1,5 @@
 import { reactive, readonly } from 'vue'
-import { call } from './api'
+import { apiRequest, call } from './api'
 
 // The router guard already calls `hrms.api.get_current_employee_info` on
 // every navigation to decide between the portal and NotLinked (R3). The
@@ -49,6 +49,20 @@ export async function ensureReportCount() {
 }
 
 export async function signOut() {
-  await call('logout').catch(() => {})
+  // POST, explicitly. Frappe's `logout` is a POST-only whitelisted method and
+  // refuses a GET with `PermissionError: Not permitted` -- and `call()` only
+  // upgrades to POST when it is given params, so `call('logout')` sent a GET.
+  // The old `.catch(() => {})` then swallowed that 403 and redirected anyway
+  // with the session still alive, at which point /login 301s a logged-in user
+  // to their Desk home page, which an Employee Self Service user has no
+  // permission for. Signing out showed a Frappe "Not permitted" dialog.
+  try {
+    await apiRequest({ url: 'logout', method: 'POST' })
+  } catch (error) {
+    // Landing on /login with a live session is exactly the loop above, so say
+    // so instead of pretending the sign-out worked.
+    console.error('Sign out failed; your session may still be open.', error)
+    throw error
+  }
   window.location.href = '/login'
 }

@@ -38,7 +38,11 @@ test.describe('employee', () => {
     // not literally 5: leave.spec.ts's own "apply for leave" run against
     // this same fixture legitimately spends a day of that same balance,
     // and Playwright doesn't guarantee spec run order.
-    const leaveCard = page.getByRole('link', { name: 'Leave balance Casual Leave' })
+    //
+    // The card is "Leave left" since the week-spine redesign moved the
+    // balances into a reference rail; it was "Leave balance" when the
+    // dashboard was a grid of equal-weight stat cards.
+    const leaveCard = page.getByRole('link', { name: /Leave left/ })
     await expect(leaveCard).toBeVisible()
     await expect(leaveCard.getByText(/^[0-9](\.5)?$/)).toBeVisible()
   })
@@ -75,5 +79,33 @@ test.describe('user with no active Employee', () => {
 
     await expect(page).toHaveURL(/\/not-linked/)
     await expect(page.getByText('Your account is not set up')).toBeVisible()
+  })
+})
+
+test.describe('dashboard week spine (redesign)', () => {
+  test('shows the Monday..Sunday spine and the action queue', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    await page.goto('/helixhr')
+
+    // Seven day cells, always, and the week is graspable without scrolling
+    // sideways -- that is the whole argument of this layout, so it is worth
+    // a test rather than an eyeball.
+    const spine = page.getByRole('region', { name: 'This week' })
+    await expect(spine).toBeVisible()
+    for (const day of ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']) {
+      await expect(spine.getByText(day, { exact: true })).toBeVisible()
+    }
+    await expect(spine.getByText(/hours logged this week/)).toBeVisible()
+
+    // The queue either lists things to act on, each carrying its own verb,
+    // or says so plainly. Both are correct; a blank region is not.
+    const queue = page.getByRole('region', { name: 'Needs you' })
+    await expect(queue).toBeVisible()
+    const rows = queue.getByRole('listitem')
+    if (await rows.count()) {
+      await expect(rows.first().getByRole('link')).toBeVisible()
+    } else {
+      await expect(queue.getByText('Nothing needs you.')).toBeVisible()
+    }
   })
 })
