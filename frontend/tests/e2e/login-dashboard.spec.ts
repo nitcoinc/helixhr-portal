@@ -34,10 +34,13 @@ test.describe('employee', () => {
 
     // U6's setup_playwright_fixtures gives the employee a real 5-day
     // Casual Leave allocation, so the card shows a real number now
-    // instead of the pre-U6 empty state.
-    await expect(page.getByText('Leave balance')).toBeVisible()
-    await expect(page.getByText(/Casual Leave/)).toBeVisible()
-    await expect(page.getByText(/^5$/)).toBeVisible()
+    // instead of the pre-U6 empty state -- asserted as "some number",
+    // not literally 5: leave.spec.ts's own "apply for leave" run against
+    // this same fixture legitimately spends a day of that same balance,
+    // and Playwright doesn't guarantee spec run order.
+    const leaveCard = page.getByRole('link', { name: 'Leave balance Casual Leave' })
+    await expect(leaveCard).toBeVisible()
+    await expect(leaveCard.getByText(/^[0-9](\.5)?$/)).toBeVisible()
   })
 })
 

@@ -217,6 +217,21 @@ def setup_playwright_fixtures():
 	frappe.db.commit()  # nosemgrep
 
 
+def ensure_leave_approver_role(user):
+	"""HRMS auto-grants the "Leave Approver" role (needed to write
+	Leave Application.status) via Employee's own on_update hook
+	(hrms.overrides.employee_master.update_approver_role) whenever
+	Employee.leave_approver is set through a real save() -- but this
+	suite's fixtures set that field with frappe.db.set_value for speed,
+	which is a raw SQL write and never fires that hook. Grant the role
+	directly instead of routing every fixture through a real Employee
+	save just for this side effect."""
+	user_doc = frappe.get_doc("User", user)
+	if "Leave Approver" not in [r.role for r in user_doc.roles]:
+		user_doc.append_roles("Leave Approver")
+		user_doc.save(ignore_permissions=True)
+
+
 def ensure_leave_allocation(employee, leave_type, leaves):
 	"""A submitted Leave Allocation covering the current year -- Leave
 	Application only counts an allocation toward balance once it's

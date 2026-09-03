@@ -52,6 +52,11 @@ const routes = [
     component: () => import('@/pages/Notifications.vue'),
   },
   {
+    path: '/approvals',
+    name: 'Approvals',
+    component: () => import('@/pages/Approvals.vue'),
+  },
+  {
     path: '/profile',
     name: 'Profile',
     component: () => import('@/pages/Profile.vue'),

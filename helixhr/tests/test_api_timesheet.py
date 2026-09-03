@@ -56,8 +56,13 @@ class TestApiTimesheet(IntegrationTestCase):
 		# (PYTHONHASHSEED), so it can't be trusted to spread test methods
 		# across distinct weeks consistently -- confirmed while writing
 		# this suite (two methods collided on the same week and each saw
-		# the other's leftover Timesheet).
-		digest = int(hashlib.md5(method_name.encode()).hexdigest(), 16)
+		# the other's leftover Timesheet). Hash the *full* test id
+		# (module + class + method), not just the method name: two
+		# different test *files* each hashing their own bare method names
+		# can still collide with each other on the same week (also
+		# confirmed directly -- test_api_approvals.py and this file
+		# produced two overlapping Timesheets in the same run).
+		digest = int(hashlib.md5(self.id().encode()).hexdigest(), 16)
 		week_offset = (digest % 200000) * 7
 		self.monday, self.sunday = get_week_bounds(add_days(frappe.utils.today(), week_offset))
 		self.project = make_test_project(method_name, users=[EMPLOYEE_USER])

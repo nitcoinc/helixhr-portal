@@ -17,6 +17,8 @@ const roleLine = computed(() =>
 const leaveTypeEntries = computed(() => Object.entries(dashboard.data?.leave_balances || {}))
 const attendanceEntries = computed(() => Object.entries(dashboard.data?.attendance_this_month || {}))
 const unreadNotifications = computed(() => dashboard.data?.unread_notifications)
+const pending = computed(() => dashboard.data?.pending)
+const hasApprovalsWaiting = computed(() => (pending.value?.approvals_waiting_for_me || 0) > 0)
 </script>
 
 <template>
@@ -91,8 +93,6 @@ const unreadNotifications = computed(() => dashboard.data?.unread_notifications)
         </ul>
       </StatCard>
 
-      <!-- Real content lands in U8 (workflow) and U9/U12 (requests, -->
-      <!-- approvals) -- these cards are honest empty states until then. -->
       <StatCard
         title="This week's timesheet"
         to="/timesheet"
@@ -102,10 +102,36 @@ const unreadNotifications = computed(() => dashboard.data?.unread_notifications)
       />
       <StatCard
         title="My pending items"
+        to="/requests"
         :loading="dashboard.loading"
-        empty
+        :empty="!dashboard.loading && !pending"
         empty-text="Nothing here yet."
-      />
+      >
+        <ul
+          v-if="pending"
+          class="space-y-1"
+        >
+          <li class="flex justify-between text-ink-gray-8">
+            <span>Leave waiting</span>
+            <span class="font-medium">{{ pending.my_open_leave }}</span>
+          </li>
+          <li class="flex justify-between text-ink-gray-8">
+            <span>Requests open</span>
+            <span class="font-medium">{{ pending.my_open_requests }}</span>
+          </li>
+        </ul>
+      </StatCard>
+
+      <StatCard
+        v-if="hasApprovalsWaiting"
+        title="Waiting for your approval"
+        to="/approvals"
+        :loading="dashboard.loading"
+      >
+        <p class="text-2xl font-semibold text-ink-gray-9">
+          {{ pending.approvals_waiting_for_me }}
+        </p>
+      </StatCard>
 
       <StatCard
         title="Notifications"

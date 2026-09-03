@@ -1,3 +1,5 @@
+import hashlib
+
 import frappe
 from frappe.model.workflow import apply_workflow
 from frappe.tests import IntegrationTestCase
@@ -71,7 +73,16 @@ class TestNotifications(IntegrationTestCase):
 				{"doctype": "User Permission", "user": EMPLOYEE_USER, "allow": "Project", "for_value": project}
 			).insert(ignore_permissions=True)
 
-		monday, _ = get_week_bounds(today())
+		# A hashed week offset, not literally "this week" -- other test
+		# files (test_api_timesheet.py, test_api_approvals.py) each pick
+		# their own hashed week too, and "this week" (offset 0) is exactly
+		# as likely to collide with one of them as any other week, which
+		# happened while writing this test (two overlapping Timesheets in
+		# the same run). See test_api_timesheet.py's setUp for the same
+		# pattern and why it hashes the full test id, not just the method
+		# name.
+		digest = int(hashlib.md5(self.id().encode()).hexdigest(), 16)
+		monday, _ = get_week_bounds(add_days(today(), (digest % 200000) * 7))
 		frappe.set_user(EMPLOYEE_USER)
 		doc = frappe.get_doc(
 			{

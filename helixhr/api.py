@@ -262,3 +262,50 @@ def _validate_rows(rows, bookable_projects):
 
 def _get_unread_notification_count():
 	return frappe.db.count("Notification Log", {"for_user": frappe.session.user, "read": 0})
+
+
+# Approvals (U12, R25, R26, KTD7)
+
+
+@frappe.whitelist(methods=["POST"])
+def act_on_approval(doctype, name, action, comment=None):
+	"""Approve or reject a report's pending Leave Application or Timesheet.
+	`comment` is required for a reject (R25). Who may actually act is
+	checked here on the server, not assumed from what the portal chose to
+	show (R26) -- Timesheet goes through the same workflow transition
+	the portal's own Submit/Edit actions use (its condition and
+	before_submit guard are the real check); Leave Application has no
+	Workflow (KTD17), so the equivalent check is explicit here.
+	"""
+	if doctype not in ("Leave Application", "Timesheet"):
+		frappe.throw(_("Not a valid request."))
+	if action not in ("Approve", "Reject"):
+		frappe.throw(_("Not a valid action."))
+	if action == "Reject" and not comment:
+		frappe.throw(_("A comment is required to reject."))
+
+	doc = frappe.get_doc(doctype, name)
+
+	if comment:
+		doc.add_comment("Comment", comment)
+
+	if doctype == "Timesheet":
+		from frappe.model.workflow import apply_workflow
+
+		apply_workflow(doc, action)
+		return
+
+	_act_on_leave_application(doc, action)
+
+
+def _act_on_leave_application(doc, action):
+	user = frappe.session.user
+	is_hr = set(frappe.get_roles(user)) & {"HR Manager", "System Manager"}
+	if not is_hr and user != doc.leave_approver:
+		frappe.throw(
+			_("Only {0}'s approver or HR can act on this leave request.").format(doc.employee),
+			frappe.PermissionError,
+		)
+
+	doc.status = "Approved" if action == "Approve" else "Rejected"
+	doc.save()
