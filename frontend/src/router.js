@@ -19,8 +19,7 @@ const routes = [
   {
     path: '/leave',
     name: 'Leave',
-    component: () => import('@/pages/PageComingSoon.vue'),
-    props: { title: 'Leave' },
+    component: () => import('@/pages/Leave.vue'),
   },
   {
     path: '/attendance',

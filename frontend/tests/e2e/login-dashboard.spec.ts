@@ -32,11 +32,12 @@ test.describe('employee', () => {
     await expect(page.getByRole('heading', { name: 'Employee' })).toBeVisible()
     await expect(page.getByText(/Reports to Manager/)).toBeVisible()
 
-    // The fixture employee has no Leave Allocation, so the card's honest
-    // real state is its empty state, not a fabricated number -- U6 adds a
-    // fixture with an allocation and can tighten this assertion then.
+    // U6's setup_playwright_fixtures gives the employee a real 5-day
+    // Casual Leave allocation, so the card shows a real number now
+    // instead of the pre-U6 empty state.
     await expect(page.getByText('Leave balance')).toBeVisible()
-    await expect(page.getByText('No leave set up yet.')).toBeVisible()
+    await expect(page.getByText(/Casual Leave/)).toBeVisible()
+    await expect(page.getByText(/^5$/)).toBeVisible()
   })
 })
 

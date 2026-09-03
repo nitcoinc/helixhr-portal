@@ -55,6 +55,47 @@ def ensure_test_company():
 	return TEST_COMPANY
 
 
+def ensure_holiday_list_assignment(company):
+	"""A headless install has no Holiday List either, and
+	hrms.utils.holiday_list.get_holiday_list_for_employee -- called by
+	Leave Application's submit path -- throws without one covering the
+	current date for the employee or their company. Only needed by tests
+	that actually submit (approve) a Leave Application; withdraw/insert
+	alone don't reach this check."""
+	from frappe.utils import get_year_ending, get_year_start, today
+
+	list_name = "_Test Holiday List"
+	if not frappe.db.exists("Holiday List", list_name):
+		frappe.get_doc(
+			{
+				"doctype": "Holiday List",
+				"holiday_list_name": list_name,
+				"from_date": get_year_start(today()),
+				"to_date": get_year_ending(today()),
+			}
+		).insert(ignore_permissions=True)
+
+	existing = frappe.db.exists(
+		"Holiday List Assignment", {"assigned_to": company, "holiday_list": list_name, "docstatus": 1}
+	)
+	if existing:
+		return list_name
+
+	assignment = frappe.get_doc(
+		{
+			"doctype": "Holiday List Assignment",
+			"applicable_for": "Company",
+			"assigned_to": company,
+			"holiday_list": list_name,
+			"from_date": get_year_start(today()),
+			"to_date": get_year_ending(today()),
+		}
+	)
+	assignment.insert(ignore_permissions=True)
+	assignment.submit()
+	return list_name
+
+
 def make_test_user(user, company, **employee_fields):
 	"""Create (or reuse) a User with password login and an Employee record
 	for it, with create_user_permission=1 -- the User Permission that
@@ -162,9 +203,50 @@ def setup_playwright_fixtures():
 	site."""
 	if not frappe.conf.get("allow_tests"):
 		frappe.throw("Test fixtures are disabled on this site (allow_tests is off).")
-	make_test_employee_and_manager()
+	employee_name, _, _, _ = make_test_employee_and_manager()
 	make_test_user_without_employee()
+
+	# So leave.spec.ts can apply for leave and see a real, non-error
+	# "Waiting for ..." status rather than hedging on whichever plain
+	# error a leave-less fixture happens to hit.
+	frappe.db.set_value("Employee", employee_name, "leave_approver", MANAGER_USER)
+	company = frappe.db.get_value("Employee", employee_name, "company")
+	ensure_leave_allocation(employee_name, "Casual Leave", 5)
+	ensure_holiday_list_assignment(company)
+
 	frappe.db.commit()  # nosemgrep
+
+
+def ensure_leave_allocation(employee, leave_type, leaves):
+	"""A submitted Leave Allocation covering the current year -- Leave
+	Application only counts an allocation toward balance once it's
+	docstatus 1 (hrms.hr.doctype.leave_application.leave_application.
+	get_allocation_based_on_application_dates filters on docstatus == 1),
+	so plain insert() alone leaves every application "outside leave
+	allocation period" even with a matching date range."""
+	from frappe.utils import get_year_ending, get_year_start, today
+
+	company = frappe.db.get_value("Employee", employee, "company")
+	existing = frappe.db.exists(
+		"Leave Allocation", {"employee": employee, "leave_type": leave_type, "docstatus": 1}
+	)
+	if existing:
+		return existing
+
+	allocation = frappe.get_doc(
+		{
+			"doctype": "Leave Allocation",
+			"employee": employee,
+			"leave_type": leave_type,
+			"from_date": get_year_start(today()),
+			"to_date": get_year_ending(today()),
+			"new_leaves_allocated": leaves,
+			"company": company,
+		}
+	)
+	allocation.insert(ignore_permissions=True)
+	allocation.submit()
+	return allocation.name
 
 
 def assert_has_employee_user_permission(user, employee_name):

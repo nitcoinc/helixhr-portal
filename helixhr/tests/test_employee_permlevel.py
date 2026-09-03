@@ -8,8 +8,10 @@ from helixhr.tests.utils import EMPLOYEE_USER, make_test_employee_and_manager
 class TestEmployeePermlevel(IntegrationTestCase):
 	def setUp(self):
 		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		# No commit() here -- see test_leave_flow.py's setUp for why a real
+		# commit() inside a test breaks IntegrationTestCase's per-test
+		# rollback isolation. Same-connection visibility doesn't need it.
 		frappe.db.set_value("Employee", self.employee_name, "bank_ac_no", "ACCT-SECRET-123")
-		frappe.db.commit()  # nosemgrep
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
@@ -59,12 +61,19 @@ class TestEmployeePermlevel(IntegrationTestCase):
 		heard of."""
 		from helixhr.tests.utils import MANAGER_USER
 
+		# Known starting value, not an assumed-empty default: this suite's
+		# fixtures are not guaranteed a clean slate between test *files*
+		# within one `bench run-tests` invocation (confirmed while
+		# building U6 -- state committed by an earlier test file's setUp
+		# was still visible here).
+		original = frappe.db.get_value("Employee", self.employee_name, "leave_approver")
+
 		frappe.set_user(EMPLOYEE_USER)
 		doc = frappe.get_doc("Employee", self.employee_name)
 		doc.leave_approver = MANAGER_USER
 		doc.save()
 
-		self.assertIsNone(frappe.db.get_value("Employee", self.employee_name, "leave_approver"))
+		self.assertEqual(frappe.db.get_value("Employee", self.employee_name, "leave_approver"), original)
 
 	def test_employee_a_cannot_change_employee_b(self):
 		frappe.set_user(EMPLOYEE_USER)

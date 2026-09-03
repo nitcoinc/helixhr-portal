@@ -195,6 +195,85 @@ test without a specific reason**; if the built-page check needs extending, prefe
 `helixhr.www.helixhr` directly where the plan's own notes allow it, and treat any new
 mysterious lock-wait timeout as this class of bug first, before assuming it's environmental.
 
+## `IntegrationTestCase` does not roll back between test *methods* here (U6)
+
+Confirmed while writing U6's `test_leave_flow.py` on the from-scratch local Docker dev bench:
+writes made by one test method are still visible to the *next* test method in the same
+`TestCase`, within one `bench run-tests` invocation -- not just across test files, across
+methods in the same class. A test that inserts a document and a later test that expects a
+clean slate (or checks a count starting from zero) will see the earlier method's data.
+
+- **Never assert against an assumed-empty baseline** ("this field is None", "this count is
+  0"). Read the actual value at the top of the test first and compare against *that*.
+- **Give each test method its own data window** where the assertion depends on nothing else
+  existing yet -- a distinct Leave Type, a distinct date range, etc. -- rather than relying on
+  isolation the framework isn't providing here.
+- A stray `frappe.db.commit()` inside a test makes this worse, not better: it doesn't create
+  isolation, it just guarantees the write survives into a *different* `bench run-tests`
+  invocation too (this actually happened while debugging U6 -- a leftover Leave Application
+  and Leave Allocation had to be deleted by hand from `test_site` afterwards). Don't call
+  `frappe.db.commit()` inside a test or its `setUp`/`tearDown` unless the test is specifically
+  about commit behavior -- same-connection visibility does not need it.
+- Calling a `@frappe.whitelist()` test-setup helper (like `setup_playwright_fixtures`) over
+  real HTTP against `test_site` has the same effect -- it's a real, separate commit outside
+  any test's scope, and will linger and can affect an unrelated Python test's assumptions
+  (seen directly: `test_leave_balances_matches_hrms_api_with_no_allocation` started failing
+  after an interactive `curl`-driven Playwright-fixture setup left a real Leave Allocation
+  behind). If you run that helper by hand while developing, clean up what it created
+  afterwards, or expect to on a long-lived local `test_site`.
+
+## Leave Application needs more than an Allocation row to actually work (U6)
+
+A few HRMS behaviors that aren't obvious from the Leave Application doctype alone, found
+while writing `test_leave_flow.py` and `LeaveForm.vue`:
+
+- **`leave_approver` is not auto-filled from `Employee.leave_approver` server-side.**
+  `validate_leave_approver` checks the field on the Leave Application document itself. The
+  portal fetches `hrms.api.get_leave_approval_details(employee)` and sends its
+  `leave_approver` explicitly on insert (`LeaveForm.vue`); a Python test inserting a Leave
+  Application directly must do the same.
+- **A Leave Allocation only counts once it's submitted** (`docstatus = 1`) --
+  `get_allocation_based_on_application_dates` filters on `docstatus == 1`, so a freshly
+  inserted-but-not-submitted allocation makes every Leave Application look like it's "outside
+  leave allocation period" even with a matching date range. `helixhr.tests.utils.
+  ensure_leave_allocation` inserts and submits in one step.
+- **Leave Application is itself submittable** (`is_submittable=1`), and the balance-consuming
+  Leave Ledger Entry is only created `on_submit`, not on insert. An application sitting at
+  `status="Open"`, `docstatus=0` (the normal pre-approval state this app's portal creates)
+  does not yet consume any balance -- only a submitted (`status="Approved"`, `docstatus=1`)
+  application does. A test that wants to prove a *second* application gets refused for
+  insufficient balance has to insert, set `status = "Approved"`, then `submit()` the first one
+  (standing in for the approver's action) before the balance check will actually see it as
+  consumed. `submit()` also then requires a Holiday List reachable for the employee or their
+  company on that date (see next point) -- `insert()` alone does not.
+- **A headless site has no Holiday List either** (same class of gap as Gender and Warehouse
+  Type, already documented above) -- `hrms.utils.holiday_list.get_holiday_list_for_employee`
+  throws `No Holiday List was found for Employee ... or their company ...` the first time
+  anything needs one (confirmed: triggered by `submit()` above, not by insert/apply).
+  `helixhr.tests.utils.ensure_holiday_list_assignment(company)` creates a Holiday List and a
+  submitted Holiday List Assignment (`applicable_for="Company"`) covering the current year.
+- **Role "Employee" has no `delete` permission on Leave Application by default** in this
+  HRMS version's base DocPerm, so withdraw (R14, KTD17 -- `frappe.delete_doc` on a pending
+  Leave Application) is refused with a plain `PermissionError` out of the box. Fixed with one
+  Custom DocPerm row (role `Employee`, permlevel 0, `delete=1`, `if_owner=1` so it only ever
+  applies to the caller's own documents) -- shipped as
+  `helixhr/fixtures/leave_application_custom_docperm.json`. **Two `fixtures` entries for the
+  same doctype (`"dt": "Custom DocPerm"`) need distinct `prefix` values in `hooks.py`** --
+  confirmed the hard way: without a prefix, `bench export-fixtures` names the file purely
+  from the doctype, so a second entry for a different `parent` doctype silently overwrites the
+  first entry's exported file instead of producing a second one.
+
+## Employee gets locked/HR-only fields from more than one place (U5 follow-up)
+
+`helixhr/fixtures/property_setter.json`'s permlevel pass only queried the `DocField` doctype,
+which covers fields defined in Employee's own doctype JSON. HRMS adds roughly fifteen more
+fields to Employee as `Custom Field` records -- `leave_approver`, `employment_type`, `grade`,
+`default_shift`, `expense_approver`, `shift_request_approver`, `payroll_cost_center`, the two
+health-insurance fields, and others -- a **separate doctype** from `DocField`, easy to miss
+with a query scoped to just the one. Found only because U6 needed `leave_approver` and it
+turned out to still be writable by the ESS role. If a future unit needs another Employee
+field and it doesn't show up under `DocField`, check `Custom Field` (`dt=Employee`) too.
+
 ## Playwright
 
 Three identities log in once via `POST /api/method/login` (not the UI) and save

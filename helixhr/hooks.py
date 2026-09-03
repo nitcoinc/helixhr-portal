@@ -87,6 +87,21 @@ fixtures = [
 			["role", "in", ["Employee", "HR Manager", "HR User", "System Manager"]],
 		],
 	},
+	{
+		# Leave Application already ships its own HR Manager / HR User
+		# Custom DocPerm rows from HRMS's own install -- only the one row
+		# this app adds (Employee role, if_owner delete for withdraw,
+		# KTD17) belongs to helixhr, so this filter stays scoped to just
+		# that role, unlike the Employee filter above. A distinct `prefix`
+		# is required: two fixture entries for the same "dt" with no
+		# prefix both write to fixtures/custom_docperm.json, and the
+		# second export silently clobbers the first (confirmed while
+		# building this -- frappe.utils.fixtures.export_fixtures names the
+		# file purely from the doctype unless prefixed).
+		"dt": "Custom DocPerm",
+		"prefix": "leave_application",
+		"filters": [["parent", "=", "Leave Application"], ["role", "=", "Employee"]],
+	},
 ]
 
 # Generators
