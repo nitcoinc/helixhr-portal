@@ -455,6 +455,7 @@ def save_my_week(week_start, rows):
 	(the workflow's own `allow_edit` per state backs this up too, this
 	is just a clearer error than a generic permission failure).
 	"""
+	rate_limit_per_user("save_my_week", limit=30, seconds=60)
 	employee = get_current_employee()
 	if isinstance(rows, str):
 		rows = json.loads(rows)
@@ -543,6 +544,7 @@ def act_on_approval(doctype, name, action, comment=None):
 	before_submit guard are the real check); Leave Application has no
 	Workflow (KTD17), so the equivalent check is explicit here.
 	"""
+	rate_limit_per_user("act_on_approval", limit=60, seconds=60)
 	if doctype not in ("Leave Application", "Timesheet"):
 		frappe.throw(_("Not a valid request."))
 	if action not in ("Approve", "Reject"):

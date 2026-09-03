@@ -12,9 +12,21 @@ const dashboard = createResource({
 })
 
 const employee = computed(() => dashboard.data?.employee)
-const roleLine = computed(() =>
-  [employee.value?.designation, employee.value?.department].filter(Boolean).join(' · '),
-)
+// R6 wants name, designation, department, manager and location on the home
+// screen. They ride one line rather than a stack: on a screen whose job is
+// "what needs me", who you are is orientation, not the headline.
+const identityLine = computed(() => {
+  const e = employee.value
+  if (!e) return ''
+  return [
+    e.designation,
+    e.department,
+    e.manager_name ? `Reports to ${e.manager_name}` : null,
+    e.branch,
+  ]
+    .filter(Boolean)
+    .join(' · ')
+})
 const week = computed(() => dashboard.data?.week)
 const needsYou = computed(() => dashboard.data?.needs_you?.items || [])
 const needsYouMore = computed(() => dashboard.data?.needs_you?.more || 0)
@@ -57,12 +69,10 @@ const today = new Intl.DateTimeFormat(undefined, {
           {{ today }}
         </p>
         <p
-          v-if="roleLine || employee.manager_name"
+          v-if="identityLine"
           class="w-full text-sm text-ink-gray-5"
         >
-          <span v-if="roleLine">{{ roleLine }}</span>
-          <span v-if="roleLine && employee.manager_name"> · </span>
-          <span v-if="employee.manager_name">Reports to {{ employee.manager_name }}</span>
+          {{ identityLine }}
         </p>
       </template>
     </header>

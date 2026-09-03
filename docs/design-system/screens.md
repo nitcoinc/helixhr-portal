@@ -2,8 +2,21 @@
 
 One short note per phase 1 screen. Full palette, type, and copy rules: `../design-system.md`.
 
-## Dashboard (U4)
-Single scroll column on phone, 2-column card grid at desktop. Header card: name, designation, department, manager, location. Below: leave balance card, attendance summary card, this-week timesheet card, pending-items card — each a tappable `Badge`-topped card linking to its page. Quick actions row (Apply Leave, Fill Timesheet, New Request) pinned under the header on phone.
+## Dashboard (redesigned post-U11 -- supersedes the U4 card grid)
+An action queue built on the working week, not a summary of numbers. Top: one identity line (name,
+then designation, department, manager and location small beneath it). Then the **week spine** -- a
+Mon..Sunday field, seven equal cells, never a scroller, each carrying an attendance dot, hours as a
+bar sized against an 8h day, and leave; today marked by a rule as well as a tint; hours-this-week
+and a Timesheet link along the bottom. Below left, **"Needs you"**: rows ordered server-side by
+severity tier then oldest-first, each with its own verb and, for a sent-back timesheet, the
+manager's reason quoted inline; out-of-week rows carry an age tag, and the list discloses "and N
+more". Right rail: leave balance, attendance, documents -- reference figures, deliberately demoted,
+and a rail row with no figure does not render. Quick actions last, as one divided row. Empty queue
+says "Nothing needs you." and names the outstanding weekly obligation. Unread count lives on the
+shell's Notifications nav item rather than on the page.
+
+> Superseded: six same-size icon+heading+text stat cards in a 2-column grid, where a sent-back
+> timesheet and a leave balance carried identical weight.
 
 ## Profile (U5)
 Two sections stacked: "Your information" (read-only, `gray-600` labels, `gray-900` values) and "You can update" (editable `FormControl` fields with inline save). Locked fields in the read-only section that map to an HR Request show a small "Ask HR" text link next to the value.
