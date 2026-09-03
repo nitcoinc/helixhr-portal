@@ -149,36 +149,44 @@ it, isolating it from every other variable (hostname vs IP, Docker networking, `
 An **API-only** request context (`request.newContext()`, used by `auth.setup.ts` to log in) is
 unaffected and can set `Host` freely.
 
-## `bench run-tests` over SSH on this VM reliably hangs on the first-ever insert (U4)
+## A `werkzeug.test.Client(application)` call inside a test can hang every test after it (U4)
 
-Found while verifying U4: `bench --site test.localhost run-tests --app helixhr`, run over SSH
-via `docker exec`, reliably hits `frappe.exceptions.QueryTimeoutError: (1205, 'Lock wait
-timeout exceeded')` on the **first** insert of a brand-new row into some table (seen on
-Department, Designation, and plain User in turn, as the fixture code changed) -- roughly every
-run, ~50s per hang. `SHOW FULL PROCESSLIST` on the shared MariaDB container showed two `Sleep`
-connections opened by the *same* test run, one of them holding a table metadata lock that the
-actual insert then queues behind.
+**Correction after finding the real cause (see below) -- the first version of this note wrongly
+blamed the dev VM.** `bench --site <site> run-tests --app helixhr` intermittently hit
+`frappe.exceptions.QueryTimeoutError: (1205, 'Lock wait timeout exceeded')` on the **first**
+insert of a brand-new row into some table (seen on Department, Designation, and plain User in
+turn, as the fixture code changed), taking ~50s per hang. It reproduced on the dev VM even
+after dropping and recreating the test site from scratch, which looked at the time like a
+VM/environment problem worth routing around by trusting CI instead.
 
-Ruled out:
-- **Leftover connections from an earlier killed command** -- checked `information_schema.innodb_trx`
-  was empty immediately before a run that still hung.
-- **Site-specific corruption** -- dropped and recreated `test.localhost` from scratch (fresh
-  database, fresh DB user); the *very next* run hung the same way, on a table (`tabUser`) with
-  zero prior history.
+**Then the identical hang happened on a clean GitHub Actions runner**, on the real U4 code, one
+test after `test_guest_is_refused` -- which called `werkzeug.test.Client(application).get(...)`
+(a real nested WSGI request) from inside an `IntegrationTestCase` test to prove a whitelisted
+method rejects Guest. That nested request leaves a database connection open that the test
+framework's per-test rollback doesn't clean up, and it then blocks the next test's first insert
+into any table. This is a real, general Frappe-testing gotcha, not specific to that VM -- it
+would reproduce on any environment, including a fresh local Docker bench.
 
-Not ruled out, and not worth further time right now: something specific to this VM's Frappe
-v16.30 + MariaDB 11.8 + Python 3.14 + mysqlclient combination, or to running the bench CLI over
-an SSH-piped `docker exec` specifically. **The identical test suite runs clean in this repo's
-GitHub Actions CI** (a fresh site per run, same app versions) -- confirmed twice in a row. So:
+**The fix: don't make a real HTTP request from inside a Python test to prove a permission
+check.** Frappe's own dispatch layer (`frappe.handler.is_whitelisted`) checks Guest access with
+a plain set membership test -- a whitelisted method is only Guest-reachable if it's in the
+module-level `frappe.guest_methods` set. Assert that directly instead:
 
-- **Treat CI as the authoritative Python test signal for this app**, not a manual run on this
-  VM. Push and let CI verify.
-- If you need to run Python tests on this VM anyway, expect the first fixture-creating test to
-  take ~50s per new table it touches and possibly still fail; a second attempt sometimes
-  succeeds since the earlier attempt's insert either commits or the blocking connection dies on
-  its own. Don't spend time chasing the exact cause further without new evidence.
-- This does not affect the frontend build or manually driving the app through a browser --
-  only the Python test *runner's* own connection handling.
+```python
+self.assertNotIn(get_dashboard, frappe.guest_methods)  # also: assertIn(get_dashboard, frappe.whitelisted)
+```
+
+No nested request, no leaked connection, and it tests the exact mechanism that actually runs in
+production. Real HTTP-level Guest coverage (an actual 403, an actual redirect) belongs in
+Playwright, not a Python unit test -- `login-dashboard.spec.ts`'s `guest` describe already
+covers that end to end.
+
+`helixhr/tests/test_install.py` still uses `Client(application)` for two tests (proving the
+built page serves real HTML) and has not caused an observed hang -- no evidence it's unsafe by
+itself. But **avoid adding a new `Client(application)` call inside any `IntegrationTestCase`
+test without a specific reason**; if the built-page check needs extending, prefer checking
+`helixhr.www.helixhr` directly where the plan's own notes allow it, and treat any new
+mysterious lock-wait timeout as this class of bug first, before assuming it's environmental.
 
 ## Playwright
 
