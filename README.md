@@ -78,6 +78,18 @@ All configuration is per-site data, not code. Set it in Desk or with
 Site config is cached for 60 seconds per web process, so a `set-config` change
 reaches the page within a minute with no restart.
 
+### HR contact address
+
+The address a signed-in user with no Employee record is told to write to. It is
+deliberately not in the code; set it once per site:
+
+```bash
+bench --site <site> set-config helixhr_hr_contact hr@example.com
+```
+
+Until it is set, the not-linked page says "Contact HR" with no link, and the
+preflight reports a WARN. Setting it to an empty value removes the link again.
+
 Every portal user needs an active Employee record whose `user_id` is their User,
 the **Employee Self Service** role, and a User Permission on their own Employee.
 Creating the Employee with "Create User Permission" checked does the last part.
@@ -147,8 +159,10 @@ always starts from a fresh site and is the authoritative signal.
 2. On the server: `bench get-app`/`git pull` in `apps/helixhr`, then
    `cd apps/helixhr/frontend && yarn install --frozen-lockfile && yarn build`.
 3. `bench --site <site> migrate` (installs fixtures) and `bench --site <site> clear-cache`.
-4. `bench --site <site> execute helixhr.preflight.run` and fix every FAIL.
-5. Restart the web workers if the Python changed (`bench restart`).
+4. First deploy to a site only: set `helixhr_hr_contact` and the other site
+   settings from the Configure table above.
+5. `bench --site <site> execute helixhr.preflight.run` and fix every FAIL.
+6. Restart the web workers if the Python changed (`bench restart`).
 
 ## Sign-in
 
