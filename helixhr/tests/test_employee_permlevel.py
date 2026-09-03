@@ -49,6 +49,23 @@ class TestEmployeePermlevel(IntegrationTestCase):
 		after_rows = frappe.db.count("Employee Education", {"parent": self.employee_name})
 		self.assertEqual(before_rows, after_rows)
 
+	def test_custom_field_write_is_also_reset(self):
+		"""HRMS adds leave_approver, employment_type, grade, default_shift
+		etc. to Employee as Custom Field records, not core DocField rows --
+		a distinct doctype the earlier permlevel pass first missed. Cover
+		one of them directly so a future HRMS upgrade that adds another
+		custom field is at least caught here if someone copies this
+		pattern, even though it can't catch a field this suite has never
+		heard of."""
+		from helixhr.tests.utils import MANAGER_USER
+
+		frappe.set_user(EMPLOYEE_USER)
+		doc = frappe.get_doc("Employee", self.employee_name)
+		doc.leave_approver = MANAGER_USER
+		doc.save()
+
+		self.assertIsNone(frappe.db.get_value("Employee", self.employee_name, "leave_approver"))
+
 	def test_employee_a_cannot_change_employee_b(self):
 		frappe.set_user(EMPLOYEE_USER)
 		with self.assertRaises(frappe.PermissionError):
