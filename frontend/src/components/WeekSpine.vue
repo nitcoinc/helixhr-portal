@@ -12,7 +12,7 @@ const props = defineProps({
 // the tints are the light end of each family, not the -600 steps that read
 // on white.
 const STATE = {
-  Present: { dot: 'bg-green-300', label: 'Present' },
+  Present: { dot: 'bg-green-200', label: 'Present' },
   'Half Day': { dot: 'bg-amber-300', label: 'Half day' },
   Absent: { dot: 'bg-red-300', label: 'Absent' },
   'On Leave': { dot: 'bg-blue-200', label: 'On leave' },
@@ -68,7 +68,7 @@ function dayLabel(day) {
        screen reads as resting on the page rather than competing with it.
        elev-2 because this is the surface the page is anchored by. -->
   <section
-    class="elev-2 overflow-hidden rounded-xl bg-blue-800"
+    class="elev-2 overflow-hidden rounded-xl bg-field"
     aria-label="This week"
   >
     <div
@@ -94,7 +94,7 @@ function dayLabel(day) {
           class="relative flex cursor-pointer flex-col items-center gap-1 border-r border-white/10 px-1 pb-2 pt-2.5 transition-colors duration-200 last:border-r-0 hover:bg-white/10"
           :class="[
             day.is_today ? 'bg-white/15' : '',
-            !day.is_today && isWeekend(day) ? 'bg-blue-900/40' : '',
+            !day.is_today && isWeekend(day) ? 'bg-field-deep/50' : '',
           ]"
           :aria-label="dayLabel(day)"
         >
@@ -103,7 +103,7 @@ function dayLabel(day) {
                cannot counterfeit. -->
           <span
             v-if="day.is_today"
-            class="absolute inset-x-0 top-0 h-0.5 bg-white"
+            class="absolute inset-x-0 top-0 h-0.5 bg-signal"
           />
           <span
             class="text-[11px] font-medium uppercase tracking-wide"
@@ -132,7 +132,7 @@ function dayLabel(day) {
             <span class="mt-1 flex h-16 w-full items-end justify-center">
               <span
                 class="w-1/2 max-w-10 rounded-sm"
-                :class="day.hours ? 'bg-white' : 'bg-transparent'"
+                :class="day.hours ? 'bg-signal' : 'bg-transparent'"
                 :style="{ height: `${barHeight(day)}%` }"
               />
             </span>
@@ -146,14 +146,14 @@ function dayLabel(day) {
         </router-link>
       </div>
 
-      <div class="flex items-center justify-between gap-3 bg-blue-900/50 px-4 py-2.5">
+      <div class="flex items-center justify-between gap-3 bg-field-deep/60 px-4 py-2.5">
         <p class="text-sm text-blue-100">
           <span class="tabular font-semibold text-white">{{ totalHours }}</span>
           {{ totalHours === 1 ? 'hour' : 'hours' }} logged this week
         </p>
         <router-link
           to="/timesheet"
-          class="inline-flex min-h-11 cursor-pointer items-center gap-1 text-sm font-medium text-white hover:underline"
+          class="inline-flex min-h-11 cursor-pointer items-center gap-1 text-sm font-medium text-signal hover:underline"
         >
           Timesheet
           <Icon

@@ -88,26 +88,11 @@ function thisWeek() {
   weekStart.value = isoDate(mondayOf(new Date()))
 }
 
-const rejectionComment = createResource({
-  url: 'frappe.client.get_list',
-  makeParams: () => ({
-    doctype: 'Comment',
-    filters: [
-      ['reference_doctype', '=', 'Timesheet'],
-      ['reference_name', '=', week.data.timesheet.name],
-      ['comment_type', '=', 'Comment'],
-    ],
-    fields: ['content'],
-    order_by: 'creation desc',
-    limit_page_length: 1,
-  }),
-  auto: false,
-  transform: (rows) => rows?.[0]?.content,
-})
-
-watch(workflowState, (state) => {
-  if (state === 'Rejected' && week.data?.timesheet?.name) rejectionComment.fetch()
-})
+// The manager's reason now arrives with the week itself. It used to be read
+// here with `frappe.client.get_list` on Comment, which the Employee Self
+// Service role cannot read: the call 403'd every time, so the page told the
+// employee their week was sent back and never told them why.
+const rejectionComment = computed(() => week.data?.timesheet?.rejection_comment)
 
 const save = createResource({ url: 'helixhr.api.save_my_week', method: 'POST' })
 const submit = createResource({ url: 'frappe.model.workflow.apply_workflow', method: 'POST' })
@@ -194,7 +179,7 @@ async function editAndResubmit() {
       v-if="workflowState === 'Rejected'"
       class="mb-4 rounded-lg border border-outline-red-2 bg-surface-red-1 p-3 text-sm text-ink-red-4"
     >
-      This week was sent back<span v-if="rejectionComment.data">: "{{ rejectionComment.data }}"</span>.
+      This week was sent back<span v-if="rejectionComment">: “{{ rejectionComment }}”</span>.
       Fix it up and resubmit.
     </div>
 

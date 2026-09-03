@@ -2,62 +2,71 @@
 
 > Built from `/ui-ux-pro-max` recommendations plus the `/hallmark` macrostructure pass, filtered for a Frappe app: an extension of frappe-ui's own Tailwind preset, not a from-scratch system. Applied to `frontend/tailwind.config.js` in U2.
 
-## Palette
+## Palette — Signal
 
-**Correction after inspecting the installed `frappe-ui@0.1.278` package (U2):** frappe-ui already ships full `gray`/`blue`/`green`/`amber`/`red` Tailwind color families plus semantic `ink-*` / `surface-*` / `outline-*` CSS-variable classes via its `tailwind` preset (`tailwind/preset.js` → `plugin.js` → `colorPalette.js`). Do **not** invent new `--color-brand-*` custom tokens — reuse the existing families directly as Tailwind classes. This is fewer moving parts and stays consistent with every other frappe-ui component on the page.
+The portal's direction, chosen from four studies and resolved against WCAG AA before any of it was
+built. **The thesis: one deep field carries the week and the app's edge; everything else rests on
+warm paper. Colour is structural — it says where you are, it never decorates.**
 
-| Role | Use these classes | Hex (light mode, from `frappe-ui/tailwind/colors.json`) | Contrast on white |
+Layout variant in use: **B, Framed** — the side nav (and, on a phone, the app bar and tab bar) take
+the field, so every page has an identity, not just the dashboard.
+
+| Role | Token / class | Hex | Measured |
 |---|---|---|---|
-| Brand / primary | `bg-blue-600 text-white` (buttons), `text-blue-700` (links, small text) | `#007BE0` / `#0070CC` | blue-600 on white ~4.7:1; blue-700 ~5.6:1 |
-| Brand bg | `bg-blue-50` | `#F2F9FF` | — |
-| Success | `text-green-700`, `bg-green-50 text-green-700` (badge) | `#137949` / `#F2FDF4` | ~5.9:1 |
-| Warning | `text-amber-700`, `bg-amber-50 text-amber-700` (badge) | `#B35309` / `#FDFAED` | ~5.1:1 |
-| Danger | `text-red-600` / `bg-red-50 text-red-600` (badge) | `#CC2929` / `#FFF7F7` | ~5.4:1 |
-| Body text | `text-ink-gray-9` (headings), `text-ink-gray-7` (body), `text-ink-gray-5` (muted) | frappe-ui semantic tokens | AA at every level used |
-| Background / border | `bg-surface-white`, `bg-surface-gray-2`, `border-outline-gray-2` | frappe-ui semantic tokens | — |
+| Page ground | `--surface-gray-1`, `bg-paper` | `#EFEAE4` | — |
+| Card surface | `--surface-white` | `#FFFDFB` | — |
+| Field | `bg-field`, `blue-800` | `#143D33` | white on it **12.03** |
+| Field deep | `bg-field-deep`, `blue-900` | `#0E2C25` | white on it **14.94** |
+| Signal yellow | `bg-signal`, `text-signal` | `#FFD24A` | on field **8.35** |
+| Primary action | `blue-500` (frappe-ui Button) | `#1E6F53` | white on it **6.08** |
+| Primary hover | `--surface-blue-3` | `#1A6349` | white on it **7.18** |
+| Link / brand text | `blue-700` | `#14523F` | **8.96** on surface, **7.61** on paper |
+| Heading ink | `--ink-gray-9` | `#1A1714` | **14.92** on paper |
+| Body ink | `--ink-gray-6/7` | `#514A43` | **8.59** on surface |
+| Muted ink | `--ink-gray-4/5` | `#70675E` | **4.63** on paper, **5.46** on surface |
+| Hairline | `--outline-gray-2` | `#E2DAD1` | — |
+| Waiting | `--ink-amber-2/3` on `--surface-amber-1` | `#8A5A00` on `#FDEFC9` | **5.18** |
+| Approved | `--ink-green-2/3` on `--surface-green-2` | `#1E6F53` on `#DCEFE5` | **5.07** |
+| Sent back | `--ink-red-3/4` on `--surface-red-2` | `#A8351A` on `#F6E2DC` | **5.28** |
 
-Do not use `gray-500`/`amber-600`/`red`-on-white for small text directly — use the `-600`/`-700` shades and semantic `ink-*` tokens above, which are the ones frappe-ui itself uses for text.
+### Two rules that are not negotiable
 
-### Measured correction (post-U11 `/impeccable audit`)
+1. **The signal yellow never touches paper.** It measures **1.21:1** on the page ground — invisible.
+   It exists only inside the field (8.35:1). On light surfaces the warm accent is `#8A5A00`. This is
+   the single rule that keeps Signal from turning into a highlighter.
+2. **Muted ink is `#70675E`, not lighter.** The obvious next step up measured 3.89:1 on paper and
+   would fail AA on every empty state and form label — the mistake this document already shipped once.
 
-The "Contrast on white" column above was **estimated, and several entries were wrong**. Measured
-off the rendered portal (page background is `surface-gray-1` #F8F8F8, not white, which costs
-~0.25), these failed WCAG AA and are now corrected in `frontend/src/index.css`:
+### Where the brand hue lives
 
-| Token / class | Was | Measured | Now | Ratio |
-|---|---|---|---|---|
-| `--ink-gray-5` (all muted text, empty states, labels) | gray-600 `#7C7C7C` | 3.93 | `#707070` | 4.66 |
-| `--ink-amber-2/3` (Badge "Waiting for …") | amber-600 `#DB7706` | 3.02 | `#B35309` | 4.83 |
-| `--ink-green-2/3` (Badge "Approved") | green-600 `#278F5E` | 3.70 | `#137949` | 4.62 |
-| `--surface-green-3` (Approve button) | green-600 | 4.06 | `#137949` | 5.44 |
-| `--surface-blue-3` (primary button hover) | blue-600 | 4.28 | `#005CA3` | 6.86 |
-| `blue.500` in `tailwind.config.cjs` (primary Button) | `#0289F7` | 3.54 | `#0070CC` | 5.01 |
+`blue` in `tailwind.config.cjs` **is the Signal green**. frappe-ui's `Button` and `Badge` hard-code
+`blue` as their primary theme (and `Button` reaches for a raw `bg-blue-500`), so retuning that scale
+is the only way to re-brand those components without forking the library. Read `blue` as "brand"
+everywhere in this app. The neutral, ink and status tokens are retuned in `frontend/src/index.css`;
+between them, all twelve pages re-skin without touching their markup.
 
-Two naming traps worth knowing: the compiled utilities read `--ink-*`, while frappe-ui's Tailwind
-plugin source names the same values `--text-ink-*` — overriding the latter builds clean and
-changes nothing on screen. And frappe-ui's solid blue `Button` is the one component that reaches
-for a raw `bg-blue-500` instead of a semantic token, so it can only be corrected in the Tailwind
-theme, not with a CSS variable.
-
-**Anti-patterns to avoid** (from the style search): bright neon accents, harsh/instant animations, dark mode (not in phase 1 scope — see brief Deferred).
+Anti-patterns: gradients, glass, decorative shadow, and any second accent hue. Signal has one
+accent and it lives on the field.
 
 ## Typography
 
-**Pairing: "Corporate Trust"** — Lexend (headings) + Source Sans 3 (body). Chosen for its accessibility focus and "corporate, trustworthy, readable" mood, matching the portal's plain-words tone better than a generic dashboard/mono pairing.
+**Archivo, one family, six roles.** Product UI rarely needs a display/body pairing — it needs one
+well-cut grotesque with real weight range so labels, data and headings stay related.
 
-```css
-@import url('https://fonts.googleapis.com/css2?family=Lexend:wght@400;500;600;700&family=Source+Sans+3:wght@400;500;600;700&display=swap');
-```
+| Role | Size / weight |
+|---|---|
+| Display figure | 40px / 800 / -3% tracking |
+| Page heading | 26px / 700 / -2% |
+| Section heading | 18px / 700 |
+| Body | 15px / 400 |
+| Small, secondary | 13px / 400 |
+| Label | 11px / 700 / +10% tracking, uppercase |
 
-```js
-// tailwind.config.js fontFamily
-fontFamily: {
-  heading: ['Lexend', 'sans-serif'],
-  sans: ['Source Sans 3', 'sans-serif'], // body default, matches frappe-ui's own base
-}
-```
+Digits that line up in columns take `.tabular` (`font-variant-numeric: tabular-nums`).
 
-Base body size 16px, line-height 1.5. Headings use `heading`, everything else (labels, buttons, table cells) stays on frappe-ui's default body font so form controls don't visually clash with frappe-ui components.
+> Superseded: the original Lexend + Source Sans 3 pairing. It set headings and body 4px apart at one
+> weight, so hierarchy was carried by position alone — one of the three measured causes of the
+> "flat" verdict, alongside zero elevation and an accent used only at small sizes.
 
 ## Spacing, radius, density
 

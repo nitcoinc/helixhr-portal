@@ -455,6 +455,32 @@ Run `node .claude/skills/impeccable/scripts/detect.mjs --json frontend/src` for 
 slop checks; it is fast and catches things like the thick coloured `border-l-4` the unread
 notification rows used to carry.
 
+## Three bugs the e2e suite could not see, and why
+
+All three shipped green. Each is the same shape: a test asserted that a *label* appeared and never
+that the thing behind it worked.
+
+- **Sign out dumped users on a Frappe "Not permitted" page.** `logout` is POST-only; `call('logout')`
+  sent a GET because `call()` only upgrades to POST when given params. Frappe refused with
+  `PermissionError`, a bare `.catch(() => {})` swallowed the 403, and the redirect ran with the
+  session still alive -- at which point `/login` 301s a logged-in user to their Desk home page,
+  which an Employee Self Service user cannot open. No test clicked Sign out.
+- **`attendance_this_month` never worked, for anyone, ever.** `_get_attendance_summary` passed the
+  `datetime.date` objects `get_first_day()`/`get_last_day()` return to
+  `hrms.api.get_attendance_calendar_events`, which is annotated `from_date: str`; Frappe's typing
+  validation raised `FrappeTypeError` and `_safe` turned it into `null`. The card rendered "Nothing
+  recorded yet" regardless of real attendance -- a type error wearing a plausible empty state, which
+  is the failure mode that hides longest. Any call into an `hrms.api` method must stringify dates.
+- **An employee could never see why their timesheet was sent back.** `Timesheet.vue` read the
+  manager's comment with `frappe.client.get_list` on `Comment`, a doctype the Employee Self Service
+  role cannot read, so the call 403'd on every rejected week. `timesheet-approval.spec.ts` asserted
+  only that the text "Sent back" was visible, never the reason, so the flow passed for months. The
+  comment now ships inside `get_my_week`'s payload, resolved server-side, and both the Python and
+  e2e tests assert the reason text itself.
+
+**The pattern worth remembering:** assert the payload, not the chrome. "Sent back is visible" and
+"the employee can read why" are different claims, and only the second one is the feature.
+
 ## Go-live checklist (grows through U11)
 
 - [ ] Confirm every Employee Self Service user has a User Permission on their own Employee

@@ -111,6 +111,13 @@ test('employee submits a week, manager rejects with a comment, employee edits an
   await empPage.reload()
   await expect(empPage.getByText('Sent back').first()).toBeVisible({ timeout: 10000 })
 
+  // The reason, not just the label. Asserting only "Sent back" is what let a
+  // 403 on the comment lookup live in this flow undetected: the employee saw
+  // that their week came back and never saw why.
+  await expect(empPage.getByText(/Please double check your hours/)).toBeVisible({
+    timeout: 10000,
+  })
+
   await empPage.getByRole('button', { name: 'Edit and resubmit' }).click()
   await expect(empPage.getByRole('button', { name: 'Submit' })).toBeVisible({ timeout: 10000 })
   await empPage.waitForTimeout(500)

@@ -387,6 +387,14 @@ def get_my_week(week_start=None):
 			"workflow_state": doc.workflow_state,
 			"total_hours": doc.total_hours,
 			"docstatus": doc.docstatus,
+			# Resolved here rather than by the page, which used to read it with
+			# `frappe.client.get_list` on Comment -- a doctype the Employee Self
+			# Service role cannot read, so that call 403'd and the employee was
+			# told their week was sent back without ever being told why. The
+			# e2e only asserted the "Sent back" label, so it never caught it.
+			"rejection_comment": _last_rejection_comment(doc.name)
+			if doc.workflow_state == "Rejected"
+			else None,
 			"rows": [
 				{
 					"project": row.project,

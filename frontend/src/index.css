@@ -1,77 +1,64 @@
-@import url('https://fonts.googleapis.com/css2?family=Lexend:wght@400;500;600;700&family=Source+Sans+3:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&display=swap');
 @import 'frappe-ui/style.css';
 
 /*
- * Contrast corrections to frappe-ui's semantic ink tokens.
+ * SIGNAL -- the portal's palette, applied at the token level.
  *
- * Measured off the rendered portal, not assumed -- docs/design-system.md
- * claimed these were "AA at every level used" and they are not. Ratios below
- * are against the surface each token actually pairs with in this app; the
- * page background is surface-gray-1 (#F8F8F8), not white, which costs ~0.25.
- * Fixing the tokens rather than the call sites corrects every frappe-ui
- * component and every `text-ink-*` utility we write at once.
+ * frappe-ui drives almost everything through these semantic CSS variables,
+ * so retuning them here re-skins all twelve pages at once; the alternative
+ * was editing several hundred call sites. Two naming traps, both learned the
+ * hard way: the compiled utilities read `--ink-*`, while frappe-ui's Tailwind
+ * plugin source names the same values `--text-ink-*` (overriding the latter
+ * builds clean and changes nothing on screen), and the brand hue lives in the
+ * `blue` scale in tailwind.config.cjs because frappe-ui's components hard-code
+ * `blue` as their primary.
  *
- * Note the variable names: the compiled utilities read `--ink-*`, while
- * frappe-ui's Tailwind plugin source names them `--text-ink-*`. Only the
- * former has any effect -- overriding the latter builds clean and changes
- * nothing on screen.
+ * Every value is measured against the ground it actually sits on, and the
+ * paper ground costs ~0.3 versus white -- which is what caught the muted ink
+ * at 3.89:1 the first time round. Ratios are in the comments.
  *
- * Scoped away from dark mode: these values are chosen against light
- * surfaces, and phase 1 ships no dark theme (see design-system.md).
+ * Scoped away from dark mode: these are chosen against light surfaces, and
+ * phase 1 ships no dark theme (see docs/design-system.md).
  */
 :root:not([data-theme='dark']) {
-  /* gray-600 #7C7C7C -> 3.93 on the page background. Muted body text, empty
-     states and form labels all use this. #707070 gives 4.66 there and 4.95
-     on white, and stays a clear step lighter than ink-gray-6 (#525252). */
-  --ink-gray-5: #707070;
+  /* Warm neutrals. The old set was pure grey on #F8F8F8; paper and a warm
+     ink are what stop the portal reading as a default admin theme. */
+  --surface-white: #fffdfb;
+  --surface-gray-1: #efeae4; /* page ground */
+  --surface-gray-2: #e7e0d8; /* hover */
+  --surface-gray-3: #dbd2c8;
+  --surface-gray-4: #cfc4b8;
+  --outline-gray-1: #e8e1d9;
+  --outline-gray-2: #e2dad1;
+  --outline-gray-3: #cfc4b8;
 
-  /* gray-500 #999999 -> 2.85 on white. frappe-ui's Tailwind plugin puts
-     `placeholder-ink-gray-4` on every form control, so every placeholder in
-     the portal renders on this token and no per-surface fix can reach them.
-     Matched to ink-gray-5 rather than kept a step lighter: no lighter value
-     clears 4.5:1 against the gray-100 field background these sit on. */
-  --ink-gray-4: #707070;
+  /* Ink. gray-4 and gray-5 share a value: frappe-ui puts
+     `placeholder-ink-gray-4` on every form control, and no step lighter than
+     this clears 4.5:1 on the field backgrounds those sit on. 4.63 on paper,
+     5.46 on surface. */
+  --ink-gray-4: #70675e;
+  --ink-gray-5: #70675e;
+  --ink-gray-6: #514a43; /* 8.59 on surface */
+  --ink-gray-7: #514a43;
+  --ink-gray-8: #2e2a26;
+  --ink-gray-9: #1a1714; /* 14.92 on paper */
 
-  /* Badge "Waiting for ..." -- amber-600 on amber-50 measured 3.02.
-     amber-700 gives 4.83. */
-  --ink-amber-2: #b35309;
-  --ink-amber-3: #b35309;
+  /* Status. Each pairs with its own surface below, not with white. */
+  --ink-amber-2: #8a5a00; /* 5.18 on surface-amber-1 */
+  --ink-amber-3: #8a5a00;
+  --surface-amber-1: #fdefc9;
+  --ink-green-2: #1e6f53; /* 5.07 on surface-green-2 */
+  --ink-green-3: #1e6f53;
+  --surface-green-2: #dcefe5;
+  --ink-red-3: #a8351a; /* 5.28 on surface-red-2 */
+  --ink-red-4: #a8351a;
+  --surface-red-2: #f6e2dc;
 
-  /* Badge "Approved" -- green-600 measured 3.70 on its badge surface.
-     green-700 gives 4.62 on green-200 and 5.22 on green-50. */
-  --ink-green-2: #137949;
-  --ink-green-3: #137949;
-
-  /* Primary button hover (frappe-ui: solid blue hovers to surface-blue-3).
-     White on blue-600 is 4.28, so hover failed while the resting state
-     passed; blue-800 also makes hover darken rather than lighten. */
-  --surface-blue-3: #005ca3;
-
-  /* Approve buttons (frappe-ui: solid green is bg-surface-green-3).
-     White on green-600 measured 4.06; green-700 gives 5.44. */
-  --surface-green-3: #137949;
-}
-
-/*
- * Touch sizing. frappe-ui's default button and form-control height is 28px
- * and its `lg` size is still only 40px, so on a phone almost every control
- * in the portal -- Save, Approve, Reject, Withdraw, the form inputs -- was
- * under the 44px the design system requires. Raising the floor for coarse
- * pointers only keeps the desktop density frappe-ui was tuned for, and it
- * reaches inside components whose markup this app does not own.
- *
- * `min-height` is ignored on non-replaced inline boxes, so inline text links
- * inside a sentence are untouched by design; the few standalone links that
- * need a real target set their own inline-flex + min-height.
- */
-@media (pointer: coarse) {
-  button,
-  [role='button'],
-  select,
-  textarea,
-  input:not([type='checkbox']):not([type='radio']):not([type='hidden']) {
-    min-height: 44px;
-  }
+  /* Solid action buttons (frappe-ui: green solid is surface-green-3, red
+     solid is surface-red-5, blue solid hovers to surface-blue-3). */
+  --surface-green-3: #1e6f53; /* white on it 6.08 */
+  --surface-red-5: #a8351a; /* white on it 6.58 */
+  --surface-blue-3: #1a6349; /* primary hover, white on it 7.18 */
 }
 
 button,

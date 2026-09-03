@@ -64,33 +64,33 @@ onUnmounted(unwatchUnread)
          page height on a long page; the sticky inner aside is only as
          tall as the viewport. Sticky alone left a bare grey strip below
          the nav once content scrolled past one screen. -->
-    <div class="hidden shrink-0 border-r border-outline-gray-2 bg-surface-white lg:block">
+    <div class="hidden shrink-0 bg-field lg:block">
       <aside class="sticky top-0 flex h-screen w-64 flex-col">
         <div class="flex items-center gap-2 px-5 py-5">
           <span
-            class="flex h-8 w-8 items-center justify-center rounded-md bg-blue-700 font-heading text-sm font-semibold text-white"
+            class="flex h-8 w-8 items-center justify-center rounded-md bg-signal font-heading text-sm font-bold text-field"
           >
             H
           </span>
-          <span class="font-heading text-base font-semibold text-ink-gray-9">HelixHR</span>
+          <span class="font-heading text-base font-semibold text-white">HelixHR</span>
         </div>
 
         <router-link
           to="/profile"
-          class="mx-3 flex cursor-pointer items-center gap-3 rounded-lg px-2 py-2 hover:bg-surface-gray-2"
+          class="mx-3 flex cursor-pointer items-center gap-3 rounded-lg px-2 py-2 hover:bg-white/10"
         >
           <span
-            class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-blue-50 font-medium text-blue-700"
+            class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white/15 font-medium text-white"
           >
             {{ initials || '—' }}
           </span>
           <span class="min-w-0">
-            <span class="block truncate text-sm font-medium text-ink-gray-8">
+            <span class="block truncate text-sm font-medium text-white">
               {{ employeeName || 'Loading…' }}
             </span>
             <span
               v-if="employeeRole"
-              class="block truncate text-xs text-ink-gray-5"
+              class="block truncate text-xs text-blue-200"
             >
               {{ employeeRole }}
             </span>
@@ -109,15 +109,15 @@ onUnmounted(unwatchUnread)
             class="flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium"
             :class="
               isActive(item)
-                ? 'bg-blue-50 text-blue-700'
-                : 'text-ink-gray-7 hover:bg-surface-gray-2 hover:text-ink-gray-9'
+                ? 'bg-white/15 text-white'
+                : 'text-blue-100 hover:bg-white/10 hover:text-white'
             "
           >
             <Icon :name="item.icon" />
             <span class="flex-1">{{ item.label }}</span>
             <span
               v-if="item.badge && unreadCount.data > 0"
-              class="flex h-5 min-w-5 items-center justify-center rounded-full bg-blue-700 px-1.5 text-xs font-medium text-white"
+              class="flex h-5 min-w-5 items-center justify-center rounded-full bg-signal px-1.5 text-xs font-bold text-field"
             >
               <span class="tabular">{{ unreadCount.data > 9 ? '9+' : unreadCount.data }}</span>
             </span>
@@ -125,7 +125,7 @@ onUnmounted(unwatchUnread)
         </nav>
 
         <button
-          class="m-3 flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-ink-gray-6 hover:bg-surface-gray-2 hover:text-ink-gray-9"
+          class="m-3 flex min-h-11 cursor-pointer items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium text-blue-200 hover:bg-white/10 hover:text-white"
           @click="signOut"
         >
           <Icon name="signOut" />
@@ -138,28 +138,28 @@ onUnmounted(unwatchUnread)
       <!-- Phone/tablet app bar. The desktop identity and notification
            count live in the sidebar instead, so this is hidden there. -->
       <header
-        class="sticky top-0 z-10 flex items-center justify-between border-b border-outline-gray-2 bg-surface-white px-4 py-2.5 lg:hidden"
+        class="sticky top-0 z-10 flex items-center justify-between bg-field px-4 py-2.5 lg:hidden"
       >
         <router-link
           to="/"
           class="flex min-h-11 cursor-pointer items-center gap-2"
         >
           <span
-            class="flex h-7 w-7 items-center justify-center rounded-md bg-blue-700 font-heading text-xs font-semibold text-white"
+            class="flex h-7 w-7 items-center justify-center rounded-md bg-signal font-heading text-xs font-bold text-field"
           >
             H
           </span>
-          <span class="font-heading text-sm font-semibold text-ink-gray-9">HelixHR</span>
+          <span class="font-heading text-sm font-semibold text-white">HelixHR</span>
         </router-link>
         <router-link
           to="/notifications"
-          class="relative flex h-11 w-11 cursor-pointer items-center justify-center rounded-full text-ink-gray-6 hover:bg-surface-gray-2"
+          class="relative flex h-11 w-11 cursor-pointer items-center justify-center rounded-full text-blue-100 hover:bg-white/10"
           aria-label="Notifications"
         >
           <Icon name="notifications" />
           <span
             v-if="unreadCount.data > 0"
-            class="absolute right-1.5 top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-blue-700 px-1 text-[10px] font-medium text-white"
+            class="absolute right-1.5 top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-signal px-1 text-[10px] font-bold text-field"
           >
             <span class="tabular">{{ unreadCount.data > 9 ? '9+' : unreadCount.data }}</span>
           </span>
@@ -175,7 +175,7 @@ onUnmounted(unwatchUnread)
 
     <!-- Phone/tablet bottom tab bar. -->
     <nav
-      class="fixed inset-x-0 bottom-0 z-10 flex border-t border-outline-gray-2 bg-surface-white lg:hidden"
+      class="fixed inset-x-0 bottom-0 z-10 flex bg-field pb-[env(safe-area-inset-bottom)] lg:hidden"
       aria-label="Main"
     >
       <router-link
@@ -184,13 +184,13 @@ onUnmounted(unwatchUnread)
         :to="item.to"
         :aria-current="isActive(item) ? 'page' : undefined"
         class="flex min-h-[56px] flex-1 cursor-pointer flex-col items-center justify-center gap-1 text-[11px] font-medium"
-        :class="isActive(item) ? 'text-blue-700' : 'text-ink-gray-6'"
+        :class="isActive(item) ? 'text-signal' : 'text-blue-200'"
       >
         <Icon :name="item.icon" />
         {{ item.label }}
       </router-link>
       <button
-        class="flex min-h-[56px] flex-1 cursor-pointer flex-col items-center justify-center gap-1 text-[11px] font-medium text-ink-gray-6"
+        class="flex min-h-[56px] flex-1 cursor-pointer flex-col items-center justify-center gap-1 text-[11px] font-medium text-blue-200"
         @click="showMore = true"
       >
         <Icon name="more" />
@@ -215,7 +215,7 @@ onUnmounted(unwatchUnread)
             <span class="flex-1">{{ item.label }}</span>
             <span
               v-if="item.badge && unreadCount.data > 0"
-              class="flex h-5 min-w-5 items-center justify-center rounded-full bg-blue-700 px-1.5 text-xs font-medium text-white"
+              class="flex h-5 min-w-5 items-center justify-center rounded-full bg-signal px-1.5 text-xs font-bold text-field"
             >
               <span class="tabular">{{ unreadCount.data > 9 ? '9+' : unreadCount.data }}</span>
             </span>

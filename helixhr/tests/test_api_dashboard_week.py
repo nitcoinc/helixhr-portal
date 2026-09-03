@@ -178,6 +178,21 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 		self.assertEqual(len(queue["items"]), 8)
 		self.assertEqual(queue["more"], 2)
 
+	def test_get_my_week_carries_the_managers_reason_for_sending_it_back(self):
+		"""Regression: the Timesheet page read this with
+		`frappe.client.get_list` on Comment, which the Employee Self Service
+		role cannot read -- the call 403'd, so an employee was told their week
+		was sent back and never told why. It ships with the week now."""
+		from helixhr.api import get_my_week
+
+		monday, _ = get_week_bounds(today())
+		self._make_rejected_timesheet("Friday hours are missing.", start=monday)
+
+		week = get_my_week()
+
+		self.assertEqual(week["timesheet"]["workflow_state"], "Rejected")
+		self.assertEqual(week["timesheet"]["rejection_comment"], "Friday hours are missing.")
+
 	def test_queue_never_leaks_another_employees_work(self):
 		other = frappe.db.get_value("Employee", {"name": ["!=", self.employee_name]}, "name")
 		self.assertTrue(other)
