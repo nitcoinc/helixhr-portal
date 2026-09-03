@@ -1,5 +1,6 @@
 import frappe
 from frappe import _
+from frappe.utils import cint
 
 from helixhr.utils import get_manager_user
 
@@ -78,3 +79,36 @@ def _unshare_from_approver(doc, manager_user):
 	frappe.db.delete(
 		"DocShare", {"share_doctype": doc.doctype, "share_name": doc.name, "user": manager_user}
 	)
+
+
+def file_before_insert(doc, method=None):
+	"""KTD18: Frappe lets a file's owner attach it to any document they
+	can *read* (not necessarily write) -- an employee could otherwise
+	attach a file to someone else's HR Request just by knowing its name.
+	Only touches files attached to HR Request; every other upload in the
+	app (there are none yet, but future ones too) is unaffected.
+
+	Refuses rather than coercing a non-private upload: this hook runs
+	*after* File's own before_insert (Document.hook() composes the base
+	controller method first, then doc_event hooks -- confirmed while
+	building this), by which point a non-private file has already been
+	written to the public path and save_file()/file_url both reflect
+	that. Flipping is_private=1 here alone leaves file_url pointing at
+	the wrong (public) path, which then fails File's own later
+	validation with a confusing "incorrect File URL" error -- refusing
+	outright is both simpler and doesn't leave a real file sitting in
+	the public folder even momentarily. RequestForm.vue already always
+	uploads with is_private=1, so this only ever fires against a caller
+	that bypasses the portal's own upload path.
+	"""
+	if doc.attached_to_doctype != "HR Request" or not doc.attached_to_name:
+		return
+
+	if not cint(doc.is_private):
+		frappe.throw(_("Files attached to a request must be private."), frappe.PermissionError)
+
+	if not frappe.has_permission("HR Request", "write", doc.attached_to_name):
+		frappe.throw(
+			_("You can't attach a file to that request."),
+			frappe.PermissionError,
+		)

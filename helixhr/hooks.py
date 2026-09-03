@@ -143,6 +143,9 @@ doc_events = {
 		"on_update": "helixhr.events.timesheet_on_update",
 		"before_submit": "helixhr.events.timesheet_before_submit",
 	},
+	"File": {
+		"before_insert": "helixhr.events.file_before_insert",
+	},
 }
 
 # Generators

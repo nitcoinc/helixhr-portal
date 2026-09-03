@@ -45,15 +45,17 @@ class TestHelixHRDashboard(IntegrationTestCase):
 		# guest coverage already exists in Playwright (login-dashboard.spec.ts).
 		self.assertNotIn(get_dashboard, frappe.guest_methods)
 
-	def test_pending_section_is_null_before_hr_request_doctype_exists(self):
-		# HR Request lands in U9. Until then, _get_pending_counts throws
-		# (doctype doesn't exist) and the whole "pending" card is null --
-		# this is the section-level failure isolation the method is built
-		# for, not a bug. Update this test once U9 ships HR Request.
+	def test_pending_section_is_a_real_count_now_that_hr_request_exists(self):
+		# HR Request shipped in U9 -- _get_pending_counts no longer throws,
+		# so "pending" is a real dict, not the section-level null this
+		# tested before the doctype existed.
 		frappe.set_user(EMPLOYEE_USER)
 		result = get_dashboard()
 
-		self.assertIsNone(result["pending"])
+		self.assertIsInstance(result["pending"], dict)
+		self.assertEqual(
+			set(result["pending"]), {"my_open_leave", "my_open_requests", "approvals_waiting_for_me"}
+		)
 
 	def test_unread_notifications_is_a_count(self):
 		frappe.set_user(EMPLOYEE_USER)
