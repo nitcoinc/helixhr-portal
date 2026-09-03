@@ -481,6 +481,28 @@ that the thing behind it worked.
 **The pattern worth remembering:** assert the payload, not the chrome. "Sent back is visible" and
 "the employee can read why" are different claims, and only the second one is the feature.
 
+## Attendance exceptions are dormant until a check-in device exists (R16)
+
+No attendance device is configured, so the Attendance page's exceptions strip needs a rule that
+does not turn every past day red the moment it ships. `helixhr.api.get_my_attendance` only counts
+a day as **missing** when it is:
+
+- on or after `tracking_since` — the employee's **first ever** submitted Attendance record. Before
+  that date the company simply was not recording, so nothing can be absent from it. With no records
+  at all, `tracked` is false and `missing` is always empty;
+- strictly before today (today is not late yet);
+- not already recorded, not a holiday on the employee's holiday list, and not covered by approved leave.
+
+If the employee has no resolvable holiday list, working days are unknowable, so `working_days_known`
+comes back false and `missing` stays empty rather than being guessed.
+
+**This needs no code change when the device arrives.** The first real Attendance record sets
+`tracking_since` and the feature starts working from that date forward. `late` reads Attendance's
+own `late_entry` flag, which only a device (or HR) sets, so it stays at zero until then too.
+
+`helixhr/tests/test_api_attendance.py` covers the no-data case first, because that is the one that
+ships today.
+
 ## Go-live checklist (grows through U11)
 
 - [ ] Confirm every Employee Self Service user has a User Permission on their own Employee

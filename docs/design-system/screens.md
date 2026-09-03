@@ -24,8 +24,10 @@ Two sections stacked: "Your information" (read-only, `gray-600` labels, `gray-90
 ## Leave (U6)
 Top: balance chips per leave type (color = brand-50 background, brand-700 text). Below: tabs or filter chips (All / Waiting / Approved / Sent back). List of leave cards, each with type, dates, day count, status `Badge`. Floating/primary "Ask for leave" button opens a form sheet (mobile: full-screen sheet; desktop: dialog).
 
-## Attendance (U7)
+## Attendance (U7, exceptions added post-audit)
 Month calendar grid, one cell per day, colored dot per status (present/absent/half day/holiday, using the three status colors plus gray for holiday). Tapping a day opens a small drawer with check-in/check-out times. Month summary strip above the calendar (counts by status).
+
+**Exceptions strip** below the summary (R16): Absent, Half day, Late arrival, No record — each pill rendered only when its count is non-zero. A late day gets an amber ring around its status dot; a "no record" day gets a dashed cell outline. The whole block is dormant until attendance is genuinely being recorded: no check-in device is configured yet, so `get_my_attendance` reports nothing missing and the strip shows one explanatory line instead. See the runbook for the rule that keeps it from flagging every past day.
 
 ## Timesheet (U8)
 Week picker (prev/next arrows + "This week" button) at top. Below: one row per timesheet entry (project, task, hours, note) in a simple list on phone, a compact table at desktop. Add-row button. Save draft (secondary) and Submit (primary) at the bottom, sticky on phone. Read-only states show a status `Badge` and, when rejected, the manager's comment in a callout box above an "Edit and resubmit" button.

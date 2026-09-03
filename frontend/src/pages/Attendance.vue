@@ -44,11 +44,33 @@ const monthEnd = computed(() => {
   return isoDate(year.value, month.value, lastDay)
 })
 
+// helixhr.api.get_my_attendance rather than hrms.api directly: the exceptions
+// R16 asks for (late, missing) need the Attendance late_entry flag and the
+// employee's holiday list, and "missing" has a rule that belongs on the server.
 const calendar = createResource({
-  url: 'hrms.api.get_attendance_calendar_events',
+  url: 'helixhr.api.get_my_attendance',
   makeParams: () => ({ from_date: monthStart.value, to_date: monthEnd.value }),
   auto: true,
 })
+
+const attendanceDays = computed(() => calendar.data?.days || {})
+const missingDays = computed(() => new Set(calendar.data?.missing || []))
+const exceptions = computed(() => calendar.data?.exceptions || {})
+// No check-in device is configured yet. Until one is, the server reports
+// nothing missing and this page says so rather than showing an empty grid
+// that looks broken.
+const isTracked = computed(() => !!calendar.data?.tracked)
+const EXCEPTION_LABELS = {
+  absent: 'Absent',
+  half_day: 'Half day',
+  late: 'Late arrival',
+  missing: 'No record',
+}
+const exceptionEntries = computed(() =>
+  Object.entries(EXCEPTION_LABELS)
+    .map(([key, label]) => [label, exceptions.value[key] || 0])
+    .filter(([, count]) => count > 0),
+)
 
 watch([year, month], () => calendar.fetch())
 
@@ -60,18 +82,19 @@ const days = computed(() => {
   for (let i = 0; i < firstWeekday.value; i++) list.push(null)
   for (let d = 1; d <= daysInMonth.value; d++) {
     const iso = isoDate(year.value, month.value, d)
-    list.push({ day: d, iso, status: calendar.data?.[iso] })
+    const record = attendanceDays.value[iso]
+    list.push({
+      day: d,
+      iso,
+      status: record?.status,
+      late: !!record?.late,
+      missing: missingDays.value.has(iso),
+    })
   }
   return list
 })
 
-const summary = computed(() => {
-  const counts = {}
-  for (const status of Object.values(calendar.data || {})) {
-    counts[status] = (counts[status] || 0) + 1
-  }
-  return counts
-})
+const summary = computed(() => calendar.data?.summary || {})
 
 function prevMonth() {
   if (month.value === 0) {
@@ -106,6 +129,14 @@ const checkins = createResource({
   }),
   auto: false,
 })
+
+function dayLabel(day) {
+  const parts = [`${monthLabel.value} ${day.day}`]
+  if (day.status) parts.push(STATUS_LABEL[day.status] || day.status)
+  if (day.late) parts.push('late arrival')
+  if (day.missing) parts.push('no record')
+  return parts.join(', ')
+}
 
 function openDay(day) {
   if (!day) return
@@ -167,6 +198,41 @@ function closeDay() {
       </span>
     </div>
 
+    <!-- R16's exceptions. Dormant by design: with no check-in device the
+         server reports nothing missing, so this whole block resolves to the
+         one explanatory line below rather than a wall of red. It starts
+         working the day real records arrive, with no change here. -->
+    <div class="max-w-xl">
+      <h2 class="mb-2 text-sm font-medium text-ink-gray-7">
+        Exceptions
+      </h2>
+      <div
+        v-if="exceptionEntries.length"
+        class="flex flex-wrap gap-2 text-sm"
+      >
+        <span
+          v-for="[label, count] in exceptionEntries"
+          :key="label"
+          class="rounded-full bg-surface-amber-1 px-3 py-1 font-medium text-ink-amber-3"
+        >
+          {{ label }}: <span class="tabular">{{ count }}</span>
+        </span>
+      </div>
+      <p
+        v-else-if="!calendar.loading && !isTracked"
+        class="text-sm text-ink-gray-5"
+      >
+        Check-in isn't set up yet, so there's nothing to flag. Once it is, late
+        arrivals and days with no record will show up here.
+      </p>
+      <p
+        v-else-if="!calendar.loading"
+        class="text-sm text-ink-gray-5"
+      >
+        Nothing to flag this month.
+      </p>
+    </div>
+
     <div class="max-w-xl rounded-xl border border-outline-gray-2 bg-surface-white p-3">
       <div class="grid grid-cols-7 gap-1 text-center text-xs text-ink-gray-5">
         <span
@@ -183,15 +249,21 @@ function closeDay() {
           v-for="(day, index) in days"
           :key="index"
           class="tabular flex aspect-square min-h-11 flex-col items-center justify-center rounded-md text-sm"
-          :class="day ? 'cursor-pointer text-ink-gray-8 hover:bg-surface-gray-2' : ''"
-          :aria-label="day ? `${monthLabel} ${day.day}` : undefined"
+          :class="[
+            day ? 'cursor-pointer text-ink-gray-8 hover:bg-surface-gray-2' : '',
+            day?.missing ? 'border border-dashed border-outline-gray-3' : '',
+          ]"
+          :aria-label="day ? dayLabel(day) : undefined"
           @click="day && openDay(day)"
         >
           <span>{{ day?.day }}</span>
           <span
             v-if="day?.status"
-            class="mt-0.5 h-1.5 w-1.5 rounded-full"
-            :class="STATUS_COLOR[day.status] || 'bg-surface-gray-4'"
+            class="mt-0.5 h-2 w-2 rounded-full"
+            :class="[
+              STATUS_COLOR[day.status] || 'bg-surface-gray-4',
+              day.late ? 'ring-2 ring-amber-500 ring-offset-1' : '',
+            ]"
           />
         </component>
       </div>

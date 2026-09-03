@@ -360,6 +360,118 @@ def _count_leave_approvals_waiting(employee):
 	return len(get_leave_applications(employee, approver_id=frappe.session.user, for_approval=True))
 
 
+# Attendance (U7, R16)
+
+
+@frappe.whitelist()
+def get_my_attendance(from_date, to_date):
+	"""One month of attendance for the logged-in employee: a status per day,
+	the late/early flags Frappe records, and the four exceptions R16 asks for
+	(absent, half day, late, missing).
+
+	"Missing" is the careful one. No check-in device is configured yet, so a
+	naive "working day with no Attendance record" would mark *every* past day
+	as missing and drown the page in red -- worse than showing nothing. A day
+	only counts as missing when it falls on or after the first Attendance
+	record this employee has ever had: before that date the company simply
+	was not recording, so nothing can be absent from it. That makes the whole
+	feature dormant until real data arrives, and correct the moment it does,
+	with no further change here.
+	"""
+	employee = get_current_employee()
+	start, end = _as_date(from_date), _as_date(to_date)
+
+	records = frappe.get_all(
+		"Attendance",
+		filters={
+			"employee": employee,
+			"attendance_date": ["between", [str(start), str(end)]],
+			"docstatus": 1,
+		},
+		fields=["attendance_date", "status", "late_entry", "early_exit"],
+	)
+
+	days = {
+		str(row.attendance_date): {
+			"status": row.status,
+			"late": bool(row.late_entry),
+			"early": bool(row.early_exit),
+		}
+		for row in records
+	}
+
+	tracking_since = frappe.db.get_value(
+		"Attendance",
+		{"employee": employee, "docstatus": 1},
+		"attendance_date",
+		order_by="attendance_date asc",
+	)
+	missing = _missing_attendance_days(employee, start, end, days, tracking_since)
+
+	summary = {}
+	for entry in days.values():
+		summary[entry["status"]] = summary.get(entry["status"], 0) + 1
+
+	return {
+		"tracked": bool(tracking_since),
+		"tracking_since": str(tracking_since) if tracking_since else None,
+		# False when the employee has no resolvable holiday list, in which case
+		# working days are unknowable and `missing` is deliberately empty
+		# rather than guessed.
+		"working_days_known": _holiday_dates(employee, start, end) is not None,
+		"days": days,
+		"missing": missing,
+		"summary": summary,
+		"exceptions": {
+			"absent": summary.get("Absent", 0),
+			"half_day": summary.get("Half Day", 0),
+			"late": sum(1 for entry in days.values() if entry["late"]),
+			"missing": len(missing),
+		},
+	}
+
+
+def _holiday_dates(employee, start, end):
+	"""Holiday dates as a set of ISO strings, or None when the employee has no
+	resolvable holiday list -- the caller must treat None as "cannot tell",
+	never as "no holidays"."""
+	try:
+		from hrms.hr.utils import get_holiday_dates_for_employee
+
+		return {str(d) for d in get_holiday_dates_for_employee(employee, str(start), str(end))}
+	except Exception:
+		return None
+
+
+def _missing_attendance_days(employee, start, end, days, tracking_since):
+	from frappe.utils import add_days
+
+	if not tracking_since:
+		return []
+	holidays = _holiday_dates(employee, start, end)
+	if holidays is None:
+		return []
+
+	on_leave = _leave_days(employee, start, end)
+	first = _as_date(tracking_since)
+	today_date = _as_date(today())
+
+	missing = []
+	date = start
+	while date <= end:
+		iso = str(date)
+		if (
+			date >= first
+			and date < today_date  # today is not late yet
+			and iso not in days
+			and iso not in holidays
+			and iso not in on_leave
+		):
+			missing.append(iso)
+		date = add_days(date, 1)
+	return missing
+
+
 # Timesheets (U8, KTD7, KTD10, KTD11)
 
 
