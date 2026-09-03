@@ -9,8 +9,42 @@ const routes = [
   },
   {
     path: '/',
-    name: 'Home',
-    component: () => import('@/pages/Home.vue'),
+    name: 'Dashboard',
+    component: () => import('@/pages/Dashboard.vue'),
+  },
+  // Stubs for pages later units build (U5-U9). Named now so Dashboard's
+  // links (R7) and quick actions resolve to a real route instead of a
+  // dead link in the meantime; each name gets swapped to its real page
+  // component when that unit lands, no route/link changes needed.
+  {
+    path: '/leave',
+    name: 'Leave',
+    component: () => import('@/pages/PageComingSoon.vue'),
+    props: { title: 'Leave' },
+  },
+  {
+    path: '/attendance',
+    name: 'Attendance',
+    component: () => import('@/pages/PageComingSoon.vue'),
+    props: { title: 'Attendance' },
+  },
+  {
+    path: '/timesheet',
+    name: 'Timesheet',
+    component: () => import('@/pages/PageComingSoon.vue'),
+    props: { title: 'Timesheet' },
+  },
+  {
+    path: '/requests',
+    name: 'Requests',
+    component: () => import('@/pages/PageComingSoon.vue'),
+    props: { title: 'Requests' },
+  },
+  {
+    path: '/profile',
+    name: 'Profile',
+    component: () => import('@/pages/PageComingSoon.vue'),
+    props: { title: 'Profile' },
   },
 ]
 

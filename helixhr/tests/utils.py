@@ -59,7 +59,12 @@ def make_test_user(user, company, **employee_fields):
 	"""Create (or reuse) a User with password login and an Employee record
 	for it, with create_user_permission=1 -- the User Permission that
 	scopes the user to their own Employee is the entire portal
-	authorization story (brief D4, plan KTD5)."""
+	authorization story (brief D4, plan KTD5).
+
+	`employee_fields` are applied even to an already-existing Employee
+	(diffed and saved only if changed) so a field added here later also
+	lands on a fixture created by an earlier unit's test run, on a real
+	bench where these persist across runs. Idempotent either way."""
 	if not frappe.db.exists("User", user):
 		frappe.get_doc(
 			{
@@ -72,15 +77,24 @@ def make_test_user(user, company, **employee_fields):
 			}
 		).insert(ignore_permissions=True)
 
-	employee_name = frappe.db.get_value("Employee", {"user_id": user})
-	if employee_name:
-		return employee_name
+	desired_fields = {"first_name": user.split("@")[0].capitalize(), **employee_fields}
+
+	existing_name = frappe.db.get_value("Employee", {"user_id": user}, "name")
+	if existing_name:
+		employee = frappe.get_doc("Employee", existing_name)
+		changed = False
+		for field, value in desired_fields.items():
+			if employee.get(field) != value:
+				employee.set(field, value)
+				changed = True
+		if changed:
+			employee.save(ignore_permissions=True)
+		return employee.name
 
 	employee = frappe.get_doc(
 		{
 			"doctype": "Employee",
 			"employee_number": user.split("@")[0],
-			"first_name": user.split("@")[0],
 			"company": company,
 			"user_id": user,
 			"date_of_birth": "1990-01-01",
@@ -88,7 +102,7 @@ def make_test_user(user, company, **employee_fields):
 			"gender": ensure_test_gender(),
 			"status": "Active",
 			"create_user_permission": 1,
-			**employee_fields,
+			**desired_fields,
 		}
 	)
 	employee.insert(ignore_permissions=True)
@@ -100,6 +114,17 @@ def make_test_employee_and_manager():
 	Create (or reuse) two test users with real Employee records: an
 	employee and their manager (reports_to). Returns
 	(employee_name, employee_user, manager_name, manager_user).
+
+	Deliberately does not set designation/department: both are optional
+	everywhere they're shown (Dashboard.vue only renders them when
+	present) and creating fresh Designation/Department master data --
+	the first-ever row in either table on this bench -- reproducibly hit
+	a MariaDB lock-wait timeout in this fixture's setUp, every time, even
+	starting from a confirmed-empty lock table. Root cause not found (not
+	a leftover transaction -- checked); not worth fixture-blocking on
+	further. A real site's real HR data won't hit an empty-table insert
+	like this, since Designation/Department are seeded by the setup
+	wizard R6 already assumes.
 	"""
 	company = ensure_test_company()
 

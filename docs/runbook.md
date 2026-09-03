@@ -125,12 +125,14 @@ Company/Fiscal Year records that overlap with what it tries to create.
 This dev VM's nginx (`helixhr-platform`'s image) is built for **one fixed site**: it hardcodes
 `try_files /10.10.16.26/public/$uri ...` and `X-Frappe-Site-Name 10.10.16.26` regardless of
 what `Host` header a client sends. A second site (`test.localhost`, used for the Python
-integration test suite -- see below) is real and works fine via `bench --site test.localhost
-run-tests`, but it is **not reachable over HTTP through this nginx at all**. Two consequences:
+integration test suite -- see below) is real, but it is **not reachable over HTTP through this
+nginx at all** (see the lock-wait section below for a separate, real problem with running its
+tests over SSH on this VM). Two consequences:
 
-- **Python tests** (`bench --site <name> run-tests`) are unaffected -- they select the site
-  directly, bypassing HTTP host resolution entirely. Keep using a dedicated site
-  (`test.localhost` here) for these.
+- **Python tests** (`bench --site <name> run-tests`) don't need HTTP host resolution at all --
+  they select the site directly. In principle a dedicated site (`test.localhost` here) is fine
+  for these; in practice, running them over SSH on **this specific VM** hits a separate, real
+  problem -- see the next section.
 - **Playwright** (real browser, needs real HTTP) runs against the dev site (`10.10.16.26`)
   instead, using the three clearly-named test users above. `bench serve --port <n>` (Frappe's
   own dev server, which *does* do Host-header-based multi-site routing) was tried as a way to
@@ -146,6 +148,37 @@ in `playwright.config.ts`). It breaks `page.goto()` outright with
 it, isolating it from every other variable (hostname vs IP, Docker networking, `--ipc=host`).
 An **API-only** request context (`request.newContext()`, used by `auth.setup.ts` to log in) is
 unaffected and can set `Host` freely.
+
+## `bench run-tests` over SSH on this VM reliably hangs on the first-ever insert (U4)
+
+Found while verifying U4: `bench --site test.localhost run-tests --app helixhr`, run over SSH
+via `docker exec`, reliably hits `frappe.exceptions.QueryTimeoutError: (1205, 'Lock wait
+timeout exceeded')` on the **first** insert of a brand-new row into some table (seen on
+Department, Designation, and plain User in turn, as the fixture code changed) -- roughly every
+run, ~50s per hang. `SHOW FULL PROCESSLIST` on the shared MariaDB container showed two `Sleep`
+connections opened by the *same* test run, one of them holding a table metadata lock that the
+actual insert then queues behind.
+
+Ruled out:
+- **Leftover connections from an earlier killed command** -- checked `information_schema.innodb_trx`
+  was empty immediately before a run that still hung.
+- **Site-specific corruption** -- dropped and recreated `test.localhost` from scratch (fresh
+  database, fresh DB user); the *very next* run hung the same way, on a table (`tabUser`) with
+  zero prior history.
+
+Not ruled out, and not worth further time right now: something specific to this VM's Frappe
+v16.30 + MariaDB 11.8 + Python 3.14 + mysqlclient combination, or to running the bench CLI over
+an SSH-piped `docker exec` specifically. **The identical test suite runs clean in this repo's
+GitHub Actions CI** (a fresh site per run, same app versions) -- confirmed twice in a row. So:
+
+- **Treat CI as the authoritative Python test signal for this app**, not a manual run on this
+  VM. Push and let CI verify.
+- If you need to run Python tests on this VM anyway, expect the first fixture-creating test to
+  take ~50s per new table it touches and possibly still fail; a second attempt sometimes
+  succeeds since the earlier attempt's insert either commits or the blocking connection dies on
+  its own. Don't spend time chasing the exact cause further without new evidence.
+- This does not affect the frontend build or manually driving the app through a browser --
+  only the Python test *runner's* own connection handling.
 
 ## Playwright
 
@@ -172,6 +205,15 @@ BASE_URL=http://<frontend-host>:8080 SITE_HOST=<site> \
   TEST_USER_PASSWORD='<value of TEST_PASSWORD in helixhr/tests/utils.py>' \
   yarn test:e2e
 ```
+
+**First real CI run found the guest-redirect test (`login-dashboard.spec.ts`'s `guest`
+describe) failing against a from-scratch CI site under `bench start`'s own dev server** --
+`page.goto('/helixhr')` landed on `/helixhr` directly instead of redirecting to `/login`. The
+identical test passed by hand against this dev VM's nginx+gunicorn setup in U3 (9/9 green). Not
+yet root-caused -- candidate difference is the dev server (Werkzeug, via `bench start`) versus
+nginx+gunicorn for how a Guest session/cookie is handled on first load. Flagged rather than
+fixed in U4 to avoid scope creep into U3 code; pick this up before relying on CI's e2e job as a
+release gate.
 
 ## Go-live checklist (grows through U11)
 
