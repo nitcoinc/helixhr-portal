@@ -96,7 +96,7 @@ const today = new Intl.DateTimeFormat(undefined, {
             class="flex items-baseline justify-between gap-3"
           >
             <span class="truncate text-sm text-ink-gray-7">{{ type }}</span>
-            <span class="font-heading text-xl font-semibold text-ink-gray-9">
+            <span class="tabular font-heading text-xl font-semibold text-ink-gray-9">
               {{ balance.balance_leaves }}
             </span>
           </li>
@@ -118,7 +118,7 @@ const today = new Intl.DateTimeFormat(undefined, {
             class="flex items-baseline justify-between gap-3"
           >
             <span class="truncate text-sm text-ink-gray-7">{{ status }}</span>
-            <span class="font-heading text-xl font-semibold text-ink-gray-9">{{ count }}</span>
+            <span class="tabular font-heading text-xl font-semibold text-ink-gray-9">{{ count }}</span>
           </li>
         </ul>
       </StatCard>
@@ -146,13 +146,13 @@ const today = new Intl.DateTimeFormat(undefined, {
         >
           <li class="flex items-baseline justify-between gap-3">
             <span class="text-sm text-ink-gray-7">Leave waiting</span>
-            <span class="font-heading text-xl font-semibold text-ink-gray-9">
+            <span class="tabular font-heading text-xl font-semibold text-ink-gray-9">
               {{ pending.my_open_leave }}
             </span>
           </li>
           <li class="flex items-baseline justify-between gap-3">
             <span class="text-sm text-ink-gray-7">Requests open</span>
-            <span class="font-heading text-xl font-semibold text-ink-gray-9">
+            <span class="tabular font-heading text-xl font-semibold text-ink-gray-9">
               {{ pending.my_open_requests }}
             </span>
           </li>
@@ -166,7 +166,7 @@ const today = new Intl.DateTimeFormat(undefined, {
         to="/approvals"
         :loading="dashboard.loading"
       >
-        <p class="font-heading text-3xl font-semibold text-ink-gray-9">
+        <p class="tabular font-heading text-3xl font-semibold text-ink-gray-9">
           {{ pending.approvals_waiting_for_me }}
         </p>
       </StatCard>
@@ -179,7 +179,7 @@ const today = new Intl.DateTimeFormat(undefined, {
         :empty="!dashboard.loading && !unreadNotifications"
         empty-text="You're all caught up."
       >
-        <p class="font-heading text-3xl font-semibold text-ink-gray-9">
+        <p class="tabular font-heading text-3xl font-semibold text-ink-gray-9">
           {{ unreadNotifications }}
           <span class="font-sans text-sm font-normal text-ink-gray-5">unread</span>
         </p>

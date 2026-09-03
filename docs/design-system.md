@@ -18,6 +18,27 @@
 
 Do not use `gray-500`/`amber-600`/`red`-on-white for small text directly — use the `-600`/`-700` shades and semantic `ink-*` tokens above, which are the ones frappe-ui itself uses for text.
 
+### Measured correction (post-U11 `/impeccable audit`)
+
+The "Contrast on white" column above was **estimated, and several entries were wrong**. Measured
+off the rendered portal (page background is `surface-gray-1` #F8F8F8, not white, which costs
+~0.25), these failed WCAG AA and are now corrected in `frontend/src/index.css`:
+
+| Token / class | Was | Measured | Now | Ratio |
+|---|---|---|---|---|
+| `--ink-gray-5` (all muted text, empty states, labels) | gray-600 `#7C7C7C` | 3.93 | `#707070` | 4.66 |
+| `--ink-amber-2/3` (Badge "Waiting for …") | amber-600 `#DB7706` | 3.02 | `#B35309` | 4.83 |
+| `--ink-green-2/3` (Badge "Approved") | green-600 `#278F5E` | 3.70 | `#137949` | 4.62 |
+| `--surface-green-3` (Approve button) | green-600 | 4.06 | `#137949` | 5.44 |
+| `--surface-blue-3` (primary button hover) | blue-600 | 4.28 | `#005CA3` | 6.86 |
+| `blue.500` in `tailwind.config.cjs` (primary Button) | `#0289F7` | 3.54 | `#0070CC` | 5.01 |
+
+Two naming traps worth knowing: the compiled utilities read `--ink-*`, while frappe-ui's Tailwind
+plugin source names the same values `--text-ink-*` — overriding the latter builds clean and
+changes nothing on screen. And frappe-ui's solid blue `Button` is the one component that reaches
+for a raw `bg-blue-500` instead of a semantic token, so it can only be corrected in the Tailwind
+theme, not with a CSS variable.
+
 **Anti-patterns to avoid** (from the style search): bright neon accents, harsh/instant animations, dark mode (not in phase 1 scope — see brief Deferred).
 
 ## Typography
@@ -105,12 +126,23 @@ Frappe/HRMS leave validation messages, matched by pattern, mapped to a plain sen
 
 See `docs/design-system/screens.md` for one short layout note per screen.
 
-## Pre-delivery checklist (carried into U11)
+## Pre-delivery checklist
 
-- [ ] No emojis as icons anywhere
-- [ ] `cursor-pointer` on every clickable element
-- [ ] Hover/focus states, 150–300ms transitions
-- [ ] Text contrast 4.5:1 minimum on every screen (per table above)
-- [ ] Visible focus ring on every interactive element (keyboard nav)
-- [ ] `prefers-reduced-motion` respected
-- [ ] Responsive at 360px, 375px, 768px, 1024px, 1440px, no horizontal scroll
+Verified by measurement, not by eye — see `frontend/test-results/audit/` and the runbook's
+`/impeccable` section for how to re-run the probe.
+
+- [x] No emojis as icons anywhere — inlined Lucide paths via `lib/icons.js`
+- [x] `cursor-pointer` on every clickable element
+- [x] Hover/focus states, 150–300ms transitions
+- [x] Text contrast 4.5:1 minimum on every screen — 45 measured failures, now 0 (the 3 remaining
+      probe hits are `disabled` controls, which WCAG 1.4.3 exempts)
+- [x] Visible focus ring on every interactive element — was Chrome's default `outline: auto 1px`
+      near-black; now a 2px brand-blue ring with offset
+- [x] `prefers-reduced-motion` respected, with skeletons pinned to a resting tint rather than
+      frozen mid-pulse by the blanket rule
+- [x] Responsive at 360px, 768px, 1440px, no horizontal scroll at any width
+- [x] Touch targets ≥44px under `pointer: coarse` (frappe-ui's controls are 28px by default)
+- [x] Tabular figures on aligned numeric columns
+- [x] Browser surfaces themed: focus ring, selection, caret, scrollbar
+- [x] Dates formatted for people, not machines (`lib/dates.js`) — the notifications list was
+      rendering `2026-09-03 18:47:46.417663`

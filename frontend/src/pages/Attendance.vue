@@ -2,6 +2,8 @@
 import { ref, computed, watch } from 'vue'
 import { createResource } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
+import Icon from '@/components/Icon.vue'
+import { formatDate, formatTime } from '@/lib/dates'
 
 const STATUS_COLOR = {
   Present: 'bg-surface-green-3',
@@ -121,25 +123,27 @@ function closeDay() {
 
     <div class="flex max-w-xl items-center justify-between">
       <button
-        class="rounded-md px-2 py-1 text-ink-gray-6 hover:bg-surface-gray-2"
+        class="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-md text-ink-gray-6 hover:bg-surface-gray-2"
+        aria-label="Previous month"
         @click="prevMonth"
       >
-        ‹
+        <Icon name="chevronLeft" />
       </button>
       <div class="flex items-center gap-2">
         <span class="font-medium text-ink-gray-9">{{ monthLabel }}</span>
         <button
-          class="rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs text-ink-gray-6"
+          class="cursor-pointer rounded-full bg-surface-gray-2 px-3 py-1.5 text-xs text-ink-gray-7 hover:bg-surface-gray-3"
           @click="goToday"
         >
           This month
         </button>
       </div>
       <button
-        class="rounded-md px-2 py-1 text-ink-gray-6 hover:bg-surface-gray-2"
+        class="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-md text-ink-gray-6 hover:bg-surface-gray-2"
+        aria-label="Next month"
         @click="nextMonth"
       >
-        ›
+        <Icon name="chevronRight" />
       </button>
     </div>
 
@@ -171,13 +175,17 @@ function closeDay() {
         >{{ d }}</span>
       </div>
       <div class="mt-1 grid grid-cols-7 gap-1">
-        <button
+        <!-- The blanks before the 1st are spacing, not controls. They used to
+             render as disabled <button>s with no text, which put four unnamed
+             buttons per month into the accessibility tree. -->
+        <component
+          :is="day ? 'button' : 'span'"
           v-for="(day, index) in days"
           :key="index"
-          class="flex aspect-square flex-col items-center justify-center rounded-md text-sm"
-          :class="day ? 'hover:bg-surface-gray-2 text-ink-gray-8' : ''"
-          :disabled="!day"
-          @click="openDay(day)"
+          class="tabular flex aspect-square min-h-11 flex-col items-center justify-center rounded-md text-sm"
+          :class="day ? 'cursor-pointer text-ink-gray-8 hover:bg-surface-gray-2' : ''"
+          :aria-label="day ? `${monthLabel} ${day.day}` : undefined"
+          @click="day && openDay(day)"
         >
           <span>{{ day?.day }}</span>
           <span
@@ -185,7 +193,7 @@ function closeDay() {
             class="mt-0.5 h-1.5 w-1.5 rounded-full"
             :class="STATUS_COLOR[day.status] || 'bg-surface-gray-4'"
           />
-        </button>
+        </component>
       </div>
     </div>
 
@@ -195,7 +203,7 @@ function closeDay() {
     >
       <div class="mb-2 flex items-center justify-between">
         <h2 class="font-medium text-ink-gray-9">
-          {{ selectedDay }}
+          {{ formatDate(selectedDay) }}
         </h2>
         <button
           class="text-ink-gray-5"
@@ -220,7 +228,7 @@ function closeDay() {
           class="flex justify-between text-sm text-ink-gray-7"
         >
           <span>{{ row.log_type === 'IN' ? 'Check-in' : 'Check-out' }}</span>
-          <span>{{ row.time }}</span>
+          <span class="tabular">{{ formatTime(row.time) }}</span>
         </li>
       </ul>
       <p

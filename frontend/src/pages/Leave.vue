@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import { createResource, Button, Badge, Dialog } from 'frappe-ui'
 import LeaveForm from '@/components/LeaveForm.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import { formatDateRange } from '@/lib/dates'
 
 const me = createResource({
   url: 'hrms.api.get_current_employee_info',
@@ -123,15 +124,21 @@ async function withdrawLeave(app) {
     <div>
       <div
         v-if="balanceEntries.length"
-        class="flex flex-wrap gap-2"
+        class="flex flex-wrap gap-3"
       >
-        <span
+        <div
           v-for="[type, balance] in balanceEntries"
           :key="type"
-          class="rounded-full bg-blue-50 px-3 py-1 text-sm font-medium text-blue-700"
+          class="rounded-xl border border-outline-gray-2 bg-surface-white px-4 py-3"
         >
-          {{ type }}: {{ balance.balance_leaves }}
-        </span>
+          <p class="text-xs text-ink-gray-6">
+            {{ type }}
+          </p>
+          <p class="tabular mt-0.5 font-heading text-2xl font-semibold text-ink-gray-9">
+            {{ balance.balance_leaves }}
+            <span class="font-sans text-sm font-normal text-ink-gray-6">days left</span>
+          </p>
+        </div>
       </div>
       <p
         v-else-if="!balances.loading"
@@ -141,16 +148,17 @@ async function withdrawLeave(app) {
       </p>
     </div>
 
-    <div class="flex gap-2 px-4">
+    <div class="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1 sm:mx-0 sm:flex-wrap sm:px-0">
       <button
         v-for="filter in FILTERS"
         :key="filter.value"
-        class="rounded-full px-3 py-1 text-sm"
+        class="min-h-11 shrink-0 cursor-pointer whitespace-nowrap rounded-full px-4 text-sm font-medium transition-colors duration-200"
         :class="
           activeFilter === filter.value
-            ? 'bg-surface-gray-7 text-ink-white'
-            : 'bg-surface-gray-2 text-ink-gray-7'
+            ? 'bg-blue-700 text-white'
+            : 'bg-surface-gray-2 text-ink-gray-7 hover:bg-surface-gray-3'
         "
+        :aria-pressed="activeFilter === filter.value"
         @click="activeFilter = filter.value"
       >
         {{ filter.label }}
@@ -181,7 +189,7 @@ async function withdrawLeave(app) {
               {{ app.leave_type }}
             </p>
             <p class="text-sm text-ink-gray-6">
-              {{ app.from_date }}<span v-if="app.to_date !== app.from_date"> – {{ app.to_date }}</span>
+              {{ formatDateRange(app.from_date, app.to_date) }}
               · {{ app.total_leave_days }} day{{ app.total_leave_days === 1 ? '' : 's' }}
             </p>
           </div>

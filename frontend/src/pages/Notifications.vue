@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { createResource, Button } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
+import { formatDateTime } from '@/lib/dates'
 
 const router = useRouter()
 
@@ -63,19 +64,38 @@ async function markAll() {
       >
         You're all caught up.
       </p>
+      <!-- Unread is marked with a dot, not a thick coloured left border: the
+           border reads as decoration, costs 3px of text alignment between
+           read and unread rows, and is invisible to anyone who can't pick the
+           hue out. The dot is captioned for screen readers too. -->
       <button
         v-for="row in rows"
         :key="row.name"
-        class="block w-full rounded-lg border border-outline-gray-2 bg-surface-white p-3 text-left"
-        :class="!row.read ? 'border-l-4 border-l-outline-blue-3' : ''"
+        class="flex w-full cursor-pointer items-start gap-3 rounded-lg border bg-surface-white p-3 text-left transition-colors duration-200"
+        :class="
+          row.read
+            ? 'border-outline-gray-2 hover:border-outline-gray-3'
+            : 'border-outline-gray-2 hover:border-blue-600'
+        "
         @click="openLog(row)"
       >
-        <p class="text-sm text-ink-gray-9">
-          {{ row.subject }}
-        </p>
-        <p class="mt-1 text-xs text-ink-gray-5">
-          {{ row.creation }}
-        </p>
+        <span
+          class="mt-1.5 h-2 w-2 shrink-0 rounded-full"
+          :class="row.read ? 'bg-transparent' : 'bg-blue-700'"
+        >
+          <span class="sr-only">{{ row.read ? '' : 'Unread' }}</span>
+        </span>
+        <span class="min-w-0 flex-1">
+          <span
+            class="block text-sm text-ink-gray-9"
+            :class="row.read ? '' : 'font-medium'"
+          >
+            {{ row.subject }}
+          </span>
+          <span class="tabular mt-1 block text-xs text-ink-gray-5">
+            {{ formatDateTime(row.creation) }}
+          </span>
+        </span>
       </button>
     </div>
   </div>

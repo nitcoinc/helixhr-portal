@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { createResource, Badge } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
+import { formatDateRange } from '@/lib/dates'
 
 const me = createResource({
   url: 'hrms.api.get_current_employee_info',
@@ -62,10 +63,10 @@ function badgeLabel(state) {
         class="flex items-center justify-between rounded-lg border border-outline-gray-2 bg-surface-white p-3"
       >
         <div>
-          <p class="text-ink-gray-9">
-            {{ row.start_date }} – {{ row.end_date }}
+          <p class="tabular text-ink-gray-9">
+            {{ formatDateRange(row.start_date, row.end_date) }}
           </p>
-          <p class="text-sm text-ink-gray-6">
+          <p class="tabular text-sm text-ink-gray-6">
             {{ row.total_hours }} hours
           </p>
         </div>

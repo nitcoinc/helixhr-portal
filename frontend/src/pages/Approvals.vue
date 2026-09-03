@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue'
 import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
+import { formatDateRange } from '@/lib/dates'
 
 const me = createResource({
   url: 'hrms.api.get_current_employee_info',
@@ -115,7 +116,7 @@ function refresh() {
           {{ row.employee_name }} · {{ row.leave_type }}
         </p>
         <p class="text-sm text-ink-gray-6">
-          {{ row.from_date }}<span v-if="row.to_date !== row.from_date"> – {{ row.to_date }}</span>
+          {{ formatDateRange(row.from_date, row.to_date) }}
           · {{ row.total_leave_days }} day{{ row.total_leave_days === 1 ? '' : 's' }}
         </p>
         <div class="mt-2 flex gap-2">
@@ -161,7 +162,7 @@ function refresh() {
           {{ row.employee_name }}
         </p>
         <p class="text-sm text-ink-gray-6">
-          {{ row.start_date }} – {{ row.end_date }} · {{ row.total_hours }} hours
+          {{ formatDateRange(row.start_date, row.end_date) }} · {{ row.total_hours }} hours
         </p>
         <div class="mt-2 flex gap-2">
           <Button

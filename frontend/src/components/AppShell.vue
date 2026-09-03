@@ -68,7 +68,7 @@ onUnmounted(unwatchUnread)
       <aside class="sticky top-0 flex h-screen w-64 flex-col">
         <div class="flex items-center gap-2 px-5 py-5">
           <span
-            class="flex h-8 w-8 items-center justify-center rounded-md bg-blue-600 font-heading text-sm font-semibold text-white"
+            class="flex h-8 w-8 items-center justify-center rounded-md bg-blue-700 font-heading text-sm font-semibold text-white"
           >
             H
           </span>
@@ -117,9 +117,9 @@ onUnmounted(unwatchUnread)
             <span class="flex-1">{{ item.label }}</span>
             <span
               v-if="item.badge && unreadCount.data > 0"
-              class="flex h-5 min-w-5 items-center justify-center rounded-full bg-blue-600 px-1.5 text-xs font-medium text-white"
+              class="flex h-5 min-w-5 items-center justify-center rounded-full bg-blue-700 px-1.5 text-xs font-medium text-white"
             >
-              {{ unreadCount.data > 9 ? '9+' : unreadCount.data }}
+              <span class="tabular">{{ unreadCount.data > 9 ? '9+' : unreadCount.data }}</span>
             </span>
           </router-link>
         </nav>
@@ -142,10 +142,10 @@ onUnmounted(unwatchUnread)
       >
         <router-link
           to="/"
-          class="flex cursor-pointer items-center gap-2"
+          class="flex min-h-11 cursor-pointer items-center gap-2"
         >
           <span
-            class="flex h-7 w-7 items-center justify-center rounded-md bg-blue-600 font-heading text-xs font-semibold text-white"
+            class="flex h-7 w-7 items-center justify-center rounded-md bg-blue-700 font-heading text-xs font-semibold text-white"
           >
             H
           </span>
@@ -153,15 +153,15 @@ onUnmounted(unwatchUnread)
         </router-link>
         <router-link
           to="/notifications"
-          class="relative cursor-pointer rounded-full p-2 text-ink-gray-6 hover:bg-surface-gray-2"
+          class="relative flex h-11 w-11 cursor-pointer items-center justify-center rounded-full text-ink-gray-6 hover:bg-surface-gray-2"
           aria-label="Notifications"
         >
           <Icon name="notifications" />
           <span
             v-if="unreadCount.data > 0"
-            class="absolute right-0.5 top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-blue-600 px-1 text-[10px] font-medium text-white"
+            class="absolute right-1.5 top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-blue-700 px-1 text-[10px] font-medium text-white"
           >
-            {{ unreadCount.data > 9 ? '9+' : unreadCount.data }}
+            <span class="tabular">{{ unreadCount.data > 9 ? '9+' : unreadCount.data }}</span>
           </span>
         </router-link>
       </header>
@@ -208,16 +208,16 @@ onUnmounted(unwatchUnread)
             v-for="item in moreItems"
             :key="item.to"
             :to="item.to"
-            class="flex cursor-pointer items-center gap-3 rounded-lg px-3 py-3 text-sm font-medium text-ink-gray-7 hover:bg-surface-gray-2"
+            class="flex min-h-11 cursor-pointer items-center gap-3 rounded-lg px-3 py-3 text-sm font-medium text-ink-gray-7 hover:bg-surface-gray-2"
             @click="closeMore"
           >
             <Icon :name="item.icon" />
             <span class="flex-1">{{ item.label }}</span>
             <span
               v-if="item.badge && unreadCount.data > 0"
-              class="flex h-5 min-w-5 items-center justify-center rounded-full bg-blue-600 px-1.5 text-xs font-medium text-white"
+              class="flex h-5 min-w-5 items-center justify-center rounded-full bg-blue-700 px-1.5 text-xs font-medium text-white"
             >
-              {{ unreadCount.data > 9 ? '9+' : unreadCount.data }}
+              <span class="tabular">{{ unreadCount.data > 9 ? '9+' : unreadCount.data }}</span>
             </span>
             <Icon
               v-else
@@ -226,7 +226,7 @@ onUnmounted(unwatchUnread)
             />
           </router-link>
           <button
-            class="flex w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-3 text-sm font-medium text-ink-gray-6 hover:bg-surface-gray-2"
+            class="flex min-h-11 w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-3 text-sm font-medium text-ink-gray-6 hover:bg-surface-gray-2"
             @click="signOut"
           >
             <Icon name="signOut" />

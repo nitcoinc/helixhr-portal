@@ -132,7 +132,7 @@ async function save(field) {
               <router-link
                 v-if="row.askHr"
                 :to="askHrLink(row.label)"
-                class="cursor-pointer text-sm text-blue-700 underline decoration-dotted"
+                class="-my-1 inline-flex min-h-11 shrink-0 cursor-pointer items-center px-1 text-sm text-blue-700 underline decoration-dotted underline-offset-2"
               >
                 Ask HR
               </router-link>

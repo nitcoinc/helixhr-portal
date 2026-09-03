@@ -34,5 +34,6 @@ export const icons = {
   profile: ['M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2', 'M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8z'],
   more: ['M4 12h16', 'M4 6h16', 'M4 18h16'],
   signOut: ['M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4', 'm16 17 5-5-5-5', 'M21 12H9'],
+  chevronLeft: ['m15 18-6-6 6-6'],
   chevronRight: ['m9 18 6-6-6-6'],
 }

@@ -433,6 +433,28 @@ collapsed the one-attribute-per-line style `eslint-plugin-vue` enforces. `yarn l
 (`eslint src`, with `--fix`) is the formatter for this directory; there is no prettier script in
 `package.json` for a reason.
 
+## Re-running the `/impeccable` UI audit
+
+The pass that produced the contrast/touch/focus corrections used a throwaway Playwright probe
+rather than a saved script -- it logs in as both fixture users, loads all ten routes at 1440px
+and at 360px with `hasTouch: true` (without that, `pointer: coarse` never matches and every
+touch-target check silently passes), and reads back computed contrast ratios, target sizes,
+focus-ring styles, heading order and console errors in one render. Screenshots land in
+`frontend/test-results/audit/` (gitignored).
+
+Two things it gets wrong unless you account for them, both of which cost real time here:
+
+- **Disabled controls are exempt.** WCAG 1.4.3 does not apply to disabled elements. The three
+  hits that survive on the Timesheet page are the `Select`s for an already-approved week; they
+  report `disabled: true`. Do not "fix" them.
+- **`<label for>` is not the only way to name a control.** A naive probe that checks only
+  `aria-label`/`textContent` reports all 18 frappe-ui `FormControl` inputs as unnamed. They are
+  correctly associated via `label[for]` + generated `id`.
+
+Run `node .claude/skills/impeccable/scripts/detect.mjs --json frontend/src` for the mechanical
+slop checks; it is fast and catches things like the thick coloured `border-l-4` the unread
+notification rows used to carry.
+
 ## Go-live checklist (grows through U11)
 
 - [ ] Confirm every Employee Self Service user has a User Permission on their own Employee

@@ -3,6 +3,7 @@ import { ref, computed, watch } from 'vue'
 import { createResource, Button, Badge } from 'frappe-ui'
 import WeekGrid from '@/components/WeekGrid.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import Icon from '@/components/Icon.vue'
 
 function pad(n) {
   return String(n).padStart(2, '0')
@@ -150,7 +151,7 @@ async function editAndResubmit() {
       <template #actions>
         <router-link
           to="/timesheet/history"
-          class="text-sm text-ink-gray-6 underline"
+          class="-my-2 inline-flex min-h-11 cursor-pointer items-center text-sm text-ink-gray-6 underline underline-offset-2 hover:text-ink-gray-9"
         >
           Past timesheets
         </router-link>
@@ -159,15 +160,16 @@ async function editAndResubmit() {
 
     <div class="flex items-center justify-between">
       <button
-        class="rounded-md px-2 py-1 text-ink-gray-6 hover:bg-surface-gray-2"
+        class="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-md text-ink-gray-6 hover:bg-surface-gray-2"
+        aria-label="Previous week"
         @click="prevWeek"
       >
-        ‹
+        <Icon name="chevronLeft" />
       </button>
       <div class="flex items-center gap-2">
-        <span class="font-medium text-ink-gray-9">{{ weekStart }} – {{ week.data?.week_end }}</span>
+        <span class="tabular font-medium text-ink-gray-9">{{ weekStart }} – {{ week.data?.week_end }}</span>
         <button
-          class="rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs text-ink-gray-6"
+          class="cursor-pointer rounded-full bg-surface-gray-2 px-3 py-1.5 text-xs text-ink-gray-7 hover:bg-surface-gray-3"
           @click="thisWeek"
         >
           This week
@@ -180,10 +182,11 @@ async function editAndResubmit() {
         </Badge>
       </div>
       <button
-        class="rounded-md px-2 py-1 text-ink-gray-6 hover:bg-surface-gray-2"
+        class="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-md text-ink-gray-6 hover:bg-surface-gray-2"
+        aria-label="Next week"
         @click="nextWeek"
       >
-        ›
+        <Icon name="chevronRight" />
       </button>
     </div>
 

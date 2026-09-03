@@ -1,12 +1,112 @@
 @import url('https://fonts.googleapis.com/css2?family=Lexend:wght@400;500;600;700&family=Source+Sans+3:wght@400;500;600;700&display=swap');
 @import 'frappe-ui/style.css';
 
+/*
+ * Contrast corrections to frappe-ui's semantic ink tokens.
+ *
+ * Measured off the rendered portal, not assumed -- docs/design-system.md
+ * claimed these were "AA at every level used" and they are not. Ratios below
+ * are against the surface each token actually pairs with in this app; the
+ * page background is surface-gray-1 (#F8F8F8), not white, which costs ~0.25.
+ * Fixing the tokens rather than the call sites corrects every frappe-ui
+ * component and every `text-ink-*` utility we write at once.
+ *
+ * Note the variable names: the compiled utilities read `--ink-*`, while
+ * frappe-ui's Tailwind plugin source names them `--text-ink-*`. Only the
+ * former has any effect -- overriding the latter builds clean and changes
+ * nothing on screen.
+ *
+ * Scoped away from dark mode: these values are chosen against light
+ * surfaces, and phase 1 ships no dark theme (see design-system.md).
+ */
+:root:not([data-theme='dark']) {
+  /* gray-600 #7C7C7C -> 3.93 on the page background. Muted body text, empty
+     states and form labels all use this. #707070 gives 4.66 there and 4.95
+     on white, and stays a clear step lighter than ink-gray-6 (#525252). */
+  --ink-gray-5: #707070;
+
+  /* Badge "Waiting for ..." -- amber-600 on amber-50 measured 3.02.
+     amber-700 gives 4.83. */
+  --ink-amber-2: #b35309;
+  --ink-amber-3: #b35309;
+
+  /* Badge "Approved" -- green-600 measured 3.70 on its badge surface.
+     green-700 gives 4.62 on green-200 and 5.22 on green-50. */
+  --ink-green-2: #137949;
+  --ink-green-3: #137949;
+
+  /* Primary button hover (frappe-ui: solid blue hovers to surface-blue-3).
+     White on blue-600 is 4.28, so hover failed while the resting state
+     passed; blue-800 also makes hover darken rather than lighten. */
+  --surface-blue-3: #005ca3;
+
+  /* Approve buttons (frappe-ui: solid green is bg-surface-green-3).
+     White on green-600 measured 4.06; green-700 gives 5.44. */
+  --surface-green-3: #137949;
+}
+
+/*
+ * Touch sizing. frappe-ui's default button and form-control height is 28px
+ * and its `lg` size is still only 40px, so on a phone almost every control
+ * in the portal -- Save, Approve, Reject, Withdraw, the form inputs -- was
+ * under the 44px the design system requires. Raising the floor for coarse
+ * pointers only keeps the desktop density frappe-ui was tuned for, and it
+ * reaches inside components whose markup this app does not own.
+ *
+ * `min-height` is ignored on non-replaced inline boxes, so inline text links
+ * inside a sentence are untouched by design; the few standalone links that
+ * need a real target set their own inline-flex + min-height.
+ */
+@media (pointer: coarse) {
+  button,
+  [role='button'],
+  select,
+  textarea,
+  input:not([type='checkbox']):not([type='radio']):not([type='hidden']) {
+    min-height: 44px;
+  }
+}
+
 button,
 a,
 [role='button'] {
   transition-property: background-color, border-color, color, box-shadow;
   transition-duration: 200ms;
   transition-timing-function: ease;
+}
+
+/*
+ * Browser surfaces. Focus ring, selection, caret and scrollbar ship with
+ * defaults that belong to no design system -- the keyboard ring was Chrome's
+ * 1px near-black `outline: auto`. These put them on the portal's palette.
+ */
+:focus-visible {
+  outline: 2px solid var(--ink-blue-3, #007be0);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+::selection {
+  background-color: #c8e6ff; /* blue-200 */
+  color: #171717; /* gray-900 */
+}
+
+:root {
+  accent-color: #0070cc;
+  caret-color: #0070cc;
+  scrollbar-color: #c7c7c7 transparent;
+  scrollbar-width: thin;
+}
+
+/*
+ * Counts, balances, hours and day numbers sit in aligned columns, so their
+ * digits have to be the same width or the column visibly wobbles between
+ * rows. Applied via a utility rather than globally: proportional figures are
+ * the better default inside sentences.
+ */
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -17,5 +117,13 @@ a,
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+
+  /* The blanket rule above would freeze a pulsing skeleton at whatever
+     opacity its single iteration lands on. Pin it to a legible resting tint
+     so "this is still loading" survives without the animation. */
+  .animate-pulse {
+    opacity: 1 !important;
+    background-color: #ededed !important; /* gray-200 */
   }
 }
