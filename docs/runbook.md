@@ -387,6 +387,52 @@ context and does not hit this; a bare console session never goes through that re
 code change here. Work around it in the console with raw `frappe.db.set_value` (see above)
 instead of the full `Document.cancel()`/`.save()` lifecycle when cleaning up test data by hand.
 
+## The app shell never existed until after U11, and the e2e suite could not see that
+
+U3's plan step 1 ends "...load the shell with the bottom nav (phone) or side nav (desktop) from
+U1". That shell was never built. `frontend/src/App.vue` shipped as `<div><router-view /></div>`
+and stayed that way through U4-U12: eleven working pages with no way to reach ten of them except
+by typing the URL. The dashboard's three quick-action buttons were the only links on the entire
+portal.
+
+**Why every unit passed anyway.** Every e2e spec written before this navigates with
+`page.goto('/helixhr/leave')` and friends. Not one of them clicked a nav item, so "does this
+portal have navigation at all" was never asserted, and a portal with zero navigation produced a
+fully green suite. `tests/e2e/navigation.spec.ts` now covers the gap: it reaches every page by
+clicking, checks `aria-current` follows the route, checks Approvals is hidden from a
+non-manager and present for a manager, exercises the phone tab bar and its More sheet, and
+checks `/not-linked` still renders with no nav chrome.
+
+**Lesson for future units.** A route-level test that starts with `goto(url)` proves the page
+renders. It proves nothing about whether a user can get there. At least one test per navigation
+surface has to travel the way a person would.
+
+### Three real bugs the shell work uncovered
+
+- `createResource({ auto: true })` at *module* scope never fetches. frappe-ui hangs auto-fetch
+  off the owning component's `onMounted`, and a module-scope resource has no owning component.
+  The shared unread-notification count sat at zero with five unread rows in the API until
+  `unreadCount.fetch()` was called explicitly. Anything created outside `setup()` must fetch by
+  hand.
+- The app mounts *before* the first router guard resolves. The shell's `onMounted` asked for the
+  manager's direct-report count, saw `session.employee` still null, gave up, and never retried,
+  so managers silently lost their Approvals nav item. That lookup is chained off the guard's own
+  `setEmployee()` now, not off a component lifecycle hook.
+- Profile rendered a literal `{}` for Manager. It resolved the name with
+  `frappe.client.get_value` on the *manager's* Employee row, which U5's permlevel lock correctly
+  forbids -- the call returns `{}`, not an error. It reads `manager_name` from
+  `helixhr.api.get_dashboard` (server-side `_get_employee_header`) now, so the two screens cannot
+  disagree.
+
+### Do not run `prettier` on `frontend/`
+
+The repo-root `.editorconfig` sets `indent_style = tab` for `*.js`/`*.vue` (it exists for
+Frappe's Python and JSON conventions), Prettier honours `.editorconfig`, and the frontend is
+2-space throughout. A single `npx prettier --write src` rewrote all 22 source files to tabs and
+collapsed the one-attribute-per-line style `eslint-plugin-vue` enforces. `yarn lint`
+(`eslint src`, with `--fix`) is the formatter for this directory; there is no prettier script in
+`package.json` for a reason.
+
 ## Go-live checklist (grows through U11)
 
 - [ ] Confirm every Employee Self Service user has a User Permission on their own Employee

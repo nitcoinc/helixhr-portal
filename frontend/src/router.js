@@ -1,11 +1,13 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { call } from './lib/api'
+import { setEmployee } from './lib/session'
 
 const routes = [
   {
     path: '/not-linked',
     name: 'NotLinked',
     component: () => import('@/pages/NotLinked.vue'),
+    meta: { shell: false },
   },
   {
     path: '/',
@@ -79,13 +81,18 @@ router.beforeEach(async (to) => {
   try {
     const employee = await call('hrms.api.get_current_employee_info')
     if (!employee || !employee.name) {
+      setEmployee(null)
       return { name: 'NotLinked' }
     }
+    // The app shell's identity block reads this instead of issuing its
+    // own copy of the same request on every page load (see lib/session).
+    setEmployee(employee)
   } catch {
     // apiRequest already redirected (auth) or reloaded (CSRF) the page
     // for the errors it knows how to handle; anything else here is an
     // unexpected failure. Show the same friendly page rather than a
     // broken shell or a raw error (R3).
+    setEmployee(null)
     return { name: 'NotLinked' }
   }
 

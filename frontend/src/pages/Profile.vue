@@ -1,6 +1,7 @@
 <script setup>
 import { computed, reactive, watch } from 'vue'
 import { createResource, FormControl, Button } from 'frappe-ui'
+import PageHeader from '@/components/PageHeader.vue'
 
 const me = createResource({
   url: 'hrms.api.get_current_employee_info',
@@ -34,26 +35,19 @@ const READONLY_FIELDS = [
   { field: 'status', label: 'Status', askHr: false },
 ]
 
-const reportsToName = createResource({
-  url: 'frappe.client.get_value',
-  makeParams: () => ({
-    doctype: 'Employee',
-    filters: employee.data.reports_to,
-    fieldname: 'employee_name',
-  }),
-  auto: false,
-  transform: (d) => d.value,
+// The manager's name has to come from the server, not from a
+// `frappe.client.get_value` on their Employee record: U5's permlevel lock
+// means an employee cannot read another Employee row, so that call came
+// back `{}` and the field rendered a literal "{}" on screen. get_dashboard
+// already resolves the same name with the right access (_get_employee_header),
+// so the profile reads it from there and the two screens cannot disagree.
+const dashboard = createResource({
+  url: 'helixhr.api.get_dashboard',
+  auto: true,
 })
 
-watch(
-  () => employee.data?.reports_to,
-  (reportsTo) => {
-    if (reportsTo) reportsToName.fetch()
-  },
-)
-
 function readonlyValue(field) {
-  if (field === 'reports_to_name') return reportsToName.data || '—'
+  if (field === 'reports_to_name') return dashboard.data?.employee?.manager_name || '—'
   return employee.data?.[field] || '—'
 }
 
@@ -110,22 +104,18 @@ async function save(field) {
 </script>
 
 <template>
-  <div class="min-h-screen bg-surface-gray-1 pb-24">
-    <header class="border-b border-outline-gray-2 bg-surface-white px-4 py-4">
-      <h1 class="font-heading text-xl font-semibold text-ink-gray-9">
-        Your profile
-      </h1>
-    </header>
+  <div class="space-y-6">
+    <PageHeader title="Your profile" />
 
     <div
       v-if="me.loading || employee.loading"
-      class="px-4 py-6 text-ink-gray-5"
+      class="py-6 text-ink-gray-5"
     >
       Loading…
     </div>
 
     <template v-else-if="employee.data">
-      <section class="px-4 py-4">
+      <section>
         <h2 class="mb-3 text-sm font-medium text-ink-gray-6">
           Your information
         </h2>
@@ -142,7 +132,7 @@ async function save(field) {
               <router-link
                 v-if="row.askHr"
                 :to="askHrLink(row.label)"
-                class="text-sm text-outline-gray-4 underline decoration-dotted"
+                class="cursor-pointer text-sm text-blue-700 underline decoration-dotted"
               >
                 Ask HR
               </router-link>
@@ -151,7 +141,7 @@ async function save(field) {
         </div>
       </section>
 
-      <section class="px-4 py-4">
+      <section>
         <h2 class="mb-3 text-sm font-medium text-ink-gray-6">
           You can update
         </h2>

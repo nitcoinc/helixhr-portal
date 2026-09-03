@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import { useRoute } from 'vue-router'
 import { createResource, Button, Badge, Dialog } from 'frappe-ui'
 import RequestForm from '@/components/RequestForm.vue'
+import PageHeader from '@/components/PageHeader.vue'
 
 const route = useRoute()
 
@@ -35,21 +36,20 @@ const rows = computed(() => requests.data || [])
 </script>
 
 <template>
-  <div class="min-h-screen bg-surface-gray-1 pb-24">
-    <header class="flex items-center justify-between border-b border-outline-gray-2 bg-surface-white px-4 py-4">
-      <h1 class="font-heading text-xl font-semibold text-ink-gray-9">
-        Requests
-      </h1>
-      <Button
-        variant="solid"
-        theme="blue"
-        @click="showForm = true"
-      >
-        New request
-      </Button>
-    </header>
+  <div class="space-y-4">
+    <PageHeader title="Requests">
+      <template #actions>
+        <Button
+          variant="solid"
+          theme="blue"
+          @click="showForm = true"
+        >
+          New request
+        </Button>
+      </template>
+    </PageHeader>
 
-    <div class="space-y-3 px-4 py-4">
+    <div class="space-y-3">
       <p
         v-if="requests.loading"
         class="text-ink-gray-5"

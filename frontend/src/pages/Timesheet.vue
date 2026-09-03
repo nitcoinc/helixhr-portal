@@ -2,6 +2,7 @@
 import { ref, computed, watch } from 'vue'
 import { createResource, Button, Badge } from 'frappe-ui'
 import WeekGrid from '@/components/WeekGrid.vue'
+import PageHeader from '@/components/PageHeader.vue'
 
 function pad(n) {
   return String(n).padStart(2, '0')
@@ -144,20 +145,19 @@ async function editAndResubmit() {
 </script>
 
 <template>
-  <div class="min-h-screen bg-surface-gray-1 pb-24">
-    <header class="flex items-center justify-between border-b border-outline-gray-2 bg-surface-white px-4 py-4">
-      <h1 class="font-heading text-xl font-semibold text-ink-gray-9">
-        Timesheet
-      </h1>
-      <router-link
-        to="/timesheet/history"
-        class="text-sm text-ink-gray-6 underline"
-      >
-        Past timesheets
-      </router-link>
-    </header>
+  <div class="space-y-4">
+    <PageHeader title="Timesheet">
+      <template #actions>
+        <router-link
+          to="/timesheet/history"
+          class="text-sm text-ink-gray-6 underline"
+        >
+          Past timesheets
+        </router-link>
+      </template>
+    </PageHeader>
 
-    <div class="flex items-center justify-between px-4 py-4">
+    <div class="flex items-center justify-between">
       <button
         class="rounded-md px-2 py-1 text-ink-gray-6 hover:bg-surface-gray-2"
         @click="prevWeek"
@@ -189,13 +189,13 @@ async function editAndResubmit() {
 
     <div
       v-if="workflowState === 'Rejected'"
-      class="mx-4 mb-4 rounded-lg border border-outline-red-2 bg-surface-red-1 p-3 text-sm text-ink-red-4"
+      class="mb-4 rounded-lg border border-outline-red-2 bg-surface-red-1 p-3 text-sm text-ink-red-4"
     >
       This week was sent back<span v-if="rejectionComment.data">: "{{ rejectionComment.data }}"</span>.
       Fix it up and resubmit.
     </div>
 
-    <div class="px-4">
+    <div>
       <WeekGrid
         :rows="rows"
         :projects="projects.data || []"
@@ -208,7 +208,7 @@ async function editAndResubmit() {
 
     <p
       v-if="error"
-      class="mx-4 mt-3 text-sm text-ink-red-4"
+      class="mt-3 text-sm text-ink-red-4"
     >
       {{ error }}
     </p>

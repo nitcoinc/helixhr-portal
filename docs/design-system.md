@@ -58,6 +58,16 @@ Mobile-first. Primary layout is a bottom tab bar (max 5 items: Home, Leave, Time
 
 Breakpoints: 375px (phone), 768px (tablet), 1024px (desktop), 1440px (wide desktop). Test at 360px minimum per the plan's Verification Contract.
 
+**Implemented in `frontend/src/components/AppShell.vue` (post-U11).** This section described the
+shell from U1 onward, but nothing built it until after U11 -- see `docs/runbook.md`, "The app
+shell never existed until after U11". As shipped: a 256px left side nav at `lg:` and up (brand,
+identity block linking to Profile, nav list with the unread count on Notifications, sign out),
+a slim brand+bell app bar below `lg:`, and a five-slot bottom tab bar (Home, Leave, Timesheet,
+Requests, More) where More opens a sheet with the rest. Page content is capped at `max-w-5xl`;
+before the shell, pages ran the full window width. Approvals appears only for a user with at
+least one direct report. `NotLinked` is the one route rendered without the shell
+(`meta.shell === false`).
+
 ## Copy rules (plain words, no Frappe terms)
 
 | Never say | Say instead |

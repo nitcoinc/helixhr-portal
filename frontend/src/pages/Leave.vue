@@ -2,6 +2,7 @@
 import { ref, computed } from 'vue'
 import { createResource, Button, Badge, Dialog } from 'frappe-ui'
 import LeaveForm from '@/components/LeaveForm.vue'
+import PageHeader from '@/components/PageHeader.vue'
 
 const me = createResource({
   url: 'hrms.api.get_current_employee_info',
@@ -106,21 +107,20 @@ async function withdrawLeave(app) {
 </script>
 
 <template>
-  <div class="min-h-screen bg-surface-gray-1 pb-24">
-    <header class="flex items-center justify-between border-b border-outline-gray-2 bg-surface-white px-4 py-4">
-      <h1 class="font-heading text-xl font-semibold text-ink-gray-9">
-        Leave
-      </h1>
-      <Button
-        variant="solid"
-        theme="blue"
-        @click="showForm = true"
-      >
-        Ask for leave
-      </Button>
-    </header>
+  <div class="space-y-4">
+    <PageHeader title="Leave">
+      <template #actions>
+        <Button
+          variant="solid"
+          theme="blue"
+          @click="showForm = true"
+        >
+          Ask for leave
+        </Button>
+      </template>
+    </PageHeader>
 
-    <div class="px-4 py-4">
+    <div>
       <div
         v-if="balanceEntries.length"
         class="flex flex-wrap gap-2"
@@ -128,7 +128,7 @@ async function withdrawLeave(app) {
         <span
           v-for="[type, balance] in balanceEntries"
           :key="type"
-          class="rounded-full bg-surface-blue-1 px-3 py-1 text-sm text-ink-blue-3"
+          class="rounded-full bg-blue-50 px-3 py-1 text-sm font-medium text-blue-700"
         >
           {{ type }}: {{ balance.balance_leaves }}
         </span>
@@ -157,7 +157,7 @@ async function withdrawLeave(app) {
       </button>
     </div>
 
-    <div class="space-y-3 px-4 py-4">
+    <div class="space-y-3">
       <p
         v-if="applications.loading"
         class="text-ink-gray-5"

@@ -1,6 +1,7 @@
 <script setup>
 import { computed } from 'vue'
 import { createResource } from 'frappe-ui'
+import PageHeader from '@/components/PageHeader.vue'
 
 const me = createResource({
   url: 'hrms.api.get_current_employee_info',
@@ -31,14 +32,10 @@ const rows = computed(() => documents.data || [])
 </script>
 
 <template>
-  <div class="min-h-screen bg-surface-gray-1 pb-24">
-    <header class="border-b border-outline-gray-2 bg-surface-white px-4 py-4">
-      <h1 class="font-heading text-xl font-semibold text-ink-gray-9">
-        Documents
-      </h1>
-    </header>
+  <div class="space-y-4">
+    <PageHeader title="Documents" />
 
-    <div class="space-y-2 px-4 py-4">
+    <div class="space-y-2">
       <p
         v-if="documents.loading"
         class="text-ink-gray-5"

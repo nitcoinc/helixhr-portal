@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
+import PageHeader from '@/components/PageHeader.vue'
 
 const me = createResource({
   url: 'hrms.api.get_current_employee_info',
@@ -82,22 +83,18 @@ function refresh() {
 </script>
 
 <template>
-  <div class="min-h-screen bg-surface-gray-1 pb-24">
-    <header class="border-b border-outline-gray-2 bg-surface-white px-4 py-4">
-      <h1 class="font-heading text-xl font-semibold text-ink-gray-9">
-        Approvals
-      </h1>
-    </header>
+  <div class="space-y-5">
+    <PageHeader title="Approvals" />
 
     <p
       v-if="error"
-      class="mx-4 mt-3 text-sm text-ink-red-4"
+      class="mt-3 text-sm text-ink-red-4"
     >
       {{ error }}
     </p>
 
     <section
-      class="px-4 py-4"
+     
       data-testid="approvals-leave-section"
     >
       <h2 class="mb-2 text-sm font-medium text-ink-gray-6">
@@ -143,7 +140,7 @@ function refresh() {
     </section>
 
     <section
-      class="px-4 py-4"
+     
       data-testid="approvals-timesheet-section"
     >
       <h2 class="mb-2 text-sm font-medium text-ink-gray-6">

@@ -1,6 +1,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { createResource } from 'frappe-ui'
+import PageHeader from '@/components/PageHeader.vue'
 
 const STATUS_COLOR = {
   Present: 'bg-surface-green-3',
@@ -115,14 +116,10 @@ function closeDay() {
 </script>
 
 <template>
-  <div class="min-h-screen bg-surface-gray-1 pb-24">
-    <header class="border-b border-outline-gray-2 bg-surface-white px-4 py-4">
-      <h1 class="font-heading text-xl font-semibold text-ink-gray-9">
-        Attendance
-      </h1>
-    </header>
+  <div class="space-y-4">
+    <PageHeader title="Attendance" />
 
-    <div class="flex items-center justify-between px-4 py-4">
+    <div class="flex max-w-xl items-center justify-between">
       <button
         class="rounded-md px-2 py-1 text-ink-gray-6 hover:bg-surface-gray-2"
         @click="prevMonth"
@@ -146,7 +143,7 @@ function closeDay() {
       </button>
     </div>
 
-    <div class="flex flex-wrap gap-2 px-4 pb-2 text-sm">
+    <div class="flex max-w-xl flex-wrap gap-2 text-sm">
       <span
         v-for="(count, status) in summary"
         :key="status"
@@ -166,28 +163,30 @@ function closeDay() {
       </span>
     </div>
 
-    <div class="grid grid-cols-7 gap-1 px-4 pt-2 text-center text-xs text-ink-gray-5">
-      <span
-        v-for="d in ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa']"
-        :key="d"
-      >{{ d }}</span>
-    </div>
-    <div class="grid grid-cols-7 gap-1 px-4 pb-6">
-      <button
-        v-for="(day, index) in days"
-        :key="index"
-        class="flex aspect-square flex-col items-center justify-center rounded-md text-sm"
-        :class="day ? 'hover:bg-surface-gray-2 text-ink-gray-8' : ''"
-        :disabled="!day"
-        @click="openDay(day)"
-      >
-        <span>{{ day?.day }}</span>
+    <div class="max-w-xl rounded-xl border border-outline-gray-2 bg-surface-white p-3">
+      <div class="grid grid-cols-7 gap-1 text-center text-xs text-ink-gray-5">
         <span
-          v-if="day?.status"
-          class="mt-0.5 h-1.5 w-1.5 rounded-full"
-          :class="STATUS_COLOR[day.status] || 'bg-surface-gray-4'"
-        />
-      </button>
+          v-for="d in ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa']"
+          :key="d"
+        >{{ d }}</span>
+      </div>
+      <div class="mt-1 grid grid-cols-7 gap-1">
+        <button
+          v-for="(day, index) in days"
+          :key="index"
+          class="flex aspect-square flex-col items-center justify-center rounded-md text-sm"
+          :class="day ? 'hover:bg-surface-gray-2 text-ink-gray-8' : ''"
+          :disabled="!day"
+          @click="openDay(day)"
+        >
+          <span>{{ day?.day }}</span>
+          <span
+            v-if="day?.status"
+            class="mt-0.5 h-1.5 w-1.5 rounded-full"
+            :class="STATUS_COLOR[day.status] || 'bg-surface-gray-4'"
+          />
+        </button>
+      </div>
     </div>
 
     <div

@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { createResource, Button } from 'frappe-ui'
+import PageHeader from '@/components/PageHeader.vue'
 
 const router = useRouter()
 
@@ -36,21 +37,20 @@ async function markAll() {
 </script>
 
 <template>
-  <div class="min-h-screen bg-surface-gray-1 pb-24">
-    <header class="flex items-center justify-between border-b border-outline-gray-2 bg-surface-white px-4 py-4">
-      <h1 class="font-heading text-xl font-semibold text-ink-gray-9">
-        Notifications
-      </h1>
-      <Button
-        variant="subtle"
-        size="sm"
-        @click="markAll"
-      >
-        Mark all read
-      </Button>
-    </header>
+  <div class="space-y-4">
+    <PageHeader title="Notifications">
+      <template #actions>
+        <Button
+          variant="subtle"
+          size="sm"
+          @click="markAll"
+        >
+          Mark all read
+        </Button>
+      </template>
+    </PageHeader>
 
-    <div class="space-y-2 px-4 py-4">
+    <div class="space-y-2">
       <p
         v-if="logs.loading"
         class="text-ink-gray-5"
