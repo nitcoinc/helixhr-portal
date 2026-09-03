@@ -1,0 +1,142 @@
+[
+ {
+  "docstatus": 0,
+  "doctype": "Workflow",
+  "document_type": "Timesheet",
+  "enable_action_confirmation": 0,
+  "is_active": 1,
+  "modified": "2026-09-03 13:16:30.386722",
+  "name": "Timesheet Approval",
+  "override_status": 0,
+  "send_email_alert": 0,
+  "states": [
+   {
+    "allow_edit": "Employee",
+    "avoid_status_override": 0,
+    "doc_status": "0",
+    "evaluate_as_expression": 0,
+    "is_optional_state": 0,
+    "message": null,
+    "next_action_email_template": null,
+    "send_email": 1,
+    "state": "Draft",
+    "update_field": null,
+    "update_value": null,
+    "workflow_builder_id": null
+   },
+   {
+    "allow_edit": "HR Manager",
+    "avoid_status_override": 0,
+    "doc_status": "0",
+    "evaluate_as_expression": 0,
+    "is_optional_state": 0,
+    "message": null,
+    "next_action_email_template": null,
+    "send_email": 1,
+    "state": "Pending Approval",
+    "update_field": null,
+    "update_value": null,
+    "workflow_builder_id": null
+   },
+   {
+    "allow_edit": "HR Manager",
+    "avoid_status_override": 0,
+    "doc_status": "1",
+    "evaluate_as_expression": 0,
+    "is_optional_state": 0,
+    "message": null,
+    "next_action_email_template": null,
+    "send_email": 1,
+    "state": "Approved",
+    "update_field": null,
+    "update_value": null,
+    "workflow_builder_id": null
+   },
+   {
+    "allow_edit": "HR Manager",
+    "avoid_status_override": 0,
+    "doc_status": "0",
+    "evaluate_as_expression": 0,
+    "is_optional_state": 0,
+    "message": null,
+    "next_action_email_template": null,
+    "send_email": 1,
+    "state": "Rejected",
+    "update_field": null,
+    "update_value": null,
+    "workflow_builder_id": null
+   }
+  ],
+  "transitions": [
+   {
+    "action": "Submit",
+    "allow_self_approval": 1,
+    "allowed": "Employee",
+    "condition": null,
+    "next_state": "Pending Approval",
+    "send_email_to_creator": 0,
+    "state": "Draft",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Approve",
+    "allow_self_approval": 0,
+    "allowed": "Employee",
+    "condition": "frappe.db.get_value(\"Employee\", doc.employee, \"reports_to\") == frappe.db.get_value(\"Employee\", {\"user_id\": frappe.session.user}, \"name\")",
+    "next_state": "Approved",
+    "send_email_to_creator": 0,
+    "state": "Pending Approval",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Approve",
+    "allow_self_approval": 1,
+    "allowed": "HR Manager",
+    "condition": null,
+    "next_state": "Approved",
+    "send_email_to_creator": 0,
+    "state": "Pending Approval",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Reject",
+    "allow_self_approval": 0,
+    "allowed": "Employee",
+    "condition": "frappe.db.get_value(\"Employee\", doc.employee, \"reports_to\") == frappe.db.get_value(\"Employee\", {\"user_id\": frappe.session.user}, \"name\")",
+    "next_state": "Rejected",
+    "send_email_to_creator": 0,
+    "state": "Pending Approval",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Reject",
+    "allow_self_approval": 1,
+    "allowed": "HR Manager",
+    "condition": null,
+    "next_state": "Rejected",
+    "send_email_to_creator": 0,
+    "state": "Pending Approval",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Edit",
+    "allow_self_approval": 1,
+    "allowed": "Employee",
+    "condition": null,
+    "next_state": "Draft",
+    "send_email_to_creator": 0,
+    "state": "Rejected",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   }
+  ],
+  "workflow_data": null,
+  "workflow_name": "Timesheet Approval",
+  "workflow_state_field": "workflow_state"
+ }
+]

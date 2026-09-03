@@ -1,0 +1,28 @@
+[
+ {
+  "amend": 0,
+  "cancel": 0,
+  "create": 1,
+  "delete": 0,
+  "docstatus": 0,
+  "doctype": "Custom DocPerm",
+  "email": 0,
+  "export": 0,
+  "if_owner": 0,
+  "impersonate": 0,
+  "import": 0,
+  "mask": 0,
+  "modified": "2026-09-03 13:16:30.313767",
+  "name": "ocjjp6dujv",
+  "parent": "Timesheet",
+  "permlevel": 0,
+  "print": 0,
+  "read": 1,
+  "report": 0,
+  "role": "Employee",
+  "select": 0,
+  "share": 0,
+  "submit": 1,
+  "write": 1
+ }
+]

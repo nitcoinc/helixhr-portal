@@ -17,6 +17,29 @@ PROFILE_EDITABLE_FIELDS = (
 )
 
 
+def get_week_bounds(any_date):
+	"""Monday..Sunday for the week containing `any_date` (KTD10 -- one
+	week equals one Timesheet, always Monday to Sunday regardless of the
+	site's own week-start setting, so week identity never depends on
+	site config)."""
+	from frappe.utils import add_days, getdate
+
+	date = getdate(any_date)
+	monday = add_days(date, -date.weekday())
+	sunday = add_days(monday, 6)
+	return monday, sunday
+
+
+def get_manager_user(employee):
+	"""The Frappe User of `employee`'s manager (Employee.reports_to), or
+	None if there isn't one. Two hops: reports_to is an Employee id, not a
+	User -- the share/guard/approvals code all needs the User."""
+	reports_to = frappe.db.get_value("Employee", employee, "reports_to")
+	if not reports_to:
+		return None
+	return frappe.db.get_value("Employee", reports_to, "user_id")
+
+
 def rate_limit_per_user(action, limit, seconds):
 	"""A small per-user rate limit, independent of Frappe's built-in
 	`rate_limit` decorator -- that decorator's own per-user mode keys off a

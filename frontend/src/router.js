@@ -29,8 +29,12 @@ const routes = [
   {
     path: '/timesheet',
     name: 'Timesheet',
-    component: () => import('@/pages/PageComingSoon.vue'),
-    props: { title: 'Timesheet' },
+    component: () => import('@/pages/Timesheet.vue'),
+  },
+  {
+    path: '/timesheet/history',
+    name: 'TimesheetHistory',
+    component: () => import('@/pages/TimesheetHistory.vue'),
   },
   {
     path: '/requests',

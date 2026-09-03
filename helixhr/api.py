@@ -1,8 +1,11 @@
+import json
+
 import frappe
-from frappe.utils import get_first_day, get_last_day, today
+from frappe import _
+from frappe.utils import flt, get_datetime, get_first_day, get_last_day, today
 from hrms.api import get_attendance_calendar_events, get_current_employee, get_leave_balance_map
 
-from helixhr.utils import PROFILE_EDITABLE_FIELDS, rate_limit_per_user
+from helixhr.utils import PROFILE_EDITABLE_FIELDS, get_week_bounds, rate_limit_per_user
 
 
 @frappe.whitelist()
@@ -97,6 +100,164 @@ def _count_leave_approvals_waiting(employee):
 	from hrms.api import get_leave_applications
 
 	return len(get_leave_applications(employee, approver_id=frappe.session.user, for_approval=True))
+
+
+# Timesheets (U8, KTD7, KTD10, KTD11)
+
+
+@frappe.whitelist()
+def get_my_week(week_start=None):
+	"""The one Timesheet for the Monday..Sunday week containing
+	`week_start` (any date in that week; defaults to today), or None if
+	the employee hasn't started one yet (KTD10: one week is one
+	Timesheet -- the newest non-cancelled one for that Monday)."""
+	employee = get_current_employee()
+	monday, sunday = get_week_bounds(week_start or today())
+
+	name = frappe.db.get_value(
+		"Timesheet",
+		{"employee": employee, "start_date": str(monday), "docstatus": ["!=", 2]},
+		"name",
+		order_by="creation desc",
+	)
+
+	timesheet = None
+	if name:
+		doc = frappe.get_doc("Timesheet", name)
+		timesheet = {
+			"name": doc.name,
+			"workflow_state": doc.workflow_state,
+			"total_hours": doc.total_hours,
+			"docstatus": doc.docstatus,
+			"rows": [
+				{
+					"project": row.project,
+					"task": row.task,
+					"hours": row.hours,
+					"note": row.description,
+					"date": _row_date(row),
+				}
+				for row in doc.time_logs
+			],
+		}
+
+	return {"week_start": str(monday), "week_end": str(sunday), "timesheet": timesheet}
+
+
+def _row_date(row):
+	return str(get_datetime(row.from_time).date()) if row.from_time else None
+
+
+@frappe.whitelist()
+def get_my_projects():
+	"""Open Projects the session user may book time on -- Project Users
+	or a User Permission on Project, each with its own open Tasks
+	(KTD11: no "bookable projects" API exists upstream)."""
+	user = frappe.session.user
+
+	project_names = set(
+		frappe.get_all("Project User", filters={"user": user}, pluck="parent")
+	) | set(
+		frappe.get_all(
+			"User Permission", filters={"user": user, "allow": "Project"}, pluck="for_value"
+		)
+	)
+	if not project_names:
+		return []
+
+	projects = frappe.get_all(
+		"Project",
+		filters={"name": ["in", list(project_names)], "status": "Open"},
+		fields=["name", "project_name"],
+		order_by="project_name",
+	)
+	for project in projects:
+		project["tasks"] = frappe.get_all(
+			"Task",
+			filters={"project": project.name, "status": ["not in", ["Cancelled", "Completed"]]},
+			fields=["name", "subject"],
+			order_by="subject",
+		)
+	return projects
+
+
+@frappe.whitelist(methods=["POST"])
+def save_my_week(week_start, rows):
+	"""Insert or update the one draft Timesheet for this week (KTD10).
+	Refuses to touch anything but a Draft or Rejected timesheet -- once a
+	week is Pending Approval or Approved it isn't this method's to edit
+	(the workflow's own `allow_edit` per state backs this up too, this
+	is just a clearer error than a generic permission failure).
+	"""
+	employee = get_current_employee()
+	if isinstance(rows, str):
+		rows = json.loads(rows)
+	monday, sunday = get_week_bounds(week_start)
+
+	bookable_projects = {p["name"] for p in get_my_projects()}
+	_validate_rows(rows, bookable_projects)
+
+	existing_name = frappe.db.get_value(
+		"Timesheet",
+		{"employee": employee, "start_date": str(monday), "docstatus": ["!=", 2]},
+		"name",
+		order_by="creation desc",
+	)
+
+	if existing_name:
+		doc = frappe.get_doc("Timesheet", existing_name)
+		if doc.workflow_state not in ("Draft", "Rejected", None):
+			frappe.throw(
+				_("This week is {0} and can't be edited here.").format(doc.workflow_state)
+			)
+	else:
+		doc = frappe.new_doc("Timesheet")
+		doc.employee = employee
+		doc.company = frappe.db.get_value("Employee", employee, "company")
+
+	doc.user = frappe.session.user
+	doc.start_date = str(monday)
+	doc.end_date = str(sunday)
+	doc.set("time_logs", [])
+	for row in rows:
+		start = get_datetime(f"{row['date']} 09:00:00")
+		hours = flt(row["hours"])
+		doc.append(
+			"time_logs",
+			{
+				"project": row["project"],
+				"task": row.get("task"),
+				"hours": hours,
+				"description": row.get("note"),
+				"activity_type": "General",
+				"from_time": start,
+				"to_time": frappe.utils.add_to_date(start, hours=hours),
+			},
+		)
+	doc.save()
+	return doc.name
+
+
+def _validate_rows(rows, bookable_projects):
+	if not rows:
+		frappe.throw(_("Add at least one row before saving."))
+
+	day_totals = {}
+	for row in rows:
+		if not row.get("project"):
+			frappe.throw(_("Every row needs a project."))
+		if row["project"] not in bookable_projects:
+			frappe.throw(_("You can't book time on {0}.").format(row["project"]))
+		if not row.get("date"):
+			frappe.throw(_("Every row needs a date."))
+
+		hours = flt(row.get("hours"))
+		if hours < 0.25 or hours > 24:
+			frappe.throw(_("Hours must be between 0.25 and 24."))
+
+		day_totals[row["date"]] = day_totals.get(row["date"], 0) + hours
+		if day_totals[row["date"]] > 24:
+			frappe.throw(_("{0} has more than 24 hours booked.").format(row["date"]))
 
 
 def _get_unread_notification_count():

@@ -318,3 +318,13 @@ release gate.
 - [ ] `X-Forwarded-Proto` reaches Frappe correctly behind the real proxy.
 - [ ] The real Entra OAuth round trip (not just password login) has been verified end to end,
       including the `redirect-to` behavior above.
+- [ ] System Settings **Apply Strict User Permissions** is turned on. Without it, a User
+      Permission on Employee only directly restricts the *Employee* doctype's own records --
+      it does **not** by itself stop an unrelated user from reading a *different* doctype's
+      document just because that document has a Link field pointing to Employee (e.g. a
+      manager reading a report's pending Timesheet by name, confirmed while writing U8's
+      tests). This app's *write* paths don't depend on this setting (Timesheet approval is
+      independently enforced by the workflow condition and the `before_submit` guard, not by
+      User Permission), but plain reads do -- turn this on before go-live, and re-check HR's
+      own Desk views afterwards in case it over-restricts a legitimate cross-employee report
+      they rely on.

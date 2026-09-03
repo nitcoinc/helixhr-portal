@@ -102,7 +102,48 @@ fixtures = [
 		"prefix": "leave_application",
 		"filters": [["parent", "=", "Leave Application"], ["role", "=", "Employee"]],
 	},
+	{
+		"dt": "Custom DocPerm",
+		"prefix": "timesheet",
+		"filters": [["parent", "=", "Timesheet"], ["role", "=", "Employee"]],
+	},
+	{"dt": "Workflow", "filters": [["document_type", "=", "Timesheet"]]},
+	{
+		# "Approved" and "Rejected" already exist as shared Workflow State
+		# records (HRMS's own Leave Application workflow uses them) --
+		# reused by name on the transitions below, not exported here, so
+		# this app never claims ownership of another app's record. Only
+		# "Draft" and "Pending Approval" are new.
+		"dt": "Workflow State",
+		"filters": [["name", "in", ["Draft", "Pending Approval"]]],
+	},
+	{
+		# Likewise "Approve" and "Reject" already exist as shared Workflow
+		# Action Master records; only "Submit" and "Edit" are new here.
+		"dt": "Workflow Action Master",
+		"filters": [["name", "in", ["Submit", "Edit"]]],
+	},
+	{
+		# ERPNext's Timesheet requires Activity Type on every row at
+		# submit time (erpnext/projects/doctype/timesheet/timesheet.py),
+		# but a headless install seeds none (same class of gap as Gender
+		# and Warehouse Type -- see docs/runbook.md) and R17 doesn't ask
+		# the portal to expose the field at all. save_my_week always uses
+		# this one fixed value.
+		"dt": "Activity Type",
+		"filters": [["name", "=", "General"]],
+	},
 ]
+
+# Document Events
+# ---------------
+
+doc_events = {
+	"Timesheet": {
+		"on_update": "helixhr.events.timesheet_on_update",
+		"before_submit": "helixhr.events.timesheet_before_submit",
+	},
+}
 
 # Generators
 # ----------
