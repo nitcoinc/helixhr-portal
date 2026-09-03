@@ -417,6 +417,9 @@ instead of the full `Document.cancel()`/`.save()` lifecycle when cleaning up tes
       `helixhr/public/helixhr/` and `helixhr/www/helixhr.html` from source -- always commit the
       rebuilt output alongside a frontend source change, and rerun after any `frappe-ui` version
       bump.
+- [ ] `frontend/src/pages/NotLinked.vue`'s `hrContactEmail` is a placeholder
+      (`hr@nitcoinc.com`, the company domain, not a confirmed real HR mailbox) -- set it to the
+      real address before go-live.
 - [ ] **Not verified in this environment (say so, don't fake it):** the real Entra ID OAuth round
       trip on a real staging install, and a Lighthouse accessibility run against Dashboard/Leave
       at 360px. This dev setup is a local Docker bench with password-only test users and no
