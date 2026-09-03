@@ -24,8 +24,7 @@ const routes = [
   {
     path: '/attendance',
     name: 'Attendance',
-    component: () => import('@/pages/PageComingSoon.vue'),
-    props: { title: 'Attendance' },
+    component: () => import('@/pages/Attendance.vue'),
   },
   {
     path: '/timesheet',
