@@ -300,30 +300,35 @@ BASE_URL=http://<frontend-host>:8080 SITE_HOST=<site> \
   yarn test:e2e
 ```
 
-**First real CI run found the guest-redirect test (`login-dashboard.spec.ts`'s `guest`
-describe) failing against a from-scratch CI site under `bench start`'s own dev server** --
-`page.goto('/helixhr')` landed on `/helixhr` directly instead of redirecting to `/login`. The
-identical test passed by hand against this dev VM's nginx+gunicorn setup in U3 (9/9 green). Not
-yet root-caused -- candidate difference is the dev server (Werkzeug, via `bench start`) versus
-nginx+gunicorn for how a Guest session/cookie is handled on first load. Flagged rather than
-fixed in U4 to avoid scope creep into U3 code; pick this up before relying on CI's e2e job as a
-release gate.
+**ROOT-CAUSED (U11): every JS/CSS asset 404s on a from-scratch CI bench, so the Vue app never
+mounts.** CI's e2e job failed non-flakily across three separate pushes/reruns -- every real page
+load blank (white screen), including the guest-redirect case first flagged back in U4. Chasing it
+by reading text assertion diffs alone went nowhere; what actually cracked it was adding
+`screenshot: 'only-on-failure'` to `playwright.config.ts` plus an `actions/upload-artifact` step
+on the e2e job (`if: failure()`, diagnostic only, never affects pass/fail) so a failing run's
+screenshots and traces survive the runner instead of being discarded on exit. The very first
+downloaded trace showed the smoking gun: `page.goto('/helixhr')` returns the HTML shell fine
+(200), but every asset under `/assets/helixhr/helixhr/assets/*` -- `index-*.js`, `index-*.css`,
+etc. -- 404s. No JS ever runs, so nothing mounts and no client-side router logic (including the
+guest-redirect check) ever fires. Confirmed directly: `sites/assets/<app>` is a **symlink to
+`apps/<app>/public`**, created by `bench build`, and it's what the dev server actually serves
+static assets from. `yarn build` (the CI "Build frontend" step) writes straight into
+`apps/helixhr/public/helixhr/` -- it never touches `sites/assets/` at all. Reproduced locally by
+deleting this bench's own `sites/assets/helixhr` symlink (404s appeared immediately) and fixed by
+running `bench build --app helixhr` (recreated the symlink, 404s gone). CI's workflow had no step
+that ever created this symlink; fixed by adding a `bench build --app helixhr` step between "New
+site, install apps" and "Start bench" in the `e2e` job.
 
-**U12/U11: the same failure widened to almost every spec, deterministically, twice in a row on
-GitHub's runner** -- not just the guest-redirect test anymore, but the very first authenticated
-page load too (`leave.spec.ts`'s "Leave" heading never appears), and it doesn't recover on CI's
-own retry. The U12 diff that shipped alongside this (`Dashboard.vue`, `router.js`, new
-`Approvals.vue`) is inert enough (an added route, a computed pending count, a new page) that it's
-an unlikely cause, and this was checked directly: the identical commit's built frontend assets,
-run against a **freshly dropped and recreated** `test_site` on this local Docker bench (matching
-CI's own from-scratch-site approach exactly, not the long-lived polluted dev site the earlier
-notes above warn about), passed cleanly end to end via a real browser -- 11/11 real specs green,
-6 correctly skipped, `--workers=1`, immediately after `bench new-site` + fixture seed. Python
-tests and the frontend job were also green on that same CI run. This narrows it to something
-about GitHub's `ubuntu-latest` runner specifically in combination with `bench start`'s Werkzeug
-dev server (timing, networking, or a Chromium build difference) rather than application code --
-but it hasn't been root-caused, and CI's e2e job should not be trusted as a release gate until it
-is. Local verification against a fresh site (as above) is the reliable signal for now.
+**Why local verification kept looking clean while CI kept failing**: this dev bench's
+`sites/assets/helixhr` symlink was created once, early in this project's very first `bench init`,
+and it lives at the *bench* level, not the *site* level -- so it survives every `bench new-site
+test_site` / `bench drop-site test_site` cycle done since. Testing against a "freshly dropped and
+recreated `test_site`" on this bench therefore never actually exercised the missing-symlink case
+that a truly from-scratch bench (every CI run, `bench init` from nothing) hits every time. The
+only environment that matched CI's real failure mode was a from-scratch `bench init`, which this
+local session never did mid-investigation -- only `bench new-site`/`drop-site` on an
+already-initialized bench. Lesson: "fresh site" and "fresh bench" are not the same reset, and only
+the latter reproduces a bench-level asset-linking bug.
 
 ### Full local Playwright runs need low parallelism, and a data reset between runs (U11)
 
@@ -416,7 +421,11 @@ instead of the full `Document.cancel()`/`.save()` lifecycle when cleaning up tes
       container: `cd apps/helixhr/frontend && yarn build`). This regenerates
       `helixhr/public/helixhr/` and `helixhr/www/helixhr.html` from source -- always commit the
       rebuilt output alongside a frontend source change, and rerun after any `frappe-ui` version
-      bump.
+      bump. On a bench that has never served this app's assets before (a fresh install, not just
+      a rebuild on an already-running bench), also run `bench build --app helixhr` once --
+      `yarn build` alone does not create the `sites/assets/helixhr` symlink the dev/prod server
+      actually serves static assets from; see the CI root-cause writeup below for what happens
+      when it's missing.
 - [ ] `frontend/src/pages/NotLinked.vue`'s `hrContactEmail` is a placeholder
       (`hr@nitcoinc.com`, the company domain, not a confirmed real HR mailbox) -- set it to the
       real address before go-live.

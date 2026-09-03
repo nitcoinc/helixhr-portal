@@ -208,6 +208,19 @@ jobs:
             --no-mariadb-socket --set-default
           bench --site test_site set-config allow_tests true
         working-directory: frappe-bench
+      # `yarn build` (above) writes straight into apps/helixhr/public --
+      # it never touches sites/assets/, which is what the dev server
+      # actually serves from (sites/assets/<app> is normally a symlink to
+      # apps/<app>/public, created by `bench build`). Root-caused via a
+      # Playwright trace showing every JS/CSS asset 404ing while the HTML
+      # shell loaded fine (blank page, no mount) -- this app's own local
+      # dev bench masked the bug because that symlink is created once at
+      # initial bench setup and survives every `bench new-site`/
+      # `drop-site` cycle after that, but a from-scratch bench (every CI
+      # run) never gets it without this step.
+      - name: Link app assets
+        run: bench build --app helixhr
+        working-directory: frappe-bench
       - name: Start bench
         run: nohup bench start > bench-start.log 2>&1 &
         working-directory: frappe-bench
