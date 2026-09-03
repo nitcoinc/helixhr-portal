@@ -59,6 +59,47 @@
   --surface-green-3: #1e6f53; /* white on it 6.08 */
   --surface-red-5: #a8351a; /* white on it 6.58 */
   --surface-blue-3: #1a6349; /* primary hover, white on it 7.18 */
+
+  /* The rest of frappe-ui's blue family. Retuning the Tailwind `blue` scale
+     covers `bg-blue-500` and friends, but these CSS variables are separate and
+     drive Badge blue, Button subtle/outline/ghost, and every `text-ink-blue-*`
+     link -- left alone they leak the old blue into a green portal, which is
+     exactly what they were doing. */
+  --ink-blue-1: #eaf2ef; /* on surface-blue-3 6.31 */
+  --ink-blue-2: #14523f; /* on surface-blue-2 7.09 */
+  --ink-blue-3: #14523f;
+  --ink-blue-link: #14523f; /* 7.61 on paper */
+  --surface-blue-1: #eaf2ef;
+  --surface-blue-2: #d6e7e0;
+  --outline-blue-1: #afcfc3;
+  --outline-blue-2: #7fb29f;
+}
+
+/*
+ * Touch sizing. frappe-ui's default control height is 28px and its `lg` size
+ * is still only 40px, so on a phone almost every control -- Save, Withdraw,
+ * Add row, Mark all read, the form inputs -- sits under the 44px the design
+ * system requires. Raising the floor for coarse pointers only keeps the
+ * desktop density frappe-ui was tuned for, and it reaches inside components
+ * whose markup this app does not own.
+ *
+ * `min-height` is ignored on non-replaced inline boxes, so inline text links
+ * inside a sentence are untouched by design.
+ *
+ * `!important` is load-bearing, not laziness: frappe-ui sets its heights with
+ * utility classes like `min-h-7`, and a class selector outranks an element
+ * selector whatever the source order. Without it the Select controls in the
+ * timesheet grid stayed at 28px while every other control obeyed.
+ */
+@media (pointer: coarse) {
+  button,
+  [role='button'],
+  [role='combobox'],
+  select,
+  textarea,
+  input:not([type='checkbox']):not([type='radio']):not([type='hidden']) {
+    min-height: 44px !important;
+  }
 }
 
 button,
@@ -70,25 +111,38 @@ a,
 }
 
 /*
- * Browser surfaces. Focus ring, selection, caret and scrollbar ship with
- * defaults that belong to no design system -- the keyboard ring was Chrome's
- * 1px near-black `outline: auto`. These put them on the portal's palette.
+ * Browser surfaces -- focus ring, selection, caret, scrollbar -- put on the
+ * portal's palette instead of the vendor defaults they shipped with.
+ *
+ * The ring is two colours on purpose. A single brand-green ring measures
+ * 7.61:1 on paper but 1.32:1 against the field, so keyboard focus would have
+ * been invisible on the side nav and tab bar -- the one place navigation
+ * actually lives. Dark on paper, signal yellow on the field.
  */
 :focus-visible {
-  outline: 2px solid var(--ink-blue-3, #007be0);
+  outline: 3px solid #1a1714; /* 14.92 on paper */
   outline-offset: 2px;
   border-radius: 2px;
 }
 
+/* Inside the field the dark ring disappears (1.32), so focus switches to the
+   signal yellow, which reads at 8.35 there. Contextual rather than a
+   two-layer ring: frappe-ui's own `focus-visible` utilities set box-shadow,
+   which overrode the halo a single combined ring depended on. */
+.bg-field :focus-visible,
+.bg-field-deep :focus-visible {
+  outline-color: #ffd24a;
+}
+
 ::selection {
-  background-color: #c8e6ff; /* blue-200 */
-  color: #171717; /* gray-900 */
+  background-color: #d6e7e0;
+  color: #1a1714; /* 13.91 */
 }
 
 :root {
-  accent-color: #0070cc;
-  caret-color: #0070cc;
-  scrollbar-color: #c7c7c7 transparent;
+  accent-color: #14523f;
+  caret-color: #14523f;
+  scrollbar-color: #cfc4b8 transparent;
   scrollbar-width: thin;
 }
 
@@ -98,7 +152,7 @@ a,
  * The portal shipped with none: every surface was white on #F8F8F8 separated
  * by a 1px border, one depth level everywhere, which is what read as flat.
  * Each step carries a real offset and a soft blur (a zero-offset halo is
- * decoration, not depth), tinted toward the blue-grey of the page rather
+ * decoration, not depth), tinted warm toward the paper ground rather
  * than neutral black so the shadow belongs to this palette.
  *
  * Two levels only, and they mean something: -1 is a surface resting on the
@@ -106,22 +160,22 @@ a,
  */
 .elev-1 {
   box-shadow:
-    0 1px 2px rgb(16 32 56 / 0.04),
-    0 2px 6px -1px rgb(16 32 56 / 0.08);
+    0 1px 2px rgb(60 40 20 / 0.05),
+    0 2px 6px -1px rgb(60 40 20 / 0.10);
 }
 
 .elev-2 {
   box-shadow:
-    0 2px 4px rgb(16 32 56 / 0.06),
-    0 10px 24px -6px rgb(16 32 56 / 0.16);
+    0 2px 4px rgb(60 40 20 / 0.07),
+    0 10px 24px -6px rgb(60 40 20 / 0.20);
 }
 
 /* Interactive surfaces rise slightly on hover; the transition is already
    declared globally for box-shadow above. */
 .elev-1:hover {
   box-shadow:
-    0 2px 4px rgb(16 32 56 / 0.05),
-    0 6px 14px -3px rgb(16 32 56 / 0.12);
+    0 2px 4px rgb(60 40 20 / 0.06),
+    0 6px 14px -3px rgb(60 40 20 / 0.15);
 }
 
 /*
@@ -150,6 +204,6 @@ a,
      so "this is still loading" survives without the animation. */
   .animate-pulse {
     opacity: 1 !important;
-    background-color: #ededed !important; /* gray-200 */
+    background-color: #e7e0d8 !important; /* warm, matches surface-gray-2 */
   }
 }

@@ -37,9 +37,20 @@ the field, so every page has an identity, not just the dashboard.
 2. **Muted ink is `#70675E`, not lighter.** The obvious next step up measured 3.89:1 on paper and
    would fail AA on every empty state and form label — the mistake this document already shipped once.
 
+### Focus ring: two colours, because the portal has two grounds
+
+Keyboard focus is a **3px `#1A1714` ring** on paper (14.92) and switches to **`#FFD24A`** inside
+`.bg-field` / `.bg-field-deep` (8.35). A single brand-green ring measured 7.61 on paper but **1.32
+against the field** — invisible on the side nav and the phone tab bar, which is the one place
+navigation actually lives. It is done with two `outline-color` rules rather than a layered ring
+because frappe-ui's own `focus-visible` utilities set `box-shadow`, which silently overrode a halo.
+
 ### Where the brand hue lives
 
-`blue` in `tailwind.config.cjs` **is the Signal green**. frappe-ui's `Button` and `Badge` hard-code
+`blue` in `tailwind.config.cjs` **is the Signal green**, and so are frappe-ui's `--ink-blue-*`,
+`--surface-blue-*` and `--outline-blue-*` CSS variables — those are a *separate* set from the
+Tailwind scale, drive Badge blue, Button subtle/outline/ghost and every `text-ink-blue-*` link, and
+leaked the old blue into a green portal until they were retuned too. frappe-ui's `Button` and `Badge` hard-code
 `blue` as their primary theme (and `Button` reaches for a raw `bg-blue-500`), so retuning that scale
 is the only way to re-brand those components without forking the library. Read `blue` as "brand"
 everywhere in this app. The neutral, ink and status tokens are retuned in `frontend/src/index.css`;
