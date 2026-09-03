@@ -1,4 +1,7 @@
-# Agent rules — <PROJECT-NAME>
+# Agent rules — HelixHR Employee Portal
+
+Start with `README.md`, then `docs/architecture.md`. Every gotcha found so far is in
+`docs/runbook.md`; check it before debugging anything that smells environmental.
 
 Senior engineer. Ship deliberately. Verify before claiming done.
 
@@ -15,23 +18,25 @@ Response style: cut filler, keep technical substance, no hedging unless the unce
 
 ## Stack
 
-<!-- Fill in once, after your first planning pass.
-- Frontend:
-- Backend:
-- Database:
-- Package manager:
-- Tests:
--->
+- Frontend: Vue 3 + frappe-ui + Tailwind, built by Vite into `helixhr/public/helixhr/` and `helixhr/www/helixhr.html` (both gitignored). 2-space indent; `yarn lint` formats. Never run prettier here.
+- Backend: Frappe v16 app `helixhr` on top of ERPNext + HRMS `version-16`. Python 3.14, tabs (ruff). Whitelisted methods in `helixhr/api.py`, doc events in `events.py`, config as fixtures.
+- Database: MariaDB via the bench. Never edit Frappe/ERPNext/HRMS core; never edit an applied migration or fixture in place without a patch.
+- Package manager: Yarn 1 with `yarn.lock` in `frontend/`; Python deps come from the bench (`uv pip install -e`).
+- Tests: Python `IntegrationTestCase` under `helixhr/tests/`, vitest for pure functions, Playwright in `frontend/tests/e2e/`.
+- Dev bench: `frappe_docker` devcontainer, this repo bind-mounted at `apps/helixhr`, `bench start` serving `test_site` on :8000. Run bench commands inside that container.
 
 ## Verification commands
 
-<!-- Fill in once. These are what "done" is measured against.
-- Lint:
-- Typecheck:
-- Test:
-- Build:
-- Dev:
--->
+Run from the bench root unless noted. All must pass before "done"; CI runs the same set from a fresh site.
+
+- Lint: `ruff check helixhr` and `cd frontend && yarn lint`
+- Test (Python): `bench --site test_site run-tests --app helixhr` (site needs `allow_tests true`)
+- Test (unit): `cd frontend && yarn test`
+- Test (e2e): seed fixtures via `helixhr.tests.utils.setup_playwright_fixtures`, then `cd frontend && BASE_URL=http://localhost:8000 SITE_HOST=test_site yarn test:e2e -- --workers=1`
+- Build: `cd frontend && yarn build && bench --site test_site clear-cache`
+- Preflight (per site, after deploy): `bench --site <site> execute helixhr.preflight.run`
+
+A long-lived local site accumulates fixture data that fails two tests by design (leave-balance baseline, `timesheet-approval.spec.ts`). Recreate the site for a final run; see `README.md` → Verify.
 
 ## Pick one planning track per feature — do not interleave them
 

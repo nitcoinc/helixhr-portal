@@ -9,18 +9,20 @@
         Contact HR to get set up.
       </p>
       <a
+        v-if="hrContactEmail"
         :href="`mailto:${hrContactEmail}`"
         class="mt-6 inline-block cursor-pointer text-blue-700 hover:underline"
       >
-        Contact HR
+        {{ hrContactEmail }}
       </a>
     </div>
   </div>
 </template>
 
 <script setup>
-// TODO(runbook): set the real HR contact address once known. Placeholder
-// uses the company domain seen elsewhere in this repo so the link at
-// least resolves to the right organization in the meantime.
-const hrContactEmail = 'hr@nitcoinc.com'
+// Site configuration, not a constant: helixhr/www/helixhr.py injects the
+// `helixhr_hr_contact` site-config key as a window global when it serves
+// the shell. Unset means the page says "Contact HR" with no link rather
+// than pointing at a made-up address.
+const hrContactEmail = window.helixhr_hr_contact || ''
 </script>

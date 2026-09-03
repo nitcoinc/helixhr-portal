@@ -1,6 +1,8 @@
-# HelixHR runbook (U3)
+# HelixHR runbook
 
-Operational steps for a human. Filled in as each unit adds a step; U11 finishes it.
+Operational steps for a human, and every environment gotcha found so far, in the order they
+were found. Start with `README.md` for install, configure, verify and release; come here when
+something does not behave. The go-live checklist is at the bottom.
 
 ## Install the app on a bench
 
@@ -40,7 +42,23 @@ up the directory tree looking for a bench (`sites/` + `apps/` siblings) using a 
 check (`while (currentDir !== '/')`), which never terminates on a Windows drive root (`C:\`).
 Build on Linux/macOS, or inside a Linux container, instead.
 
-## Microsoft Entra ID login (production / staging only)
+## Sign-in: local login first, Entra ID later
+
+Phase 1 goes live with Frappe's own username/password login. No Entra ID app registration
+exists yet, and the OAuth round trip cannot be verified without a real host, so the portal
+does not depend on it. Two consequences for a local-login site:
+
+- **System Settings → Disable Username/Password Login must stay off.** Turning it on with no
+  enabled Social Login Key locks every user out, including Administrator over the web.
+  `helixhr.preflight.run` fails on exactly that combination.
+- **System Settings → Enable Password Policy** is the only strength check, so turn it on.
+
+Portal users are ordinary Frappe Users: create the Employee first, then the User from the
+Employee form (or set `user_id`), with the **Employee Self Service** role and "Create User
+Permission" checked. HR can reset a password from Desk. When Entra ID is ready, follow the
+section below; nothing in the app changes.
+
+## Microsoft Entra ID login (when a real host exists)
 
 1. In the Azure portal, register a new App registration.
    - Platform: **Web**.
@@ -503,16 +521,36 @@ own `late_entry` flag, which only a device (or HR) sets, so it stays at zero unt
 `helixhr/tests/test_api_attendance.py` covers the no-data case first, because that is the one that
 ships today.
 
-## Go-live checklist (grows through U11)
+## Go-live checklist
 
-- [ ] Confirm every Employee Self Service user has a User Permission on their own Employee
-      (query: Employee where `create_user_permission` was unchecked, or User Permission count
-      mismatched against active Employee count).
-- [ ] Disable Signup and Disable Username/Password Login are set (see above).
-- [ ] `X-Forwarded-Proto` reaches Frappe correctly behind the real proxy.
-- [ ] The real Entra OAuth round trip (not just password login) has been verified end to end,
-      including the `redirect-to` behavior above.
-- [ ] System Settings **Apply Strict User Permissions** is turned on. Without it, a User
+Most of this is checked by one command. Run it on staging, then again on production, after
+every deploy; it exits non-zero on any FAIL so a deploy script can gate on it:
+
+```bash
+bench --site <site> execute helixhr.preflight.run
+```
+
+It reports PASS/WARN/FAIL for: Apply Strict User Permissions, every linked employee having a
+User Permission on their own Employee, Disable Signup, password login still on (local-login
+phase), the Entra key (WARN while unconfigured), password policy, upload limits, site
+`rate_limit`, the HR contact address, the four fixtures the app cannot work without, and the
+frontend being built. The checks and their rationale live in `helixhr/preflight.py`; when Entra
+goes live, flip the two marked there.
+
+The items preflight **cannot** see, because they live outside the site:
+
+- [ ] `X-Forwarded-Proto` reaches Frappe correctly behind the real proxy, so the session
+      cookie is marked `Secure`. Check the cookie in the browser after the first HTTPS login.
+- [ ] Later, for Entra: the real OAuth round trip has been verified end to end, including the
+      `redirect-to` behavior above. Not a phase 1 gate.
+- [ ] A Lighthouse accessibility run against Dashboard/Leave at 360px. Contrast and touch
+      targets are already measured directly (see the `/impeccable` section); Lighthouse would
+      add performance numbers and a second a11y opinion. Needs the `lighthouse` package, which
+      is not a dependency here yet.
+
+What each preflight line means, for whoever has to fix one:
+
+- **Apply Strict User Permissions** (System Settings) must be on. Without it, a User
       Permission on Employee only directly restricts the *Employee* doctype's own records --
       it does **not** by itself stop an unrelated user from reading a *different* doctype's
       document just because that document has a Link field pointing to Employee (e.g. a
@@ -522,30 +560,32 @@ ships today.
       User Permission), but plain reads do -- turn this on before go-live, and re-check HR's
       own Desk views afterwards in case it over-restricts a legitimate cross-employee report
       they rely on.
-- [ ] System Settings **Allowed File Extensions** and **Max File Size** are set. The app's own
-      `file_before_insert` hook (`helixhr/events.py`) only refuses a non-private upload against
-      an HR Request -- it does not constrain file type or size. Those are core Frappe settings,
-      unset by default on a fresh site.
-- [ ] Site config `rate_limit` (Frappe's site-wide request rate limiter, in `site_config.json` /
-      via `bench set-config`) is set for production traffic. This is separate from, and in
-      addition to, this app's own per-user limiter (`helixhr.utils.rate_limit_per_user`), which
-      only covers `update_my_profile` today.
-- [ ] To surface a document on the Documents page: create a **HelixHR Document Link** (Desk list,
-      HR Manager/System Manager only) with `title`, `url`, optional `company` (scopes it to one
-      company; leave blank for all) and `description`. No app code change needed for a new link.
-- [ ] Building the frontend for release: `cd frontend && yarn build` (or inside the bench
-      container: `cd apps/helixhr/frontend && yarn build`). This regenerates
-      `helixhr/public/helixhr/` and `helixhr/www/helixhr.html` from source -- always commit the
-      rebuilt output alongside a frontend source change, and rerun after any `frappe-ui` version
-      bump. On a bench that has never served this app's assets before (a fresh install, not just
-      a rebuild on an already-running bench), also run `bench build --app helixhr` once --
-      `yarn build` alone does not create the `sites/assets/helixhr` symlink the dev/prod server
-      actually serves static assets from; see the CI root-cause writeup below for what happens
-      when it's missing.
-- [ ] `frontend/src/pages/NotLinked.vue`'s `hrContactEmail` is a placeholder
-      (`hr@nitcoinc.com`, the company domain, not a confirmed real HR mailbox) -- set it to the
-      real address before go-live.
-- [ ] **Not verified in this environment (say so, don't fake it):** the real Entra ID OAuth round
-      trip on a real staging install, and a Lighthouse accessibility run against Dashboard/Leave
-      at 360px. This dev setup is a local Docker bench with password-only test users and no
-      staging host or Lighthouse tooling available; both need a real staging deploy to check.
+- **Employee User Permissions**: every active Employee with a `user_id` must have a User
+      Permission (`allow = Employee`, `for_value` = their own record). Creating the Employee
+      with "Create User Permission" checked does this; the check exists because one missed
+      checkbox means that user can read every employee.
+- **Upload limits**: System Settings **Allowed File Extensions** and **Max File Size**. The
+      app's own `file_before_insert` hook (`helixhr/events.py`) only refuses a non-private
+      upload against an HR Request -- it does not constrain file type or size. Those are core
+      Frappe settings, unset by default on a fresh site.
+- **Site rate_limit**: `bench --site <site> set-config rate_limit '{"limit": 600, "window": 60}'`
+      (tune to real traffic). Frappe's site-wide request limiter, separate from and in addition
+      to this app's own per-user limiter (`helixhr.utils.rate_limit_per_user`) on
+      `update_my_profile`, `save_my_week` and `act_on_approval`.
+- **HR contact address**: `bench --site <site> set-config helixhr_hr_contact hr@example.com`.
+      Shown as a mailto link on the not-linked page (`frontend/src/pages/NotLinked.vue`), which
+      reads it from the `window.helixhr_hr_contact` global that `helixhr/www/helixhr.py` injects
+      through the shell's `boot`. Unset, the page says "Contact HR" with no address; nothing is
+      hardcoded. Site config is cached 60s per web process, so no restart is needed.
+- **Frontend built**: `cd frontend && yarn build` (or inside the bench container:
+      `cd apps/helixhr/frontend && yarn build`). This regenerates `helixhr/public/helixhr/` and
+      `helixhr/www/helixhr.html` from source; both are gitignored, so every deploy rebuilds.
+      Rerun after any `frappe-ui` version bump. On a bench that has never served this app's
+      assets before, also run `bench build --app helixhr` once -- `yarn build` alone does not
+      create the `sites/assets/helixhr` symlink the server actually serves static assets from;
+      see the CI root-cause writeup above for what happens when it's missing.
+
+Not a check, but part of going live: to surface a document on the Documents page, create a
+**HelixHR Document Link** (Desk list, HR Manager/System Manager only) with `title`, `url`,
+optional `company` (scopes it to one company; leave blank for all) and `description`. No app
+code change is needed for a new link.

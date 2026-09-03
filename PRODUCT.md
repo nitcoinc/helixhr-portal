@@ -62,8 +62,9 @@ are the security model and the browser never holds an API key or token.
 - Employees may edit only: personal mobile, personal email, current address,
   permanent address, emergency contact name, relation and phone. Every other
   Employee field is read-only, enforced by permlevel, not by the UI.
-- Sign-in is Microsoft Entra ID via Frappe's Office 365 Social Login Key. Self
-  sign-up is off; no custom auth code.
+- Sign-in is Frappe's own login. Phase 1 launches with local username/password;
+  Microsoft Entra ID via the Office 365 Social Login Key follows once a real
+  host exists to verify it on. Self sign-up is off; no custom auth code.
 - A logged-in user with no active Employee record gets a friendly "not linked"
   page, never an error.
 - Mobile-first, and must work at 360px with no horizontal scroll.
@@ -87,7 +88,8 @@ attendance devices, reports, recruitment and accounting all stay in Frappe Desk.
 
 ## Open decisions
 
-- The HR contact address on the not-linked page is a placeholder
-  (`hr@nitcoinc.com`); the real address is unconfirmed.
+- The HR contact address on the not-linked page is site configuration
+  (`helixhr_hr_contact`), not code. Until it is set, the page says "Contact HR"
+  with no address.
 - The Entra ID sign-in round trip and a Lighthouse run have not been verified on
   a staging host — no such environment exists in the current setup.

@@ -28,6 +28,9 @@ class TestHelixHRInstall(IntegrationTestCase):
 		self.assertIn('id="app"', body)
 		self.assertIn("window.csrf_token", body)
 		self.assertIn("/assets/helixhr/helixhr/assets/", body)
+		# Site config reaches the SPA as a window global, so the not-linked
+		# page can show a real HR address without hardcoding one.
+		self.assertIn('window["helixhr_hr_contact"]', body)
 
 	def test_website_route_rule_maps_subpaths_to_the_spa(self):
 		from frappe.app import application
