@@ -309,6 +309,79 @@ nginx+gunicorn for how a Guest session/cookie is handled on first load. Flagged 
 fixed in U4 to avoid scope creep into U3 code; pick this up before relying on CI's e2e job as a
 release gate.
 
+**U12/U11: the same failure widened to almost every spec, deterministically, twice in a row on
+GitHub's runner** -- not just the guest-redirect test anymore, but the very first authenticated
+page load too (`leave.spec.ts`'s "Leave" heading never appears), and it doesn't recover on CI's
+own retry. The U12 diff that shipped alongside this (`Dashboard.vue`, `router.js`, new
+`Approvals.vue`) is inert enough (an added route, a computed pending count, a new page) that it's
+an unlikely cause, and this was checked directly: the identical commit's built frontend assets,
+run against a **freshly dropped and recreated** `test_site` on this local Docker bench (matching
+CI's own from-scratch-site approach exactly, not the long-lived polluted dev site the earlier
+notes above warn about), passed cleanly end to end via a real browser -- 11/11 real specs green,
+6 correctly skipped, `--workers=1`, immediately after `bench new-site` + fixture seed. Python
+tests and the frontend job were also green on that same CI run. This narrows it to something
+about GitHub's `ubuntu-latest` runner specifically in combination with `bench start`'s Werkzeug
+dev server (timing, networking, or a Chromium build difference) rather than application code --
+but it hasn't been root-caused, and CI's e2e job should not be trusted as a release gate until it
+is. Local verification against a fresh site (as above) is the reliable signal for now.
+
+### Full local Playwright runs need low parallelism, and a data reset between runs (U11)
+
+`bench start`'s Werkzeug dev server (used both here and in CI) isn't built for the kind of
+concurrency `fullyParallel: true` throws at it. On this local Docker bench, running the full
+suite with its default worker count against an already-warm site produced transient failures
+(login-dashboard heading not visible, leave-type dropdown not populated) that vanished when the
+same suite was rerun with `--workers=1` — this is contention/timing on the single dev-server
+process, not an application bug. CI gets away with the default parallelism because it always
+runs against a freshly created site with no accumulated load; a long-lived local dev/test site
+does not have that luxury.
+
+Separately, `timesheet-approval.spec.ts` says up front that it's designed to run once per site
+(it drives a real reject → resubmit → approve cycle against "this week", and a second run finds
+that week's Timesheet already `Approved`, which is correct behavior, not a bug, but reads to
+Playwright as "combobox is disabled" because the page correctly hides the edit form). Reset
+before every local rerun of the full suite:
+
+```python
+# bench --site <site> console
+import frappe
+emp = frappe.db.get_value("Employee", {"user_id": "employee@helixhr.test"}, "name")
+for ts in frappe.get_all("Timesheet", filters={"employee": emp}, pluck="name"):
+    frappe.db.set_value("Timesheet", ts, "docstatus", 2, update_modified=False)
+    frappe.db.delete("Timesheet Detail", {"parent": ts})
+    frappe.db.delete("Timesheet", {"name": ts})
+for la in frappe.get_all("Leave Application", filters={"employee": emp}, pluck="name"):
+    frappe.db.set_value("Leave Application", la, "docstatus", 2, update_modified=False)
+    frappe.db.delete("Leave Application", {"name": la})
+frappe.db.commit()
+```
+
+Use raw `frappe.db.set_value`/`delete` here, not `doc.cancel()` / `frappe.delete_doc()` -- see
+the next section for why a plain `doc.cancel()` from a bare `bench console` session can itself
+throw.
+
+### A bare `bench console` session can crash on `doc.cancel()`/`doc.save()` -- upstream Frappe bug, not ours (U11)
+
+Cancelling or saving a document that has a Notification alert on it (this app ships
+`HelixHR Timesheet Status Changed` on `Timesheet`, `["dt": "Notification"]` fixture) from a bare
+`bench --site <site> console` session can raise:
+
+```
+UnboundLocalError: cannot access local variable 'value' where it is not associated with a value
+```
+
+from deep inside `frappe/locale.py:get_locale_value` (`return value or frappe.db.get_default(key)`
+-- `value` is only assigned when `lang and lang != "en"`, so a session where `frappe.local.lang`
+is `None` or exactly `"en"` hits an unbound local, not a project bug -- every frame in the
+traceback is inside `apps/frappe`, none in `helixhr`). A real HTTP request (the browser sessions
+Playwright drives, and presumably production traffic) sets `frappe.local.lang` from the request
+context and does not hit this; a bare console session never goes through that request setup, so
+`frappe.local.lang` stays `None`. Confirmed this only reproduces via direct console
+`doc.cancel()`/`doc.save()` calls, never through the app's own `act_on_approval` /
+`apply_workflow` code paths exercised by Playwright or the Python test suite -- so no HelixHR
+code change here. Work around it in the console with raw `frappe.db.set_value` (see above)
+instead of the full `Document.cancel()`/`.save()` lifecycle when cleaning up test data by hand.
+
 ## Go-live checklist (grows through U11)
 
 - [ ] Confirm every Employee Self Service user has a User Permission on their own Employee
@@ -328,3 +401,23 @@ release gate.
       User Permission), but plain reads do -- turn this on before go-live, and re-check HR's
       own Desk views afterwards in case it over-restricts a legitimate cross-employee report
       they rely on.
+- [ ] System Settings **Allowed File Extensions** and **Max File Size** are set. The app's own
+      `file_before_insert` hook (`helixhr/events.py`) only refuses a non-private upload against
+      an HR Request -- it does not constrain file type or size. Those are core Frappe settings,
+      unset by default on a fresh site.
+- [ ] Site config `rate_limit` (Frappe's site-wide request rate limiter, in `site_config.json` /
+      via `bench set-config`) is set for production traffic. This is separate from, and in
+      addition to, this app's own per-user limiter (`helixhr.utils.rate_limit_per_user`), which
+      only covers `update_my_profile` today.
+- [ ] To surface a document on the Documents page: create a **HelixHR Document Link** (Desk list,
+      HR Manager/System Manager only) with `title`, `url`, optional `company` (scopes it to one
+      company; leave blank for all) and `description`. No app code change needed for a new link.
+- [ ] Building the frontend for release: `cd frontend && yarn build` (or inside the bench
+      container: `cd apps/helixhr/frontend && yarn build`). This regenerates
+      `helixhr/public/helixhr/` and `helixhr/www/helixhr.html` from source -- always commit the
+      rebuilt output alongside a frontend source change, and rerun after any `frappe-ui` version
+      bump.
+- [ ] **Not verified in this environment (say so, don't fake it):** the real Entra ID OAuth round
+      trip on a real staging install, and a Lighthouse accessibility run against Dashboard/Leave
+      at 360px. This dev setup is a local Docker bench with password-only test users and no
+      staging host or Lighthouse tooling available; both need a real staging deploy to check.
