@@ -5,6 +5,12 @@ import { defineConfig, devices } from '@playwright/test'
 // created and how the two test identities get their password logins.
 const baseURL = process.env.BASE_URL || 'http://localhost:8080'
 
+// P2-U0: the quality baseline is opt-in. Registering its project
+// unconditionally would put a hard-throttled multi-minute run inside every
+// functional and release pass, so BASELINE_MODE both selects the protocol
+// (full vs lightweight) and decides whether the project exists at all.
+const baselineMode = process.env.BASELINE_MODE
+
 export default defineConfig({
   testDir: './e2e',
   fullyParallel: true,
@@ -28,11 +34,29 @@ export default defineConfig({
       name: 'employee',
       use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/employee.json' },
       dependencies: ['setup'],
+      testIgnore: /performance\.spec\.ts/,
     },
     {
       name: 'manager',
       use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/manager.json' },
       dependencies: ['setup'],
+      testIgnore: /performance\.spec\.ts/,
     },
+    // P2-U0: the pinned quality baseline, present only when BASELINE_MODE
+    // is set. The spec owns the viewport, CPU and network profile itself (a
+    // browser context created inside a test does not inherit `use`), so
+    // nothing device-shaped is set here.
+    ...(baselineMode
+      ? [
+          {
+            name: 'baseline',
+            testMatch: /performance\.spec\.ts/,
+            use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/employee.json' },
+            dependencies: ['setup'],
+            retries: 0,
+            fullyParallel: false,
+          },
+        ]
+      : []),
   ],
 })

@@ -521,6 +521,87 @@ own `late_entry` flag, which only a device (or HR) sets, so it stays at zero unt
 `helixhr/tests/test_api_attendance.py` covers the no-data case first, because that is the one that
 ships today.
 
+## Performance baseline (P2-U0)
+
+`frontend/tests/e2e/performance.spec.ts` is the frozen measurement protocol behind P2-R21..P2-R24.
+It is a Playwright project of its own, and it only exists when `BASELINE_MODE` is set, so a plain
+`yarn test:e2e` can never pick it up: it throttles CPU 4x and the network to
+1.6Mbps/750Kbps/150ms, so it takes minutes and would only make the other specs flaky.
+
+Seed the volume profile first. `setup_playwright_fixtures` gives the happy path three rows;
+`setup_baseline_fixtures` gives one employee a year of real history (365 Attendance, 260 check-ins,
+52 Timesheets, 40 Leave Applications, 100 HR Requests, 250 Notification Logs), 200 Employees across
+two companies, 75 mixed-company document links, and the manager 20 reports with 25 mixed pending
+approvals. Same `allow_tests` gate as every other fixture entry point, so it cannot run on a real
+site. It takes about a minute the first time and is idempotent afterwards (a second call is ~1s and
+must report identical counts).
+
+```bash
+# in the bench container
+bench --site test_site execute helixhr.tests.utils.setup_baseline_fixtures   # seed (idempotent)
+bench --site test_site execute helixhr.tests.utils.baseline_fixture_counts   # expected vs actual
+bench --site test_site execute helixhr.tests.utils.teardown_baseline_fixtures  # reset
+
+# on the host, after a production build of the exact commit under test
+cd frontend && yarn build
+BASELINE_MODE=full BASE_URL=http://localhost:8000 SITE_HOST=test_site \
+  yarn test:e2e -- --project=baseline --workers=1
+```
+
+`BASELINE_MODE=lightweight` runs the same protocol with 3 cold loads and 6 interactions instead of
+10 and 20 — that is the after-each-unit regression run; the full protocol is for U0 and U9.
+
+The reset that is always honest is a fresh site. `teardown_baseline_fixtures` exists for a
+long-lived local site: it cancels submitted Leave Applications before deleting them so HRMS unwinds
+its own Leave Ledger Entries, and removes the manager DocShares the seeded pending timesheets
+created. It deliberately leaves the two fixture identities and their allocations alone.
+
+Results, screenshots and the environment pin land in `.impeccable/review/baseline/`, which is
+gitignored along with the rest of `.impeccable/review/` — nothing from a run is committed, and the
+run records only URLs (query strings stripped), byte counts and timings, never record content. The
+numbers that matter are quoted in a plan/change record by their **result identifier**, which is what
+each run prints and writes into its own JSON.
+
+A run refuses to produce a number it cannot trust and fails instead: any console/page error, any
+request that fails or returns >= 400, a missing metric (no LCP, no event-timing entry, an
+unsupported PerformanceObserver type), a fixture count that differs from `BASELINE_PROFILE`, a
+`frontend/src` file newer than the built entry chunk (stale build), or an environment that differs
+from `environment-pin.json` (browser version, viewport, throttling, site, fixture anchor). Delete
+that pin only when you mean to re-baseline. Cold and warm runs are labelled separately and only the
+cold runs feed the accepted numbers; the warm sample is one extra load in an already-populated
+context and is reported for context only.
+
+### The first baseline: `P2-U0-full-20260904T2020-ded07d7`
+
+Chromium 151.0.7922.34, 360x800 @3x, CPU 4x, 1.6Mbps/750Kbps/150ms, 10 cold Dashboard loads plus 20
+scripted interactions (Leave, Timesheet, Requests, More sheet, Attendance, Home — repeated),
+75th percentile by nearest rank, `test_site` on the local bench.
+
+| Metric | p75 (cold) | Target |
+|---|---|---|
+| LCP | 3936 ms | P2-R23: <= 2500 ms |
+| CLS | 0.8431 | P2-R23: <= 0.1 |
+| Interaction latency (event timing) | 24 ms | P2-R23: <= 200 ms |
+| Requests | 15 | — |
+| Application data requests on Dashboard | 4 (`hrms.api.get_current_employee_info`, `frappe.client.get_list`, `frappe.client.get_count`, `helixhr.api.get_dashboard`) | P2-R21: <= 2 |
+| Transferred, whole page | 826,220 B | — |
+| Transferred JavaScript | 354,014 B | P2-R24: -20% |
+| Transferred CSS | 162,906 B | P2-R24: no regression |
+| Remote font requests | 2 (`fonts.googleapis.com`, `fonts.gstatic.com`) | P2-R24: 0 |
+| Public source maps | yes (`index-*.js.map` returns 200) | P2-R24: none |
+
+Server time at p75: `get_dashboard` 195ms, `frappe.client.get_count` 192ms, `frappe.client.get_list`
+189ms, `get_current_employee_info` 162ms. Warm load for comparison: LCP 752ms, 8,174 B transferred.
+
+Two honest caveats, both machine-recorded in every result file rather than argued in prose:
+
+- **No HTTPS staging host exists yet**, so this is the local bench. `asset_content_encoding` reads
+  `identity`: the bench dev server serves JavaScript and CSS uncompressed, so the transfer numbers
+  above are raw bytes, not gzip. A before/after comparison is only valid between runs with the same
+  encoding — compare local to local, or re-baseline on staging before quoting a gzip figure.
+- The pre-U0 estimates in the plan (~133KB gzip JS, ~22KB gzip CSS) are superseded by this result
+  identifier, per P2-R24.
+
 ## Go-live checklist
 
 Most of this is checked by one command. Run it on staging, then again on production, after
