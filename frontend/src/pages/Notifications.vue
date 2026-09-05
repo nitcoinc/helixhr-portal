@@ -3,6 +3,8 @@ import { computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { createResource, Button } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
+import AsyncState from '@/components/AsyncState.vue'
+import Icon from '@/components/Icon.vue'
 import { formatDateTime } from '@/lib/dates'
 
 const router = useRouter()
@@ -19,6 +21,12 @@ const ROUTE_FOR_DOCTYPE = {
   'Leave Application': '/leave',
   Timesheet: '/timesheet',
   'HR Request': '/requests',
+}
+
+const ICON_FOR_DOCTYPE = {
+  'Leave Application': 'leave',
+  Timesheet: 'timesheet',
+  'HR Request': 'requests',
 }
 
 function openLog(row) {
@@ -38,12 +46,11 @@ async function markAll() {
 </script>
 
 <template>
-  <div class="space-y-4">
+  <div>
     <PageHeader title="Notifications">
       <template #actions>
         <Button
           variant="subtle"
-          size="sm"
           @click="markAll"
         >
           Mark all read
@@ -51,52 +58,57 @@ async function markAll() {
       </template>
     </PageHeader>
 
-    <div class="space-y-2">
-      <p
-        v-if="logs.loading"
-        class="text-ink-gray-5"
-      >
-        Loading…
-      </p>
-      <p
-        v-else-if="rows.length === 0"
-        class="text-ink-gray-5"
-      >
-        You're all caught up.
-      </p>
-      <!-- Unread is marked with a dot, not a thick coloured left border: the
-           border reads as decoration, costs 3px of text alignment between
-           read and unread rows, and is invisible to anyone who can't pick the
-           hue out. The dot is captioned for screen readers too. -->
-      <button
-        v-for="row in rows"
-        :key="row.name"
-        class="flex w-full cursor-pointer items-start gap-3 rounded-lg border bg-surface-white p-3 text-left transition-colors duration-200"
-        :class="
-          row.read
-            ? 'border-outline-gray-2 hover:border-outline-gray-3'
-            : 'border-outline-gray-2 hover:border-blue-600'
-        "
-        @click="openLog(row)"
-      >
-        <span
-          class="mt-1.5 h-2 w-2 shrink-0 rounded-full"
-          :class="row.read ? 'bg-transparent' : 'bg-blue-700'"
+    <AsyncState
+      section="notifications"
+      :resource="logs"
+      :empty="rows.length === 0"
+      empty-title="You're all caught up"
+      empty-body="Decisions on your leave, timesheets and requests land here."
+      skeleton="row"
+      :skeleton-rows="4"
+    >
+      <ul class="space-y-2">
+        <li
+          v-for="row in rows"
+          :key="row.name"
         >
-          <span class="sr-only">{{ row.read ? '' : 'Unread' }}</span>
-        </span>
-        <span class="min-w-0 flex-1">
-          <span
-            class="block text-sm text-ink-gray-9"
-            :class="row.read ? '' : 'font-medium'"
+          <button
+            class="surface-card elev-1 flex w-full cursor-pointer items-start gap-3 p-3 text-left"
+            @click="openLog(row)"
           >
-            {{ row.subject }}
-          </span>
-          <span class="tabular mt-1 block text-xs text-ink-gray-5">
-            {{ formatDateTime(row.creation) }}
-          </span>
-        </span>
-      </button>
-    </div>
+            <!-- An unread row carries a *filled field-green* icon tile and a
+                 read one a grey tile. Tone plus weight, never hue alone: the
+                 subject is also semibold while unread, and the tile's state
+                 is captioned for a screen reader. -->
+            <span
+              class="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg"
+              :class="row.read ? 'bg-surface-gray-2 text-ink-gray-6' : 'bg-field text-signal'"
+            >
+              <Icon
+                :name="ICON_FOR_DOCTYPE[row.document_type] || 'notifications'"
+                size="h-4 w-4"
+              />
+              <span class="sr-only">{{ row.read ? 'Read' : 'Unread' }}</span>
+            </span>
+            <span class="min-w-0 flex-1">
+              <span
+                class="block text-sm text-ink-gray-9"
+                :class="row.read ? '' : 'font-semibold'"
+              >
+                {{ row.subject }}
+              </span>
+              <span class="tabular mt-1 block text-xs text-ink-gray-5">
+                {{ formatDateTime(row.creation) }}
+              </span>
+            </span>
+            <Icon
+              name="chevronRight"
+              size="h-4 w-4"
+              class="mt-2 shrink-0 text-ink-gray-4"
+            />
+          </button>
+        </li>
+      </ul>
+    </AsyncState>
   </div>
 </template>

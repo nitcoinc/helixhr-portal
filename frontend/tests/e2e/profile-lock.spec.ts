@@ -17,16 +17,32 @@ test.describe('employee', () => {
     const departmentRow = page.getByTestId('profile-readonly-department')
     await expect(departmentRow.getByRole('link', { name: 'Ask HR' })).toBeVisible()
 
-    // Mobile number is editable: type a value and save it.
+    // Mobile is editable. P2-U3 replaced the seven per-field Save buttons
+    // with one bar for the whole form: it appears only once something has
+    // actually changed, and says how much.
+    // A fresh value every run: the bar only appears once something has
+    // actually *changed*, so re-filling the number a previous run left behind
+    // would correctly produce no bar at all.
+    const mobile = `+1-555-${String(Date.now() % 10000).padStart(4, '0')}`
     const mobileRow = page.getByTestId('profile-editable-cell_number')
-    await mobileRow.getByLabel('Mobile number').fill('+1-555-0123')
-    await mobileRow.getByRole('button', { name: 'Save' }).click()
-    await expect(mobileRow.getByText('Saved')).toBeVisible()
+    await mobileRow.getByLabel('Mobile').fill(mobile)
+
+    const saveBar = page.getByTestId('profile-save-bar')
+    await expect(saveBar).toBeVisible()
+    await expect(saveBar.getByText('1 unsaved change')).toBeVisible()
+    await saveBar.getByRole('button', { name: 'Save' }).click()
+    // `exact` matters here: Playwright's default text match is a
+    // case-insensitive substring, and "1 unsaved change" contains "saved",
+    // so a loose matcher passes before the save has even been sent.
+    await expect(saveBar.getByText('Saved', { exact: true })).toBeVisible()
 
     await page.reload()
-    await expect(page.getByTestId('profile-editable-cell_number').getByLabel('Mobile number')).toHaveValue(
-      '+1-555-0123',
+    await expect(page.getByTestId('profile-editable-cell_number').getByLabel('Mobile')).toHaveValue(
+      mobile,
     )
+    // And with nothing changed the bar is gone, so a page you came to read
+    // carries no dead control.
+    await expect(page.getByTestId('profile-save-bar')).toHaveCount(0)
   })
 
   test('Ask HR link opens a pre-filled request route', async ({ page }, testInfo) => {

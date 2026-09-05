@@ -1,7 +1,8 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
-import { createResource } from 'frappe-ui'
+import { createResource, Dialog } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
+import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
 import { formatDate, formatTime } from '@/lib/dates'
 
@@ -143,9 +144,19 @@ function openDay(day) {
   selectedDay.value = day.iso
   checkins.fetch()
 }
-function closeDay() {
-  selectedDay.value = null
-}
+
+// The day panel is a frappe-ui `Dialog` rather than the hand-rolled
+// `fixed inset-x-0 bottom-0` div it used to be. That div sat *under* the
+// phone tab bar, could not be closed with Escape, did not trap focus and
+// left focus wherever it had been when it closed -- four P2-R4 failures for
+// one panel. reka-ui, underneath `Dialog`, answers all four; index.css gives
+// it the phone sheet shape and the desktop bounded-dialog shape (P2-R6).
+const dayOpen = computed({
+  get: () => !!selectedDay.value,
+  set: (open) => {
+    if (!open) selectedDay.value = null
+  },
+})
 </script>
 
 <template>
@@ -178,137 +189,145 @@ function closeDay() {
       </button>
     </div>
 
-    <div class="flex max-w-xl flex-wrap gap-2 text-sm">
-      <span
-        v-for="(count, status) in summary"
-        :key="status"
-        class="flex items-center gap-1 rounded-full bg-surface-gray-2 px-2 py-0.5 text-ink-gray-7"
+    <AsyncState
+      class="max-w-xl"
+      section="attendance-month"
+      :resource="calendar"
+      :empty="false"
+      skeleton="field"
+      skeleton-height="h-[26rem]"
+    >
+      <!-- The anchored region: this month, counted, on the field. The dot is
+           a second reading of a word that is always present, so nothing here
+           is carried by colour alone. -->
+      <section
+        class="surface-field elev-2 mb-4 p-4"
+        aria-label="This month"
       >
-        <span
-          class="h-2 w-2 rounded-full"
-          :class="STATUS_COLOR[status] || 'bg-surface-gray-4'"
-        />
-        {{ STATUS_LABEL[status] || status }}: {{ count }}
-      </span>
-      <span
-        v-if="!calendar.loading && Object.keys(summary).length === 0"
-        class="text-ink-gray-5"
-      >
-        No attendance recorded yet.
-      </span>
-    </div>
-
-    <!-- R16's exceptions. Dormant by design: with no check-in device the
-         server reports nothing missing, so this whole block resolves to the
-         one explanatory line below rather than a wall of red. It starts
-         working the day real records arrive, with no change here. -->
-    <div class="max-w-xl">
-      <h2 class="mb-2 text-sm font-medium text-ink-gray-7">
-        Exceptions
-      </h2>
-      <div
-        v-if="exceptionEntries.length"
-        class="flex flex-wrap gap-2 text-sm"
-      >
-        <span
-          v-for="[label, count] in exceptionEntries"
-          :key="label"
-          class="rounded-full bg-surface-amber-1 px-3 py-1 font-medium text-ink-amber-3"
+        <div
+          v-if="Object.keys(summary).length"
+          class="flex flex-wrap gap-x-5 gap-y-2"
         >
-          {{ label }}: <span class="tabular">{{ count }}</span>
-        </span>
-      </div>
-      <p
-        v-else-if="!calendar.loading && !isTracked"
-        class="text-sm text-ink-gray-5"
-      >
-        Check-in isn't set up yet, so there's nothing to flag. Once it is, late
-        arrivals and days with no record will show up here.
-      </p>
-      <p
-        v-else-if="!calendar.loading"
-        class="text-sm text-ink-gray-5"
-      >
-        Nothing to flag this month.
-      </p>
-    </div>
+          <p
+            v-for="(count, status) in summary"
+            :key="status"
+            class="flex items-center gap-2 text-sm text-blue-100"
+          >
+            <span
+              class="h-2 w-2 shrink-0 rounded-full"
+              :class="STATUS_COLOR[status] || 'bg-surface-gray-4'"
+              aria-hidden="true"
+            />
+            <span class="tabular font-heading text-base font-bold text-white">{{ count }}</span>
+            {{ STATUS_LABEL[status] || status }}
+          </p>
+        </div>
+        <p
+          v-else
+          class="text-sm text-blue-100"
+        >
+          No attendance recorded yet this month.
+        </p>
 
-    <div class="max-w-xl rounded-xl border border-outline-gray-2 bg-surface-white p-3">
-      <div class="grid grid-cols-7 gap-1 text-center text-xs text-ink-gray-5">
-        <span
-          v-for="d in ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa']"
-          :key="d"
-        >{{ d }}</span>
-      </div>
-      <div class="mt-1 grid grid-cols-7 gap-1">
-        <!-- The blanks before the 1st are spacing, not controls. They used to
+        <!-- R16's exceptions. Dormant by design: with no check-in device the
+             server reports nothing missing, so this resolves to the one
+             explanatory line rather than a wall of red. It starts working the
+             day real records arrive, with no change here. -->
+        <div class="mt-4 border-t border-white/15 pt-3">
+          <h2 class="label !text-blue-200 mb-2">
+            Exceptions
+          </h2>
+          <div
+            v-if="exceptionEntries.length"
+            class="flex flex-wrap gap-2 text-sm"
+          >
+            <span
+              v-for="[label, count] in exceptionEntries"
+              :key="label"
+              class="rounded-full bg-signal px-3 py-1 font-medium text-field"
+            >
+              {{ label }}: <span class="tabular">{{ count }}</span>
+            </span>
+          </div>
+          <p
+            v-else-if="!isTracked"
+            class="text-sm text-blue-200"
+          >
+            Check-in isn't set up yet, so there's nothing to flag. Once it is,
+            late arrivals and days with no record will show up here.
+          </p>
+          <p
+            v-else
+            class="text-sm text-blue-200"
+          >
+            Nothing to flag this month.
+          </p>
+        </div>
+      </section>
+
+      <div class="surface-card elev-1 p-3">
+        <div class="grid grid-cols-7 gap-1 text-center text-xs text-ink-gray-5">
+          <span
+            v-for="d in ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa']"
+            :key="d"
+          >{{ d }}</span>
+        </div>
+        <div class="mt-1 grid grid-cols-7 gap-1">
+          <!-- The blanks before the 1st are spacing, not controls. They used to
              render as disabled <button>s with no text, which put four unnamed
              buttons per month into the accessibility tree. -->
-        <component
-          :is="day ? 'button' : 'span'"
-          v-for="(day, index) in days"
-          :key="index"
-          class="tabular flex aspect-square min-h-11 flex-col items-center justify-center rounded-md text-sm"
-          :class="[
-            day ? 'cursor-pointer text-ink-gray-8 hover:bg-surface-gray-2' : '',
-            day?.missing ? 'border border-dashed border-outline-gray-3' : '',
-          ]"
-          :aria-label="day ? dayLabel(day) : undefined"
-          @click="day && openDay(day)"
-        >
-          <span>{{ day?.day }}</span>
-          <span
-            v-if="day?.status"
-            class="mt-0.5 h-2 w-2 rounded-full"
+          <component
+            :is="day ? 'button' : 'span'"
+            v-for="(day, index) in days"
+            :key="index"
+            class="tabular flex aspect-square min-h-11 flex-col items-center justify-center rounded-md text-sm"
             :class="[
-              STATUS_COLOR[day.status] || 'bg-surface-gray-4',
-              day.late ? 'ring-2 ring-amber-500 ring-offset-1' : '',
+              day ? 'cursor-pointer text-ink-gray-8 hover:bg-surface-gray-2' : '',
+              day?.missing ? 'border border-dashed border-outline-gray-3' : '',
             ]"
-          />
-        </component>
+            :aria-label="day ? dayLabel(day) : undefined"
+            @click="day && openDay(day)"
+          >
+            <span>{{ day?.day }}</span>
+            <span
+              v-if="day?.status"
+              class="mt-0.5 h-2 w-2 rounded-full"
+              :class="[
+                STATUS_COLOR[day.status] || 'bg-surface-gray-4',
+                day.late ? 'ring-2 ring-amber-500 ring-offset-1' : '',
+              ]"
+            />
+          </component>
+        </div>
       </div>
-    </div>
+    </AsyncState>
 
-    <div
-      v-if="selectedDay"
-      class="fixed inset-x-0 bottom-0 z-10 rounded-t-xl border-t border-outline-gray-2 bg-surface-white p-4 shadow-lg"
+    <Dialog
+      v-model="dayOpen"
+      :options="{ title: formatDate(selectedDay), size: 'sm' }"
     >
-      <div class="mb-2 flex items-center justify-between">
-        <h2 class="font-medium text-ink-gray-9">
-          {{ formatDate(selectedDay) }}
-        </h2>
-        <button
-          class="text-ink-gray-5"
-          @click="closeDay"
+      <template #body-content>
+        <AsyncState
+          section="attendance-day"
+          :resource="checkins"
+          :empty="!checkins.data?.length"
+          empty-title="No check-ins for this day"
+          empty-body="Check-in isn't set up yet, so there's nothing recorded here."
+          skeleton="row"
+          :skeleton-rows="2"
         >
-          Close
-        </button>
-      </div>
-      <p
-        v-if="checkins.loading"
-        class="text-ink-gray-5"
-      >
-        Loading…
-      </p>
-      <ul
-        v-else-if="checkins.data?.length"
-        class="space-y-1"
-      >
-        <li
-          v-for="row in checkins.data"
-          :key="row.name"
-          class="flex justify-between text-sm text-ink-gray-7"
-        >
-          <span>{{ row.log_type === 'IN' ? 'Check-in' : 'Check-out' }}</span>
-          <span class="tabular">{{ formatTime(row.time) }}</span>
-        </li>
-      </ul>
-      <p
-        v-else
-        class="text-sm text-ink-gray-5"
-      >
-        No check-ins recorded for this day.
-      </p>
-    </div>
+          <ul class="divide-y divide-outline-gray-1">
+            <li
+              v-for="row in checkins.data"
+              :key="row.name"
+              class="flex justify-between py-2 text-sm text-ink-gray-7"
+            >
+              <span>{{ row.log_type === 'IN' ? 'Check-in' : 'Check-out' }}</span>
+              <span class="tabular">{{ formatTime(row.time) }}</span>
+            </li>
+          </ul>
+        </AsyncState>
+      </template>
+    </Dialog>
   </div>
 </template>

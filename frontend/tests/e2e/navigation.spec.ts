@@ -192,7 +192,7 @@ test.describe('route changes reuse the bootstrap (P2-R20, P2-R21)', () => {
     expect(duringRoutes.filter((c) => c === 'frappe.client.get_count')).toHaveLength(0)
   })
 
-  test('a route that owns no legacy identity resource issues none', async ({ page }, testInfo) => {
+  test('no route repeats the identity lookup (P2-R21)', async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
     await page.setViewportSize({ width: 1440, height: 900 })
 
@@ -208,12 +208,21 @@ test.describe('route changes reuse the bootstrap (P2-R20, P2-R21)', () => {
     await expect(page.getByRole('region', { name: 'This week' })).toBeVisible()
     const afterBoot = calls.length
 
-    // Leave, Approvals, Profile, Documents and TimesheetHistory each still
-    // create their own pre-P2-U2 `hrms.api.get_current_employee_info`
-    // resource. Those live in page files this unit does not own (P2-U3,
-    // P2-U5, P2-U7) and are the remaining half of P2-R21; the routes that
-    // do not carry one prove the router itself has stopped asking.
-    for (const link of ['Attendance', 'Notifications', 'Requests', 'Timesheet']) {
+    // P2-U3 removed the last five page-local
+    // `hrms.api.get_current_employee_info` resources -- Leave, Approvals,
+    // Profile, Documents and TimesheetHistory each created one, left over
+    // from before P2-U2's bootstrap. Every route below now reads identity
+    // from `lib/session.js`, so the whole nav can be walked without a single
+    // repeat lookup, which is the second half of P2-R21.
+    for (const link of [
+      'Attendance',
+      'Notifications',
+      'Requests',
+      'Timesheet',
+      'Leave',
+      'Documents',
+      'Profile',
+    ]) {
       await mainNav(page).getByRole('link', { name: link, exact: false }).click()
       await expect(mainNav(page).getByRole('link', { name: link, exact: false })).toHaveAttribute(
         'aria-current',

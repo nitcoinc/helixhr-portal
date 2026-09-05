@@ -1,9 +1,12 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useRoute } from 'vue-router'
-import { createResource, Button, Badge, Dialog } from 'frappe-ui'
+import { createResource, Button, Dialog } from 'frappe-ui'
 import RequestForm from '@/components/RequestForm.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import AsyncState from '@/components/AsyncState.vue'
+import StatusBadge from '@/components/StatusBadge.vue'
+import { formatDate } from '@/lib/dates'
 
 const route = useRoute()
 
@@ -25,18 +28,11 @@ function onCreated() {
   requests.reload()
 }
 
-function badgeTheme(status) {
-  if (status === 'Done') return 'green'
-  if (status === 'Rejected') return 'red'
-  if (status === 'In Progress') return 'blue'
-  return 'orange'
-}
-
 const rows = computed(() => requests.data || [])
 </script>
 
 <template>
-  <div class="space-y-4">
+  <div>
     <PageHeader title="Requests">
       <template #actions>
         <Button
@@ -49,45 +45,66 @@ const rows = computed(() => requests.data || [])
       </template>
     </PageHeader>
 
-    <div class="space-y-3">
-      <p
-        v-if="requests.loading"
-        class="text-ink-gray-5"
-      >
-        Loading…
-      </p>
-      <p
-        v-else-if="rows.length === 0"
-        class="text-ink-gray-5"
-      >
-        You have no requests yet. New request to get started.
-      </p>
-      <div
-        v-for="row in rows"
-        :key="row.name"
-        class="rounded-lg border border-outline-gray-2 bg-surface-white p-4"
-      >
-        <div class="flex items-start justify-between">
-          <div>
-            <p class="text-sm text-ink-gray-5">
-              {{ row.category }}
+    <AsyncState
+      section="requests-list"
+      :resource="requests"
+      :empty="rows.length === 0"
+      empty-title="No requests yet"
+      empty-body="Ask HR for a letter, a payroll correction, or anything else you need."
+      :skeleton-rows="3"
+    >
+      <template #empty-action>
+        <!-- Not the header's wording: with an empty list both are on screen
+             at once, and two controls with the same accessible name is a
+             duplicate rather than an affordance. -->
+        <Button
+          variant="solid"
+          theme="blue"
+          @click="showForm = true"
+        >
+          Send your first request
+        </Button>
+      </template>
+
+      <ul class="space-y-2">
+        <li
+          v-for="row in rows"
+          :key="row.name"
+          class="surface-card elev-1 p-4"
+        >
+          <div class="flex items-start justify-between gap-3">
+            <div class="min-w-0">
+              <p class="label">
+                {{ row.category }}
+              </p>
+              <p class="mt-1 font-medium text-ink-gray-9">
+                {{ row.subject }}
+              </p>
+              <p class="mt-0.5 text-sm text-ink-gray-5">
+                Sent {{ formatDate(row.creation) }}
+              </p>
+            </div>
+            <StatusBadge
+              kind="request"
+              :status="row.status"
+            />
+          </div>
+          <!-- HR's reply is attributed and quoted rather than prefixed with a
+               bare "HR:", so a reply reads as somebody having answered. -->
+          <div
+            v-if="row.hr_note"
+            class="surface-inset mt-3 p-3"
+          >
+            <p class="label">
+              HR replied
             </p>
-            <p class="font-medium text-ink-gray-9">
-              {{ row.subject }}
+            <p class="mt-1 text-sm text-ink-gray-7">
+              {{ row.hr_note }}
             </p>
           </div>
-          <Badge :theme="badgeTheme(row.status)">
-            {{ row.status }}
-          </Badge>
-        </div>
-        <p
-          v-if="row.hr_note"
-          class="mt-2 rounded-md bg-surface-gray-1 p-2 text-sm text-ink-gray-7"
-        >
-          HR: {{ row.hr_note }}
-        </p>
-      </div>
-    </div>
+        </li>
+      </ul>
+    </AsyncState>
 
     <Dialog
       v-model="showForm"

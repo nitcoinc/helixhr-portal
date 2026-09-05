@@ -101,12 +101,14 @@ test('employee submits a week, manager rejects with a comment, employee edits an
   const tsSection = mgrPage.getByTestId('approvals-timesheet-section')
   await expect(tsSection.getByText('Employee')).toBeVisible({ timeout: 10000 })
 
-  await tsSection.getByRole('button', { name: 'Reject' }).click()
+  // P2-U3 renamed the manager's action to the word the employee already
+  // sees on the row ("Sent back"); "Reject" was the Frappe verb.
+  await tsSection.getByRole('button', { name: 'Send back' }).click()
   const rejectDialog = mgrPage.getByRole('dialog')
   await expect(rejectDialog).toBeVisible()
-  await rejectDialog.getByLabel('Comment').fill('Please double check your hours')
-  await rejectDialog.getByRole('button', { name: 'Reject' }).click()
-  await expect(tsSection.getByText('Nothing waiting on you.')).toBeVisible({ timeout: 10000 })
+  await rejectDialog.getByLabel('Why are you sending it back?').fill('Please double check your hours')
+  await rejectDialog.getByRole('button', { name: 'Send back' }).click()
+  await expect(tsSection.getByText('Nothing waiting on you')).toBeVisible({ timeout: 10000 })
 
   await empPage.reload()
   await expect(empPage.getByText('Sent back').first()).toBeVisible({ timeout: 10000 })
@@ -127,7 +129,7 @@ test('employee submits a week, manager rejects with a comment, employee edits an
   await mgrPage.goto('/helixhr/approvals')
   await expect(tsSection.getByText('Employee')).toBeVisible({ timeout: 10000 })
   await tsSection.getByRole('button', { name: 'Approve' }).click()
-  await expect(tsSection.getByText('Nothing waiting on you.')).toBeVisible({ timeout: 10000 })
+  await expect(tsSection.getByText('Nothing waiting on you')).toBeVisible({ timeout: 10000 })
 
   await empCtx.close()
   await mgrCtx.close()

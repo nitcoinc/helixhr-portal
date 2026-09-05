@@ -1,8 +1,10 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
-import { createResource, Button, Badge } from 'frappe-ui'
+import { createResource, Button } from 'frappe-ui'
 import WeekGrid from '@/components/WeekGrid.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import AsyncState from '@/components/AsyncState.vue'
+import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
 
 function pad(n) {
@@ -61,18 +63,6 @@ function removeRow(index) {
 
 const workflowState = computed(() => week.data?.timesheet?.workflow_state)
 const isReadOnly = computed(() => workflowState.value && workflowState.value !== 'Draft' && workflowState.value !== 'Rejected')
-
-const badgeTheme = computed(() => {
-  if (workflowState.value === 'Approved') return 'green'
-  if (workflowState.value === 'Rejected') return 'red'
-  if (workflowState.value === 'Pending Approval') return 'orange'
-  return 'gray'
-})
-const badgeLabel = computed(() => {
-  if (workflowState.value === 'Pending Approval') return 'Waiting for manager'
-  if (workflowState.value === 'Rejected') return 'Sent back'
-  return workflowState.value
-})
 
 function prevWeek() {
   const d = new Date(weekStart.value)
@@ -159,12 +149,11 @@ async function editAndResubmit() {
         >
           This week
         </button>
-        <Badge
+        <StatusBadge
           v-if="workflowState"
-          :theme="badgeTheme"
-        >
-          {{ badgeLabel }}
-        </Badge>
+          kind="timesheet"
+          :status="workflowState"
+        />
       </div>
       <button
         class="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-md text-ink-gray-6 hover:bg-surface-gray-2"
@@ -177,13 +166,20 @@ async function editAndResubmit() {
 
     <div
       v-if="workflowState === 'Rejected'"
-      class="mb-4 rounded-lg border border-outline-red-2 bg-surface-red-1 p-3 text-sm text-ink-red-4"
+      class="surface-alert mb-4 p-3 text-sm"
+      role="alert"
     >
       This week was sent back<span v-if="rejectionComment">: “{{ rejectionComment }}”</span>.
       Fix it up and resubmit.
     </div>
 
-    <div>
+    <AsyncState
+      section="timesheet-week"
+      :resource="week"
+      :empty="false"
+      skeleton="block"
+      skeleton-height="h-72"
+    >
       <WeekGrid
         :rows="rows"
         :projects="projects.data || []"
@@ -192,16 +188,22 @@ async function editAndResubmit() {
         @add-row="addRow"
         @remove-row="removeRow"
       />
-    </div>
+    </AsyncState>
 
     <p
       v-if="error"
-      class="mt-3 text-sm text-ink-red-4"
+      class="surface-alert mt-3 p-3 text-sm"
+      role="alert"
     >
       {{ error }}
     </p>
 
-    <div class="sticky bottom-0 mt-4 flex gap-2 border-t border-outline-gray-2 bg-surface-white px-4 py-3">
+    <!-- `.action-bar` (index.css) sits above the phone tab bar and inside the
+         safe area. This bar used to be `sticky bottom-0`, which put Submit
+         *underneath* the fixed tab bar at 360px -- the primary action on the
+         page was unreachable without scrolling past the end of the document
+         (P2-U3 scenario 2). -->
+    <div class="action-bar mt-4 flex gap-2">
       <template v-if="workflowState === 'Rejected'">
         <Button
           variant="solid"
