@@ -27,11 +27,12 @@ const rows = computed(() => logs.data?.notification_logs || [])
 const ROUTE_FOR_DOCTYPE = {
   'Leave Application': { detail: 'LeaveDetail', list: 'Leave' },
   'HR Request': { detail: 'RequestDetail', list: 'Requests' },
-  // Timesheet has no detail route keyed by its record name: a week is
-  // addressed by its Monday (`/timesheet/:weekStart`) and a Notification Log
-  // carries the Timesheet's id, not its start date. Past weeks is the list
-  // that contains it; P2-U6 wires the row there to the exact week.
-  Timesheet: { detail: null, list: 'TimesheetHistory' },
+  // A week is addressed by its Monday (`/timesheet/:weekStart`) and a
+  // Notification Log carries the Timesheet's *id*. P2-U6 added the one
+  // indexed read that turns one into the other, so a timesheet notification
+  // now opens the week it is about rather than the list containing it.
+  // Past weeks stays the fallback for a record that no longer resolves.
+  Timesheet: { detail: 'TimesheetWeek', list: 'TimesheetHistory' },
 }
 
 const ICON_FOR_DOCTYPE = {
@@ -40,10 +41,20 @@ const ICON_FOR_DOCTYPE = {
   'HR Request': 'requests',
 }
 
-function routeFor(row) {
+const timesheetWeek = createResource({ url: 'helixhr.api.get_timesheet_week_start' })
+
+async function routeFor(row) {
   const route = ROUTE_FOR_DOCTYPE[row.document_type]
   if (!route) return null
   if (route.detail && row.document_name) {
+    if (row.document_type === 'Timesheet') {
+      // One indexed, session-scoped read, and only when a timesheet row is
+      // actually opened -- the list itself pays nothing for it.
+      const weekStart = await timesheetWeek
+        .submit({ name: row.document_name })
+        .catch(() => null)
+      return weekStart ? { name: route.detail, params: { weekStart } } : { name: route.list }
+    }
     return { name: route.detail, params: { name: row.document_name } }
   }
   return { name: route.list }
@@ -92,13 +103,13 @@ const markAllRead = createResource({
  * to find that out: `get_notification_logs` is served with a 60s HTTP cache,
  * so a reload here would hand back the pre-read answer.
  */
-function openLog(row) {
+async function openLog(row) {
   if (!row.read) {
     row.read = 1
     setUnread(currentUnread() - 1)
     markRead.submit({ docname: row.name }).catch(() => unreadCount.reload())
   }
-  const to = routeFor(row)
+  const to = await routeFor(row)
   if (to) router.push(to)
 }
 

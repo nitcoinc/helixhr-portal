@@ -64,6 +64,23 @@ been laid out ever moves.
 > Superseded: six same-size icon+heading+text stat cards in a 2-column grid, where a sent-back
 > timesheet and a leave balance carried identical weight.
 
+## The action bar sits at the bottom, always
+
+`.action-bar` is `position: sticky`, which pins an element only while it would
+otherwise scroll out of view. On a page shorter than the viewport — an empty
+timesheet week, a profile with one pending change — there is nothing to stick
+against, so the bar sat mid-screen with dead paper beneath it. Three things
+make it reach the bottom instead: the shell's inner column carries
+`min-h-screen` below `lg:` (above `lg:` the outer wrapper is already a flex
+container), `main:has(.action-bar)` becomes a column whose page root fills it,
+and the bar takes `margin-top: auto`. That last one needs `!important`:
+a page root usually carries Tailwind's `space-y-*`, whose
+`> :not([hidden]) ~ :not([hidden])` selector outranks a plain class and would
+put a fixed margin back.
+
+Measured at 390x844 the bar's bottom edge lands at 756px with the tab bar at
+788px; at 1440x900 it lands at 860px, the foot of the viewport.
+
 ## Profile · phone (P2-U3 — **built**)
 
 Identity in the field block: initials monogram in signal yellow, name, then
@@ -178,7 +195,7 @@ it used to be `frappe.client.get_list` on Employee Checkin with neither.
 - "Report a problem with this day" has no leading (!) glyph: `lib/icons.js` carries no alert glyph
   and P2-U5 does not add one.
 
-## Timesheet · phone, day-first (P2-U6)
+## Timesheet · phone, day-first (P2-U6 — **built**)
 
 The week spine **is** the day picker: tap a day, and only that day's rows show. Hours move in 0.25
 steps through −/+ steppers rather than a text field. "Copy Wednesday" per day. Week total and
@@ -186,22 +203,79 @@ workflow status live on the spine. Sticky Save / Submit week above the tab bar.
 
 Chosen over the project-first alternate, which stays on the canvas for reference only.
 
-*Built so far (P2-U3):* the sticky bar clears the tab bar and the safe area, the status badge is the
-shared one, and the grid is an async region. The day-first interaction is P2-U6's.
+**One model, two layouts.** A *line* is a project + task + note carrying an hours map keyed by
+calendar date. The phone renders the selected day's slice of it; the desktop grid renders it whole.
+Neither layout owns any state, so the two cannot drift — and the wire format stays what the server
+already stores, one row per project/task/note *per day*.
 
-## Timesheet · desktop grid (P2-U6)
+**Save and submit are one server call.** `helixhr.api.submit_my_week(week_start, rows,
+expected_modified)` writes the week and applies the workflow transition inside one transaction,
+after locking the employee row. The browser used to save, swallow the failure, and submit the
+*previously saved* rows anyway (P2-AE4). The same method reopens a sent-back week (Rejected →
+Draft) before writing it, because Rejected is not an editable state for an Employee — that reopen
+used to be a button called "Edit and resubmit" that performed only the reopen and left the fix
+neither saved nor sent. `expected_modified` is the `modified` the screen was rendered from: a
+second tap, or a week edited in another tab, is refused rather than transitioning twice.
+
+*Deviations from the artboard, recorded:*
+
+- **The row's project, task and note are the controls**, drawn as borderless selects and a
+  borderless input rather than the artboard's plain text. The artboard shows a filled row and no
+  way to change it; an edit mode would have been a second state to design and a second place for
+  the model to live.
+- The week reads "15 Jun – 21 Jun 2026", not "1 – 7 Sep". `lib/dates.js` is the only calendar
+  module and its range formatter prints the year — the same constraint recorded on Leave.
+- A day with nothing on it prints `0h` rather than the artboard's `–h` over a hollow ring. The ring
+  is the Dashboard spine's *attendance* vocabulary; this spine picks days and counts hours, and
+  borrowing the ring here would say something about attendance that it does not know.
+- Each row carries a trailing `×` to take it off the selected day. The artboard has no remove
+  control at all — stepping to zero leaves a row that reads as "booked, zero hours".
+- "Copy last week" appears on the phone too, as one full-width button under the day's rows. The
+  artboard puts it only on the desktop toolbar, which would leave the phone with the per-day copy
+  and no way to start a week from the last one.
+- The status badge does **not** name the approver ("Waiting for manager", not "Waiting for
+  Priya"). The approver is named once, in the sentence next to Submit, where there is room for it.
+
+## Timesheet · desktop grid (P2-U6 — **built**)
 
 Project × day grid, day-total bars beneath, weekend columns dimmed, a per-row note, "Copy last
-week", and the approver named next to Submit.
+week", and the approver named next to Submit. It is a real `<table>` with row headers, inside its
+own horizontal scroll container, so the page itself never scrolls sideways.
 
-## Past weeks · phone (P2-U6)
+Two projects on one day — the case the grid exists for — used to be refused outright: ERPNext's
+Timesheet rejects time logs whose windows overlap, and every row was written starting at 09:00, so
+the second row on a day threw `OverlapError`. A day's rows are now laid end to end from midnight.
+The portal books durations and never shows a clock time; the child table stores a window, and this
+is what makes one honest.
+
+*Deviations from the artboard, recorded:*
+
+- The note cell is an always-editable field, not a pencil that opens one. A pencil that opens an
+  input is two controls for one job.
+- The footer says "Goes to Priya Raman for approval." and the save state, but not the artboard's
+  "Friday is still empty." Nothing in HRMS says which days an employee owes; 40 hours is context on
+  the spine, never a rule, and a nudge built on a guess is a nudge that is wrong for anyone
+  part-time.
+
+## Past weeks · phone (P2-U6 — **built**)
 
 Grouped by month with `.label`. Each row is a resting card with the week's range, a bar of hours
 against 40h, and the status badge; a sent-back week quotes the manager's reason inline. **Each row
-opens that week**, not the current one.
+opens that week** by its Monday (`/timesheet/:weekStart`), not the current one.
 
-*Not yet true:* rows still link to `/timesheet`. The `/timesheet/:weekStart` route exists (P2-U2)
-but `Timesheet.vue` does not read the parameter, so P2-U6 wires both ends at once.
+`get_my_timesheet_history` serves one bounded page (12, up to 52) with the total, and batches every
+sent-back week's reason into one Comment query. It replaced a `frappe.client.get_list` asking for
+`limit_page_length: 0` — every week the employee had ever filed, to render a dozen — which also
+could not show the reason at all, because the Employee Self Service role cannot read Comment. Each
+row carries the **Monday** of its week rather than the record's `start_date`: ERPNext recomputes
+`start_date` from the earliest time log, so a week whose Monday is empty starts on a Tuesday.
+
+*Deviations from the artboard, recorded:*
+
+- The footer button reads "Show 12 more" from the true remainder rather than the artboard's
+  "Show July"; the page is bounded by count, not by month, the same rule as Leave.
+- "Avg 38.2 h" is the average of the weeks currently loaded, and says so by moving when more are
+  loaded. An all-time average would need a second aggregate query for a decorative figure.
 
 ## Requests · phone, detail, new sheet, desktop (P2-U8)
 
@@ -247,11 +321,11 @@ in the same interaction, and opens the record — the list is *not* reloaded to 
 - The footer reads "Showing your 50 most recent." rather than "Showing the last 30 days". The
   endpoint bounds by count, not by age, and a line that says otherwise is a line that is wrong the
   first time somebody has a quiet month.
-- A **timesheet** notification opens **Past weeks**, not the exact week. A week is addressed by its
-  Monday (`/timesheet/:weekStart`) and a Notification Log carries the Timesheet's record id, not its
-  start date, so the exact link is not derivable from what the row holds. Past weeks is the list
-  that contains it; P2-U6 wires that row to the week. Leave and request notifications do open the
-  exact record.
+- ~~A **timesheet** notification opens **Past weeks**, not the exact week.~~ **Closed in P2-U6.**
+  A week is addressed by its Monday and a Notification Log carries the Timesheet's record id, so
+  P2-U6 added `helixhr.api.get_timesheet_week_start` — one indexed, session-scoped read, issued
+  only when a timesheet row is actually opened. Every notification kind now opens its exact record.
+  Past weeks remains the fallback for a record that no longer resolves.
 
 ## Not linked / login states (Phase 1 U3, revised in P2-U2)
 

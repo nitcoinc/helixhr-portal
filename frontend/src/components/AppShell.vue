@@ -153,7 +153,11 @@ onUnmounted(unwatchUnread)
       </aside>
     </div>
 
-    <div class="flex min-w-0 flex-1 flex-col">
+    <!-- min-h-screen on the phone: the outer wrapper is only a flex
+         container at `lg:`, so below that this column has no height for
+         `main` to fill, and a page shorter than the viewport leaves its
+         action bar floating mid-screen. -->
+    <div class="flex min-h-screen min-w-0 flex-1 flex-col lg:min-h-0">
       <!-- Phone/tablet app bar. The desktop identity and notification
            count live in the sidebar instead, so this is hidden there. -->
       <header

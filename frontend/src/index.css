@@ -414,6 +414,32 @@ a,
  * It sits above the phone tab bar and inside the safe area; on a desktop
  * there is no tab bar, so only the inset applies.
  */
+/* `sticky` only pins an element that would otherwise scroll out of view. On
+   a page shorter than the viewport -- an empty timesheet week, a profile with
+   one change -- the bar has nothing to stick against and sits mid-screen with
+   dead paper beneath it, which is not what the artboards draw. Making the
+   page a column that fills `main` and pushing the bar down with `margin-top:
+   auto` pins it at the bottom when the page is short, while `sticky` keeps
+   doing its job once the page is long enough to scroll. Scoped with `:has` so
+   only a page that actually carries a bar changes layout. */
+main:has(.action-bar) {
+  display: flex;
+  flex-direction: column;
+}
+
+main:has(.action-bar) > * {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+/* !important because a page root usually carries Tailwind's `space-y-*`,
+   whose `> :not([hidden]) ~ :not([hidden])` selector outranks this class and
+   would otherwise put a fixed margin back on the bar. */
+main:has(.action-bar) .action-bar {
+  margin-top: auto !important;
+}
+
 .action-bar {
   position: sticky;
   /* The phone tab bar is 56px of fixed chrome plus the home-indicator inset.

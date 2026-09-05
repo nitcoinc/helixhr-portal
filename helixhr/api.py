@@ -11,6 +11,7 @@ from frappe.utils import (
 	get_first_day,
 	get_last_day,
 	get_system_timezone,
+	getdate,
 )
 from hrms.api import (
 	get_attendance_calendar_events,
@@ -1294,6 +1295,20 @@ def get_my_checkins(date):
 
 # Timesheets (U8, KTD7, KTD10, KTD11)
 
+# A week is written whole: every save below replaces the week's rows
+# outright. The cap is not a policy about how much anybody may work, it is
+# a bound on what one request may ask the database to write (P2-R22) --
+# seven days times a plausible project list does not come near it, and a
+# malformed or hostile payload stops at it instead of at the row limit of
+# a child table.
+_MAX_WEEK_ROWS = 100
+
+# What a full working week looks like, for the "30 of 40 hours" reading on
+# the week spine and the bar on Past weeks. Not a rule the server enforces
+# -- nothing in HRMS carries a contracted weekly figure for an employee --
+# so it is context, never validation.
+FULL_WEEK_HOURS = 40
+
 
 @frappe.whitelist()
 def get_my_week(week_start=None):
@@ -1319,6 +1334,11 @@ def get_my_week(week_start=None):
 			"workflow_state": doc.workflow_state,
 			"total_hours": doc.total_hours,
 			"docstatus": doc.docstatus,
+			# The concurrency token submit_my_week checks (P2-R25, P2-R27).
+			# The screen sends back the value it was rendered from; a week
+			# that moved on in another tab, or a second tap of Submit, no
+			# longer matches it.
+			"modified": str(doc.modified),
 			# Resolved here rather than by the page, which used to read it with
 			# `frappe.client.get_list` on Comment -- a doctype the Employee Self
 			# Service role cannot read, so that call 403'd and the employee was
@@ -1339,18 +1359,103 @@ def get_my_week(week_start=None):
 			],
 		}
 
-	return {"week_start": str(monday), "week_end": str(sunday), "timesheet": timesheet}
+	return {
+		"week_start": str(monday),
+		"week_end": str(sunday),
+		# Who this week goes to when it is sent. The desktop grid names them
+		# beside Submit, and an employee with nobody named is told before
+		# they fill a week in rather than by a refusal afterwards.
+		"approver_name": _approver_name(employee),
+		"full_week_hours": FULL_WEEK_HOURS,
+		"timesheet": timesheet,
+	}
 
 
 def _row_date(row):
 	return str(get_datetime(row.from_time).date()) if row.from_time else None
 
 
+def _approver_name(employee):
+	"""The manager's display name -- two hops, because `reports_to` is an
+	Employee id."""
+	reports_to = frappe.db.get_value("Employee", employee, "reports_to")
+	return frappe.db.get_value("Employee", reports_to, "employee_name") if reports_to else None
+
+
+@frappe.whitelist()
+def get_my_timesheet_history(limit=12, start=0):
+	"""Past weeks, newest first, one bounded page at a time (P2-R22).
+
+	The page used to ask `frappe.client.get_list` for `limit_page_length:
+	0` -- every week the employee had ever filed, to render a dozen. The
+	manager's reason for each sent-back week comes back with the page in
+	one Comment query rather than one per row, and each row carries the
+	**Monday** of its week: ERPNext recomputes `start_date` from the
+	earliest time log, so a week whose Monday is empty starts on a
+	Tuesday, and the route parameter is always the Monday (KTD10).
+	"""
+	employee = get_current_employee()
+	limit = min(max(cint(limit) or 12, 1), 52)
+	start = max(cint(start), 0)
+	scope = {"employee": employee, "docstatus": ["!=", 2]}
+
+	rows = frappe.get_all(
+		"Timesheet",
+		filters=scope,
+		fields=["name", "start_date", "end_date", "total_hours", "workflow_state"],
+		order_by="start_date desc",
+		limit_start=start,
+		limit_page_length=limit,
+	)
+	reasons = _rejection_comments([row.name for row in rows if row.workflow_state == "Rejected"])
+
+	weeks = []
+	for row in rows:
+		monday, sunday = get_week_bounds(row.start_date)
+		weeks.append(
+			{
+				"name": row.name,
+				"week_start": str(monday),
+				"week_end": str(sunday),
+				"total_hours": row.total_hours,
+				"workflow_state": row.workflow_state,
+				"rejection_comment": reasons.get(row.name),
+			}
+		)
+
+	return {
+		"weeks": weeks,
+		"total": frappe.db.count("Timesheet", scope),
+		"full_week_hours": FULL_WEEK_HOURS,
+	}
+
+
+@frappe.whitelist()
+def get_timesheet_week_start(name):
+	"""The Monday of the week a Timesheet belongs to.
+
+	A Notification Log carries the record id, not the week (P2-U4 recorded
+	that as a deviation: a timesheet notification opened Past weeks rather
+	than the week it was about). One indexed read resolves it, scoped to
+	the session employee -- somebody else's timesheet id answers nothing.
+	"""
+	employee = get_current_employee()
+	start = frappe.db.get_value("Timesheet", {"name": name, "employee": employee}, "start_date")
+	if not start:
+		frappe.throw(_("That week is not yours to open."), frappe.PermissionError)
+	return str(get_week_bounds(start)[0])
+
+
 @frappe.whitelist()
 def get_my_projects():
 	"""Open Projects the session user may book time on -- Project Users
 	or a User Permission on Project, each with its own open Tasks
-	(KTD11: no "bookable projects" API exists upstream)."""
+	(KTD11: no "bookable projects" API exists upstream).
+
+	Tasks come back in **one** query for the whole allowed project set
+	(P2-R22). It used to be one Task query per project, so an employee on
+	a dozen projects paid a dozen round trips to fill a dropdown.
+	"""
 	user = frappe.session.user
 
 	project_names = set(
@@ -1369,14 +1474,33 @@ def get_my_projects():
 		fields=["name", "project_name"],
 		order_by="project_name",
 	)
-	for project in projects:
-		project["tasks"] = frappe.get_all(
-			"Task",
-			filters={"project": project.name, "status": ["not in", ["Cancelled", "Completed"]]},
-			fields=["name", "subject"],
-			order_by="subject",
+	if not projects:
+		return []
+
+	tasks_by_project = {}
+	for task in frappe.get_all(
+		"Task",
+		filters={
+			"project": ["in", [project.name for project in projects]],
+			"status": ["not in", ["Cancelled", "Completed"]],
+		},
+		fields=["name", "subject", "project"],
+		order_by="subject",
+	):
+		tasks_by_project.setdefault(task.project, []).append(
+			{"name": task.name, "subject": task.subject}
 		)
+
+	for project in projects:
+		project["tasks"] = tasks_by_project.get(project.name, [])
 	return projects
+
+
+def _bookable_tasks_by_project():
+	"""`{project: {task ids}}` for the session user -- the allow-list both
+	writes below validate against. The browser's dropdown is a convenience;
+	this is the check (P2-R27)."""
+	return {project["name"]: {task["name"] for task in project["tasks"]} for project in get_my_projects()}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -1389,12 +1513,96 @@ def save_my_week(week_start, rows):
 	"""
 	rate_limit_per_user("save_my_week", limit=30, seconds=60)
 	employee = get_current_employee()
-	if isinstance(rows, str):
-		rows = json.loads(rows)
+	monday, sunday = get_week_bounds(week_start)
+	return _write_my_week(employee, monday, sunday, rows).name
+
+
+@frappe.whitelist(methods=["POST"])
+def submit_my_week(week_start, rows, expected_modified=None):
+	"""Save this week's rows and send them to the manager, in one request
+	(P2-U6, P2-AE4, P2-R27).
+
+	The browser used to do this in two calls -- `save_my_week`, then
+	`frappe.model.workflow.apply_workflow` -- and `saveDraft()` caught its
+	own error, so `submitWeek()` awaited a *failed* save and submitted
+	anyway. An invalid edit was silently dropped and the previously saved
+	rows went to the manager as though they were what the employee saw
+	(P2-AE4). One method removes the seam: validation that refuses never
+	reaches the transition, and anything that throws rolls back the write
+	with it.
+
+	`expected_modified` is the concurrency token `get_my_week` returned
+	for this week, or nothing at all when the week has no Timesheet yet.
+	A second tap of Submit, or a week edited in another tab, arrives
+	carrying a value that no longer matches and is refused rather than
+	transitioning twice. The employee row is locked first, so two
+	concurrent requests serialize and the loser reads the winner's result
+	instead of racing it -- the first submit of a week has no Timesheet
+	row to lock yet, which is precisely the case where a double tap would
+	otherwise insert two.
+	"""
+	from frappe.model.workflow import apply_workflow
+
+	rate_limit_per_user("save_my_week", limit=30, seconds=60)
+	employee = get_current_employee()
 	monday, sunday = get_week_bounds(week_start)
 
-	bookable_projects = {p["name"] for p in get_my_projects()}
-	_validate_rows(rows, bookable_projects)
+	frappe.db.get_value("Employee", employee, "name", for_update=True)
+
+	current = frappe.db.get_value(
+		"Timesheet",
+		{"employee": employee, "start_date": str(monday), "docstatus": ["!=", 2]},
+		["name", "workflow_state", "modified"],
+		order_by="creation desc",
+		as_dict=True,
+	)
+	_assert_week_is_still_sendable(current, expected_modified)
+
+	doc = _write_my_week(employee, monday, sunday, rows)
+	apply_workflow(doc, "Submit")
+	doc.reload()
+	return {
+		"name": doc.name,
+		"workflow_state": doc.workflow_state,
+		"modified": str(doc.modified),
+	}
+
+
+_STALE_WEEK = "This week changed while you were working on it. Reload and try again."
+
+
+def _assert_week_is_still_sendable(current, expected_modified):
+	"""One send per week, per state. Everything here runs *after* the
+	employee row lock, so the second of two concurrent submits sees the
+	first one's result."""
+	if current and current.workflow_state not in ("Draft", "Rejected", None):
+		frappe.throw(
+			_("This week is {0} and can't be sent again.").format(current.workflow_state)
+		)
+
+	if not expected_modified:
+		# The screen was rendered before this week had a Timesheet. If one
+		# exists now, something else created it -- another tab, or the
+		# first half of a double tap.
+		if current:
+			frappe.throw(_(_STALE_WEEK))
+		return
+
+	if not current or get_datetime(expected_modified) != get_datetime(current.modified):
+		frappe.throw(_(_STALE_WEEK))
+
+
+def _write_my_week(employee, monday, sunday, rows):
+	"""Replace this week's rows. Shared by `save_my_week` and
+	`submit_my_week` so a week is validated and written exactly one way."""
+	from frappe.model.workflow import apply_workflow
+
+	if isinstance(rows, str):
+		rows = json.loads(rows)
+	if not isinstance(rows, list):
+		frappe.throw(_("Those rows aren't in a shape we can save."))
+
+	_validate_rows(rows, _bookable_tasks_by_project(), monday, sunday)
 
 	existing_name = frappe.db.get_value(
 		"Timesheet",
@@ -1405,7 +1613,18 @@ def save_my_week(week_start, rows):
 
 	if existing_name:
 		doc = frappe.get_doc("Timesheet", existing_name)
-		if doc.workflow_state not in ("Draft", "Rejected", None):
+		if doc.workflow_state == "Rejected":
+			# Rejected is not an editable state for an Employee (the
+			# workflow gives `allow_edit` to HR Manager), so a sent-back
+			# week has to travel Rejected -> Draft before it can be
+			# written. The portal used to make the employee do that
+			# themselves with a button called "Edit and resubmit" that
+			# only performed the reopen -- it left them on a Draft with
+			# their fix unsaved and unsent (P2-U6 step 7). It is plumbing,
+			# not a decision, so it happens here.
+			apply_workflow(doc, "Edit")
+			doc.reload()
+		if doc.workflow_state not in ("Draft", None):
 			frappe.throw(
 				_("This week is {0} and can't be edited here.").format(doc.workflow_state)
 			)
@@ -1418,9 +1637,21 @@ def save_my_week(week_start, rows):
 	doc.start_date = str(monday)
 	doc.end_date = str(sunday)
 	doc.set("time_logs", [])
+	# ERPNext's Timesheet refuses two time logs whose from/to windows overlap,
+	# so a day's rows are laid end to end from midnight rather than all
+	# starting at the same hour. The portal books *durations*, not clock
+	# times -- nothing in it displays from_time -- but the child table stores
+	# a window, and two projects on one day is the ordinary case the grid is
+	# built for. Midnight rather than 09:00 as the anchor: a day validated up
+	# to 24 hours has to fit inside its own day.
+	day_offset = {}
 	for row in rows:
-		start = get_datetime(f"{row['date']} 09:00:00")
+		date = str(getdate(row["date"]))
 		hours = flt(row["hours"])
+		start = frappe.utils.add_to_date(
+			get_datetime(f"{date} 00:00:00"), hours=day_offset.get(date, 0)
+		)
+		day_offset[date] = day_offset.get(date, 0) + hours
 		doc.append(
 			"time_logs",
 			{
@@ -1434,29 +1665,45 @@ def save_my_week(week_start, rows):
 			},
 		)
 	doc.save()
-	return doc.name
+	return doc
 
 
-def _validate_rows(rows, bookable_projects):
+def _validate_rows(rows, tasks_by_project, monday, sunday):
+	"""Everything the browser also checks, checked again here because the
+	browser is not where the rule lives (P2-R27, P2-U6 scenario 4)."""
 	if not rows:
 		frappe.throw(_("Add at least one row before saving."))
+	if len(rows) > _MAX_WEEK_ROWS:
+		frappe.throw(_("That's more rows than one week can hold."))
 
 	day_totals = {}
 	for row in rows:
-		if not row.get("project"):
+		if not isinstance(row, dict):
+			frappe.throw(_("Those rows aren't in a shape we can save."))
+
+		project = row.get("project")
+		if not project:
 			frappe.throw(_("Every row needs a project."))
-		if row["project"] not in bookable_projects:
-			frappe.throw(_("You can't book time on {0}.").format(row["project"]))
+		if project not in tasks_by_project:
+			frappe.throw(_("You can't book time on {0}.").format(project))
+
+		task = row.get("task")
+		if task and task not in tasks_by_project[project]:
+			frappe.throw(_("That task isn't on {0}.").format(project))
+
 		if not row.get("date"):
 			frappe.throw(_("Every row needs a date."))
+		date = getdate(row["date"])
+		if date < monday or date > sunday:
+			frappe.throw(_("{0} isn't in this week.").format(date))
 
 		hours = flt(row.get("hours"))
 		if hours < 0.25 or hours > 24:
 			frappe.throw(_("Hours must be between 0.25 and 24."))
 
-		day_totals[row["date"]] = day_totals.get(row["date"], 0) + hours
-		if day_totals[row["date"]] > 24:
-			frappe.throw(_("{0} has more than 24 hours booked.").format(row["date"]))
+		day_totals[str(date)] = day_totals.get(str(date), 0) + hours
+		if day_totals[str(date)] > 24:
+			frappe.throw(_("{0} has more than 24 hours booked.").format(date))
 
 
 def _get_unread_notification_count():
