@@ -31,6 +31,7 @@ from helixhr.utils import (
 	ALLOWED_UPLOAD_EXTENSIONS,
 	RATE_LIMIT_POLICY,
 	UPLOAD_MAX_BYTES,
+	portal_home_page,
 	rate_limit_bounds,
 )
 
@@ -216,6 +217,50 @@ def _entra_enabled():
 			"Social Login Key", {"social_login_provider": "Office 365", "enable_social_login": 1}
 		)
 	)
+
+
+def check_portal_landing():
+	"""Employees must land on the portal, not on Desk.
+
+	`helixhr.utils.portal_home_page` is registered as
+	`get_website_user_home_page`, but Frappe consults two Desk-editable
+	settings *before* it and one *after* the whole chain, and any of them
+	silently sends employees back to Desk with no error anywhere:
+
+	- a `home_page` on the Role doctype wins over every hook;
+	- Portal Settings' "Default Portal Home" wins over every hook;
+	- a `default_workspace` on the User overrides even the resolved answer.
+
+	This is a FAIL rather than a WARN because the symptom -- "our people keep
+	ending up in ERPNext" -- reads as a portal bug and is very hard to trace
+	back to a field somebody set in Desk months earlier.
+	"""
+	problems = []
+
+	for role in ("Employee", "Employee Self Service"):
+		if not frappe.db.exists("Role", role):
+			continue
+		home = frappe.db.get_value("Role", role, "home_page")
+		if home:
+			problems.append(f"Role {role} sets home page {home!r}, which wins over the app's landing rule")
+
+	portal_home = frappe.db.get_single_value("Portal Settings", "default_portal_home")
+	if portal_home:
+		problems.append(f"Portal Settings' default portal home is {portal_home!r}, which wins over the app's landing rule")
+
+	pinned = frappe.get_all(
+		"User",
+		filters={"enabled": 1, "default_workspace": ["is", "set"], "name": ["not in", ("Administrator", "Guest")]},
+		pluck="name",
+	)
+	stuck = [user for user in pinned if portal_home_page(user)]
+	if stuck:
+		shown = ", ".join(stuck[:5]) + (f" and {len(stuck) - 5} more" if len(stuck) > 5 else "")
+		problems.append(f"{len(stuck)} portal user(s) have a default workspace pinned, which overrides it: {shown}")
+
+	if problems:
+		return _result("Portal landing", FAIL, "; ".join(problems))
+	return _result("Portal landing", PASS, "employees land on /helixhr; Desk users are untouched")
 
 
 def check_signup_disabled():
@@ -519,6 +564,7 @@ CHECKS = [
 	check_self_leave_approval_blocked,
 	check_unsubmitted_approved_leave,
 	check_document_link_urls,
+	check_portal_landing,
 	check_signup_disabled,
 	check_password_login,
 	check_entra,

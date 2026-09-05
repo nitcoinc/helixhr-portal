@@ -54,6 +54,43 @@ def get_manager_user(employee):
 #
 # These are the plan's numbers. Tighten freely; loosening one is a policy
 # decision that preflight will FAIL on until this table is edited too.
+# Roles whose holders work in Desk. Anyone holding one of these keeps
+# Frappe's own landing page; everybody else with an active Employee record is
+# sent to the portal. HR staff are employees too and hold the Employee role,
+# so the rule cannot be "has the Employee role" -- it has to be "does not work
+# in Desk".
+DESK_ROLES = frozenset({"HR Manager", "HR User", "System Manager", "Administrator"})
+
+PORTAL_HOME_PAGE = "helixhr"
+
+
+def portal_home_page(user=None):
+	"""Where this user lands after signing in.
+
+	Registered as `get_website_user_home_page` in hooks.py, which Frappe calls
+	with the user and consults before `role_home_page` and before Website
+	Settings. `role_home_page` cannot express this rule: it matches the *first*
+	entry in `frappe.get_roles()`, whose order is not defined, so mapping the
+	Employee role would send an HR Manager to the portal on some sites and to
+	Desk on others.
+
+	Returning None means "no opinion" -- Frappe carries on down its own chain
+	and a Desk user lands where they always did.
+
+	Two things still win over this, by Frappe's design, and both are in
+	docs/deployment.md: a `home_page` set on the Role doctype, and a
+	`default_workspace` set on the User.
+	"""
+	user = user or frappe.session.user
+	if user in ("Guest", "Administrator"):
+		return None
+	if set(frappe.get_roles(user)) & DESK_ROLES:
+		return None
+	if frappe.db.exists("Employee", {"user_id": user, "status": "Active"}):
+		return PORTAL_HOME_PAGE
+	return None
+
+
 RATE_LIMIT_POLICY = {
 	"update_my_profile": (20, 60),
 	"save_my_week": (30, 60),

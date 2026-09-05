@@ -708,6 +708,11 @@ Loosening one is a policy decision, and `preflight.check_rate_limits` FAILs unti
 
 ## Go-live checklist
 
+How the portal is exposed, which host names serve what, how employees are kept
+out of Desk, and how a new employee is onboarded are in
+[deployment.md](deployment.md). This section is the per-site settings check.
+
+
 Most of this is checked by one command. Run it on staging, then again on production, after
 every deploy; it exits non-zero on any FAIL so a deploy script can gate on it:
 

@@ -68,6 +68,12 @@ required_apps = ["hrms"]
 # --------------------
 # Serves the built Vue single-page app for every /helixhr/* path. (KTD1, U2)
 
+# An employee signing in lands on the portal, not on Desk. Frappe consults
+# this before role_home_page and before Website Settings; returning None for
+# HR and System Managers leaves their Desk landing untouched. Blocking Desk
+# outright is a proxy concern -- see docs/deployment.md.
+get_website_user_home_page = "helixhr.utils.portal_home_page"
+
 website_route_rules = [
 	{"from_route": "/helixhr/<path:app_path>", "to_route": "helixhr"},
 ]

@@ -4,13 +4,16 @@ A Frappe v16 app that gives employees a plain, mobile-first portal for leave,
 attendance, timesheets, HR requests, documents, notifications and profile, plus
 one Approvals page for managers. Frappe HR stays the only source of truth; HR
 keeps working in Frappe Desk. The portal is served at `/helixhr` on the same
-site as ERPNext and HRMS.
+site as ERPNext and HRMS, and an employee signing in lands there rather than
+on Desk -- see [docs/deployment.md](docs/deployment.md) for how that is decided
+and how to keep employees out of Desk entirely.
 
 - What it is and is not: [PRODUCT.md](PRODUCT.md)
 - How it is put together: [docs/architecture.md](docs/architecture.md)
+- Deploying it: exposure, host names, onboarding an employee: [docs/deployment.md](docs/deployment.md)
 - Operating it, and every hard-won gotcha: [docs/runbook.md](docs/runbook.md)
 - Visual system, copy rules and measured contrast: [docs/design-system.md](docs/design-system.md)
-- The phase 1 plan the code was built from: [docs/plans/](docs/plans/)
+- The plans the code was built from, phase 1 and phase 2: [docs/plans/](docs/plans/)
 
 ## Repository layout
 
@@ -31,7 +34,7 @@ frontend/                Vue 3 + frappe-ui + Tailwind, built by Vite
   src/components/        AppShell, WeekSpine, NeedsYou, forms
   src/lib/               api client, session, dates, error mapping
   tests/e2e/             Playwright specs (real browser, real site)
-docs/                    runbook, architecture, design system, plans
+docs/                    deployment, runbook, architecture, design system, plans
 ```
 
 The frontend build writes into `helixhr/public/helixhr/` and
@@ -82,6 +85,9 @@ All configuration is per-site data, not code. Set it in Desk or with
 | `rate_limit` | `bench --site <site> set-config rate_limit '{"limit": 600, "window": 60}'` | site-wide request limit, in addition to the app's per-user write limits. |
 | `helixhr_rate_limits` | optional, e.g. `'{"create_my_request": [5, 3600]}'` | tightens one per-user write bound. Preflight FAILs on anything looser than policy. |
 | `helixhr_hr_contact` | `bench --site <site> set-config helixhr_hr_contact hr@example.com` | the address shown to a signed-in user with no Employee record. Unset shows "Contact HR" with no link. |
+| Role home page | Desk: Role -> Employee | leave **empty**. A Role home page wins over the app's landing rule and sends employees to Desk. Preflight FAILs on it. |
+| Default Portal Home | Desk: Portal Settings | leave **empty**, same reason. |
+| Default Workspace | Desk: User | leave **empty** on portal users; it overrides the resolved landing page. |
 | Documents page content | Desk: HelixHR Document Link | one record per link; no code change to add one. |
 
 Site config is cached for 60 seconds per web process, so a `set-config` change
@@ -212,6 +218,25 @@ tested, or nobody can sign in. Preflight fails on exactly that combination.
 Which phase a site is in is site config, not a code comment:
 `bench --site <site> set-config helixhr_auth_phase entra` (default `local`).
 Preflight's expectations flip with it, in both directions.
+
+## Add an employee
+
+Four things must be true before somebody can use the portal, and three happen
+by themselves if you use the Employee form:
+
+1. An **Employee** record with status Active.
+2. A **User** linked in its `user_id`.
+3. The **Employee role** on that user — added automatically by ERPNext's
+   *Create User* button.
+4. **User Permissions** for Employee *and* Company — created automatically when
+   `user_id` is set on the form, because *Create User Permission* defaults to on.
+
+The trap is that ERPNext's *Create User* button skips step 4 while editing
+`user_id` on the form performs it. Without step 4, strict User Permissions do
+not scope that person to their own records. Preflight's *Employee User
+Permissions* check FAILs on exactly that and names the user, so run it after
+onboarding people. Full detail, including how to keep employees out of Desk:
+[docs/deployment.md](docs/deployment.md).
 
 ## Test users
 
