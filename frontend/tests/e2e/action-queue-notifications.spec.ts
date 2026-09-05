@@ -195,14 +195,30 @@ function logs(rows: object[]) {
   }
 }
 
+/** The server's own "today" (P2-U2's get_portal_bootstrap), not the test
+ * runner's host clock. CI runs in UTC while this site's configured
+ * timezone is Asia/Kolkata; near the UTC/IST day boundary (18:30 UTC =
+ * midnight IST) the two clocks disagree about what day it is, which is
+ * exactly the class of bug P2-U2 fixed in the app itself -- a first real
+ * CI run hit it directly (19:07 UTC = 00:37 IST) and "Today" had nothing
+ * in it. `page.request` shares the page's session, so this needs no
+ * separate login. */
+async function siteToday(page: Page): Promise<string> {
+  const response = await page.request.get('/api/method/helixhr.api.get_portal_bootstrap')
+  const body = await response.json()
+  return body.message.today as string
+}
+
 /** `creation` is a naive site-timezone timestamp, exactly as Frappe stores
- * it; these are built from the browser's clock so "Today" is genuinely
- * today whenever the suite runs. */
-function stamp(daysAgo: number) {
-  const d = new Date()
-  d.setDate(d.getDate() - daysAgo)
+ * it. Pure calendar arithmetic on the anchor date string -- never parsed
+ * back through `new Date(string)`, which is the exact mistake being fixed
+ * here one level up. */
+function stamp(anchor: string, daysAgo: number) {
+  const [y, m, d] = anchor.split('-').map(Number)
+  const noon = new Date(Date.UTC(y, m - 1, d, 12))
+  noon.setUTCDate(noon.getUTCDate() - daysAgo)
   const pad = (n: number) => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} 09:30:00.000000`
+  return `${noon.getUTCFullYear()}-${pad(noon.getUTCMonth() + 1)}-${pad(noon.getUTCDate())} 09:30:00.000000`
 }
 
 async function stubNotifications(page: Page, rows: object[], unread: number) {
@@ -228,10 +244,11 @@ test.describe('Notifications', () => {
   })
 
   test('groups Today and Earlier, and opening a reply clears it everywhere', async ({ page }) => {
+    const today = await siteToday(page)
     await stubNotifications(
       page,
       [
-        { ...LOG_UNREAD, creation: stamp(0) },
+        { ...LOG_UNREAD, creation: stamp(today, 0) },
         {
           name: 'NL-OLD-1',
           subject: 'Your week of 24 Aug was approved',
@@ -240,7 +257,7 @@ test.describe('Notifications', () => {
           document_name: 'TS-OLD',
           type: 'Alert',
           read: 1,
-          creation: stamp(6),
+          creation: stamp(today, 6),
         },
       ],
       2,
@@ -266,7 +283,8 @@ test.describe('Notifications', () => {
   })
 
   test('Mark all read updates the list and the badge in one interaction', async ({ page }) => {
-    await stubNotifications(page, [{ ...LOG_UNREAD, creation: stamp(0) }], 1)
+    const today = await siteToday(page)
+    await stubNotifications(page, [{ ...LOG_UNREAD, creation: stamp(today, 0) }], 1)
     await page.route(
       '**/api/method/frappe.desk.doctype.notification_log.notification_log.mark_all_as_read*',
       (route) =>
