@@ -7,7 +7,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
-import { attachToRequest } from '@/lib/api'
+import { attachToRequest, keepaliveRequest } from '@/lib/api'
 import { formatDate, formatDateTime } from '@/lib/dates'
 import { currentUnread, setUnread, unreadCount } from '@/lib/unread'
 import { useIsDesktop } from '@/lib/useIsDesktop'
@@ -108,7 +108,6 @@ function closeDetail() {
 
 // --- clearing the obligation --------------------------------------------
 
-const markRead = createResource({ url: 'helixhr.api.mark_my_request_read', method: 'POST' })
 const justMarkedRead = ref(false)
 
 /**
@@ -126,7 +125,7 @@ async function clearReadObligation(data) {
   const row = rows.value.find((entry) => entry.name === data.name)
   if (row) row.unread = false
   try {
-    const result = await markRead.submit({ name: data.name })
+    const result = await keepaliveRequest('helixhr.api.mark_my_request_read', { name: data.name })
     setUnread(result.unread)
   } catch {
     unreadCount.reload()

@@ -113,6 +113,43 @@ export async function attachToRequest(file, { name }) {
   return (await response.json()).message
 }
 
+/**
+ * A write that must survive the page unloading immediately after it is
+ * sent -- `fetch`'s own `keepalive` flag, which frappe-ui's resourceFetcher
+ * does not set (frappe-ui/src/utils/request.js is a plain `fetch`).
+ *
+ * Reading an HR reply marks it read, and the very next thing a real person
+ * does is often leave the page: opening the record it's about is an in-app
+ * route change (safe -- the JS context and any pending fetch keep running),
+ * but a refresh or a closed tab is a real navigation, which cancels an
+ * ordinary in-flight fetch before the browser ever sends it. `keepalive`
+ * is exactly the platform mechanism for "still deliver this even if the
+ * document is gone" (confirmed: without it, the read-clearing call in
+ * Requests.vue was reliably lost under a `page.goto` immediately after,
+ * which is the same shape as a real refresh).
+ */
+export async function keepaliveRequest(method, params) {
+  const response = await fetch('/api/method/' + method, {
+    method: 'POST',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json; charset=utf-8',
+      'X-Frappe-CSRF-Token': window.csrf_token,
+    },
+    body: JSON.stringify(params || {}),
+    keepalive: true,
+  })
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}))
+    const error = new Error(body?.exception || response.statusText)
+    error.exc_type = body?.exc_type
+    error.response = response
+    error.helixhrMethod = method
+    throw error
+  }
+  return (await response.json()).message
+}
+
 // A dead session usually fails several in-flight requests at once. Without
 // this latch each one reassigns window.location, and the destination the
 // *last* one happened to compute is the one that wins -- so the requested
