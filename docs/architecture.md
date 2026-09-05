@@ -340,34 +340,36 @@ gate exits non-zero. `TestPerUserRateLimits` forces the limiter back on with
 `frappe.flags.helixhr_enforce_rate_limits` and proves the eleventh request in
 an hour is refused, so the bypass is never the thing under test.
 
-## `helixhr/api.py` is over the review threshold
+## `helixhr/api.py` is one module on purpose
 
-It is about 2,600 lines. The agreed threshold is 1,500, and it was crossed
-during P2-U4..P2-U8; splitting it was deliberately *not* done inside those
-units, because every one of them also edited it and a move would have made
-each diff unreviewable. Recorded here so the decision is taken on purpose
-rather than by drift.
+It is about 2,600 lines. Phase 2's plan carried a 1,500-line review threshold
+(KTD4) that would have triggered a split into per-domain modules; that
+threshold was reviewed once the file had actually grown and **dropped**
+(decision taken 2026-09-05, after P2-U9). This is the recorded outcome, not
+an outstanding to-do — nothing here is pending.
 
-The seams already exist — the file is sectioned by domain and the sections
-share almost nothing but `get_current_employee`, `_as_date` and the rate
-limiter. A split along them would be:
+The reasoning, so it does not get re-litigated every time the file grows:
 
-| Module | Contents |
-|---|---|
-| `api/dashboard.py` | `get_dashboard`, the week spine, `_get_needs_you`, `_queue_item` |
-| `api/leave.py` | `get_my_leave*`, `get_leave_form_context`, `get_leave_day_count`, `apply_for_leave`, `withdraw_my_leave`, `_leave_state` |
-| `api/attendance.py` | `get_my_attendance`, `get_my_checkins`, holidays, exceptions |
-| `api/timesheet.py` | `get_my_week`, `save_my_week`, `submit_my_week`, history, projects |
-| `api/approvals.py` | `get_my_approvals`, `get_approval_detail`, `act_on_approval` |
-| `api/requests.py` | `get_my_requests`, `get_my_request`, `create_my_request`, `attach_to_my_request`, `mark_my_request_read` |
-| `api/documents.py` | `get_my_documents` |
-| `api/session.py` | `get_portal_bootstrap`, `get_current_employee`, `user_today`, `update_my_profile` |
+- Every whitelisted method's **dotted path is public API**. `helixhr.api.get_my_leave`
+  is a string in `frontend/src/`, in `helixhr/tests/`, and potentially in any
+  external caller. Moving the function renames the endpoint, so a split is not
+  an internal refactor — it is an API migration that needs `helixhr/api.py` kept
+  as a re-export shim (or `override_whitelisted_methods`) plus a pass over every
+  `helixhr.api.<name>` string in the repo. The shim then reintroduces the single
+  file the split was meant to remove.
+- **Line count is a poor proxy for the risk here.** This is the app's one
+  authorization boundary, and its value is that a reviewer can read every
+  whitelisted entry point in one place and check that each resolves its
+  employee from the session. Splitting it across eight files makes that audit
+  harder, not easier.
+- The file is already sectioned by domain and the sections share almost
+  nothing but `get_current_employee`, `_as_date` and the rate limiter, so the
+  navigability a split would buy is largely there already.
 
-The cost is real and is why this is a recommendation and not a to-do: every
-whitelisted method's dotted path is a public API that the frontend, the tests
-and any external caller use, so a split needs `helixhr/api.py` kept as a
-re-export shim (or `override_whitelisted_methods`) and a pass over every
-`helixhr.api.<name>` string in `frontend/src/` and `helixhr/tests/`.
+If it is ever split, the seams are the existing domain sections: dashboard,
+leave, attendance, timesheet, approvals, requests, documents, session. Split
+it because a concrete test seam cannot stay isolated — the other half of
+KTD4 — not because of a line count.
 
 ## Frontend structure
 
