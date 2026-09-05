@@ -90,7 +90,7 @@ four behind permlevel 1. "Work email" is the sign-in address from the bootstrap 
   people open to *read* far more often than to edit. Revisit if editing turns out to be the common
   errand.
 
-## Leave · phone, ask sheet, desktop (P2-U5; field block, tiles and badges built in P2-U3)
+## Leave · phone, ask sheet, desktop (P2-U5 — **built**)
 
 Balances in the **field block**, one row per type with a used/left bar and the figure always printed
 next to it, so the bar is a second reading rather than the only one. Below, leave grouped
@@ -99,23 +99,84 @@ next to it, so the bar is a second reading rather than the only one. Below, leav
 Priya"). A sent-back leave quotes the manager's reason inline in a `.surface-alert` block with
 "Edit and resend". The ask sheet shows the balance on each type chip, server-derived working days,
 and the approver's name before sending. Desktop opens the selected leave in an inline detail panel
-at the same URL.
+at the same URL (`/leave/:name`).
 
-*Built so far (P2-U3):* the field block, date tiles, status badges and async states. The Coming
-up / Past grouping, the inline rejection block and the desktop detail panel are P2-U5's.
+The whole screen reads from one session-scoped response, `helixhr.api.get_my_leave` — balances,
+rows, the approver's *name*, the lifecycle state and the manager's reason. It replaced three browser
+calls, one of which was a generic `frappe.client.get_list` against **User**, issued on every page
+load to render one word.
 
-## Attendance · phone + day sheet (P2-U5; field block and sheet built in P2-U3)
+**The lifecycle, row by row** (P2-R10). Three of these are `docstatus` 0 and look alike in the
+database; they are three different sentences on screen:
+
+| State | What it is | Badge | What the employee can do |
+|---|---|---|---|
+| open | `docstatus` 0, Open | "Waiting for \<approver\>" | Withdraw (confirmed) |
+| sent_back | `docstatus` 0, Rejected | "Sent back" | Edit and resend · Withdraw |
+| waiting_for_hr | `docstatus` 0, **Approved** — the P2-U1 legacy defect row | "Waiting for HR" (resting grey) | **Nothing** |
+| approved | `docstatus` 1, Approved | "Approved" | Ask HR to cancel (a prefilled HR Request) |
+
+"Waiting for HR" is not a Leave Application status; it is passed to `StatusBadge` as an unmapped
+value on purpose, which renders it verbatim in resting grey. It must never read as "Approved" — the
+row never consumed balance.
+
+*Deviations from the artboard, recorded:*
+
+- **The phone detail is a full-width panel, not a bottom sheet.** At `lg:` it is the 384px column
+  the artboard draws; below that it replaces the list and carries "Back to leave". The canvas draws
+  no phone leave-detail sheet at all, P2-R6 allows a full-height treatment where space is
+  constrained, and it is the only shape that keeps the detail as **one** block of markup. The
+  alternative was writing the same 60 lines twice, once for the aside and once for a sheet slot,
+  which is a drift waiting to happen.
+- The row's meta line reads "14 Sep – 16 Sep · 3 days · sent 5 Sep" where the artboard has
+  "Mon – Wed · 3 days · sent 3 Sep". `lib/dates.js` is the only calendar module and it renders
+  dates, not weekday names; adding a weekday formatter for one line is not worth a seventh way to
+  spell a date.
+- The sent-back row's second control is **Withdraw**, not the artboard's "Dismiss". The only real
+  operation on a rejected record is removing it, and "Dismiss" reads as though it merely hides it.
+- The whole card is the link (a stretched link on the type, plus the trailing chevron) rather than
+  a separate "Details" link beside Withdraw — two interactive elements inside one row that both
+  open the same record is a duplicate, and nesting them is invalid markup.
+- The detail's "Days" line prints the stored count without "(Sat – Sun skipped)". The skipped set
+  is a property of the request *being composed* — it comes back from `get_leave_day_count` — and is
+  not stored on the record, so it lives in the ask sheet and nowhere else.
+- "Show N more" carries the true remainder from a count query rather than the artboard's fixed
+  "Show 6 more"; the first page is bounded at 20 (P2-R22).
+- The ask sheet's sticky footer is `sticky bottom-0` inside the sheet's own scroll container rather
+  than the page's `.action-bar`, which is positioned against the tab bar and would sit in the wrong
+  place inside an overlay.
+
+## Attendance · phone + day sheet (P2-U5 — **built**)
 
 Month counts in the **field block** with the status dot beside each word, and the R16 exceptions
 strip inside it — dormant by design until a check-in device exists, when it resolves to one
-explanatory line instead of a wall of red. Monday-first grid below in a resting card, one cell per
-day, a status dot per day, an amber ring for a late arrival and a dashed outline for a day with no
-record. Legend under the grid. Tapping a day opens the **day sheet**: check-in/out times, the late
-badge, and "Report a problem with this day", which prefills an HR Request.
+explanatory line instead of a wall of red. **Monday-first** grid below in a resting card, one cell
+per day, a status dot per day, an amber ring for a late arrival and a dashed outline for a day with
+no record. Legend under the grid. Tapping a day opens the **day sheet**: check-in/out times, the
+late badge, and "Report a problem with this day", which prefills an HR Request with the date and the
+status already written into its subject.
 
-*Built so far (P2-U3):* the field block, and the day panel as a real sheet — it used to be a bare
-`fixed bottom-0` div that sat *under* the tab bar, could not be closed with Escape, trapped no focus
-and restored none. The Monday-first grid, the legend and "Report a problem" are P2-U5's.
+The grid ran **Sunday**-first until P2-U5, which made it the one surface in the portal that
+disagreed with the week spine, `helixhr.utils.get_week_bounds` and `lib/dates.js` about which column
+a date belongs in.
+
+`get_my_attendance` bounds its span at 366 days and refuses a reversed one before reading a row, and
+resolves the employee's holiday list **once** per request rather than once per question asked of it.
+The day sheet reads `helixhr.api.get_my_checkins`, which states the employee filter and a row cap;
+it used to be `frappe.client.get_list` on Employee Checkin with neither.
+
+*Deviations from the artboard, recorded:*
+
+- The check-in row carries a plain "Late" badge, not the artboard's "42 min late". Minutes need a
+  shift start time; no Shift Type is configured, and the Attendance record carries a `late_entry`
+  flag, not a lateness. The badge tells the truth the record actually holds.
+- The field block keeps the four month counts as *status words with dots* plus the P2-U3 exceptions
+  strip, rather than the artboard's four large figures. The strip is R16's and was built in P2-U3;
+  replacing it with four numbers would drop the late/no-record distinction the strip exists for.
+- The day sheet's title is "3 Sep 2026" rather than "Tuesday, 1 Sep" — the same weekday-name
+  constraint as Leave, above.
+- "Report a problem with this day" has no leading (!) glyph: `lib/icons.js` carries no alert glyph
+  and P2-U5 does not add one.
 
 ## Timesheet · phone, day-first (P2-U6)
 

@@ -4,7 +4,7 @@ import { createResource, Dialog } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
-import { formatDate, formatTime } from '@/lib/dates'
+import { formatDate, formatTime, today } from '@/lib/dates'
 
 const STATUS_COLOR = {
   Present: 'bg-surface-green-3',
@@ -21,14 +21,27 @@ const STATUS_LABEL = {
   Holiday: 'Holiday',
 }
 
-const today = new Date()
-const year = ref(today.getFullYear())
-const month = ref(today.getMonth()) // 0-indexed
+// P2-R5 / P2-AE3. "This month" is the *user's* month, from the same server
+// today the rest of the portal uses. `new Date()` here read the host clock,
+// so a laptop set to another zone could open the wrong month on the last day
+// of one.
+const [startYear, startMonth] = today()
+  .split('-')
+  .map(Number)
+const year = ref(startYear)
+const month = ref(startMonth - 1) // 0-indexed
+
+/** A UTC-pinned Date for month arithmetic only. It is never rendered as an
+ * instant and never crosses a timezone: the y/m/d that goes in comes out. */
+function utc(y, m, d) {
+  return new Date(Date.UTC(y, m, d))
+}
 
 const monthLabel = computed(() =>
-  new Date(year.value, month.value, 1).toLocaleDateString(undefined, {
+  utc(year.value, month.value, 1).toLocaleDateString(undefined, {
     month: 'long',
     year: 'numeric',
+    timeZone: 'UTC',
   }),
 )
 
@@ -40,14 +53,15 @@ function isoDate(y, m, d) {
 }
 
 const monthStart = computed(() => isoDate(year.value, month.value, 1))
-const monthEnd = computed(() => {
-  const lastDay = new Date(year.value, month.value + 1, 0).getDate()
-  return isoDate(year.value, month.value, lastDay)
-})
+const monthEnd = computed(() =>
+  isoDate(year.value, month.value, utc(year.value, month.value + 1, 0).getUTCDate()),
+)
 
 // helixhr.api.get_my_attendance rather than hrms.api directly: the exceptions
 // R16 asks for (late, missing) need the Attendance late_entry flag and the
-// employee's holiday list, and "missing" has a rule that belongs on the server.
+// employee's holiday list, and "missing" has a rule that belongs on the
+// server. P2-U5 added the date-span bound and made it resolve holidays once
+// per request rather than once per question asked of them.
 const calendar = createResource({
   url: 'helixhr.api.get_my_attendance',
   makeParams: () => ({ from_date: monthStart.value, to_date: monthEnd.value }),
@@ -75,8 +89,12 @@ const exceptionEntries = computed(() =>
 
 watch([year, month], () => calendar.fetch())
 
-const daysInMonth = computed(() => new Date(year.value, month.value + 1, 0).getDate())
-const firstWeekday = computed(() => new Date(year.value, month.value, 1).getDay())
+const daysInMonth = computed(() => utc(year.value, month.value + 1, 0).getUTCDate())
+// Monday = 0. The week spine on Home, `helixhr.utils.get_week_bounds` and
+// `lib/dates.js` all run Monday..Sunday (KTD10); this grid was the one
+// Sunday-first surface in the portal, so the same date sat in a different
+// column depending on which screen you were looking at.
+const firstWeekday = computed(() => (utc(year.value, month.value, 1).getUTCDay() + 6) % 7)
 
 const days = computed(() => {
   const list = []
@@ -114,22 +132,28 @@ function nextMonth() {
   }
 }
 function goToday() {
-  year.value = today.getFullYear()
-  month.value = today.getMonth()
+  const [y, m] = today().split('-').map(Number)
+  year.value = y
+  month.value = m - 1
 }
+
+// --- the day sheet ------------------------------------------------------
 
 const selectedDay = ref(null)
 const checkins = createResource({
-  url: 'frappe.client.get_list',
-  makeParams: () => ({
-    doctype: 'Employee Checkin',
-    filters: [['time', 'between', [`${selectedDay.value} 00:00:00`, `${selectedDay.value} 23:59:59`]]],
-    fields: ['name', 'time', 'log_type'],
-    order_by: 'time asc',
-    limit_page_length: 0,
-  }),
+  // P2-R27. This was `frappe.client.get_list` on Employee Checkin with no
+  // employee filter and `limit_page_length: 0` -- correct only because
+  // Frappe's permission layer narrowed it, and unbounded either way.
+  url: 'helixhr.api.get_my_checkins',
+  makeParams: () => ({ date: selectedDay.value?.iso }),
   auto: false,
 })
+
+function statusLabel(day) {
+  if (!day) return ''
+  if (day.status) return STATUS_LABEL[day.status] || day.status
+  return day.missing ? 'No record' : 'Nothing recorded'
+}
 
 function dayLabel(day) {
   const parts = [`${monthLabel.value} ${day.day}`]
@@ -141,9 +165,23 @@ function dayLabel(day) {
 
 function openDay(day) {
   if (!day) return
-  selectedDay.value = day.iso
+  selectedDay.value = day
   checkins.fetch()
 }
+
+/** "Report a problem with this day" (P2-R15). Attendance correction is HR's
+ * job in Frappe HR, so the portal does not edit the record -- it opens one HR
+ * Request with the date and the status already written into it, which is what
+ * makes the reply actionable without a round of "which day?". */
+const reportRoute = computed(() => ({
+  name: 'Requests',
+  query: {
+    category: 'Other',
+    subject: selectedDay.value
+      ? `Attendance problem on ${formatDate(selectedDay.value.iso)} (${statusLabel(selectedDay.value)})`
+      : '',
+  },
+}))
 
 // The day panel is a frappe-ui `Dialog` rather than the hand-rolled
 // `fixed inset-x-0 bottom-0` div it used to be. That div sat *under* the
@@ -157,6 +195,13 @@ const dayOpen = computed({
     if (!open) selectedDay.value = null
   },
 })
+
+const LEGEND = [
+  { label: 'Present', class: STATUS_COLOR.Present },
+  { label: 'Half day', class: STATUS_COLOR['Half Day'] },
+  { label: 'Absent', class: STATUS_COLOR.Absent },
+  { label: 'On leave', class: STATUS_COLOR['On Leave'] },
+]
 </script>
 
 <template>
@@ -174,7 +219,7 @@ const dayOpen = computed({
       <div class="flex items-center gap-2">
         <span class="font-medium text-ink-gray-9">{{ monthLabel }}</span>
         <button
-          class="cursor-pointer rounded-full bg-surface-gray-2 px-3 py-1.5 text-xs text-ink-gray-7 hover:bg-surface-gray-3"
+          class="min-h-11 cursor-pointer rounded-full bg-surface-gray-2 px-3 text-xs text-ink-gray-7 hover:bg-surface-gray-3"
           @click="goToday"
         >
           This month
@@ -268,7 +313,7 @@ const dayOpen = computed({
       <div class="surface-card elev-1 p-3">
         <div class="grid grid-cols-7 gap-1 text-center text-xs text-ink-gray-5">
           <span
-            v-for="d in ['Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa']"
+            v-for="d in ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']"
             :key="d"
           >{{ d }}</span>
         </div>
@@ -285,6 +330,7 @@ const dayOpen = computed({
               day ? 'cursor-pointer text-ink-gray-8 hover:bg-surface-gray-2' : '',
               day?.missing ? 'border border-dashed border-outline-gray-3' : '',
             ]"
+            :data-day="day?.iso"
             :aria-label="day ? dayLabel(day) : undefined"
             @click="day && openDay(day)"
           >
@@ -300,13 +346,53 @@ const dayOpen = computed({
           </component>
         </div>
       </div>
+
+      <!-- The legend. The grid's dots are a second reading of a word that
+           lives in the day's accessible name and in the sheet; without this
+           they are a second reading of nothing (P2-R5). -->
+      <ul class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-gray-6">
+        <li
+          v-for="entry in LEGEND"
+          :key="entry.label"
+          class="flex items-center gap-1.5"
+        >
+          <span
+            class="h-2 w-2 shrink-0 rounded-full"
+            :class="entry.class"
+            aria-hidden="true"
+          />
+          {{ entry.label }}
+        </li>
+        <li class="flex items-center gap-1.5">
+          <span
+            class="h-2 w-2 shrink-0 rounded-full ring-2 ring-amber-500"
+            aria-hidden="true"
+          />
+          Late
+        </li>
+        <li class="flex items-center gap-1.5">
+          <span
+            class="h-3 w-3 shrink-0 rounded-sm border border-dashed border-outline-gray-3"
+            aria-hidden="true"
+          />
+          No record
+        </li>
+      </ul>
     </AsyncState>
 
     <Dialog
       v-model="dayOpen"
-      :options="{ title: formatDate(selectedDay), size: 'sm' }"
+      :options="{ title: selectedDay ? formatDate(selectedDay.iso) : '', size: 'sm' }"
     >
       <template #body-content>
+        <p
+          v-if="selectedDay"
+          class="-mt-2 mb-3 text-sm text-ink-gray-6"
+        >
+          {{ statusLabel(selectedDay) }}
+          <span v-if="selectedDay.late"> · late arrival</span>
+        </p>
+
         <AsyncState
           section="attendance-day"
           :resource="checkins"
@@ -320,13 +406,30 @@ const dayOpen = computed({
             <li
               v-for="row in checkins.data"
               :key="row.name"
-              class="flex justify-between py-2 text-sm text-ink-gray-7"
+              class="flex items-center justify-between gap-2 py-2 text-sm text-ink-gray-7"
             >
               <span>{{ row.log_type === 'IN' ? 'Check-in' : 'Check-out' }}</span>
-              <span class="tabular">{{ formatTime(row.time) }}</span>
+              <span class="flex items-center gap-2">
+                <span class="tabular">{{ formatTime(row.time) }}</span>
+                <span
+                  v-if="row.log_type === 'IN' && selectedDay?.late"
+                  class="rounded-full bg-surface-amber-1 px-2 py-0.5 text-xs font-medium text-ink-amber-3"
+                >Late</span>
+              </span>
             </li>
           </ul>
         </AsyncState>
+
+        <!-- Attendance correction stays in Frappe HR (P2-R15). What the
+             portal owns is asking for it, with the day already named. -->
+        <div class="mt-4 border-t border-outline-gray-1 pt-3">
+          <router-link
+            class="flex min-h-11 w-full items-center justify-center rounded-md border border-outline-gray-2 px-4 text-sm font-medium text-ink-gray-8 hover:bg-surface-gray-2"
+            :to="reportRoute"
+          >
+            Report a problem with this day
+          </router-link>
+        </div>
       </template>
     </Dialog>
   </div>

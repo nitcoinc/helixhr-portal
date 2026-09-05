@@ -3,6 +3,8 @@ import json
 import frappe
 from frappe import _
 from frappe.utils import (
+	cint,
+	date_diff,
 	flt,
 	get_datetime,
 	get_datetime_in_timezone,
@@ -14,7 +16,9 @@ from hrms.api import (
 	get_attendance_calendar_events,
 	get_current_employee,
 	get_current_employee_info,
+	get_leave_approval_details,
 	get_leave_balance_map,
+	get_leave_types,
 )
 
 from helixhr.events import HR_REPLY_SUBJECT_PREFIX
@@ -437,6 +441,39 @@ def _get_needs_you(employee, once):
 			)
 		)
 
+	# Leave the manager sent back, with the reason quoted on the row (P2-R14,
+	# P2-U5 scenario 1). A rejection stays at docstatus 0 by design (P2-U1),
+	# so this is blocked work the employee can actually move: edit the dates
+	# and resend, or withdraw it.
+	rejected_leave = frappe.get_all(
+		"Leave Application",
+		filters={"employee": employee, "status": "Rejected", "docstatus": 0},
+		fields=["name", "leave_type", "from_date", "owner"],
+		order_by="from_date asc",
+		limit=_QUEUE_FETCH,
+	)
+	leave_reasons = _leave_reason(
+		[row.name for row in rejected_leave],
+		{row.name: row.owner for row in rejected_leave},
+	)
+	for row in rejected_leave:
+		items.append(
+			_queue_item(
+				kind="leave_rejected",
+				doctype="Leave Application",
+				name=row.name,
+				title=f"Your {row.leave_type} was sent back",
+				detail=leave_reasons.get(row.name),
+				date=str(row.from_date),
+				day=day_for(row.from_date),
+				age_days=age_days(row.from_date),
+				action="Edit and resend",
+				owner="you",
+				urgency="blocked",
+				to={"name": "LeaveDetail", "params": {"name": row.name}},
+			)
+		)
+
 	# An HR reply is an obligation for exactly as long as its notification is
 	# unread (KTD6). Deriving it from Notification Log rather than from the
 	# request's own status is what lets reading it clear the queue without a
@@ -670,7 +707,444 @@ def _pending_approvals(employee):
 	return decisions
 
 
+# ---------------------------------------------------------------------------
+# Leave (P2-U5, P2-R10, P2-R14, P2-R22, P2-R27)
+#
+# Every leave read and write an employee performs goes through this section
+# rather than through `frappe.client.*` from the browser. Three reasons, in
+# order of how much they matter:
+#
+#   1. The browser used to call `frappe.client.delete` to withdraw. That is a
+#      caller-controlled generic write: the only thing standing between it and
+#      somebody else's leave was Frappe's own permission check, and nothing at
+#      all stood between it and an *approved* one but the UI's decision not to
+#      draw the button (P2-R27).
+#   2. Half-day and approver correctness are properties of the record, not of
+#      the form. `apply_for_leave` sets `half_day_date` from `from_date` and
+#      refuses outright when no approver exists, so neither can be wrong
+#      because a watcher in a Vue component did not fire (P2-U5 scenarios 3
+#      and 4).
+#   3. The day count, the non-working days and the approver's *name* are
+#      server facts. Recomputing any of them in the browser would be a second
+#      implementation of HRMS's eligibility rules, which is exactly the thing
+#      this unit is told not to build.
+# ---------------------------------------------------------------------------
+
+# The bounded first page (P2-R22). A long-serving employee has hundreds of
+# rows and the screen shows two groups of a handful; the rest arrives through
+# an explicit "Show N more" rather than by fetching the lot on every visit.
+_LEAVE_PAGE = 20
+_LEAVE_MAX_PAGE = 200
+
+# How far ahead of a leave request the day-count endpoint will look. A leave
+# application cannot cross two allocation records anyway, so anything past a
+# year is a typo or a probe, and refusing it cheaply keeps a caller from
+# asking the holiday resolver for a decade of dates (P2-R22).
+_LEAVE_MAX_SPAN_DAYS = 366
+
+
+def _leave_state(status, docstatus):
+	"""The lifecycle state the *portal* reasons about, which is not the same
+	thing as `status` on its own (P2-R10).
+
+	  open            docstatus 0, Open       -- with the approver, withdrawable
+	  sent_back       docstatus 0, Rejected   -- the manager's reason applies
+	  waiting_for_hr  docstatus 0, Approved   -- the legacy defect state P2-U1
+	                                             step 4 reconciles. It never
+	                                             consumed balance, so it must
+	                                             never read as "Approved", and
+	                                             the employee has no action.
+	  approved        docstatus 1, Approved   -- submitted; balance consumed
+	  decided         docstatus 1, anything else
+	  cancelled       docstatus 2, or status Cancelled
+	"""
+	docstatus = cint(docstatus)
+	if docstatus == 2 or status == "Cancelled":
+		return "cancelled"
+	if docstatus == 1:
+		return "approved" if status == "Approved" else "decided"
+	if status == "Rejected":
+		return "sent_back"
+	if status == "Approved":
+		return "waiting_for_hr"
+	return "open"
+
+
+def _may_withdraw(state):
+	"""Withdrawal is a property of the lifecycle, not of the screen. Only a
+	still-unsubmitted request of this employee's own can be removed; an
+	approved one is a submitted document with a ledger entry behind it and
+	the honest path is "Ask HR to cancel"."""
+	return state in ("open", "sent_back")
+
+
+def _leave_reason(names, owners):
+	"""The approver's reason for each sent-back leave, in one query.
+
+	Scoped twice on purpose (P2-U5 scenario 1). Only a *rejected* record is
+	asked about at all, and only comments written by somebody other than the
+	employee who raised it are returned -- `act_on_approval` is the only path
+	that can leave one, and it authorizes the approver or HR first, so what
+	survives both filters is the manager's reason and nothing else.
+	"""
+	if not names:
+		return {}
+
+	latest = {}
+	for row in frappe.get_all(
+		"Comment",
+		filters={
+			"reference_doctype": "Leave Application",
+			"reference_name": ["in", names],
+			"comment_type": "Comment",
+		},
+		fields=["reference_name", "content", "owner"],
+		# Ascending, so the newest comment is written last and wins.
+		order_by="creation asc",
+	):
+		if row.owner == owners.get(row.reference_name):
+			continue
+		text = frappe.utils.strip_html(row.content).strip() if row.content else None
+		if text:
+			latest[row.reference_name] = text
+	return latest
+
+
+def _leave_projection(row, approver_names, reasons):
+	state = _leave_state(row.get("status"), row.get("docstatus"))
+	approver = row.get("leave_approver")
+	return {
+		"name": row.get("name"),
+		"leave_type": row.get("leave_type"),
+		"from_date": str(row.get("from_date")) if row.get("from_date") else None,
+		"to_date": str(row.get("to_date")) if row.get("to_date") else None,
+		"total_leave_days": flt(row.get("total_leave_days")),
+		"half_day": bool(cint(row.get("half_day"))),
+		"half_day_date": str(row.get("half_day_date")) if row.get("half_day_date") else None,
+		"description": row.get("description"),
+		"status": row.get("status"),
+		"docstatus": cint(row.get("docstatus")),
+		"state": state,
+		"can_withdraw": _may_withdraw(state),
+		"approver": approver,
+		# `get_leave_applications` hands back a user id; the row needs the
+		# person. The portal used to resolve these with its own
+		# `frappe.client.get_list` against User -- a generic read of an
+		# unrelated DocType, issued once per page load, to render one word.
+		"approver_name": approver_names.get(approver),
+		# Only ever populated for a sent-back record; see _leave_reason.
+		"reason": reasons.get(row.get("name")),
+		"posting_date": str(row.get("posting_date")) if row.get("posting_date") else None,
+		"creation": str(row.get("creation")) if row.get("creation") else None,
+		"modified": str(row.get("modified")) if row.get("modified") else None,
+	}
+
+
+_LEAVE_FIELDS = [
+	"name",
+	"leave_type",
+	"from_date",
+	"to_date",
+	"total_leave_days",
+	"half_day",
+	"half_day_date",
+	"description",
+	"status",
+	"docstatus",
+	"leave_approver",
+	"posting_date",
+	"owner",
+	"creation",
+	"modified",
+]
+
+
+def _approver_names(rows):
+	ids = {row.get("leave_approver") for row in rows if row.get("leave_approver")}
+	if not ids:
+		return {}
+	return {
+		row.name: row.full_name
+		for row in frappe.get_all(
+			"User", filters={"name": ["in", list(ids)]}, fields=["name", "full_name"]
+		)
+	}
+
+
+def _leave_balances(employee):
+	"""Allocated / used / left per leave type, in the shape the field block
+	draws. `get_leave_balance_map` is already session-scoped to the caller's
+	own Employee, so nothing here widens it."""
+	balances = []
+	for leave_type, details in (get_leave_balance_map() or {}).items():
+		allocated = flt(details.get("allocated_leaves"))
+		left = flt(details.get("balance_leaves"))
+		balances.append(
+			{
+				"leave_type": leave_type,
+				"allocated": allocated,
+				"left": left,
+				"used": max(0.0, allocated - left),
+			}
+		)
+	balances.sort(key=lambda entry: entry["leave_type"])
+	return balances
+
+
+@frappe.whitelist()
+def get_my_leave(limit=None):
+	"""Balances and a bounded page of this employee's own leave, with the
+	approver's display name and the manager's reason already resolved
+	(P2-R14, P2-R22).
+
+	One request where the page used to make three -- balances, applications,
+	and a generic User list to turn approver ids into names.
+	"""
+	employee = get_current_employee()
+	limit = min(max(cint(limit) or _LEAVE_PAGE, 1), _LEAVE_MAX_PAGE)
+
+	rows = frappe.get_all(
+		"Leave Application",
+		filters={"employee": employee},
+		fields=_LEAVE_FIELDS,
+		order_by="from_date desc",
+		limit=limit,
+	)
+	total = frappe.db.count("Leave Application", {"employee": employee})
+
+	rejected = [row.name for row in rows if row.status == "Rejected"]
+	owners = {row.name: row.owner for row in rows}
+	reasons = _leave_reason(rejected, owners)
+	approver_names = _approver_names(rows)
+
+	return {
+		"balances": _leave_balances(employee),
+		"applications": [_leave_projection(row, approver_names, reasons) for row in rows],
+		"total": total,
+		"limit": limit,
+		"today": user_today(),
+	}
+
+
+@frappe.whitelist()
+def get_my_leave_detail(name):
+	"""One leave record, by name (P2-R12, KTD5).
+
+	The list is bounded, so `/leave/<name>` has to be answerable on its own:
+	an old record reached from a notification or a bookmark is not
+	necessarily on the page the list returned.
+	"""
+	employee = get_current_employee()
+	row = frappe.db.get_value(
+		"Leave Application", name, [*_LEAVE_FIELDS, "employee"], as_dict=True
+	)
+	if not row:
+		frappe.throw(_("That leave request no longer exists."), frappe.DoesNotExistError)
+	if row.employee != employee:
+		# Not "not found": the caller is authenticated and this is a refusal,
+		# which the portal renders as its own state with no Retry (P2-R2).
+		frappe.throw(_("That leave request isn't yours."), frappe.PermissionError)
+
+	reasons = _leave_reason([name] if row.status == "Rejected" else [], {name: row.owner})
+	return _leave_projection(row, _approver_names([row]), reasons)
+
+
+@frappe.whitelist()
+def get_leave_form_context():
+	"""Everything the ask sheet needs before the employee types anything:
+	the leave types they may take with the balance on each, and who the
+	request will go to.
+
+	Replaces `hrms.api.get_leave_types` + `hrms.api.get_leave_approval_details`
+	as two separate browser calls, and -- more importantly -- means the
+	browser never has to be told its own Employee id to ask the question.
+	"""
+	employee = get_current_employee()
+	today = user_today()
+	details = get_leave_approval_details(employee) or {}
+	balances = {entry["leave_type"]: entry for entry in _leave_balances(employee)}
+
+	types = []
+	for leave_type in get_leave_types(employee, today) or []:
+		entry = balances.get(leave_type)
+		types.append(
+			{
+				"leave_type": leave_type,
+				# None, not 0, for a type with no allocation (leave without
+				# pay): "0 left" and "no balance to show" are different
+				# sentences and the chip prints them differently.
+				"left": entry["left"] if entry else None,
+				"allocated": entry["allocated"] if entry else None,
+			}
+		)
+
+	return {
+		"today": today,
+		"types": types,
+		"approver": details.get("leave_approver"),
+		"approver_name": details.get("leave_approver_name"),
+	}
+
+
+@frappe.whitelist()
+def get_leave_day_count(leave_type, from_date, to_date, half_day=0, half_day_date=None):
+	"""The day count HRMS itself will store, plus the non-working days it
+	skipped and what the balance looks like afterwards (P2-U5 scenario 2).
+
+	This calls HRMS's own `get_number_of_leave_days`, deliberately: a
+	browser-side count would be a second implementation of the
+	`include_holiday` rule, and the first time the two disagreed the
+	employee would see one number and get another.
+
+	It is a *preview*, never a gate. The browser shows what comes back and
+	still sends the request; whether the leave is allowed is decided by
+	HRMS on insert, and a refusal there wins over anything shown here.
+	"""
+	from hrms.hr.doctype.leave_application.leave_application import (
+		get_leave_balance_on,
+		get_number_of_leave_days,
+	)
+
+	employee = get_current_employee()
+	start, end = _as_date(from_date), _as_date(to_date)
+	if end < start:
+		frappe.throw(_("The end date must be on or after the start date."))
+	if date_diff(end, start) + 1 > _LEAVE_MAX_SPAN_DAYS:
+		frappe.throw(_("A leave request can't be longer than a year."))
+
+	half_day = cint(half_day)
+	if half_day:
+		# The half-day date is the selected From date, here as well as in
+		# apply_for_leave, so the preview cannot describe a different
+		# request from the one that gets sent.
+		half_day_date = str(start)
+
+	days = flt(
+		get_number_of_leave_days(employee, leave_type, start, end, half_day, half_day_date)
+	)
+
+	skipped = []
+	if not frappe.db.get_value("Leave Type", leave_type, "include_holiday"):
+		holidays = _holiday_dates(employee, start, end) or set()
+		skipped = sorted(holidays)
+
+	balance = flt(get_leave_balance_on(employee, leave_type, end))
+	return {
+		"total_leave_days": days,
+		"skipped": skipped,
+		"skipped_label": _skipped_label(skipped),
+		"balance": balance,
+		"balance_after": balance - days,
+	}
+
+
+def _skipped_label(skipped):
+	"""One plain sentence about the non-working days inside the range, built
+	here rather than in the browser: naming a weekday needs a locale-aware
+	formatter and `lib/dates.js` deliberately has none (it renders dates, not
+	day names)."""
+	if not skipped:
+		return None
+	if len(skipped) <= 2:
+		names = ", ".join(_as_date(day).strftime("%a") for day in skipped)
+		return _("{0} skipped").format(names)
+	return _("{0} non-working days skipped").format(len(skipped))
+
+
+@frappe.whitelist(methods=["POST"])
+def apply_for_leave(leave_type, from_date, to_date, half_day=0, description=None):
+	"""Create this employee's leave request (P2-R27).
+
+	Field-allow-listed and session-scoped: `employee` comes from the session,
+	`leave_approver` from HRMS's own resolution, and `half_day_date` from
+	`from_date` -- none of the three is a caller input, so none of them can be
+	wrong or forged. `frappe.client.insert` with a browser-built document,
+	which this replaces, offered all three as parameters.
+
+	No approver means no document at all (P2-U5 scenario 4): HR Settings'
+	`leave_approver_mandatory_in_leave_application` would refuse it anyway,
+	but refusing here means the employee gets a sentence naming the next
+	step instead of a validation error, and no draft is left behind.
+	"""
+	employee = get_current_employee()
+	approver = (get_leave_approval_details(employee) or {}).get("leave_approver")
+	if not approver:
+		frappe.throw(
+			_("You don't have a leave approver yet, so this can't be sent. Ask HR to set one.")
+		)
+
+	half_day = cint(half_day)
+	start = _as_date(from_date)
+	# A half day is one day by definition; accepting the form's To date here
+	# is what let a stale watcher submit "half day, 14th to 16th".
+	end = start if half_day else _as_date(to_date)
+
+	doc = frappe.get_doc(
+		{
+			"doctype": "Leave Application",
+			"employee": employee,
+			"leave_type": leave_type,
+			"from_date": str(start),
+			"to_date": str(end),
+			"half_day": half_day,
+			"half_day_date": str(start) if half_day else None,
+			"description": description,
+			"leave_approver": approver,
+			"status": "Open",
+		}
+	)
+	doc.insert()
+	return {"name": doc.name, "status": doc.status, "total_leave_days": flt(doc.total_leave_days)}
+
+
+@frappe.whitelist(methods=["POST"])
+def withdraw_my_leave(name):
+	"""Withdraw one still-unsubmitted leave request of the caller's own
+	(P2-U5 step 4, P2-R27).
+
+	The row is locked first, then the three things that make withdrawal
+	legal are checked in order -- it is yours, it is unsubmitted, and it has
+	not already been decided. An approved application is a *submitted*
+	document since P2-U1: it has a Leave Ledger Entry behind it, deleting it
+	would strand that entry, and the portal is not an HR administration
+	tool. The path for that is an HR Request, which the screen offers by
+	name.
+	"""
+	employee = get_current_employee()
+	current = frappe.db.get_value(
+		"Leave Application",
+		name,
+		["employee", "docstatus", "status"],
+		as_dict=True,
+		for_update=True,
+	)
+	if not current:
+		frappe.throw(_("That leave request no longer exists."), frappe.DoesNotExistError)
+	if current.employee != employee:
+		frappe.throw(_("That leave request isn't yours."), frappe.PermissionError)
+
+	state = _leave_state(current.status, current.docstatus)
+	if state == "waiting_for_hr":
+		# The P2-U1 legacy row. It is unsubmitted, so a delete would
+		# technically succeed -- and would quietly destroy the record HR has
+		# been asked to resolve in Desk.
+		frappe.throw(_("This one is with HR. Ask HR to sort it out before withdrawing it."))
+	if not _may_withdraw(state):
+		frappe.throw(
+			_("This leave has already been decided, so it can't be withdrawn. Ask HR to cancel it.")
+		)
+
+	frappe.delete_doc("Leave Application", name)
+	return {"name": name, "withdrawn": True}
+
+
 # Attendance (U7, R16)
+
+# One year, the widest span the screen can ask for (P2-U5 step 6).
+_ATTENDANCE_MAX_DAYS = 366
+# A day's worth of punches. Nobody badges fifty times; the cap is there so a
+# malformed date can never turn the day sheet into an unbounded read.
+_CHECKIN_LIMIT = 50
 
 
 @frappe.whitelist()
@@ -690,6 +1164,14 @@ def get_my_attendance(from_date, to_date):
 	"""
 	employee = get_current_employee()
 	start, end = _as_date(from_date), _as_date(to_date)
+	# Bounded at the API, not at the caller (P2-R22). The screen only ever
+	# asks for one month, so anything else is a typo or a probe -- and both
+	# are answered before a single row is read, rather than after the holiday
+	# resolver has been asked for a decade of dates.
+	if end < start:
+		frappe.throw(_("Those dates are the wrong way round."))
+	if date_diff(end, start) + 1 > _ATTENDANCE_MAX_DAYS:
+		frappe.throw(_("Ask for a shorter date range -- a year at most."))
 
 	records = frappe.get_all(
 		"Attendance",
@@ -716,7 +1198,12 @@ def get_my_attendance(from_date, to_date):
 		"attendance_date",
 		order_by="attendance_date asc",
 	)
-	missing = _missing_attendance_days(employee, start, end, days, tracking_since)
+	# Once per request (P2-U5 step 6). This used to be resolved twice --
+	# once for `working_days_known` and again inside the missing-day walk --
+	# and `get_holiday_dates_for_employee` is a holiday-list lookup plus a
+	# date range read, not a cached value.
+	holidays = _holiday_dates(employee, start, end)
+	missing = _missing_attendance_days(employee, start, end, days, tracking_since, holidays)
 
 	summary = {}
 	for entry in days.values():
@@ -728,7 +1215,7 @@ def get_my_attendance(from_date, to_date):
 		# False when the employee has no resolvable holiday list, in which case
 		# working days are unknowable and `missing` is deliberately empty
 		# rather than guessed.
-		"working_days_known": _holiday_dates(employee, start, end) is not None,
+		"working_days_known": holidays is not None,
 		"days": days,
 		"missing": missing,
 		"summary": summary,
@@ -753,12 +1240,11 @@ def _holiday_dates(employee, start, end):
 		return None
 
 
-def _missing_attendance_days(employee, start, end, days, tracking_since):
+def _missing_attendance_days(employee, start, end, days, tracking_since, holidays):
 	from frappe.utils import add_days
 
 	if not tracking_since:
 		return []
-	holidays = _holiday_dates(employee, start, end)
 	if holidays is None:
 		return []
 
@@ -780,6 +1266,30 @@ def _missing_attendance_days(employee, start, end, days, tracking_since):
 			missing.append(iso)
 		date = add_days(date, 1)
 	return missing
+
+
+@frappe.whitelist()
+def get_my_checkins(date):
+	"""The caller's own check-ins for one day, for the attendance day sheet.
+
+	The page used to ask `frappe.client.get_list` for Employee Checkin with
+	no employee filter at all and rely entirely on Frappe's permission layer
+	to narrow it. That works today, and it is still the wrong shape: the
+	scope is not stated anywhere the reader of the page can see it, and the
+	bound is `limit_page_length: 0` (P2-R22, P2-R27).
+	"""
+	employee = get_current_employee()
+	day = _as_date(date)
+	return frappe.get_all(
+		"Employee Checkin",
+		filters={
+			"employee": employee,
+			"time": ["between", [f"{day} 00:00:00", f"{day} 23:59:59"]],
+		},
+		fields=["name", "time", "log_type"],
+		order_by="time asc",
+		limit=_CHECKIN_LIMIT,
+	)
 
 
 # Timesheets (U8, KTD7, KTD10, KTD11)

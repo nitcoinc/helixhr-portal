@@ -1,7 +1,14 @@
-// Plain-English translations for the ten most common Frappe/HRMS leave
+// Plain-English translations for the most common Frappe/HRMS leave
 // validation messages (R15, docs/design-system.md). Anything that doesn't
 // match falls back to Frappe's own message with HTML tags stripped, so an
 // unmapped error is still readable rather than a raw markup blob.
+//
+// P2-U5 widened where this is used: it now also translates the refusals from
+// `helixhr.api.get_leave_day_count` and `helixhr.api.withdraw_my_leave`.
+// Those are written as plain sentences already, so they fall through the
+// fallback unchanged and deliberately have no pattern of their own -- a
+// mapping table that restates its own strings is a second place for them to
+// drift.
 
 const PATTERNS = [
   {
@@ -43,6 +50,19 @@ const PATTERNS = [
   {
     test: /employee .*not active|not associated with any leave approver/i,
     message: () => "There's a setup issue with your leave approver. Ask HR.",
+  },
+  // HR Settings' leave_approver_mandatory_in_leave_application (P2-U1 step
+  // 3). apply_for_leave refuses before the document exists, so this is the
+  // second line of defence -- a direct caller, or an approver unset between
+  // the form loading and Send.
+  {
+    test: /leave approver is mandatory|leave approver.*mandatory/i,
+    message: () =>
+      "You don't have a leave approver yet, so this can't be sent. Ask HR to set one.",
+  },
+  {
+    test: /leave type is mandatory|please select a leave type/i,
+    message: () => 'Pick a leave type first.',
   },
 ]
 
