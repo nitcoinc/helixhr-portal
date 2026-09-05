@@ -80,33 +80,14 @@ website_route_rules = [
 
 fixtures = [
 	{"dt": "Property Setter", "filters": [["module", "=", "HelixHR"]]},
-	{
-		"dt": "Custom DocPerm",
-		"filters": [
-			["parent", "=", "Employee"],
-			["role", "in", ["Employee", "HR Manager", "HR User", "System Manager"]],
-		],
-	},
-	{
-		# Leave Application already ships its own HR Manager / HR User
-		# Custom DocPerm rows from HRMS's own install -- only the one row
-		# this app adds (Employee role, if_owner delete for withdraw,
-		# KTD17) belongs to helixhr, so this filter stays scoped to just
-		# that role, unlike the Employee filter above. A distinct `prefix`
-		# is required: two fixture entries for the same "dt" with no
-		# prefix both write to fixtures/custom_docperm.json, and the
-		# second export silently clobbers the first (confirmed while
-		# building this -- frappe.utils.fixtures.export_fixtures names the
-		# file purely from the doctype unless prefixed).
-		"dt": "Custom DocPerm",
-		"prefix": "leave_application",
-		"filters": [["parent", "=", "Leave Application"], ["role", "=", "Employee"]],
-	},
-	{
-		"dt": "Custom DocPerm",
-		"prefix": "timesheet",
-		"filters": [["parent", "=", "Timesheet"], ["role", "=", "Employee"]],
-	},
+	# Custom DocPerm is deliberately NOT a fixture. Frappe *replaces* a
+	# doctype's standard DocPerm rows with its Custom DocPerm rows rather than
+	# merging them (frappe.permissions.get_valid_perms), so shipping a partial
+	# set of roles removes every other role's access on a fresh site -- and
+	# widening the filters would freeze this machine's Frappe/ERPNext/HRMS
+	# permission rows into the app. helixhr.patches.v1_0.apply_permission_deltas
+	# snapshots each site's own standard rows and applies only this app's
+	# deltas on top. (P2-U1)
 	{"dt": "Workflow", "filters": [["document_type", "=", "Timesheet"]]},
 	{
 		# "Approved" and "Rejected" already exist as shared Workflow State
@@ -209,15 +190,27 @@ doc_events = {
 
 # Permissions
 # -----------
-# Permissions evaluated in scripted ways
-
-# permission_query_conditions = {
-# 	"Event": "frappe.desk.doctype.event.event.get_permission_query_conditions",
-# }
+# Permissions evaluated in scripted ways.
 #
-# has_permission = {
-# 	"Event": "frappe.desk.doctype.event.event.has_permission",
-# }
+# P2-R19 / P2-AE2: HelixHR Document Link is scoped to global links plus the
+# reader's own company, and both halves are registered -- the query
+# condition covers every list-shaped route (frappe.client.get_list,
+# /api/resource, report view, export) and the controller check covers every
+# single-document route (frappe.client.get, print, the Desk form). A
+# browser-side filter is not a boundary; these are.
+
+permission_query_conditions = {
+	"HelixHR Document Link": (
+		"helixhr.helixhr.doctype.helixhr_document_link.helixhr_document_link"
+		".get_permission_query_conditions"
+	),
+}
+
+has_permission = {
+	"HelixHR Document Link": (
+		"helixhr.helixhr.doctype.helixhr_document_link.helixhr_document_link.has_permission"
+	),
+}
 
 # Document Events
 # ---------------

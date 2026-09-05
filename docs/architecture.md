@@ -47,21 +47,92 @@ There is no app-level auth code. Three Frappe mechanisms carry it:
    authorization boundary; `preflight.py` checks every linked employee has one.
 3. **Permlevel lock on Employee.** `fixtures/property_setter.json` moves every
    Employee field an employee may not edit to permlevel 1 (HR-only fields such
-   as bank details to permlevel 2), and `fixtures/custom_docperm.json` gives the
-   Employee role read-only at level 1 and nothing at level 2. The seven editable
+   as bank details to permlevel 2), and `patches/v1_0/apply_permission_deltas.py`
+   gives the Employee role read-only at level 1 and nothing at level 2. The seven editable
    fields (mobile, personal email, addresses, emergency contact) stay at level 0.
    `api.update_my_profile` also drops any field outside those seven before it
    touches the document, so the UI is never the only guard.
+
+4. **Scoped controller permissions on this app's own doctypes.** HelixHR
+   Document Link registers both `permission_query_conditions` and
+   `has_permission` in `hooks.py`, so global-plus-own-company scoping applies
+   to every route (portal method, `frappe.client.get_list`, `/api/resource`,
+   report view, print, export), not only to the query the browser sends. Its
+   `company` field is marked `ignore_user_permissions` deliberately: a Company
+   User Permission would hide the *global* links too, because strict user
+   permissions refuse a document whose scoped link field is empty. The scope
+   is owned by the hooks instead, so it does not depend on which User
+   Permissions a site happens to have created.
+
+   HR Request's `employee` field is marked the same way, for the same reason
+   from the other direction: `employee` is still empty when `insert()` checks
+   create permission (`before_insert` runs after it), so under strict user
+   permissions *every* create was refused. The read boundary for HR Request is
+   `if_owner` plus `HRRequest.before_insert` resolving `employee` from the
+   session.
 
 Writes the employee should not be able to make are refused server-side:
 
 - `save_my_week` refuses a week that is not Draft or Rejected, refuses projects
   the user is not assigned to, and is rate-limited per user.
-- `act_on_approval` re-checks that the caller is the approver (`reports_to`
-  for timesheets, `leave_approver` for leave) before applying a workflow action.
+- `act_on_approval` locks the native row (`SELECT ... FOR UPDATE` on
+  `modified`), then re-checks that the caller is the approver (`reports_to`
+  for timesheets, `leave_approver` for leave), then checks the record is still
+  undecided and matches the caller's optional `expected_modified` token, and
+  only then adds a comment or applies the transition. That order is the point:
+  it used to comment first, so an unauthorized caller left a comment on
+  somebody else's record.
 - `events.timesheet_before_submit` refuses a submit by anyone but the approver
   even if a Desk user finds another route to it.
 - `events.file_before_insert` refuses a public file attached to an HR Request.
+
+## Leave approval runs the native lifecycle
+
+`act_on_approval` on a Leave Application **submits** it (`docstatus` 1). That
+is what makes HRMS write the Leave Ledger Entry, consume balance and update
+attendance; setting `status = "Approved"` alone does none of it, and the row it
+leaves behind (`docstatus` 0, status Approved) is a defect state that
+`preflight.check_unsubmitted_approved_leave` counts and
+`patches/v1_0/report_unsubmitted_approved_leave` lists for HR to resolve in
+Desk. A rejection stays unsubmitted, so it consumes nothing.
+
+**Submit permission path (decided, and tested):** the portal calls `doc.submit()`
+with **no `ignore_permissions`**, after its own approver/HR check. The grant is
+already there natively:
+
+- Employee is a nested set, so a manager's own User Permission on their Employee
+  record covers every Employee below them — and therefore their reports' Leave
+  Applications.
+- HRMS auto-grants the **Leave Approver** role whenever `Employee.leave_approver`
+  is set through a real save, and that role carries `submit` at permlevel 0.
+- An approver *outside* the reporting line instead gets the `submit=1` DocShare
+  that `hrms.hr.utils.share_doc_with_approver` creates on every save.
+
+`test_api_approvals.TestLeaveApprovalIsNative.test_the_approvers_submit_grant_is_native`
+asserts that grant exists, so an upstream change that removes it fails here
+rather than in production.
+
+Two HR Settings carry rules the portal must not re-implement, and
+`preflight.py` FAILs without them: `leave_approver_mandatory_in_leave_application`
+(no approver, no request) and `prevent_self_leave_approval`.
+
+**Permission deltas are a patch, not a fixture.** Frappe *discards* a doctype's
+standard `DocPerm` rows once that doctype has any `Custom DocPerm` row rather
+than merging them (`frappe.permissions.get_valid_perms`). Shipping Custom
+DocPerm rows as fixtures therefore removed every role the fixture filter did not
+name — on a fresh site that cost Leave Application and Timesheet their HR
+Manager, HR User, Leave Approver and Projects User rules entirely. Widening the
+filters would have frozen this machine's Frappe/ERPNext/HRMS rows into the app,
+so instead `patches/v1_0/apply_permission_deltas.py` calls
+`frappe.permissions.setup_custom_perms` to snapshot **each site's own** standard
+rows and then applies only this app's deltas on top: the Employee permlevel 1/2
+rules, `if_owner` delete on Leave Application (KTD17), `submit` on Timesheet for
+role Employee, and the removal of the Employee role's unused `share` on Leave
+Application. `preflight.check_custom_docperm_coverage` is the standing guard —
+the patch runs once, so anything that trims these rules later shows up there.
+HRMS's own Employee Self Service rules are never touched; removing document
+sharing site-wide is System Settings' "Disable Document Sharing", not a
+permission rule.
 
 ## Data flow per screen
 
@@ -72,7 +143,7 @@ Writes the employee should not be able to make are refused server-side:
 | Attendance | `api.get_my_attendance`, `frappe.client.get_list` on Employee Checkin | none | Attendance, Employee Checkin, Holiday List, Leave Application |
 | Timesheet | `api.get_my_week`, `api.get_my_projects` | `api.save_my_week`, `frappe.model.workflow.apply_workflow` (send for approval) | Timesheet + Timesheet Detail, Workflow "Timesheet Approval" |
 | Requests | `frappe.client.get_list` | `frappe.client.insert`, file upload | HR Request (this app's doctype), File |
-| Documents | `frappe.client.get_list` | none | HelixHR Document Link |
+| Documents | `api.get_my_documents` (scoped server-side; `frappe.client.get_list` is scoped by the same hooks) | none | HelixHR Document Link |
 | Notifications | `notification_log.get_notification_logs` | `notification_log.mark_all_as_read` | Notification Log, fed by the four Notification fixtures |
 | Approvals | `frappe.client.get_list` on Timesheet, `hrms.api.get_leave_applications` | `api.act_on_approval` | Workflow actions, DocShare for the approver |
 | Profile | `api.get_dashboard` header, `frappe.client.get` on own Employee | `api.update_my_profile` | Employee |
@@ -128,10 +199,10 @@ a device arrives; the first record starts the clock.
 ## Fixtures
 
 `hooks.py` lists them with filters scoped to this app's own records so
-`bench export-fixtures` never captures another app's rows. Two Custom DocPerm
-entries need distinct `prefix` values or the second export overwrites the first.
-Fixtures are installed by `bench migrate`; `preflight.check_fixtures` confirms
-the four that the app cannot work without.
+`bench export-fixtures` never captures another app's rows. Permission rows are
+deliberately **not** among them — see "Permission deltas are a patch, not a
+fixture" above. Fixtures are installed by `bench migrate`;
+`preflight.check_fixtures` confirms the four that the app cannot work without.
 
 ## Tests
 

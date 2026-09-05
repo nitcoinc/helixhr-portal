@@ -26,16 +26,16 @@ class TestHRRequest(IntegrationTestCase):
 		return doc
 
 	def test_employee_is_set_from_session_even_if_posted_otherwise(self):
-		# Base permission (a Link field's value is restricted by the
-		# acting user's own User Permission on Employee, enforced on
-		# create too, not just read) already refuses this outright, before
-		# the doctype's own before_insert override even gets a chance to
-		# run -- confirmed while writing this test. before_insert setting
-		# `self.employee` from the session stays as defense in depth for
-		# any other path that reaches it (e.g. a future bulk-import
-		# route bypassing the ordinary create check).
-		with self.assertRaises(frappe.PermissionError):
-			self._make_request(employee=self.manager_name)
+		# `before_insert` resolving `employee` from the session is now the
+		# check that carries this (KTD5). It used to be Frappe's own Link
+		# user-permission check, but that only fired because `employee`
+		# was still empty when insert() checked create permission -- which
+		# under strict User Permissions (P2-R26) refused *every* create,
+		# including the employee's own. The field is now marked
+		# `ignore_user_permissions` and if_owner is the read boundary; see
+		# docs/architecture.md.
+		doc = self._make_request(employee=self.manager_name)
+		self.assertEqual(doc.employee, self.employee_name)
 
 	def test_employee_cannot_change_status_or_hr_note(self):
 		frappe.set_user(EMPLOYEE_USER)
@@ -194,3 +194,123 @@ class TestHelixHRDocumentLink(IntegrationTestCase):
 			frappe.get_doc(
 				{"doctype": "HelixHR Document Link", "title": "Sneaky", "url": "https://example.com"}
 			).insert()
+
+
+class TestDocumentLinkScope(IntegrationTestCase):
+	"""P2-U1 / P2-R19 / P2-AE2: company scoping is a server rule on the
+	DocType, not a filter the browser happens to send, and it must not
+	depend on a site having created a Company User Permission."""
+
+	OTHER_COMPANY = "_Test Company Other"
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.employee_name, _, _, _ = make_test_employee_and_manager()
+		self.company = frappe.db.get_value("Employee", self.employee_name, "company")
+		if not frappe.db.exists("Company", self.OTHER_COMPANY):
+			frappe.get_doc(
+				{
+					"doctype": "Company",
+					"company_name": self.OTHER_COMPANY,
+					"abbr": "TCO",
+					"default_currency": "USD",
+					"country": "United States",
+				}
+			).insert(ignore_permissions=True)
+
+		self.everyone_link = self._link("P2-U1 handbook", "https://example.com/handbook")
+		self.own_link = self._link("P2-U1 local policy", "https://example.com/local", self.company)
+		self.other_link = self._link(
+			"P2-U1 other office policy", "https://example.com/other", self.OTHER_COMPANY
+		)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _link(self, title, url, company=None):
+		existing = frappe.db.get_value("HelixHR Document Link", {"title": title}, "name")
+		if existing:
+			return existing
+		return frappe.get_doc(
+			{
+				"doctype": "HelixHR Document Link",
+				"title": title,
+				"url": url,
+				"company": company,
+			}
+		).insert(ignore_permissions=True).name
+
+	def test_the_portal_method_returns_global_and_own_company_links_only(self):
+		from helixhr.api import get_my_documents
+
+		frappe.set_user(EMPLOYEE_USER)
+		names = [row["name"] for row in get_my_documents()]
+
+		self.assertIn(self.everyone_link, names)
+		self.assertIn(self.own_link, names)
+		self.assertNotIn(self.other_link, names)
+
+	def test_the_generic_list_get_and_count_routes_enforce_the_same_scope(self):
+		frappe.set_user(EMPLOYEE_USER)
+
+		# No or_filters: the scope has to come from the server. This is the
+		# shape of frappe.client.get_list and /api/resource.
+		names = frappe.get_list("HelixHR Document Link", pluck="name", limit=0)
+		self.assertIn(self.everyone_link, names)
+		self.assertIn(self.own_link, names)
+		self.assertNotIn(self.other_link, names)
+
+		self.assertTrue(frappe.has_permission("HelixHR Document Link", "read", self.everyone_link))
+		self.assertTrue(frappe.has_permission("HelixHR Document Link", "read", self.own_link))
+		self.assertFalse(frappe.has_permission("HelixHR Document Link", "read", self.other_link))
+
+		with self.assertRaises(frappe.PermissionError):
+			frappe.client.get("HelixHR Document Link", self.other_link)
+
+		visible = frappe.client.get_count("HelixHR Document Link")
+		self.assertEqual(
+			visible,
+			len(names),
+			"get_count must count the same rows the scoped list returns",
+		)
+
+	def test_report_print_and_export_are_not_granted_to_employees(self):
+		frappe.set_user(EMPLOYEE_USER)
+		for ptype in ("report", "print", "export", "email", "write", "create", "share"):
+			self.assertFalse(
+				frappe.has_permission("HelixHR Document Link", ptype),
+				f"Employee should not have {ptype} on HelixHR Document Link",
+			)
+
+	def test_hr_still_sees_every_company(self):
+		frappe.set_user("Administrator")
+		names = frappe.get_list("HelixHR Document Link", pluck="name", limit=0)
+		self.assertIn(self.other_link, names)
+
+
+class TestDocumentLinkUrlSafety(IntegrationTestCase):
+	"""P2-R19: a policy catalogue stores web addresses, nothing else."""
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _insert(self, url, title="P2-U1 url check"):
+		return frappe.get_doc(
+			{"doctype": "HelixHR Document Link", "title": title, "url": url}
+		).insert(ignore_permissions=True)
+
+	def test_unsafe_and_malformed_links_are_refused(self):
+		for url in (
+			"javascript:alert(1)",
+			"data:text/html;base64,PHNjcmlwdD4=",
+			"not a url at all",
+			"https://user:secret@example.com/handbook",
+			"",
+		):
+			with self.assertRaises(frappe.ValidationError, msg=url):
+				self._insert(url)
+
+	def test_a_plain_https_link_is_still_accepted(self):
+		doc = self._insert("https://example.com/policies/leave.pdf", title="P2-U1 valid url")
+		self.assertEqual(doc.url, "https://example.com/policies/leave.pdf")
+		frappe.delete_doc("HelixHR Document Link", doc.name, force=True, ignore_permissions=True)

@@ -47,6 +47,10 @@ def _system(field):
 	return frappe.db.get_single_value("System Settings", field)
 
 
+def _hr_setting(field):
+	return frappe.db.get_single_value("HR Settings", field)
+
+
 # --- authorization ----------------------------------------------------------
 
 
@@ -84,6 +88,84 @@ def check_employee_user_permissions():
 			f"{len(missing)} of {len(employees)} linked employees have no User Permission: {shown}",
 		)
 	return _result("Employee User Permissions", PASS, f"all {len(employees)} linked employees scoped")
+
+
+def check_custom_docperm_coverage():
+	"""Frappe *discards* a doctype's standard DocPerm rows once it has any
+	Custom DocPerm row rather than merging them
+	(frappe.permissions.get_valid_perms), so a partial set of Custom DocPerm
+	rows silently removes every role it does not name.
+
+	`patches.v1_0.apply_permission_deltas` is what keeps that from happening:
+	it copies this site's own standard rows in (frappe.permissions
+	.setup_custom_perms) before applying this app's deltas. A patch runs once,
+	so this is the standing guard afterwards -- an operator editing rules in
+	the Role Permissions Manager, or a restored site that missed the patch,
+	shows up here. FAIL names the roles that have been left with nothing.
+	"""
+	problems = []
+	for doctype in ("Employee", "Leave Application", "Timesheet"):
+		custom = set(frappe.get_all("Custom DocPerm", filters={"parent": doctype}, pluck="role"))
+		if not custom:
+			continue
+		standard = set(
+			frappe.get_all("DocPerm", filters={"parent": doctype}, pluck="role", parent_doctype="DocType")
+		)
+		lost = sorted(standard - custom)
+		if lost:
+			problems.append(f"{doctype}: {', '.join(lost)}")
+	if problems:
+		return _result(
+			"Custom DocPerm coverage",
+			FAIL,
+			"Custom DocPerm rows replaced the standard ones and left these roles with no access -- "
+			+ "; ".join(problems)
+			+ " -- re-run helixhr.patches.v1_0.apply_permission_deltas",
+		)
+	return _result("Custom DocPerm coverage", PASS, "no role lost access to a customised doctype")
+
+
+def check_leave_approver_mandatory():
+	"""P2-R14: HR Settings, not portal copy, is what refuses a leave request
+	from an employee whose approver was never set. Without it the request is
+	created and then waits on nobody."""
+	on = frappe.utils.cint(_hr_setting("leave_approver_mandatory_in_leave_application"))
+	return _result(
+		"Leave approver mandatory",
+		PASS if on else FAIL,
+		"on"
+		if on
+		else "off -- a leave request from an employee with no approver would be accepted and wait on nobody",
+	)
+
+
+def check_self_leave_approval_blocked():
+	"""P2-U1 step 3: an employee who is also a leave approver (any manager)
+	must not be able to approve their own leave. HRMS enforces this natively
+	once the setting is on."""
+	on = frappe.utils.cint(_hr_setting("prevent_self_leave_approval"))
+	return _result(
+		"Self leave approval blocked",
+		PASS if on else FAIL,
+		"on" if on else "off -- an approver could approve their own leave request",
+	)
+
+
+def check_unsubmitted_approved_leave():
+	"""P2-R10 / P2-U1 step 4: rows the pre-P2-U1 portal marked Approved
+	without submitting. They consumed no balance and wrote no ledger entry,
+	so HR has to submit or reject each one in Desk. Deliberately a WARN:
+	nothing is broken going forward, but the backlog is real and only a
+	human can decide each case."""
+	count = frappe.db.count("Leave Application", {"docstatus": 0, "status": "Approved"})
+	if count:
+		return _result(
+			"Approved-but-unsubmitted leave",
+			WARN,
+			f"{count} leave request(s) say Approved but were never submitted and consumed no balance "
+			"-- submit or reject each one in Desk (see patches/v1_0/report_unsubmitted_approved_leave)",
+		)
+	return _result("Approved-but-unsubmitted leave", PASS, "none")
 
 
 # --- sign-in (local-login phase) -------------------------------------------
@@ -197,6 +279,10 @@ def check_frontend_built():
 CHECKS = [
 	check_strict_user_permissions,
 	check_employee_user_permissions,
+	check_custom_docperm_coverage,
+	check_leave_approver_mandatory,
+	check_self_leave_approval_blocked,
+	check_unsubmitted_approved_leave,
 	check_signup_disabled,
 	check_password_login,
 	check_entra,

@@ -107,6 +107,24 @@ jobs:
           bench --site test_site set-config allow_tests true
         working-directory: frappe-bench
 
+      # P2-R26 / P2-AE9: run the suite against production-like authorization.
+      # `set-config` is not enough for any of these -- all three live in a
+      # Single doctype, not site_config.json, and without strict user
+      # permissions a User Permission on Employee does not restrict the
+      # doctypes that link to it, which is the app's whole boundary.
+      # frappe.client.set_value refuses these fields, so set them on the
+      # Single directly and clear the cache the value is read from.
+      - name: Production-like permission and HR settings
+        run: |
+          bench --site test_site execute frappe.db.set_single_value \
+            --kwargs '{"doctype":"System Settings","fieldname":"apply_strict_user_permissions","value":1}'
+          bench --site test_site execute frappe.db.set_single_value \
+            --kwargs '{"doctype":"HR Settings","fieldname":"leave_approver_mandatory_in_leave_application","value":1}'
+          bench --site test_site execute frappe.db.set_single_value \
+            --kwargs '{"doctype":"HR Settings","fieldname":"prevent_self_leave_approval","value":1}'
+          bench --site test_site clear-cache
+        working-directory: frappe-bench
+
       - name: Run helixhr tests
         run: bench --site test_site run-tests --app helixhr
         working-directory: frappe-bench

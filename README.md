@@ -21,7 +21,8 @@ helixhr/                 Frappe app (Python)
   preflight.py           go-live checks: bench --site <site> execute helixhr.preflight.run
   utils.py               week bounds, manager lookup, per-user rate limit
   hooks.py               fixtures, doc_events, the /helixhr/* route rule
-  fixtures/              Property Setters, Custom DocPerms, Workflow, Notifications
+  fixtures/              Property Setters, Workflow, Activity Type, Notifications
+  patches/               migrate-time fixes, incl. this app's permission deltas
   helixhr/doctype/       HR Request, HelixHR Document Link
   www/helixhr.py         serves the built SPA, injects CSRF token and site config
   tests/                 Python integration tests (bench run-tests)

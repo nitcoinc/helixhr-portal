@@ -5,7 +5,12 @@ from frappe import _
 from frappe.utils import flt, get_datetime, get_first_day, get_last_day, today
 from hrms.api import get_attendance_calendar_events, get_current_employee, get_leave_balance_map
 
-from helixhr.utils import PROFILE_EDITABLE_FIELDS, get_week_bounds, rate_limit_per_user
+from helixhr.utils import (
+	PROFILE_EDITABLE_FIELDS,
+	get_manager_user,
+	get_week_bounds,
+	rate_limit_per_user,
+)
 
 
 @frappe.whitelist()
@@ -183,7 +188,14 @@ def _week_timesheet_state(employee, monday):
 def _leave_days(employee, monday, sunday):
 	"""Set of ISO dates inside the week covered by an approved leave. Leave
 	Applications store a range, so each one is expanded across the days it
-	overlaps with this week."""
+	overlaps with this week.
+
+	`docstatus` 1, not status alone (P2-R10): an application whose status
+	says Approved but which was never submitted consumed no balance and
+	created no ledger entry, so it is a legacy defect row for HR to
+	resolve, not a day off. preflight.check_unsubmitted_approved_leave
+	counts them and patches/v1_0/report_unsubmitted_approved_leave lists
+	them."""
 	from frappe.utils import add_days, getdate
 
 	covered = set()
@@ -192,6 +204,7 @@ def _leave_days(employee, monday, sunday):
 		filters={
 			"employee": employee,
 			"status": "Approved",
+			"docstatus": 1,
 			"from_date": ["<=", str(sunday)],
 			"to_date": [">=", str(monday)],
 		},
@@ -647,7 +660,7 @@ def _get_unread_notification_count():
 
 
 @frappe.whitelist(methods=["POST"])
-def act_on_approval(doctype, name, action, comment=None):
+def act_on_approval(doctype, name, action, comment=None, expected_modified=None):
 	"""Approve or reject a report's pending Leave Application or Timesheet.
 	`comment` is required for a reject (R25). Who may actually act is
 	checked here on the server, not assumed from what the portal chose to
@@ -655,6 +668,17 @@ def act_on_approval(doctype, name, action, comment=None):
 	the portal's own Submit/Edit actions use (its condition and
 	before_submit guard are the real check); Leave Application has no
 	Workflow (KTD17), so the equivalent check is explicit here.
+
+	Order matters, and it is the P2-U1 fix. The sequence is: lock the
+	native row, authorize, check the expected state, and only then create
+	any side effect. Before P2-U1 the comment was added first, so an
+	unauthorized caller left a real Comment on somebody else's leave
+	before the approver check refused them (P2-R10, P2-U1 step 9).
+
+	`expected_modified` is the optional concurrency token (P2-R25): pass
+	the `modified` value the screen was rendered from and a decision made
+	against stale data is refused instead of overwriting a decision
+	somebody else already made.
 	"""
 	rate_limit_per_user("act_on_approval", limit=60, seconds=60)
 	if doctype not in ("Leave Application", "Timesheet"):
@@ -664,7 +688,17 @@ def act_on_approval(doctype, name, action, comment=None):
 	if action == "Reject" and not comment:
 		frappe.throw(_("A comment is required to reject."))
 
+	# SELECT ... FOR UPDATE on the one row: two concurrent decisions
+	# serialize here, so the second one reads the first one's result and is
+	# refused by the state check below rather than racing it (P2-U1 step 1).
+	current_modified = frappe.db.get_value(doctype, name, "modified", for_update=True)
+	if current_modified is None:
+		frappe.throw(_("That request no longer exists."), frappe.DoesNotExistError)
+
 	doc = frappe.get_doc(doctype, name)
+	_assert_may_act_on(doc)
+	_assert_still_open(doc)
+	_assert_expected_state(expected_modified, current_modified)
 
 	if comment:
 		doc.add_comment("Comment", comment)
@@ -678,14 +712,102 @@ def act_on_approval(doctype, name, action, comment=None):
 	_act_on_leave_application(doc, action)
 
 
-def _act_on_leave_application(doc, action):
+def _assert_may_act_on(doc):
+	"""Refuse anyone but this record's own approver (or HR) before a single
+	side effect runs (P2-U1 step 9)."""
 	user = frappe.session.user
-	is_hr = set(frappe.get_roles(user)) & {"HR Manager", "System Manager"}
-	if not is_hr and user != doc.leave_approver:
+	if user == "Administrator" or set(frappe.get_roles(user)) & {"HR Manager", "System Manager"}:
+		return
+
+	if doc.doctype == "Timesheet":
+		# The same rule events.timesheet_before_submit enforces on submit,
+		# applied here so a Reject (which never submits) and the comment
+		# that goes with it are covered by it too.
+		if user == get_manager_user(doc.employee):
+			return
 		frappe.throw(
-			_("Only {0}'s approver or HR can act on this leave request.").format(doc.employee),
+			_("Only {0}'s manager or HR can act on this timesheet.").format(doc.employee),
 			frappe.PermissionError,
 		)
 
-	doc.status = "Approved" if action == "Approve" else "Rejected"
-	doc.save()
+	if user == doc.leave_approver:
+		return
+	frappe.throw(
+		_("Only {0}'s approver or HR can act on this leave request.").format(doc.employee),
+		frappe.PermissionError,
+	)
+
+
+def _assert_still_open(doc):
+	"""One decision per record. A second decision -- the losing half of a
+	concurrent approve/approve or approve/reject -- is refused here, before
+	it can add a contradicting comment or a second ledger effect."""
+	if doc.doctype == "Timesheet":
+		if doc.workflow_state != "Pending Approval":
+			frappe.throw(_("This timesheet has already been decided. Reload to see the result."))
+		return
+
+	if doc.docstatus != 0 or doc.status != "Open":
+		frappe.throw(_("This leave request has already been decided. Reload to see the result."))
+
+
+def _assert_expected_state(expected_modified, current_modified):
+	if not expected_modified:
+		return
+	if get_datetime(expected_modified) != get_datetime(current_modified):
+		frappe.throw(_("Somebody changed this while you were looking at it. Reload and try again."))
+
+
+def _act_on_leave_application(doc, action):
+	"""Run the native HRMS lifecycle (P2-R10, P2-AE1).
+
+	An approval *submits* the application, which is what makes HRMS write
+	the Leave Ledger Entry, consume balance and update attendance. Before
+	P2-U1 this only set `status = "Approved"` and saved, so the portal
+	said "Approved" while the leave was never taken from the balance.
+
+	A rejection deliberately stays at docstatus 0: an unsubmitted
+	application consumes nothing, and HRMS's own on_submit refuses any
+	status but Approved/Rejected anyway.
+
+	No `ignore_permissions`: the caller has already been authorized above,
+	and the submit itself runs under the grant HRMS sets up natively --
+	Employee is a nested set, so a manager's own User Permission covers
+	their reports' records, and the Leave Approver role HRMS auto-grants
+	when `Employee.leave_approver` is set carries submit at permlevel 0.
+	An approver who is not in the reporting line instead gets the
+	`submit=1` DocShare hrms.hr.utils.share_doc_with_approver creates on
+	every save. See docs/architecture.md and
+	test_the_approvers_submit_grant_is_native.
+	"""
+	if action == "Approve":
+		doc.status = "Approved"
+		doc.submit()
+	else:
+		doc.status = "Rejected"
+		doc.save()
+
+
+# Documents (R19, P2-R19)
+
+
+@frappe.whitelist()
+def get_my_documents():
+	"""The policy links this employee may see: global ones plus their own
+	company's (P2-R19).
+
+	The scope is not this method's only enforcement -- HelixHR Document
+	Link registers `permission_query_conditions` and `has_permission`
+	(hooks.py), so a caller reaching for frappe.client.get_list,
+	/api/resource, report view, print or export gets the same answer. This
+	method exists so the portal asks a session-scoped question instead of
+	sending the filter itself (KTD5, R27).
+	"""
+	employee = get_current_employee()
+	company = frappe.db.get_value("Employee", employee, "company")
+	return frappe.get_all(
+		"HelixHR Document Link",
+		or_filters=[["company", "is", "not set"], ["company", "=", company]],
+		fields=["name", "title", "url", "company", "description"],
+		order_by="title asc",
+	)

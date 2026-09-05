@@ -273,13 +273,19 @@ while writing `test_leave_flow.py` and `LeaveForm.vue`:
 - **Role "Employee" has no `delete` permission on Leave Application by default** in this
   HRMS version's base DocPerm, so withdraw (R14, KTD17 -- `frappe.delete_doc` on a pending
   Leave Application) is refused with a plain `PermissionError` out of the box. Fixed with one
-  Custom DocPerm row (role `Employee`, permlevel 0, `delete=1`, `if_owner=1` so it only ever
-  applies to the caller's own documents) -- shipped as
-  `helixhr/fixtures/leave_application_custom_docperm.json`. **Two `fixtures` entries for the
-  same doctype (`"dt": "Custom DocPerm"`) need distinct `prefix` values in `hooks.py`** --
-  confirmed the hard way: without a prefix, `bench export-fixtures` names the file purely
-  from the doctype, so a second entry for a different `parent` doctype silently overwrites the
-  first entry's exported file instead of producing a second one.
+  Custom DocPerm rule (role `Employee`, permlevel 0, `delete=1`, `if_owner=1` so it only ever
+  applies to the caller's own documents) -- applied by
+  `helixhr/patches/v1_0/apply_permission_deltas.py`. It is a **second** rule alongside the
+  standard Employee one, not `if_owner` set on the standard rule: `if_owner` on the base rule
+  moves read/write/report into the owner-only bucket too, and an employee then cannot see a
+  leave request HR filed for them.
+- **Never ship `Custom DocPerm` as a fixture.** `frappe.permissions.get_valid_perms` discards
+  *every* standard DocPerm for a doctype that has at least one Custom DocPerm row, so a
+  fixture carrying one role wipes out all the others on a fresh site -- Leave Application and
+  Timesheet lost HR Manager, HR User, Leave Approver and Projects User this way, and it was
+  invisible on this dev machine because HRMS's Employee Self Service User Type had already
+  copied the standard rows in through `frappe.permissions.add_permission`. Apply deltas in a
+  patch on top of `setup_custom_perms` instead (P2-U1).
 
 ## Employee gets locked/HR-only fields from more than one place (U5 follow-up)
 
@@ -547,6 +553,11 @@ cd frontend && yarn build
 BASELINE_MODE=full BASE_URL=http://localhost:8000 SITE_HOST=test_site \
   yarn test:e2e -- --project=baseline --workers=1
 ```
+
+**Tear the baseline down before `bench run-tests`.** The seed is not test-suite-neutral: with
+it in place five `test_api_dashboard_week` queue tests fail, because `_get_needs_you` picks up
+the 100 seeded "Baseline request" rows. Run `teardown_baseline_fixtures` first and the suite is
+back to one failure (the leave-balance baseline documented in `CLAUDE.md`) instead of six.
 
 `BASELINE_MODE=lightweight` runs the same protocol with 3 cold loads and 6 interactions instead of
 10 and 20 — that is the after-each-unit regression run; the full protocol is for U0 and U9.

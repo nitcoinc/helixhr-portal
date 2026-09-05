@@ -1,5 +1,6 @@
 import frappe
 from frappe.tests import IntegrationTestCase
+from frappe.utils import add_days, today
 
 from helixhr import preflight
 from helixhr.tests.utils import EMPLOYEE_USER, make_test_employee_and_manager
@@ -78,3 +79,89 @@ class TestPreflight(IntegrationTestCase):
 				preflight.run()
 
 		self._with_system_setting("apply_strict_user_permissions", 0, _run)
+
+
+class TestPreflightP2U1(IntegrationTestCase):
+	"""P2-U1 steps 3 and 4: the two HR Settings that carry R14 and
+	self-approval natively, the legacy-row WARN, and the Custom DocPerm
+	coverage trap. All four judge real site state."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+
+	def _with_hr_setting(self, field, value, fn):
+		original = frappe.db.get_single_value("HR Settings", field)
+		frappe.db.set_single_value("HR Settings", field, value)
+		try:
+			return fn()
+		finally:
+			frappe.db.set_single_value("HR Settings", field, original)
+
+	def test_leave_approver_mandatory_off_fails(self):
+		result = self._with_hr_setting(
+			"leave_approver_mandatory_in_leave_application",
+			0,
+			preflight.check_leave_approver_mandatory,
+		)
+		self.assertEqual(result["status"], preflight.FAIL)
+
+	def test_leave_approver_mandatory_on_passes(self):
+		result = self._with_hr_setting(
+			"leave_approver_mandatory_in_leave_application",
+			1,
+			preflight.check_leave_approver_mandatory,
+		)
+		self.assertEqual(result["status"], preflight.PASS)
+
+	def test_self_leave_approval_allowed_fails(self):
+		result = self._with_hr_setting(
+			"prevent_self_leave_approval", 0, preflight.check_self_leave_approval_blocked
+		)
+		self.assertEqual(result["status"], preflight.FAIL)
+
+	def test_self_leave_approval_blocked_passes(self):
+		result = self._with_hr_setting(
+			"prevent_self_leave_approval", 1, preflight.check_self_leave_approval_blocked
+		)
+		self.assertEqual(result["status"], preflight.PASS)
+
+	def test_a_legacy_approved_but_unsubmitted_leave_is_counted_as_a_warning(self):
+		from helixhr.tests.utils import ensure_leave_allocation
+
+		ensure_leave_allocation(self.employee_name, "Casual Leave", 5)
+		leave = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": self.employee_name,
+				"leave_type": "Casual Leave",
+				"from_date": add_days(today(), 96),
+				"to_date": add_days(today(), 96),
+				"description": "legacy defect row",
+				"leave_approver": frappe.session.user,
+			}
+		)
+		leave.insert(ignore_permissions=True)
+		# Exactly the shape the pre-P2-U1 approval path left behind.
+		frappe.db.set_value("Leave Application", leave.name, "status", "Approved", update_modified=False)
+		try:
+			result = preflight.check_unsubmitted_approved_leave()
+			self.assertEqual(result["status"], preflight.WARN)
+			self.assertIn("never submitted", result["detail"])
+
+			# And the patch that reports them finds this row.
+			from helixhr.patches.v1_0.report_unsubmitted_approved_leave import FIELDS
+
+			listed = frappe.get_all(
+				"Leave Application", filters={"docstatus": 0, "status": "Approved"}, fields=FIELDS
+			)
+			self.assertIn(leave.name, [row.name for row in listed])
+		finally:
+			frappe.delete_doc("Leave Application", leave.name, force=True, ignore_permissions=True)
+
+	def test_custom_docperm_coverage_passes_on_this_site(self):
+		"""If this ever fails, something has removed another role's access to
+		one of the doctypes this app customises -- see
+		patches.v1_0.apply_permission_deltas."""
+		result = preflight.check_custom_docperm_coverage()
+		self.assertEqual(result["status"], preflight.PASS, result["detail"])
