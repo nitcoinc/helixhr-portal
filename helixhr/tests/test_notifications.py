@@ -1,4 +1,5 @@
 import hashlib
+import uuid
 
 import frappe
 from frappe.model.workflow import apply_workflow
@@ -132,16 +133,20 @@ class TestNotifications(IntegrationTestCase):
 		self.assertIn("Please add a task", log.description or "")
 
 	def test_hr_request_status_change_notifies_the_requester(self):
+		# P2-U8: role Employee has no generic `create` on HR Request any
+		# more, so a request is made the way the portal makes one.
+		from helixhr.api import create_my_request
+
 		frappe.set_user(EMPLOYEE_USER)
 		doc = frappe.get_doc(
-			{
-				"doctype": "HR Request",
-				"category": "HR Letter",
-				"subject": "Need a letter",
-				"details": "test",
-			}
+			"HR Request",
+			create_my_request(
+				category="HR Letter",
+				subject="Need a letter",
+				details="test",
+				operation_key=str(uuid.uuid4()),
+			)["name"],
 		)
-		doc.insert()
 
 		before = self._unread_count(EMPLOYEE_USER)
 
@@ -175,15 +180,20 @@ class TestNotifications(IntegrationTestCase):
 		)
 
 	def _employee_request(self):
+		# P2-U8: role Employee has no generic `create` on HR Request any
+		# more, so a request is made the way the portal makes one.
+		from helixhr.api import create_my_request
+
 		frappe.set_user(EMPLOYEE_USER)
 		doc = frappe.get_doc(
-			{
-				"doctype": "HR Request",
-				"category": "HR Letter",
-				"subject": "Address proof",
-				"details": "For my bank.",
-			}
-		).insert()
+			"HR Request",
+			create_my_request(
+				category="HR Letter",
+				subject="Address proof",
+				details="For my bank.",
+				operation_key=str(uuid.uuid4()),
+			)["name"],
+		)
 		frappe.set_user("Administrator")
 		doc.reload()
 		return doc
@@ -246,6 +256,8 @@ class TestNotifications(IntegrationTestCase):
 		self.assertEqual(len(self._reply_logs(doc.name)), 1)
 
 	def test_new_hr_request_notifies_hr_manager_without_details(self):
+		from helixhr.api import create_my_request
+
 		hr_manager_user = "hr-manager-notif@helixhr.test"
 		if not frappe.db.exists("User", hr_manager_user):
 			frappe.get_doc(
@@ -262,14 +274,12 @@ class TestNotifications(IntegrationTestCase):
 		before = self._unread_count(hr_manager_user)
 
 		frappe.set_user(EMPLOYEE_USER)
-		frappe.get_doc(
-			{
-				"doctype": "HR Request",
-				"category": "Payroll Question",
-				"subject": "Why is my payslip late",
-				"details": "Some very private salary detail that should not leak into the subject line",
-			}
-		).insert()
+		create_my_request(
+			category="Payroll Question",
+			subject="Why is my payslip late",
+			details="Some very private salary detail that should not leak into the subject line",
+			operation_key=str(uuid.uuid4()),
+		)
 
 		frappe.set_user("Administrator")
 		after = self._unread_count(hr_manager_user)

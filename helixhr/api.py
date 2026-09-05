@@ -1,7 +1,11 @@
 import json
+import os
+import re
+from mimetypes import guess_type
 
 import frappe
 from frappe import _
+from frappe.handler import ALLOWED_MIMETYPES
 from frappe.utils import (
 	add_days,
 	cint,
@@ -2246,3 +2250,380 @@ def get_my_documents():
 		fields=["name", "title", "url", "company", "description"],
 		order_by="title asc",
 	)
+
+
+# ---------------------------------------------------------------------------
+# HR Requests (P2-U8, P2-R12, P2-R13, P2-R18, P2-R22, P2-R25, P2-R27)
+#
+# The employee's conversation with HR. Three rules hold this section together:
+#
+#   * Role Employee has no `create` and no `write` on HR Request any more
+#     (the DocType's own permissions). Everything an employee writes here goes
+#     through `create_my_request` or `attach_to_my_request`, both of which
+#     resolve the employee from the session and accept a fixed, bounded set of
+#     fields -- so there is no generic Frappe route left that widens what an
+#     employee may say about their own request, or whose request it is.
+#   * Creating the request and attaching the file are **two** observable
+#     steps, and they are told apart on purpose (P2-R18). A request whose
+#     upload failed is a real request that is missing a file, not a failure --
+#     saying "couldn't send" about a committed record is the defect this
+#     replaces.
+#   * The first of those two steps carries a client operation key, so a
+#     response lost between the commit and the browser costs a retry rather
+#     than a duplicate request (P2-AE7).
+# ---------------------------------------------------------------------------
+
+# One bounded first page, and the ceiling Load More may climb to (P2-R22).
+_REQUEST_PAGE = 20
+_REQUEST_MAX_PAGE = 100
+
+_REQUEST_FIELDS = (
+	"name",
+	"category",
+	"subject",
+	"status",
+	"hr_note",
+	"creation",
+	"picked_up_on",
+	"replied_on",
+	"closed_on",
+)
+
+# What the new-request sheet states up front, enforced here so the sentence on
+# the screen is a rule and not a hope. The site's own `max_file_size` still
+# applies underneath (File.check_max_file_size); this is the portal's own,
+# lower, stated cap.
+_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
+
+# The shape `crypto.randomUUID()` produces, plus enough slack for a fallback
+# generator, and nothing else. Bounded input at the boundary: this value goes
+# into an indexed unique column.
+_OPERATION_KEY_PATTERN = re.compile(r"^[A-Za-z0-9-]{16,64}$")
+
+# Data(140) on the DocType. Truncating silently would change what the employee
+# said, so an over-long subject is refused rather than trimmed.
+_SUBJECT_MAX = 140
+_DETAILS_MAX = 5000
+
+
+@frappe.whitelist()
+def get_my_requests(limit=None):
+	"""A bounded page of this employee's own requests, newest first.
+
+	Carries what the list actually renders and nothing else: the lifecycle
+	dates, HR's reply, how many files are on it, and whether there is an
+	unread notification about it -- which is what puts a row under "Needs
+	you" rather than a status word (P2-R13).
+	"""
+	employee = get_current_employee()
+	limit = min(max(cint(limit) or _REQUEST_PAGE, 1), _REQUEST_MAX_PAGE)
+
+	rows = frappe.get_all(
+		"HR Request",
+		filters={"employee": employee},
+		fields=list(_REQUEST_FIELDS),
+		order_by="creation desc",
+		limit=limit,
+	)
+	names = [row.name for row in rows]
+	unread = _unread_request_notifications(names)
+	counts = _attachment_counts(names)
+
+	return {
+		"requests": [
+			{
+				**row,
+				"unread": row.name in unread,
+				"attachments": counts.get(row.name, 0),
+			}
+			for row in rows
+		],
+		"total": frappe.db.count("HR Request", {"employee": employee}),
+		"limit": limit,
+		"today": user_today(),
+	}
+
+
+@frappe.whitelist()
+def get_my_request(name):
+	"""One request, in full: what the employee wrote, when it moved, HR's
+	reply, and every file on it (P2-R12, P2-R18).
+
+	Its own read rather than a lookup into the list, because the list is
+	bounded -- an old request reached from a notification or a bookmark is
+	not necessarily on the page the list returned.
+	"""
+	employee = get_current_employee()
+	return _request_detail(name, employee)
+
+
+def _request_detail(name, employee):
+	row = frappe.db.get_value(
+		"HR Request", name, [*_REQUEST_FIELDS, "details", "employee"], as_dict=True
+	)
+	if not row:
+		frappe.throw(_("That request no longer exists."), frappe.DoesNotExistError)
+	if row.employee != employee:
+		# Not "not found": the caller is authenticated and this is a refusal,
+		# which the portal renders as its own state with no Retry (P2-R2).
+		frappe.throw(_("That request isn't yours."), frappe.PermissionError)
+	row.pop("employee")
+
+	files = frappe.get_all(
+		"File",
+		filters={"attached_to_doctype": "HR Request", "attached_to_name": name},
+		fields=["name", "file_name", "file_url", "file_size", "is_private", "owner", "creation"],
+		order_by="creation asc",
+	)
+	mine = frappe.session.user
+	return {
+		**row,
+		"unread_notifications": _unread_request_notifications([name]).get(name, []),
+		# Split by who put it there, because the screen says two different
+		# things about them: yours sit under "You wrote", HR's under "HR
+		# replied". Every one of them is private and reachable only through
+		# File's own download check against this request (P2-U8 scenario 4).
+		"attachments": [_attachment(row) for row in files if row.owner == mine],
+		"hr_attachments": [_attachment(row) for row in files if row.owner != mine],
+	}
+
+
+def _attachment(row):
+	return {
+		"name": row.name,
+		"file_name": row.file_name,
+		"file_url": row.file_url,
+		"file_size": cint(row.file_size),
+		"is_private": cint(row.is_private),
+	}
+
+
+def _attachment_counts(names):
+	"""How many files each of these requests carries, in one query rather
+	than one per row (P2-R22)."""
+	if not names:
+		return {}
+	counts = {}
+	# Counted here rather than with a GROUP BY: Frappe v16's query builder
+	# refuses a SQL function written as a string in `fields`, and the page is
+	# bounded to 100 requests with a handful of files each, so one flat read
+	# is both cheaper to reason about and still a single query.
+	for row in frappe.get_all(
+		"File",
+		filters={"attached_to_doctype": "HR Request", "attached_to_name": ["in", names]},
+		pluck="attached_to_name",
+	):
+		counts[row] = counts.get(row, 0) + 1
+	return counts
+
+
+def _unread_request_notifications(names):
+	"""{request name -> the caller's unread Notification Log rows about it}.
+
+	The read state is Frappe's own (P2-KTD6); there is no second seen-model
+	here. `for_user` is the session user in the filter as well as in the
+	doctype's permission query -- this runs through `frappe.get_all`, which
+	does not apply that query, so the filter is the boundary.
+	"""
+	if not names:
+		return {}
+	found = {}
+	for row in frappe.get_all(
+		"Notification Log",
+		filters={
+			"for_user": frappe.session.user,
+			"document_type": "HR Request",
+			"document_name": ["in", names],
+			"read": 0,
+		},
+		fields=["name", "document_name"],
+	):
+		found.setdefault(row.document_name, []).append(row.name)
+	return found
+
+
+@frappe.whitelist(methods=["POST"])
+def mark_my_request_read(name):
+	"""Clear the read obligation on a request the employee has just opened
+	(P2-R13, P2-U8 step 5).
+
+	Every unread Notification Log this user holds about this request, not
+	only the HR-reply one: the employee has now seen the record all of them
+	point at, and leaving a status-change row unread would leave the shell
+	badge claiming there is something else to look at.
+
+	Returns the new total so the badge moves in the same interaction rather
+	than at the next poll.
+	"""
+	employee = get_current_employee()
+	if frappe.db.get_value("HR Request", name, "employee") != employee:
+		frappe.throw(_("That request isn't yours."), frappe.PermissionError)
+
+	cleared = _unread_request_notifications([name]).get(name, [])
+	for log in cleared:
+		# Scoped to `for_user` by the query above, so this can only ever mark
+		# the caller's own row.
+		frappe.db.set_value("Notification Log", log, "read", 1, update_modified=False)
+
+	return {"cleared": len(cleared), "unread": _get_unread_notification_count()}
+
+
+@frappe.whitelist(methods=["POST"])
+def create_my_request(category, subject, details=None, operation_key=None):
+	"""Create this employee's HR Request, once, whatever the network does
+	(P2-R18, P2-R25, P2-AE7).
+
+	`operation_key` is generated by the browser with `crypto.randomUUID()`
+	**once per user attempt** and stored on the record in a unique column.
+	The contract it buys:
+
+	  * A first call commits the request and returns it.
+	  * A retry with the same key -- the case where the first response was
+	    lost -- returns *that* request rather than making a second one.
+	  * A key that already belongs to somebody else's request is refused
+	    with `DuplicateEntryError` and nothing else: no name, no subject, no
+	    hint that a record exists. The caller's contract is to rotate the key
+	    and send again.
+	  * A deliberate second submission carries a *new* key, so it is a
+	    second request and is meant to be.
+
+	Employee, status and the naming series are all record facts rather than
+	caller inputs, and category is checked against the DocType's own options
+	-- `frappe.client.insert` with a browser-built document, which this
+	replaces, offered every one of them as a parameter.
+	"""
+	employee = get_current_employee()
+	key = (operation_key or "").strip()
+	if not _OPERATION_KEY_PATTERN.match(key):
+		frappe.throw(_("That request couldn't be started. Try sending it again."))
+
+	existing = _request_for_key(key, employee)
+	if existing:
+		return {**_request_detail(existing, employee), "created": False}
+
+	category = (category or "").strip()
+	if category not in _request_categories():
+		frappe.throw(_("Pick what your request is about."))
+	subject = (subject or "").strip()
+	if not subject:
+		frappe.throw(_("Give your request a subject, so HR knows what it's about."))
+	if len(subject) > _SUBJECT_MAX:
+		frappe.throw(_("That subject is too long. Keep it under {0} characters.").format(_SUBJECT_MAX))
+	details = (details or "").strip()
+	if len(details) > _DETAILS_MAX:
+		frappe.throw(_("Those details are too long. Keep them under {0} characters.").format(_DETAILS_MAX))
+
+	doc = frappe.get_doc(
+		{
+			"doctype": "HR Request",
+			"employee": employee,
+			"category": category,
+			"subject": subject,
+			"details": details or None,
+			"client_operation_key": key,
+		}
+	)
+	try:
+		# Role Employee has no `create` on this DocType by design: the
+		# allow-list above *is* the create rule, and it is stricter than a
+		# DocPerm can be.
+		doc.insert(ignore_permissions=True)
+	except (frappe.UniqueValidationError, frappe.DuplicateEntryError):
+		# Two calls with the same key raced. Whichever lost re-reads and
+		# returns the winner, which is the same answer a later retry gets.
+		frappe.db.rollback()
+		won = _request_for_key(key, employee)
+		if not won:
+			raise
+		return {**_request_detail(won, employee), "created": False}
+
+	return {**_request_detail(doc.name, employee), "created": True}
+
+
+def _request_for_key(key, employee):
+	"""The request this key already made, if any. Refuses rather than
+	answers when the key belongs to another employee."""
+	row = frappe.db.get_value(
+		"HR Request", {"client_operation_key": key}, ["name", "employee"], as_dict=True
+	)
+	if not row:
+		return None
+	if row.employee != employee:
+		frappe.throw(
+			_("That request couldn't be started. Try sending it again."),
+			frappe.DuplicateEntryError,
+		)
+	return row.name
+
+
+def _request_categories():
+	options = frappe.get_meta("HR Request").get_field("category").options or ""
+	return [line.strip() for line in options.split("\n") if line.strip()]
+
+
+@frappe.whitelist(methods=["POST"])
+def attach_to_my_request(name):
+	"""Attach one private file to a request of the caller's own (P2-R27).
+
+	Frappe's `upload_file` cannot serve this any more: it gates on `write`
+	permission for the target document, and role Employee deliberately has
+	no write on HR Request. This is the same job with the ownership rule
+	stated directly, plus the type and size policy the new-request sheet
+	promises the employee up front.
+
+	Idempotent by (request, file name, uploader), so "Retry upload" after a
+	failed or ambiguous attempt attaches the file once rather than twice
+	(P2-AE7). The multipart body is read from `frappe.request.files`, which
+	is where Frappe puts an uploaded stream for any whitelisted method.
+	"""
+	employee = get_current_employee()
+	if frappe.db.get_value("HR Request", name, "employee") != employee:
+		frappe.throw(_("That request isn't yours."), frappe.PermissionError)
+
+	upload = (getattr(frappe.request, "files", None) or {}).get("file")
+	if upload is None:
+		frappe.throw(_("No file came through. Pick the file again."))
+
+	file_name = os.path.basename(upload.filename or "").strip()
+	if not file_name:
+		frappe.throw(_("That file has no name. Pick another one."))
+
+	content = upload.stream.read()
+	if len(content) > _ATTACHMENT_MAX_BYTES:
+		frappe.throw(
+			_("That file is bigger than {0} MB. Send a smaller one.").format(
+				_ATTACHMENT_MAX_BYTES // (1024 * 1024)
+			)
+		)
+	if guess_type(file_name)[0] not in ALLOWED_MIMETYPES:
+		frappe.throw(_("You can attach a PDF, an image or an Office document."))
+
+	existing = frappe.db.get_value(
+		"File",
+		{
+			"attached_to_doctype": "HR Request",
+			"attached_to_name": name,
+			"file_name": file_name,
+			"owner": frappe.session.user,
+		},
+		["name", "file_name", "file_url", "file_size", "is_private"],
+		as_dict=True,
+	)
+	if existing:
+		return {**_attachment(existing), "created": False}
+
+	doc = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": file_name,
+			"content": content,
+			"attached_to_doctype": "HR Request",
+			"attached_to_name": name,
+			# Never a parameter. `helixhr.events.file_before_insert` refuses a
+			# non-private file on an HR Request anyway; this is why it never
+			# has to.
+			"is_private": 1,
+		}
+	)
+	doc.insert(ignore_permissions=True)
+	return {**_attachment(doc), "created": True}

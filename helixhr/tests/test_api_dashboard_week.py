@@ -1,3 +1,5 @@
+import uuid
+
 import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, getdate, today
@@ -353,15 +355,20 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 		"""An HR Request the employee owns, answered by somebody else -- the
 		reply notification is written by the doc event, exactly as it is in
 		production."""
+		from helixhr.api import create_my_request
+
 		frappe.set_user(EMPLOYEE_USER)
+		# P2-U8: the portal's own method -- role Employee has no generic
+		# `create` on HR Request any more.
 		doc = frappe.get_doc(
-			{
-				"doctype": "HR Request",
-				"category": "HR Letter",
-				"subject": "Address proof",
-				"details": "For my bank.",
-			}
-		).insert()
+			"HR Request",
+			create_my_request(
+				category="HR Letter",
+				subject="Address proof",
+				details="For my bank.",
+				operation_key=str(uuid.uuid4()),
+			)["name"],
+		)
 		frappe.set_user("Administrator")
 		doc.reload()
 		doc.hr_note = note

@@ -277,24 +277,69 @@ row carries the **Monday** of its week rather than the record's `start_date`: ER
 - "Avg 38.2 h" is the average of the weeks currently loaded, and says so by moving when more are
   loaded. An all-time average would need a second aggregate query for a decorative figure.
 
-## Requests · phone, detail, new sheet, desktop (P2-U8)
+## Requests · phone, detail, new sheet, desktop (P2-U8 — **built**)
 
-Conversation rows: category as a `.label`, subject, "Sent …", status badge, trailing chevron. HR's
-reply is an **attributed bubble** with an initials monogram and an attachment chip, not a "HR:"
-prefix. Grouped **Needs you / Open / Closed**. The detail view is a timeline: Sent → Picked up →
-Replied. A partial failure is told truthfully — "request sent, file failed", with Retry upload.
-The new-request sheet offers the category as four explained tiles. Desktop is list + detail.
+Conversation rows: category as a `.label`, subject, "Sent … · picked up …", status badge, trailing
+chevron. HR's reply is an **attributed bubble** with an initials monogram, not a "HR:" prefix.
+Grouped **Needs you / Open / Closed** — and "Needs you" is *not* a status: it is an unread
+Notification Log row about that request, the same read state the shell badge and Notifications use
+(P2-KTD6). A reply you have read stops needing you while the request stays Done.
 
-*Built so far (P2-U3):* resting cards, category labels, status badges, the reply as an inset block,
-async states. The grouping, the timeline detail, the tiles and the upload-retry contract are P2-U8's.
+The detail view is a timeline (Sent → Picked up by HR → Replied), then what the employee wrote with
+its attachment chips, then HR's reply with its own. A partial failure is told truthfully on the
+record it is about — "Your request was sent; only the file failed." with **Retry upload**. The
+new-request sheet offers the category as four explained tiles and states the attachment rule before
+the file picker. Desktop lists left and shows the record right, at the same URL (`/requests/:name`,
+KTD5).
 
-## Documents · phone, desktop (P2-U8)
+The three timeline dates are the record's own: `picked_up_on`, `replied_on` and `closed_on` are
+stamped by `HRRequest.before_save` inside the save that causes them. Reconstructing them from
+Version rows was the alternative and is worse twice over — Version stores a JSON diff the Employee
+role cannot read, and parsing one per row is the N+1 P2-R22 exists to prevent.
 
-Type icon, title, description, host name. Grouped **For everyone / \<company\>** with `.label`.
-Search above the list, and an "Ask HR" line under it. Desktop is a three-column grid.
+*Deviations from the artboard, recorded:*
 
-*Built so far (P2-U3):* the grouping, the type icon, the host name and the chevron. Search and the
-desktop grid are P2-U8's.
+- **A step with no date is not drawn.** A request that existed before P2-U8 has no stamps, so its
+  timeline says "Sent" alone. An undated dot would claim something happened without being able to
+  say when.
+- **"Marked as read just now" appears when *this view* cleared the obligation** — opening the
+  request from the list, from Home, or from a bookmark. Reaching it from **Notifications** does not
+  show the line, because P2-U4's notification row already marked itself read on the way out and the
+  detail found nothing left to clear. The caption is a receipt for an action, not a description of
+  a state.
+- **The failed upload lives in memory.** "Retry upload" holds the bytes the browser already has;
+  after a reload the chip is gone and the honest path is to attach the file to the request again.
+  No server can hold a file that never arrived.
+- **"Ask a follow-up" opens the new-request sheet**, not a reply box. HR Request has no threading,
+  and adding one here would be a second conversation model.
+- The attachment chip uses the `requests` (document) glyph rather than a paperclip: `lib/icons.js`
+  carries no paperclip and P2-U8's file list does not include it. Worth one line in a later unit.
+- **The page header stays on the phone detail view**, where the artboard replaces it with the back
+  link alone. Leave (P2-U5) already ships that way, and one screen dropping its title and primary
+  action while its sibling keeps them is a bigger inconsistency than the extra 56px.
+
+## Documents · phone, desktop (P2-U8 — **built**)
+
+Type icon (document for a `.pdf` address, folder for any other link — derived from the URL, not
+stored), title, description, host name. Grouped **For everyone / \<company\>** with `.label`.
+A search field and an "Ask HR" line above the list. Desktop is a three-column grid.
+
+The rows come from `helixhr.api.get_my_documents`, which resolves the employee and their company
+from the session. The page used to send its own `or_filters` to `frappe.client.get_list`: the
+server-side scope that makes the answer safe landed in P2-U1, but as long as the *question* came
+from the browser the page still read as though the filter were the boundary.
+
+**Grouping and search ship whatever the row count is**, because the two groups are the permission
+model P2-R19 enforces, made visible.
+
+*Deviations from the artboard, recorded:*
+
+- The search field carries a **visible label**, where the artboard shows a placeholder and a glyph.
+  "Visible labels always, never placeholder-as-label" is a design-system rule (`design-system.md`,
+  component conventions) and it outranks the comp.
+- A search that matches nothing gets its **own** line ("Nothing here matches … Ask HR if it should
+  be."), not the empty state. An empty catalogue and a narrow search are different facts and P2-R2
+  forbids showing one as the other.
 
 ## Approvals · phone, desktop (P2-U7 — **built**)
 

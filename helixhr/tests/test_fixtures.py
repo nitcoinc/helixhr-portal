@@ -1,3 +1,5 @@
+import uuid
+
 import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, add_to_date, get_datetime, today
@@ -55,16 +57,18 @@ class TestLeastPrivilegePermissions(IntegrationTestCase):
 		frappe.set_user("Administrator")
 
 	def test_an_employee_cannot_share_their_own_request(self):
+		# P2-U8: role Employee has no `create` on HR Request any more, so the
+		# fixture goes through the portal's own session-scoped method.
+		from helixhr.api import create_my_request
+
 		frappe.set_user(EMPLOYEE_USER)
-		request = frappe.get_doc(
-			{
-				"doctype": "HR Request",
-				"category": "HR Letter",
-				"subject": "P2-U1 sharing check",
-				"details": "no sharing",
-			}
+		created = create_my_request(
+			category="HR Letter",
+			subject="P2-U1 sharing check",
+			details="no sharing",
+			operation_key=str(uuid.uuid4()),
 		)
-		request.insert()
+		request = frappe.get_doc("HR Request", created["name"])
 
 		self.assertFalse(frappe.has_permission("HR Request", "share", doc=request.name))
 		with self.assertRaises(frappe.PermissionError):
@@ -242,14 +246,16 @@ class TestStrictPermissionParity(IntegrationTestCase):
 		subject = "P2-AE9 permission parity"
 		name = frappe.db.get_value("HR Request", {"subject": subject}, "name")
 		if not name:
-			name = frappe.get_doc(
-				{
-					"doctype": "HR Request",
-					"category": "HR Letter",
-					"subject": subject,
-					"details": "parity",
-				}
-			).insert().name
+			# P2-U8: the portal method, because role Employee no longer has a
+			# generic `create` on this DocType.
+			from helixhr.api import create_my_request
+
+			name = create_my_request(
+				category="HR Letter",
+				subject=subject,
+				details="parity",
+				operation_key=str(uuid.uuid4()),
+			)["name"]
 		records["HR Request"] = name
 
 		file_name = frappe.db.get_value(

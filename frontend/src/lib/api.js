@@ -63,18 +63,30 @@ export function call(method, params) {
   })
 }
 
-/** Upload a File to a document's attachments. frappe-ui's frappeRequest
- * always JSON-encodes the body and forces a JSON Content-Type header, so
- * it can't carry multipart form data -- this goes straight through
- * fetch instead, letting the browser set its own multipart boundary. */
-export async function uploadFile(file, { doctype, docname }) {
+/**
+ * Attach one private file to an HR Request the signed-in employee owns.
+ *
+ * frappe-ui's frappeRequest always JSON-encodes the body and forces a JSON
+ * Content-Type header, so it can't carry multipart form data -- this goes
+ * straight through fetch instead, letting the browser set its own multipart
+ * boundary.
+ *
+ * P2-U8: the endpoint is the portal's own, not Frappe's generic
+ * `upload_file`. That one gates on `write` permission for the target
+ * document, and role Employee deliberately no longer has write on HR Request
+ * -- so the ownership rule, the private flag, and the file type and size
+ * policy the sheet promises all live in one session-scoped method (P2-R27).
+ *
+ * The failure carries `helixhrMethod` and a plain `messages` array, so a
+ * failed attachment reads the same way in the UI as any other API failure.
+ */
+export async function attachToRequest(file, { name }) {
   const formData = new FormData()
   formData.append('file', file)
-  formData.append('doctype', doctype)
-  formData.append('docname', docname)
-  formData.append('is_private', '1')
+  formData.append('name', name)
 
-  const response = await fetch('/api/method/upload_file', {
+  const url = '/api/method/helixhr.api.attach_to_my_request'
+  const response = await fetch(url, {
     method: 'POST',
     headers: {
       'X-Frappe-CSRF-Token': window.csrf_token,
@@ -84,8 +96,18 @@ export async function uploadFile(file, { doctype, docname }) {
   if (!response.ok) {
     const body = await response.json().catch(() => ({}))
     const error = new Error(body?.exception || 'Upload failed')
-    error.messages = body?._server_messages ? JSON.parse(body._server_messages) : []
+    error.messages = body?._server_messages
+      ? JSON.parse(body._server_messages).map((m) => {
+          try {
+            return JSON.parse(m).message
+          } catch {
+            return m
+          }
+        })
+      : []
+    error.exc_type = body?.exc_type
     error.response = response
+    error.helixhrMethod = url
     throw error
   }
   return (await response.json()).message

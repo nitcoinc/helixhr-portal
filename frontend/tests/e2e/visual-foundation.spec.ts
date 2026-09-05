@@ -40,9 +40,11 @@ test.describe('employee', () => {
   }) => {
     // Only the list call fails. The bootstrap still succeeds, so this is a
     // section failure inside a healthy portal -- exactly the case that used
-    // to render as "You have no requests yet".
+    // to render as "You have no requests yet". P2-U8 moved Requests off
+    // `frappe.client.get_list` onto its own session-scoped endpoint, so that
+    // is what the stub names now.
     let failures = 0
-    await page.route('**/api/method/frappe.client.get_list*', (route) => {
+    await page.route('**/api/method/helixhr.api.get_my_requests*', (route) => {
       failures += 1
       return route.fulfill({
         status: 500,
@@ -68,11 +70,11 @@ test.describe('employee', () => {
   test('a successful empty response is a task-specific empty state with an action', async ({
     page,
   }) => {
-    await page.route('**/api/method/frappe.client.get_list*', (route) =>
+    await page.route('**/api/method/helixhr.api.get_my_requests*', (route) =>
       route.fulfill({
         status: 200,
         contentType: 'application/json',
-        body: JSON.stringify({ message: [] }),
+        body: JSON.stringify({ message: { requests: [], total: 0, limit: 20 } }),
       }),
     )
 
@@ -93,7 +95,7 @@ test.describe('employee', () => {
     const held = new Promise<void>((resolve) => {
       release = resolve
     })
-    await page.route('**/api/method/frappe.client.get_list*', async (route) => {
+    await page.route('**/api/method/helixhr.api.get_my_requests*', async (route) => {
       await held
       return route.continue()
     })
@@ -323,7 +325,7 @@ test.describe('employee', () => {
     const held = new Promise<void>((resolve) => {
       release = resolve
     })
-    await page.route('**/api/method/frappe.client.get_list*', async (route) => {
+    await page.route('**/api/method/helixhr.api.get_my_requests*', async (route) => {
       await held
       return route.continue()
     })

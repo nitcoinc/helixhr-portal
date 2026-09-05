@@ -2,6 +2,7 @@ import frappe
 from frappe import _
 from frappe.utils import cint
 
+from helixhr.helixhr.doctype.hr_request.hr_request import request_belongs_to_session
 from helixhr.utils import get_manager_user
 
 # Timesheet workflow document event hooks (KTD7, KTD18). Two guards, both
@@ -206,9 +207,17 @@ def file_before_insert(doc, method=None):
 	the wrong (public) path, which then fails File's own later
 	validation with a confusing "incorrect File URL" error -- refusing
 	outright is both simpler and doesn't leave a real file sitting in
-	the public folder even momentarily. RequestForm.vue already always
-	uploads with is_private=1, so this only ever fires against a caller
-	that bypasses the portal's own upload path.
+	the public folder even momentarily. `helixhr.api.attach_to_my_request`
+	already always writes is_private=1, so this only ever fires against a
+	caller that bypasses the portal's own upload path.
+
+	P2-U8: the ownership test used to be `has_permission("HR Request",
+	"write", ...)`. Role Employee no longer has write on HR Request at all
+	(creation and attachment go through the two session-scoped portal
+	methods instead), so that check would now refuse the request's own
+	owner. `request_belongs_to_session` asks the question this hook actually
+	means -- is this the caller's own request -- and HR keeps its own write
+	permission as the second branch.
 	"""
 	if doc.attached_to_doctype != "HR Request" or not doc.attached_to_name:
 		return
@@ -216,8 +225,12 @@ def file_before_insert(doc, method=None):
 	if not cint(doc.is_private):
 		frappe.throw(_("Files attached to a request must be private."), frappe.PermissionError)
 
-	if not frappe.has_permission("HR Request", "write", doc.attached_to_name):
-		frappe.throw(
-			_("You can't attach a file to that request."),
-			frappe.PermissionError,
-		)
+	if request_belongs_to_session(doc.attached_to_name):
+		return
+	if frappe.has_permission("HR Request", "write", doc.attached_to_name):
+		return
+
+	frappe.throw(
+		_("You can't attach a file to that request."),
+		frappe.PermissionError,
+	)
