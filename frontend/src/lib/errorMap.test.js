@@ -72,3 +72,31 @@ describe('toPlainLeaveError', () => {
     )
   })
 })
+
+// P2-U5. The two messages the leave lifecycle added, plus the promise that
+// the portal's own plain refusals survive the map untouched.
+describe('P2-U5 leave lifecycle messages', () => {
+  it('names the next step when no approver is set', () => {
+    expect(
+      toPlainLeaveError({ messages: ['Leave Approver is mandatory in Leave Application'] }),
+    ).toBe("You don't have a leave approver yet, so this can't be sent. Ask HR to set one.")
+  })
+
+  it('asks for a leave type rather than repeating the field name', () => {
+    expect(toPlainLeaveError({ messages: ['Leave Type is mandatory'] })).toBe(
+      'Pick a leave type first.',
+    )
+  })
+
+  it('passes the portal\'s own plain refusals through unchanged', () => {
+    const refusal =
+      'This leave has already been decided, so it can\'t be withdrawn. Ask HR to cancel it.'
+    expect(toPlainLeaveError({ messages: [refusal] })).toBe(refusal)
+  })
+
+  it('passes the reversed-range refusal through unchanged', () => {
+    expect(
+      toPlainLeaveError({ messages: ['The end date must be on or after the start date.'] }),
+    ).toBe('The end date must be on or after the start date.')
+  })
+})

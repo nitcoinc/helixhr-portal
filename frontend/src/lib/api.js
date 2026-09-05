@@ -22,6 +22,10 @@ export function apiRequest(options) {
   return frappeRequest(options).catch((error) => {
     const status = error?.response?.status
     const messages = error?.messages || []
+    // P2-R25: carry *which* call failed on the error itself, so a section's
+    // retry panel and anything that logs the failure can name it instead of
+    // reporting an anonymous "something went wrong".
+    if (error && !error.helixhrMethod) error.helixhrMethod = options?.url
     const requiresLogin =
       status === 401 ||
       LOGIN_REQUIRED_EXC_TYPES.includes(error?.exc_type) ||
@@ -30,7 +34,17 @@ export function apiRequest(options) {
       redirectToLogin()
       return Promise.reject(error)
     }
-    if (status === 417 || error?.exc_type === 'CSRFTokenError') {
+    // A stale CSRF token is the one failure a reload actually fixes, and
+    // `exc_type` is the only reliable way to spot it. The `status === 417`
+    // clause that used to sit here was inverted: Frappe's CSRFTokenError is
+    // **400**, while 417 is plain ValidationError -- the status of every
+    // `frappe.throw` this app makes. So every domain refusal ("this has
+    // already been decided", "you do not have enough Casual Leave") reloaded
+    // the page instead of being shown, which is exactly the "explain the
+    // outcome" behaviour P2-R25 and P2-U7 step 4 ask for. Found while
+    // building P2-U7's stale-decision path; belongs to P2-U2's api.js, fixed
+    // here because no refusal message can reach any screen while it stands.
+    if (error?.exc_type === 'CSRFTokenError') {
       window.location.reload()
       return Promise.reject(error)
     }
@@ -49,18 +63,30 @@ export function call(method, params) {
   })
 }
 
-/** Upload a File to a document's attachments. frappe-ui's frappeRequest
- * always JSON-encodes the body and forces a JSON Content-Type header, so
- * it can't carry multipart form data -- this goes straight through
- * fetch instead, letting the browser set its own multipart boundary. */
-export async function uploadFile(file, { doctype, docname }) {
+/**
+ * Attach one private file to an HR Request the signed-in employee owns.
+ *
+ * frappe-ui's frappeRequest always JSON-encodes the body and forces a JSON
+ * Content-Type header, so it can't carry multipart form data -- this goes
+ * straight through fetch instead, letting the browser set its own multipart
+ * boundary.
+ *
+ * P2-U8: the endpoint is the portal's own, not Frappe's generic
+ * `upload_file`. That one gates on `write` permission for the target
+ * document, and role Employee deliberately no longer has write on HR Request
+ * -- so the ownership rule, the private flag, and the file type and size
+ * policy the sheet promises all live in one session-scoped method (P2-R27).
+ *
+ * The failure carries `helixhrMethod` and a plain `messages` array, so a
+ * failed attachment reads the same way in the UI as any other API failure.
+ */
+export async function attachToRequest(file, { name }) {
   const formData = new FormData()
   formData.append('file', file)
-  formData.append('doctype', doctype)
-  formData.append('docname', docname)
-  formData.append('is_private', '1')
+  formData.append('name', name)
 
-  const response = await fetch('/api/method/upload_file', {
+  const url = '/api/method/helixhr.api.attach_to_my_request'
+  const response = await fetch(url, {
     method: 'POST',
     headers: {
       'X-Frappe-CSRF-Token': window.csrf_token,
@@ -70,14 +96,35 @@ export async function uploadFile(file, { doctype, docname }) {
   if (!response.ok) {
     const body = await response.json().catch(() => ({}))
     const error = new Error(body?.exception || 'Upload failed')
-    error.messages = body?._server_messages ? JSON.parse(body._server_messages) : []
+    error.messages = body?._server_messages
+      ? JSON.parse(body._server_messages).map((m) => {
+          try {
+            return JSON.parse(m).message
+          } catch {
+            return m
+          }
+        })
+      : []
+    error.exc_type = body?.exc_type
     error.response = response
+    error.helixhrMethod = url
     throw error
   }
   return (await response.json()).message
 }
 
+// A dead session usually fails several in-flight requests at once. Without
+// this latch each one reassigns window.location, and the destination the
+// *last* one happened to compute is the one that wins -- so the requested
+// page could be lost on the way to /login (P2-U2 scenario 3, 6).
+let redirecting = false
+
 function redirectToLogin() {
+  if (redirecting) return
+  redirecting = true
+  // `redirect-to` is what preserves the destination through the login form:
+  // Frappe's login page sends the user back here afterwards, and the full
+  // portal path (including any exact-record route, P2-R12) is in it.
   const current = window.location.pathname + window.location.search
   window.location.href = `/login?redirect-to=${encodeURIComponent(current)}`
 }

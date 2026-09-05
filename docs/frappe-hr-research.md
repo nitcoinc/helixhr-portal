@@ -65,7 +65,7 @@ Alternative if IT insists on SAML: `castlecraft/microsoft_integration` app. Not 
 
 - **frappe-ui**: Vue 3 component library + data helpers (`createResource`, `useDoc`, `useList`, `useCall`). Tailwind.
 - **frappe-ui-starter** (`npx degit netchampfaris/frappe-ui-starter frontend` inside the app): Vue 3, Vue Router, Tailwind, Vite. Dev server on 8080 proxies to Frappe on 8000. Build output goes to the app's `www/<name>` folder; `hooks.py` `website_route_rules` maps `/helixhr/*` to it.
-- Session: same origin, so the cookie is sent automatically. CSRF: production `index.html` injects `window.csrf_token` from boot; frappe-ui sends `X-Frappe-CSRF-Token`. Dev only: `ignore_csrf: 1` in `site_config.json`.
+- Session: same origin, so the cookie is sent automatically. CSRF: production `index.html` injects `window.csrf_token` from boot; frappe-ui sends `X-Frappe-CSRF-Token`. Dev: **not** `ignore_csrf` -- that disables CSRF for every mutation on the site and `helixhr.preflight.check_csrf` FAILs a site that has it. The shell renders a real token in dev too; see `frontend/README.md`. (P2-U9)
 - Frappe's own products (HR mobile, Helpdesk, CRM, Insights) use this exact pattern.
 
 ## 6. Pieces we reuse instead of building

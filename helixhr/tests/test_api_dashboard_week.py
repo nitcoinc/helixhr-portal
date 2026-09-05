@@ -1,9 +1,11 @@
+import uuid
+
 import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, getdate, today
 
 from helixhr.api import get_dashboard
-from helixhr.tests.utils import EMPLOYEE_USER, make_test_employee_and_manager
+from helixhr.tests.utils import EMPLOYEE_USER, MANAGER_USER, make_test_employee_and_manager
 from helixhr.utils import get_week_bounds
 
 
@@ -41,6 +43,14 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 		which is somebody else's data as far as this test is concerned."""
 		frappe.set_user("Administrator")
 		employees = [self.employee_name, self.manager_name]
+		# HR Requests and the reply notifications they produce outlive a test
+		# method exactly like the leave and timesheet rows below, and an
+		# unread reply is a queue row -- left behind, it turns every later
+		# test's "the queue is empty" into a coin toss.
+		requests = frappe.get_all("HR Request", filters={"employee": ["in", employees]}, pluck="name")
+		if requests:
+			frappe.db.delete("Notification Log", {"document_type": "HR Request", "document_name": ["in", requests]})
+			frappe.db.delete("HR Request", {"name": ["in", requests]})
 		for doctype in ("Leave Application", "Timesheet", "Attendance"):
 			names = frappe.get_all(doctype, filters={"employee": ["in", employees]}, pluck="name")
 			if not names:
@@ -126,32 +136,136 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 	def test_needs_you_is_empty_for_an_employee_with_nothing_outstanding(self):
 		self.assertEqual(get_dashboard()["needs_you"]["items"], [])
 
-	def test_open_leave_shows_up_as_a_row_pointing_at_the_leave_page(self):
+	def test_open_leave_waits_on_the_manager_and_is_not_the_employees_action(self):
+		"""P2-U4 scenario 3. It is still their leave and still visible -- but
+		the only honest action on it is "wait", so it belongs in the quieter
+		waiting list, not in a queue called "Needs you"."""
 		monday, _ = get_week_bounds(today())
-		self._make_leave(add_days(monday, 1), add_days(monday, 1), status="Open", submit=False)
+		name = self._make_leave(add_days(monday, 1), add_days(monday, 1), status="Open", submit=False)
 
-		items = get_dashboard()["needs_you"]["items"]
+		queue = get_dashboard()["needs_you"]
 
-		self.assertEqual(len(items), 1)
-		self.assertEqual(items[0]["kind"], "leave_waiting")
-		self.assertEqual(items[0]["to"], "/leave")
-		self.assertEqual(items[0]["action"], "View")
+		self.assertEqual(queue["items"], [])
+		self.assertEqual(len(queue["waiting"]), 1)
+		row = queue["waiting"][0]
+		self.assertEqual(row["kind"], "leave_waiting")
+		self.assertEqual(row["owner"], "manager")
+		self.assertEqual(row["urgency"], "waiting")
+		self.assertEqual(row["to"], {"name": "LeaveDetail", "params": {"name": name}})
+		self.assertEqual(row["action"], "View")
+		self.assertEqual(row["id"], f"leave_waiting:{name}")
 
 	def test_a_sent_back_timesheet_leads_the_queue_and_carries_the_reason(self):
 		monday, _ = get_week_bounds(today())
 		self._make_leave(add_days(monday, 1), add_days(monday, 1), status="Open", submit=False)
 		timesheet = self._make_rejected_timesheet("Friday hours are missing.")
 
-		items = get_dashboard()["needs_you"]["items"]
-		kinds = [item["kind"] for item in items]
+		queue = get_dashboard()["needs_you"]
+		items = queue["items"]
 
-		# Blocked work outranks something merely waiting on somebody else.
-		self.assertEqual(kinds[0], "timesheet_rejected")
-		self.assertIn("leave_waiting", kinds)
+		# Blocked work is the queue; something merely waiting on somebody
+		# else is beside it, not above or below it.
+		self.assertEqual([item["kind"] for item in items], ["timesheet_rejected"])
+		self.assertEqual([item["kind"] for item in queue["waiting"]], ["leave_waiting"])
 		self.assertEqual(items[0]["detail"], "Friday hours are missing.")
 		self.assertEqual(items[0]["action"], "Edit and resubmit")
 		self.assertEqual(items[0]["day"], str(monday))
+		self.assertEqual(items[0]["urgency"], "blocked")
+		self.assertEqual(items[0]["owner"], "you")
+		self.assertEqual(
+			items[0]["to"], {"name": "TimesheetWeek", "params": {"weekStart": str(monday)}}
+		)
 		frappe.delete_doc("Timesheet", timesheet, force=True, ignore_permissions=True)
+
+	def test_two_sent_back_weeks_are_two_stable_items_each_opening_its_own_week(self):
+		"""Covers P2-AE5. Opening the older item has to open the older week
+		and the older reason -- both rows pointed at "/timesheet", which
+		resolves to whichever week is current when the link is followed."""
+		monday, _ = get_week_bounds(today())
+		older = add_days(monday, -21)
+		newer = self._make_rejected_timesheet("this week", start=monday)
+		older_name = self._make_rejected_timesheet("three weeks ago", start=older)
+
+		items = get_dashboard()["needs_you"]["items"]
+
+		self.assertEqual(len(items), 2)
+		self.assertEqual(
+			[item["id"] for item in items],
+			[f"timesheet_rejected:{older_name}", f"timesheet_rejected:{newer}"],
+		)
+		self.assertEqual(
+			[item["to"] for item in items],
+			[
+				{"name": "TimesheetWeek", "params": {"weekStart": str(older)}},
+				{"name": "TimesheetWeek", "params": {"weekStart": str(monday)}},
+			],
+		)
+		self.assertEqual([item["detail"] for item in items], ["three weeks ago", "this week"])
+
+	def test_an_hr_reply_is_a_queue_row_for_as_long_as_its_notification_is_unread(self):
+		"""P2-U4 scenario 5 / P2-KTD6. The obligation *is* the unread
+		notification, so reading it clears the row -- no second seen-state
+		model, and no "HR replied" row that never goes away."""
+		request = self._make_request_with_reply("Collect it from reception.")
+
+		items = get_dashboard()["needs_you"]["items"]
+		self.assertEqual(len(items), 1)
+		row = items[0]
+		self.assertEqual(row["kind"], "request_answered")
+		self.assertEqual(row["urgency"], "unread")
+		self.assertEqual(row["to"], {"name": "RequestDetail", "params": {"name": request}})
+		self.assertEqual(row["detail"], "Collect it from reception.")
+		self.assertTrue(row["notification"])
+
+		frappe.db.set_value("Notification Log", row["notification"], "read", 1)
+
+		self.assertEqual(get_dashboard()["needs_you"]["items"], [])
+
+	def test_a_manager_sees_both_kinds_of_decision_each_opening_the_exact_one(self):
+		"""P2-U4 scenario 2. A pending timesheet was invisible everywhere:
+		the queue row and the Approvals nav item both read a leave-only
+		count."""
+		monday, _ = get_week_bounds(today())
+		leave = self._make_leave(
+			add_days(monday, 1), add_days(monday, 1), status="Open", submit=False
+		)
+		timesheet = self._make_pending_timesheet(start=monday)
+
+		frappe.set_user(MANAGER_USER)
+		queue = get_dashboard()["needs_you"]
+		by_kind = {item["kind"]: item for item in queue["items"]}
+
+		self.assertIn("approval_leave", by_kind)
+		self.assertIn("approval_timesheet", by_kind)
+		self.assertEqual(
+			by_kind["approval_leave"]["to"],
+			{"name": "ApprovalDetail", "params": {"kind": "leave", "name": leave}},
+		)
+		self.assertEqual(
+			by_kind["approval_timesheet"]["to"],
+			{"name": "ApprovalDetail", "params": {"kind": "timesheet", "name": timesheet}},
+		)
+		self.assertEqual(by_kind["approval_leave"]["urgency"], "decision")
+		self.assertEqual(len(queue["items"]), 2)
+
+	def test_an_approver_with_no_direct_reports_still_gets_the_approvals_entry(self):
+		"""The second half of scenario 2: `can_approve` gated the nav item on
+		the direct-report count, so a leave approver who manages nobody could
+		not reach the decision they had been asked to make."""
+		from helixhr.api import get_portal_bootstrap
+
+		monday, _ = get_week_bounds(today())
+		self._make_leave(add_days(monday, 1), add_days(monday, 1), status="Open", submit=False)
+		frappe.set_user("Administrator")
+		frappe.db.set_value("Employee", self.employee_name, "reports_to", None)
+		self.addCleanup(
+			frappe.db.set_value, "Employee", self.employee_name, "reports_to", self.manager_name
+		)
+
+		frappe.set_user(MANAGER_USER)
+		boot = get_portal_bootstrap()
+
+		self.assertTrue(boot["can_approve"])
 
 	def test_an_older_rejection_outranks_a_newer_one_and_reports_its_age(self):
 		"""The direction's named risk: a stale item must not sort under a
@@ -231,6 +345,60 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 		doc.insert(ignore_permissions=True)
 		if submit:
 			frappe.db.set_value("Leave Application", doc.name, "docstatus", 1)
+		return doc.name
+
+	def _make_request_with_reply(self, note):
+		"""An HR Request the employee owns, answered by somebody else -- the
+		reply notification is written by the doc event, exactly as it is in
+		production."""
+		from helixhr.api import create_my_request
+
+		frappe.set_user(EMPLOYEE_USER)
+		# P2-U8: the portal's own method -- role Employee has no generic
+		# `create` on HR Request any more.
+		doc = frappe.get_doc(
+			"HR Request",
+			create_my_request(
+				category="HR Letter",
+				subject="Address proof",
+				details="For my bank.",
+				operation_key=str(uuid.uuid4()),
+			)["name"],
+		)
+		frappe.set_user("Administrator")
+		doc.reload()
+		doc.hr_note = note
+		doc.save()
+		frappe.set_user(EMPLOYEE_USER)
+		return doc.name
+
+	def _make_pending_timesheet(self, start=None):
+		"""A timesheet waiting on the manager. Inserted straight into
+		Pending Approval and shared the way `timesheet_on_update` shares it,
+		so the read under test is the manager's real permission path (a
+		DocShare), not an ignore_permissions shortcut."""
+		start = start or get_week_bounds(today())[0]
+		frappe.set_user("Administrator")
+		doc = frappe.get_doc(
+			{
+				"doctype": "Timesheet",
+				"employee": self.employee_name,
+				"start_date": str(start),
+				"end_date": str(add_days(start, 6)),
+			}
+		)
+		doc.flags.ignore_validate = True
+		doc.flags.ignore_mandatory = True
+		doc.insert(ignore_permissions=True)
+		frappe.db.set_value("Timesheet", doc.name, "workflow_state", "Pending Approval")
+		frappe.share.add_docshare(
+			"Timesheet",
+			doc.name,
+			MANAGER_USER,
+			write=1,
+			submit=1,
+			flags={"ignore_share_permission": True},
+		)
 		return doc.name
 
 	def _make_rejected_timesheet(self, comment, employee=None, start=None):

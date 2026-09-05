@@ -4,6 +4,21 @@
     <meta charset="UTF-8" />
     <link rel="icon" href="/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      P2-U9 step 4. Install-friendly metadata only: a name, a scope, an icon
+      and the two Signal colours the OS chrome should use. There is no
+      service worker and no `start_url` outside `/helixhr`, so nothing an
+      employee sees is ever cached offline -- a manifest on its own installs
+      the app without making the browser store a single personal byte, which
+      is the condition the plan attaches to shipping one at all. Adding a
+      service worker later is a Product Contract change, not a build change:
+      the deferred list rules out offline personal-data caching.
+    -->
+    <link rel="manifest" href="/assets/helixhr/helixhr/manifest.webmanifest" />
+    <meta name="theme-color" content="#143D33" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="HelixHR" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
     <title>HelixHR</title>
   </head>
   <body>

@@ -4,7 +4,8 @@ import { useRoute } from 'vue-router'
 import { Dialog } from 'frappe-ui'
 import Icon from '@/components/Icon.vue'
 import { session, signOut } from '@/lib/session'
-import { unreadCount, watchUnread, unwatchUnread } from '@/lib/unread'
+import { currentUnread, watchUnread, unwatchUnread } from '@/lib/unread'
+import { watchDialogs, unwatchDialogs } from '@/lib/dialogA11y'
 
 // `primary` items are the four that fit the phone tab bar alongside
 // "More" (design system: max 5 tab items). Everything else lives in the
@@ -24,7 +25,15 @@ const NAV = [
 const route = useRoute()
 const showMore = ref(false)
 
-const isManager = computed(() => (session.reportCount || 0) > 0)
+const unread = computed(() => currentUnread())
+const unreadLabel = computed(() => (unread.value > 9 ? '9+' : String(unread.value)))
+
+// P2-U4 / P2-R11: the bootstrap's own answer, not a second rule derived from
+// the report count. A leave approver need not be anybody's manager, and a
+// manager whose only pending work is a timesheet has a decision to make with
+// no direct-report leave in sight -- both had no Approvals item at all while
+// this read a direct-report count.
+const isManager = computed(() => session.canApprove)
 const navItems = computed(() => NAV.filter((item) => !item.managerOnly || isManager.value))
 const primaryItems = computed(() => navItems.value.filter((item) => item.primary))
 const moreItems = computed(() => navItems.value.filter((item) => !item.primary))
@@ -48,12 +57,25 @@ function isActive(item) {
   return item.to === '/' ? route.path === '/' : route.path.startsWith(item.to)
 }
 
+// The More tab lights up when the route you are on lives behind it, so the
+// tab bar never shows five unlit destinations while you are standing on
+// Attendance or Profile (P2-U3 step 6).
+const moreIsActive = computed(() => moreItems.value.some(isActive))
+
 function closeMore() {
   showMore.value = false
 }
 
-onMounted(watchUnread)
-onUnmounted(unwatchUnread)
+onMounted(() => {
+  watchUnread()
+  // P2-U9: names frappe-ui's unlabelled dialog close button, once for the
+  // whole application. See src/lib/dialogA11y.js.
+  watchDialogs()
+})
+onUnmounted(() => {
+  unwatchUnread()
+  unwatchDialogs()
+})
 </script>
 
 <template>
@@ -116,10 +138,10 @@ onUnmounted(unwatchUnread)
             <Icon :name="item.icon" />
             <span class="flex-1">{{ item.label }}</span>
             <span
-              v-if="item.badge && unreadCount.data > 0"
+              v-if="item.badge && unread > 0"
               class="flex h-5 min-w-5 items-center justify-center rounded-full bg-signal px-1.5 text-xs font-bold text-field"
             >
-              <span class="tabular">{{ unreadCount.data > 9 ? '9+' : unreadCount.data }}</span>
+              <span class="tabular">{{ unreadLabel }}</span>
             </span>
           </router-link>
         </nav>
@@ -134,7 +156,11 @@ onUnmounted(unwatchUnread)
       </aside>
     </div>
 
-    <div class="flex min-w-0 flex-1 flex-col">
+    <!-- min-h-screen on the phone: the outer wrapper is only a flex
+         container at `lg:`, so below that this column has no height for
+         `main` to fill, and a page shorter than the viewport leaves its
+         action bar floating mid-screen. -->
+    <div class="flex min-h-screen min-w-0 flex-1 flex-col lg:min-h-0">
       <!-- Phone/tablet app bar. The desktop identity and notification
            count live in the sidebar instead, so this is hidden there. -->
       <header
@@ -158,17 +184,19 @@ onUnmounted(unwatchUnread)
         >
           <Icon name="notifications" />
           <span
-            v-if="unreadCount.data > 0"
+            v-if="unread > 0"
             class="absolute right-1.5 top-1.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-signal px-1 text-[10px] font-bold text-field"
           >
-            <span class="tabular">{{ unreadCount.data > 9 ? '9+' : unreadCount.data }}</span>
+            <span class="tabular">{{ unreadLabel }}</span>
           </span>
         </router-link>
       </header>
 
       <!-- pb-24 clears the fixed phone tab bar; the sidebar layout has no
            bar to clear, so desktop drops back to normal padding. -->
-      <main class="mx-auto w-full max-w-5xl flex-1 px-4 pb-24 pt-5 sm:px-6 lg:pb-10">
+      <main
+        class="mx-auto w-full max-w-5xl flex-1 px-4 pt-5 pb-[calc(5.5rem+env(safe-area-inset-bottom))] sm:px-6 lg:pb-10"
+      >
         <slot />
       </main>
     </div>
@@ -190,7 +218,11 @@ onUnmounted(unwatchUnread)
         {{ item.label }}
       </router-link>
       <button
-        class="flex min-h-[56px] flex-1 cursor-pointer flex-col items-center justify-center gap-1 text-[11px] font-medium text-blue-200"
+        class="flex min-h-[56px] flex-1 cursor-pointer flex-col items-center justify-center gap-1 text-[11px] font-medium"
+        :class="moreIsActive ? 'text-signal' : 'text-blue-200'"
+        :aria-current="moreIsActive ? 'page' : undefined"
+        :aria-expanded="showMore"
+        aria-haspopup="dialog"
         @click="showMore = true"
       >
         <Icon name="more" />
@@ -208,16 +240,22 @@ onUnmounted(unwatchUnread)
             v-for="item in moreItems"
             :key="item.to"
             :to="item.to"
-            class="flex min-h-11 cursor-pointer items-center gap-3 rounded-lg px-3 py-3 text-sm font-medium text-ink-gray-7 hover:bg-surface-gray-2"
+            :aria-current="isActive(item) ? 'page' : undefined"
+            class="flex min-h-11 cursor-pointer items-center gap-3 rounded-lg px-3 py-3 text-sm font-medium"
+            :class="
+              isActive(item)
+                ? 'bg-surface-gray-2 text-ink-gray-9'
+                : 'text-ink-gray-7 hover:bg-surface-gray-2'
+            "
             @click="closeMore"
           >
             <Icon :name="item.icon" />
             <span class="flex-1">{{ item.label }}</span>
             <span
-              v-if="item.badge && unreadCount.data > 0"
+              v-if="item.badge && unread > 0"
               class="flex h-5 min-w-5 items-center justify-center rounded-full bg-signal px-1.5 text-xs font-bold text-field"
             >
-              <span class="tabular">{{ unreadCount.data > 9 ? '9+' : unreadCount.data }}</span>
+              <span class="tabular">{{ unreadLabel }}</span>
             </span>
             <Icon
               v-else

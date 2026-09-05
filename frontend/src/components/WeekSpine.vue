@@ -1,38 +1,46 @@
 <script setup>
 import { computed } from 'vue'
 import Icon from '@/components/Icon.vue'
+import { ATTENDANCE_LABEL, barHeight } from '@/lib/week'
 
 const props = defineProps({
   week: { type: Object, default: null },
   loading: { type: Boolean, default: false },
 })
 
-// Day state, in the vocabulary the Attendance page uses so a green marker
-// means the same thing on both screens. These sit on the deep blue field, so
-// the tints are the light end of each family, not the -600 steps that read
-// on white.
-const STATE = {
-  Present: { dot: 'bg-green-200', label: 'Present' },
-  'Half Day': { dot: 'bg-amber-300', label: 'Half day' },
-  Absent: { dot: 'bg-red-300', label: 'Absent' },
-  'On Leave': { dot: 'bg-blue-200', label: 'On leave' },
-  Holiday: { dot: 'bg-white/40', label: 'Holiday' },
+// The words come from lib/week.js so a green marker means the same thing here
+// and on Attendance. The dots do not: these sit on the deep blue field, so the
+// tints are the light end of each family, not the -600 steps that read on
+// white.
+const DOT = {
+  Present: 'bg-green-200',
+  'Half Day': 'bg-amber-300',
+  Absent: 'bg-red-300',
+  'On Leave': 'bg-blue-200',
+  Holiday: 'bg-white/40',
 }
 
 const days = computed(() => props.week?.days || [])
-// The bar is read against a normal working day, not against the week's own
-// maximum -- a week where the biggest day was 2h should look like a thin
-// week, not a full one.
-const FULL_DAY_HOURS = 8
 const totalHours = computed(() => props.week?.total_hours || 0)
 // With nothing logged, the bar track is 150px of blank that reads as a chart
 // which failed to load. A week with no hours has no shape to show, so the
 // track collapses and the spine goes back to being a compact strip.
 const hasHours = computed(() => totalHours.value > 0)
 
+// The week this spine is drawing, by its Monday -- the same identity the
+// server uses and the route takes (P2-U2, P2-R12). "/timesheet" resolves to
+// whatever week is current when the link is followed, which is only the same
+// answer by accident.
+const weekRoute = computed(() =>
+  props.week?.week_start
+    ? { name: 'TimesheetWeek', params: { weekStart: props.week.week_start } }
+    : { name: 'Timesheet' },
+)
+
+/** The day's attendance status, or null when it has none. */
 function stateFor(day) {
-  if (day.on_leave) return STATE['On Leave']
-  return STATE[day.attendance] || null
+  if (day.on_leave) return 'On Leave'
+  return day.attendance && DOT[day.attendance] ? day.attendance : null
 }
 
 function isWeekend(day) {
@@ -41,20 +49,15 @@ function isWeekend(day) {
 
 function dotClass(day) {
   const state = stateFor(day)
-  if (state) return state.dot
+  if (state) return DOT[state]
   if (day.is_future || isWeekend(day)) return 'bg-transparent'
   return 'border border-white/40 bg-transparent'
-}
-
-function barHeight(day) {
-  if (!day.hours) return 0
-  return Math.max(8, Math.min(100, (day.hours / FULL_DAY_HOURS) * 100))
 }
 
 function dayLabel(day) {
   const state = stateFor(day)
   const parts = [`${day.weekday} ${day.day_of_month}`]
-  if (state) parts.push(state.label)
+  if (state) parts.push(ATTENDANCE_LABEL[state])
   if (day.hours) parts.push(`${day.hours} hours`)
   return parts.join(', ')
 }
@@ -90,7 +93,7 @@ function dayLabel(day) {
         <router-link
           v-for="day in days"
           :key="day.date"
-          to="/timesheet"
+          :to="weekRoute"
           class="relative flex cursor-pointer flex-col items-center gap-1 border-r border-white/10 px-1 pb-2 pt-2.5 transition-colors duration-200 last:border-r-0 hover:bg-white/10"
           :class="[
             day.is_today ? 'bg-white/15' : '',
@@ -133,7 +136,7 @@ function dayLabel(day) {
               <span
                 class="w-1/2 max-w-10 rounded-sm"
                 :class="day.hours ? 'bg-signal' : 'bg-transparent'"
-                :style="{ height: `${barHeight(day)}%` }"
+                :style="{ height: `${barHeight(day.hours)}%` }"
               />
             </span>
             <span
@@ -152,7 +155,7 @@ function dayLabel(day) {
           {{ totalHours === 1 ? 'hour' : 'hours' }} logged this week
         </p>
         <router-link
-          to="/timesheet"
+          :to="weekRoute"
           class="inline-flex min-h-11 cursor-pointer items-center gap-1 text-sm font-medium text-signal hover:underline"
         >
           Timesheet

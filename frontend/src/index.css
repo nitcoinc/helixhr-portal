@@ -1,5 +1,57 @@
-@import url('https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800&display=swap');
-@import 'frappe-ui/style.css';
+/*
+ * frappe-ui's own stylesheet is three @tailwind directives plus
+ * `@import './fonts/Inter/inter.css'`. Only the directives are wanted here:
+ * this portal's one family is Archivo (below), and the Inter import emitted
+ * two variable woff2 files -- about 600KB on disk -- that no rule in the
+ * built CSS ever references. Expanded inline rather than imported so the
+ * font never comes back on a frappe-ui bump without somebody noticing
+ * (P2-U9 step 1, P2-R24).
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * ARCHIVO, self-hosted (P2-U3, P2-R24).
+ *
+ * The portal used to `@import` this family from fonts.googleapis.com, which
+ * cost two cross-origin requests on every cold load -- one for the stylesheet,
+ * one for the woff2 -- on the critical path, from hosts a Frappe deployment
+ * behind a corporate proxy has no reason to be able to reach. Both are gone:
+ * the two variable subsets below are committed under `src/assets/fonts/`
+ * alongside the SIL Open Font License they ship under, Vite hashes and emits
+ * them next to the CSS, and they are served same-origin from the app's own
+ * asset path.
+ *
+ * One variable file per subset covers 400-800, so the whole six-role type
+ * scale in docs/design-system.md is 35KB rather than five static weights.
+ * `swap` keeps text visible while it loads; the file is same-origin and
+ * arrives with the stylesheet, so the swap is not the layout event it was
+ * when it came from a third-party host.
+ */
+@font-face {
+  font-family: 'Archivo';
+  font-style: normal;
+  font-weight: 400 800;
+  font-stretch: 100%;
+  font-display: swap;
+  src: url('./assets/fonts/archivo-latin-v25.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'Archivo';
+  font-style: normal;
+  font-weight: 400 800;
+  font-stretch: 100%;
+  font-display: swap;
+  src: url('./assets/fonts/archivo-latin-ext-v25.woff2') format('woff2');
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF,
+    U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020,
+    U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
 
 /*
  * SIGNAL -- the portal's palette, applied at the token level.
@@ -187,6 +239,246 @@ a,
 .tabular {
   font-variant-numeric: tabular-nums;
   font-feature-settings: 'tnum' 1;
+}
+
+/*
+ * SURFACE HIERARCHY (P2-U3, P2-R1).
+ *
+ * Five surfaces, named for what they mean rather than for how they look, so
+ * "which card is this" stops being a per-page decision. Before this the
+ * portal had two radii in play with no rule -- `rounded-xl` on the dashboard
+ * rail and the week spine, `rounded-lg` on every list row -- and frappe-ui's
+ * preset makes that worse than it reads, because it *redefines* Tailwind's
+ * scale: `rounded` is 8px, `rounded-md` 10px, `rounded-lg` 12px and
+ * `rounded-xl` 16px. Two pages using the "same" class were 4px apart. The
+ * radius is written out here in pixels so neither scale can move it again.
+ *
+ *   .surface-field    the one anchored region per page. Deep field, 12px,
+ *                     elev-2. Signal yellow is legal *only* inside this.
+ *   .surface-card     a resting card or list row. Paper-white, 8px, elev-1.
+ *   .surface-inset    a quoted block inside a card (an HR reply, a manager's
+ *                     reason). No elevation -- it is inside something, not on
+ *                     top of it.
+ *   .surface-alert    a destructive or blocking callout. Red family, 8px.
+ *   .dialog-content   overlays. frappe-ui owns the element; the sheet rules
+ *                     further down own its shape.
+ */
+.surface-field {
+  border-radius: 12px;
+  background-color: #143d33;
+  color: #fff;
+}
+
+.surface-card {
+  border-radius: 8px;
+  border: 1px solid var(--outline-gray-1);
+  background-color: var(--surface-white);
+}
+
+.surface-inset {
+  border-radius: 8px;
+  background-color: var(--surface-gray-1);
+}
+
+.surface-alert {
+  border-radius: 8px;
+  border: 1px solid #eccfc6;
+  background-color: var(--surface-red-2);
+  color: var(--ink-red-4);
+}
+
+/*
+ * TYPE ROLES (docs/design-system.md, "Typography").
+ *
+ * The six roles existed in the document and nowhere in the code, so pages
+ * picked Tailwind sizes freely and the page title was `text-2xl` here and
+ * `text-xl` there. Only the three roles that carry structure need a class;
+ * body and small are the inherited defaults, and `.tabular` already exists.
+ */
+.type-display {
+  font-size: 40px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  line-height: 1.05;
+}
+
+.type-page-title {
+  font-size: 26px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+}
+
+.type-section {
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+/*
+ * The group label -- Coming up / Past, Needs you / Open / Closed, Today /
+ * Earlier, For everyone. It is the canvas's only grouping device: no rules,
+ * no boxes, no second surface, just a small capitalised word above a run of
+ * cards. Muted ink is the floor value (#70675E, 4.63 on paper); nothing
+ * lighter clears AA at 11px.
+ */
+.label {
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-gray-4);
+}
+
+/*
+ * The date tile. Every row that is *about a date* leads with one, so leave,
+ * past weeks and attendance rows scan down the same left edge. 56px square,
+ * month over a bold day number, on the page ground rather than on the card
+ * so it reads as a stamp rather than a second card.
+ */
+.date-tile {
+  display: flex;
+  width: 56px;
+  min-width: 56px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background-color: var(--surface-gray-2);
+  padding: 6px 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.date-tile > .date-tile-month {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-gray-4);
+}
+
+.date-tile > .date-tile-day {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.1;
+  color: var(--ink-gray-9);
+}
+
+/*
+ * OVERLAYS: bottom sheet on a phone, bounded dialog on a desktop (P2-R6).
+ *
+ * Deliberately CSS over a new component. frappe-ui's `Dialog` already wraps
+ * reka-ui's dialog, which is what supplies the focus trap, the Escape key,
+ * the `aria-modal` semantics and focus restoration on close -- reimplementing
+ * those in a HelixHR sheet component would be re-solving a solved problem
+ * badly. It exposes `.dialog-overlay` and `.dialog-content` as global class
+ * names, so the phone shape is reachable from here.
+ *
+ * The z-index is load-bearing, not cosmetic: the bottom tab bar is `z-10` and
+ * therefore its own stacking context, and reka-ui's portal appends the
+ * overlay to the end of <body> with `z-index: auto`. Without a value here a
+ * sheet renders *behind* the tab bar it is supposed to cover.
+ */
+.dialog-overlay {
+  z-index: 50;
+}
+
+@media (max-width: 767px) {
+  /* frappe-ui's positioner centres the panel in a `min-h-screen` column;
+     on a phone the sheet is pinned to the bottom edge instead, and `dvh`
+     rather than `vh` so a collapsing browser toolbar cannot push the
+     primary action off the bottom of the screen. */
+  .dialog-overlay > div {
+    min-height: 100dvh;
+    justify-content: flex-end;
+    padding: 0;
+  }
+
+  .dialog-content {
+    margin: 0;
+    max-width: 100%;
+    max-height: 92dvh;
+    overflow-y: auto;
+    border-radius: 16px 16px 0 0;
+    /* Clears the home indicator on a notched phone. The tab bar is behind
+       the overlay, so only the inset has to be cleared. */
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  /* The grab handle. Decoration in the strict sense, but it is the one mark
+     that tells a thumb this panel came up from the bottom edge, so it is on
+     the sheet itself rather than in every caller's markup. */
+  .dialog-content::before {
+    display: block;
+    width: 36px;
+    height: 4px;
+    margin: 8px auto 0;
+    border-radius: 9999px;
+    background-color: var(--outline-gray-3);
+    content: '';
+  }
+}
+
+/*
+ * A page's sticky action bar (Timesheet's Save/Submit, Profile's Save bar).
+ * It sits above the phone tab bar and inside the safe area; on a desktop
+ * there is no tab bar, so only the inset applies.
+ */
+/* `sticky` only pins an element that would otherwise scroll out of view. On
+   a page shorter than the viewport -- an empty timesheet week, a profile with
+   one change -- the bar has nothing to stick against and sits mid-screen with
+   dead paper beneath it, which is not what the artboards draw. Making the
+   page a column that fills `main` and pushing the bar down with `margin-top:
+   auto` pins it at the bottom when the page is short, while `sticky` keeps
+   doing its job once the page is long enough to scroll. Scoped with `:has` so
+   only a page that actually carries a bar changes layout. */
+main:has(.action-bar) {
+  display: flex;
+  flex-direction: column;
+}
+
+main:has(.action-bar) > * {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+}
+
+/* !important because a page root usually carries Tailwind's `space-y-*`,
+   whose `> :not([hidden]) ~ :not([hidden])` selector outranks this class and
+   would otherwise put a fixed margin back on the bar. */
+main:has(.action-bar) .action-bar {
+  margin-top: auto !important;
+}
+
+.action-bar {
+  position: sticky;
+  /* The phone tab bar is 56px of fixed chrome plus the home-indicator inset.
+     A bar stuck to `bottom: 0` sits *underneath* it, which is where the
+     timesheet's Submit button was living at 360px. */
+  bottom: calc(56px + env(safe-area-inset-bottom));
+  z-index: 5;
+  margin-left: -1rem;
+  margin-right: -1rem;
+  border-top: 1px solid var(--outline-gray-2);
+  background-color: var(--surface-white);
+  padding: 0.75rem 1rem;
+}
+
+@media (min-width: 640px) {
+  .action-bar {
+    margin-left: -1.5rem;
+    margin-right: -1.5rem;
+    padding-left: 1.5rem;
+    padding-right: 1.5rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  /* No tab bar at desktop widths, so the bar returns to the viewport edge. */
+  .action-bar {
+    bottom: 0;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

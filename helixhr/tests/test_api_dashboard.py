@@ -45,23 +45,27 @@ class TestHelixHRDashboard(IntegrationTestCase):
 		# guest coverage already exists in Playwright (login-dashboard.spec.ts).
 		self.assertNotIn(get_dashboard, frappe.guest_methods)
 
-	def test_pending_section_is_a_real_count_now_that_hr_request_exists(self):
-		# HR Request shipped in U9 -- _get_pending_counts no longer throws,
-		# so "pending" is a real dict, not the section-level null this
-		# tested before the doctype existed.
+	def test_a_broken_section_names_itself_and_leaves_the_rest_of_the_page_alone(self):
+		"""P2-U4 scenario 7 / P2-R25. A null section used to be
+		indistinguishable from "nothing recorded yet", so an outage read as
+		an empty month. The response now says which region failed, and only
+		that region."""
+		from unittest.mock import patch
+
 		frappe.set_user(EMPLOYEE_USER)
-		result = get_dashboard()
+		with patch("helixhr.api._get_attendance_summary", side_effect=Exception("boom")):
+			result = get_dashboard()
 
-		self.assertIsInstance(result["pending"], dict)
-		self.assertEqual(
-			set(result["pending"]), {"my_open_leave", "my_open_requests", "approvals_waiting_for_me"}
-		)
+		self.assertEqual(result["failed_sections"], ["attendance_this_month"])
+		self.assertIsNone(result["attendance_this_month"])
+		self.assertEqual(result["employee"]["name"], self.employee_name)
+		self.assertIsNotNone(result["week"])
+		self.assertIsNotNone(result["needs_you"])
 
-	def test_unread_notifications_is_a_count(self):
+	def test_a_healthy_page_names_no_failed_section(self):
 		frappe.set_user(EMPLOYEE_USER)
-		result = get_dashboard()
 
-		self.assertIsInstance(result["unread_notifications"], int)
+		self.assertEqual(get_dashboard()["failed_sections"], [])
 
 	def tearDown(self):
 		frappe.set_user("Administrator")

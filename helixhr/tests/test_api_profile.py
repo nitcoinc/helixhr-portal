@@ -58,15 +58,26 @@ class TestUpdateMyProfile(IntegrationTestCase):
 		)
 
 	def test_rate_limit_triggers_per_user_not_globally(self):
-		frappe.set_user(EMPLOYEE_USER)
-		from helixhr.utils import rate_limit_per_user
-
-		with self.assertRaises(frappe.RateLimitExceededError):
-			for _ in range(25):
-				rate_limit_per_user("test_rate_limit_scope", limit=20, seconds=60)
-
-		# A different user's bucket is untouched.
+		"""P2-U9 step 6: the bound comes from `RATE_LIMIT_POLICY`, and the
+		limiter is off on a site with `allow_tests` -- so this forces it on
+		for the length of the test rather than asserting the bypass."""
 		from helixhr.tests.utils import MANAGER_USER
+		from helixhr.utils import rate_limit_bounds, rate_limit_per_user, reset_rate_limit
 
-		frappe.set_user(MANAGER_USER)
-		rate_limit_per_user("test_rate_limit_scope", limit=20, seconds=60)
+		limit, _ = rate_limit_bounds("update_my_profile")
+		frappe.flags.helixhr_enforce_rate_limits = True
+		try:
+			frappe.set_user(EMPLOYEE_USER)
+			reset_rate_limit("update_my_profile")
+			with self.assertRaises(frappe.RateLimitExceededError):
+				for _ in range(limit + 5):
+					rate_limit_per_user("update_my_profile")
+
+			# A different user's bucket is untouched.
+			frappe.set_user(MANAGER_USER)
+			reset_rate_limit("update_my_profile")
+			rate_limit_per_user("update_my_profile")
+		finally:
+			frappe.flags.helixhr_enforce_rate_limits = False
+			for user in (EMPLOYEE_USER, MANAGER_USER):
+				reset_rate_limit("update_my_profile", user=user)

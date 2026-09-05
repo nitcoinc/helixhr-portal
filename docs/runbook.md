@@ -273,13 +273,19 @@ while writing `test_leave_flow.py` and `LeaveForm.vue`:
 - **Role "Employee" has no `delete` permission on Leave Application by default** in this
   HRMS version's base DocPerm, so withdraw (R14, KTD17 -- `frappe.delete_doc` on a pending
   Leave Application) is refused with a plain `PermissionError` out of the box. Fixed with one
-  Custom DocPerm row (role `Employee`, permlevel 0, `delete=1`, `if_owner=1` so it only ever
-  applies to the caller's own documents) -- shipped as
-  `helixhr/fixtures/leave_application_custom_docperm.json`. **Two `fixtures` entries for the
-  same doctype (`"dt": "Custom DocPerm"`) need distinct `prefix` values in `hooks.py`** --
-  confirmed the hard way: without a prefix, `bench export-fixtures` names the file purely
-  from the doctype, so a second entry for a different `parent` doctype silently overwrites the
-  first entry's exported file instead of producing a second one.
+  Custom DocPerm rule (role `Employee`, permlevel 0, `delete=1`, `if_owner=1` so it only ever
+  applies to the caller's own documents) -- applied by
+  `helixhr/patches/v1_0/apply_permission_deltas.py`. It is a **second** rule alongside the
+  standard Employee one, not `if_owner` set on the standard rule: `if_owner` on the base rule
+  moves read/write/report into the owner-only bucket too, and an employee then cannot see a
+  leave request HR filed for them.
+- **Never ship `Custom DocPerm` as a fixture.** `frappe.permissions.get_valid_perms` discards
+  *every* standard DocPerm for a doctype that has at least one Custom DocPerm row, so a
+  fixture carrying one role wipes out all the others on a fresh site -- Leave Application and
+  Timesheet lost HR Manager, HR User, Leave Approver and Projects User this way, and it was
+  invisible on this dev machine because HRMS's Employee Self Service User Type had already
+  copied the standard rows in through `frappe.permissions.add_permission`. Apply deltas in a
+  patch on top of `setup_custom_perms` instead (P2-U1).
 
 ## Employee gets locked/HR-only fields from more than one place (U5 follow-up)
 
@@ -521,7 +527,191 @@ own `late_entry` flag, which only a device (or HR) sets, so it stays at zero unt
 `helixhr/tests/test_api_attendance.py` covers the no-data case first, because that is the one that
 ships today.
 
+## Performance baseline (P2-U0)
+
+`frontend/tests/e2e/performance.spec.ts` is the frozen measurement protocol behind P2-R21..P2-R24.
+It is a Playwright project of its own, and it only exists when `BASELINE_MODE` is set, so a plain
+`yarn test:e2e` can never pick it up: it throttles CPU 4x and the network to
+1.6Mbps/750Kbps/150ms, so it takes minutes and would only make the other specs flaky.
+
+Seed the volume profile first. `setup_playwright_fixtures` gives the happy path three rows;
+`setup_baseline_fixtures` gives one employee a year of real history (365 Attendance, 260 check-ins,
+52 Timesheets, 40 Leave Applications, 100 HR Requests, 250 Notification Logs), 200 Employees across
+two companies, 75 mixed-company document links, and the manager 20 reports with 25 mixed pending
+approvals. Same `allow_tests` gate as every other fixture entry point, so it cannot run on a real
+site. It takes about a minute the first time and is idempotent afterwards (a second call is ~1s and
+must report identical counts).
+
+```bash
+# in the bench container
+bench --site test_site execute helixhr.tests.utils.setup_baseline_fixtures   # seed (idempotent)
+bench --site test_site execute helixhr.tests.utils.baseline_fixture_counts   # expected vs actual
+bench --site test_site execute helixhr.tests.utils.teardown_baseline_fixtures  # reset
+
+# on the host, after a production build of the exact commit under test
+cd frontend && yarn build
+BASELINE_MODE=full BASE_URL=http://localhost:8000 SITE_HOST=test_site \
+  yarn test:e2e -- --project=baseline --workers=1
+```
+
+**Tear the baseline down before `bench run-tests`.** The seed is not test-suite-neutral: with
+it in place five `test_api_dashboard_week` queue tests fail, because `_get_needs_you` picks up
+the 100 seeded "Baseline request" rows. Run `teardown_baseline_fixtures` first and the suite is
+back to one failure (the leave-balance baseline documented in `CLAUDE.md`) instead of six.
+
+`BASELINE_MODE=lightweight` runs the same protocol with 3 cold loads and 6 interactions instead of
+10 and 20 — that is the after-each-unit regression run; the full protocol is for U0 and U9.
+
+The reset that is always honest is a fresh site. `teardown_baseline_fixtures` exists for a
+long-lived local site: it cancels submitted Leave Applications before deleting them so HRMS unwinds
+its own Leave Ledger Entries, and removes the manager DocShares the seeded pending timesheets
+created. It deliberately leaves the two fixture identities and their allocations alone.
+
+Results, screenshots and the environment pin land in `.impeccable/review/baseline/`, which is
+gitignored along with the rest of `.impeccable/review/` — nothing from a run is committed, and the
+run records only URLs (query strings stripped), byte counts and timings, never record content. The
+numbers that matter are quoted in a plan/change record by their **result identifier**, which is what
+each run prints and writes into its own JSON.
+
+A run refuses to produce a number it cannot trust and fails instead: any console/page error, any
+request that fails or returns >= 400, a missing metric (no LCP, no event-timing entry, an
+unsupported PerformanceObserver type), a fixture count that differs from `BASELINE_PROFILE`, a
+`frontend/src` file newer than the built entry chunk (stale build), or an environment that differs
+from `environment-pin.json` (browser version, viewport, throttling, site, fixture anchor). Delete
+that pin only when you mean to re-baseline. Cold and warm runs are labelled separately and only the
+cold runs feed the accepted numbers; the warm sample is one extra load in an already-populated
+context and is reported for context only.
+
+### The first baseline: `P2-U0-full-20260904T2020-ded07d7`
+
+Chromium 151.0.7922.34, 360x800 @3x, CPU 4x, 1.6Mbps/750Kbps/150ms, 10 cold Dashboard loads plus 20
+scripted interactions (Leave, Timesheet, Requests, More sheet, Attendance, Home — repeated),
+75th percentile by nearest rank, `test_site` on the local bench.
+
+| Metric | p75 (cold) | Target |
+|---|---|---|
+| LCP | 3936 ms | P2-R23: <= 2500 ms |
+| CLS | 0.8431 | P2-R23: <= 0.1 |
+| Interaction latency (event timing) | 24 ms | P2-R23: <= 200 ms |
+| Requests | 15 | — |
+| Application data requests on Dashboard | 4 (`hrms.api.get_current_employee_info`, `frappe.client.get_list`, `frappe.client.get_count`, `helixhr.api.get_dashboard`) | P2-R21: <= 2 |
+| Transferred, whole page | 826,220 B | — |
+| Transferred JavaScript | 354,014 B | P2-R24: -20% |
+| Transferred CSS | 162,906 B | P2-R24: no regression |
+| Remote font requests | 2 (`fonts.googleapis.com`, `fonts.gstatic.com`) | P2-R24: 0 |
+| Public source maps | yes (`index-*.js.map` returns 200) | P2-R24: none |
+
+Server time at p75: `get_dashboard` 195ms, `frappe.client.get_count` 192ms, `frappe.client.get_list`
+189ms, `get_current_employee_info` 162ms. Warm load for comparison: LCP 752ms, 8,174 B transferred.
+
+Two honest caveats, both machine-recorded in every result file rather than argued in prose:
+
+- **No HTTPS staging host exists yet**, so this is the local bench. `asset_content_encoding` reads
+  `identity`: the bench dev server serves JavaScript and CSS uncompressed, so the transfer numbers
+  above are raw bytes, not gzip. A before/after comparison is only valid between runs with the same
+  encoding — compare local to local, or re-baseline on staging before quoting a gzip figure.
+- The pre-U0 estimates in the plan (~133KB gzip JS, ~22KB gzip CSS) are superseded by this result
+  identifier, per P2-R24.
+
+### The P2-U9 result: `P2-U0-full-20260905T0806-f5aef9f`
+
+Same protocol, same pin, same seeded fixture set, one commit later. This is the number P2-R21..R24
+are argued from.
+
+| Metric | U0 (`...20260904T2020-ded07d7`) | U9 (`...20260905T0806-f5aef9f`) | Target | Verdict |
+|---|---|---|---|---|
+| Application data requests on Dashboard | 4 | **2** (`get_portal_bootstrap`, `get_dashboard`) | P2-R21: ≤ 2 | **pass** |
+| Requests, whole page | 15 | **13** | — | pass |
+| LCP p75 | 3936 ms | **2860 ms** | P2-R23: ≤ 2500 ms | **fail here, staging gate** |
+| CLS p75 | 0.8431 | **0** | P2-R23: ≤ 0.1 | **pass** |
+| Interaction latency p75 | 24 ms | **32 ms** | P2-R23: ≤ 200 ms | **pass** |
+| Transferred JavaScript | 354,014 B | **277,088 B** (−21.7%) | P2-R24: −20% | **pass** |
+| Transferred CSS | 162,906 B | **78,983 B** (−51.5%) | P2-R24: no regression | **pass** |
+| Remote font requests | 2 | **0** | P2-R24: 0 | **pass** |
+| Public source maps | yes | **no** (`.map` returns 404, none built) | P2-R24: none | **pass** |
+| Transferred, whole page | 826,220 B | **404,182 B** | — | pass |
+
+Server time at p75: `get_dashboard` 196 ms, `get_portal_bootstrap` 159 ms. Warm load: LCP 708 ms,
+12,811 B.
+
+The harness now prints and records these verdicts itself (`gates` in the result JSON) instead of
+leaving them to prose, and an enforced gate that fails invalidates the run. **`P2-R23-lcp` is the
+one gate that is measured but not enforced locally**, and the reason is in the same result file:
+`asset_content_encoding: identity`. This bench serves JavaScript and CSS uncompressed, so the
+emulated 1.6 Mbps link carries about 356 KB that a real proxy would have gzipped to roughly a
+third of that. R23 is written against "representative staging"; run the protocol there with
+`PERF_GATE=staging` and the gate becomes a hard failure. **Until that run exists on an HTTPS
+staging host, R23's LCP clause is unproven, not passed.** CLS and interaction latency are
+environment-robust and pass here.
+
+Where the JavaScript went, for anyone re-doing this:
+
+- `feather-icons` is aliased to a stub in `vite.config.js` (−96,010 B raw). frappe-ui's `Button`
+  and `Dialog` import `FeatherIcon` unconditionally, and the package is one un-tree-shakeable
+  module holding every glyph. Nothing here passes a Feather icon name; a vitest guard fails if
+  anything starts to.
+- Production source maps are off (no transfer effect, but they were public).
+- CSS: `tailwind.config.cjs` scans a named list of frappe-ui components rather than all of them,
+  and `src/index.css` expands frappe-ui's three `@tailwind` directives inline instead of importing
+  its stylesheet — which also drops the two Inter variable fonts (about 600 KB of assets no rule
+  ever referenced).
+
+### Running the whole release set
+
+```bash
+# in the bench container
+bench --site test_site run-tests --app helixhr
+bench --site <site> execute helixhr.preflight.run
+
+# on the host, from frontend/
+npx eslint src && npx vitest run && npx vite build
+BASE_URL=http://localhost:8000 SITE_HOST=test_site npx playwright test \
+  -c tests/playwright.config.ts --workers=1
+```
+
+The Playwright run includes the **employee-mobile-webkit** project (P2-U9 step 9): the critical employee
+flows on the only engine iOS has, under a coarse pointer. It needs WebKit's system libraries:
+
+```bash
+npx playwright install --with-deps webkit     # needs root
+```
+
+On a host that cannot install them the browser downloads but refuses to launch
+(`browserType.launch` fails immediately). CI installs them; this repo's dev VM cannot, so
+**employee-mobile-webkit is a CI-only gate here** and a local run must select the projects explicitly:
+
+```bash
+npx playwright test -c tests/playwright.config.ts \
+  --project=setup --project=employee --project=manager --workers=1
+```
+
+### Rate limits are off on a site with `allow_tests`, on purpose
+
+`helixhr.utils.rate_limits_enforced()` returns false when the site has `allow_tests`. Without that,
+the two suites and the limits are mutually exclusive: the Python suite creates far more than ten HR
+Requests as one user in one run (the `create_my_request` bound is 10/hour), and running the
+Playwright suite twice inside a minute re-trips the 30/minute timesheet bound.
+
+It is safe because `preflight.check_test_mode` **FAILs** any site with `allow_tests` on, and
+preflight exits non-zero — so no production site can reach that branch. The bound itself is proved
+by `helixhr/tests/test_upload_security.py::TestPerUserRateLimits`, which sets
+`frappe.flags.helixhr_enforce_rate_limits` and asserts the eleventh request in an hour is refused.
+
+A site may tighten a bound without a release:
+
+```bash
+bench --site <site> set-config helixhr_rate_limits '{"create_my_request": [5, 3600]}'
+```
+
+Loosening one is a policy decision, and `preflight.check_rate_limits` FAILs until
+`RATE_LIMIT_POLICY` in `helixhr/utils.py` is edited to match.
+
 ## Go-live checklist
+
+How the portal is exposed, which host names serve what, how employees are kept
+out of Desk, and how a new employee is onboarded are in
+[deployment.md](deployment.md). This section is the per-site settings check.
+
 
 Most of this is checked by one command. Run it on staging, then again on production, after
 every deploy; it exits non-zero on any FAIL so a deploy script can gate on it:
@@ -531,22 +721,81 @@ bench --site <site> execute helixhr.preflight.run
 ```
 
 It reports PASS/WARN/FAIL for: Apply Strict User Permissions, every linked employee having a
-User Permission on their own Employee, Disable Signup, password login still on (local-login
-phase), the Entra key (WARN while unconfigured), password policy, upload limits, site
-`rate_limit`, the HR contact address, the four fixtures the app cannot work without, and the
-frontend being built. The checks and their rationale live in `helixhr/preflight.py`; when Entra
-goes live, flip the two marked there.
+User Permission on their own Employee, Custom DocPerm coverage, the two HR Settings behind R14
+and self-approval, the legacy approved-but-unsubmitted leave backlog, Disable Signup, the
+sign-in phase, password policy, the **exact** upload policy, **every named per-user write
+bound**, site `rate_limit`, **test mode**, **CSRF**, the **HTTPS header and cookie probe**, the
+HR contact address, the four fixtures the app cannot work without, and the frontend being built.
+The checks and their rationale live in `helixhr/preflight.py`.
 
-The items preflight **cannot** see, because they live outside the site:
+Three of those are new in P2-U9 and judge *values*, not presence:
 
-- [ ] `X-Forwarded-Proto` reaches Frappe correctly behind the real proxy, so the session
-      cookie is marked `Secure`. Check the cookie in the browser after the first HTTPS login.
-- [ ] Later, for Entra: the real OAuth round trip has been verified end to end, including the
-      `redirect-to` behavior above. Not a phase 1 gate.
-- [ ] A Lighthouse accessibility run against Dashboard/Leave at 360px. Contrast and touch
-      targets are already measured directly (see the `/impeccable` section); Lighthouse would
-      add performance numbers and a second a11y opinion. Needs the `lighthouse` package, which
-      is not a dependency here yet.
+- **Upload policy** FAILs unless System Settings lists only PDF/PNG/JPG/JPEG/DOCX/XLSX, Max File
+  Size is at most 10 MB, guests cannot upload, and public uploads are restricted to System
+  Managers. The app's own `validate_portal_upload` already refuses anything else on an HR Request;
+  this is about every *other* upload the site accepts.
+- **Per-user write limits** re-derives every effective bound, `helixhr_rate_limits` site config
+  included, and FAILs on anything looser than `helixhr.utils.RATE_LIMIT_POLICY`.
+- **Test mode off** FAILs on `allow_tests`. That flag both exposes the fixture entry points and
+  disables the per-user write limiter, so it is the one setting that must never survive to
+  production. On a *test* site this FAIL is expected and correct.
+
+Sign-in is phase-aware through site config rather than a code comment:
+
+```bash
+bench --site <site> set-config helixhr_auth_phase entra   # default: "local"
+```
+
+In the `local` phase password login must stay on (turning it off with no enabled Social Login Key
+locks everyone out) and the Office 365 key is a WARN. In the `entra` phase both flip: a missing or
+disabled key is a FAIL, and password login still being enabled is a FAIL.
+
+### Host-only sign-offs
+
+These live outside the site. Two of them are now **machine-detectable** — point preflight at the
+real hostname and it fetches the portal over HTTPS and inspects what came back:
+
+```bash
+bench --site <site> set-config helixhr_public_url https://<host>/helixhr
+bench --site <site> execute helixhr.preflight.run
+```
+
+The `HTTPS headers and cookies` check then FAILs unless the response carries
+`Strict-Transport-Security`, a `Content-Security-Policy` with `frame-ancestors`,
+`X-Content-Type-Options: nosniff`, `Referrer-Policy` and `Permissions-Policy`, and unless the `sid`
+cookie is set with `Secure`, `HttpOnly` and a `SameSite` attribute. Unset, it is a WARN that names
+this section — never a PASS.
+
+The app sets those headers itself (`helixhr.utils.set_security_headers`, registered as an
+`after_request` hook), with `setdefault`, so a proxy that sets a stricter value keeps it. HSTS is
+sent only when the request arrived over HTTPS, which is exactly why the proxy item below still
+has to be checked by a person the first time.
+
+- [ ] **`X-Forwarded-Proto` reaches Frappe behind the real proxy.** Everything else follows from
+      it: Frappe marks the `sid` cookie `Secure` only when `request.scheme == "https"`, and this
+      app sends HSTS on the same condition. Confirm with the preflight probe above, and look at
+      the cookie in the browser after the first HTTPS login.
+- [ ] **Hashed assets are served immutably and compressed.** `/assets/helixhr/helixhr/assets/*`
+      filenames all carry a content hash (the CI `Asset, cache and header policy` step asserts
+      that), so the proxy should serve them
+      `Cache-Control: public, max-age=31536000, immutable` with gzip or brotli on. The bench dev
+      server serves `max-age=43200, public` and **no compression at all**, which is why every
+      transfer figure above is raw bytes. The portal shell must stay uncached —
+      `helixhr/www/helixhr.py` sets `no_cache = 1` and Frappe answers
+      `no-store,no-cache,must-revalidate,max-age=0`; do not let a proxy override that.
+- [ ] **Re-run the performance protocol on staging with `PERF_GATE=staging`.** R23's LCP clause is
+      unproven until that run exists (see the P2-U9 result above).
+- [ ] **One screen-reader pass** over navigation, error states, dialogs, status changes, and both
+      primary mobile workflows (send a week for approval; send a request with an attachment).
+      Everything deterministic is already measured by `visual-foundation.spec.ts` and
+      `hardening.spec.ts` — 320px reflow, 200% text zoom, coarse-pointer target sizes, focus
+      trapping, dialog close labels, reduced motion. What a machine cannot judge is whether the
+      announced order and wording make sense, and that is what this pass is for.
+- [ ] **The Entra OAuth round trip**, end to end, including the `redirect-to` behavior above,
+      before flipping `helixhr_auth_phase` to `entra`.
+- [ ] A Lighthouse accessibility run against Dashboard/Leave at 360px. Optional, and a second
+      opinion rather than a gate; it needs the `lighthouse` package, which is not a dependency
+      here.
 
 What each preflight line means, for whoever has to fix one:
 
@@ -564,14 +813,43 @@ What each preflight line means, for whoever has to fix one:
       Permission (`allow = Employee`, `for_value` = their own record). Creating the Employee
       with "Create User Permission" checked does this; the check exists because one missed
       checkbox means that user can read every employee.
-- **Upload limits**: System Settings **Allowed File Extensions** and **Max File Size**. The
-      app's own `file_before_insert` hook (`helixhr/events.py`) only refuses a non-private
-      upload against an HR Request -- it does not constrain file type or size. Those are core
-      Frappe settings, unset by default on a fresh site.
+- **Document link URLs**: every stored `HelixHR Document Link` must be a plain `http(s)`
+      address. The doctype validates on save and nothing revalidates a row that is never saved
+      again, so a `javascript:` or `data:` link written before that rule still renders into an
+      `:href`. Fix or delete each named row in Desk.
+- **Upload policy**: System Settings **Allowed File Extensions** (PDF, PNG, JPG, JPEG, DOCX,
+      XLSX -- one per line), **Max File Size** 10, **Allow Guests to Upload Files** off, and
+      **Only allow System Managers to upload public files** on. All four are core Frappe
+      settings and all four are unset or wrong by default on a fresh site.
+
+      Separately from them, `helixhr.utils.validate_portal_upload` is what actually governs an
+      HR Request attachment, and it does not depend on any of the above: private, at most 10MB,
+      and PDF/PNG/JPEG/DOCX/XLSX only, checked by extension **and** by leading signature. The two
+      OOXML types are opened as zip containers, so a `.docm` renamed to `.docx` (it still carries
+      `vbaProject.bin`) and a truncated archive are both refused, as are SVG, HTML, the legacy
+      `.doc`/`.xls` formats and anything whose bytes disagree with its name. It runs in
+      `api.attach_to_my_request` and again in the `File.before_insert` hook, so a File written by
+      any other path gets the same answer. Files attached to an HR Request are additionally
+      served with `Content-Disposition: attachment`, so an uploaded document can never render in
+      the site's own origin.
 - **Site rate_limit**: `bench --site <site> set-config rate_limit '{"limit": 600, "window": 60}'`
       (tune to real traffic). Frappe's site-wide request limiter, separate from and in addition
-      to this app's own per-user limiter (`helixhr.utils.rate_limit_per_user`) on
-      `update_my_profile`, `save_my_week` and `act_on_approval`.
+      to this app's own per-user limiter (`helixhr.utils.rate_limit_per_user`), which since
+      P2-U9 covers every sensitive write:
+
+      | Action | Bound |
+      |---|---|
+      | `update_my_profile` | 20 / minute |
+      | `save_my_week`, `submit_my_week` | 30 / minute |
+      | `act_on_approval` | 30 / minute |
+      | `mark_my_request_read` | 60 / minute |
+      | `apply_for_leave`, `withdraw_my_leave` | 20 / hour |
+      | `attach_to_my_request` | 20 / hour |
+      | `create_my_request` | 10 / hour |
+
+      Buckets are keyed by session user and site, never by IP -- one office behind one address
+      would otherwise share one bucket. See "Rate limits are off on a site with `allow_tests`"
+      above before wondering why the suites do not trip them.
 - **HR contact address**: `bench --site <site> set-config helixhr_hr_contact hr@example.com`.
       Shown as a mailto link on the not-linked page (`frontend/src/pages/NotLinked.vue`), which
       reads it from the `window.helixhr_hr_contact` global that `helixhr/www/helixhr.py` injects

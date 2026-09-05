@@ -107,6 +107,24 @@ jobs:
           bench --site test_site set-config allow_tests true
         working-directory: frappe-bench
 
+      # P2-R26 / P2-AE9: run the suite against production-like authorization.
+      # `set-config` is not enough for any of these -- all three live in a
+      # Single doctype, not site_config.json, and without strict user
+      # permissions a User Permission on Employee does not restrict the
+      # doctypes that link to it, which is the app's whole boundary.
+      # frappe.client.set_value refuses these fields, so set them on the
+      # Single directly and clear the cache the value is read from.
+      - name: Production-like permission and HR settings
+        run: |
+          bench --site test_site execute frappe.db.set_single_value \
+            --kwargs '{"doctype":"System Settings","fieldname":"apply_strict_user_permissions","value":1}'
+          bench --site test_site execute frappe.db.set_single_value \
+            --kwargs '{"doctype":"HR Settings","fieldname":"leave_approver_mandatory_in_leave_application","value":1}'
+          bench --site test_site execute frappe.db.set_single_value \
+            --kwargs '{"doctype":"HR Settings","fieldname":"prevent_self_leave_approval","value":1}'
+          bench --site test_site clear-cache
+        working-directory: frappe-bench
+
       - name: Run helixhr tests
         run: bench --site test_site run-tests --app helixhr
         working-directory: frappe-bench
@@ -243,8 +261,43 @@ jobs:
           node-version: "24"
       - run: yarn install --frozen-lockfile
         working-directory: frappe-bench/apps/helixhr/frontend
-      - run: npx playwright install --with-deps chromium
+      # P2-U9 step 9. Mobile WebKit is mandatory, not optional: it is the only
+      # engine on iOS and the one place a coarse pointer, a real safe-area
+      # inset and Safari's overlay behaviour are exercised. `--with-deps` is
+      # what installs the system libraries it needs; without them the browser
+      # downloads and then refuses to launch.
+      - run: npx playwright install --with-deps chromium webkit
         working-directory: frappe-bench/apps/helixhr/frontend
+      # P2-U9 step 3 and scenario 4: what the *host* serves, which a browser
+      # test cannot fully see (Chromium only fetches a source map with
+      # devtools open). Runs before the suite so a broken asset pipeline is
+      # named as one rather than surfacing as thirty failing specs.
+      - name: Asset, cache and header policy
+        run: |
+          set -euo pipefail
+          shell=$(curl -sS -D - -o /dev/null http://localhost:8000/helixhr)
+          echo "$shell"
+          echo "$shell" | grep -iq 'cache-control:.*no-cache' \
+            || { echo 'FAIL: the portal shell is cacheable'; exit 1; }
+          echo "$shell" | grep -iq 'x-content-type-options: *nosniff' \
+            || { echo 'FAIL: no nosniff header'; exit 1; }
+          echo "$shell" | grep -iq "content-security-policy:.*frame-ancestors 'none'" \
+            || { echo 'FAIL: no frame-ancestors'; exit 1; }
+          echo "$shell" | grep -iq 'referrer-policy:' || { echo 'FAIL: no Referrer-Policy'; exit 1; }
+          echo "$shell" | grep -iq 'permissions-policy:' || { echo 'FAIL: no Permissions-Policy'; exit 1; }
+
+          entry=$(grep -o 'assets/index-[A-Za-z0-9_-]*\.js' \
+            frappe-bench/apps/helixhr/helixhr/www/helixhr.html | head -1)
+          test -n "$entry" || { echo 'FAIL: no hashed entry chunk in the built shell'; exit 1; }
+          asset="http://localhost:8000/assets/helixhr/helixhr/$entry"
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$asset")" = "200" \
+            || { echo "FAIL: $asset did not return 200"; exit 1; }
+          test "$(curl -s -o /dev/null -w '%{http_code}' "$asset.map")" != "200" \
+            && echo "OK: no public source map" \
+            || { echo 'FAIL: a public source map is served'; exit 1; }
+          test -z "$(find frappe-bench/apps/helixhr/helixhr/public/helixhr -name '*.map' -print -quit)" \
+            || { echo 'FAIL: .map files were built'; exit 1; }
+        working-directory: ${{ github.workspace }}
       - run: yarn test:e2e
         working-directory: frappe-bench/apps/helixhr/frontend
         env:
