@@ -608,3 +608,86 @@ class TestApiTimesheet(IntegrationTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			get_timesheet_week_start(name)
 
+
+	# --- KTD10: the week is a range, because ERPNext rewrites start_date ---
+
+	def _tuesday_row(self, hours=8):
+		row = self._week_row(hours=hours)
+		row["date"] = str(add_days(self.monday, 1))
+		return row
+
+	def _timesheets_this_week(self):
+		return frappe.get_all(
+			"Timesheet",
+			filters={
+				"employee": self.employee_name,
+				"start_date": ["between", [str(self.monday), str(self.sunday)]],
+				"docstatus": ["!=", 2],
+			},
+			pluck="name",
+		)
+
+	def test_a_week_that_starts_on_tuesday_is_still_that_weeks_timesheet(self):
+		"""ERPNext's Timesheet.set_dates rewrites start_date to the earliest
+		booked day, so a week with no Monday hours -- leave, a holiday, or
+		simply starting mid-week -- persists with the Tuesday. Matched by
+		`start_date == monday`, the grid read straight back as an empty
+		week."""
+		frappe.set_user(EMPLOYEE_USER)
+		name = save_my_week(str(self.monday), json.dumps([self._tuesday_row()]))
+
+		frappe.set_user("Administrator")
+		self.assertEqual(
+			str(frappe.db.get_value("Timesheet", name, "start_date")),
+			str(add_days(self.monday, 1)),
+		)
+
+		frappe.set_user(EMPLOYEE_USER)
+		week = get_my_week(str(self.monday))
+		self.assertIsNotNone(week["timesheet"])
+		self.assertEqual(week["timesheet"]["name"], name)
+		self.assertEqual(week["timesheet"]["total_hours"], 8)
+		self.assertEqual(week["timesheet"]["rows"][0]["date"], str(add_days(self.monday, 1)))
+
+	def test_saving_a_tuesday_start_week_twice_updates_the_one_timesheet(self):
+		"""The second save used to insert -- and ERPNext refused it with a
+		raw OverlapError against the row the employee could not see."""
+		frappe.set_user(EMPLOYEE_USER)
+		first = save_my_week(str(self.monday), json.dumps([self._tuesday_row()]))
+		second = save_my_week(str(self.monday), json.dumps([self._tuesday_row(hours=6)]))
+
+		self.assertEqual(first, second)
+		frappe.set_user("Administrator")
+		self.assertEqual(self._timesheets_this_week(), [first])
+		self.assertEqual(frappe.get_doc("Timesheet", first).total_hours, 6)
+
+	def test_a_tuesday_start_week_is_sent_once_and_refused_the_second_time(self):
+		frappe.set_user(EMPLOYEE_USER)
+		save_my_week(str(self.monday), json.dumps([self._tuesday_row()]))
+		token = self._token()
+		sent = submit_my_week(str(self.monday), json.dumps([self._tuesday_row()]), token)
+		self.assertEqual(sent["workflow_state"], "Pending Approval")
+
+		with self.assertRaises(frappe.ValidationError) as refused:
+			submit_my_week(str(self.monday), json.dumps([self._tuesday_row()]), token)
+		self.assertIn("Pending Approval", str(refused.exception))
+
+		frappe.set_user("Administrator")
+		self.assertEqual(self._timesheets_this_week(), [sent["name"]])
+
+	def test_both_write_paths_lock_the_employee_row(self):
+		"""A `SELECT ... FOR UPDATE` only excludes writers that also take it.
+		submit_my_week held the lock while save_my_week took none, so a
+		concurrent save walked straight past it and both could insert."""
+		from unittest.mock import patch
+
+		import helixhr.api as api
+
+		frappe.set_user(EMPLOYEE_USER)
+		with patch("helixhr.api._lock_employee", wraps=api._lock_employee) as lock:
+			save_my_week(str(self.monday), json.dumps([self._week_row()]))
+			self.assertTrue(lock.called, "save_my_week took no lock")
+
+			lock.reset_mock()
+			submit_my_week(str(self.monday), json.dumps([self._week_row()]), self._token())
+			self.assertTrue(lock.called, "submit_my_week took no lock")

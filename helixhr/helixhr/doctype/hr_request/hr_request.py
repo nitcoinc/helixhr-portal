@@ -92,4 +92,10 @@ def request_belongs_to_session(name):
 	employee = frappe.db.get_value("HR Request", name, "employee")
 	if not employee:
 		return False
-	return employee == frappe.db.get_value("Employee", {"user_id": frappe.session.user}, "name")
+	# `status = "Active"`, the same scope `_session_company` and
+	# `hrms.api.get_current_employee` resolve by: a user whose Employee has
+	# been set to Left or Inactive while their login is still enabled must
+	# not keep passing the ownership branch of `events.file_before_insert`.
+	return employee == frappe.db.get_value(
+		"Employee", {"user_id": frappe.session.user, "status": "Active"}, "name"
+	)

@@ -42,11 +42,11 @@ const props = defineProps({
   /** Override `resource.error`. */
   error: { type: [Object, String], default: null },
   /**
-   * Whether a successful response resolved to nothing. Left null, the region
-   * treats an empty array / absent data as empty; pass it explicitly when
-   * "empty" is a property of something the page computed.
+   * Whether a successful response resolved to nothing. Always the page's own
+   * answer: "empty" is a property of what the page computed from the response,
+   * not of the response's shape, and every region in the portal knows it.
    */
-  empty: { type: Boolean, default: null },
+  empty: { type: Boolean, required: true },
   /** The empty state's headline. Names the task, never "No data". */
   emptyTitle: { type: String, default: 'Nothing here yet' },
   /** One line under it, naming the next action. */
@@ -81,18 +81,10 @@ const isForbidden = computed(() => {
   return type === 'PermissionError' || type === 'ValidationError:PermissionError'
 })
 
-const isEmpty = computed(() => {
-  if (props.empty !== null) return props.empty
-  const data = props.resource?.data
-  if (data === null || data === undefined) return true
-  if (Array.isArray(data)) return data.length === 0
-  return false
-})
-
 const state = computed(() => {
   if (isLoading.value) return 'pending'
   if (failure.value) return isForbidden.value ? 'forbidden' : 'unavailable'
-  if (isEmpty.value) return 'empty'
+  if (props.empty) return 'empty'
   return 'ready'
 })
 
@@ -118,8 +110,7 @@ const skeletonItemHeight = computed(() => {
 })
 
 function retry() {
-  if (props.resource?.reload) props.resource.reload()
-  else if (props.resource?.fetch) props.resource.fetch()
+  props.resource?.reload()
 }
 </script>
 

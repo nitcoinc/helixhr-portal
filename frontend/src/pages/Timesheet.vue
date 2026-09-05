@@ -15,6 +15,7 @@ import {
   today,
   weekDates,
 } from '@/lib/dates'
+import { FULL_WEEK_HOURS as DEFAULT_FULL_WEEK_HOURS, barHeight } from '@/lib/week'
 
 // P2-U6 / P2-R12 / P2-AE5. `/timesheet` and `/timesheet/:weekStart` are the
 // same component: the week is a route parameter, so refresh and browser Back
@@ -27,8 +28,6 @@ const props = defineProps({
 const router = useRouter()
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-const FULL_WEEK_HOURS = 40
-const FULL_DAY_HOURS = 8
 
 // P2-AE3, and the defect this page carried until now: the week was computed
 // with `new Date('YYYY-MM-DD')` and read back with `.getDay()`/`.getDate()`,
@@ -234,6 +233,10 @@ const isReadOnly = computed(
 )
 const approverName = computed(() => week.data?.approver_name || '')
 
+// The server's answer, the same one Past weeks reads. It used to be a literal
+// 40 here and `full_week_hours` there, which is two answers to one question.
+const fullWeekHours = computed(() => week.data?.full_week_hours ?? DEFAULT_FULL_WEEK_HOURS)
+
 // The manager's reason arrives with the week itself. It used to be read here
 // with `frappe.client.get_list` on Comment, which the Employee Self Service
 // role cannot read: the call 403'd every time, so the page told the employee
@@ -333,10 +336,6 @@ const savedLabel = computed(() => {
   return minutes < 1 ? 'Saved just now' : `Saved ${minutes} min ago`
 })
 
-function barHeight(day) {
-  if (!day.total) return 0
-  return Math.max(8, Math.min(100, (day.total / FULL_DAY_HOURS) * 100))
-}
 </script>
 
 <template>
@@ -427,7 +426,7 @@ function barHeight(day) {
               <span
                 class="w-1/2 max-w-8 rounded-sm"
                 :class="day.total ? 'bg-signal' : 'bg-transparent'"
-                :style="{ height: `${barHeight(day)}%` }"
+                :style="{ height: `${barHeight(day.total)}%` }"
               />
             </span>
             <span
@@ -442,7 +441,7 @@ function barHeight(day) {
         <div class="flex items-center justify-between gap-3 bg-field-deep/60 px-4 py-2.5">
           <p class="text-sm text-blue-100">
             <span class="tabular font-semibold text-white">{{ weekTotal }}</span>
-            of {{ FULL_WEEK_HOURS }} hours this week
+            of {{ fullWeekHours }} hours this week
           </p>
           <button
             class="cursor-pointer text-sm font-medium text-signal hover:underline"
@@ -515,7 +514,7 @@ function barHeight(day) {
           :projects="projects.data || []"
           :days="days"
           :selected-date="selectedDate"
-          :full-week-hours="FULL_WEEK_HOURS"
+          :full-week-hours="fullWeekHours"
           :read-only="isReadOnly"
           @add-line="addLine"
           @remove-line="removeLine"

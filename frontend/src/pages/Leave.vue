@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { createResource, Button, Dialog } from 'frappe-ui'
 import LeaveForm from '@/components/LeaveForm.vue'
@@ -9,6 +9,7 @@ import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
 import { formatDate, formatDateRange, isCalendarDate, today } from '@/lib/dates'
 import { toPlainLeaveError } from '@/lib/errorMap'
+import { useIsDesktop } from '@/lib/useIsDesktop'
 
 // P2-U5 / KTD5. `/leave` and `/leave/:name` are the same component: the
 // selected record is a route parameter, so refresh and browser Back land on
@@ -150,20 +151,7 @@ function closeDetail() {
   router.push({ name: 'Leave' })
 }
 
-// One breakpoint decides the *shape*, never the identity: the URL is the same
-// at both widths (KTD5). 1024px is where the shell drops the phone tab bar
-// for the side nav, so it is also where there is room for two columns.
-const isDesktop = ref(false)
-let widthQuery = null
-function syncWidth(event) {
-  isDesktop.value = event.matches
-}
-onMounted(() => {
-  widthQuery = window.matchMedia('(min-width: 1024px)')
-  isDesktop.value = widthQuery.matches
-  widthQuery.addEventListener('change', syncWidth)
-})
-onUnmounted(() => widthQuery?.removeEventListener('change', syncWidth))
+const isDesktop = useIsDesktop()
 
 // --- asking, and asking again -------------------------------------------
 

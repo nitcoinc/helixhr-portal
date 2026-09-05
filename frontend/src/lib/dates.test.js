@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   addCalendarDays,
   configureCalendar,
@@ -9,6 +9,7 @@ import {
   isCalendarDate,
   mondayOf,
   resetCalendar,
+  today,
   todayInZone,
   weekBounds,
 } from './dates'
@@ -168,6 +169,54 @@ describe('"today" comes from the authoritative user timezone (P2-AE3)', () => {
   })
 })
 
+// The bootstrap runs once per hard *load*, and the portal ships a
+// `display: standalone` manifest -- an installed app is backgrounded and
+// resumed, not reloaded. A tab opened on Sunday night and reopened on Monday
+// morning kept answering "Sunday": /timesheet opened last week and the
+// employee booked Monday's hours into it, while `get_dashboard` (which calls
+// `user_today()` live) disagreed with every screen.
+describe('the bootstrap "today" expires at the user\'s midnight', () => {
+  const ZONE = 'Asia/Kolkata'
+  // 22:00 IST on Sunday 6 September 2026.
+  const SUNDAY_NIGHT = Date.UTC(2026, 8, 6, 16, 30, 0)
+  // 08:00 IST on Monday 7 September, same tab, never reloaded.
+  const MONDAY_MORNING = Date.UTC(2026, 8, 7, 2, 30, 0)
+
+  afterEach(() => vi.useRealTimers())
+
+  function boot() {
+    configureCalendar({ timeZone: ZONE, systemTimeZone: ZONE, today: '2026-09-06' })
+  }
+
+  it('prefers the server value while it is still today', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(SUNDAY_NIGHT)
+    boot()
+    expect(today()).toBe('2026-09-06')
+  })
+
+  it('follows the clock past midnight without a reload', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(SUNDAY_NIGHT)
+    boot()
+    expect(today()).toBe('2026-09-06')
+
+    vi.setSystemTime(MONDAY_MORNING)
+    expect(today()).toBe('2026-09-07')
+    // ...and the week moves with it, which is the defect this is about.
+    expect(weekBounds(today()).start).toBe('2026-09-07')
+  })
+
+  it('ignores a browser clock that is merely behind the server', () => {
+    vi.useFakeTimers()
+    // 23:30 on the 5th in Kolkata: the browser is half an hour behind the
+    // server's own answer. Skew is exactly what the cached value absorbs.
+    vi.setSystemTime(Date.UTC(2026, 8, 5, 18, 0, 0))
+    boot()
+    expect(today()).toBe('2026-09-06')
+  })
+})
+
 describe('timestamps are instants, rendered in the user timezone (P2-R5)', () => {
   it('reads a naive Frappe timestamp as site wall-clock time', () => {
     // Stored by a site running on Asia/Kolkata: 18:47 IST is 13:17 UTC,
@@ -212,6 +261,11 @@ describe('timestamps are instants, rendered in the user timezone (P2-R5)', () =>
   })
 
   it('labels Today and Yesterday against the user calendar, not the host one', () => {
+    // The clock is pinned as well as the bootstrap value: "today" expires
+    // once the user's zone has moved past it, so a bootstrap date in the
+    // real past is *not* today and must not be labelled as one.
+    vi.useFakeTimers()
+    vi.setSystemTime(Date.UTC(2026, 8, 3, 20, 0, 0)) // 16:00 in New York
     configureCalendar({
       timeZone: 'America/New_York',
       systemTimeZone: 'Asia/Kolkata',
@@ -223,6 +277,7 @@ describe('timestamps are instants, rendered in the user timezone (P2-R5)', () =>
     expect(formatDateTime('2026-09-03 01:30:00')).toBe('Yesterday, 16:00')
     expect(formatDateTime('2026-08-20 01:30:00')).toBe('19 Aug, 16:00')
     expect(formatDateTime('2025-08-20 01:30:00')).toBe('19 Aug 2025, 16:00')
+    vi.useRealTimers()
   })
 
   it('survives a DST transition in the user zone', () => {

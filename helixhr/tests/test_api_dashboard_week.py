@@ -151,8 +151,6 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 		self.assertEqual(row["kind"], "leave_waiting")
 		self.assertEqual(row["owner"], "manager")
 		self.assertEqual(row["urgency"], "waiting")
-		self.assertEqual(row["reference_doctype"], "Leave Application")
-		self.assertEqual(row["reference_name"], name)
 		self.assertEqual(row["to"], {"name": "LeaveDetail", "params": {"name": name}})
 		self.assertEqual(row["action"], "View")
 		self.assertEqual(row["id"], f"leave_waiting:{name}")
@@ -215,7 +213,6 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 		row = items[0]
 		self.assertEqual(row["kind"], "request_answered")
 		self.assertEqual(row["urgency"], "unread")
-		self.assertEqual(row["reference_name"], request)
 		self.assertEqual(row["to"], {"name": "RequestDetail", "params": {"name": request}})
 		self.assertEqual(row["detail"], "Collect it from reception.")
 		self.assertTrue(row["notification"])
@@ -249,7 +246,7 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 			{"name": "ApprovalDetail", "params": {"kind": "timesheet", "name": timesheet}},
 		)
 		self.assertEqual(by_kind["approval_leave"]["urgency"], "decision")
-		self.assertEqual(get_dashboard()["pending"]["approvals_waiting_for_me"], 2)
+		self.assertEqual(len(queue["items"]), 2)
 
 	def test_an_approver_with_no_direct_reports_still_gets_the_approvals_entry(self):
 		"""The second half of scenario 2: `can_approve` gated the nav item on
@@ -268,7 +265,6 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 		frappe.set_user(MANAGER_USER)
 		boot = get_portal_bootstrap()
 
-		self.assertEqual(boot["report_count"], 0)
 		self.assertTrue(boot["can_approve"])
 
 	def test_an_older_rejection_outranks_a_newer_one_and_reports_its_age(self):

@@ -159,6 +159,30 @@ class TestPreflightP2U1(IntegrationTestCase):
 		finally:
 			frappe.delete_doc("Leave Application", leave.name, force=True, ignore_permissions=True)
 
+	def test_a_javascript_document_link_written_before_the_rule_is_a_fail(self):
+		"""P2-R19: the doctype validates on save and nothing revalidates a
+		row that is never saved again, so a link written before that rule
+		still renders into an `:href`. Inserted here past validation, the
+		way it got into the table in the first place."""
+		doc = frappe.get_doc(
+			{
+				"doctype": "HelixHR Document Link",
+				"title": "_Test legacy link",
+				"url": "https://example.test/policy.pdf",
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.set_value(
+			"HelixHR Document Link", doc.name, "url", "javascript:alert(1)", update_modified=False
+		)
+		try:
+			result = preflight.check_document_link_urls()
+			self.assertEqual(result["status"], preflight.FAIL)
+			self.assertIn(doc.name, result["detail"])
+		finally:
+			frappe.delete_doc("HelixHR Document Link", doc.name, force=True, ignore_permissions=True)
+
+		self.assertEqual(preflight.check_document_link_urls()["status"], preflight.PASS)
+
 	def test_custom_docperm_coverage_passes_on_this_site(self):
 		"""If this ever fails, something has removed another role's access to
 		one of the doctypes this app customises -- see

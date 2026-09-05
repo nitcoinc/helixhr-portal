@@ -46,9 +46,6 @@ function dashboard({ needsYou, failed = [] }) {
       },
       leave_balances: {},
       attendance_this_month: failed.includes('attendance_this_month') ? null : { Present: 3 },
-      timesheet_this_week: null,
-      pending: { my_open_leave: 0, my_open_requests: 0, approvals_waiting_for_me: 0 },
-      unread_notifications: 0,
       week: week(),
       needs_you: needsYou,
       failed_sections: failed,
@@ -60,8 +57,6 @@ function rejectedWeek(start: string, detail: string, ageDays: number) {
   return {
     id: `timesheet_rejected:TS-${start}`,
     kind: 'timesheet_rejected',
-    reference_doctype: 'Timesheet',
-    reference_name: `TS-${start}`,
     notification: null,
     title: 'Your timesheet was sent back',
     detail,
@@ -128,8 +123,6 @@ test.describe('the Home action queue (P2-AE5)', () => {
             {
               id: 'leave_waiting:HR-LAP-2026-TEST',
               kind: 'leave_waiting',
-              reference_doctype: 'Leave Application',
-              reference_name: 'HR-LAP-2026-TEST',
               notification: null,
               title: 'Casual Leave waiting for your manager',
               detail: null,

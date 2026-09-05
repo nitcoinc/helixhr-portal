@@ -290,6 +290,46 @@ class TestResponseHardening(IntegrationTestCase):
 		utils.set_security_headers(response=response, request=self._Request(attached["file_url"]))
 		self.assertIn("attachment", response.headers["Content-Disposition"])
 
+	def test_a_file_url_shared_with_another_doctype_is_still_a_download(self):
+		"""Frappe reuses one `file_url` across File rows with identical
+		content, so a single-row lookup can answer with whichever row it
+		happens to find first. Any row saying HR Request forces the
+		download."""
+		frappe.set_user("Administrator")
+		make_test_employee_and_manager()
+		frappe.set_user(EMPLOYEE_USER)
+		from helixhr.api import attach_to_my_request, create_my_request
+
+		created = create_my_request(
+			category="HR Letter", subject="Shared content", operation_key=str(uuid.uuid4())
+		)
+		frappe.local.request = with_uploaded_file("shared.pdf", PDF)
+		attached = attach_to_my_request(created["name"])
+		frappe.local.request = None
+
+		# The second row on the same URL: a To Do, which is not an HR
+		# Request and must not be the answer.
+		frappe.set_user("Administrator")
+		todo = frappe.get_doc({"doctype": "ToDo", "description": "_Test shared file"}).insert(
+			ignore_permissions=True
+		)
+		other = frappe.get_doc(
+			{
+				"doctype": "File",
+				"file_name": "shared.pdf",
+				"file_url": attached["file_url"],
+				"is_private": 1,
+				"attached_to_doctype": "ToDo",
+				"attached_to_name": todo.name,
+			}
+		).insert(ignore_permissions=True)
+		self.addCleanup(frappe.delete_doc, "File", other.name, force=True, ignore_permissions=True)
+
+		response = Response("ok")
+		shared_url = attached["file_url"]
+		utils.set_security_headers(response=response, request=self._Request(shared_url))
+		self.assertIn("attachment", response.headers["Content-Disposition"])
+
 	def test_an_unrelated_private_file_keeps_its_own_disposition(self):
 		response = Response("ok")
 		utils.set_security_headers(

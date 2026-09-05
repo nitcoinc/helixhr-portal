@@ -57,7 +57,7 @@ export function configureCalendar({ timeZone, systemTimeZone, today, locale } = 
   if (locale !== undefined) calendar.locale = locale
 }
 
-/** Test seam, and what a sign-out resets. */
+/** Test seam. */
 export function resetCalendar() {
   calendar.timeZone = null
   calendar.systemTimeZone = null
@@ -213,14 +213,25 @@ export function todayInZone(timeZone, at) {
 }
 
 /** The user's today, preferring the value the server sent in the bootstrap
- * so the browser clock cannot disagree with the API. */
+ * so the browser clock cannot disagree with the API -- but only while that
+ * value is still today.
+ *
+ * The bootstrap runs once per hard *load*, and the portal ships a
+ * `display: standalone` manifest: an installed app is backgrounded and
+ * resumed, not reloaded. A tab opened on Sunday night and resumed on Monday
+ * morning kept answering "Sunday" forever, so `/timesheet` opened last week
+ * and Attendance opened last month while `get_dashboard` -- which calls
+ * `user_today()` live -- disagreed with all of it (P2-AE3).
+ *
+ * So the cached value expires by comparison rather than by a listener: once
+ * the live clock has moved past it in the user's zone it is stale and the
+ * clock wins. A browser clock that is merely *behind* the server never wins,
+ * which is the skew the cached value exists to absorb. Both values are
+ * `YYYY-MM-DD`, so a string comparison is a date comparison. */
 export function today() {
-  return calendar.today || todayInZone(userTimeZone())
-}
-
-/** The Monday..Sunday week the user is in right now. */
-export function currentWeek() {
-  return weekBounds(today())
+  const live = todayInZone(userTimeZone())
+  if (!calendar.today) return live
+  return live > calendar.today ? live : calendar.today
 }
 
 // --- rendering ---------------------------------------------------------

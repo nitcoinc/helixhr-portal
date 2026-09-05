@@ -23,27 +23,41 @@ class HelixHRDocumentLink(Document):
 		self.url = validate_document_url(self.url)
 
 
-def validate_document_url(url):
-	"""Return `url` unchanged if it is a plain HTTP(S) address, else throw
-	(P2-R19). Rejected before storage rather than filtered on render, so a
-	bad value cannot reach a page that forgets to escape it."""
+def document_url_problem(url):
+	"""Why `url` is not a document link, or None when it is one.
+
+	The rule, once. `validate_document_url` throws it at save time and
+	`preflight.check_document_link_urls` counts the rows that already
+	break it -- validation only runs on save, so a `javascript:` link
+	written before P2-R19 stays in the table until somebody looks.
+	"""
 	value = (url or "").strip()
 	if not value:
-		frappe.throw(_("A document needs a link."))
+		return _("A document needs a link.")
 
 	try:
 		parsed = urlparse(value)
 	except ValueError:
-		frappe.throw(_("That link isn't a valid web address."))
+		return _("That link isn't a valid web address.")
 
 	if parsed.scheme.lower() not in ALLOWED_URL_SCHEMES:
-		frappe.throw(_("A document link must start with http:// or https://."))
+		return _("A document link must start with http:// or https://.")
 	if not parsed.hostname:
-		frappe.throw(_("That link isn't a valid web address."))
+		return _("That link isn't a valid web address.")
 	if parsed.username or parsed.password:
-		frappe.throw(_("A document link can't carry a username or password."))
+		return _("A document link can't carry a username or password.")
 
-	return value
+	return None
+
+
+def validate_document_url(url):
+	"""Return `url` trimmed if it is a plain HTTP(S) address, else throw
+	(P2-R19). Rejected before storage rather than filtered on render, so a
+	bad value cannot reach a page that forgets to escape it."""
+	problem = document_url_problem(url)
+	if problem:
+		frappe.throw(problem)
+	return (url or "").strip()
 
 
 def get_permission_query_conditions(user=None, **kwargs):

@@ -56,7 +56,7 @@ const PATTERNS = [
   // second line of defence -- a direct caller, or an approver unset between
   // the form loading and Send.
   {
-    test: /leave approver is mandatory|leave approver.*mandatory/i,
+    test: /leave approver.*mandatory/i,
     message: () =>
       "You don't have a leave approver yet, so this can't be sent. Ask HR to set one.",
   },

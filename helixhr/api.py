@@ -63,13 +63,17 @@ def get_dashboard(**kwargs):
 			cache[key] = fn()
 		return cache[key]
 
+	# One error policy for the whole app: `_safe` owns it, and a section
+	# only adds its name to `failed_sections`. The sentinel is what keeps a
+	# section that legitimately answers `None` apart from one that threw.
+	missing = object()
+
 	def section(name, fn):
-		try:
-			return fn()
-		except Exception:
+		value = _safe(fn, title=f"HelixHR dashboard section failed: {name}", default=missing)
+		if value is missing:
 			failed.append(name)
-			frappe.log_error(title=f"HelixHR dashboard section failed: {name}")
 			return None
+		return value
 
 	return {
 		"employee": section("employee", lambda: _get_employee_header(employee)),
@@ -77,9 +81,6 @@ def get_dashboard(**kwargs):
 		"attendance_this_month": section(
 			"attendance_this_month", lambda: _get_attendance_summary(once)
 		),
-		"timesheet_this_week": None,  # wired up in U8
-		"pending": section("pending", lambda: _get_pending_counts(employee, once)),
-		"unread_notifications": section("unread_notifications", _get_unread_notification_count),
 		# The two sections the week-spine dashboard is built on. Kept inside
 		# get_dashboard rather than split into their own endpoints so the home
 		# screen stays one request.
@@ -170,7 +171,6 @@ def get_portal_bootstrap():
 		"today": today,
 		"week_start": str(monday),
 		"week_end": str(sunday),
-		"report_count": 0,
 		"can_approve": False,
 		"unread_notifications": 0,
 	}
@@ -182,16 +182,18 @@ def get_portal_bootstrap():
 		# service failure (P2-U2 scenario 3).
 		return boot
 
-	boot["report_count"] = _safe(lambda: _count_direct_reports(employee["name"])) or 0
 	# A leave approver need not be anybody's manager, and a manager's only
 	# pending work may be a timesheet -- gating the Approvals nav item on
 	# direct reports alone hid the entry from both (P2-R11). The count is
 	# still tried first because it is one indexed count and short-circuits
-	# the two list reads for the common case.
-	boot["can_approve"] = boot["report_count"] > 0 or bool(
-		_safe(lambda: _pending_approvals(employee["name"]))
+	# the two list reads for the common case; it is a local, not part of
+	# the response, because `can_approve` is the only thing the shell reads.
+	title = "HelixHR portal bootstrap failed"
+	report_count = _safe(lambda: _count_direct_reports(employee["name"]), title=title) or 0
+	boot["can_approve"] = report_count > 0 or bool(
+		_safe(lambda: _pending_approvals(employee["name"]), title=title)
 	)
-	boot["unread_notifications"] = _safe(_get_unread_notification_count) or 0
+	boot["unread_notifications"] = _safe(_get_unread_notification_count, title=title) or 0
 	return boot
 
 
@@ -199,12 +201,18 @@ def _count_direct_reports(employee):
 	return frappe.db.count("Employee", {"reports_to": employee, "status": "Active"})
 
 
-def _safe(fn):
+def _safe(fn, title="HelixHR portal section failed", default=None):
+	"""Run `fn`, and turn a failure into `default` plus one named log line.
+
+	`title` is the caller's own label: a bootstrap failure used to log
+	itself as "HelixHR dashboard section failed", so the one place the
+	shell can break was the hardest one to find in the error log.
+	"""
 	try:
 		return fn()
 	except Exception:
-		frappe.log_error(title="HelixHR dashboard section failed")
-		return None
+		frappe.log_error(title=title)
+		return default
 
 
 def _get_employee_header(employee):
@@ -254,21 +262,11 @@ def _attendance_events():
 	return get_attendance_calendar_events(str(start), str(end)) or {}
 
 
-def _get_pending_counts(employee, once):
-	return {
-		"my_open_leave": len(once("open_leave", lambda: _open_leave(employee))),
-		"my_open_requests": frappe.db.count("HR Request", {"employee": employee, "status": "Open"}),
-		"approvals_waiting_for_me": len(once("approvals", lambda: _pending_approvals(employee))),
-	}
-
-
 def _open_leave(employee):
-	"""This employee's leave that is still with their manager. One read: the
-	count on the dashboard's `pending` section and the rows in the queue's
-	"Waiting on others" list are the same question asked twice.
+	"""This employee's leave that is still with their manager -- the rows
+	the queue's "Waiting on others" list is drawn from.
 
-	Bounded by _QUEUE_FETCH like every other queue source -- the count is
-	an approximation above that, which no real employee reaches.
+	Bounded by _QUEUE_FETCH like every other queue source.
 	"""
 	return frappe.get_all(
 		"Leave Application",
@@ -322,14 +320,27 @@ def _get_week_spine(employee, once):
 	}
 
 
-def _week_timesheet(employee, monday):
-	"""The one Timesheet this week's hours and this week's status both come
-	from. One lookup: the spine used to ask for its name, then ask again
-	for its workflow_state."""
+def _week_timesheet(employee, monday, fields=("name", "workflow_state"), sunday=None):
+	"""The one Timesheet a week's hours, status and edits all come from --
+	the newest non-cancelled one whose `start_date` falls inside the week
+	(KTD10). Every query site goes through here so the rule lives once.
+
+	The week is a **range**, never `start_date == monday`. ERPNext's own
+	`Timesheet.set_dates` rewrites `start_date` to the earliest `from_time`
+	in the child table, so a week booked Tuesday-Friday -- leave, a
+	holiday, or simply starting mid-week -- persists with the Tuesday.
+	Matched by equality it then read back as an empty week, and the next
+	save hit ERPNext's OverlapError against the row nobody could see.
+	"""
+	sunday = sunday or get_week_bounds(monday)[1]
 	return frappe.db.get_value(
 		"Timesheet",
-		{"employee": employee, "start_date": str(monday), "docstatus": ["!=", 2]},
-		["name", "workflow_state"],
+		{
+			"employee": employee,
+			"start_date": ["between", [str(monday), str(sunday)]],
+			"docstatus": ["!=", 2],
+		},
+		list(fields),
 		as_dict=True,
 		order_by="creation desc",
 	)
@@ -430,7 +441,6 @@ def _get_needs_you(employee, once):
 		items.append(
 			_queue_item(
 				kind="timesheet_rejected",
-				doctype="Timesheet",
 				name=row.name,
 				title="Your timesheet was sent back",
 				detail=reasons.get(row.name),
@@ -442,8 +452,14 @@ def _get_needs_you(employee, once):
 				urgency="blocked",
 				# The exact week, by its Monday -- not "/timesheet", which
 				# opened the *current* week whichever week was sent back
-				# (P2-AE5).
-				to={"name": "TimesheetWeek", "params": {"weekStart": str(row.start_date)}},
+				# (P2-AE5). Normalised through get_week_bounds because
+				# ERPNext rewrites `start_date` to the earliest booked day,
+				# so a week that starts on the Tuesday would otherwise put
+				# a Tuesday in the route parameter (KTD10).
+				to={
+					"name": "TimesheetWeek",
+					"params": {"weekStart": str(get_week_bounds(row.start_date)[0])},
+				},
 			)
 		)
 
@@ -466,7 +482,6 @@ def _get_needs_you(employee, once):
 		items.append(
 			_queue_item(
 				kind="leave_rejected",
-				doctype="Leave Application",
 				name=row.name,
 				title=f"Your {row.leave_type} was sent back",
 				detail=leave_reasons.get(row.name),
@@ -500,7 +515,6 @@ def _get_needs_you(employee, once):
 		items.append(
 			_queue_item(
 				kind="request_answered",
-				doctype="HR Request",
 				name=log.document_name,
 				title=log.subject,
 				detail=_notification_text(log.description),
@@ -521,7 +535,6 @@ def _get_needs_you(employee, once):
 		items.append(
 			_queue_item(
 				kind=decision["kind"],
-				doctype=decision["reference_doctype"],
 				name=decision["reference_name"],
 				title=decision["title"],
 				detail=None,
@@ -542,7 +555,6 @@ def _get_needs_you(employee, once):
 		waiting.append(
 			_queue_item(
 				kind="leave_waiting",
-				doctype="Leave Application",
 				name=row.name,
 				title=f"{row.leave_type} waiting for your manager",
 				detail=None,
@@ -567,15 +579,13 @@ def _get_needs_you(employee, once):
 
 
 def _queue_item(
-	*, kind, doctype, name, title, detail, date, day, age_days, action, owner, urgency, to, notification=None
+	*, kind, name, title, detail, date, day, age_days, action, owner, urgency, to, notification=None
 ):
 	return {
 		# Stable record identity, and the Vue list key. Never an index: a
 		# re-ordered queue reused the wrong row's DOM state under one.
 		"id": f"{kind}:{notification or name}",
 		"kind": kind,
-		"reference_doctype": doctype,
-		"reference_name": name,
 		"notification": notification,
 		"title": title,
 		"detail": detail,
@@ -860,7 +870,15 @@ def _may_withdraw(state):
 	"""Withdrawal is a property of the lifecycle, not of the screen. Only a
 	still-unsubmitted request of this employee's own can be removed; an
 	approved one is a submitted document with a ledger entry behind it and
-	the honest path is "Ask HR to cancel"."""
+	the honest path is "Ask HR to cancel".
+
+	The lifecycle is half the answer. The other half is `owner`: the only
+	delete grant the Employee role has is the `if_owner` Custom DocPerm
+	from patches/v1_0/apply_permission_deltas, and `if_owner` matches
+	`Document.owner`, not `employee`. A leave HR filed in Desk *for* this
+	employee is theirs to see and not theirs to delete, so callers pair
+	this with the owner check rather than promising a button that throws.
+	"""
 	return state in ("open", "sent_back")
 
 
@@ -911,7 +929,7 @@ def _leave_projection(row, approver_names, reasons):
 		"status": row.get("status"),
 		"docstatus": cint(row.get("docstatus")),
 		"state": state,
-		"can_withdraw": _may_withdraw(state),
+		"can_withdraw": _may_withdraw(state) and row.get("owner") == frappe.session.user,
 		"approver": approver,
 		# `get_leave_applications` hands back a user id; the row needs the
 		# person. The portal used to resolve these with its own
@@ -1202,7 +1220,7 @@ def withdraw_my_leave(name):
 	current = frappe.db.get_value(
 		"Leave Application",
 		name,
-		["employee", "docstatus", "status"],
+		["employee", "docstatus", "status", "owner"],
 		as_dict=True,
 		for_update=True,
 	)
@@ -1221,6 +1239,11 @@ def withdraw_my_leave(name):
 		frappe.throw(
 			_("This leave has already been decided, so it can't be withdrawn. Ask HR to cancel it.")
 		)
+	if current.owner != frappe.session.user:
+		# HR filed this one in Desk, so the `if_owner` delete grant does not
+		# cover it and the delete below would throw a bare PermissionError.
+		# Same sentence the screen shows, from the same rule (_may_withdraw).
+		frappe.throw(_("HR raised this one for you. Ask HR to cancel it."))
 
 	frappe.delete_doc("Leave Application", name)
 	return {"name": name, "withdrawn": True}
@@ -1406,16 +1429,11 @@ def get_my_week(week_start=None):
 	employee = get_current_employee()
 	monday, sunday = get_week_bounds(week_start or user_today())
 
-	name = frappe.db.get_value(
-		"Timesheet",
-		{"employee": employee, "start_date": str(monday), "docstatus": ["!=", 2]},
-		"name",
-		order_by="creation desc",
-	)
+	current = _week_timesheet(employee, monday, ("name",), sunday)
 
 	timesheet = None
-	if name:
-		doc = frappe.get_doc("Timesheet", name)
+	if current:
+		doc = frappe.get_doc("Timesheet", current.name)
 		timesheet = {
 			"name": doc.name,
 			"workflow_state": doc.workflow_state,
@@ -1634,18 +1652,14 @@ def submit_my_week(week_start, rows, expected_modified=None):
 	employee = get_current_employee()
 	monday, sunday = get_week_bounds(week_start)
 
-	frappe.db.get_value("Employee", employee, "name", for_update=True)
+	_lock_employee(employee)
 
-	current = frappe.db.get_value(
-		"Timesheet",
-		{"employee": employee, "start_date": str(monday), "docstatus": ["!=", 2]},
-		["name", "workflow_state", "modified"],
-		order_by="creation desc",
-		as_dict=True,
-	)
+	current = _week_timesheet(employee, monday, ("name", "workflow_state", "modified"), sunday)
 	_assert_week_is_still_sendable(current, expected_modified)
 
-	doc = _write_my_week(employee, monday, sunday, rows)
+	# The row this week already has, handed to the writer rather than looked
+	# up again: it is the same query, and it was being run twice per submit.
+	doc = _write_my_week(employee, monday, sunday, rows, existing_name=current.name if current else None)
 	apply_workflow(doc, "Submit")
 	doc.reload()
 	return {
@@ -1679,9 +1693,29 @@ def _assert_week_is_still_sendable(current, expected_modified):
 		frappe.throw(_(_STALE_WEEK))
 
 
-def _write_my_week(employee, monday, sunday, rows):
+def _lock_employee(employee):
+	"""`SELECT ... FOR UPDATE` on the one Employee row every writer of a
+	week shares, so two concurrent writes serialise instead of both
+	inserting a Timesheet for the same week.
+
+	It lives in `_write_my_week` because a lock only excludes statements
+	that also take it: `submit_my_week` held it while `save_my_week` took
+	nothing at all, so a save walked straight past a concurrent submit and
+	the double-insert the lock exists to stop was still reachable. The
+	first write of a week has no Timesheet row to lock yet, which is
+	exactly the case that matters.
+	"""
+	return frappe.db.get_value("Employee", employee, "name", for_update=True)
+
+
+def _write_my_week(employee, monday, sunday, rows, existing_name=None):
 	"""Replace this week's rows. Shared by `save_my_week` and
-	`submit_my_week` so a week is validated and written exactly one way."""
+	`submit_my_week` so a week is validated and written exactly one way.
+
+	`existing_name` is the week's Timesheet when the caller already looked
+	it up (`submit_my_week` does, to check sendability); otherwise it is
+	resolved here.
+	"""
 	from frappe.model.workflow import apply_workflow
 
 	if isinstance(rows, str):
@@ -1691,12 +1725,10 @@ def _write_my_week(employee, monday, sunday, rows):
 
 	_validate_rows(rows, _bookable_tasks_by_project(), monday, sunday)
 
-	existing_name = frappe.db.get_value(
-		"Timesheet",
-		{"employee": employee, "start_date": str(monday), "docstatus": ["!=", 2]},
-		"name",
-		order_by="creation desc",
-	)
+	_lock_employee(employee)
+	if not existing_name:
+		current = _week_timesheet(employee, monday, ("name",), sunday)
+		existing_name = current.name if current else None
 
 	if existing_name:
 		doc = frappe.get_doc("Timesheet", existing_name)

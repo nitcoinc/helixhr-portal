@@ -144,7 +144,7 @@ permission rule.
 ## Portal bootstrap, and whose calendar it is (P2-U2)
 
 `helixhr.api.get_portal_bootstrap` is the one session-scoped read the shell
-makes per hard load: the active Employee, `report_count`/`can_approve`, the
+makes per hard load: the active Employee, `can_approve`, the
 initial unread count, and the calendar contract. It replaced a
 `hrms.api.get_current_employee_info` call in the router guard that ran on
 *every* navigation, plus the shell's separate `frappe.client.get_count` for
@@ -256,10 +256,15 @@ The corollary is that role Employee deliberately has *no* create or write
 DocPerm on HR Request and no delete on Leave Application: the method is the
 create rule, and it is stricter than a DocPerm can be.
 
-`get_dashboard` is one round trip that assembles the header, the week spine
-(`_get_week_spine`), the action queue (`_get_needs_you`), reference counts and
-the unread count. Each sub-part runs through `_safe`, which turns an exception
-into `null` for that block so one broken source never blanks the whole page.
+`get_dashboard` is one round trip that assembles the header, the leave
+balances, this month's attendance, the week spine (`_get_week_spine`) and the
+action queue (`_get_needs_you`) -- and nothing else: the counts it used to
+carry alongside them (`pending`, `unread_notifications`) cost a query each
+and no screen read them, the badge being fed by the bootstrap and the poller.
+Each sub-part runs through `_safe`, which turns an exception into `null` for
+that block so one broken source never blanks the whole page, and names itself
+in `failed_sections`; `_safe`'s `title` is the caller's own, so a bootstrap
+failure no longer logs itself as a dashboard failure.
 The cost of that choice is that a type error looks like an empty state; the
 runbook records the time this hid a real bug, so any new block needs a Python
 test that asserts real data comes back, not just that the key exists.
@@ -274,6 +279,20 @@ with the approver's User via DocShare so they can read it, and removes the
 share when it leaves that state. The manager's rejection reason is a Comment on
 the Timesheet, resolved server-side in `get_my_week` because the Employee role
 cannot read Comment directly.
+
+**One week is one Timesheet, and the week is a range.** Every query for "this
+employee's week" goes through `api._week_timesheet`, which matches
+`start_date` **between** the Monday and the Sunday -- never `== monday`.
+ERPNext's `Timesheet.set_dates` rewrites `start_date` to the earliest
+`from_time` in the child table, so a week booked Tuesday-Friday (leave, a
+holiday, or simply starting mid-week) persists with the Tuesday: matched by
+equality, `get_my_week` read it back as an empty week and the next save hit
+ERPNext's own `OverlapError` against the row nobody could see. For the same
+reason the `weekStart` route parameter is always normalised through
+`get_week_bounds` before it leaves the server. Both writers of a week
+(`save_my_week`, `submit_my_week`) also take `api._lock_employee` -- a
+`SELECT ... FOR UPDATE` only excludes writers that also take it, and the
+lock used to sit in `submit_my_week` alone.
 
 ## Attendance and the dormant device
 
@@ -355,7 +374,7 @@ re-export shim (or `override_whitelisted_methods`) and a pass over every
 - `App.vue` mounts `AppShell` for every route except the three state routes
   (`meta.shell: false`). The shell is a desktop sidebar at 1024px and up, and
   an app bar plus a five-item bottom tab bar below that, with a "More" dialog
-  for the rest. Approvals appears only when `session.reportCount > 0`.
+  for the rest. Approvals appears only when the bootstrap says `can_approve`.
 - `lib/session.js` owns the portal bootstrap (`ensureBootstrap`, at most once
   per hard load; `retryBootstrap` only on an explicit user retry), the
   `idle`/`loading`/`ready`/`not-linked`/`unavailable` status the router and

@@ -28,16 +28,12 @@ const state = reactive({
    */
   status: 'idle',
   employee: null,
-  /** Direct reports. Gates the Approvals nav item only. */
-  reportCount: null,
   canApprove: false,
   unread: 0,
   /** The authoritative calendar (P2-R5). Mirrored into lib/dates.js. */
   timeZone: null,
   systemTimeZone: null,
   today: null,
-  weekStart: null,
-  weekEnd: null,
   /** The failure behind status 'unavailable', for the retry panel. */
   error: null,
 })
@@ -85,14 +81,11 @@ async function load() {
 function apply(boot) {
   const employee = boot?.employee || null
   state.employee = employee
-  state.reportCount = boot?.report_count ?? null
   state.canApprove = !!boot?.can_approve
   state.unread = boot?.unread_notifications ?? 0
   state.timeZone = boot?.time_zone || null
   state.systemTimeZone = boot?.system_time_zone || null
   state.today = boot?.today || null
-  state.weekStart = boot?.week_start || null
-  state.weekEnd = boot?.week_end || null
   state.error = null
   // The server's timezone answer, not the browser's, is what every date on
   // screen is rendered against from here on (P2-AE3).

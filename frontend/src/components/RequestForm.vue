@@ -66,6 +66,12 @@ function newOperationKey() {
 }
 
 const operationKey = ref(newOperationKey())
+// Set by an ambiguous failure. From that moment the request may already
+// exist, and the retry's payload is ignored by design -- the server answers
+// the key, not the body. So the fields stop being editable: an employee who
+// fixes a typo and presses Send again would otherwise watch the correction
+// vanish with no way to apply it, Send being the only write path there is.
+const frozen = ref(false)
 // Set when the server gave a real verdict on the last attempt: the request
 // was refused and nothing was written, so the next press of Send is a fresh
 // attempt and takes a fresh key. An *ambiguous* failure sets nothing, which
@@ -89,11 +95,18 @@ function plainError(e, fallback) {
   return e?.messages?.[0] || fallback
 }
 
+// A reverse proxy that gives up on a slow POST answers 408 (Request Timeout)
+// or, on nginx, 499 (client closed) -- while the request may well have
+// committed behind it. Both sit under 500 and used to read as a verdict, so
+// the retry carried a *fresh* key and created exactly the duplicate the
+// operation key exists to prevent (P2-AE7).
+const AMBIGUOUS_STATUS = [408, 499]
+
 /** Did the server actually answer? A network drop, a proxy timeout or a 5xx
  * leaves the outcome unknown, and an unknown outcome must reuse the key. */
 function isAmbiguous(e) {
   const status = e?.response?.status
-  return !status || status >= 500
+  return !status || status >= 500 || AMBIGUOUS_STATUS.includes(status)
 }
 
 async function submit() {
@@ -118,10 +131,22 @@ async function submit() {
       // The key already belongs to somebody else's request. The server tells
       // us nothing about it, and the only thing to change is the key.
       operationKey.value = newOperationKey()
+      // A fresh key is a fresh attempt, so the fields are the employee's
+      // again -- nothing the old key wrote can be reused now.
+      frozen.value = false
       error.value = 'That didn’t go through. Press Send to HR again.'
       return
     }
-    if (!isAmbiguous(e)) rotateBeforeNextSend.value = true
+    if (isAmbiguous(e)) {
+      // Nothing here clears the form, and from now on nothing may change it
+      // either: the retry sends the key, and the key already has a payload.
+      frozen.value = true
+      error.value =
+        'We didn’t hear back, so your request may already have gone through. ' +
+        'Press Send to HR again — it won’t send a second one.'
+      return
+    }
+    rotateBeforeNextSend.value = true
     // Every field stays exactly as typed -- nothing here clears the form.
     error.value = plainError(e, 'Could not send your request. Please try again.')
     return
@@ -143,6 +168,10 @@ async function submit() {
 
   emit('created', {
     name: created.name,
+    // False when the server answered this operation key from an earlier
+    // attempt: the request on screen is that one, and anything typed since is
+    // not on it. The page says so rather than reporting a plain success.
+    created: created.created !== false,
     uploadError,
     // Handed back so Retry upload has the same bytes to send again. It lives
     // in memory only: after a reload the chip is gone, and the honest way to
@@ -169,7 +198,8 @@ async function submit() {
           v-for="option in CATEGORIES"
           :key="option.value"
           type="button"
-          class="min-h-11 cursor-pointer rounded-lg border p-3 text-left transition-colors duration-200"
+          :disabled="frozen"
+          class="min-h-11 cursor-pointer rounded-lg border p-3 text-left transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-60"
           :class="
             category === option.value
               ? 'border-field bg-surface-white ring-1 ring-field'
@@ -189,12 +219,14 @@ async function submit() {
       type="text"
       label="Subject"
       required
+      :disabled="frozen"
     />
     <FormControl
       v-model="details"
       type="textarea"
       label="Details"
       placeholder="What do you need, and by when?"
+      :disabled="frozen"
     />
 
     <div>
@@ -207,6 +239,7 @@ async function submit() {
         type="file"
         class="block w-full text-sm text-ink-gray-7"
         :accept="ACCEPT"
+        :disabled="frozen"
         @change="onFileChange"
       >
       <!-- The rule up front, because it is the server's rule: the same limits

@@ -4,7 +4,7 @@ import { useRoute } from 'vue-router'
 import { Dialog } from 'frappe-ui'
 import Icon from '@/components/Icon.vue'
 import { session, signOut } from '@/lib/session'
-import { unreadCount, watchUnread, unwatchUnread } from '@/lib/unread'
+import { currentUnread, watchUnread, unwatchUnread } from '@/lib/unread'
 import { watchDialogs, unwatchDialogs } from '@/lib/dialogA11y'
 
 // `primary` items are the four that fit the phone tab bar alongside
@@ -25,20 +25,14 @@ const NAV = [
 const route = useRoute()
 const showMore = ref(false)
 
-// The bootstrap already answered "how many unread" (P2-KTD7), and the shared
-// poller's first fetch takes a round trip to say the same thing. Preferring
-// the poll once it has an answer and falling back to the boot value means the
-// badge is right on the first painted frame instead of appearing a beat later
-// -- one fewer thing moving on a cold load, and one fewer reason for the
-// count to look stale after an action (P2-U3 step 6).
-const unread = computed(() => unreadCount.data ?? session.unread ?? 0)
+const unread = computed(() => currentUnread())
 const unreadLabel = computed(() => (unread.value > 9 ? '9+' : String(unread.value)))
 
 // P2-U4 / P2-R11: the bootstrap's own answer, not a second rule derived from
 // the report count. A leave approver need not be anybody's manager, and a
 // manager whose only pending work is a timesheet has a decision to make with
 // no direct-report leave in sight -- both had no Approvals item at all while
-// this read `reportCount`.
+// this read a direct-report count.
 const isManager = computed(() => session.canApprove)
 const navItems = computed(() => NAV.filter((item) => !item.managerOnly || isManager.value))
 const primaryItems = computed(() => navItems.value.filter((item) => item.primary))

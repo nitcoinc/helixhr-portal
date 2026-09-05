@@ -45,24 +45,6 @@ class TestHelixHRDashboard(IntegrationTestCase):
 		# guest coverage already exists in Playwright (login-dashboard.spec.ts).
 		self.assertNotIn(get_dashboard, frappe.guest_methods)
 
-	def test_pending_section_is_a_real_count_now_that_hr_request_exists(self):
-		# HR Request shipped in U9 -- _get_pending_counts no longer throws,
-		# so "pending" is a real dict, not the section-level null this
-		# tested before the doctype existed.
-		frappe.set_user(EMPLOYEE_USER)
-		result = get_dashboard()
-
-		self.assertIsInstance(result["pending"], dict)
-		self.assertEqual(
-			set(result["pending"]), {"my_open_leave", "my_open_requests", "approvals_waiting_for_me"}
-		)
-
-	def test_unread_notifications_is_a_count(self):
-		frappe.set_user(EMPLOYEE_USER)
-		result = get_dashboard()
-
-		self.assertIsInstance(result["unread_notifications"], int)
-
 	def test_a_broken_section_names_itself_and_leaves_the_rest_of_the_page_alone(self):
 		"""P2-U4 scenario 7 / P2-R25. A null section used to be
 		indistinguishable from "nothing recorded yet", so an outage read as

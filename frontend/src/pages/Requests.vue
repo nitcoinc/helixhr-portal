@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { createResource, Button, Dialog } from 'frappe-ui'
 import RequestForm from '@/components/RequestForm.vue'
@@ -10,6 +10,7 @@ import Icon from '@/components/Icon.vue'
 import { attachToRequest } from '@/lib/api'
 import { formatDate, formatDateTime } from '@/lib/dates'
 import { currentUnread, setUnread, unreadCount } from '@/lib/unread'
+import { useIsDesktop } from '@/lib/useIsDesktop'
 
 // P2-U8 / KTD5. `/requests` and `/requests/:name` are the same component: the
 // selected record is a route parameter, so refresh and browser Back land on
@@ -141,6 +142,13 @@ const pendingUpload = ref(null)
 const uploadError = ref('')
 const retrying = ref(false)
 
+// Set when the create was answered from an earlier attempt's operation key
+// (P2-AE7). The request on screen is the one that went through, and whatever
+// was edited between the two presses of Send is not on it -- which the page
+// has to say, because "we reused your earlier request" and "we made the
+// request you just typed" otherwise render identically.
+const reusedExisting = ref('')
+
 const failedUpload = computed(() =>
   pendingUpload.value && pendingUpload.value.name === props.name ? pendingUpload.value : null,
 )
@@ -184,8 +192,9 @@ function newRequest() {
  * "sent, the file didn't" -- is said on the record it is about, next to a
  * Retry upload that targets that same request (P2-R18, P2-AE7).
  */
-function onCreated({ name, uploadError: failure, pendingFile }) {
+function onCreated({ name, created, uploadError: failure, pendingFile }) {
   showForm.value = false
+  reusedExisting.value = created ? '' : name
   uploadError.value = failure || ''
   pendingUpload.value = failure && pendingFile ? { name, file: pendingFile } : null
   requests.reload()
@@ -194,20 +203,7 @@ function onCreated({ name, uploadError: failure, pendingFile }) {
 
 // --- one URL, two shapes ------------------------------------------------
 
-// 1024px is where the shell drops the phone tab bar for the side nav, so it
-// is also where there is room for the list and the record side by side. The
-// URL is the same at both widths (KTD5).
-const isDesktop = ref(false)
-let widthQuery = null
-function syncWidth(event) {
-  isDesktop.value = event.matches
-}
-onMounted(() => {
-  widthQuery = window.matchMedia('(min-width: 1024px)')
-  isDesktop.value = widthQuery.matches
-  widthQuery.addEventListener('change', syncWidth)
-})
-onUnmounted(() => widthQuery?.removeEventListener('change', syncWidth))
+const isDesktop = useIsDesktop()
 
 // The timeline. Three steps, and only the ones that happened are drawn --
 // a step with no date is a step the record cannot vouch for.
@@ -413,6 +409,21 @@ const timeline = computed(() => {
             class="surface-card elev-1 p-4"
             aria-label="Request"
           >
+            <!-- The idempotent retry, told truthfully. The record is the one
+                 the first attempt made; a correction typed before the second
+                 press of Send is not on it, and no later Send can apply it
+                 (P2-AE7). -->
+            <p
+              v-if="reusedExisting === selected.name"
+              class="surface-alert mb-3 p-3 text-sm"
+              data-testid="request-reused"
+              role="status"
+            >
+              Your earlier request went through — this is it. Anything you
+              changed since was not applied. Ask a follow-up if you need to
+              correct it.
+            </p>
+
             <p class="label">
               {{ selected.category }} · {{ selected.name }}
             </p>

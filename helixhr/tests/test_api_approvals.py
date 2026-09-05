@@ -518,6 +518,54 @@ class TestApprovalQueueAndEvidence(IntegrationTestCase):
 		self.assertIn(name, [row["name"] for row in get_my_approvals()["pending"]])
 		self.assertEqual(get_approval_detail("timesheet", name)["name"], name)
 
+	def test_changing_the_managers_own_login_moves_every_pending_share(self):
+		"""The same defect from the other side. A rename, an Entra migration
+		or a duplicate-account cleanup changes the *manager's* `user_id`;
+		`_approver_user` then answers the new address and the portal refuses
+		the old one, while the DocShare granting write+submit on every
+		pending week still pointed at the old account -- reachable through
+		`frappe.client.set_value`, `/api/resource` and `apply_workflow`."""
+		name = self._pending_timesheet()
+		self.assertEqual(self._shared_users(name), [MANAGER_USER])
+
+		frappe.set_user("Administrator")
+		renamed = "manager-renamed@helixhr.test"
+		if not frappe.db.exists("User", renamed):
+			frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": renamed,
+					"first_name": "Renamed",
+					"last_name": "Manager",
+					"send_welcome_email": 0,
+					"roles": [{"doctype": "Has Role", "role": "Employee"}],
+				}
+			).insert(ignore_permissions=True)
+		self.addCleanup(self._restore_manager_record)
+
+		manager = frappe.get_doc("Employee", self.manager_name)
+		manager.user_id = renamed
+		manager.save()
+
+		self.assertEqual(self._shared_users(name), [renamed])
+		frappe.set_user(MANAGER_USER)
+		with self.assertRaises(frappe.PermissionError):
+			get_approval_detail("timesheet", name)
+
+		# And a manager who leaves keeps nothing at all.
+		frappe.set_user("Administrator")
+		manager.reload()
+		manager.status = "Inactive"
+		manager.save()
+		self.assertEqual(self._shared_users(name), [])
+
+	def _restore_manager_record(self):
+		frappe.set_user("Administrator")
+		manager = frappe.get_doc("Employee", self.manager_name)
+		manager.status = "Active"
+		manager.user_id = MANAGER_USER
+		manager.save(ignore_permissions=True)
+
 
 class TestLeaveApprovalIsNative(IntegrationTestCase):
 	"""P2-U1 / P2-R10 / P2-AE1: approving leave through the portal must run
@@ -535,13 +583,14 @@ class TestLeaveApprovalIsNative(IntegrationTestCase):
 		# bench (see docs/runbook.md), and HRMS refuses two applications
 		# that overlap -- so a shared or reused day makes this class fail
 		# on its second run rather than on a real defect. Consecutive
-		# even offsets from day 98 keep every date inside the current
-		# allocation period, clear of the other fixtures in this repo
+		# even offsets from day 96 keep every date inside the current
+		# allocation period (the allocation ends with the calendar year, and
+		# each method added here costs two more days), clear of the other fixtures in this repo
 		# (which sit inside the first 98 days, on odd offsets), and never
 		# consecutive -- Casual Leave caps continuous days, and HRMS reads
 		# two applications on adjacent days as one continuous leave.
 		methods = sorted(name for name in dir(self) if name.startswith("test_"))
-		self.leave_date = add_days(today(), 98 + 2 * methods.index(self.id().split(".")[-1]))
+		self.leave_date = add_days(today(), 96 + 2 * methods.index(self.id().split(".")[-1]))
 		self._clear_leave_on(self.leave_date)
 
 	def tearDown(self):
@@ -791,6 +840,44 @@ class TestLeaveApprovalIsNative(IntegrationTestCase):
 			"Leave Approver" in roles or shared,
 			"neither the native Leave Approver role nor an HRMS DocShare grants submit",
 		)
+
+	def test_hr_manager_can_approve_a_leave_they_are_not_the_approver_of(self):
+		"""The error copy promises "or HR", and `_assert_may_act_on` lets HR
+		through -- so the native submit has to accept them too. HRMS's
+		`validate_leave_approver` only checks that the field is *set* (it
+		never compares it to the session user) and `validate_for_self_approval`
+		only blocks the employee themselves, so the HR Manager role's own
+		submit permission carries it. Checked here rather than assumed: if
+		HRMS starts requiring the named approver, this fails instead of
+		production."""
+		leave = self._pending_leave()
+		self.assertEqual(leave.leave_approver, MANAGER_USER)
+
+		frappe.set_user("Administrator")
+		hr_user = "hr-manager-leave@helixhr.test"
+		if not frappe.db.exists("User", hr_user):
+			frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": hr_user,
+					"first_name": "HR",
+					"last_name": "Approver",
+					"send_welcome_email": 0,
+					"roles": [{"doctype": "Has Role", "role": "HR Manager"}],
+				}
+			).insert(ignore_permissions=True)
+
+		frappe.set_user(hr_user)
+		result = act_on_approval(
+			"Leave Application", leave.name, "Approve", **token("Leave Application", leave.name)
+		)
+
+		self.assertEqual(result["state"], "Approved")
+		frappe.set_user("Administrator")
+		doc = frappe.get_doc("Leave Application", leave.name)
+		self.assertEqual(doc.docstatus, 1)
+		self.assertEqual(doc.leave_approver, MANAGER_USER, "the named approver is not rewritten")
+		self.assertTrue(self._ledger(leave.name), "an HR approval consumes balance like any other")
 
 	def test_leave_with_no_approver_is_refused_by_hr_settings(self):
 		"""P2-U1 step 3: the refusal is HR Settings, not portal copy."""

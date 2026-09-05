@@ -808,6 +808,10 @@ What each preflight line means, for whoever has to fix one:
       Permission (`allow = Employee`, `for_value` = their own record). Creating the Employee
       with "Create User Permission" checked does this; the check exists because one missed
       checkbox means that user can read every employee.
+- **Document link URLs**: every stored `HelixHR Document Link` must be a plain `http(s)`
+      address. The doctype validates on save and nothing revalidates a row that is never saved
+      again, so a `javascript:` or `data:` link written before that rule still renders into an
+      `:href`. Fix or delete each named row in Desk.
 - **Upload policy**: System Settings **Allowed File Extensions** (PDF, PNG, JPG, JPEG, DOCX,
       XLSX -- one per line), **Max File Size** 10, **Allow Guests to Upload Files** off, and
       **Only allow System Managers to upload public files** on. All four are core Frappe

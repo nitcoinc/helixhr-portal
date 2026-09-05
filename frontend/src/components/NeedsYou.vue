@@ -1,6 +1,7 @@
 <script setup>
 import Icon from '@/components/Icon.vue'
 import { formatDate } from '@/lib/dates'
+import { NEEDS_YOU_ICON } from '@/lib/icons'
 
 defineProps({
   items: { type: Array, default: () => [] },
@@ -36,13 +37,6 @@ function ageLabel(item) {
   return `${Math.floor(days / 30)} months ago`
 }
 
-const ICON = {
-  timesheet_rejected: 'timesheet',
-  request_answered: 'requests',
-  approval_leave: 'approvals',
-  approval_timesheet: 'approvals',
-  leave_waiting: 'leave',
-}
 </script>
 
 <template>
@@ -114,7 +108,7 @@ const ICON = {
           :class="TONE[item.tone] || TONE.muted"
         >
           <Icon
-            :name="ICON[item.kind] || 'requests'"
+            :name="NEEDS_YOU_ICON[item.kind] || 'requests'"
             size="h-4 w-4"
           />
         </span>
@@ -187,7 +181,7 @@ const ICON = {
             class="surface-card elev-1 flex min-h-11 cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors duration-200 hover:border-blue-600"
           >
             <Icon
-              :name="ICON[item.kind] || 'leave'"
+              :name="NEEDS_YOU_ICON[item.kind] || 'leave'"
               size="h-4 w-4"
               class="shrink-0 text-ink-gray-4"
             />

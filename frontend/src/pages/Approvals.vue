@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { createResource, Button, FormControl } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
@@ -7,6 +7,7 @@ import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
 import { formatDate, formatDateRange } from '@/lib/dates'
+import { useIsDesktop } from '@/lib/useIsDesktop'
 
 // P2-U7 / KTD5. `/approvals` and `/approvals/:kind/:name` are one component:
 // the selected decision is a route parameter, so a manager can be sent the
@@ -55,22 +56,7 @@ function closeDetail() {
   router.push({ name: 'Approvals' })
 }
 
-// One breakpoint decides the *shape*, never the identity (KTD5): at lg: the
-// evidence sits beside the queue, below it the selected row expands in place.
-// The two are genuinely different layouts -- a project x day grid does not
-// fit 360px -- so exactly one of them is rendered rather than both being in
-// the DOM with one hidden.
-const isDesktop = ref(false)
-let widthQuery = null
-function syncWidth(event) {
-  isDesktop.value = event.matches
-}
-onMounted(() => {
-  widthQuery = window.matchMedia('(min-width: 1024px)')
-  isDesktop.value = widthQuery.matches
-  widthQuery.addEventListener('change', syncWidth)
-})
-onUnmounted(() => widthQuery?.removeEventListener('change', syncWidth))
+const isDesktop = useIsDesktop()
 
 // --- deciding ------------------------------------------------------------
 

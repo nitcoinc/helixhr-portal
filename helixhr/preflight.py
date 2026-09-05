@@ -180,6 +180,33 @@ def check_unsubmitted_approved_leave():
 	return _result("Approved-but-unsubmitted leave", PASS, "none")
 
 
+def check_document_link_urls():
+	"""P2-R19: every stored document link is a plain HTTP(S) address.
+
+	The doctype validates on save, and nothing revalidates a row that is
+	never saved again -- a `javascript:` or `data:` link written before
+	that rule existed still renders into an `:href`. A FAIL rather than a
+	WARN: the row is one click from executing in the reader's page, and
+	the fix is to edit or delete it in Desk.
+	"""
+	from helixhr.helixhr.doctype.helixhr_document_link.helixhr_document_link import (
+		document_url_problem,
+	)
+
+	bad = [
+		row.name
+		for row in frappe.get_all("HelixHR Document Link", fields=["name", "url"])
+		if document_url_problem(row.url)
+	]
+	if bad:
+		return _result(
+			"Document link URLs",
+			FAIL,
+			f"{len(bad)} link(s) are not http(s) -- fix or delete in Desk: " + ", ".join(bad[:5]),
+		)
+	return _result("Document link URLs", PASS, "all http(s)")
+
+
 # --- sign-in (local-login phase) -------------------------------------------
 
 
@@ -491,6 +518,7 @@ CHECKS = [
 	check_leave_approver_mandatory,
 	check_self_leave_approval_blocked,
 	check_unsubmitted_approved_leave,
+	check_document_link_urls,
 	check_signup_disabled,
 	check_password_login,
 	check_entra,

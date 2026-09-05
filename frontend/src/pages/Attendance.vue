@@ -5,6 +5,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
 import { formatDate, formatTime, today } from '@/lib/dates'
+import { ATTENDANCE_LABEL } from '@/lib/week'
 
 const STATUS_COLOR = {
   Present: 'bg-surface-green-3',
@@ -12,13 +13,6 @@ const STATUS_COLOR = {
   'Half Day': 'bg-surface-amber-3',
   'On Leave': 'bg-surface-blue-3',
   Holiday: 'bg-surface-gray-4',
-}
-const STATUS_LABEL = {
-  Present: 'Present',
-  Absent: 'Absent',
-  'Half Day': 'Half day',
-  'On Leave': 'On leave',
-  Holiday: 'Holiday',
 }
 
 // P2-R5 / P2-AE3. "This month" is the *user's* month, from the same server
@@ -151,13 +145,13 @@ const checkins = createResource({
 
 function statusLabel(day) {
   if (!day) return ''
-  if (day.status) return STATUS_LABEL[day.status] || day.status
+  if (day.status) return ATTENDANCE_LABEL[day.status] || day.status
   return day.missing ? 'No record' : 'Nothing recorded'
 }
 
 function dayLabel(day) {
   const parts = [`${monthLabel.value} ${day.day}`]
-  if (day.status) parts.push(STATUS_LABEL[day.status] || day.status)
+  if (day.status) parts.push(ATTENDANCE_LABEL[day.status] || day.status)
   if (day.late) parts.push('late arrival')
   if (day.missing) parts.push('no record')
   return parts.join(', ')
@@ -264,7 +258,7 @@ const LEGEND = [
               aria-hidden="true"
             />
             <span class="tabular font-heading text-base font-bold text-white">{{ count }}</span>
-            {{ STATUS_LABEL[status] || status }}
+            {{ ATTENDANCE_LABEL[status] || status }}
           </p>
         </div>
         <p

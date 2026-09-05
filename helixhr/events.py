@@ -18,8 +18,29 @@ from helixhr.utils import UPLOAD_POLICY, get_manager_user, upload_extension, val
 PENDING_STATE = "Pending Approval"
 
 
+def _approver_user(employee):
+	"""The User that may hold `employee`'s pending-week share: their
+	manager's login, and only while that manager is an **Active** Employee.
+
+	Stricter than `helixhr.utils.get_manager_user`, deliberately. A share
+	carries `write=1, submit=1` and is reachable from `frappe.client`,
+	`/api/resource` and `apply_workflow` -- not only from the portal, which
+	already refuses a manager whose Employee record is not Active. A
+	manager who has left with their login still enabled must not keep the
+	one grant that survives that refusal (P2-U7 step 6, from the other
+	side).
+	"""
+	reports_to = frappe.db.get_value("Employee", employee, "reports_to")
+	if not reports_to:
+		return None
+	manager = frappe.db.get_value("Employee", reports_to, ["user_id", "status"], as_dict=True)
+	if not manager or manager.status != "Active":
+		return None
+	return manager.user_id
+
+
 def timesheet_on_update(doc, method=None):
-	manager_user = get_manager_user(doc.employee)
+	manager_user = _approver_user(doc.employee)
 
 	if doc.workflow_state == PENDING_STATE and doc.docstatus == 0:
 		if not manager_user:
@@ -49,23 +70,42 @@ def employee_on_update(doc, method=None):
 
 	Without this, a Timesheet sent to Manager A stayed shared with A --
 	with write *and submit* -- for as long as it sat pending, while
-	`get_manager_user` had already started answering B. A could still
+	`_approver_user` had already started answering B. A could still
 	approve a week for somebody who no longer reported to them, and B
 	could not see it at all. The reconcile runs inside the Employee save's
 	own transaction, so the reassignment and the share change commit
 	together or not at all.
+
+	Widened after P2-U7: the manager's *own* record moving is the same
+	defect from the other side. A rename, an Entra migration or a
+	duplicate-account cleanup changes `Employee.user_id`, and leaving with
+	the login still enabled changes `status` -- after either one
+	`_approver_user` answers somebody else (or nobody) while the DocShare
+	granting `write=1, submit=1` on every week they have pending still
+	points at the old account, which `frappe.client.set_value`,
+	`/api/resource` and `apply_workflow` all honour.
 	"""
 	before = doc.get_doc_before_save()
-	if not before or before.reports_to == doc.reports_to:
+	if not before:
 		return
 
-	manager_user = frappe.db.get_value("Employee", doc.reports_to, "user_id") if doc.reports_to else None
+	if before.reports_to != doc.reports_to:
+		_reconcile_pending_weeks(doc.name)
+
+	if before.user_id != doc.user_id or before.status != doc.status:
+		for report in frappe.get_all("Employee", filters={"reports_to": doc.name}, pluck="name"):
+			_reconcile_pending_weeks(report)
+
+
+def _reconcile_pending_weeks(employee):
+	"""Point every week `employee` has waiting at whoever may act on it now."""
+	manager_user = _approver_user(employee)
 	for name in frappe.get_all(
 		"Timesheet",
-		filters={"employee": doc.name, "workflow_state": PENDING_STATE, "docstatus": 0},
+		filters={"employee": employee, "workflow_state": PENDING_STATE, "docstatus": 0},
 		pluck="name",
 	):
-		_reconcile_timesheet_share(name, doc.name, manager_user)
+		_reconcile_timesheet_share(name, employee, manager_user)
 
 
 def timesheet_before_submit(doc, method=None):

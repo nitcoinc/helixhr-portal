@@ -316,12 +316,17 @@ def _force_download_portal_attachment(response, request):
 	if not path.startswith("/private/files/"):
 		return
 	try:
-		attached_to = frappe.db.get_value("File", {"file_url": path}, "attached_to_doctype")
+		# Every File row on this URL, not the first one Frappe happens to
+		# return: Frappe reuses one `file_url` across rows with identical
+		# content, so two employees uploading the same PDF share it and a
+		# single-row read can answer with somebody else's attachment. Any
+		# row saying HR Request is enough to force the download.
+		attached = frappe.get_all("File", filters={"file_url": path}, pluck="attached_to_doctype")
 	except Exception:
 		# after_request runs outside the request's own error handling; a
 		# lookup failure must never replace a served file with a 500.
 		return
-	if attached_to != "HR Request":
+	if "HR Request" not in attached:
 		return
 
 	filename = os.path.basename(path)

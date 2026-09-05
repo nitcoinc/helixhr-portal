@@ -337,6 +337,37 @@ class TestPortalLeaveApi(IntegrationTestCase):
 		frappe.set_user("Administrator")
 		self.assertTrue(frappe.db.exists("Leave Application", result["name"]))
 
+	def test_hr_filed_leave_is_readable_but_not_withdrawable(self):
+		"""The `if_owner` delete grant (patches/v1_0/apply_permission_deltas)
+		matches `Document.owner`, not `employee`. A leave HR files in Desk
+		for an employee is theirs to read and never theirs to delete, so the
+		portal must not offer Withdraw on it -- it used to, and the button
+		threw a bare PermissionError."""
+		frappe.set_user("Administrator")
+		hr_filed = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": self.employee_name,
+				"leave_type": "Casual Leave",
+				"from_date": add_days(today(), 104),
+				"to_date": add_days(today(), 104),
+				"leave_approver": MANAGER_USER,
+				"status": "Open",
+			}
+		).insert(ignore_permissions=True)
+
+		frappe.set_user(EMPLOYEE_USER)
+		row = get_my_leave_detail(hr_filed.name)
+		self.assertEqual(row["state"], "open")
+		self.assertFalse(row["can_withdraw"])
+
+		with self.assertRaises(frappe.ValidationError) as refused:
+			withdraw_my_leave(hr_filed.name)
+		self.assertIn("Ask HR", str(refused.exception))
+
+		frappe.set_user("Administrator")
+		self.assertTrue(frappe.db.exists("Leave Application", hr_filed.name))
+
 	# --- the projection ----------------------------------------------------
 
 	def test_the_legacy_row_is_waiting_for_hr_and_offers_no_action(self):

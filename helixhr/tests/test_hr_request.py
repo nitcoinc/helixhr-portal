@@ -90,6 +90,27 @@ class TestHRRequest(IntegrationTestCase):
 		doc = self._make_request(employee=self.manager_name)
 		self.assertEqual(doc.employee, self.employee_name)
 
+	def test_a_left_employee_no_longer_owns_their_old_request(self):
+		"""`request_belongs_to_session` resolves the Employee the same way
+		`_session_company` and `hrms.api.get_current_employee` do --
+		`status = "Active"`. A user whose Employee is Left or Inactive with
+		their login still enabled used to pass the ownership branch of
+		`events.file_before_insert`."""
+		from helixhr.helixhr.doctype.hr_request.hr_request import request_belongs_to_session
+
+		doc = self._make_request()
+		frappe.set_user(EMPLOYEE_USER)
+		self.assertTrue(request_belongs_to_session(doc.name))
+
+		frappe.set_user("Administrator")
+		frappe.db.set_value("Employee", self.employee_name, "status", "Inactive")
+		self.addCleanup(
+			frappe.db.set_value, "Employee", self.employee_name, "status", "Active"
+		)
+
+		frappe.set_user(EMPLOYEE_USER)
+		self.assertFalse(request_belongs_to_session(doc.name))
+
 	def test_the_employee_role_can_no_longer_create_or_write_hr_requests_generically(self):
 		"""P2-U8 step 2. Creation is `helixhr.api.create_my_request` and
 		nothing else -- the generic route is closed at the DocType, not by

@@ -37,3 +37,17 @@ export const icons = {
   chevronLeft: ['m15 18-6-6 6-6'],
   chevronRight: ['m9 18 6-6-6-6'],
 }
+
+// Every kind `helixhr.api._get_needs_you` emits, and the glyph its row draws.
+// It lives here, next to the glyphs, because `<script setup>` cannot export
+// and this map has to be assertable: a kind with no entry falls back silently,
+// which is how a sent-back *leave* rendered with the Requests icon for a whole
+// unit. `icons.test.js` holds the six kinds against the server's own list.
+export const NEEDS_YOU_ICON = {
+  timesheet_rejected: 'timesheet',
+  leave_rejected: 'leave',
+  request_answered: 'requests',
+  approval_leave: 'approvals',
+  approval_timesheet: 'approvals',
+  leave_waiting: 'leave',
+}
