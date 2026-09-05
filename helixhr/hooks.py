@@ -128,6 +128,13 @@ doc_events = {
 	"File": {
 		"before_insert": "helixhr.events.file_before_insert",
 	},
+	# P2-U7 step 6. A pending Timesheet is reachable by its approver through
+	# a DocShare, and `reports_to` is what decides who the approver is -- so
+	# a reassignment that does not move the share leaves the old manager
+	# holding write and submit on a week that is no longer theirs.
+	"Employee": {
+		"on_update": "helixhr.events.employee_on_update",
+	},
 	# P2-U4 / P2-KTD6. The employee-facing "HR replied" event. A fixture
 	# Notification watches one field on a Value Change and the existing one
 	# watches `status`, so a reply written without a status change produced

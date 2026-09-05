@@ -119,6 +119,48 @@ async function clearCurrentWeek(api) {
   }
 }
 
+/**
+ * The Timesheet the employee has just sent, by name. The approvals queue is
+ * one mixed list ordered oldest-first (P2-U7), and other specs leave their
+ * own pending weeks on this site -- so "the first timesheet row" is not
+ * necessarily this week, and acting on the wrong one silently passes the
+ * next few assertions for the wrong reason.
+ */
+async function pendingWeekName(baseURL) {
+  const api = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+  await api.post('/api/method/login', { form: { usr: 'Administrator', pwd: 'admin' } })
+  const employeeResp = await api.get(
+    '/api/method/frappe.client.get_value?doctype=Employee&filters=' +
+      encodeURIComponent(JSON.stringify({ user_id: 'employee@helixhr.test' })) +
+      '&fieldname=name',
+  )
+  const employee = (await employeeResp.json())?.message?.name
+  // Bounded to the fortnight around this week, because another spec keeps a
+  // pending week of its own for this same employee, five weeks back.
+  const now = new Date()
+  const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+  monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7))
+  const from = new Date(monday)
+  from.setUTCDate(from.getUTCDate() - 7)
+  const to = new Date(monday)
+  to.setUTCDate(to.getUTCDate() + 7)
+
+  const response = await api.get(
+    '/api/method/frappe.client.get_value?doctype=Timesheet&filters=' +
+      encodeURIComponent(
+        JSON.stringify({
+          employee,
+          workflow_state: 'Pending Approval',
+          start_date: ['between', [from.toISOString().slice(0, 10), to.toISOString().slice(0, 10)]],
+        }),
+      ) +
+      '&fieldname=name',
+  )
+  const name = (await response.json())?.message?.name
+  await api.dispose()
+  return name
+}
+
 test('employee submits a week, manager rejects with a comment, employee edits and resubmits, manager approves', async ({
   browser,
 }: {
@@ -158,17 +200,28 @@ test('employee submits a week, manager rejects with a comment, employee edits an
   await mgrPage.goto('/helixhr/approvals')
   await expect(mgrPage.getByRole('heading', { name: 'Approvals' })).toBeVisible()
 
-  const tsSection = mgrPage.getByTestId('approvals-timesheet-section')
-  await expect(tsSection.getByText('Employee')).toBeVisible({ timeout: 10000 })
+  // P2-U7 replaced the two sections (Leave, Timesheets) with one mixed
+  // queue, and the reject dialog with the reason field on the same surface
+  // as the evidence: the manager reads the week, then decides it.
+  const queue = mgrPage.getByTestId('approvals-queue')
+  // The queue mixes leave and timesheets from everybody who reports to this
+  // manager (P2-U7), so this addresses the record rather than a position,
+  // and "it worked" is *this* record leaving -- not the list emptying.
+  const week = await pendingWeekName(process.env.BASE_URL || 'http://localhost:8080')
+  const weekRow = queue.locator(`[data-approval-name="${week}"]`)
+  await expect(weekRow).toBeVisible({ timeout: 10000 })
+
+  await weekRow.click()
+  const panel = mgrPage.getByTestId('approval-detail')
+  await expect(panel.getByText('Day total')).toBeVisible({ timeout: 10000 })
 
   // P2-U3 renamed the manager's action to the word the employee already
   // sees on the row ("Sent back"); "Reject" was the Frappe verb.
-  await tsSection.getByRole('button', { name: 'Send back' }).click()
-  const rejectDialog = mgrPage.getByRole('dialog')
-  await expect(rejectDialog).toBeVisible()
-  await rejectDialog.getByLabel('Why are you sending it back?').fill('Please double check your hours')
-  await rejectDialog.getByRole('button', { name: 'Send back' }).click()
-  await expect(tsSection.getByText('Nothing waiting on you')).toBeVisible({ timeout: 10000 })
+  await panel
+    .getByLabel('Send back with a reason (required to send back)')
+    .fill('Please double check your hours')
+  await panel.getByRole('button', { name: 'Send back' }).click()
+  await expect(weekRow).toHaveCount(0, { timeout: 10000 })
 
   await empPage.reload()
   await expect(empPage.locator('[data-status="Rejected"]:visible')).toBeVisible({ timeout: 10000 })
@@ -188,9 +241,11 @@ test('employee submits a week, manager rejects with a comment, employee edits an
   await expect(empPage.locator('[data-status="Pending Approval"]:visible')).toBeVisible({ timeout: 10000 })
 
   await mgrPage.goto('/helixhr/approvals')
-  await expect(tsSection.getByText('Employee')).toBeVisible({ timeout: 10000 })
-  await tsSection.getByRole('button', { name: 'Approve' }).click()
-  await expect(tsSection.getByText('Nothing waiting on you')).toBeVisible({ timeout: 10000 })
+  await expect(weekRow).toBeVisible({ timeout: 10000 })
+  await weekRow.click()
+  await expect(panel.getByText('Day total')).toBeVisible({ timeout: 10000 })
+  await panel.getByRole('button', { name: /^Approve/ }).click()
+  await expect(weekRow).toHaveCount(0, { timeout: 10000 })
 
   await empCtx.close()
   await mgrCtx.close()

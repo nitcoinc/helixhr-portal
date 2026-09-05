@@ -271,6 +271,20 @@ class TestApiTimesheet(IntegrationTestCase):
 		shared_users = [row.user for row in frappe.share.get_users("Timesheet", name)]
 		self.assertNotIn(MANAGER_USER, shared_users)
 
+	def test_send_back_also_removes_the_share(self):
+		"""P2-U7 scenario 8. Approve was already covered; a sent-back week
+		is just as decided, and the approver has just as little left to do
+		with it -- but its share used to be removed only because
+		`workflow_state` happened to be listed, and Cancelled was not."""
+		name = self._save_and_submit()
+
+		frappe.set_user(MANAGER_USER)
+		apply_workflow({"doctype": "Timesheet", "name": name}, "Reject")
+
+		frappe.set_user("Administrator")
+		shared_users = [row.user for row in frappe.share.get_users("Timesheet", name)]
+		self.assertNotIn(MANAGER_USER, shared_users)
+
 	def test_manager_reject_with_comment_then_employee_edits_and_resubmits(self):
 		"""AE3 (reject, edit, resubmit)."""
 		name = self._save_and_submit()

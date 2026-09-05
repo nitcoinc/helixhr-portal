@@ -11,10 +11,16 @@ from helixhr.utils import get_manager_user
 # Employee record) would otherwise hide their reports' timesheets entirely.
 
 
+# The one workflow state that carries a share. Everything else -- Draft,
+# Approved, Rejected, Cancelled -- has nothing for an approver to do, so the
+# access goes away with the decision (P2-U7 scenario 8).
+PENDING_STATE = "Pending Approval"
+
+
 def timesheet_on_update(doc, method=None):
 	manager_user = get_manager_user(doc.employee)
 
-	if doc.workflow_state == "Pending Approval":
+	if doc.workflow_state == PENDING_STATE and doc.docstatus == 0:
 		if not manager_user:
 			# The Submit transition (Draft -> Pending Approval) is a plain
 			# field update, not a real docstatus submit, so it lands here
@@ -28,9 +34,37 @@ def timesheet_on_update(doc, method=None):
 					"Ask HR to set one before submitting."
 				)
 			)
-		_share_with_approver(doc, manager_user)
-	elif doc.workflow_state in ("Approved", "Rejected") and manager_user:
-		_unshare_from_approver(doc, manager_user)
+		_reconcile_timesheet_share(doc.name, doc.employee, manager_user)
+	else:
+		# Approved, Rejected, Cancelled, or back to Draft. "Cancelled" and
+		# the docstatus-2 case were missing until P2-U7: a cancelled week
+		# kept its approver's write+submit share forever.
+		_reconcile_timesheet_share(doc.name, doc.employee, None)
+
+
+def employee_on_update(doc, method=None):
+	"""P2-U7 step 6. When somebody's manager changes, every week they have
+	waiting has to change hands with them.
+
+	Without this, a Timesheet sent to Manager A stayed shared with A --
+	with write *and submit* -- for as long as it sat pending, while
+	`get_manager_user` had already started answering B. A could still
+	approve a week for somebody who no longer reported to them, and B
+	could not see it at all. The reconcile runs inside the Employee save's
+	own transaction, so the reassignment and the share change commit
+	together or not at all.
+	"""
+	before = doc.get_doc_before_save()
+	if not before or before.reports_to == doc.reports_to:
+		return
+
+	manager_user = frappe.db.get_value("Employee", doc.reports_to, "user_id") if doc.reports_to else None
+	for name in frappe.get_all(
+		"Timesheet",
+		filters={"employee": doc.name, "workflow_state": PENDING_STATE, "docstatus": 0},
+		pluck="name",
+	):
+		_reconcile_timesheet_share(name, doc.name, manager_user)
 
 
 def timesheet_before_submit(doc, method=None):
@@ -55,30 +89,48 @@ def timesheet_before_submit(doc, method=None):
 	)
 
 
-def _share_with_approver(doc, manager_user):
-	# add_docshare is itself idempotent (looks up any existing DocShare
-	# for this user/doc and updates it rather than duplicating).
-	frappe.share.add_docshare(
-		doc.doctype,
-		doc.name,
-		manager_user,
-		write=1,
-		submit=1,
-		flags={"ignore_share_permission": True},
-	)
+def _reconcile_timesheet_share(name, employee, keep_user):
+	"""Leave exactly one approver share on this timesheet -- `keep_user`'s
+	-- and none at all when `keep_user` is None.
 
+	Written as a reconcile rather than an add/remove pair because the thing
+	that goes wrong is never the share you knew about: it is the one an
+	*older* manager still holds after a reassignment (P2-U7 scenario 7).
+	Removing "the current manager's share" cannot remove that one, because
+	by the time anybody looks, the current manager is somebody else.
 
-def _unshare_from_approver(doc, manager_user):
-	# frappe.share.remove() -> frappe.delete_doc("DocShare", ...) checks
-	# the *acting* user's delete permission on DocShare itself -- which
-	# the manager (role Employee) doesn't have. This runs as part of the
-	# manager's own Approve/Reject action, so a plain permission-checked
-	# delete would fail on the very share that made the read/write access
-	# possible in the first place. A direct db.delete is safe here: it's
-	# cleaning up a share this app created, not exposing new access.
-	frappe.db.delete(
-		"DocShare", {"share_doctype": doc.doctype, "share_name": doc.name, "user": manager_user}
-	)
+	The employee's own user is never touched: it is their record, and any
+	share they hold on it came from somewhere other than this app.
+
+	`frappe.db.delete` rather than `frappe.share.remove`: the latter goes
+	through `frappe.delete_doc("DocShare", ...)`, which checks the *acting*
+	user's delete permission on DocShare -- which a manager (role Employee)
+	does not have. This runs as part of the manager's own Approve/Reject,
+	so a permission-checked delete would fail on the very share that made
+	the action possible. A direct delete is safe here: it removes access
+	this app granted, it never creates any.
+	"""
+	employee_user = frappe.db.get_value("Employee", employee, "user_id")
+	for share in frappe.get_all(
+		"DocShare",
+		filters={"share_doctype": "Timesheet", "share_name": name},
+		fields=["name", "user"],
+	):
+		if share.user and share.user in (keep_user, employee_user):
+			continue
+		frappe.db.delete("DocShare", {"name": share.name})
+
+	if keep_user:
+		# add_docshare is itself idempotent (looks up any existing DocShare
+		# for this user/doc and updates it rather than duplicating).
+		frappe.share.add_docshare(
+			"Timesheet",
+			name,
+			keep_user,
+			write=1,
+			submit=1,
+			flags={"ignore_share_permission": True},
+		)
 
 
 # HR Request reply notifications (P2-U4, P2-KTD6, P2-R13).

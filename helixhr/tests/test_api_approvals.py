@@ -6,7 +6,7 @@ from frappe.model.workflow import apply_workflow
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, today
 
-from helixhr.api import act_on_approval, save_my_week
+from helixhr.api import act_on_approval, get_approval_detail, get_my_approvals, save_my_week
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	MANAGER_USER,
@@ -16,6 +16,15 @@ from helixhr.tests.utils import (
 	make_test_employee_and_manager,
 )
 from helixhr.utils import get_week_bounds
+
+
+def token(doctype, name):
+	"""The concurrency token the screen always sends (P2-U7 step 3):
+	`get_approval_detail` hands the manager a `modified` and a state, and
+	`act_on_approval` refuses a decision that does not carry them back."""
+	field = "workflow_state" if doctype == "Timesheet" else "status"
+	row = frappe.db.get_value(doctype, name, ["modified", field], as_dict=True)
+	return {"expected_modified": str(row.modified), "expected_state": row.get(field)}
 
 
 class TestApiApprovals(IntegrationTestCase):
@@ -127,7 +136,7 @@ class TestApiApprovals(IntegrationTestCase):
 		leave = self._pending_leave()
 
 		frappe.set_user(MANAGER_USER)
-		act_on_approval("Leave Application", leave.name, "Approve")
+		act_on_approval("Leave Application", leave.name, "Approve", **token("Leave Application", leave.name))
 
 		frappe.set_user(EMPLOYEE_USER)
 		self.assertEqual(frappe.db.get_value("Leave Application", leave.name, "status"), "Approved")
@@ -152,7 +161,9 @@ class TestApiApprovals(IntegrationTestCase):
 
 		frappe.set_user(wrong_approver)
 		with self.assertRaises(frappe.PermissionError):
-			act_on_approval("Leave Application", leave.name, "Approve")
+			act_on_approval(
+				"Leave Application", leave.name, "Approve", **token("Leave Application", leave.name)
+			)
 
 		self.assertEqual(frappe.db.get_value("Leave Application", leave.name, "status"), "Open")
 
@@ -164,7 +175,9 @@ class TestApiApprovals(IntegrationTestCase):
 		ts = self._pending_timesheet()
 
 		frappe.set_user(MANAGER_USER)
-		act_on_approval("Timesheet", ts.name, "Reject", comment="Please fix your hours")
+		act_on_approval(
+			"Timesheet", ts.name, "Reject", comment="Please fix your hours", **token("Timesheet", ts.name)
+		)
 
 		doc = frappe.get_doc("Timesheet", ts.name)
 		self.assertEqual(doc.workflow_state, "Rejected")
@@ -190,6 +203,320 @@ class TestApiApprovals(IntegrationTestCase):
 		frappe.set_user(MANAGER_USER)
 		with self.assertRaises(frappe.ValidationError):
 			act_on_approval("Employee", self.employee_name, "Approve")
+
+
+class TestApprovalQueueAndEvidence(IntegrationTestCase):
+	"""P2-U7. The queue a manager decides from, the evidence they read
+	before deciding, and the share that carries the access."""
+
+	SECOND_MANAGER = "second-manager@helixhr.test"
+	OUTSIDER = "outsider-manager@helixhr.test"
+
+	def setUp(self):
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		frappe.db.set_value("Employee", self.employee_name, "reports_to", self.manager_name)
+		frappe.db.set_value("Employee", self.employee_name, "leave_approver", MANAGER_USER)
+		ensure_leave_approver_role(MANAGER_USER)
+		self.company = frappe.db.get_value("Employee", self.employee_name, "company")
+		ensure_holiday_list_assignment(self.company)
+
+		digest = int(hashlib.md5(self.id().encode()).hexdigest(), 16)
+		self.monday, _ = get_week_bounds(add_days(today(), (digest % 200000) * 7))
+		self.leave_date = add_days(today(), digest % 100)
+		frappe.cache.delete(f"helixhr:rate-limit:save_my_week:{EMPLOYEE_USER}")
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		# Every method leaves the reporting line as it found it -- the
+		# reassignment test moves it on purpose.
+		frappe.db.set_value("Employee", self.employee_name, "reports_to", self.manager_name)
+
+	# helpers
+
+	def _other(self, user):
+		from helixhr.tests.utils import make_test_user
+
+		frappe.set_user("Administrator")
+		return make_test_user(user, self.company)
+
+	def _project(self):
+		from helixhr.tests.utils import TEST_COMPANY, ensure_test_company
+
+		project_name = f"_Test Evidence Project {self.id().split('.')[-1]}"
+		existing = frappe.db.get_value("Project", {"project_name": project_name}, "name")
+		if not existing:
+			ensure_test_company()
+			existing = frappe.get_doc(
+				{
+					"doctype": "Project",
+					"project_name": project_name,
+					"status": "Open",
+					"company": TEST_COMPANY,
+				}
+			).insert(ignore_permissions=True).name
+		if not frappe.db.exists(
+			"User Permission", {"user": EMPLOYEE_USER, "allow": "Project", "for_value": existing}
+		):
+			frappe.get_doc(
+				{
+					"doctype": "User Permission",
+					"user": EMPLOYEE_USER,
+					"allow": "Project",
+					"for_value": existing,
+				}
+			).insert(ignore_permissions=True)
+		return existing
+
+	def _pending_timesheet(self, rows=None):
+		project = self._project()
+		frappe.set_user(EMPLOYEE_USER)
+		name = save_my_week(
+			str(self.monday),
+			json.dumps(
+				rows
+				or [
+					{"date": str(self.monday), "project": project, "hours": 8, "note": "long Monday"},
+					{"date": str(add_days(self.monday, 1)), "project": project, "hours": 6.5, "note": ""},
+				]
+			),
+		)
+		apply_workflow({"doctype": "Timesheet", "name": name}, "Submit")
+		frappe.set_user("Administrator")
+		return name
+
+	def _pending_leave(self, approver=MANAGER_USER):
+		ensure_leave_allocation(self.employee_name, "Casual Leave", 5)
+		frappe.set_user(EMPLOYEE_USER)
+		doc = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": self.employee_name,
+				"leave_type": "Casual Leave",
+				"from_date": str(self.leave_date),
+				"to_date": str(self.leave_date),
+				"description": "Nephew's wedding",
+				"leave_approver": approver,
+			}
+		).insert()
+		frappe.set_user("Administrator")
+		return doc
+
+	def _shared_users(self, timesheet):
+		return frappe.get_all(
+			"DocShare",
+			filters={"share_doctype": "Timesheet", "share_name": timesheet},
+			pluck="user",
+		)
+
+	# P2-U7 scenario 1 / P2-AE6
+
+	def test_timesheet_evidence_is_complete_and_an_unrelated_manager_gets_none_of_it(self):
+		name = self._pending_timesheet()
+
+		frappe.set_user(MANAGER_USER)
+		detail = get_approval_detail("timesheet", name)
+		self.assertEqual(detail["kind"], "timesheet")
+		self.assertEqual(detail["week_start"], str(self.monday))
+		self.assertEqual(len(detail["day_totals"]), 7)
+		self.assertEqual(detail["day_totals"][0]["hours"], 8)
+		self.assertEqual(detail["day_totals"][1]["hours"], 6.5)
+		self.assertEqual(detail["total_hours"], 14.5)
+		self.assertEqual(sum(line["total"] for line in detail["lines"]), 14.5)
+		self.assertIn("long Monday", detail["note"])
+		# The token the decision has to carry back.
+		self.assertTrue(detail["modified"])
+		self.assertEqual(detail["state"], "Pending Approval")
+
+		self._other(self.OUTSIDER)
+		frappe.set_user(self.OUTSIDER)
+		queued = [row["name"] for row in get_my_approvals()["pending"]]
+		self.assertNotIn(name, queued)
+		with self.assertRaises(frappe.PermissionError):
+			get_approval_detail("timesheet", name)
+
+	# P2-U7 scenario 2
+
+	def test_leave_evidence_carries_the_reason_dates_days_and_status(self):
+		leave = self._pending_leave()
+
+		frappe.set_user(MANAGER_USER)
+		detail = get_approval_detail("leave", leave.name)
+		self.assertEqual(detail["reason"], "Nephew's wedding")
+		self.assertEqual(detail["from_date"], str(self.leave_date))
+		self.assertEqual(detail["to_date"], str(self.leave_date))
+		self.assertEqual(detail["total_days"], 1)
+		self.assertEqual(detail["status"], "Open")
+		self.assertEqual(detail["state"], "Open")
+		self.assertEqual(detail["employee_name"], frappe.db.get_value("Employee", self.employee_name, "employee_name"))
+
+	def test_the_queue_mixes_both_kinds_oldest_first_and_excludes_the_managers_own_week(self):
+		leave = self._pending_leave()
+		timesheet = self._pending_timesheet()
+
+		frappe.set_user(MANAGER_USER)
+		result = get_my_approvals()
+		by_name = {row["name"]: row for row in result["pending"]}
+		self.assertIn(leave.name, by_name)
+		self.assertIn(timesheet, by_name)
+		self.assertEqual(by_name[leave.name]["kind"], "leave")
+		self.assertEqual(by_name[timesheet]["kind"], "timesheet")
+		self.assertTrue(by_name[timesheet]["initials"])
+		self.assertIsNotNone(by_name[timesheet]["age_days"])
+
+		sent = [row["sent_on"] for row in result["pending"] if row["sent_on"]]
+		self.assertEqual(sent, sorted(sent), "the queue is oldest first")
+
+		self.assertNotIn(
+			self.manager_name,
+			[row["employee"] for row in result["pending"]],
+			"a manager never decides their own record",
+		)
+
+	# P2-U7 scenario 6
+
+	def test_a_leave_approver_with_no_reports_sees_only_the_leave_assigned_to_them(self):
+		from helixhr.api import get_portal_bootstrap
+
+		approver_employee = self._other("lone-approver@helixhr.test")
+		self.assertEqual(
+			frappe.db.count("Employee", {"reports_to": approver_employee, "status": "Active"}), 0
+		)
+		frappe.db.set_value("Employee", self.employee_name, "leave_approver", "lone-approver@helixhr.test")
+		ensure_leave_approver_role("lone-approver@helixhr.test")
+		try:
+			# Assigned at insert, not patched afterwards: HRMS's own
+			# `share_doc_with_approver` runs on save and is what gives an
+			# approver outside the reporting line any sight of the record
+			# at all (P2-U1 step 2).
+			leave = self._pending_leave(approver="lone-approver@helixhr.test")
+			timesheet = self._pending_timesheet()
+
+			frappe.set_user("lone-approver@helixhr.test")
+			self.assertTrue(get_portal_bootstrap()["can_approve"])
+			pending = get_my_approvals()["pending"]
+			self.assertIn(leave.name, [row["name"] for row in pending])
+			self.assertNotIn(
+				timesheet,
+				[row["name"] for row in pending],
+				"a leave approver is not the timesheet approver",
+			)
+		finally:
+			frappe.set_user("Administrator")
+			frappe.db.set_value("Employee", self.employee_name, "leave_approver", MANAGER_USER)
+
+	# P2-U7 scenario 3 and 5
+
+	def test_a_decision_with_no_token_is_refused_before_anything_happens(self):
+		leave = self._pending_leave()
+
+		frappe.set_user(MANAGER_USER)
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval("Leave Application", leave.name, "Approve")
+
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("Leave Application", leave.name, "status"), "Open")
+
+	def test_a_timesheet_decided_twice_transitions_once(self):
+		name = self._pending_timesheet()
+
+		frappe.set_user(MANAGER_USER)
+		current = token("Timesheet", name)
+		act_on_approval("Timesheet", name, "Approve", **current)
+		# The double tap: the same evidence, sent twice.
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval("Timesheet", name, "Approve", **current)
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval("Timesheet", name, "Reject", comment="on second thoughts", **current)
+
+		frappe.set_user("Administrator")
+		doc = frappe.get_doc("Timesheet", name)
+		self.assertEqual(doc.workflow_state, "Approved")
+		self.assertEqual(doc.docstatus, 1)
+		self.assertEqual(
+			frappe.get_all(
+				"Comment",
+				filters={
+					"reference_doctype": "Timesheet",
+					"reference_name": name,
+					"comment_type": "Comment",
+				},
+				pluck="content",
+			),
+			[],
+			"the loser of a concurrent decision leaves no comment",
+		)
+
+	def test_a_state_that_moved_under_the_manager_is_refused(self):
+		name = self._pending_timesheet()
+
+		frappe.set_user(MANAGER_USER)
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval(
+				"Timesheet",
+				name,
+				"Approve",
+				expected_modified=frappe.db.get_value("Timesheet", name, "modified"),
+				expected_state="Draft",
+			)
+
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("Timesheet", name, "workflow_state"), "Pending Approval")
+
+	# P2-U7 scenario 8
+
+	def test_the_share_exists_only_while_the_week_is_pending(self):
+		name = self._pending_timesheet()
+		self.assertIn(MANAGER_USER, self._shared_users(name))
+
+		frappe.set_user(MANAGER_USER)
+		act_on_approval("Timesheet", name, "Approve", **token("Timesheet", name))
+
+		frappe.set_user("Administrator")
+		self.assertEqual(self._shared_users(name), [])
+
+	def test_cancelling_an_approved_week_leaves_no_share_behind(self):
+		name = self._pending_timesheet()
+		frappe.set_user(MANAGER_USER)
+		act_on_approval("Timesheet", name, "Approve", **token("Timesheet", name))
+
+		frappe.set_user("Administrator")
+		doc = frappe.get_doc("Timesheet", name)
+		doc.cancel()
+		self.assertEqual(self._shared_users(name), [])
+
+	# P2-U7 scenario 7
+
+	def test_reassigning_the_manager_moves_every_pending_share(self):
+		second_manager_employee = self._other(self.SECOND_MANAGER)
+		name = self._pending_timesheet()
+		self.assertEqual(self._shared_users(name), [MANAGER_USER])
+
+		frappe.set_user("Administrator")
+		employee = frappe.get_doc("Employee", self.employee_name)
+		employee.reports_to = second_manager_employee
+		employee.save()
+
+		shared = self._shared_users(name)
+		self.assertEqual(shared, [self.SECOND_MANAGER], "only the current manager holds the week")
+
+		# The old manager loses the decision as well as the read.
+		frappe.set_user(MANAGER_USER)
+		self.assertNotIn(name, [row["name"] for row in get_my_approvals()["pending"]])
+		with self.assertRaises(frappe.PermissionError):
+			get_approval_detail("timesheet", name)
+		with self.assertRaises(frappe.PermissionError):
+			act_on_approval(
+				"Timesheet",
+				name,
+				"Approve",
+				expected_modified=frappe.db.get_value("Timesheet", name, "modified"),
+				expected_state="Pending Approval",
+			)
+
+		# The new one gets both.
+		frappe.set_user(self.SECOND_MANAGER)
+		self.assertIn(name, [row["name"] for row in get_my_approvals()["pending"]])
+		self.assertEqual(get_approval_detail("timesheet", name)["name"], name)
 
 
 class TestLeaveApprovalIsNative(IntegrationTestCase):
@@ -292,7 +619,10 @@ class TestLeaveApprovalIsNative(IntegrationTestCase):
 		before = self._balance()
 
 		frappe.set_user(MANAGER_USER)
-		act_on_approval("Leave Application", leave.name, "Approve")
+		result = act_on_approval(
+			"Leave Application", leave.name, "Approve", **token("Leave Application", leave.name)
+		)
+		self.assertEqual(result["state"], "Approved")
 
 		frappe.set_user("Administrator")
 		doc = frappe.get_doc("Leave Application", leave.name)
@@ -314,7 +644,13 @@ class TestLeaveApprovalIsNative(IntegrationTestCase):
 		before = self._balance()
 
 		frappe.set_user(MANAGER_USER)
-		act_on_approval("Leave Application", leave.name, "Reject", comment="Two people are already out")
+		act_on_approval(
+			"Leave Application",
+			leave.name,
+			"Reject",
+			comment="Two people are already out",
+			**token("Leave Application", leave.name),
+		)
 
 		frappe.set_user("Administrator")
 		doc = frappe.get_doc("Leave Application", leave.name)
@@ -343,12 +679,13 @@ class TestLeaveApprovalIsNative(IntegrationTestCase):
 			).insert(ignore_permissions=True)
 		ensure_leave_approver_role(unrelated)
 
+		current = token("Leave Application", leave.name)
 		for user in (unrelated, EMPLOYEE_USER):
 			frappe.set_user(user)
 			with self.assertRaises(frappe.PermissionError):
-				act_on_approval("Leave Application", leave.name, "Approve")
+				act_on_approval("Leave Application", leave.name, "Approve", **current)
 			with self.assertRaises(frappe.PermissionError):
-				act_on_approval("Leave Application", leave.name, "Reject", comment="mine now")
+				act_on_approval("Leave Application", leave.name, "Reject", comment="mine now", **current)
 
 		frappe.set_user("Administrator")
 		doc = frappe.get_doc("Leave Application", leave.name)
@@ -379,12 +716,24 @@ class TestLeaveApprovalIsNative(IntegrationTestCase):
 		leave = self._pending_leave()
 
 		frappe.set_user(MANAGER_USER)
-		act_on_approval("Leave Application", leave.name, "Approve")
+		stale = token("Leave Application", leave.name)
+		act_on_approval("Leave Application", leave.name, "Approve", **stale)
 
+		# The loser of a concurrent approve/approve and of an
+		# approve/reject: same record, same token, already decided.
 		with self.assertRaises(frappe.ValidationError):
-			act_on_approval("Leave Application", leave.name, "Approve")
+			act_on_approval("Leave Application", leave.name, "Approve", **stale)
 		with self.assertRaises(frappe.ValidationError):
-			act_on_approval("Leave Application", leave.name, "Reject", comment="changed my mind")
+			act_on_approval(
+				"Leave Application", leave.name, "Reject", comment="changed my mind", **stale
+			)
+		# And with a *fresh* token, which is the reassure-yourself-and-retry
+		# case: still refused, because the record is no longer open.
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval(
+				"Leave Application", leave.name, "Reject", comment="changed my mind",
+				**token("Leave Application", leave.name),
+			)
 
 		frappe.set_user("Administrator")
 		self.assertEqual(len(self._ledger(leave.name)), 1)
@@ -410,8 +759,7 @@ class TestLeaveApprovalIsNative(IntegrationTestCase):
 
 		# The current token still works.
 		frappe.set_user(MANAGER_USER)
-		current = frappe.db.get_value("Leave Application", leave.name, "modified")
-		act_on_approval("Leave Application", leave.name, "Approve", expected_modified=str(current))
+		act_on_approval("Leave Application", leave.name, "Approve", **token("Leave Application", leave.name))
 		frappe.set_user("Administrator")
 		self.assertEqual(frappe.db.get_value("Leave Application", leave.name, "docstatus"), 1)
 
@@ -491,7 +839,9 @@ class TestLeaveApprovalIsNative(IntegrationTestCase):
 			)
 			leave.insert()
 			with self.assertRaises(frappe.ValidationError):
-				act_on_approval("Leave Application", leave.name, "Approve")
+				act_on_approval(
+					"Leave Application", leave.name, "Approve", **token("Leave Application", leave.name)
+				)
 			frappe.set_user("Administrator")
 			self.assertEqual(frappe.db.get_value("Leave Application", leave.name, "docstatus"), 0)
 		finally:

@@ -34,7 +34,17 @@ export function apiRequest(options) {
       redirectToLogin()
       return Promise.reject(error)
     }
-    if (status === 417 || error?.exc_type === 'CSRFTokenError') {
+    // A stale CSRF token is the one failure a reload actually fixes, and
+    // `exc_type` is the only reliable way to spot it. The `status === 417`
+    // clause that used to sit here was inverted: Frappe's CSRFTokenError is
+    // **400**, while 417 is plain ValidationError -- the status of every
+    // `frappe.throw` this app makes. So every domain refusal ("this has
+    // already been decided", "you do not have enough Casual Leave") reloaded
+    // the page instead of being shown, which is exactly the "explain the
+    // outcome" behaviour P2-R25 and P2-U7 step 4 ask for. Found while
+    // building P2-U7's stale-decision path; belongs to P2-U2's api.js, fixed
+    // here because no refusal message can reach any screen while it stands.
+    if (error?.exc_type === 'CSRFTokenError') {
       window.location.reload()
       return Promise.reject(error)
     }

@@ -296,15 +296,41 @@ Search above the list, and an "Ask HR" line under it. Desktop is a three-column 
 *Built so far (P2-U3):* the grouping, the type icon, the host name and the chevron. Search and the
 desktop grid are P2-U8's.
 
-## Approvals · phone, desktop (P2-U7)
+## Approvals · phone, desktop (P2-U7 — **built**)
 
-**One mixed queue**, oldest first, each row led by the employee's initials. On a phone the item
-expands in place with a 7-day hours strip. On a desktop the full timesheet — rows, day totals, note
-— is visible *before* Approve becomes available. "Send back" requires a reason inline.
+**One mixed queue**, leave and timesheets together, oldest first, each row led by the employee's
+initials in a green tile, with the amount (`38.5 h`, `3 days`) and the age (`2 d`) on the right. The
+row is a button, not a link, because it both selects and collapses; the selected record is in the URL
+either way (`/approvals/:kind/:name`, KTD5).
 
-*Built so far (P2-U3):* resting cards, the async states, and the copy — the manager's action is
-"Send back", the word the employee already sees on the row, rather than Frappe's "Reject". The
-single queue, the initials, the hours strip and the evidence-before-approve rule are P2-U7's.
+On a **phone** the row expands in place: a seven-day hours strip (bars scaled against an 8-hour day,
+with the number printed under each bar so the bar is never the only reading), then one line per
+project/task with its total, the week total, the employee's note, and the two actions.
+
+On a **desktop** the queue keeps the left column and the selected item's full evidence sits in a
+36rem panel on the right: a project × day table with a Day-total row, the employee's note quoted, and
+only then the reason field and the two buttons. Approve does not exist on the page until that panel
+has loaded — the decision is unavailable until the thing being decided is on screen (P2-AE6).
+
+"Send back" requires its reason on the same surface as the evidence, not behind a dialog: the
+employee reads that sentence, so it is written next to what it is about. Below the queue, **Decided
+this week** lists the last few outcomes with a `StatusBadge`.
+
+*Deviations from the artboard, recorded:*
+
+- The primary button carries the quantity at **both** widths ("Approve 38.5 h", "Approve 3 days"),
+  where the artboard shows it on desktop only. One control, one label; a decision that consumes 38.5
+  hours or three days of somebody's balance says so on the control that does it.
+- **Decided this week** is best-effort for timesheets. A Timesheet's DocShare is removed the moment
+  it is decided (P2-U7 scenario 8), so a decided week is only still visible to a manager who can read
+  it another way — the nested-set User Permission over their own reports. A leave approver who is
+  nobody's manager sees their leave decisions there and nothing else, which is correct: the group is
+  a receipt for work this user did, not a record they own.
+- Leave evidence adds a **"Left after this"** figure (the balance HRMS reports on the application).
+  It is the one number an approver otherwise has to leave the page to find.
+- The phone expansion does not reproduce the desktop grid. Seven columns of project × day do not fit
+  360px, so the strip carries the shape of the week and the project lines carry the totals; the same
+  server projection feeds both.
 
 ## Notifications · phone (P2-U4 — **built**)
 

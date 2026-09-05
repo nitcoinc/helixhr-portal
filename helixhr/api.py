@@ -3,6 +3,7 @@ import json
 import frappe
 from frappe import _
 from frappe.utils import (
+	add_days,
 	cint,
 	date_diff,
 	flt,
@@ -655,56 +656,136 @@ def _last_rejection_comment(timesheet):
 	return frappe.utils.strip_html(comment).strip() if comment else None
 
 
-def _pending_approvals(employee):
-	"""Every decision the session user may make right now -- leave *and*
-	timesheet (P2-R11). A manager whose only pending work is a timesheet had
-	no approval row on Home and no Approvals nav item at all, because both
-	read a leave-only count.
+def _approval_summaries(employee):
+	"""Every decision the session user may make right now, as one bounded,
+	typed, oldest-first list -- leave *and* timesheet (P2-R11, P2-U7 step 1).
 
-	Both reads run as the session user, so Frappe's own permissions decide
-	what comes back: HRMS filters leave by `leave_approver`, and a timesheet
-	is visible to its approver through the DocShare `timesheet_on_update`
-	grants at Pending Approval. Nothing here is an authorization decision of
-	its own -- `act_on_approval` re-checks who may act, on the server, every
-	time.
+	This is the single source of the three things that used to be answered
+	separately and could therefore disagree: what the Approvals queue shows,
+	what Home counts as a decision the manager owes, and whether the
+	Approvals nav item is drawn at all. It is *not* an authorization
+	decision -- `_assert_may_act_on` re-checks who may act, on the server,
+	on every read of a detail and on every action.
+
+	Both reads run as the session user through `frappe.get_list`, so
+	Frappe's own permissions decide what comes back: HRMS filters leave by
+	`leave_approver`, and a timesheet reaches its approver through the
+	Pending-Approval DocShare `timesheet_on_update` grants plus the nested-set
+	User Permission a manager holds over their reports.
+
+	The timesheet read used `frappe.get_all` until P2-U7. `get_all` is
+	`get_list` with `ignore_permissions=True`, so it answered with *every*
+	pending timesheet on the site regardless of who was asking -- the
+	employee-name and week of every person in the company, to anyone with a
+	session, through Home and through this queue.
 	"""
 	from hrms.api import get_leave_applications
 
-	decisions = []
+	today = _as_date(user_today())
+	rows = []
+
 	for row in get_leave_applications(employee, approver_id=frappe.session.user, for_approval=True):
-		decisions.append(
+		sent_on = row.get("creation") or row.get("posting_date")
+		rows.append(
 			{
-				"kind": "approval_leave",
-				"reference_doctype": "Leave Application",
-				"reference_name": row["name"],
-				"route_kind": "leave",
-				"title": f"{row.get('employee_name')} asked for {row.get('leave_type')}",
-				"date": str(row.get("from_date")) if row.get("from_date") else None,
+				# Stable identity, and the Vue list key.
+				"id": f"leave:{row['name']}",
+				"kind": "leave",
+				"doctype": "Leave Application",
+				"name": row["name"],
+				"employee": row.get("employee"),
+				"employee_name": row.get("employee_name"),
+				"initials": _initials(row.get("employee_name")),
+				"leave_type": row.get("leave_type"),
+				"from_date": str(row["from_date"]) if row.get("from_date") else None,
+				"to_date": str(row["to_date"]) if row.get("to_date") else None,
+				"total_days": flt(row.get("total_leave_days")),
+				"total_hours": None,
+				"status": row.get("status"),
+				"sent_on": str(sent_on) if sent_on else None,
+				"age_days": _age_in_days(sent_on, today),
 			}
 		)
 
-	for row in frappe.get_all(
+	for row in frappe.get_list(
 		"Timesheet",
 		filters={
 			"workflow_state": "Pending Approval",
 			"docstatus": 0,
 			"employee": ["!=", employee],
 		},
-		fields=["name", "employee_name", "start_date"],
+		fields=["name", "employee", "employee_name", "start_date", "end_date", "total_hours", "modified"],
 		order_by="start_date asc",
 		limit=_QUEUE_FETCH,
 	):
-		decisions.append(
+		# `modified` is when the week last moved, which for a Pending
+		# Approval timesheet is when it was sent. Timesheet has no
+		# submitted-on field of its own and the workflow transition is a
+		# plain field update, so this is the closest honest answer.
+		rows.append(
 			{
-				"kind": "approval_timesheet",
-				"reference_doctype": "Timesheet",
-				"reference_name": row.name,
-				"route_kind": "timesheet",
-				"title": f"{row.employee_name} sent a week for your approval",
-				"date": str(row.start_date) if row.start_date else None,
+				"id": f"timesheet:{row.name}",
+				"kind": "timesheet",
+				"doctype": "Timesheet",
+				"name": row.name,
+				"employee": row.employee,
+				"employee_name": row.employee_name,
+				"initials": _initials(row.employee_name),
+				"leave_type": None,
+				"from_date": str(row.start_date) if row.start_date else None,
+				"to_date": str(row.end_date) if row.end_date else None,
+				"total_days": None,
+				"total_hours": flt(row.total_hours),
+				"status": "Pending Approval",
+				"sent_on": str(row.modified) if row.modified else None,
+				"age_days": _age_in_days(row.modified, today),
 			}
 		)
 
+	# Oldest first: the queue is a backlog, and the person who has waited
+	# longest is the one the manager is holding up (P2-U7 step 7).
+	rows.sort(key=lambda entry: (entry["sent_on"] or "", entry["name"]))
+	return rows
+
+
+def _initials(full_name):
+	"""Two letters for the row's avatar. The name is always printed beside
+	it, so this is a second reading of it and never the only one."""
+	parts = [part for part in (full_name or "").split() if part]
+	if not parts:
+		return "?"
+	return (parts[0][0] + (parts[-1][0] if len(parts) > 1 else "")).upper()
+
+
+def _age_in_days(value, today):
+	if not value:
+		return None
+	return max(0, (today - _as_date(value)).days)
+
+
+def _pending_approvals(employee):
+	"""The same decisions, shaped for Home's action queue (P2-R11, P2-R12).
+
+	One source, two shapes: the queue row and the Approvals list are the
+	same server answer, so a decision can never be on one and missing from
+	the other.
+	"""
+	decisions = []
+	for row in _approval_summaries(employee):
+		if row["kind"] == "leave":
+			title = f"{row['employee_name']} asked for {row['leave_type']}"
+		else:
+			title = f"{row['employee_name']} sent a week for your approval"
+		decisions.append(
+			{
+				"kind": "approval_leave" if row["kind"] == "leave" else "approval_timesheet",
+				"reference_doctype": row["doctype"],
+				"reference_name": row["name"],
+				"route_kind": row["kind"],
+				"title": title,
+				"date": row["from_date"],
+			}
+		)
 	return decisions
 
 
@@ -1710,29 +1791,314 @@ def _get_unread_notification_count():
 	return frappe.db.count("Notification Log", {"for_user": frappe.session.user, "read": 0})
 
 
-# Approvals (U12, R25, R26, KTD7)
+# ---------------------------------------------------------------------------
+# Approvals (U12, R25, R26, KTD7; P2-U7, P2-R17, P2-R25, P2-R27)
+#
+# One decision queue, and one rule about it: the summary a manager sees, the
+# evidence they read before deciding, and the authorization on the decision
+# itself all come from the same two server functions. `_approval_summaries`
+# decides what is in the queue; `_assert_may_act_on` decides who may open or
+# act on any single item. Nothing on the screen widens either.
+#
+# There is no second approval model here. Timesheet keeps its Workflow and
+# its Pending-Approval-only DocShare; Leave Application keeps the native
+# HRMS submit lifecycle. There is no bulk approve, deliberately: the whole
+# point of P2-U7 is that a decision is made against evidence, and a button
+# that decides eight records at once cannot have been.
+# ---------------------------------------------------------------------------
+
+# How much of the queue is shown at once. A manager with more than this many
+# people waiting has a staffing problem, not a paging problem -- the count is
+# still exact so the screen can say so.
+_APPROVAL_PAGE = 25
+# "Decided this week" is a receipt, not a history: the last few outcomes, so
+# a manager can see that the thing they just did actually happened.
+_DECIDED_DAYS = 7
+_DECIDED_LIMIT = 5
+
+
+@frappe.whitelist()
+def get_my_approvals():
+	"""The manager's queue: everything waiting on them, oldest first, plus
+	the handful of decisions they made this week (P2-U7 step 1).
+
+	Summary only. The evidence -- timesheet rows and day totals, a leave's
+	reason -- costs a document read per item, so it is loaded by
+	`get_approval_detail` for the one item actually selected (P2-R22).
+	"""
+	employee = get_current_employee()
+	pending = _approval_summaries(employee)
+	return {
+		"today": user_today(),
+		"pending": pending[:_APPROVAL_PAGE],
+		"total": len(pending),
+		"decided": _recently_decided(employee),
+	}
+
+
+def _recently_decided(employee):
+	"""What this approver decided in the last week, newest first.
+
+	Best effort by design. A Timesheet's DocShare is removed the moment it
+	is decided (P2-U7 scenario 8), so a decided week is only still visible
+	to a manager who can read it some other way -- the nested-set User
+	Permission over their own reports. An approver who is nobody's manager
+	sees their leave decisions here and nothing else, which is correct: the
+	group is a receipt for work this user did, not a record they own.
+	"""
+	since = add_days(user_today(), -_DECIDED_DAYS)
+	today = _as_date(user_today())
+	decided = []
+
+	for row in frappe.get_list(
+		"Leave Application",
+		filters={
+			"leave_approver": frappe.session.user,
+			"employee": ["!=", employee],
+			"status": ["in", ["Approved", "Rejected"]],
+			"modified": [">=", str(since)],
+		},
+		fields=["name", "employee_name", "leave_type", "from_date", "to_date", "status", "modified"],
+		order_by="modified desc",
+		limit=_DECIDED_LIMIT,
+	):
+		decided.append(
+			{
+				"id": f"leave:{row.name}",
+				"kind": "leave",
+				"name": row.name,
+				"employee_name": row.employee_name,
+				"initials": _initials(row.employee_name),
+				"label": row.leave_type,
+				"from_date": str(row.from_date) if row.from_date else None,
+				"to_date": str(row.to_date) if row.to_date else None,
+				"status": row.status,
+				"decided_on": str(row.modified) if row.modified else None,
+			}
+		)
+
+	for row in frappe.get_list(
+		"Timesheet",
+		filters={
+			"employee": ["!=", employee],
+			"workflow_state": ["in", ["Approved", "Rejected"]],
+			"modified": [">=", str(since)],
+		},
+		fields=["name", "employee_name", "start_date", "end_date", "workflow_state", "modified"],
+		order_by="modified desc",
+		limit=_DECIDED_LIMIT,
+	):
+		decided.append(
+			{
+				"id": f"timesheet:{row.name}",
+				"kind": "timesheet",
+				"name": row.name,
+				"employee_name": row.employee_name,
+				"initials": _initials(row.employee_name),
+				"label": "Timesheet",
+				"from_date": str(row.start_date) if row.start_date else None,
+				"to_date": str(row.end_date) if row.end_date else None,
+				"status": row.workflow_state,
+				"decided_on": str(row.modified) if row.modified else None,
+			}
+		)
+
+	decided.sort(key=lambda entry: entry["decided_on"] or "", reverse=True)
+	for entry in decided:
+		entry["age_days"] = _age_in_days(entry["decided_on"], today)
+	return decided[:_DECIDED_LIMIT]
+
+
+@frappe.whitelist()
+def get_approval_detail(kind, name):
+	"""The evidence for one decision, loaded only when it is selected
+	(P2-U7 step 2, P2-R17, P2-AE6).
+
+	Authorized by exactly the rule that authorizes the decision itself --
+	`_assert_may_act_on`, the same function `act_on_approval` calls. A
+	manager who could not approve this record cannot read it here either,
+	and the answer is a PermissionError rather than an empty projection, so
+	the screen can say "you don't have access to this" instead of "nothing
+	here".
+
+	`frappe.get_doc` performs no read check of its own, which is why the
+	assert is not optional.
+	"""
+	doctype = _APPROVAL_DOCTYPES.get(kind)
+	if not doctype:
+		frappe.throw(_("Not a valid request."))
+
+	if not frappe.db.exists(doctype, name):
+		frappe.throw(_("That request no longer exists."), frappe.DoesNotExistError)
+
+	doc = frappe.get_doc(doctype, name)
+	_assert_may_act_on(doc)
+
+	if doctype == "Leave Application":
+		return _leave_decision_detail(doc)
+	return _timesheet_decision_detail(doc)
+
+
+_APPROVAL_DOCTYPES = {"leave": "Leave Application", "timesheet": "Timesheet"}
+
+
+def _decision_head(doc, employee_name):
+	return {
+		"name": doc.name,
+		"doctype": doc.doctype,
+		"employee": doc.employee,
+		"employee_name": employee_name,
+		"initials": _initials(employee_name),
+		# The concurrency token. The screen sends back the value it was
+		# rendered from, and `act_on_approval` refuses anything else
+		# (P2-R25, P2-U7 step 3).
+		"modified": str(doc.modified),
+	}
+
+
+def _leave_decision_detail(doc):
+	"""Reason, dates, day count and current status -- everything the
+	approver needs before the balance is consumed (P2-U7 scenario 2)."""
+	detail = _decision_head(doc, doc.employee_name)
+	detail.update(
+		{
+			"kind": "leave",
+			"state": doc.status,
+			"status": doc.status,
+			"docstatus": cint(doc.docstatus),
+			"leave_type": doc.leave_type,
+			"from_date": str(doc.from_date) if doc.from_date else None,
+			"to_date": str(doc.to_date) if doc.to_date else None,
+			"total_days": flt(doc.total_leave_days),
+			"half_day": bool(cint(doc.half_day)),
+			"half_day_date": str(doc.half_day_date) if doc.half_day_date else None,
+			# The employee's own words for why they need the days.
+			"reason": frappe.utils.strip_html(doc.description or "").strip() or None,
+			"leave_balance": flt(doc.leave_balance),
+			"sent_on": str(doc.creation) if doc.creation else None,
+			"age_days": _age_in_days(doc.creation, _as_date(user_today())),
+		}
+	)
+	return detail
+
+
+def _timesheet_decision_detail(doc):
+	"""Every row and every total on the week, which is what makes the
+	decision a decision rather than a rubber stamp (P2-AE6).
+
+	The rows are aggregated into one line per project/task with a cell per
+	day, because that is the shape both the desktop grid and the phone
+	strip read from -- one data model, two layouts.
+	"""
+	monday, sunday = get_week_bounds(doc.start_date)
+	dates = [str(add_days(monday, offset)) for offset in range(7)]
+
+	lines = {}
+	day_totals = dict.fromkeys(dates, 0.0)
+	notes = []
+	for row in doc.time_logs:
+		date = _row_date(row)
+		hours = flt(row.hours)
+		key = (row.project, row.task)
+		line = lines.setdefault(
+			key,
+			{"project": row.project, "task": row.task, "hours_by_date": {}, "total": 0.0},
+		)
+		if date:
+			line["hours_by_date"][date] = flt(line["hours_by_date"].get(date, 0)) + hours
+			if date in day_totals:
+				day_totals[date] += hours
+		line["total"] += hours
+		note = (row.description or "").strip()
+		if note and note not in notes:
+			notes.append(note)
+
+	names = _project_and_task_names(lines)
+	for (project, task), line in lines.items():
+		line["project_name"] = names["projects"].get(project) or project
+		line["task_subject"] = names["tasks"].get(task) or task
+
+	detail = _decision_head(doc, doc.employee_name)
+	detail.update(
+		{
+			"kind": "timesheet",
+			"state": doc.workflow_state,
+			"status": doc.workflow_state,
+			"docstatus": cint(doc.docstatus),
+			"week_start": str(monday),
+			"week_end": str(sunday),
+			"dates": dates,
+			"lines": sorted(
+				lines.values(), key=lambda line: (line["project_name"] or "", line["task_subject"] or "")
+			),
+			"day_totals": [{"date": date, "hours": flt(day_totals[date])} for date in dates],
+			"total_hours": flt(doc.total_hours),
+			"full_week_hours": FULL_WEEK_HOURS,
+			# The employee's note, which is usually the explanation for
+			# whatever looks odd in the grid.
+			"note": " ".join(notes) or None,
+			"sent_on": str(doc.modified) if doc.modified else None,
+			"age_days": _age_in_days(doc.modified, _as_date(user_today())),
+		}
+	)
+	return detail
+
+
+def _project_and_task_names(lines):
+	"""Two queries for the whole week, not two per row (P2-R22)."""
+	projects = {project for project, _ in lines if project}
+	tasks = {task for _, task in lines if task}
+	return {
+		"projects": {
+			row.name: row.project_name
+			for row in frappe.get_all(
+				"Project", filters={"name": ["in", list(projects)]}, fields=["name", "project_name"]
+			)
+		}
+		if projects
+		else {},
+		"tasks": {
+			row.name: row.subject
+			for row in frappe.get_all(
+				"Task", filters={"name": ["in", list(tasks)]}, fields=["name", "subject"]
+			)
+		}
+		if tasks
+		else {},
+	}
+
+
 
 
 @frappe.whitelist(methods=["POST"])
-def act_on_approval(doctype, name, action, comment=None, expected_modified=None):
-	"""Approve or reject a report's pending Leave Application or Timesheet.
-	`comment` is required for a reject (R25). Who may actually act is
-	checked here on the server, not assumed from what the portal chose to
-	show (R26) -- Timesheet goes through the same workflow transition
-	the portal's own Submit/Edit actions use (its condition and
-	before_submit guard are the real check); Leave Application has no
-	Workflow (KTD17), so the equivalent check is explicit here.
+def act_on_approval(
+	doctype, name, action, comment=None, expected_modified=None, expected_state=None
+):
+	"""Approve or send back a report's pending Leave Application or
+	Timesheet. `comment` is required for a Reject (R25) -- the employee is
+	told what to change, not just that it came back.
+
+	Who may actually act is checked here on the server, not assumed from
+	what the portal chose to show (R26). Timesheet goes through the same
+	workflow transition the portal's own Submit/Edit actions use (its
+	condition and before_submit guard are the real check); Leave
+	Application has no Workflow (KTD17), so the equivalent check is
+	explicit here.
 
 	Order matters, and it is the P2-U1 fix. The sequence is: lock the
-	native row, authorize, check the expected state, and only then create
-	any side effect. Before P2-U1 the comment was added first, so an
-	unauthorized caller left a real Comment on somebody else's leave
-	before the approver check refused them (P2-R10, P2-U1 step 9).
+	native row, authorize, check the state the caller was looking at, and
+	only then create any side effect. Before P2-U1 the comment was added
+	first, so an unauthorized caller left a real Comment on somebody else's
+	leave before the approver check refused them (P2-R10, P2-U1 step 9).
 
-	`expected_modified` is the optional concurrency token (P2-R25): pass
-	the `modified` value the screen was rendered from and a decision made
-	against stale data is refused instead of overwriting a decision
-	somebody else already made.
+	`expected_modified` is **required** as of P2-U7: it is the `modified`
+	value `get_approval_detail` handed the screen, so a decision is always
+	made against evidence the caller actually saw. Optional was not enough
+	-- a caller who simply omitted the token got the old unguarded write
+	back, which is the entire failure mode P2-R25 exists to close.
+	`expected_state` is the workflow state / status that came with it, and
+	is compared too: it is the difference between "somebody edited this"
+	and "somebody already decided this", and the manager is told which.
 	"""
 	rate_limit_per_user("act_on_approval", limit=60, seconds=60)
 	if doctype not in ("Leave Application", "Timesheet"):
@@ -1741,6 +2107,8 @@ def act_on_approval(doctype, name, action, comment=None, expected_modified=None)
 		frappe.throw(_("Not a valid action."))
 	if action == "Reject" and not comment:
 		frappe.throw(_("A comment is required to reject."))
+	if not expected_modified:
+		frappe.throw(_("Open this request before deciding it, then try again."))
 
 	# SELECT ... FOR UPDATE on the one row: two concurrent decisions
 	# serialize here, so the second one reads the first one's result and is
@@ -1753,6 +2121,7 @@ def act_on_approval(doctype, name, action, comment=None, expected_modified=None)
 	_assert_may_act_on(doc)
 	_assert_still_open(doc)
 	_assert_expected_state(expected_modified, current_modified)
+	_assert_expected_workflow_state(doc, expected_state)
 
 	if comment:
 		doc.add_comment("Comment", comment)
@@ -1761,9 +2130,10 @@ def act_on_approval(doctype, name, action, comment=None, expected_modified=None)
 		from frappe.model.workflow import apply_workflow
 
 		apply_workflow(doc, action)
-		return
+		return {"name": doc.name, "action": action, "state": doc.workflow_state}
 
 	_act_on_leave_application(doc, action)
+	return {"name": doc.name, "action": action, "state": doc.status}
 
 
 def _assert_may_act_on(doc):
@@ -1810,6 +2180,17 @@ def _assert_expected_state(expected_modified, current_modified):
 		return
 	if get_datetime(expected_modified) != get_datetime(current_modified):
 		frappe.throw(_("Somebody changed this while you were looking at it. Reload and try again."))
+
+
+def _assert_expected_workflow_state(doc, expected_state):
+	"""The second half of the token (P2-U7 step 3). `modified` says the row
+	moved; this says what it moved *to*, which is the difference between a
+	harmless edit and a decision somebody else already made."""
+	if not expected_state:
+		return
+	current = doc.workflow_state if doc.doctype == "Timesheet" else doc.status
+	if expected_state != current:
+		frappe.throw(_("This has already been decided. Reload to see the result."))
 
 
 def _act_on_leave_application(doc, action):

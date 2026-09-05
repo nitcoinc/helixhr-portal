@@ -91,13 +91,21 @@ async function seedLeave(
 
   if (options.reject) {
     // Administrator is an authorized actor in act_on_approval, so this is the
-    // real portal path a rejection takes -- not a raw status write.
+    // real portal path a rejection takes -- not a raw status write. P2-U7
+    // made the concurrency token mandatory, so the seed reads the record
+    // first exactly as the Approvals screen does.
+    const detail = await api.get(
+      '/api/method/helixhr.api.get_approval_detail?kind=leave&name=' + encodeURIComponent(name),
+    )
+    const evidence = (await detail.json())?.message
     const rejected = await api.post('/api/method/helixhr.api.act_on_approval', {
       data: {
         doctype: 'Leave Application',
         name,
         action: 'Reject',
         comment: options.reject,
+        expected_modified: evidence?.modified,
+        expected_state: evidence?.state,
       },
     })
     expect(rejected.ok(), await rejected.text()).toBeTruthy()
