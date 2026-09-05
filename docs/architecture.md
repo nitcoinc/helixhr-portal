@@ -195,9 +195,12 @@ URL that survives refresh and browser Back. One convention, defined in
 - Route names are stable PascalCase — `LeaveDetail`, `RequestDetail`,
   `ApprovalDetail`, `TimesheetWeek`. Link by name.
 - Every detail route sets `props: true`; the page takes the id as a prop.
-- The detail routes currently resolve to the list page they belong to. The
-  unit that builds each real detail screen swaps the component in and changes
-  nothing else.
+- A detail route renders the same page component as its list, which reads the
+  id from its prop and asks the server for that one record
+  (`get_my_leave_detail`, `get_my_request`, `get_approval_detail`,
+  `get_my_week`). The list is context, not a prerequisite: the detail route
+  is reachable directly, and refresh and browser Back both land on the same
+  record.
 
 Three routes are states rather than pages, all rendered by `NotLinked.vue`
 with `meta.shell: false`: `/not-linked` (signed in, no Employee — shows the
@@ -211,15 +214,47 @@ them to `/login?redirect-to=<the full portal path>`.
 
 | Screen | Reads | Writes | Backing records |
 |---|---|---|---|
-| Dashboard | `api.get_dashboard` | none | Timesheet, Leave Application, HR Request, Attendance, Notification Log |
-| Leave | `hrms.api.get_leave_balance_map`, `get_leave_applications`, `get_leave_types`, `get_leave_approval_details` | `frappe.client.insert`, `frappe.client.delete` (withdraw, own docs only) | Leave Application, Leave Allocation |
-| Attendance | `api.get_my_attendance`, `frappe.client.get_list` on Employee Checkin | none | Attendance, Employee Checkin, Holiday List, Leave Application |
-| Timesheet | `api.get_my_week`, `api.get_my_projects` | `api.save_my_week`, `frappe.model.workflow.apply_workflow` (send for approval) | Timesheet + Timesheet Detail, Workflow "Timesheet Approval" |
-| Requests | `frappe.client.get_list` | `frappe.client.insert`, file upload | HR Request (this app's doctype), File |
-| Documents | `api.get_my_documents` (scoped server-side; `frappe.client.get_list` is scoped by the same hooks) | none | HelixHR Document Link |
-| Notifications | `notification_log.get_notification_logs` | `notification_log.mark_all_as_read` | Notification Log, fed by the four Notification fixtures |
-| Approvals | `frappe.client.get_list` on Timesheet, `hrms.api.get_leave_applications` | `api.act_on_approval` | Workflow actions, DocShare for the approver |
-| Profile | `api.get_dashboard` header, `frappe.client.get` on own Employee | `api.update_my_profile` | Employee |
+| Dashboard | `get_portal_bootstrap`, `get_dashboard` | none | Timesheet, Leave Application, HR Request, Attendance, Notification Log |
+| Leave | `get_my_leave`, `get_my_leave_detail`, `get_leave_form_context`, `get_leave_day_count` | `apply_for_leave`, `withdraw_my_leave` | Leave Application, Leave Allocation, Leave Ledger Entry |
+| Attendance | `get_my_attendance`, `get_my_checkins` | none (an exception opens a prefilled HR Request) | Attendance, Employee Checkin, Holiday List, Leave Application |
+| Timesheet | `get_my_week`, `get_my_timesheet_history`, `get_timesheet_week_start`, `get_my_projects` | `save_my_week`, `submit_my_week` | Timesheet + Timesheet Detail, Workflow "Timesheet Approval" |
+| Requests | `get_my_requests`, `get_my_request` | `create_my_request`, `attach_to_my_request`, `mark_my_request_read` | HR Request, File, Notification Log |
+| Documents | `get_my_documents` (`frappe.client.get_list` is scoped by the same hooks) | none | HelixHR Document Link |
+| Notifications | `notification_log.get_notification_logs` | `notification_log.mark_all_as_read`, `mark_my_request_read` | Notification Log, fed by the Notification fixtures and `events.hr_request_on_update` |
+| Approvals | `get_my_approvals`, `get_approval_detail` | `act_on_approval` | Leave Application, Timesheet, Workflow actions, DocShare |
+| Profile | `get_portal_bootstrap` header, `frappe.client.get` on own Employee | `update_my_profile` | Employee |
+
+Every method in the first two columns without a package prefix is
+`helixhr.api.<name>`. That is the point of the table: apart from Documents'
+list route, the notification log and the employee's own Employee record, no
+screen reaches a generic `frappe.client` route any more.
+
+### Why so many thin methods (P2-R27)
+
+A generic `frappe.client.insert`/`get_list`/`delete` call is shaped by the
+*caller*. That is fine for a read Frappe's own permissions fully constrain,
+and wrong everywhere the rule is "your own record, your own company, this
+field only, this state only, at most this often". Each method above exists
+because a caller-controlled request could not enforce one of:
+
+- **ownership** — `employee` comes from the session, never from a parameter
+  (`apply_for_leave`, `create_my_request`, `save_my_week`);
+- **a field allow-list** — `update_my_profile` writes seven fields whatever
+  else it is handed; `apply_for_leave` derives `leave_approver` and
+  `half_day_date` rather than accepting them;
+- **expected-state validation in one transaction** — `submit_my_week` and
+  `act_on_approval` lock the row and compare `modified`/workflow state, so a
+  stale second tap is refused instead of committing twice;
+- **an idempotency key** — `create_my_request` returns the existing request
+  for a repeated `operation_key`, and `attach_to_my_request` is idempotent by
+  (request, file name, uploader);
+- **bounded input** — subject/details lengths, the attendance span, history
+  page sizes, upload size and type;
+- **a rate bound** — see "Per-user write limits" below.
+
+The corollary is that role Employee deliberately has *no* create or write
+DocPerm on HR Request and no delete on Leave Application: the method is the
+create rule, and it is stricter than a DocPerm can be.
 
 `get_dashboard` is one round trip that assembles the header, the week spine
 (`_get_week_spine`), the action queue (`_get_needs_you`), reference counts and
@@ -248,6 +283,73 @@ is before today, is a working day on their holiday list, and is not on leave.
 With no records the strip shows a single placeholder line. Nothing changes when
 a device arrives; the first record starts the clock.
 
+## Response headers, uploads and write limits (P2-U9)
+
+**Security headers.** Frappe version-16 sets none of its own, so
+`helixhr.utils.set_security_headers` is registered as an `after_request` hook
+and adds `X-Content-Type-Options: nosniff`, `Referrer-Policy`,
+`Permissions-Policy` and `Content-Security-Policy: frame-ancestors 'none'` to
+every response the site serves — plus `Strict-Transport-Security`, but only
+when the request arrived over HTTPS, so a plain-HTTP dev bench cannot pin
+`localhost` in a developer's browser. Every header is set with `setdefault`:
+a reverse proxy that already sets a stricter value keeps it.
+
+**Upload policy.** `helixhr.utils.validate_portal_upload` is the single rule:
+private, at most 10MB, and one of PDF, PNG, JPEG, DOCX or XLSX — checked by
+extension *and* by leading signature, with the two OOXML types opened as zip
+containers so a `.docm` renamed to `.docx` (it carries `vbaProject.bin`) and a
+truncated archive are both refused. It is called from
+`api.attach_to_my_request`, which is the portal's only upload path, and again
+from `events.file_before_insert`, which is the chokepoint every other path
+goes through. The same hook function forces `Content-Disposition: attachment`
+on `/private/files/...` responses for files attached to an HR Request, so an
+uploaded document can never render in the site's own origin.
+
+**Per-user write limits.** `helixhr.utils.RATE_LIMIT_POLICY` is one table read
+by three places: `rate_limit_per_user` enforces it, `preflight.check_rate_limits`
+refuses a site that has loosened it through the optional `helixhr_rate_limits`
+site config, and the runbook quotes it. The buckets are keyed by session user
+and site, not by IP — one office behind one address would otherwise share a
+bucket.
+
+The limiter is **off on a site with `allow_tests`**, because the limits and
+the test suites are otherwise mutually exclusive: the Python suite creates far
+more than ten HR Requests as one user in one run, and a second Playwright pass
+inside the same minute re-trips the timesheet bound. That is safe only because
+`preflight.check_test_mode` FAILs a site with `allow_tests` on and the deploy
+gate exits non-zero. `TestPerUserRateLimits` forces the limiter back on with
+`frappe.flags.helixhr_enforce_rate_limits` and proves the eleventh request in
+an hour is refused, so the bypass is never the thing under test.
+
+## `helixhr/api.py` is over the review threshold
+
+It is about 2,600 lines. The agreed threshold is 1,500, and it was crossed
+during P2-U4..P2-U8; splitting it was deliberately *not* done inside those
+units, because every one of them also edited it and a move would have made
+each diff unreviewable. Recorded here so the decision is taken on purpose
+rather than by drift.
+
+The seams already exist — the file is sectioned by domain and the sections
+share almost nothing but `get_current_employee`, `_as_date` and the rate
+limiter. A split along them would be:
+
+| Module | Contents |
+|---|---|
+| `api/dashboard.py` | `get_dashboard`, the week spine, `_get_needs_you`, `_queue_item` |
+| `api/leave.py` | `get_my_leave*`, `get_leave_form_context`, `get_leave_day_count`, `apply_for_leave`, `withdraw_my_leave`, `_leave_state` |
+| `api/attendance.py` | `get_my_attendance`, `get_my_checkins`, holidays, exceptions |
+| `api/timesheet.py` | `get_my_week`, `save_my_week`, `submit_my_week`, history, projects |
+| `api/approvals.py` | `get_my_approvals`, `get_approval_detail`, `act_on_approval` |
+| `api/requests.py` | `get_my_requests`, `get_my_request`, `create_my_request`, `attach_to_my_request`, `mark_my_request_read` |
+| `api/documents.py` | `get_my_documents` |
+| `api/session.py` | `get_portal_bootstrap`, `get_current_employee`, `user_today`, `update_my_profile` |
+
+The cost is real and is why this is a recommendation and not a to-do: every
+whitelisted method's dotted path is a public API that the frontend, the tests
+and any external caller use, so a split needs `helixhr/api.py` kept as a
+re-export shim (or `override_whitelisted_methods`) and a pass over every
+`helixhr.api.<name>` string in `frontend/src/` and `helixhr/tests/`.
+
 ## Frontend structure
 
 - `App.vue` mounts `AppShell` for every route except the three state routes
@@ -262,10 +364,17 @@ a device arrives; the first record starts the clock.
 - `lib/dates.js` is the local-calendar module — see "Portal bootstrap, and
   whose calendar it is" above. Nothing else in the frontend may parse a Frappe
   date or compute a week boundary.
-- `lib/unread.js` is a module-scope resource for the notification badge; it
-  must be fetched by hand because frappe-ui only auto-fetches inside a
-  component's `onMounted`. The bootstrap already carries the initial count
-  (`session.unread`); folding the first poll into it is P2-U4's job.
+- `lib/unread.js` is a module-scope resource for the notification badge. It
+  makes no first fetch at all -- the bootstrap already carries the count -- and
+  the 60s poll it does own exists only while the document is visible: hiding
+  the tab clears the interval, and the hidden -> visible transition costs
+  exactly one catch-up read however many of `visibilitychange` and `focus`
+  the platform delivers.
+- `lib/dialogA11y.js` names frappe-ui's unlabelled dialog close button, once
+  for the whole app, and `lib/featherIcons.js` is the stub the Feather icon
+  set is aliased to. Both are there because the alternative was editing
+  `node_modules`; both have a guard next to them that fails if the assumption
+  they rest on stops being true.
 - `index.css` is the design token layer. frappe-ui hard-codes `blue` as its
   primary palette, so `tailwind.config.cjs` retunes the `blue` scale to the
   brand green; read `blue` as "brand" throughout. The accent yellow may only
@@ -292,10 +401,16 @@ fixture" above. Fixtures are installed by `bench migrate`;
   never assert against an assumed-empty baseline.
 - **Vitest** (`frontend/src/**/*.test.js`): pure functions only, currently the
   error-message mapping.
-- **Playwright** (`frontend/tests/e2e/`): three projects, `setup` logs the two
-  fixture users in once and stores state, `employee` and `manager` reuse it.
-  `navigation.spec.ts` travels by clicking, not by URL, because a portal with
-  no navigation once passed every URL-driven spec.
+- **Playwright** (`frontend/tests/e2e/`): `setup` logs the two fixture users
+  in once and stores state; `employee` and `manager` reuse it on desktop
+  Chromium; `employee-mobile-webkit` re-runs the critical flows on iOS's only engine
+  under a coarse pointer; `baseline` exists only when `BASELINE_MODE` is set
+  and runs the pinned performance protocol. `navigation.spec.ts` travels by
+  clicking, not by URL, because a portal with no navigation once passed every
+  URL-driven spec. `hardening.spec.ts` owns the P2-U9 gates that are cheap
+  enough to run every pass: lazy route chunks, the visibility-aware poll,
+  built-asset policy, no service worker, the security headers, and the two
+  accessibility items.
 
 ## Extending
 

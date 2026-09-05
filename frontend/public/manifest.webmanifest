@@ -1,0 +1,19 @@
+{
+  "name": "HelixHR Employee Portal",
+  "short_name": "HelixHR",
+  "description": "Leave, attendance, timesheets, approvals and HR requests.",
+  "start_url": "/helixhr",
+  "scope": "/helixhr",
+  "display": "standalone",
+  "orientation": "portrait-primary",
+  "background_color": "#EFEAE4",
+  "theme_color": "#143D33",
+  "icons": [
+    {
+      "src": "/assets/helixhr/helixhr/favicon.png",
+      "sizes": "any",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

@@ -96,6 +96,14 @@ weights the old import pulled.
 
 Standard density (8–64px spacing scale) — this is a form- and list-heavy app, not a marketing page, but phones are the primary device so it must not feel cramped. Reuse frappe-ui's own spacing tokens; do not introduce a second scale. Touch targets: minimum 44×44px on every tappable element (buttons, nav items, table row actions), including small secondary ones, 8px+ between adjacent tappable elements.
 
+**A stretched link is still a 24px target on paper.** The list rows on Leave and Requests make the
+whole card tappable with `after:absolute after:inset-0` on the row's one link, which is the correct
+pattern — but the *link element's own* box stays as tall as its text, and that is what an automated
+target-size check measures. Give it a real box:
+`-my-2 inline-flex min-h-11 items-center`. The negative margin returns exactly what `min-h-11`
+added, so the row's density does not change. The same idiom is used on the inline links in
+Timesheet and WeekSpine.
+
 **Radius is not a Tailwind class in this app.** frappe-ui's preset *redefines* the scale — `rounded`
 is 8px, `rounded-md` 10px, `rounded-lg` 12px, `rounded-xl` 16px — so "use `rounded-lg`" meant
 different things depending on whose Tailwind you had in your head, and the portal shipped with
@@ -131,6 +139,13 @@ restoration on close, and reimplementing those badly is the usual way an app fai
 overlay. `index.css` pins the panel to the bottom edge on a phone, gives it a grab handle, caps it
 at `92dvh`, and clears `env(safe-area-inset-bottom)`.
 
+frappe-ui's own header renders the close control as a ghost `Button` containing nothing but an
+`<svg>`, so it has no accessible name. It is named at runtime by
+`frontend/src/lib/dialogA11y.js`, which the app shell starts once — not by overriding Dialog's
+`body-header` slot, because that slot also carries reka-ui's `DialogTitle`, and the dialog's own
+`aria-labelledby` points at the id that component registers. Trading a labelled close button for an
+unnamed dialog is not a fix.
+
 One value in there is load-bearing rather than cosmetic: `.dialog-overlay { z-index: 50 }`. The
 bottom tab bar is `z-10` and therefore its own stacking context, and reka-ui portals the overlay to
 the end of `<body>` with `z-index: auto` — without a value a sheet renders *behind* the tab bar it
@@ -138,7 +153,8 @@ is supposed to cover.
 
 ## Component conventions (frappe-ui)
 
-- Use frappe-ui's `Button`, `Badge`, `FormControl`, `Dialog`, `ListView` / `Table`, `Avatar`, and `Tabs` components as-is. Do not restyle their internals — only the theme tokens above change their color.
+- Use frappe-ui's `Button`, `FormControl` and `Dialog` as-is. Do not restyle their internals — only the theme tokens above change their color. **Reaching for another frappe-ui component is a build decision as well as a design one:** `tailwind.config.cjs` scans a named list of frappe-ui components rather than all of them (scanning all of them cost 167,821 bytes of CSS against U0's 162,906-byte budget), so a new one has to be added to `FRAPPE_UI_IN_USE` or it renders unstyled. `frontend/src/lib/frappeUiComponents.test.js` fails until it is.
+- Never pass `icon`, `iconLeft` or `iconRight` to a frappe-ui component. Those render `FeatherIcon`, and the Feather set is aliased away in `vite.config.js` (96KB of glyphs this portal does not draw). Add the path to `lib/icons.js` and use `Icon.vue`, which is the design system's rule anyway.
 - Status badges use `StatusBadge.vue`, not frappe-ui's `Badge`. It takes a raw Frappe status plus the document kind (`leave` / `timesheet` / `request`) and answers with this product's word — the same status value means different things on different documents, and five pages used to hold five drifting copies of that mapping. The word carries the meaning; the tint is a redundant second channel, so nothing here relies on colour alone.
 - Icons: SVG only (Lucide, matching frappe-ui's own icon set). No emoji as icons anywhere, including empty states.
 - Primary action: one filled `Button` (brand color) per screen. Secondary actions are `Button` with `variant="ghost"` or a plain text link.
@@ -228,8 +244,12 @@ Verified by measurement, not by eye — see `frontend/test-results/audit/` and t
 - [x] Dates formatted for people, not machines (`lib/dates.js`) — the notifications list was
       rendering `2026-09-03 18:47:46.417663`
 - [x] No remote font request — Archivo is self-hosted (P2-U3, P2-R24)
-- [x] Cold-load CLS at or under R23's 0.1 — measured 0.8379 before P2-U3, 0.0002 after, on the
-      seeded U0 fixture set at the pinned 360px/4× CPU profile
+- [x] Cold-load CLS at or under R23's 0.1 — measured 0.8431 on the U0 baseline, 0 after P2-U9, on
+      the seeded U0 fixture set at the pinned 360px/4× CPU profile
+- [x] Every dialog's close control has an accessible name, and every list row link is a 44px
+      target in its own right — `frontend/tests/e2e/hardening.spec.ts`
+- [x] Installable without an offline cache: a web manifest carrying the Signal field colour, and
+      no service worker (`frontend/public/manifest.webmanifest`)
 - [x] One surface, one radius rule, one status vocabulary and one async-state region across every
       route — checked deterministically by `frontend/tests/e2e/visual-foundation.spec.ts` at 320,
       360, 768, 1024 and 1440px, at 200% text, under a coarse pointer and under reduced motion

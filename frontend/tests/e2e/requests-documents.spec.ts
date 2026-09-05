@@ -1,5 +1,12 @@
 import { test, expect, request, APIRequestContext, Page } from '@playwright/test'
 
+// P2-U9 step 5: the upload policy checks the bytes, not only the name, so a
+// fixture attachment has to be a real file. One page, produced once by pypdf.
+const SAFE_PDF = Buffer.from(
+  'JVBERi0xLjMKJeLjz9MKMSAwIG9iago8PAovUHJvZHVjZXIgKHB5cGRmKQo+PgplbmRvYmoKMiAwIG9iago8PAovVHlwZSAvUGFnZXMKL0NvdW50IDEKL0tpZHMgWyA0IDAgUiBdCj4+CmVuZG9iagozIDAgb2JqCjw8Ci9UeXBlIC9DYXRhbG9nCi9QYWdlcyAyIDAgUgo+PgplbmRvYmoKNCAwIG9iago8PAovVHlwZSAvUGFnZQovUmVzb3VyY2VzIDw8Cj4+Ci9NZWRpYUJveCBbIDAuMCAwLjAgNzIgNzIgXQovUGFyZW50IDIgMCBSCj4+CmVuZG9iagp4cmVmCjAgNQowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMTUgMDAwMDAgbiAKMDAwMDAwMDA1NCAwMDAwMCBuIAowMDAwMDAwMTEzIDAwMDAwIG4gCjAwMDAwMDAxNjIgMDAwMDAgbiAKdHJhaWxlcgo8PAovU2l6ZSA1Ci9Sb290IDMgMCBSCi9JbmZvIDEgMCBSCj4+CnN0YXJ0eHJlZgoyNTQKJSVFT0YK',
+  'base64',
+)
+
 // P2-U8. What the browser has to prove here is the *contract between two
 // steps*: a request that commits, a file that may not, and one URL that both
 // of them end up on.
@@ -127,7 +134,7 @@ test.describe('employee', () => {
 
     // The limits are on screen before the file picker is used, not after the
     // upload is refused.
-    await expect(sheet).toContainText('PDF, image or Office document')
+    await expect(sheet).toContainText('PDF, PNG or JPEG image, or a Word or Excel document')
     await expect(sheet).toContainText('10')
 
     // Nothing to send until it has a subject.
@@ -193,9 +200,9 @@ test.describe('employee', () => {
       const sheet = page.getByRole('dialog')
       await sheet.getByLabel('Subject').fill(subject)
       await sheet.locator('input[type="file"]').setInputFiles({
-        name: 'bank-form.txt',
-        mimeType: 'text/plain',
-        buffer: Buffer.from('a private attachment'),
+        name: 'bank-form.pdf',
+        mimeType: 'application/pdf',
+        buffer: SAFE_PDF,
       })
       await sheet.getByRole('button', { name: 'Send to HR' }).click()
 
@@ -205,7 +212,7 @@ test.describe('employee', () => {
       // The truth, on the record it is about: the request was sent, the file
       // was not, and nothing here says the request failed.
       const failure = page.locator('[data-testid="upload-failed"]')
-      await expect(failure).toContainText('bank-form.txt didn’t upload')
+      await expect(failure).toContainText('bank-form.pdf didn’t upload')
       await expect(failure).toContainText('Your request was sent; only the file failed.')
 
       // And the request really exists, once.
@@ -218,7 +225,7 @@ test.describe('employee', () => {
       // Retry sends the same bytes to the same request.
       await failure.getByRole('button', { name: 'Retry upload' }).click()
       await expect(page.locator('[data-testid="upload-failed"]')).toHaveCount(0)
-      await expect(detailPanel(page).getByRole('link', { name: /bank-form\.txt/ })).toBeVisible()
+      await expect(detailPanel(page).getByRole('link', { name: /bank-form\.pdf/ })).toBeVisible()
 
       const files = await api.get(
         '/api/method/frappe.client.get_count?doctype=File&filters=' +

@@ -1,4 +1,15 @@
-@import 'frappe-ui/style.css';
+/*
+ * frappe-ui's own stylesheet is three @tailwind directives plus
+ * `@import './fonts/Inter/inter.css'`. Only the directives are wanted here:
+ * this portal's one family is Archivo (below), and the Inter import emitted
+ * two variable woff2 files -- about 600KB on disk -- that no rule in the
+ * built CSS ever references. Expanded inline rather than imported so the
+ * font never comes back on a frappe-ui bump without somebody noticing
+ * (P2-U9 step 1, P2-R24).
+ */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
 /*
  * ARCHIVO, self-hosted (P2-U3, P2-R24).

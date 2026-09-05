@@ -42,6 +42,33 @@ export default defineConfig({
       dependencies: ['setup'],
       testIgnore: /performance\.spec\.ts/,
     },
+    // P2-U9 step 9. Mobile WebKit is the second mandatory browser: it is the
+    // only engine on iOS, it is where a coarse pointer, a real safe-area
+    // inset and Safari's own overlay behaviour actually live, and every
+    // mobile-shaped defect this plan fixed was reasoned about on it. Scoped
+    // to the critical employee flows rather than the whole suite -- the
+    // desktop Chromium projects already cover the rest, and a second full
+    // pass would double the release run for no new information.
+    //
+    // It needs the WebKit build and its system libraries:
+    //   npx playwright install --with-deps webkit
+    // A host that cannot install those (this repo's dev VM is one -- the
+    // browser downloads but libevent and friends need root) cannot run this
+    // project; CI installs them, and docs/runbook.md records it.
+    {
+      // The `employee-` prefix is load-bearing: every employee-scoped spec
+      // gates on `testInfo.project.name.startsWith('employee')`, so this
+      // project runs them and the manager-only and run-once ones stay out.
+      name: 'employee-mobile-webkit',
+      use: { ...devices['iPhone 14'], storageState: 'tests/.auth/employee.json' },
+      dependencies: ['setup'],
+      // Read-shaped critical flows only. The data-mutating specs (leave,
+      // timesheet entry and approval, requests) are single-run-per-site by
+      // design -- one of them signs a session out and another consumes a
+      // leave allocation -- so a second pass in the same run would fight the
+      // first rather than test a second engine.
+      testMatch: /(login-dashboard|navigation|visual-foundation|hardening)\.spec\.ts/,
+    },
     // P2-U0: the pinned quality baseline, present only when BASELINE_MODE
     // is set. The spec owns the viewport, CPU and network profile itself (a
     // browser context created inside a test does not inherit `use`), so

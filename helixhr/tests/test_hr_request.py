@@ -1,3 +1,4 @@
+import base64
 import io
 import uuid
 
@@ -32,7 +33,18 @@ class _Request:
 		self.files = files
 
 
-def with_uploaded_file(filename, content=b"a private attachment"):
+# One real, one-page PDF, produced once by pypdf. The P2-U9 upload policy
+# checks extension *and* leading signature, and Frappe's own File controller
+# then parses the bytes (`strip_exif_data` for images, `pdf_contains_js` for
+# PDFs) -- so a plain text body under a .pdf name is refused twice over, and a
+# test fixture has to be the real thing.
+SAFE_PDF_BASE64 = (
+	"JVBERi0xLjMKJeLjz9MKMSAwIG9iago8PAovUHJvZHVjZXIgKHB5cGRmKQo+PgplbmRvYmoKMiAwIG9iago8PAovVHlwZSAvUGFnZXMKL0NvdW50IDEKL0tpZHMgWyA0IDAgUiBdCj4+CmVuZG9iagozIDAgb2JqCjw8Ci9UeXBlIC9DYXRhbG9nCi9QYWdlcyAyIDAgUgo+PgplbmRvYmoKNCAwIG9iago8PAovVHlwZSAvUGFnZQovUmVzb3VyY2VzIDw8Cj4+Ci9NZWRpYUJveCBbIDAuMCAwLjAgNzIgNzIgXQovUGFyZW50IDIgMCBSCj4+CmVuZG9iagp4cmVmCjAgNQowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMTUgMDAwMDAgbiAKMDAwMDAwMDA1NCAwMDAwMCBuIAowMDAwMDAwMTEzIDAwMDAwIG4gCjAwMDAwMDAxNjIgMDAwMDAgbiAKdHJhaWxlcgo8PAovU2l6ZSA1Ci9Sb290IDMgMCBSCi9JbmZvIDEgMCBSCj4+CnN0YXJ0eHJlZgoyNTQKJSVFT0YK"
+)
+SAFE_PDF = base64.b64decode(SAFE_PDF_BASE64)
+
+
+def with_uploaded_file(filename, content=SAFE_PDF):
 	"""Put one file on `frappe.local.request` for the duration of a call."""
 	return _Request({"file": _UploadedFile(filename, content)})
 
@@ -139,8 +151,9 @@ class TestHRRequest(IntegrationTestCase):
 			frappe.get_doc(
 				{
 					"doctype": "File",
-					"file_name": "sneaky.txt",
-					"content": "hi",
+					"file_name": "sneaky.pdf",
+					"content": SAFE_PDF_BASE64,
+					"decode": 1,
 					"attached_to_doctype": "HR Request",
 					"attached_to_name": other_request.name,
 					"is_private": 1,
@@ -161,8 +174,9 @@ class TestHRRequest(IntegrationTestCase):
 			frappe.get_doc(
 				{
 					"doctype": "File",
-					"file_name": "letter.txt",
-					"content": "details",
+					"file_name": "letter.pdf",
+					"content": SAFE_PDF_BASE64,
+					"decode": 1,
 					"attached_to_doctype": "HR Request",
 					"attached_to_name": doc.name,
 					"is_private": 0,
@@ -176,8 +190,9 @@ class TestHRRequest(IntegrationTestCase):
 		file_doc = frappe.get_doc(
 			{
 				"doctype": "File",
-				"file_name": "letter.txt",
-				"content": "details",
+				"file_name": "letter.pdf",
+				"content": SAFE_PDF_BASE64,
+					"decode": 1,
 				"attached_to_doctype": "HR Request",
 				"attached_to_name": doc.name,
 				"is_private": 1,
@@ -424,20 +439,20 @@ class TestRequestIdempotency(IntegrationTestCase):
 
 		# First attempt: the network dropped it, so nothing was written.
 		# Second attempt, same request, same file.
-		frappe.local.request = with_uploaded_file("bank-form.txt")
+		frappe.local.request = with_uploaded_file("bank-form.pdf")
 		attached = attach_to_my_request(created["name"])
 		self.assertTrue(attached["created"])
 		self.assertEqual(attached["is_private"], 1)
 
 		# A third press of Retry upload with the same file attaches nothing
 		# new -- the request must not end up carrying it twice.
-		frappe.local.request = with_uploaded_file("bank-form.txt")
+		frappe.local.request = with_uploaded_file("bank-form.pdf")
 		again = attach_to_my_request(created["name"])
 		self.assertFalse(again["created"])
 		self.assertEqual(again["name"], attached["name"])
 
 		detail = get_my_request(created["name"])
-		self.assertEqual([row["file_name"] for row in detail["attachments"]], ["bank-form.txt"])
+		self.assertEqual([row["file_name"] for row in detail["attachments"]], ["bank-form.pdf"])
 
 	def test_another_employees_operation_key_reveals_nothing_and_asks_for_a_new_one(self):
 		key = str(uuid.uuid4())
@@ -509,7 +524,7 @@ class TestRequestDetailAndScope(IntegrationTestCase):
 		from helixhr.api import attach_to_my_request, get_my_request
 
 		created = self._create(details="Address as on my profile.")
-		frappe.local.request = with_uploaded_file("id-scan.txt")
+		frappe.local.request = with_uploaded_file("id-scan.pdf")
 		attach_to_my_request(created["name"])
 
 		frappe.set_user("Administrator")
@@ -531,7 +546,7 @@ class TestRequestDetailAndScope(IntegrationTestCase):
 		self.assertTrue(detail["picked_up_on"])
 		self.assertTrue(detail["replied_on"])
 		self.assertTrue(detail["closed_on"])
-		self.assertEqual([row["file_name"] for row in detail["attachments"]], ["id-scan.txt"])
+		self.assertEqual([row["file_name"] for row in detail["attachments"]], ["id-scan.pdf"])
 		self.assertTrue(all(row["is_private"] == 1 for row in detail["attachments"]))
 
 	def test_an_unrelated_employee_cannot_open_alter_share_or_attach_to_the_request(self):
@@ -544,7 +559,7 @@ class TestRequestDetailAndScope(IntegrationTestCase):
 			get_my_request(created["name"])
 		with self.assertRaises(frappe.PermissionError):
 			mark_my_request_read(created["name"])
-		frappe.local.request = with_uploaded_file("sneaky.txt")
+		frappe.local.request = with_uploaded_file("sneaky.pdf")
 		with self.assertRaises(frappe.PermissionError):
 			attach_to_my_request(created["name"])
 		with self.assertRaises(frappe.PermissionError):
@@ -571,7 +586,7 @@ class TestRequestDetailAndScope(IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			attach_to_my_request(created["name"])
 
-		frappe.local.request = with_uploaded_file("huge.pdf", b"x" * (_ATTACHMENT_MAX_BYTES + 1))
+		frappe.local.request = with_uploaded_file("huge.pdf", SAFE_PDF + b"x" * _ATTACHMENT_MAX_BYTES)
 		with self.assertRaises(frappe.ValidationError):
 			attach_to_my_request(created["name"])
 

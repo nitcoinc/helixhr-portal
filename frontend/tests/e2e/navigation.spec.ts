@@ -13,7 +13,7 @@ const mainNav = (page) => page.getByRole('navigation', { name: 'Main' })
 
 test.describe('desktop side nav', () => {
   test('reaches every employee page by clicking, never by URL', async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto('/helixhr')
 
@@ -42,7 +42,7 @@ test.describe('desktop side nav', () => {
   })
 
   test('hides Approvals from an employee with no reports (U12)', async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto('/helixhr')
     await expect(mainNav(page).getByRole('link', { name: 'Leave' })).toBeVisible()
@@ -61,7 +61,7 @@ test.describe('desktop side nav', () => {
 
 test.describe('phone tab bar', () => {
   test('navigates from the tab bar and from More', async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
     await page.setViewportSize({ width: 360, height: 780 })
     await page.goto('/helixhr')
 
@@ -151,7 +151,7 @@ test.describe('signing out', () => {
 
 test.describe('route changes reuse the bootstrap (P2-R20, P2-R21)', () => {
   test('seven navigations repeat no employee or capability lookup', async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
     await page.setViewportSize({ width: 1440, height: 900 })
 
     const calls: string[] = []
@@ -193,7 +193,7 @@ test.describe('route changes reuse the bootstrap (P2-R20, P2-R21)', () => {
   })
 
   test('no route repeats the identity lookup (P2-R21)', async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
     await page.setViewportSize({ width: 1440, height: 900 })
 
     const calls: string[] = []
@@ -236,7 +236,7 @@ test.describe('route changes reuse the bootstrap (P2-R20, P2-R21)', () => {
 
 test.describe('exact routes are addressable (P2-R12)', () => {
   test('a week route survives a refresh', async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
     // The week is addressed by its Monday, so the URL means the same thing
     // tomorrow as it does today -- that is what an offset ("last week")
     // could never do.
@@ -251,7 +251,7 @@ test.describe('exact routes are addressable (P2-R12)', () => {
   })
 
   test('Back returns to the previous list, at where it was left', async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
     await page.setViewportSize({ width: 1440, height: 700 })
     await page.goto('/helixhr/notifications')
     await expect(page.getByRole('heading', { level: 1, name: 'Notifications' })).toBeVisible()

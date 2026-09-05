@@ -297,8 +297,21 @@ has_permission = {
 
 # Request Events
 # ----------------
+# P2-U9 steps 5 and 8. Frappe version-16 sets no security headers of its own
+# (the only Content-Security-Policy in the framework is the Web Form's
+# frame-ancestors header), so nosniff, Referrer-Policy, Permissions-Policy,
+# frame-ancestors and -- over HTTPS only -- HSTS are set here, for every
+# response this site serves rather than only the portal's own routes. The
+# same hook forces a download disposition on files attached to an HR Request,
+# which is the one thing that cannot be done from `helixhr.api`: a
+# `/private/files/...` request is served before any whitelisted method runs.
+#
+# Every header is set with `setdefault`, so a reverse proxy that already sets
+# a stricter value keeps it.
+
+after_request = ["helixhr.utils.set_security_headers"]
+
 # before_request = ["helixhr.utils.before_request"]
-# after_request = ["helixhr.utils.after_request"]
 
 # Job Events
 # ----------

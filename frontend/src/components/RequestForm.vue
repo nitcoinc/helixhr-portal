@@ -39,6 +39,12 @@ const CATEGORIES = [
 // so the sentence and the check cannot drift apart in the copy.
 const MAX_MB = 10
 
+// P2-U9 step 5. The exact five types `helixhr.utils.validate_portal_upload`
+// accepts, by extension *and* by content. This attribute only filters the
+// file picker -- it is a courtesy, never the boundary -- but a picker that
+// offers something the server will refuse is a promise the app then breaks.
+const ACCEPT = '.pdf,.png,.jpg,.jpeg,.docx,.xlsx'
+
 const category = ref(
   CATEGORIES.some((c) => c.value === props.initialCategory)
     ? props.initialCategory
@@ -200,12 +206,14 @@ async function submit() {
         id="request-attachment"
         type="file"
         class="block w-full text-sm text-ink-gray-7"
+        :accept="ACCEPT"
         @change="onFileChange"
       >
       <!-- The rule up front, because it is the server's rule: the same limits
            are enforced by helixhr.api.attach_to_my_request. -->
       <p class="mt-1 text-sm text-ink-gray-5">
-        PDF, image or Office document · up to <span class="tabular">{{ MAX_MB }}</span> MB
+        PDF, PNG or JPEG image, or a Word or Excel document ·
+        up to <span class="tabular">{{ MAX_MB }}</span> MB
       </p>
     </div>
 

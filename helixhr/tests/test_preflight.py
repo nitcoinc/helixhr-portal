@@ -165,3 +165,131 @@ class TestPreflightP2U1(IntegrationTestCase):
 		patches.v1_0.apply_permission_deltas."""
 		result = preflight.check_custom_docperm_coverage()
 		self.assertEqual(result["status"], preflight.PASS, result["detail"])
+
+
+class TestPreflightP2U9(IntegrationTestCase):
+	"""P2-U9 scenario 6. The go-live gate has to judge *values*: an upload
+	policy that still allows SVG, a per-user bound quietly loosened in site
+	config, a production site left in test mode, CSRF turned off, or an auth
+	phase that contradicts itself."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+
+	def _with_system_setting(self, field, value, fn):
+		original = frappe.db.get_single_value("System Settings", field)
+		frappe.db.set_single_value("System Settings", field, value)
+		try:
+			return fn()
+		finally:
+			frappe.db.set_single_value("System Settings", field, original)
+
+	def _with_conf(self, key, value, fn):
+		missing = object()
+		original = frappe.conf.get(key, missing)
+		if value is None:
+			frappe.conf.pop(key, None)
+		else:
+			frappe.conf[key] = value
+		try:
+			return fn()
+		finally:
+			if original is missing:
+				frappe.conf.pop(key, None)
+			else:
+				frappe.conf[key] = original
+
+	def test_allow_tests_on_a_site_is_a_fail(self):
+		self.assertEqual(
+			self._with_conf("allow_tests", 1, preflight.check_test_mode)["status"], preflight.FAIL
+		)
+		self.assertEqual(
+			self._with_conf("allow_tests", 0, preflight.check_test_mode)["status"], preflight.PASS
+		)
+
+	def test_ignore_csrf_is_a_fail(self):
+		self.assertEqual(self._with_conf("ignore_csrf", 1, preflight.check_csrf)["status"], preflight.FAIL)
+		self.assertEqual(self._with_conf("ignore_csrf", 0, preflight.check_csrf)["status"], preflight.PASS)
+
+	def test_an_upload_extension_outside_the_policy_fails(self):
+		def _svg_allowed():
+			return self._with_system_setting(
+				"allowed_file_extensions", "PDF\nPNG\nSVG", preflight.check_file_settings
+			)
+
+		result = _svg_allowed()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("SVG", result["detail"])
+
+	def test_the_exact_policy_passes(self):
+		def _exact():
+			return self._with_system_setting(
+				"allowed_file_extensions",
+				"PDF\nPNG\nJPG\nJPEG\nDOCX\nXLSX",
+				lambda: self._with_system_setting(
+					"max_file_size",
+					10,
+					lambda: self._with_system_setting(
+						"allow_guests_to_upload_files",
+						0,
+						lambda: self._with_system_setting(
+							"only_allow_system_managers_to_upload_public_files",
+							1,
+							preflight.check_file_settings,
+						),
+					),
+				),
+			)
+
+		self.assertEqual(_exact()["status"], preflight.PASS)
+
+	def test_a_max_file_size_above_the_policy_fails(self):
+		result = self._with_system_setting(
+			"max_file_size",
+			50,
+			lambda: self._with_system_setting(
+				"allowed_file_extensions", "PDF", preflight.check_file_settings
+			),
+		)
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("50 MB", result["detail"])
+
+	def test_a_missing_or_loosened_rate_bound_fails(self):
+		result = self._with_conf(
+			"helixhr_rate_limits", {"apply_for_leave": [200, 3600]}, preflight.check_rate_limits
+		)
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("apply_for_leave", result["detail"])
+
+	def test_a_tightened_rate_bound_still_passes(self):
+		result = self._with_conf(
+			"helixhr_rate_limits", {"apply_for_leave": [5, 3600]}, preflight.check_rate_limits
+		)
+		self.assertEqual(result["status"], preflight.PASS)
+
+	def test_the_entra_phase_fails_while_the_key_is_missing(self):
+		self.assertFalse(preflight._entra_enabled())
+		result = self._with_conf("helixhr_auth_phase", "entra", preflight.check_entra)
+		self.assertEqual(result["status"], preflight.FAIL)
+
+	def test_the_entra_phase_fails_while_password_login_is_still_on(self):
+		result = self._with_conf(
+			"helixhr_auth_phase",
+			"entra",
+			lambda: self._with_system_setting(
+				"disable_user_pass_login", 0, preflight.check_password_login
+			),
+		)
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("still enabled", result["detail"])
+
+	def test_the_https_check_warns_rather_than_passing_when_it_cannot_run(self):
+		result = self._with_conf("helixhr_public_url", None, preflight.check_public_endpoint)
+		self.assertEqual(result["status"], preflight.WARN)
+		self.assertIn("host-only", result["detail"])
+
+	def test_a_plain_http_public_url_fails(self):
+		result = self._with_conf(
+			"helixhr_public_url", "http://example.invalid/helixhr", preflight.check_public_endpoint
+		)
+		self.assertEqual(result["status"], preflight.FAIL)

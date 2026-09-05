@@ -298,8 +298,13 @@ const timeline = computed(() => {
                     <!-- One link per row, stretched over the whole card. Two
                          nested interactive elements would be the alternative,
                          and that is neither valid markup nor navigable. -->
+                    <!-- P2-U9: `-my-2 min-h-11` for the same reason as the
+                         Leave row -- the stretched pseudo-element makes the
+                         card tappable, but an automated target-size check
+                         reads the link's own 24px box. The negative margin
+                         keeps the list's density unchanged. -->
                     <router-link
-                      class="mt-1 block font-medium text-ink-gray-9 after:absolute after:inset-0 after:content-['']"
+                      class="-my-2 inline-flex min-h-11 items-center font-medium text-ink-gray-9 after:absolute after:inset-0 after:content-['']"
                       :class="row.unread ? 'font-semibold' : ''"
                       :to="{ name: 'RequestDetail', params: { name: row.name } }"
                     >

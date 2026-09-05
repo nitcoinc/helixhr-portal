@@ -1,9 +1,52 @@
+// The frappe-ui components this app imports by name. Keep it in sync with
+// `src/**` -- the vitest guard next to it does exactly that.
+const FRAPPE_UI_IN_USE = ['Button', 'Dialog', 'FormControl']
+
+// What those three render underneath, read off their own imports:
+// Dialog -> Button; Button -> Tooltip, LoadingIndicator, FeatherIcon;
+// FormControl -> TextInput, Select, Textarea, Checkbox, Autocomplete,
+// Combobox, FormLabel; Autocomplete/Combobox -> Popover, ErrorMessage.
+const FRAPPE_UI_TRANSITIVE = [
+  'Autocomplete',
+  'Checkbox',
+  'Combobox',
+  'ErrorMessage',
+  'FeatherIcon.vue',
+  'FormLabel.vue',
+  'Input.vue',
+  'LoadingIndicator.vue',
+  'Popover',
+  'Select',
+  'Textarea',
+  'TextInput',
+  'Tooltip',
+]
+
 module.exports = {
   presets: [require('frappe-ui/tailwind')],
   content: [
     './index.html',
     './src/**/*.{vue,js,ts,jsx,tsx}',
-    './node_modules/frappe-ui/src/components/**/*.{vue,js,ts,jsx,tsx}',
+    // P2-U9 / P2-R24. Scanning *every* frappe-ui component generated the
+    // utilities for Calendar, Charts, TextEditor, ListView, Tree, the
+    // pickers and everything else this portal never renders: 167,821 bytes
+    // of CSS against U0's 162,906-byte budget, which R24 forbids
+    // regressing past. Scanning only the components that can actually reach
+    // the DOM here brings it to 81,080 bytes.
+    //
+    // Two halves, and they fail differently:
+    //   * FRAPPE_UI_IN_USE is what `src/` imports by name.
+    //     `src/lib/frappeUiComponents.test.js` fails if an import is added
+    //     without adding it here.
+    //   * FRAPPE_UI_TRANSITIVE is what those components render underneath
+    //     (Dialog and FormControl both compose others). Nothing checks this
+    //     one automatically; a gap shows up as an unstyled control the
+    //     first time that path renders, which is loud rather than silent.
+    ...[...FRAPPE_UI_IN_USE, ...FRAPPE_UI_TRANSITIVE].map((component) =>
+      component.endsWith('.vue')
+        ? `./node_modules/frappe-ui/src/components/${component}`
+        : `./node_modules/frappe-ui/src/components/${component}/**/*.{vue,js,ts,jsx,tsx}`,
+    ),
   ],
   theme: {
     extend: {

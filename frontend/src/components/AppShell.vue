@@ -5,6 +5,7 @@ import { Dialog } from 'frappe-ui'
 import Icon from '@/components/Icon.vue'
 import { session, signOut } from '@/lib/session'
 import { unreadCount, watchUnread, unwatchUnread } from '@/lib/unread'
+import { watchDialogs, unwatchDialogs } from '@/lib/dialogA11y'
 
 // `primary` items are the four that fit the phone tab bar alongside
 // "More" (design system: max 5 tab items). Everything else lives in the
@@ -71,8 +72,16 @@ function closeMore() {
   showMore.value = false
 }
 
-onMounted(watchUnread)
-onUnmounted(unwatchUnread)
+onMounted(() => {
+  watchUnread()
+  // P2-U9: names frappe-ui's unlabelled dialog close button, once for the
+  // whole application. See src/lib/dialogA11y.js.
+  watchDialogs()
+})
+onUnmounted(() => {
+  unwatchUnread()
+  unwatchDialogs()
+})
 </script>
 
 <template>

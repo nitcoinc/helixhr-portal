@@ -352,8 +352,15 @@ async function doWithdraw() {
                     <!-- One link per row, stretched over the whole card. Two
                          nested interactive elements would be the alternative,
                          and that is neither valid markup nor navigable. -->
+                    <!-- P2-U9: the stretched pseudo-element makes the whole
+                         card tappable, but the link's own box measured 24px
+                         high on a dense list, which is what an automated
+                         target-size check reads. `-my-2 min-h-11` is the same
+                         idiom Timesheet.vue and WeekSpine.vue already use:
+                         a real 44px target box, absorbed by negative margin
+                         so the row's density does not change. -->
                     <router-link
-                      class="font-medium text-ink-gray-9 after:absolute after:inset-0 after:content-['']"
+                      class="-my-2 inline-flex min-h-11 items-center font-medium text-ink-gray-9 after:absolute after:inset-0 after:content-['']"
                       :to="{ name: 'LeaveDetail', params: { name: app.name } }"
                     >
                       {{ app.leave_type }}

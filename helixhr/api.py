@@ -1,11 +1,9 @@
 import json
 import os
 import re
-from mimetypes import guess_type
 
 import frappe
 from frappe import _
-from frappe.handler import ALLOWED_MIMETYPES
 from frappe.utils import (
 	add_days,
 	cint,
@@ -30,9 +28,11 @@ from hrms.api import (
 from helixhr.events import HR_REPLY_SUBJECT_PREFIX
 from helixhr.utils import (
 	PROFILE_EDITABLE_FIELDS,
+	UPLOAD_MAX_BYTES,
 	get_manager_user,
 	get_week_bounds,
 	rate_limit_per_user,
+	validate_portal_upload,
 )
 
 
@@ -102,7 +102,7 @@ def update_my_profile(**fields):
 	resolved from the session, never from an argument, so nobody can name
 	another employee's record here (KTD5).
 	"""
-	rate_limit_per_user("update_my_profile", limit=20, seconds=60)
+	rate_limit_per_user("update_my_profile")
 	employee = get_current_employee()
 	updates = {field: value for field, value in fields.items() if field in PROFILE_EDITABLE_FIELDS}
 
@@ -1152,6 +1152,7 @@ def apply_for_leave(leave_type, from_date, to_date, half_day=0, description=None
 	but refusing here means the employee gets a sentence naming the next
 	step instead of a validation error, and no draft is left behind.
 	"""
+	rate_limit_per_user("apply_for_leave")
 	employee = get_current_employee()
 	approver = (get_leave_approval_details(employee) or {}).get("leave_approver")
 	if not approver:
@@ -1196,6 +1197,7 @@ def withdraw_my_leave(name):
 	tool. The path for that is an HR Request, which the screen offers by
 	name.
 	"""
+	rate_limit_per_user("withdraw_my_leave")
 	employee = get_current_employee()
 	current = frappe.db.get_value(
 		"Leave Application",
@@ -1596,7 +1598,7 @@ def save_my_week(week_start, rows):
 	(the workflow's own `allow_edit` per state backs this up too, this
 	is just a clearer error than a generic permission failure).
 	"""
-	rate_limit_per_user("save_my_week", limit=30, seconds=60)
+	rate_limit_per_user("save_my_week")
 	employee = get_current_employee()
 	monday, sunday = get_week_bounds(week_start)
 	return _write_my_week(employee, monday, sunday, rows).name
@@ -1628,7 +1630,7 @@ def submit_my_week(week_start, rows, expected_modified=None):
 	"""
 	from frappe.model.workflow import apply_workflow
 
-	rate_limit_per_user("save_my_week", limit=30, seconds=60)
+	rate_limit_per_user("save_my_week")
 	employee = get_current_employee()
 	monday, sunday = get_week_bounds(week_start)
 
@@ -2104,7 +2106,7 @@ def act_on_approval(
 	is compared too: it is the difference between "somebody edited this"
 	and "somebody already decided this", and the manager is told which.
 	"""
-	rate_limit_per_user("act_on_approval", limit=60, seconds=60)
+	rate_limit_per_user("act_on_approval")
 	if doctype not in ("Leave Application", "Timesheet"):
 		frappe.throw(_("Not a valid request."))
 	if action not in ("Approve", "Reject"):
@@ -2289,11 +2291,11 @@ _REQUEST_FIELDS = (
 	"closed_on",
 )
 
-# What the new-request sheet states up front, enforced here so the sentence on
-# the screen is a rule and not a hope. The site's own `max_file_size` still
-# applies underneath (File.check_max_file_size); this is the portal's own,
-# lower, stated cap.
-_ATTACHMENT_MAX_BYTES = 10 * 1024 * 1024
+# What the new-request sheet states up front, enforced by
+# `helixhr.utils.validate_portal_upload` so the sentence on the screen is a
+# rule and not a hope. The site's own `max_file_size` still applies underneath
+# (File.check_max_file_size); this is the portal's own, lower, stated cap.
+_ATTACHMENT_MAX_BYTES = UPLOAD_MAX_BYTES
 
 # The shape `crypto.randomUUID()` produces, plus enough slack for a fallback
 # generator, and nothing else. Bounded input at the boundary: this value goes
@@ -2455,6 +2457,7 @@ def mark_my_request_read(name):
 	Returns the new total so the badge moves in the same interaction rather
 	than at the next poll.
 	"""
+	rate_limit_per_user("mark_notifications_read")
 	employee = get_current_employee()
 	if frappe.db.get_value("HR Request", name, "employee") != employee:
 		frappe.throw(_("That request isn't yours."), frappe.PermissionError)
@@ -2492,6 +2495,7 @@ def create_my_request(category, subject, details=None, operation_key=None):
 	-- `frappe.client.insert` with a browser-built document, which this
 	replaces, offered every one of them as a parameter.
 	"""
+	rate_limit_per_user("create_my_request")
 	employee = get_current_employee()
 	key = (operation_key or "").strip()
 	if not _OPERATION_KEY_PATTERN.match(key):
@@ -2576,6 +2580,7 @@ def attach_to_my_request(name):
 	(P2-AE7). The multipart body is read from `frappe.request.files`, which
 	is where Frappe puts an uploaded stream for any whitelisted method.
 	"""
+	rate_limit_per_user("attach_to_my_request")
 	employee = get_current_employee()
 	if frappe.db.get_value("HR Request", name, "employee") != employee:
 		frappe.throw(_("That request isn't yours."), frappe.PermissionError)
@@ -2589,14 +2594,11 @@ def attach_to_my_request(name):
 		frappe.throw(_("That file has no name. Pick another one."))
 
 	content = upload.stream.read()
-	if len(content) > _ATTACHMENT_MAX_BYTES:
-		frappe.throw(
-			_("That file is bigger than {0} MB. Send a smaller one.").format(
-				_ATTACHMENT_MAX_BYTES // (1024 * 1024)
-			)
-		)
-	if guess_type(file_name)[0] not in ALLOWED_MIMETYPES:
-		frappe.throw(_("You can attach a PDF, an image or an Office document."))
+	# P2-U9 step 5. Size, extension, leading signature and -- for the two
+	# OOXML types -- the container itself, all in one place that
+	# `helixhr.events.file_before_insert` shares, so a File inserted by any
+	# other path gets the same answer.
+	validate_portal_upload(file_name, content)
 
 	existing = frappe.db.get_value(
 		"File",

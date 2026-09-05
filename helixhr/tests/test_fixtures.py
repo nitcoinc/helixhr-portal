@@ -4,6 +4,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, add_to_date, get_datetime, today
 
+from helixhr.tests.test_hr_request import SAFE_PDF_BASE64
 from helixhr.tests.utils import EMPLOYEE_USER, MANAGER_USER, make_test_employee_and_manager
 from helixhr.utils import get_week_bounds
 
@@ -265,8 +266,12 @@ class TestStrictPermissionParity(IntegrationTestCase):
 			file_name = frappe.get_doc(
 				{
 					"doctype": "File",
-					"file_name": "p2-ae9.txt",
-					"content": "parity",
+					# A real PDF: the P2-U9 upload policy refuses a text body
+					# under any name, and this file exists to be *reached*,
+					# not to test the policy (that is test_upload_security).
+					"file_name": "p2-ae9.pdf",
+					"content": SAFE_PDF_BASE64,
+					"decode": 1,
 					"attached_to_doctype": "HR Request",
 					"attached_to_name": name,
 					"is_private": 1,

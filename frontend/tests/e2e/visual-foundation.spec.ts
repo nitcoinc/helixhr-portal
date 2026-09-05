@@ -31,7 +31,7 @@ async function horizontalOverflow(page: Page) {
 
 test.describe('employee', () => {
   test.beforeEach(async ({}, testInfo) => {
-    test.skip(testInfo.project.name !== 'employee', 'employee-only scenarios')
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenarios')
   })
 
   // ── Scenario 1 ────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@ from frappe import _
 from frappe.utils import cint
 
 from helixhr.helixhr.doctype.hr_request.hr_request import request_belongs_to_session
-from helixhr.utils import get_manager_user
+from helixhr.utils import UPLOAD_POLICY, get_manager_user, upload_extension, validate_portal_upload
 
 # Timesheet workflow document event hooks (KTD7, KTD18). Two guards, both
 # needed because Frappe's workflow engine only enforces "does the acting
@@ -225,12 +225,47 @@ def file_before_insert(doc, method=None):
 	if not cint(doc.is_private):
 		frappe.throw(_("Files attached to a request must be private."), frappe.PermissionError)
 
-	if request_belongs_to_session(doc.attached_to_name):
-		return
-	if frappe.has_permission("HR Request", "write", doc.attached_to_name):
+	if not (
+		request_belongs_to_session(doc.attached_to_name)
+		or frappe.has_permission("HR Request", "write", doc.attached_to_name)
+	):
+		frappe.throw(
+			_("You can't attach a file to that request."),
+			frappe.PermissionError,
+		)
+
+	_enforce_upload_policy(doc)
+
+
+def _enforce_upload_policy(doc):
+	"""P2-U9 step 5. The same type/size/signature policy
+	`helixhr.api.attach_to_my_request` applies, applied again here so that a
+	File inserted by any *other* path -- Desk, a script, a caller that found
+	another way in -- cannot put an SVG, an HTML page, a macro-enabled
+	document or a renamed executable behind an HR Request.
+
+	One policy for everybody who attaches to this doctype, HR included:
+	the point of the rule is what the stored bytes are, and that does not
+	change with who uploaded them. `helixhr.utils.set_security_headers`
+	serves everything under it as a download for the same reason.
+
+	Content first, name second. `get_content()` answers from `doc.content`
+	while the document is being created and from the saved path afterwards;
+	when it can answer neither, the extension rule alone still applies
+	rather than the check silently passing.
+	"""
+	try:
+		content = doc.get_content()
+	except Exception:
+		content = None
+	if isinstance(content, str):
+		content = content.encode("utf-8", "surrogateescape")
+
+	if isinstance(content, bytes | bytearray):
+		validate_portal_upload(doc.file_name, content)
 		return
 
-	frappe.throw(
-		_("You can't attach a file to that request."),
-		frappe.PermissionError,
-	)
+	if upload_extension(doc.file_name) not in UPLOAD_POLICY:
+		frappe.throw(
+			_("You can attach a PDF, a PNG or JPEG image, or a Word or Excel document.")
+		)

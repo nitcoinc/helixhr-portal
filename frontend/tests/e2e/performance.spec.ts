@@ -19,6 +19,33 @@ import path from 'node:path'
 // and fails the test (P2-U0 scenario 3). A quieter measurement is never
 // silently accepted as an improvement.
 
+// P2-U9 step 1. The frozen U0 result every later run is argued against.
+// Copied here as numbers, not re-read from `.impeccable/review/baseline/`,
+// because that directory is gitignored and a comparison must not quietly
+// change its own reference point. Result identifier:
+// P2-U0-full-20260904T2020-ded07d7 (docs/runbook.md).
+const U0 = {
+  resultId: 'P2-U0-full-20260904T2020-ded07d7',
+  lcpMs: 3936,
+  cls: 0.8431,
+  interactionMs: 24,
+  requests: 15,
+  apiRequests: 4,
+  transferredBytes: 826220,
+  jsBytes: 354014,
+  cssBytes: 162906,
+  remoteFontRequests: 2,
+  sourceMapsPublic: true,
+}
+
+// R23's thresholds are written against "representative staging", and this
+// bench is not that: it serves JavaScript and CSS uncompressed
+// (`asset_content_encoding: identity`) behind an emulated 1.6Mbps link, so
+// its LCP carries bytes a real proxy would have gzipped. The Web Vitals gate
+// is therefore evaluated and recorded on every run but only *enforced* where
+// the environment can honour it -- set PERF_GATE=staging there.
+const ENFORCE_WEB_VITALS = process.env.PERF_GATE === 'staging'
+
 const LIGHTWEIGHT = process.env.BASELINE_MODE === 'lightweight'
 const COLD_LOADS = LIGHTWEIGHT ? 3 : 10
 const INTERACTIONS = LIGHTWEIGHT ? 6 : 20
@@ -562,11 +589,23 @@ test.describe('P2-U0 quality baseline', () => {
       interaction_samples: measured,
     }
 
+    const gates = evaluateGates(results)
+    results.gates = gates
+    for (const gate of gates) {
+      if (gate.pass === false && gate.enforced) invalidate(`${gate.id} failed: ${gate.detail}`)
+    }
+
     fs.mkdirSync(OUT_DIR, { recursive: true })
     const file = path.join(OUT_DIR, `${resultId}.json`)
     fs.writeFileSync(file, `${JSON.stringify(results, null, 2)}\n`)
     // eslint-disable-next-line no-console
     console.log(`baseline ${results.status}: ${file}`)
+    for (const gate of gates) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `  ${gate.pass === null ? 'SKIP' : gate.pass ? 'PASS' : 'FAIL'} ${gate.id}  ${gate.detail}`,
+      )
+    }
 
     expect(problems, `run invalidated:\n- ${problems.join('\n- ')}`).toEqual([])
   })
@@ -611,4 +650,80 @@ function checkPin(manifest) {
       )
     }
   }
+}
+
+
+/** P2-R21..P2-R24 against the frozen U0 result, as explicit pass/fail lines
+ * in the result file rather than a paragraph in a change record.
+ *
+ * `enforced: false` means the gate is measured and reported here but decided
+ * elsewhere -- see ENFORCE_WEB_VITALS above for why the Web Vitals gate is
+ * a staging decision and not a local-bench one. */
+function evaluateGates(results) {
+  const cold = results.cold_run_p75
+  const gate = (id, requirement, pass, detail, enforced = true) => ({
+    id,
+    requirement,
+    pass,
+    detail,
+    enforced,
+  })
+  const jsBudget = Math.round(U0.jsBytes * 0.8)
+  return [
+    gate(
+      'P2-R21',
+      'at most two application data requests on a cold Dashboard load',
+      cold.api_requests !== null ? cold.api_requests <= 2 : null,
+      `${cold.api_requests} (U0: ${U0.apiRequests})`,
+    ),
+    gate(
+      'P2-R22',
+      'the unread badge is a count query, and histories are bounded',
+      cold.requests !== null ? cold.requests <= U0.requests : null,
+      `${cold.requests} requests in total (U0: ${U0.requests})`,
+    ),
+    gate(
+      'P2-R23-lcp',
+      'LCP at or below 2500ms at p75',
+      cold.lcp_ms !== null ? cold.lcp_ms <= 2500 : null,
+      `${cold.lcp_ms}ms (U0: ${U0.lcpMs}ms)`,
+      ENFORCE_WEB_VITALS,
+    ),
+    gate(
+      'P2-R23-cls',
+      'CLS at or below 0.1 at p75',
+      cold.cls !== null ? cold.cls <= 0.1 : null,
+      `${cold.cls} (U0: ${U0.cls})`,
+    ),
+    gate(
+      'P2-R23-inp',
+      'interaction latency at or below 200ms at p75',
+      results.interaction_p75_ms !== null ? results.interaction_p75_ms <= 200 : null,
+      `${results.interaction_p75_ms}ms (U0: ${U0.interactionMs}ms)`,
+    ),
+    gate(
+      'P2-R24-js',
+      'initial JavaScript transfer at least 20% below the U0 baseline',
+      cold.js_bytes !== null ? cold.js_bytes <= jsBudget : null,
+      `${cold.js_bytes} B against a ${jsBudget} B budget (U0: ${U0.jsBytes} B)`,
+    ),
+    gate(
+      'P2-R24-css',
+      'CSS does not regress beyond the U0 baseline',
+      cold.css_bytes !== null ? cold.css_bytes <= U0.cssBytes : null,
+      `${cold.css_bytes} B (U0: ${U0.cssBytes} B)`,
+    ),
+    gate(
+      'P2-R24-fonts',
+      'no remote font request',
+      results.remote_font_requests.length === 0,
+      `${results.remote_font_requests.length} (U0: ${U0.remoteFontRequests})`,
+    ),
+    gate(
+      'P2-R24-sourcemaps',
+      'no public source map',
+      results.source_maps_public === false,
+      `served: ${results.source_maps_public} (U0: ${U0.sourceMapsPublic})`,
+    ),
+  ]
 }

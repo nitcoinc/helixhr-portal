@@ -20,7 +20,7 @@ test.describe('employee', () => {
   // real, person-specific name now makes it a real bug: this test must
   // only run logged in as the employee.
   test('sees real dashboard data: name, manager, leave card (R6)', async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
     await page.goto('/helixhr')
     await expect(page).not.toHaveURL(/\/login/)
 
@@ -84,7 +84,7 @@ test.describe('user with no active Employee', () => {
 
 test.describe('dashboard week spine (redesign)', () => {
   test('shows the Monday..Sunday spine and the action queue', async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
     await page.goto('/helixhr')
 
     // Seven day cells, always, and the week is graspable without scrolling
@@ -139,7 +139,7 @@ function methodCalls(page) {
 
 test.describe('portal bootstrap (P2-R20, P2-R21)', () => {
   test('a hard load asks who you are exactly once', async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
     const calls = methodCalls(page)
 
     await page.goto('/helixhr')
@@ -171,7 +171,7 @@ test.describe('a failed portal service is not a broken account (P2-AE8)', () => 
   test('offers Retry, never "not set up", and resumes the requested page', async ({
     page,
   }, testInfo) => {
-    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
     const failing = '**/api/method/helixhr.api.get_portal_bootstrap*'
     await page.route(failing, (route) =>
       route.fulfill({
@@ -201,7 +201,7 @@ test.describe('a failed portal service is not a broken account (P2-AE8)', () => 
 
 test.describe('an unknown portal route', () => {
   test('says so and offers a way home', async ({ page }, testInfo) => {
-    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
     await page.goto('/helixhr/leave/nope/not-a-route')
     await expect(page.getByRole('heading', { name: 'That page does not exist' })).toBeVisible()
     await page.getByRole('link', { name: 'Go to Home' }).click()

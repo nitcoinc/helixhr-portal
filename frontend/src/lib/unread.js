@@ -44,18 +44,76 @@ export function setUnread(count) {
 
 let poll = null
 let subscribers = 0
+let listening = false
+let wasVisible = true
+
+// P2-U9 step 2. A background tab is not a user, and a 60s timer that keeps
+// firing in one is pure cost: on a phone it is the thing that wakes the
+// radio while the portal is not on screen, and on a desktop with the portal
+// parked in a tab it is a request a minute forever for a number nobody is
+// reading.
+//
+// So: the interval only exists while the document is visible, and coming
+// back reloads *once* rather than waiting up to a minute for the badge to
+// become true again (P2-R13). `visibilitychange` is the event that actually
+// fires on a phone -- `focus` alone misses an app switch on iOS -- and
+// `focus` covers the desktop case of returning to an already-visible tab
+// from another window. Both funnel into the same two functions, and both
+// `startPolling` and `unwatchUnread` are idempotent, so a second call can
+// never leave two timers running, and the catch-up read is gated on the
+// hidden -> visible *transition* rather than on the event: a phone that
+// delivers both `visibilitychange` and `focus` on one return still costs
+// exactly one request (P2-U9 scenario 3).
+const POLL_MS = 60000
+
+function isVisible() {
+  return typeof document === 'undefined' || document.visibilityState !== 'hidden'
+}
+
+function startPolling() {
+  if (poll || !subscribers || !isVisible()) return
+  poll = setInterval(() => unreadCount.reload(), POLL_MS)
+}
+
+function stopPolling() {
+  if (!poll) return
+  clearInterval(poll)
+  poll = null
+}
+
+function onVisibilityChange() {
+  if (!subscribers) return
+  const visible = isVisible()
+  if (visible === wasVisible) return
+  wasVisible = visible
+  if (!visible) {
+    stopPolling()
+    return
+  }
+  // One catch-up read, then resume the timer from now rather than from
+  // whenever the hidden interval would have fired.
+  unreadCount.reload()
+  startPolling()
+}
 
 export function watchUnread() {
   subscribers += 1
-  if (!poll) {
-    poll = setInterval(() => unreadCount.reload(), 60000)
+  wasVisible = isVisible()
+  if (!listening && typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', onVisibilityChange)
+    window.addEventListener('focus', onVisibilityChange)
+    listening = true
   }
+  startPolling()
 }
 
 export function unwatchUnread() {
   subscribers = Math.max(0, subscribers - 1)
-  if (subscribers === 0 && poll) {
-    clearInterval(poll)
-    poll = null
+  if (subscribers > 0) return
+  stopPolling()
+  if (listening && typeof document !== 'undefined') {
+    document.removeEventListener('visibilitychange', onVisibilityChange)
+    window.removeEventListener('focus', onVisibilityChange)
+    listening = false
   }
 }
