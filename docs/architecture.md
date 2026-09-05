@@ -19,10 +19,16 @@ browser  GET /helixhr/anything
    -> www/helixhr.html (built by Vite from frontend/index.html) loads the bundle
    -> Vue Router (frontend/src/router.js) owns the path from here
 
-every navigation
-   -> router.beforeEach calls hrms.api.get_current_employee_info
-      no active Employee  -> /not-linked, no shell
-      Employee            -> lib/session.setEmployee(), shell renders
+one hard load
+   -> router.beforeEach awaits lib/session.ensureBootstrap()
+   -> POST helixhr.api.get_portal_bootstrap  (once, P2-R20)
+      no active Employee  -> /not-linked, no shell, HR contact
+      request failed      -> /unavailable, no shell, Retry
+      Employee            -> lib/session state filled, shell renders
+
+every navigation after that
+   -> reads lib/session; no identity or capability request at all
+   -> an unknown path      -> /:pathMatch -> not found, with a way Home
 
 page data
    -> frappe-ui createResource / lib/api.apiRequest
@@ -134,6 +140,73 @@ HRMS's own Employee Self Service rules are never touched; removing document
 sharing site-wide is System Settings' "Disable Document Sharing", not a
 permission rule.
 
+
+## Portal bootstrap, and whose calendar it is (P2-U2)
+
+`helixhr.api.get_portal_bootstrap` is the one session-scoped read the shell
+makes per hard load: the active Employee, `report_count`/`can_approve`, the
+initial unread count, and the calendar contract. It replaced a
+`hrms.api.get_current_employee_info` call in the router guard that ran on
+*every* navigation, plus the shell's separate `frappe.client.get_count` for
+direct reports.
+
+**It is not authorization.** `can_approve` decides whether the Approvals nav
+item is drawn and nothing else. Every domain method still resolves
+`frappe.session.user` itself and is still refused by Frappe permissions —
+see "Security model" above.
+
+**Whose "today".** Server-derived dates come from `helixhr.api.user_today()`,
+which reads `User.time_zone` for the authenticated user and falls back to the
+site's System Settings timezone. `frappe.utils.today()` is the site's day, not
+the user's, and is no longer used in `api.py` for anything user-facing. The
+bootstrap returns `time_zone`, `system_time_zone`, `today`, `week_start` and
+`week_end`, and `frontend/src/lib/session.js` hands the first three to
+`configureCalendar()` in `lib/dates.js`.
+
+**The two shapes.** `lib/dates.js` treats `"2026-09-03"` as a calendar value —
+never parsed as an instant, never converted, so it cannot shift a day west of
+UTC (it used to render as "2 Sep" in a Los Angeles browser, and `2026-01-01`
+as "31 Dec 2025"). A real timestamp such as `"2026-09-03 18:47:46.417663"` is
+a naive wall-clock reading in the *site's* zone, converted to the *user's*
+zone for display. Week arithmetic is integer y/m/d, Monday..Sunday, matching
+`helixhr.utils.get_week_bounds`. `frontend/src/lib/dates.test.js` pins all of
+it across Asia/Kolkata, America/New_York and America/Los_Angeles.
+
+## Exact-detail route convention (P2-R12)
+
+Every queue row, notification, list item and approval opens an addressable
+URL that survives refresh and browser Back. One convention, defined in
+`frontend/src/router.js`:
+
+| List | Detail | Parameter |
+|---|---|---|
+| `/leave` | `/leave/:name` | Leave Application name |
+| `/requests` | `/requests/:name` | HR Request name |
+| `/approvals` | `/approvals/:kind/:name` | `kind` is `leave` or `timesheet` |
+| `/timesheet` | `/timesheet/:weekStart` | the week's Monday, `YYYY-MM-DD` |
+| `/notifications` | — | a row links to the target record's route above |
+
+- The parameter is the record's real Frappe name, or for a week its Monday as
+  a plain calendar date. Never an index and never an offset from "now": both
+  change meaning on refresh, which is the thing P2-R12 forbids.
+- `:weekStart` is constrained to `\d{4}-\d{2}-\d{2}`, so `/timesheet/history`
+  stays its own route and a malformed week falls through to not-found rather
+  than rendering an arbitrary week.
+- Route names are stable PascalCase — `LeaveDetail`, `RequestDetail`,
+  `ApprovalDetail`, `TimesheetWeek`. Link by name.
+- Every detail route sets `props: true`; the page takes the id as a prop.
+- The detail routes currently resolve to the list page they belong to. The
+  unit that builds each real detail screen swaps the component in and changes
+  nothing else.
+
+Three routes are states rather than pages, all rendered by `NotLinked.vue`
+with `meta.shell: false`: `/not-linked` (signed in, no Employee — shows the
+site's HR contact), `/unavailable` (the bootstrap failed — Retry, and it
+resumes the destination in `?retry-to=`), and the `/:pathMatch(.*)*` catch-all
+(unknown URL — Home). A Guest never reaches any of them: `lib/api.js` sends
+them to `/login?redirect-to=<the full portal path>`.
+
+
 ## Data flow per screen
 
 | Screen | Reads | Writes | Backing records |
@@ -177,16 +250,22 @@ a device arrives; the first record starts the clock.
 
 ## Frontend structure
 
-- `App.vue` mounts `AppShell` for every route except `/not-linked`
+- `App.vue` mounts `AppShell` for every route except the three state routes
   (`meta.shell: false`). The shell is a desktop sidebar at 1024px and up, and
   an app bar plus a five-item bottom tab bar below that, with a "More" dialog
   for the rest. Approvals appears only when `session.reportCount > 0`.
-- `lib/session.js` holds the Employee the router guard fetched, so the shell
-  does not repeat the request, and owns `signOut` (an explicit POST to
-  `logout`, then a hard redirect to `/login`).
+- `lib/session.js` owns the portal bootstrap (`ensureBootstrap`, at most once
+  per hard load; `retryBootstrap` only on an explicit user retry), the
+  `idle`/`loading`/`ready`/`not-linked`/`unavailable` status the router and
+  `NotLinked.vue` branch on, and `signOut` (an explicit POST to `logout`, then
+  a hard redirect to `/login`).
+- `lib/dates.js` is the local-calendar module — see "Portal bootstrap, and
+  whose calendar it is" above. Nothing else in the frontend may parse a Frappe
+  date or compute a week boundary.
 - `lib/unread.js` is a module-scope resource for the notification badge; it
   must be fetched by hand because frappe-ui only auto-fetches inside a
-  component's `onMounted`.
+  component's `onMounted`. The bootstrap already carries the initial count
+  (`session.unread`); folding the first poll into it is P2-U4's job.
 - `index.css` is the design token layer. frappe-ui hard-codes `blue` as its
   primary palette, so `tailwind.config.cjs` retunes the `blue` scale to the
   brand green; read `blue` as "brand" throughout. The accent yellow may only

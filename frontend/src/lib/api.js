@@ -22,6 +22,10 @@ export function apiRequest(options) {
   return frappeRequest(options).catch((error) => {
     const status = error?.response?.status
     const messages = error?.messages || []
+    // P2-R25: carry *which* call failed on the error itself, so a section's
+    // retry panel and anything that logs the failure can name it instead of
+    // reporting an anonymous "something went wrong".
+    if (error && !error.helixhrMethod) error.helixhrMethod = options?.url
     const requiresLogin =
       status === 401 ||
       LOGIN_REQUIRED_EXC_TYPES.includes(error?.exc_type) ||
@@ -77,7 +81,18 @@ export async function uploadFile(file, { doctype, docname }) {
   return (await response.json()).message
 }
 
+// A dead session usually fails several in-flight requests at once. Without
+// this latch each one reassigns window.location, and the destination the
+// *last* one happened to compute is the one that wins -- so the requested
+// page could be lost on the way to /login (P2-U2 scenario 3, 6).
+let redirecting = false
+
 function redirectToLogin() {
+  if (redirecting) return
+  redirecting = true
+  // `redirect-to` is what preserves the destination through the login form:
+  // Frappe's login page sends the user back here afterwards, and the full
+  // portal path (including any exact-record route, P2-R12) is in it.
   const current = window.location.pathname + window.location.search
   window.location.href = `/login?redirect-to=${encodeURIComponent(current)}`
 }

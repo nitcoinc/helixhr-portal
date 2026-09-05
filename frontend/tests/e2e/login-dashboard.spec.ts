@@ -109,3 +109,89 @@ test.describe('dashboard week spine (redesign)', () => {
     }
   })
 })
+
+// P2-U2. Boot, and the four failure identities that used to look alike.
+
+/** Every whitelisted method the page called, in order. */
+function methodCalls(page) {
+  const calls: string[] = []
+  page.on('request', (request) => {
+    const url = request.url()
+    if (!url.includes('/api/method/')) return
+    calls.push(decodeURIComponent(url.split('/api/method/')[1].split('?')[0]))
+  })
+  return calls
+}
+
+test.describe('portal bootstrap (P2-R20, P2-R21)', () => {
+  test('a hard load asks who you are exactly once', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    const calls = methodCalls(page)
+
+    await page.goto('/helixhr')
+    await expect(page.getByRole('region', { name: 'This week' })).toBeVisible()
+
+    // One bootstrap...
+    expect(calls.filter((c) => c === 'helixhr.api.get_portal_bootstrap')).toHaveLength(1)
+    // ...and none of the two calls it replaced. The router guard used to
+    // run get_current_employee_info on every navigation and the shell
+    // counted direct reports separately.
+    expect(calls.filter((c) => c.includes('get_current_employee_info'))).toHaveLength(0)
+    expect(calls.filter((c) => c === 'frappe.client.get_count')).toHaveLength(0)
+  })
+})
+
+test.describe('a Guest keeps the page they asked for', () => {
+  test.use({ storageState: { cookies: [], origins: [] } })
+
+  test('carries the destination into the login redirect (P2-R12)', async ({ page }) => {
+    await page.goto('/helixhr/leave')
+    await expect(page).toHaveURL(/\/login/)
+    // Not just "/login": the exact route has to survive signing in, or a
+    // notification link is a link to the home page.
+    expect(decodeURIComponent(page.url())).toContain('/helixhr/leave')
+  })
+})
+
+test.describe('a failed portal service is not a broken account (P2-AE8)', () => {
+  test('offers Retry, never "not set up", and resumes the requested page', async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    const failing = '**/api/method/helixhr.api.get_portal_bootstrap*'
+    await page.route(failing, (route) =>
+      route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          exc_type: 'InternalServerError',
+          _server_messages: JSON.stringify([JSON.stringify({ message: 'Bootstrap exploded' })]),
+        }),
+      }),
+    )
+
+    await page.goto('/helixhr/requests')
+    await expect(page).toHaveURL(/\/helixhr\/unavailable/)
+    await expect(page.getByRole('heading', { name: 'We could not load your portal' })).toBeVisible()
+    // The bug this guards: a 500 rendered as "your account is not set up",
+    // which is both wrong and unactionable.
+    await expect(page.getByText('Your account is not set up')).toHaveCount(0)
+
+    await page.unroute(failing)
+    await page.getByRole('button', { name: 'Retry' }).click()
+    // Retry resumes the destination, it does not dump the user on Home.
+    await expect(page).toHaveURL(/\/helixhr\/requests$/)
+    await expect(page.getByRole('heading', { level: 1, name: 'Requests' })).toBeVisible()
+  })
+})
+
+test.describe('an unknown portal route', () => {
+  test('says so and offers a way home', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    await page.goto('/helixhr/leave/nope/not-a-route')
+    await expect(page.getByRole('heading', { name: 'That page does not exist' })).toBeVisible()
+    await page.getByRole('link', { name: 'Go to Home' }).click()
+    await expect(page).toHaveURL(/\/helixhr\/?$/)
+    await expect(page.getByRole('region', { name: 'This week' })).toBeVisible()
+  })
+})

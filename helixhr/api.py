@@ -2,8 +2,20 @@ import json
 
 import frappe
 from frappe import _
-from frappe.utils import flt, get_datetime, get_first_day, get_last_day, today
-from hrms.api import get_attendance_calendar_events, get_current_employee, get_leave_balance_map
+from frappe.utils import (
+	flt,
+	get_datetime,
+	get_datetime_in_timezone,
+	get_first_day,
+	get_last_day,
+	get_system_timezone,
+)
+from hrms.api import (
+	get_attendance_calendar_events,
+	get_current_employee,
+	get_current_employee_info,
+	get_leave_balance_map,
+)
 
 from helixhr.utils import (
 	PROFILE_EDITABLE_FIELDS,
@@ -67,6 +79,84 @@ def update_my_profile(**fields):
 	return {field: doc.get(field) for field in PROFILE_EDITABLE_FIELDS}
 
 
+# Portal bootstrap and the user's own calendar (P2-U2, P2-R5, P2-R20, P2-R21)
+
+
+def get_user_time_zone(user=None):
+	"""The IANA timezone the portal treats as authoritative for this user.
+
+	P2-R5: "today" and the Monday..Sunday week are the *user's* calendar,
+	not the browser's -- a laptop with a wrong clock zone, or an employee
+	travelling, must not move their week. Frappe already stores a per-user
+	`User.time_zone`; the site's System Settings timezone is the documented
+	fallback when a user has none, which is the normal case.
+	"""
+	user = user or frappe.session.user
+	return frappe.db.get_value("User", user, "time_zone") or get_system_timezone()
+
+
+def user_today(user=None):
+	"""Today's date, as a `YYYY-MM-DD` calendar value, in the user's own
+	timezone. This is the server-side half of P2-AE3: every date this API
+	derives from "now" has to agree with what the portal renders."""
+	return get_datetime_in_timezone(get_user_time_zone(user)).strftime("%Y-%m-%d")
+
+
+@frappe.whitelist()
+def get_portal_bootstrap():
+	"""Everything the shell needs before it can render anything, in one
+	request (P2-R20, P2-R21, KTD7).
+
+	Replaces the per-navigation `hrms.api.get_current_employee_info` call
+	plus the shell's separate `frappe.client.get_count` for direct reports:
+	the router guard fetched identity again on every route change, which is
+	both a wasted round trip per navigation and a second place for the two
+	answers to disagree.
+
+	**This is not an authorization decision.** `can_approve` only decides
+	whether a nav item is drawn; every domain method still resolves the
+	session user and is still refused by Frappe permissions on its own
+	(see docs/architecture.md, "Security model"). A caller who lies to
+	themselves about this response gains nothing.
+	"""
+	employee = get_current_employee_info() or None
+	time_zone = get_user_time_zone()
+	today = user_today()
+	monday, sunday = get_week_bounds(today)
+
+	boot = {
+		"user": frappe.session.user,
+		"employee": employee,
+		# The calendar contract. `system_time_zone` is the frame Frappe's
+		# naive timestamps are wall-clock readings in; without it the
+		# browser cannot convert one into the user's zone at all.
+		"time_zone": time_zone,
+		"system_time_zone": get_system_timezone(),
+		"today": today,
+		"week_start": str(monday),
+		"week_end": str(sunday),
+		"report_count": 0,
+		"can_approve": False,
+		"unread_notifications": 0,
+	}
+
+	if not employee or not employee.get("name"):
+		# A signed-in user with no active Employee record. Everything below
+		# is scoped to an Employee, so there is nothing more to say -- and
+		# saying it plainly is what lets the browser tell this apart from a
+		# service failure (P2-U2 scenario 3).
+		return boot
+
+	boot["report_count"] = _safe(lambda: _count_direct_reports(employee["name"])) or 0
+	boot["can_approve"] = boot["report_count"] > 0
+	boot["unread_notifications"] = _safe(_get_unread_notification_count) or 0
+	return boot
+
+
+def _count_direct_reports(employee):
+	return frappe.db.count("Employee", {"reports_to": employee, "status": "Active"})
+
+
 def _safe(fn):
 	try:
 		return fn()
@@ -94,7 +184,7 @@ def _get_attendance_summary():
 	# and Frappe's typing validation raises FrappeTypeError on a date. _safe
 	# swallowed it, so this card returned null and rendered "Nothing recorded
 	# yet" for every employee regardless of their real attendance.
-	start, end = str(get_first_day(today())), str(get_last_day(today()))
+	start, end = str(get_first_day(user_today())), str(get_last_day(user_today()))
 	events = get_attendance_calendar_events(start, end)
 	summary = {}
 	for status in events.values():
@@ -120,11 +210,11 @@ def _get_week_spine(employee):
 	"""
 	from frappe.utils import add_days, getdate
 
-	monday, sunday = get_week_bounds(today())
+	monday, sunday = get_week_bounds(user_today())
 	attendance = get_attendance_calendar_events(str(monday), str(sunday)) or {}
 	hours = _hours_by_day(employee, monday)
 	leave_days = _leave_days(employee, monday, sunday)
-	current = getdate(today())
+	current = getdate(user_today())
 
 	days = []
 	for offset in range(7):
@@ -230,8 +320,8 @@ def _leave_days(employee, monday, sunday):
 # when it falls outside the week, so an old item reads as old rather than
 # merely losing two words of context.
 def _get_needs_you(employee):
-	monday, sunday = get_week_bounds(today())
-	current = _as_date(today())
+	monday, sunday = get_week_bounds(user_today())
+	current = _as_date(user_today())
 	items = []
 
 	def day_for(date):
@@ -467,7 +557,7 @@ def _missing_attendance_days(employee, start, end, days, tracking_since):
 
 	on_leave = _leave_days(employee, start, end)
 	first = _as_date(tracking_since)
-	today_date = _as_date(today())
+	today_date = _as_date(user_today())
 
 	missing = []
 	date = start
@@ -495,7 +585,7 @@ def get_my_week(week_start=None):
 	the employee hasn't started one yet (KTD10: one week is one
 	Timesheet -- the newest non-cancelled one for that Monday)."""
 	employee = get_current_employee()
-	monday, sunday = get_week_bounds(week_start or today())
+	monday, sunday = get_week_bounds(week_start or user_today())
 
 	name = frappe.db.get_value(
 		"Timesheet",

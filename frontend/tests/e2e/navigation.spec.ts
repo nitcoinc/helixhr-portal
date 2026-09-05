@@ -144,3 +144,194 @@ test.describe('signing out', () => {
     expect(after.status(), 'the server session must actually be gone').toBe(403)
   })
 })
+
+// P2-U2. What the router now owes: one identity lookup per hard load,
+// addressable exact routes, and a session failure that is told apart from
+// an ordinary permission failure.
+
+test.describe('route changes reuse the bootstrap (P2-R20, P2-R21)', () => {
+  test('seven navigations repeat no employee or capability lookup', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    await page.setViewportSize({ width: 1440, height: 900 })
+
+    const calls: string[] = []
+    page.on('request', (request) => {
+      const url = request.url()
+      if (url.includes('/api/method/')) {
+        calls.push(decodeURIComponent(url.split('/api/method/')[1].split('?')[0]))
+      }
+    })
+
+    await page.goto('/helixhr')
+    await expect(page.getByRole('region', { name: 'This week' })).toBeVisible()
+    const afterBoot = calls.length
+    expect(calls.filter((c) => c === 'helixhr.api.get_portal_bootstrap')).toHaveLength(1)
+
+    for (const link of [
+      'Leave',
+      'Timesheet',
+      'Requests',
+      'Attendance',
+      'Documents',
+      'Notifications',
+      'Profile',
+    ]) {
+      await mainNav(page).getByRole('link', { name: link, exact: false }).click()
+      await expect(mainNav(page).getByRole('link', { name: link, exact: false })).toHaveAttribute(
+        'aria-current',
+        'page',
+      )
+    }
+
+    const duringRoutes = calls.slice(afterBoot)
+    // The whole point of the bootstrap: seven route changes cost zero
+    // identity or capability round trips from the router and the shell.
+    // Before this unit the guard re-ran hrms.api.get_current_employee_info
+    // on every single one of them.
+    expect(duringRoutes.filter((c) => c === 'helixhr.api.get_portal_bootstrap')).toHaveLength(0)
+    expect(duringRoutes.filter((c) => c === 'frappe.client.get_count')).toHaveLength(0)
+  })
+
+  test('a route that owns no legacy identity resource issues none', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    await page.setViewportSize({ width: 1440, height: 900 })
+
+    const calls: string[] = []
+    page.on('request', (request) => {
+      const url = request.url()
+      if (url.includes('/api/method/')) {
+        calls.push(decodeURIComponent(url.split('/api/method/')[1].split('?')[0]))
+      }
+    })
+
+    await page.goto('/helixhr')
+    await expect(page.getByRole('region', { name: 'This week' })).toBeVisible()
+    const afterBoot = calls.length
+
+    // Leave, Approvals, Profile, Documents and TimesheetHistory each still
+    // create their own pre-P2-U2 `hrms.api.get_current_employee_info`
+    // resource. Those live in page files this unit does not own (P2-U3,
+    // P2-U5, P2-U7) and are the remaining half of P2-R21; the routes that
+    // do not carry one prove the router itself has stopped asking.
+    for (const link of ['Attendance', 'Notifications', 'Requests', 'Timesheet']) {
+      await mainNav(page).getByRole('link', { name: link, exact: false }).click()
+      await expect(mainNav(page).getByRole('link', { name: link, exact: false })).toHaveAttribute(
+        'aria-current',
+        'page',
+      )
+    }
+
+    expect(calls.slice(afterBoot).filter((c) => c.includes('get_current_employee'))).toHaveLength(0)
+  })
+})
+
+test.describe('exact routes are addressable (P2-R12)', () => {
+  test('a week route survives a refresh', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    // The week is addressed by its Monday, so the URL means the same thing
+    // tomorrow as it does today -- that is what an offset ("last week")
+    // could never do.
+    await page.goto('/helixhr/timesheet/2026-09-07')
+    await expect(page.getByRole('heading', { level: 1, name: 'Timesheet' })).toBeVisible()
+    await page.reload()
+    await expect(page).toHaveURL(/\/helixhr\/timesheet\/2026-09-07$/)
+    await expect(page.getByRole('heading', { level: 1, name: 'Timesheet' })).toBeVisible()
+    // ...and a malformed week is a missing page, not an arbitrary one.
+    await page.goto('/helixhr/timesheet/last-week')
+    await expect(page.getByRole('heading', { name: 'That page does not exist' })).toBeVisible()
+  })
+
+  test('Back returns to the previous list, at where it was left', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    await page.setViewportSize({ width: 1440, height: 700 })
+    await page.goto('/helixhr/notifications')
+    await expect(page.getByRole('heading', { level: 1, name: 'Notifications' })).toBeVisible()
+
+    await page.mouse.wheel(0, 400)
+    const leftAt = await page.evaluate(() => window.scrollY)
+
+    await mainNav(page).getByRole('link', { name: 'Profile' }).click()
+    await expect(page).toHaveURL(/\/helixhr\/profile$/)
+
+    await page.goBack()
+    await expect(page).toHaveURL(/\/helixhr\/notifications$/)
+    if (leftAt > 0) {
+      // scrollBehavior returns the saved position on a popstate. Only
+      // asserted when the list was actually long enough to scroll, so this
+      // does not become a test of the fixture data's length.
+      await expect
+        .poll(() => page.evaluate(() => window.scrollY))
+        .toBeGreaterThan(leftAt - 50)
+    }
+  })
+})
+
+test.describe('a dead session and a refused action are different things', () => {
+  // Owns the session it destroys, like the sign-out test above.
+  test.use({ storageState: { cookies: [], origins: [] } })
+
+  async function signIn(page, usr: string) {
+    const api = await request.newContext({
+      baseURL: process.env.BASE_URL || 'http://localhost:8000',
+      extraHTTPHeaders: { Host: process.env.SITE_HOST || 'test_site' },
+    })
+    const login = await api.post('/api/method/login', {
+      form: { usr, pwd: process.env.TEST_USER_PASSWORD || 'Helixhr-Test-Fixture-2026!' },
+    })
+    expect(login.ok()).toBeTruthy()
+    const state = await api.storageState()
+    await api.dispose()
+    await page.context().addCookies(state.cookies)
+  }
+
+  test('an expired session redirects to login, carrying the page', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'employee', 'run once')
+    await signIn(page, 'employee@helixhr.test')
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/helixhr')
+    await expect(page.getByRole('region', { name: 'This week' })).toBeVisible()
+
+    // The session dies while the tab stays open. The bootstrap is already
+    // cached, so it is the *domain* call on the next page that finds out.
+    // Through the page, so it carries the CSRF token the API requires.
+    const loggedOut = await page.evaluate(async () => {
+      const response = await fetch('/api/method/logout', {
+        method: 'POST',
+        headers: { 'X-Frappe-CSRF-Token': window.csrf_token },
+      })
+      return response.status
+    })
+    expect(loggedOut, 'the session has to actually be gone').toBe(200)
+
+    await mainNav(page).getByRole('link', { name: 'Documents' }).click()
+    await page.waitForURL(/\/login/)
+    expect(decodeURIComponent(page.url())).toContain('/helixhr/documents')
+  })
+
+  test('an ordinary permission failure stays an in-app error', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'employee', 'run once')
+    await signIn(page, 'employee@helixhr.test')
+    await page.setViewportSize({ width: 1440, height: 900 })
+
+    // A logged-in user who is refused one action gets a 403 PermissionError
+    // too -- without the "Login to access" phrase. Redirecting that to the
+    // login page would throw away a live session and tell the user the
+    // wrong thing entirely (see the note in lib/api.js).
+    await page.route('**/api/method/helixhr.api.get_my_documents*', (route) =>
+      route.fulfill({
+        status: 403,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          exc_type: 'PermissionError',
+          _server_messages: JSON.stringify([
+            JSON.stringify({ message: 'Not permitted to read Document Link' }),
+          ]),
+        }),
+      }),
+    )
+
+    await page.goto('/helixhr/documents')
+    await expect(page.getByRole('heading', { level: 1, name: 'Documents' })).toBeVisible()
+    await expect(page).not.toHaveURL(/\/login/)
+  })
+})
