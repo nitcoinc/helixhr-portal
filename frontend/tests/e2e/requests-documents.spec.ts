@@ -58,10 +58,23 @@ async function seedRequest(
 
 /** HR replying, through a real save so the controller stamps `replied_on` and
  * `helixhr.events.hr_request_on_update` writes the Notification Log the queue
- * reads (P2-KTD6). */
+ * reads (P2-KTD6). `hr_note` only, deliberately not also `status`: Frappe's
+ * own "HelixHR Request Status Changed" fixture Notification's channel is
+ * "System Notification", which core dispatches via
+ * `frappe.desk.doctype.notification_log.notification_log.enqueue_create_notification`
+ * -- a genuine background job (confirmed against frappe/email/doctype/
+ * notification/notification.py), not something synchronous within this
+ * save. Changing status in the same call used to also fire that job, which
+ * lands at a real but non-deterministic delay (measured several hundred ms
+ * on this bench) -- consistently landing *after* mark_my_request_read on
+ * CI's timing, reopening the row this test had just confirmed cleared. That
+ * is Frappe core's own async behaviour, not this app's code, and this test
+ * is about the reply-notification path specifically (KTD6, synchronous, ours
+ * to guarantee) -- so it only changes the one field that path actually
+ * reacts to. */
 async function hrReplies(api: APIRequestContext, name: string, note: string) {
   const response = await api.post('/api/method/frappe.client.set_value', {
-    data: { doctype: 'HR Request', name, fieldname: { hr_note: note, status: 'Done' } },
+    data: { doctype: 'HR Request', name, fieldname: 'hr_note', value: note },
   })
   expect(response.ok(), await response.text()).toBeTruthy()
 }
