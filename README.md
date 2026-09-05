@@ -51,7 +51,7 @@ commit them.
 
 ```bash
 cd frappe-bench
-bench get-app https://github.com/nitcoinc/helixhr-portal --branch main
+bench get-app https://github.com/<your-org>/helixhr-portal --branch main
 cd apps/helixhr/frontend && yarn install --frozen-lockfile && yarn build && cd -
 bench --site <site> install-app helixhr
 bench build --app helixhr          # links sites/assets/helixhr; needed once per bench
@@ -255,3 +255,12 @@ password in that file's `TEST_PASSWORD`. They exist only on sites where
 ## License
 
 MIT
+
+---
+
+## About the Developer
+
+**HelixHR Portal** is developed and maintained by the engineering team at
+**[Nitco Inc](https://nitcoinc.ai)** — an AI-native consulting and software
+development company committed to delivering secure, high-quality open-source
+solutions for modern workplaces.

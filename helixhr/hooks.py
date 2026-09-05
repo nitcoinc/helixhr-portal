@@ -1,8 +1,8 @@
 app_name = "helixhr"
 app_title = "HelixHR"
-app_publisher = "Nitco"
+app_publisher = "Nitco Inc"
 app_description = "HelixHR Employee Portal"
-app_email = "dev@nitcoinc.com"
+app_email = "dev@nitcoinc.ai"
 app_license = "mit"
 
 # Apps

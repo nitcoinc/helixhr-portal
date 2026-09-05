@@ -1,0 +1,161 @@
+# Agent rules — <PROJECT-NAME>
+
+Senior engineer. Ship deliberately. Verify before claiming done.
+
+## Minimal engineering mode
+
+- Prefer no code, then config, then an existing utility, then a small local change, then a new abstraction.
+- Before writing code, ask: can existing code, the standard library, a framework feature, or a current dependency solve this?
+- Implement the smallest safe change that satisfies the task.
+- Do not add a dependency, abstraction, service, helper, class, hook, middleware, or file unless clearly justified.
+- Never trade away validation, error handling, security, accessibility, observability, or tests to be smaller.
+- If a shortcut is intentional, note the upgrade path in a comment or the final message.
+
+Response style: cut filler, keep technical substance, no hedging unless the uncertainty matters, exact technical terms. Format as decision -> reason -> action.
+
+## Stack
+
+<!-- Fill in once, after your first planning pass.
+- Frontend:
+- Backend:
+- Database:
+- Package manager:
+- Tests:
+-->
+
+## Verification commands
+
+<!-- Fill in once. These are what "done" is measured against.
+- Lint:
+- Typecheck:
+- Test:
+- Build:
+- Dev:
+-->
+
+## Pick one planning track per feature — do not interleave them
+
+Both tracks are installed and both are good. They produce different artifacts in different places, so mixing them mid-feature gives you two half-written plans.
+
+**Track A — tracker-centric.** Work lives as issues/tickets. Best when work is shared across people or agents.
+
+```
+/grill-with-docs  ->  /to-spec  ->  /to-tickets  ->  /implement  ->  /code-review
+```
+
+**Track B — artifact-centric.** Work lives as plan files in the repo. Best for solo deep work and when you want the plan reviewable in a PR.
+
+```
+/ce-brainstorm  ->  /ce-plan  ->  /ce-work
+```
+
+Reach for `/prototype` from either track when a design question is genuinely unresolved — throwaway code answers "does this state model feel right?" faster than argument does.
+
+## Skill routing
+
+| Your intent | Use | Notes |
+|---|---|---|
+| Sharpen a vague idea, and get ADRs + a glossary out of it | `/grill-with-docs` | Relentless interview. Writes durable docs as it goes. |
+| Answer a design question with throwaway code | `/prototype` | Terminal app for logic; switchable variants for UI. Never ships. |
+| Turn this conversation into a spec/PRD | `/to-spec` | No interview — synthesises what you already discussed. |
+| Break a spec into buildable slices | `/to-tickets` | Tracer-bullet verticals with explicit blocking edges. |
+| Build from a spec or tickets | `/implement` | Uses TDD at pre-agreed seams. |
+| Requirements Q&A before any tech decisions | `/ce-brainstorm` | Requirements only, no implementation detail. |
+| Technical plan with units and test scenarios | `/ce-plan` | Writes a dated plan file with traceability. |
+| Execute a plan with verification and commits | `/ce-work` | Host verification, commit tracking. |
+| Review a branch or PR properly | `/code-review` | Two axes in parallel: Standards and Spec. |
+| Check I didn't over-engineer what I just wrote | `/ponytail-review` | Over-engineering only. Cheap, run it often. |
+| Find dead weight across the whole repo | `/ponytail-audit` | Repo-wide complexity scan. |
+| Research what's actually true right now | `/last30days <topic>` | Searches people, not editors. Ranks by real engagement. |
+| Design system for a new UI: palette, type, industry conventions | `/ui-ux-pro-max` | Do this before writing UI, not after. |
+| Generate UI that doesn't look AI-generated | `/hallmark` | Theme + macrostructure + slop gates. |
+| Audit, critique or polish UI that already exists | `/impeccable` | Live browser iteration, deterministic detector rules. |
+
+## UI work, in order
+
+```
+/ui-ux-pro-max   pick the design system        (greenfield, before any markup)
+/hallmark        generate the screens          (avoids the AI-slop fingerprint)
+/impeccable      audit -> critique -> polish   (on real, rendered UI)
+```
+
+Skipping straight to `/impeccable` on a UI with no design system just polishes something inconsistent.
+
+## Review, in order
+
+```
+/ponytail-review   while coding    - did I add code that didn't need to exist?
+/code-review       before merge    - Standards axis + Spec axis, run in parallel
+```
+
+`/code-review` needs a fixed point. Give it one: `main`, a SHA, `HEAD~5`.
+
+## Spend tokens deliberately
+
+- `ccc search "<intent>"` before broad file reads. Semantic, local, no model calls — it replaces the read-twenty-files-to-find-one habit.
+- `/prototype` before committing to a state model. Cheaper than implementing the wrong one and refactoring.
+- `/to-tickets` sizes each slice to one fresh context window on purpose. Respect the sizing; don't chain three tickets in one session.
+- `/code-review` runs its two axes as separate sub-agents so their contexts never pollute each other.
+- Record durable decisions once (Mem0) instead of re-deriving them next session.
+
+## Tools
+
+Semantic code search — prefer over broad reads:
+
+```
+ccc index .                    # once per repo, and after large changes
+ccc search "<intent>"          # natural language
+ccc grep "<pattern>"           # structural, by example
+ccc status                     # index freshness
+```
+
+`ccc` also runs as an MCP server (`ccc mcp`), so search is available as a tool call. See the harness notes at the bottom of this file.
+
+Memory (only if `mem0` is installed and `MEM0_API_KEY` is set):
+
+```
+mem0 add "<durable decision>"
+mem0 search "<query>"
+```
+
+Store durable decisions, rejected approaches, recurring bugs and repo preferences. Never store secrets, API keys, passwords, customer data or scratch notes.
+
+## Code quality
+
+- Smallest safe change. Follow existing patterns over inventing new ones.
+- No shipped `console.log` / `print` debugging.
+- No `any` without a stated reason.
+- Validate external input at the boundary.
+- Public functions need a clear name or a short docstring.
+
+## Dependency safety
+
+- Prefer the latest stable patch. No prereleases without a reason.
+- Node: pnpm, commit the lockfile.
+- Python: uv, commit `uv.lock`.
+- A new package needs a reason, a freshness check (`/last30days`), and a security check.
+
+## Done means
+
+- Verification commands pass — not "should pass".
+- `/ponytail-review` clean, and `/code-review` run for anything meaningful.
+- Durable decisions recorded.
+- If you skipped or couldn't finish part of the task, say which part and why.
+
+---
+
+## Pi specifics
+
+- Global skills live in `~/.pi/agent/skills/`. Installed by `install/setup.ps1` or `install/setup.sh`.
+- Pi has no plugin marketplace, so Compound Engineering is installed as plain skills:
+  ```
+  npx skills add EveryInc/compound-engineering-plugin -g -a pi -y
+  ```
+  Only `/ce-brainstorm`, `/ce-plan` and `/ce-work` are supported entry points; the rest are internal collaborators those three call.
+- Ponytail has a native Pi installer:
+  ```
+  pi install git:github.com/DietrichGebert/ponytail
+  ```
+- No MCP config ships for Pi in this template, because upstream Pi does not document a stable MCP config location. Call `ccc` directly as a shell command instead — `ccc search "<intent>"`. If your Pi build does support MCP, register `ccc mcp` yourself.
+- Upstream Pi has no built-in permission boundary. Use it on trusted repos, or run it in a container when you need isolation.
+- Run `/setup-matt-pocock-skills` once per project. It writes `docs/agents/issue-tracker.md`, which `/to-spec`, `/to-tickets` and `/code-review` all read.

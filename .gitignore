@@ -35,6 +35,9 @@ frontend/tests/.auth/
 # CocoIndex semantic index — large, machine-local, rebuild with `ccc index .`
 .cocoindex_code/
 
+# Ruff linter cache
+.ruff_cache/
+
 # Agent scratch
 _archive/
 .claude/audit.log

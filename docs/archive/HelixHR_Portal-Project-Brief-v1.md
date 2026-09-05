@@ -527,8 +527,8 @@ This project is part of the **HelixHR** initiative.
 
 The company currently operates two primary legal entities:
 
-- Nitco Inc — USA
-- Nitco Outsourcing Pvt Ltd — India
+- Company A — USA
+- Company B — India
 
 Frappe HR is being used as the HR platform.
 

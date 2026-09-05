@@ -1,7 +1,7 @@
 [project]
 name = "helixhr"
 authors = [
-    { name = "Nitco", email = "dev@nitcoinc.com"}
+    { name = "Nitco Inc", email = "dev@nitcoinc.ai"}
 ]
 description = "HelixHR Employee Portal"
 requires-python = ">=3.14"

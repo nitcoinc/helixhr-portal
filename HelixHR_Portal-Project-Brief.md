@@ -53,7 +53,7 @@ Frappe HR Desk is an admin tool. It is too busy for an employee who only wants t
 | D12 | Versions | Frappe Framework **v16**, Frappe HR **v16**, ERPNext **v16**. **Confirmed by the owner (2 Sep 2026).** | Latest stable. New "Espresso" Desk UI for HR staff. |
 | D13 | AI Assistant | **Phase 2. Separate document.** Phase 1 only keeps the API small and typed so the assistant can reuse it later. | Not a priority. See `docs/ai-assistant-phase2.md`. |
 | D14 | User accounts | Every employee has a Frappe User whose email **equals** their Microsoft sign-in email. HR fixes any mismatch before go-live. | Frappe Social Login matches by email. No mapping code needed. |
-| D15 | Countries | **One Frappe site, two Company records** (Nitco Inc USA, Nitco Outsourcing Pvt Ltd India). Holiday lists, leave policies and payroll differ per Company. | Standard Frappe multi-company. Nothing for the portal to do. |
+| D15 | Countries | **One Frappe site, two Company records** (example: US Corp, India Pvt Ltd). Holiday lists, leave policies and payroll differ per Company. | Standard Frappe multi-company. Nothing for the portal to do. |
 | D16 | Timesheet approval | Create a **Workflow on Timesheet**. Approver = the employee's `reports_to` manager. | Same manager approves leave and time. One Approvals page. |
 | D17 | HR Request queue | **One queue** for both countries, worked by the **HR Manager** role. | 100 to 200 people. One queue is enough. Split later if needed. |
 | D18 | Cancelling approved leave | Employees **cannot** cancel approved leave themselves. They open an HR Request. Draft or pending leave can be withdrawn by the employee. | Keeps balances and payroll safe. Frappe permission stays simple. |
