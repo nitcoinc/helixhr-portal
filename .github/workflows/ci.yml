@@ -298,7 +298,17 @@ jobs:
           test -z "$(find frappe-bench/apps/helixhr/helixhr/public/helixhr -name '*.map' -print -quit)" \
             || { echo 'FAIL: .map files were built'; exit 1; }
         working-directory: ${{ github.workspace }}
-      - run: yarn test:e2e
+      # --workers=1 is not a performance choice, it's correctness: the plan's
+      # own U9 step 9 requires one-worker ordering, and README/runbook never
+      # invoke this suite without it. State is not rolled back between test
+      # *cases* on this bench -- the two fixture identities are shared -- so
+      # parallel workers race each other's writes to the same Employee's
+      # leave/timesheet/notification data. Omitting this flag here (this
+      # workflow's first real run had never exercised it before) produced
+      # exactly that: three tests failing on one worker's stale read of
+      # data another worker had just mutated, passing again on retry once
+      # the race had settled.
+      - run: yarn test:e2e -- --workers=1
         working-directory: frappe-bench/apps/helixhr/frontend
         env:
           BASE_URL: http://localhost:8000
