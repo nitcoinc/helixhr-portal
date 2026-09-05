@@ -31,6 +31,14 @@ const identityLine = computed(() => {
 const week = computed(() => dashboard.data?.week)
 const needsYou = computed(() => dashboard.data?.needs_you?.items || [])
 const needsYouMore = computed(() => dashboard.data?.needs_you?.more || 0)
+const needsYouWaiting = computed(() => dashboard.data?.needs_you?.waiting || [])
+// P2-R25. `get_dashboard` names the sections that failed rather than letting
+// a null pass for "nothing recorded yet" -- one broken reference rail must
+// not make the rest of the page look empty, and it must be labelled as
+// broken with a way to try again.
+const attendanceFailed = computed(() =>
+  (dashboard.data?.failed_sections || []).includes('attendance_this_month'),
+)
 const leaveTypeEntries = computed(() => Object.entries(dashboard.data?.leave_balances || {}))
 const attendanceEntries = computed(() => Object.entries(dashboard.data?.attendance_this_month || {}))
 // Both rails used to render entry[0] as though it were the whole story: the
@@ -123,6 +131,7 @@ const today = new Intl.DateTimeFormat(undefined, {
           <NeedsYou
             :items="needsYou"
             :more="needsYouMore"
+            :waiting="needsYouWaiting"
             :week-hours="week?.total_hours || 0"
             :timesheet-state="week?.timesheet_state"
           />
@@ -161,21 +170,32 @@ const today = new Intl.DateTimeFormat(undefined, {
             />
           </router-link>
 
-          <router-link
-            v-if="leadAttendance"
-            to="/attendance"
-            class="surface-card elev-1 group flex cursor-pointer items-center justify-between gap-3 px-4 py-3 transition-colors duration-200 hover:border-blue-600"
+          <AsyncState
+            v-if="leadAttendance || attendanceFailed"
+            section="attendance"
+            :resource="dashboard"
+            :loading="false"
+            :error="attendanceFailed ? { section: 'attendance_this_month' } : null"
+            :empty="false"
           >
-            <span class="min-w-0">
-              <span class="block text-sm text-ink-gray-6">Attendance</span>
-              <span class="block truncate text-xs text-ink-gray-5">
-                {{ leadAttendance[0] }} this month
+            <template #error-title>
+              We couldn't load your attendance
+            </template>
+            <router-link
+              to="/attendance"
+              class="surface-card elev-1 group flex cursor-pointer items-center justify-between gap-3 px-4 py-3 transition-colors duration-200 hover:border-blue-600"
+            >
+              <span class="min-w-0">
+                <span class="block text-sm text-ink-gray-6">Attendance</span>
+                <span class="block truncate text-xs text-ink-gray-5">
+                  {{ leadAttendance[0] }} this month
+                </span>
               </span>
-            </span>
-            <span class="tabular font-heading text-2xl font-semibold text-ink-gray-9">
-              {{ leadAttendance[1] }}
-            </span>
-          </router-link>
+              <span class="tabular font-heading text-2xl font-semibold text-ink-gray-9">
+                {{ leadAttendance[1] }}
+              </span>
+            </router-link>
+          </AsyncState>
 
           <router-link
             to="/documents"

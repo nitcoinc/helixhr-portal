@@ -97,13 +97,27 @@ test.describe('dashboard week spine (redesign)', () => {
     }
     await expect(spine.getByText(/hours logged this week/)).toBeVisible()
 
+    // P2-U4 / P2-R12: the spine links at *this* week by its Monday, not at
+    // "/timesheet", which resolves to whichever week is current when the
+    // link is followed. Same identity the server uses.
+    await expect(spine.getByRole('link', { name: 'Timesheet' })).toHaveAttribute(
+      'href',
+      /\/helixhr\/timesheet\/\d{4}-\d{2}-\d{2}$/,
+    )
+
     // The queue either lists things to act on, each carrying its own verb,
     // or says so plainly. Both are correct; a blank region is not.
     const queue = page.getByRole('region', { name: 'Needs you' })
     await expect(queue).toBeVisible()
     const rows = queue.getByRole('listitem')
     if (await rows.count()) {
-      await expect(rows.first().getByRole('link')).toBeVisible()
+      // Every row goes to a *record*, never to a list page: P2-U4 gave each
+      // item an exact destination, and action-queue-notifications.spec.ts
+      // travels the two that matter.
+      await expect(rows.first().getByRole('link')).toHaveAttribute(
+        'href',
+        /\/helixhr\/(leave|requests|timesheet|approvals)\/.+/,
+      )
     } else {
       await expect(queue.getByText('Nothing needs you.')).toBeVisible()
     }

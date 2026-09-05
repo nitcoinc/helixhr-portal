@@ -63,5 +63,27 @@ class TestHelixHRDashboard(IntegrationTestCase):
 
 		self.assertIsInstance(result["unread_notifications"], int)
 
+	def test_a_broken_section_names_itself_and_leaves_the_rest_of_the_page_alone(self):
+		"""P2-U4 scenario 7 / P2-R25. A null section used to be
+		indistinguishable from "nothing recorded yet", so an outage read as
+		an empty month. The response now says which region failed, and only
+		that region."""
+		from unittest.mock import patch
+
+		frappe.set_user(EMPLOYEE_USER)
+		with patch("helixhr.api._get_attendance_summary", side_effect=Exception("boom")):
+			result = get_dashboard()
+
+		self.assertEqual(result["failed_sections"], ["attendance_this_month"])
+		self.assertIsNone(result["attendance_this_month"])
+		self.assertEqual(result["employee"]["name"], self.employee_name)
+		self.assertIsNotNone(result["week"])
+		self.assertIsNotNone(result["needs_you"])
+
+	def test_a_healthy_page_names_no_failed_section(self):
+		frappe.set_user(EMPLOYEE_USER)
+
+		self.assertEqual(get_dashboard()["failed_sections"], [])
+
 	def tearDown(self):
 		frappe.set_user("Administrator")

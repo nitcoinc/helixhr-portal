@@ -5,6 +5,7 @@ from frappe.model.workflow import apply_workflow
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, today
 
+from helixhr.events import HR_REPLY_SUBJECT_PREFIX
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	MANAGER_USER,
@@ -152,6 +153,97 @@ class TestNotifications(IntegrationTestCase):
 
 		after = self._unread_count(EMPLOYEE_USER)
 		self.assertGreater(after, before)
+
+	# P2-U4 / P2-KTD6. The reply event: the fixture Notification watches
+	# `status` on a Value Change and cannot see `hr_note` at all, so an HR
+	# reply written without moving the status produced nothing to read and
+	# nothing to clear.
+
+	def _reply_logs(self, request=None):
+		filters = {
+			"for_user": EMPLOYEE_USER,
+			"document_type": "HR Request",
+			"subject": ["like", f"{HR_REPLY_SUBJECT_PREFIX}%"],
+		}
+		if request:
+			filters["document_name"] = request
+		return frappe.get_all(
+			"Notification Log",
+			filters=filters,
+			fields=["name", "read", "subject", "description"],
+			order_by="creation asc",
+		)
+
+	def _employee_request(self):
+		frappe.set_user(EMPLOYEE_USER)
+		doc = frappe.get_doc(
+			{
+				"doctype": "HR Request",
+				"category": "HR Letter",
+				"subject": "Address proof",
+				"details": "For my bank.",
+			}
+		).insert()
+		frappe.set_user("Administrator")
+		doc.reload()
+		return doc
+
+	def test_a_reply_with_no_status_change_is_still_one_exact_notification(self):
+		doc = self._employee_request()
+		status_before = doc.status
+
+		doc.hr_note = "Collect it from reception."
+		doc.save()
+
+		logs = self._reply_logs(doc.name)
+		self.assertEqual(len(logs), 1)
+		self.assertEqual(logs[0].subject, f"{HR_REPLY_SUBJECT_PREFIX} Address proof")
+		self.assertIn("Collect it from reception.", logs[0].description)
+		self.assertEqual(logs[0].read, 0)
+		self.assertEqual(frappe.db.get_value("HR Request", doc.name, "status"), status_before)
+
+	def test_saving_the_same_note_again_creates_nothing(self):
+		doc = self._employee_request()
+		doc.hr_note = "Collect it from reception."
+		doc.save()
+
+		for _ in range(3):
+			doc.reload()
+			doc.details = f"For my bank. {frappe.generate_hash(length=6)}"
+			doc.save()
+
+		self.assertEqual(len(self._reply_logs(doc.name)), 1)
+
+	def test_a_revised_reply_is_a_new_obligation_and_leaves_the_read_one_read(self):
+		doc = self._employee_request()
+		doc.hr_note = "Collect it from reception."
+		doc.save()
+
+		first = self._reply_logs(doc.name)[0]
+		frappe.db.set_value("Notification Log", first.name, "read", 1)
+
+		doc.reload()
+		doc.hr_note = "Reception is closed today -- collect it tomorrow."
+		doc.status = "Done"
+		doc.save()
+
+		logs = self._reply_logs(doc.name)
+		self.assertEqual(len(logs), 2)
+		self.assertEqual(logs[0].name, first.name)
+		self.assertEqual(logs[0].read, 1, "reading the older reply is not undone by a newer one")
+		self.assertEqual(logs[1].read, 0)
+		self.assertIn("Reception is closed today", logs[1].description)
+
+	def test_clearing_a_note_notifies_nobody(self):
+		doc = self._employee_request()
+		doc.hr_note = "Collect it from reception."
+		doc.save()
+
+		doc.reload()
+		doc.hr_note = ""
+		doc.save()
+
+		self.assertEqual(len(self._reply_logs(doc.name)), 1)
 
 	def test_new_hr_request_notifies_hr_manager_without_details(self):
 		hr_manager_user = "hr-manager-notif@helixhr.test"

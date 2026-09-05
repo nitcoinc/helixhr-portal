@@ -128,6 +128,13 @@ doc_events = {
 	"File": {
 		"before_insert": "helixhr.events.file_before_insert",
 	},
+	# P2-U4 / P2-KTD6. The employee-facing "HR replied" event. A fixture
+	# Notification watches one field on a Value Change and the existing one
+	# watches `status`, so a reply written without a status change produced
+	# no notification and therefore no obligation the employee could clear.
+	"HR Request": {
+		"on_update": "helixhr.events.hr_request_on_update",
+	},
 }
 
 # Generators

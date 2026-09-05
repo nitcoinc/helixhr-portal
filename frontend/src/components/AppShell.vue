@@ -33,7 +33,12 @@ const showMore = ref(false)
 const unread = computed(() => unreadCount.data ?? session.unread ?? 0)
 const unreadLabel = computed(() => (unread.value > 9 ? '9+' : String(unread.value)))
 
-const isManager = computed(() => (session.reportCount || 0) > 0)
+// P2-U4 / P2-R11: the bootstrap's own answer, not a second rule derived from
+// the report count. A leave approver need not be anybody's manager, and a
+// manager whose only pending work is a timesheet has a decision to make with
+// no direct-report leave in sight -- both had no Approvals item at all while
+// this read `reportCount`.
+const isManager = computed(() => session.canApprove)
 const navItems = computed(() => NAV.filter((item) => !item.managerOnly || isManager.value))
 const primaryItems = computed(() => navItems.value.filter((item) => item.primary))
 const moreItems = computed(() => navItems.value.filter((item) => !item.primary))

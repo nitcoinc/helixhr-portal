@@ -81,6 +81,63 @@ def _unshare_from_approver(doc, manager_user):
 	)
 
 
+# HR Request reply notifications (P2-U4, P2-KTD6, P2-R13).
+#
+# The reply an employee has to read is `hr_note`, and the fixture Notification
+# "HelixHR Request Status Changed" cannot see it: a Notification with event
+# "Value Change" watches exactly one field, and that one watches `status`. HR
+# adding or revising a note without moving the status produced nothing at all,
+# so "HR replied" never became an obligation and never cleared -- which is the
+# whole of P2-KTD6's "the reply event is code, not a fixture".
+#
+# The subject prefix is the marker. Notification Log has no room for a custom
+# field of ours, and the queue has to be able to ask for *reply* rows without
+# also sweeping up the status-change rows the fixtures write, so the prefix is
+# both written and matched in one place. helixhr.api._get_needs_you imports it.
+HR_REPLY_SUBJECT_PREFIX = "HR replied about"
+
+
+def hr_request_on_update(doc, method=None):
+	"""One notification per new employee-visible reply, and none for
+	anything else.
+
+	Deduplication is the diff itself: `get_doc_before_save()` is the
+	persisted row, so a save that did not change `hr_note` writes nothing,
+	however many times HR saves the record. A *revised* note is a genuinely
+	new thing to read, so it inserts a new unread row rather than reopening
+	the older one -- the older reply stays read, which is what it is.
+	"""
+	before = doc.get_doc_before_save()
+	if not before:
+		# An insert. HR cannot write hr_note at creation (permlevel 1), and
+		# an employee's own new request has nothing to reply to yet.
+		return
+
+	note = (doc.hr_note or "").strip()
+	if not note or note == (before.hr_note or "").strip():
+		return
+
+	for_user = frappe.db.get_value("Employee", doc.employee, "user_id") or doc.owner
+	if not for_user or for_user == frappe.session.user:
+		# Nobody tells you what you just wrote.
+		return
+
+	frappe.get_doc(
+		{
+			"doctype": "Notification Log",
+			"for_user": for_user,
+			"from_user": frappe.session.user,
+			"type": "Alert",
+			"document_type": "HR Request",
+			"document_name": doc.name,
+			"subject": f"{HR_REPLY_SUBJECT_PREFIX} {doc.subject}",
+			# Notification Log mirrors description <-> email_content in its
+			# own before_insert, so one of the pair is enough.
+			"description": frappe.utils.escape_html(note),
+		}
+	).insert(ignore_permissions=True)
+
+
 def file_before_insert(doc, method=None):
 	"""KTD18: Frappe lets a file's owner attach it to any document they
 	can *read* (not necessarily write) -- an employee could otherwise

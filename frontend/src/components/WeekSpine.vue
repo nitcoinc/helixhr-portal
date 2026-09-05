@@ -30,6 +30,16 @@ const totalHours = computed(() => props.week?.total_hours || 0)
 // track collapses and the spine goes back to being a compact strip.
 const hasHours = computed(() => totalHours.value > 0)
 
+// The week this spine is drawing, by its Monday -- the same identity the
+// server uses and the route takes (P2-U2, P2-R12). "/timesheet" resolves to
+// whatever week is current when the link is followed, which is only the same
+// answer by accident.
+const weekRoute = computed(() =>
+  props.week?.week_start
+    ? { name: 'TimesheetWeek', params: { weekStart: props.week.week_start } }
+    : { name: 'Timesheet' },
+)
+
 function stateFor(day) {
   if (day.on_leave) return STATE['On Leave']
   return STATE[day.attendance] || null
@@ -90,7 +100,7 @@ function dayLabel(day) {
         <router-link
           v-for="day in days"
           :key="day.date"
-          to="/timesheet"
+          :to="weekRoute"
           class="relative flex cursor-pointer flex-col items-center gap-1 border-r border-white/10 px-1 pb-2 pt-2.5 transition-colors duration-200 last:border-r-0 hover:bg-white/10"
           :class="[
             day.is_today ? 'bg-white/15' : '',
@@ -152,7 +162,7 @@ function dayLabel(day) {
           {{ totalHours === 1 ? 'hour' : 'hours' }} logged this week
         </p>
         <router-link
-          to="/timesheet"
+          :to="weekRoute"
           class="inline-flex min-h-11 cursor-pointer items-center gap-1 text-sm font-medium text-signal hover:underline"
         >
           Timesheet

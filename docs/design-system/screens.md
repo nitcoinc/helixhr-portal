@@ -44,9 +44,13 @@ An action queue built on the working week, not a summary of numbers. Top: one id
 then designation, department, manager and location small beneath it). Then the **week spine** — a
 Mon–Sun field, seven equal cells, never a scroller, each carrying an attendance dot, hours as a bar
 sized against an 8h day, and leave; today marked by a rule as well as a tint; hours-this-week and a
-Timesheet link along the bottom. Below left, **"Needs you"**: rows ordered server-side by severity
-tier then oldest-first, each with its own verb and, for a sent-back timesheet, the manager's reason
-quoted inline; out-of-week rows carry an age tag, and the list discloses "and N more". Right rail:
+Timesheet link along the bottom. Below left, **"Needs you"**: rows ordered server-side by urgency
+tier then oldest-first, each with its own verb and, for a sent-back timesheet or an HR reply, the
+sentence quoted inline; out-of-week rows carry an age tag, and the list discloses "and N more".
+Every row carries a stable record identity (its list key) and opens **that** record — the sent-back
+week by its Monday, the answered request, the exact decision a manager owes. Under it, a quieter
+**"Waiting on others"** run of rows under a `.label`: leave sitting with a manager is still visible
+but is not work, so it does not pad a queue called "Needs you" (P2-U4). Right rail:
 leave balance, attendance, documents — reference figures, deliberately demoted, and a rail row with
 no figure does not render. Quick actions last, as one divided row. Empty queue says "Nothing needs
 you." and names the outstanding weekly obligation. Unread count lives on the shell's Notifications
@@ -167,15 +171,26 @@ expands in place with a 7-day hours strip. On a desktop the full timesheet — r
 "Send back", the word the employee already sees on the row, rather than Frappe's "Reject". The
 single queue, the initials, the hours strip and the evidence-before-approve rule are P2-U7's.
 
-## Notifications · phone (P2-U4)
+## Notifications · phone (P2-U4 — **built**)
 
 Grouped **Today / Earlier** with `.label`. One resting card per row: an icon tile per kind — a
 **filled field-green tile with a signal-yellow glyph while unread**, a grey tile once read — the
 subject (semibold while unread), a one-line quote of the reply where there is one, the time, and a
-trailing chevron. Each row opens the exact record. "Showing the last 30 days" closes the list.
+trailing chevron. Under a TODAY heading the row prints the time alone ("16:02"); an Earlier row
+keeps its day ("Yesterday, 10:42"). Opening a row marks that one row read, moves the shell's count
+in the same interaction, and opens the record — the list is *not* reloaded to find that out, because
+`get_notification_logs` is served with a 60s HTTP cache and would hand back the pre-read answer.
 
-*Built so far (P2-U3):* the cards, the icon tiles and the read/unread treatment. The Today / Earlier
-grouping, the quoted line, the exact destinations and immediate read state are P2-U4's.
+*Deviations from the artboard, recorded:*
+
+- The footer reads "Showing your 50 most recent." rather than "Showing the last 30 days". The
+  endpoint bounds by count, not by age, and a line that says otherwise is a line that is wrong the
+  first time somebody has a quiet month.
+- A **timesheet** notification opens **Past weeks**, not the exact week. A week is addressed by its
+  Monday (`/timesheet/:weekStart`) and a Notification Log carries the Timesheet's record id, not its
+  start date, so the exact link is not derivable from what the row holds. Past weeks is the list
+  that contains it; P2-U6 wires that row to the week. Leave and request notifications do open the
+  exact record.
 
 ## Not linked / login states (Phase 1 U3, revised in P2-U2)
 

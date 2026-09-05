@@ -7,6 +7,11 @@ defineProps({
   // Rows the queue holds but did not show, so a long backlog is disclosed
   // rather than silently truncated.
   more: { type: Number, default: 0 },
+  // Work that is this person's but is not this person's *move* -- leave
+  // sitting with a manager. It stays visible, in its own quieter section,
+  // instead of padding the queue with rows whose only honest action is
+  // "wait" (P2-U4, P2-R8, P2-R11).
+  waiting: { type: Array, default: () => [] },
   loading: { type: Boolean, default: false },
   // Shown in the empty state so a clear queue still tells you where you
   // stand rather than just going blank -- the direction's named risk.
@@ -34,7 +39,8 @@ function ageLabel(item) {
 const ICON = {
   timesheet_rejected: 'timesheet',
   request_answered: 'requests',
-  approvals: 'approvals',
+  approval_leave: 'approvals',
+  approval_timesheet: 'approvals',
   leave_waiting: 'leave',
 }
 </script>
@@ -94,10 +100,14 @@ const ICON = {
       v-else
       class="space-y-2"
     >
+      <!-- The key is the server's own record identity, never the index: the
+           queue re-orders as work is done, and an index key reuses the wrong
+           row's DOM state when it does (P2-U4 step 1). -->
       <li
-        v-for="(item, index) in items"
-        :key="`${item.kind}-${index}`"
+        v-for="item in items"
+        :key="item.id"
         class="elev-1 flex flex-wrap items-start gap-x-3 gap-y-2 rounded-xl border border-outline-gray-1 bg-surface-white p-3 sm:flex-nowrap"
+        :data-kind="item.kind"
       >
         <span
           class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg"
@@ -113,8 +123,8 @@ const ICON = {
           <p class="text-sm font-medium text-ink-gray-9">
             {{ item.title }}
           </p>
-          <!-- The manager's reason, inline: the whole point is not having to
-               open the timesheet to find out what to change. -->
+          <!-- The manager's reason, or HR's reply, inline: the whole point is
+               not having to open the record to find out what it says. -->
           <p
             v-if="item.detail"
             class="mt-0.5 text-sm text-ink-gray-6"
@@ -156,5 +166,45 @@ const ICON = {
     >
       and <span class="tabular font-medium">{{ more }}</span> more not shown here.
     </p>
+
+    <!-- Waiting on others. Same rows, deliberately quieter: no tinted tile,
+         no verb of its own, and it never competes with the queue above it. -->
+    <div
+      v-if="waiting.length"
+      class="mt-5"
+    >
+      <h3 class="label mb-2">
+        Waiting on others
+      </h3>
+      <ul class="space-y-2">
+        <li
+          v-for="item in waiting"
+          :key="item.id"
+          :data-kind="item.kind"
+        >
+          <router-link
+            :to="item.to"
+            class="surface-card elev-1 flex min-h-11 cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors duration-200 hover:border-blue-600"
+          >
+            <Icon
+              :name="ICON[item.kind] || 'leave'"
+              size="h-4 w-4"
+              class="shrink-0 text-ink-gray-4"
+            />
+            <span class="min-w-0 flex-1">
+              <span class="block truncate text-sm text-ink-gray-7">{{ item.title }}</span>
+              <span class="tabular block text-xs text-ink-gray-5">
+                {{ formatDate(item.date) }}
+              </span>
+            </span>
+            <Icon
+              name="chevronRight"
+              size="h-4 w-4"
+              class="shrink-0 text-ink-gray-4"
+            />
+          </router-link>
+        </li>
+      </ul>
+    </div>
   </section>
 </template>
