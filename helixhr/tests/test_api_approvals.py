@@ -133,6 +133,12 @@ class TestApiApprovals(IntegrationTestCase):
 			act_on_approval("Leave Application", leave.name, "Reject")
 
 	def test_approve_leave_sets_status_and_employee_sees_it(self):
+		"""Approval submits the native document (P2-U1), which walks HRMS's
+		own holiday-list lookup for the leave date -- the one call in this
+		class that reaches it, since every other test here is refused
+		before submit. Needs its own assignment; nothing upstream in this
+		class's setUp provides one (unlike TestLeaveApprovalIsNative)."""
+		ensure_holiday_list_assignment(frappe.db.get_value("Employee", self.employee_name, "company"))
 		leave = self._pending_leave()
 
 		frappe.set_user(MANAGER_USER)

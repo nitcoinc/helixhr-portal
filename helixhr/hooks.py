@@ -172,7 +172,16 @@ doc_events = {
 # ------------
 
 # before_install = "helixhr.install.before_install"
-# after_install = "helixhr.install.after_install"
+
+# `bench new-site --install-app` marks every patch as already applied
+# without running it (frappe.installer.set_all_patches_as_completed), so a
+# fresh install never runs patches/v1_0/apply_permission_deltas or
+# report_unsubmitted_approved_leave -- both mutate data, not schema, and
+# `bench migrate` is the only other place either would run. See
+# helixhr/install.py for the full account; this is the fix for CI's first
+# real failure (P2-R26/P2-AE9 across the whole suite on a site nothing had
+# ever migrated).
+after_install = "helixhr.install.after_install"
 
 # Uninstallation
 # ------------
