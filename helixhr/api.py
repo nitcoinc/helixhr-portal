@@ -458,7 +458,7 @@ def _get_needs_you(employee, once):
 		order_by="start_date asc",
 		limit=_QUEUE_FETCH,
 	)
-	reasons = _rejection_comments("Timesheet", [row.name for row in rejected])
+	reasons = _rejection_comments("Timesheet", [row.name for row in rejected], employee)
 	for row in rejected:
 		items.append(
 			_queue_item(
@@ -528,7 +528,7 @@ def _get_needs_you(employee, once):
 		limit=_QUEUE_FETCH,
 	)
 	request_reasons = _rejection_comments(
-		"Attendance Request", [row.name for row in rejected_requests]
+		"Attendance Request", [row.name for row in rejected_requests], employee
 	)
 	for row in rejected_requests:
 		items.append(
@@ -690,6 +690,9 @@ def _queue_item(
 # tables hold a handful of rows per employee.
 _QUEUE_LIMIT = 8
 _QUEUE_FETCH = 50
+# The bound on the one comment read that spans many records: a handful of
+# comments per sent-back record, over a page of records (P3-R25).
+_COMMENT_FETCH = 200
 # blocked work, then an answer waiting to be read, then a decision this
 # person owes somebody else. "waiting" never enters the queue; it is the
 # urgency of the separate Waiting-on-others list.
@@ -716,16 +719,28 @@ def _notification_text(description):
 	return unescape(frappe.utils.strip_html(description)).strip() or None
 
 
-def _rejection_comments(doctype, names):
+def _rejection_comments(doctype, names, employee=None):
 	"""The approver's reason for every sent-back record of `doctype`, in one
 	query (P2-R22: server queries avoid per-record comment lookups). This was
 	one Comment read per queue row.
 
 	Generalised by doctype in P3-U5: a sent-back Attendance Request carries
-	its reason the same way a sent-back Timesheet does (P3-KTD9)."""
+	its reason the same way a sent-back Timesheet does (P3-KTD9).
+
+	Scoped to comments somebody *other than* the employee wrote, the way
+	`_leave_reason` already is: the newest comment on a sent-back record is
+	otherwise whatever the employee themselves last typed on it, which is not
+	a reason it came back.
+
+	Newest first and bounded (P3-R25: every read has a limit). Descending
+	with "first one seen wins" is what makes the bound safe -- a truncated
+	page can only cost an older record its reason, never replace a reason
+	with a staler one.
+	"""
 	if not names:
 		return {}
 
+	employee_user = frappe.db.get_value("Employee", employee, "user_id") if employee else None
 	latest = {}
 	for row in frappe.get_all(
 		"Comment",
@@ -734,12 +749,15 @@ def _rejection_comments(doctype, names):
 			"reference_name": ["in", names],
 			"comment_type": "Comment",
 		},
-		fields=["reference_name", "content"],
-		# Ascending, so the newest comment is the last one written into the
-		# map and wins.
-		order_by="creation asc",
+		fields=["reference_name", "content", "owner"],
+		order_by="creation desc",
+		limit=_COMMENT_FETCH,
 	):
-		latest[row.reference_name] = frappe.utils.strip_html(row.content).strip() if row.content else None
+		if row.reference_name in latest or (employee_user and row.owner == employee_user):
+			continue
+		text = frappe.utils.strip_html(row.content).strip() if row.content else None
+		if text:
+			latest[row.reference_name] = text
 	return latest
 
 
@@ -1792,7 +1810,15 @@ def _next_log_type(last):
 
 
 def _has_location(row):
-	return bool(row.get("latitude")) and bool(row.get("longitude"))
+	"""P3-R9. Whether this punch still carries coordinates at all.
+
+	The sentinel is the *pair* (0, 0) -- what `tasks.ERASED` writes when the
+	retention period expires, and the one reading `_punch_coordinates`
+	refuses as input -- never either value on its own. Testing each
+	coordinate for truth reported "no location" for a real punch on the
+	equator or the prime meridian.
+	"""
+	return not (flt(row.get("latitude")) == 0 and flt(row.get("longitude")) == 0)
 
 
 def _punch_projection(row, existing=False):
@@ -1907,7 +1933,15 @@ def punch_my_checkin(latitude, longitude, expected_log_type):
 		)
 
 	last = _last_punch_in_window(employee, window["start"], window["end"])
-	if last and abs(time_diff_in_seconds(now, last.time)) < _PUNCH_DEBOUNCE_SECONDS:
+	if (
+		last
+		and last.log_type == expected
+		# The type has to match too: a double tap always asks for what it
+		# already got, while a genuine check-out half a minute after the
+		# check-in asks for the other one -- and returning the check-in for
+		# it reported a punch that never happened.
+		and abs(time_diff_in_seconds(now, last.time)) < _PUNCH_DEBOUNCE_SECONDS
+	):
 		# The same punch, tapped twice. Returning it (rather than refusing)
 		# is what makes a retry after a timeout safe.
 		return _punch_projection(last, existing=True)
@@ -2061,6 +2095,7 @@ def get_my_attendance_requests(limit=None, start=0):
 	reasons = _rejection_comments(
 		"Attendance Request",
 		[row.name for row in rows if row.workflow_state == REQUEST_REJECTED],
+		employee,
 	)
 
 	return {
@@ -2091,7 +2126,7 @@ def get_my_attendance_request(name):
 		frappe.throw(_("That attendance request isn't yours."), frappe.PermissionError)
 
 	reasons = _rejection_comments(
-		"Attendance Request", [name] if row.workflow_state == REQUEST_REJECTED else []
+		"Attendance Request", [name] if row.workflow_state == REQUEST_REJECTED else [], employee
 	)
 	detail = _request_projection(row, reasons)
 	detail["approver_name"] = _approver_name(employee)
@@ -2781,7 +2816,7 @@ def get_my_timesheet_history(limit=12, start=0):
 		limit_page_length=limit,
 	)
 	reasons = _rejection_comments(
-		"Timesheet", [row.name for row in rows if row.workflow_state == "Rejected"]
+		"Timesheet", [row.name for row in rows if row.workflow_state == "Rejected"], employee
 	)
 
 	weeks = []
@@ -2968,12 +3003,13 @@ def _lock_employee(employee):
 	week shares, so two concurrent writes serialise instead of both
 	inserting a Timesheet for the same week.
 
-	It lives in `_write_my_week` because a lock only excludes statements
-	that also take it: `submit_my_week` held it while `save_my_week` took
-	nothing at all, so a save walked straight past a concurrent submit and
-	the double-insert the lock exists to stop was still reachable. The
-	first write of a week has no Timesheet row to lock yet, which is
-	exactly the case that matters.
+	Taken by every writer that has to serialise against another, because a
+	lock only excludes statements that also take it: `submit_my_week` held
+	it while `save_my_week` took nothing at all, so a save walked straight
+	past a concurrent submit and the double-insert the lock exists to stop
+	was still reachable. The first write of a week has no Timesheet row to
+	lock yet, which is exactly the case that matters. `punch_my_checkin`
+	takes the same lock for the same reason on the same row (P3-R7).
 	"""
 	return frappe.db.get_value("Employee", employee, "name", for_update=True)
 
@@ -4217,10 +4253,13 @@ def _holiday_list_spans(employee, start, end):
 	"""The holiday lists in force across `start`..`end`, as
 	`{holiday_list, from_date, to_date}` spans in date order.
 
-	Mirrors `hrms.utils.holiday_list.get_holiday_dates_between_range`: HRMS
+	At most two spans, because it mirrors
+	`hrms.utils.holiday_list.get_holiday_dates_between_range` exactly: HRMS
 	resolves the list at each end of the range and splits at the later
-	assignment's start date. `raise_exception=False` because "no list" is a
-	state this page renders (P3-R11), not an error.
+	assignment's start date, so a third assignment starting inside the range
+	is not seen -- by HRMS either, which is the resolver every other page
+	agrees with. `raise_exception=False` because "no list" is a state this
+	page renders (P3-R11), not an error.
 	"""
 	from_list = (
 		get_holiday_list_for_employee(employee, raise_exception=False, as_on=start, as_dict=True) or {}

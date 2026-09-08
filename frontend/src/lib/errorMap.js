@@ -127,6 +127,13 @@ function joinRows(rows) {
     .join('. ')
 }
 
+/** What a portal action says when the failure carries no sentence of its own
+ * -- a network drop, a gateway timeout, anything that never reached a Frappe
+ * `throw`. Exported so every action says the same thing: an error line that
+ * resolves to '' renders as nothing at all, which is how "Send" came to fail
+ * silently on Attendance requests (P3-U9). */
+export const FALLBACK_ERROR = 'Something went wrong. Please try again.'
+
 /** Map a raw Frappe error (an Error thrown by apiRequest, with `.messages`
  * and/or `.message`) to one plain sentence. */
 export function toPlainLeaveError(error) {
@@ -136,5 +143,5 @@ export function toPlainLeaveError(error) {
     const match = raw.match(test)
     if (match) return message(match)
   }
-  return raw || 'Something went wrong. Please try again.'
+  return raw || FALLBACK_ERROR
 }

@@ -88,6 +88,54 @@ test.describe('employee', () => {
     await expect(strip).toContainText(countdown(daysBetween(today, payload.next.date)))
   })
 
+  // P3-U9 regression. The year chips used to live inside the async region,
+  // so choosing a year with no holidays in it rendered the empty state --
+  // which removed the only control that could get back out of that year.
+  test('a year with no holidays keeps its year chips reachable', async ({ page }) => {
+    const today = await siteToday(page)
+    const current = Number(today.slice(0, 4))
+    const quiet = current - 1
+
+    // The real payload, re-served: the shape stays the server's and only
+    // which year is empty is the test's.
+    const response = await page.request.get('/api/method/helixhr.api.get_my_holidays')
+    const real = (await response.json()).message
+    await page.route('**/api/method/helixhr.api.get_my_holidays*', (route) => {
+      // frappe-ui posts a resource's params as a JSON body, so the year is
+      // in `postData` and not in the query string.
+      const asked = Number(route.request().postDataJSON()?.year ?? current)
+      const empty = asked === quiet
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          message: {
+            ...real,
+            known: true,
+            year: asked,
+            years: [current, quiet],
+            holidays: empty ? [] : real.holidays,
+            next: empty ? null : real.next,
+          },
+        }),
+      })
+    })
+
+    await page.goto('/helixhr/holidays')
+    await page.waitForLoadState('networkidle')
+
+    const chips = page.getByRole('group', { name: 'Year' })
+    await expect(chips.getByRole('button', { name: String(quiet) })).toBeVisible()
+
+    await chips.getByRole('button', { name: String(quiet) }).click()
+    await expect(page.getByText(`No holidays listed for ${quiet}`)).toBeVisible()
+    // The way out is still on the page.
+    await expect(chips.getByRole('button', { name: String(current) })).toBeVisible()
+
+    await chips.getByRole('button', { name: String(current) }).click()
+    await expect(page.getByText(`No holidays listed for ${quiet}`)).toHaveCount(0)
+  })
+
   test('the footnote names the list and says weekly offs are not in it', async ({ page }) => {
     await page.goto('/helixhr/holidays')
     await page.waitForLoadState('networkidle')

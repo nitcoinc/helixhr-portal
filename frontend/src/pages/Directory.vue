@@ -223,9 +223,17 @@ const emptyBody = computed(() =>
                  letters the Approvals queue draws. No photos here: a face is
                  personal data the directory does not need to answer "who do I
                  ask about payroll" (P3-R22). -->
-            <button
-              type="button"
-              class="flex w-full min-w-0 items-center gap-3 p-3 text-left lg:cursor-default"
+            <!-- A card is a control only where tapping it does something.
+                 At desktop widths the card already shows everything the
+                 sheet would, so `openPerson` returns early -- and a page of
+                 fifty <button>s that do nothing is fifty tab stops between
+                 the search box and the next real control. The dynamic tag is
+                 the same shape Attendance.vue uses for the blank days before
+                 the 1st of a month. -->
+            <component
+              :is="isDesktop ? 'div' : 'button'"
+              :type="isDesktop ? undefined : 'button'"
+              class="flex w-full min-w-0 items-center gap-3 p-3 text-left"
               :aria-expanded="!isDesktop ? person.name === openName : undefined"
               @click="openPerson(person)"
             >
@@ -248,7 +256,7 @@ const emptyBody = computed(() =>
                 name="chevronRight"
                 class="shrink-0 text-ink-gray-4"
               />
-            </button>
+            </component>
 
             <!-- The rest of the card, at desktop widths. On a phone the same
                  three facts arrive in the sheet instead. -->
@@ -261,10 +269,16 @@ const emptyBody = computed(() =>
               </p>
               <p v-if="person.manager_name">
                 Reports to
+                <!-- A real target, not a 20px word: `inline-flex` plus a
+                     44px minimum, with the negative margin keeping the
+                     sentence's line height (the shape Payslips' row link
+                     uses). `display: inline` would put it under WCAG
+                     2.5.8's inline-text exemption, and this is a control in
+                     a card rather than a link in a paragraph. -->
                 <button
                   v-if="managerRow(person)"
                   type="button"
-                  class="cursor-pointer text-blue-700 underline underline-offset-2"
+                  class="-my-2 inline-flex min-h-11 cursor-pointer items-center text-blue-700 underline underline-offset-2"
                   @click="openManager(person)"
                 >
                   {{ person.manager_name }}
@@ -344,7 +358,7 @@ const emptyBody = computed(() =>
                 <button
                   v-if="managerRow(selected)"
                   type="button"
-                  class="cursor-pointer text-blue-700 underline underline-offset-2"
+                  class="-my-2 inline-flex min-h-11 cursor-pointer items-center text-blue-700 underline underline-offset-2"
                   @click="openManager(selected)"
                 >
                   {{ selected.manager_name }}

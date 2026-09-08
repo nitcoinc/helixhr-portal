@@ -426,7 +426,10 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 		doc.flags.ignore_mandatory = True
 		doc.insert(ignore_permissions=True)
 		frappe.db.set_value("Timesheet", doc.name, "workflow_state", "Rejected")
-		frappe.get_doc(
+		# Owned by the *manager*, because that is who sends a week back and
+		# the reason is read as theirs: an employee's own comment on their
+		# sent-back week is not the reason it came back (P3-KTD9).
+		comment_doc = frappe.get_doc(
 			{
 				"doctype": "Comment",
 				"comment_type": "Comment",
@@ -435,4 +438,5 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 				"content": comment,
 			}
 		).insert(ignore_permissions=True)
+		frappe.db.set_value("Comment", comment_doc.name, "owner", MANAGER_USER, update_modified=False)
 		return doc.name

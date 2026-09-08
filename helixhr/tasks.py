@@ -67,6 +67,17 @@ def null_stale_checkin_coordinates():
 		if not names:
 			break
 		scrubbed += scrub_checkin_locations(names)
+		# One commit per batch. A first run over a real backlog is 200
+		# batches of 500 rows plus their Version rewrites, which is well
+		# past the scheduled-job timeout -- and a single transaction that
+		# times out rolls the whole sweep back, so the job never makes any
+		# progress at all. Committing per batch is safe precisely because
+		# the sweep is idempotent: a run that dies half way leaves the
+		# batches it finished erased and the next run starts from what is
+		# left. Only here -- `scrub_checkin_locations` itself stays
+		# commit-free, because the status-to-Left path calls it inside the
+		# Employee save's own transaction (P3-KTD15).
+		frappe.db.commit()
 	return {"retention_days": days, "scrubbed": scrubbed}
 
 

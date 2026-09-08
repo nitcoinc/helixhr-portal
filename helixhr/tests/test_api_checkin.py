@@ -122,6 +122,20 @@ class TestPunchDerivation(CheckinTestCase):
 		self.assertFalse(second["existing"])
 		self.assertEqual([row.log_type for row in self._punches()], ["IN", "OUT"])
 
+	def test_a_check_out_inside_the_debounce_window_is_its_own_punch(self):
+		"""The debounce is for the same punch tapped twice, and a double tap
+		always asks for the type it already got. A genuine check-out half a
+		minute after the check-in asks for the other one, and returning the
+		check-in for it reported a punch that never happened (P3-R7)."""
+		first = punch_my_checkin(HERE[0], HERE[1], "IN")
+
+		second = punch_my_checkin(HERE[0], HERE[1], "OUT")
+
+		self.assertEqual(second["log_type"], "OUT")
+		self.assertFalse(second["existing"])
+		self.assertNotEqual(second["name"], first["name"])
+		self.assertEqual([row.log_type for row in self._punches()], ["IN", "OUT"])
+
 	def test_a_stale_expected_type_is_refused_rather_than_guessed(self):
 		punch_my_checkin(HERE[0], HERE[1], "IN")
 		self._age_last_punch(120)
@@ -229,9 +243,20 @@ class TestPunchCoordinates(CheckinTestCase):
 	def test_a_real_location_on_the_null_meridian_is_accepted(self):
 		"""Zero is only meaningless as a *pair*: 0 latitude with a real
 		longitude is a place in the Gulf of Guinea, and refusing it would be
-		a rule about arithmetic rather than about locations."""
+		a rule about arithmetic rather than about locations.
+
+		`has_location` follows the same rule, at every call site: testing
+		each coordinate for truth reported "no location" for a real punch on
+		the equator, and for every punch on the prime meridian.
+		"""
 		result = punch_my_checkin(0, HERE[1], "IN")
 		self.assertEqual(result["log_type"], "IN")
+		self.assertTrue(result["has_location"])
+
+		self._age_last_punch(120)
+		out = punch_my_checkin(HERE[0], 0, "OUT")
+		self.assertTrue(out["has_location"], "longitude 0 is the prime meridian, not an erasure")
+		self.assertTrue(get_my_checkins(str(getdate()))[0]["has_location"])
 
 
 class TestCheckinAvailability(CheckinTestCase):

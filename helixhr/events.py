@@ -359,13 +359,21 @@ REQUEST_REJECTED = "Rejected"
 REQUEST_WITHDRAWABLE = (REQUEST_DRAFT, REQUEST_PENDING_MANAGER, REQUEST_REJECTED)
 
 # Outside Draft the state is the only thing that moves. `shift` is the one
-# exception: HRMS's own validate fills it from the employee's Shift Assignment
-# on every save, including the manager's transition (P3-KTD8).
-REQUEST_MUTABLE_FIELDS = {"workflow_state", "shift"}
+# exception, and only while it is still empty: HRMS's `validate_shifts` fills
+# it from the employee's Shift Assignment when the field has no value, and
+# never once it has (P3-KTD8). Exempting it unconditionally let an employee
+# (or their manager, through the pending-state DocShare) PUT any Shift Type
+# onto a pending request, and HR's confirmation then wrote Attendance against
+# a shift the person was never assigned -- HRMS checks neither.
+REQUEST_MUTABLE_FIELDS = {"workflow_state"}
 
 # A Desk rejection carries no comment of its own, and "sent back" with no
-# reason at all is worse than a sentence naming who to ask (P3-KTD9).
-ATTENDANCE_REQUEST_SENT_BACK_FALLBACK = "HR sent this back, ask HR for details"
+# reason at all is worse than a sentence naming who to ask (P3-KTD9). State
+# neutral on purpose: either step can send a request back, so naming HR would
+# be wrong for a manager's rejection.
+ATTENDANCE_REQUEST_SENT_BACK_FALLBACK = (
+	"No reason was given, ask your manager or HR for details"
+)
 
 _HR_ROLES = {"HR Manager", "System Manager"}
 
@@ -436,10 +444,14 @@ def attendance_request_validate(doc, method=None):
 	if not before or before.get("workflow_state") in (None, REQUEST_DRAFT) or _is_hr():
 		return
 
+	mutable = set(REQUEST_MUTABLE_FIELDS)
+	if not before.get("shift"):
+		mutable.add("shift")
+
 	changed = [
 		field.fieldname
 		for field in doc.meta.fields
-		if field.fieldname not in REQUEST_MUTABLE_FIELDS
+		if field.fieldname not in mutable
 		and not field.is_virtual
 		and field.fieldtype not in no_value_fields
 		and (doc.get(field.fieldname) or None) != (before.get(field.fieldname) or None)
@@ -517,13 +529,19 @@ def _notify_attendance_request(doc):
 
 
 def _last_request_comment(name):
-	"""The reason whoever sent it back typed, as one plain line."""
+	"""The reason whoever sent it back typed, as one plain line.
+
+	Scoped to the acting user's own comments: "the newest comment on the
+	document" is whatever the *employee* last typed on their own sent-back
+	request, which is not a reason it came back (P3-KTD9).
+	"""
 	content = frappe.db.get_value(
 		"Comment",
 		{
 			"reference_doctype": "Attendance Request",
 			"reference_name": name,
 			"comment_type": "Comment",
+			"owner": frappe.session.user,
 		},
 		"content",
 		order_by="creation desc",
@@ -548,6 +566,19 @@ def attendance_request_before_submit(doc, method=None):
 	if not _is_hr():
 		frappe.throw(
 			_("Only HR can confirm an attendance request."),
+			frappe.PermissionError,
+		)
+	# P3-KTD6: an HR Manager never approves their own request at either step.
+	# The workflow fixture's `user_id != session.user` condition covers the
+	# transition route only -- `frappe.client.submit` never consults a
+	# transition at all, and it is the route HR's legitimate final step uses,
+	# so the rule has to be here too. Administrator is exempt: it is the
+	# migration and backfill account, not a person with requests of their own.
+	if frappe.session.user != "Administrator" and frappe.db.get_value(
+		"Employee", doc.employee, "user_id"
+	) == frappe.session.user:
+		frappe.throw(
+			_("You can't confirm your own attendance request. Ask another HR Manager."),
 			frappe.PermissionError,
 		)
 	if stored_state != REQUEST_PENDING_HR:

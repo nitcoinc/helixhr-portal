@@ -387,6 +387,19 @@ class TestPreflightP3U1(IntegrationTestCase):
 		self.assertEqual(result["status"], preflight.FAIL)
 		self.assertIn("geolocation", result["detail"])
 
+	def test_a_second_geolocation_directive_appended_by_a_proxy_fails(self):
+		"""A substring match passed this: the app's own `geolocation=(self)`
+		is still in the header, and the browser denies anyway because the
+		proxy's `geolocation=()` is there too (P3-KTD12)."""
+		result = self._check_with_response_headers(
+			{
+				**self._GOOD_HEADERS,
+				"Permissions-Policy": "geolocation=(self), camera=(), geolocation=()",
+			}
+		)
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("geolocation", result["detail"])
+
 	def test_a_missing_permissions_policy_still_fails(self):
 		result = self._check_with_response_headers(dict(self._GOOD_HEADERS))
 		self.assertEqual(result["status"], preflight.FAIL)
@@ -530,6 +543,30 @@ class TestPreflightP3U1(IntegrationTestCase):
 		self.assertEqual(result["status"], preflight.FAIL)
 		self.assertIn(untouched, result["detail"])
 		self.assertIn("never ran", result["detail"])
+
+	def test_a_delta_flipped_back_on_the_site_fails_and_names_the_doctype(self):
+		"""Presence was not the question. A site where somebody handed role
+		Employee its `create` on Employee Checkin back in the Role
+		Permissions Manager still has Custom DocPerm rows for the doctype,
+		and the delta P3-KTD13 applies is gone."""
+		row = frappe.db.get_value(
+			"Custom DocPerm",
+			{"parent": "Employee Checkin", "role": "Employee", "permlevel": 0, "if_owner": 0},
+			"name",
+		)
+		self.assertIsNotNone(row, "the Employee Checkin delta has not run on this site")
+		self.assertEqual(preflight.check_custom_docperm_coverage()["status"], preflight.PASS)
+
+		frappe.db.set_value("Custom DocPerm", row, "create", 1)
+		try:
+			result = preflight.check_custom_docperm_coverage()
+			self.assertEqual(result["status"], preflight.FAIL)
+			self.assertIn("Employee Checkin", result["detail"])
+			self.assertIn("create", result["detail"])
+		finally:
+			frappe.db.set_value("Custom DocPerm", row, "create", 0)
+			frappe.clear_cache(doctype="Employee Checkin")
+		self.assertEqual(preflight.check_custom_docperm_coverage()["status"], preflight.PASS)
 
 	def test_the_delta_doctypes_are_all_covered_on_this_site(self):
 		"""Employee Checkin and Attendance Request joined the table in P3; a

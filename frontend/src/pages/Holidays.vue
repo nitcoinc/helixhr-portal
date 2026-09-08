@@ -88,6 +88,36 @@ const emptyBody = computed(() =>
   <div>
     <PageHeader title="Holidays" />
 
+    <!-- The year chips, outside the async region and above it -- the same
+         place Payslips and Directory put their filters. Inside the region
+         they were removed by their own effect: choosing a year with no
+         holidays in it rendered the empty state, which took the only control
+         that could leave that year with it (P3-R11). The server sends the
+         whole `years` list whether or not the chosen year has anything in
+         it, so the chips stay accurate in the empty state. -->
+    <div
+      v-if="years.length > 1"
+      class="mb-4 flex max-w-xl flex-wrap gap-2"
+      role="group"
+      aria-label="Year"
+    >
+      <button
+        v-for="option in years"
+        :key="option"
+        type="button"
+        class="tabular min-h-11 cursor-pointer rounded-full border px-4 text-sm font-medium"
+        :class="
+          option === year
+            ? 'border-field bg-surface-white text-ink-gray-9 ring-1 ring-field'
+            : 'border-outline-gray-2 bg-surface-white text-ink-gray-7 hover:bg-surface-gray-2'
+        "
+        :aria-pressed="option === year"
+        @click="year = option"
+      >
+        {{ option }}
+      </button>
+    </div>
+
     <AsyncState
       class="max-w-xl"
       section="holidays"
@@ -127,31 +157,6 @@ const emptyBody = computed(() =>
           No holidays left in {{ year }}.
         </p>
       </section>
-
-      <!-- The year chip. Only the years an assigned list actually covers, so
-           it never offers a year that resolves to nothing. -->
-      <div
-        v-if="years.length > 1"
-        class="mb-4 flex flex-wrap gap-2"
-        role="group"
-        aria-label="Year"
-      >
-        <button
-          v-for="option in years"
-          :key="option"
-          type="button"
-          class="tabular min-h-11 cursor-pointer rounded-full border px-4 text-sm font-medium"
-          :class="
-            option === year
-              ? 'border-field bg-surface-white text-ink-gray-9 ring-1 ring-field'
-              : 'border-outline-gray-2 bg-surface-white text-ink-gray-7 hover:bg-surface-gray-2'
-          "
-          :aria-pressed="option === year"
-          @click="year = option"
-        >
-          {{ option }}
-        </button>
-      </div>
 
       <div
         v-for="group in groups"

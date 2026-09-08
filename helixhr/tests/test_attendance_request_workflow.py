@@ -34,11 +34,13 @@ from helixhr.events import (
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	MANAGER_USER,
+	NIGHT_SHIFT_TYPE,
 	OTHER_MANAGER_USER,
 	ensure_holiday_list_assignment,
 	ensure_holiday_list_assignment_from,
 	ensure_hr_manager_user,
 	ensure_test_holiday,
+	ensure_test_shift_type,
 	make_test_employee_and_manager,
 	make_test_user,
 )
@@ -441,6 +443,62 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 		state = self._state(name)
 		self.assertEqual((state.workflow_state, state.docstatus), ("Approved", 1))
 
+	def test_an_hr_manager_who_is_the_requester_cannot_confirm_it(self):
+		"""P3-KTD6: never your own request, at either step. The workflow
+		fixture's `user_id != session.user` condition covers the transition
+		route only, and the legitimate final step is a plain submit."""
+		from frappe.client import submit as client_submit
+
+		name = self._pending_hr()
+
+		frappe.set_user("Administrator")
+		employee_login = frappe.get_doc("User", EMPLOYEE_USER)
+		employee_login.add_roles("HR Manager")
+		frappe.clear_cache(user=EMPLOYEE_USER)
+		try:
+			frappe.set_user(EMPLOYEE_USER)
+			with self.assertRaises(frappe.PermissionError):
+				client_submit(frappe.get_doc(DOCTYPE, name).as_dict())
+			self.assertEqual(self._state(name).docstatus, 0)
+		finally:
+			frappe.set_user("Administrator")
+			employee_login.reload()
+			employee_login.remove_roles("HR Manager")
+			frappe.clear_cache(user=EMPLOYEE_USER)
+
+		# Another HR Manager still confirms it.
+		frappe.set_user(self.hr_user)
+		client_submit(frappe.get_doc(DOCTYPE, name).as_dict())
+		state = self._state(name)
+		self.assertEqual((state.workflow_state, state.docstatus), ("Approved", 1))
+
+	def test_a_pending_requests_shift_is_frozen_once_it_has_one(self):
+		"""P3-R17a. HRMS's `validate_shifts` fills `shift` only while it is
+		empty and never checks the Shift Type is one the employee was
+		assigned, so an unconditional exemption let either party PUT any
+		shift onto a pending request -- and HR's confirmation then wrote
+		Attendance against it."""
+		from frappe.client import set_value as client_set_value
+
+		frappe.set_user("Administrator")
+		assigned = ensure_test_shift_type()
+		other = ensure_test_shift_type(name=NIGHT_SHIFT_TYPE)
+		name = self._pending_manager()
+
+		# The empty -> filled case HRMS needs is still allowed.
+		frappe.set_user("Administrator")
+		frappe.db.set_value(DOCTYPE, name, "shift", None, update_modified=False)
+		frappe.set_user(EMPLOYEE_USER)
+		client_set_value(DOCTYPE, name, "shift", assigned)
+		self.assertEqual(frappe.db.get_value(DOCTYPE, name, "shift"), assigned)
+
+		# Filled -> something else is not, from either side.
+		for user in (EMPLOYEE_USER, MANAGER_USER):
+			frappe.set_user(user)
+			with self.assertRaises((frappe.ValidationError, frappe.PermissionError), msg=user):
+				client_set_value(DOCTYPE, name, "shift", other)
+		self.assertEqual(frappe.db.get_value(DOCTYPE, name, "shift"), assigned)
+
 	def test_hr_may_edit_a_pending_request(self):
 		name = self._pending_manager()
 		frappe.set_user(self.hr_user)
@@ -523,6 +581,46 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 
 		apply_workflow(_ref(name), "Edit")
 		self.assertEqual(self._state(name).workflow_state, "Draft")
+
+	def test_the_employees_own_comment_is_never_the_reason_it_came_back(self):
+		"""P3-KTD9. "The newest comment on the document" was whatever the
+		employee last typed on their own sent-back request."""
+		name = self._pending_manager()
+		frappe.set_user(MANAGER_USER)
+		doc = frappe.get_doc(DOCTYPE, name)
+		doc.add_comment("Comment", "Log the hours in the timesheet instead")
+		apply_workflow(_ref(name), "Reject")
+
+		frappe.set_user(EMPLOYEE_USER)
+		frappe.get_doc(DOCTYPE, name).add_comment("Comment", "Will do, sorry")
+
+		listed = get_my_attendance_requests()
+		mine = next(row for row in listed["requests"] if row["name"] == name)
+		self.assertEqual(mine["reason_sent_back"], "Log the hours in the timesheet instead")
+		item = next(
+			i
+			for i in get_dashboard()["needs_you"]["items"]
+			if i["kind"] == "attendance_request_rejected" and i["to"]["params"]["name"] == name
+		)
+		self.assertEqual(item["detail"], "Log the hours in the timesheet instead")
+
+	def test_a_managers_rejection_without_a_reason_does_not_name_hr(self):
+		"""The fallback sentence is state-neutral: either step can send a
+		request back (P3-KTD9)."""
+		name = self._pending_manager()
+		frappe.set_user(EMPLOYEE_USER)
+		# The employee's own comment is not a reason either, whichever
+		# route reads it.
+		frappe.get_doc(DOCTYPE, name).add_comment("Comment", "Any news?")
+
+		frappe.set_user(MANAGER_USER)
+		apply_workflow(_ref(name), "Reject")
+
+		log = self._logs(name)[-1]
+		self.assertIn("was sent back", log.subject)
+		self.assertIn(ATTENDANCE_REQUEST_SENT_BACK_FALLBACK, log.description)
+		self.assertNotIn("Any news?", log.description)
+		self.assertNotIn("HR sent", log.description)
 
 	def test_hr_raised_request_notifies_the_employee_not_the_owner(self):
 		name = self._hr_request()

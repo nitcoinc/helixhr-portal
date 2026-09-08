@@ -32,6 +32,7 @@ a doctype in the permission-delta table carries no Custom DocPerm row at all.
 import os
 
 import frappe
+from frappe.utils import cint
 
 from helixhr.patches.v1_0.apply_permission_deltas import DELTAS
 from helixhr.utils import (
@@ -128,17 +129,45 @@ def check_custom_docperm_coverage():
 	delta never ran (a site migrated before its dated re-run line landed in
 	patches.txt), so an employee still holds HRMS's shipped create, write
 	and delete on Employee Checkin.
+
+	The deltas themselves are checked value by value, not by presence.
+	"Some Custom DocPerm row exists for Employee Checkin" was true on a site
+	where somebody had handed role Employee its create and delete back in the
+	Role Permissions Manager, and this check said the deltas were carried.
+	Each `(role, permlevel, if_owner)` rule the patch names is compared
+	ptype by ptype against the row on the site.
 	"""
 	problems = []
-	for doctype in DELTAS:
-		custom = set(frappe.get_all("Custom DocPerm", filters={"parent": doctype}, pluck="role"))
-		if not custom:
+	for doctype, deltas in DELTAS.items():
+		ptypes = sorted({ptype for _rule, values in deltas for ptype in values})
+		rows = frappe.get_all(
+			"Custom DocPerm",
+			filters={"parent": doctype},
+			fields=["role", "permlevel", "if_owner", *ptypes],
+		)
+		if not rows:
 			problems.append(f"{doctype}: no Custom DocPerm row at all, the permission delta never ran")
 			continue
+
+		by_rule = {(row.role, cint(row.permlevel), cint(row.if_owner)): row for row in rows}
+		for (role, permlevel, if_owner), values in deltas:
+			row = by_rule.get((role, cint(permlevel), cint(if_owner)))
+			scope = f"{role} level {permlevel}" + (" (own records)" if cint(if_owner) else "")
+			if not row:
+				problems.append(f"{doctype}: {scope} has no rule at all")
+				continue
+			wrong = [
+				f"{ptype}={cint(row.get(ptype))} not {cint(expected)}"
+				for ptype, expected in values.items()
+				if cint(row.get(ptype)) != cint(expected)
+			]
+			if wrong:
+				problems.append(f"{doctype}: {scope} {', '.join(wrong)}")
+
 		standard = set(
 			frappe.get_all("DocPerm", filters={"parent": doctype}, pluck="role", parent_doctype="DocType")
 		)
-		lost = sorted(standard - custom)
+		lost = sorted(standard - {row.role for row in rows})
 		if lost:
 			problems.append(f"{doctype}: {', '.join(lost)}")
 	if problems:
@@ -508,8 +537,16 @@ def check_public_endpoint():
 	permissions_policy = headers.get("permissions-policy")
 	if permissions_policy is None:
 		problems.append("no Permissions-Policy")
-	elif "geolocation=(self)" not in permissions_policy.replace(" ", ""):
-		problems.append(f"Permissions-Policy does not allow geolocation for self: {permissions_policy!r}")
+	else:
+		# The *effective* directive, not a substring: a proxy that appends
+		# its own `geolocation=()` after the app's `geolocation=(self)`
+		# leaves both in the header, the browser denies, and a plain
+		# substring match passed the site anyway (P3-KTD12 / P3-AE13).
+		compact = permissions_policy.replace(" ", "")
+		if "geolocation=()" in compact or "geolocation=(self)" not in compact:
+			problems.append(
+				f"Permissions-Policy does not allow geolocation for self: {permissions_policy!r}"
+			)
 
 	# requests folds repeated Set-Cookie headers into one comma-joined string
 	# on `.headers`; urllib3 keeps them separate on `.raw`. Prefer the raw
@@ -563,6 +600,11 @@ def check_fixtures():
 		("Workflow", "Timesheet Approval"),
 		# P3-KTD6 / P3-R26: the two-step attendance approval (P3-U5).
 		("Workflow", "Attendance Request Approval"),
+		# Its two new states. A Workflow's `workflow_state` values are Links
+		# and fixture import runs with `ignore_links`, so a Workflow State
+		# row that never installed leaves the workflow itself looking fine.
+		("Workflow State", "Pending Manager"),
+		("Workflow State", "Pending HR"),
 		("Activity Type", "General"),
 		("Notification", "HelixHR Timesheet Status Changed"),
 		("Notification", "HelixHR Leave Status Changed"),

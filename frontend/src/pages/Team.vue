@@ -171,11 +171,19 @@ function outTodayLine(row) {
   return parts.join(' · ')
 }
 
-const emptyTitle = 'Nobody on your team is booked off this week'
-const emptyBody = computed(
-  () =>
-    `Approved and waiting leave for the ${totalReports.value === 1 ? 'person' : `${totalReports.value} people`} reporting to you shows up here. Use the arrows to look at another week.`,
-)
+// Empty is "there is nobody on the grid", never "this week is quiet". A week
+// with no leave in it is a real answer and still has to render the grid, the
+// week's shading, and -- the part that made this a defect -- the anchored
+// block, whose "out today" and "N still waiting" are not week-scoped at all:
+// collapsing the region on a quiet week hid a manager's own decision queue.
+const noReports = computed(() => !!team.data && reports.value.length === 0)
+const emptyTitle = 'Nobody reports to you right now'
+const emptyBody =
+  'The leave of the people who report to you shows up here. Ask HR if that looks wrong.'
+
+// The quiet week, in one plain sentence, so an empty grid is never mistaken
+// for a week that failed to load.
+const quietWeek = computed(() => !noReports.value && !hasLeave.value)
 </script>
 
 <template>
@@ -220,7 +228,7 @@ const emptyBody = computed(
     <AsyncState
       section="team"
       :resource="team"
-      :empty="!hasLeave"
+      :empty="noReports"
       :empty-title="emptyTitle"
       :empty-body="emptyBody"
       skeleton="field"
@@ -288,6 +296,13 @@ const emptyBody = computed(
           </router-link>
         </p>
       </section>
+
+      <p
+        v-if="quietWeek"
+        class="mb-3 text-sm text-ink-gray-6"
+      >
+        Nobody on your team is booked off this week. Use the arrows to look at another week.
+      </p>
 
       <!-- Desktop: the week across, one row per report. Wide content
            scrolls inside its own container, never the page. -->

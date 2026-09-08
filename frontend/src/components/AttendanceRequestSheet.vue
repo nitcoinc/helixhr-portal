@@ -4,7 +4,7 @@ import { createResource, Dialog, FormControl, Button } from 'frappe-ui'
 import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import StepStrip from '@/components/StepStrip.vue'
-import { toPlainMessage } from '@/lib/errorMap'
+import { FALLBACK_ERROR, toPlainMessage } from '@/lib/errorMap'
 import { formatDate, formatDateRange, today } from '@/lib/dates'
 
 // P3-U6 step 2 / P3-R12, P3-R13, P3-R17. "Fix a day": the sheet that raises
@@ -99,7 +99,14 @@ function refreshPreview() {
 watch([reason, fromDate, toDate, halfDay], refreshPreview)
 onUnmounted(() => clearTimeout(previewTimer))
 
-const previewError = computed(() => (preview.error ? toPlainMessage(preview.error.messages?.[0]) : ''))
+// A network failure carries no `messages`, so `toPlainMessage` returns '' and
+// the line disappeared -- the same sentence the leave paths fall back to is
+// said instead, because "no explanation" is the one thing this must not be.
+const previewError = computed(() =>
+  preview.error
+    ? toPlainMessage(preview.error.messages?.[0] ?? preview.error.message) || FALLBACK_ERROR
+    : '',
+)
 
 /** "2 days would be marked as Work From Home", in the server's numbers. */
 const markLine = computed(() => {
@@ -206,7 +213,7 @@ async function run(action) {
     emit('changed')
     open.value = false
   } catch (e) {
-    error.value = toPlainMessage(e?.messages?.[0] ?? e?.message)
+    error.value = toPlainMessage(e?.messages?.[0] ?? e?.message) || FALLBACK_ERROR
     if (props.name) request.fetch()
   } finally {
     sending.value = false

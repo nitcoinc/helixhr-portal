@@ -187,6 +187,43 @@ test.describe('employee', () => {
 
     await clearRequestsOn(baseURL!, day)
   })
+
+  // P3-U9 regression. A failure whose message survives tag-stripping as
+  // nothing at all -- markup with no words in it, which is what a proxy or a
+  // bare `frappe.throw("<br>")` produces -- left `error` as '', and the error
+  // line is `v-if="error"`: Send did nothing and said nothing.
+  test('a Send that fails without a message still says something', async ({ page, baseURL }) => {
+    test.setTimeout(60000)
+    const day = windowFor(await siteToday(page), 0)
+    await clearRequestsOn(baseURL!, day)
+
+    await page.goto(`/helixhr/attendance?fix=${day}`)
+    const sheet = page.getByRole('dialog')
+    await expect(sheet.getByRole('button', { name: 'Work From Home' })).toBeVisible({
+      timeout: 10000,
+    })
+    await expect(page.getByTestId('attendance-request-preview')).toContainText(
+      'would be marked as Work From Home',
+      { timeout: 10000 },
+    )
+
+    // The draft never gets made, and the failure carries no sentence: its
+    // one server message is markup that strips to an empty string.
+    await page.route('**/api/method/helixhr.api.create_my_attendance_request', (route) =>
+      route.fulfill({
+        status: 500,
+        contentType: 'application/json',
+        body: JSON.stringify({ _server_messages: JSON.stringify(['{"message": "<br>"}']) }),
+      }),
+    )
+    await sheet.getByRole('button', { name: 'Send to Manager' }).click()
+
+    await expect(sheet.getByRole('alert')).toContainText('Something went wrong. Please try again.', {
+      timeout: 10000,
+    })
+
+    await clearRequestsOn(baseURL!, day)
+  })
 })
 
 test.describe('manager', () => {

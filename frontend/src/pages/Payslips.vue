@@ -34,7 +34,21 @@ const payslips = createResource({
 const rows = computed(() => payslips.data?.payslips || [])
 const total = computed(() => payslips.data?.total || 0)
 const years = computed(() => payslips.data?.years || [])
-const latest = computed(() => rows.value[0] || null)
+// The anchored block is "what the last payroll run paid", so it must not
+// follow the year filter. `rows[0]` read the *filtered* list, which put a
+// 2024 slip under "Latest payslip" with its net pay as the page's headline
+// figure the moment somebody filtered to 2024. The newest slip is whatever
+// the unfiltered list's first row is, remembered rather than re-fetched: the
+// page always opens unfiltered (`year` starts null), so there is nothing to
+// ask the server for (P3-R1).
+const latest = ref(null)
+watch(
+  () => payslips.data,
+  (data) => {
+    if (data && year.value === null) latest.value = data.payslips?.[0] || null
+  },
+  { immediate: true },
+)
 
 const moreCount = computed(() => Math.max(0, total.value - rows.value.length))
 function showMore() {
@@ -126,6 +140,7 @@ const sheetOpen = computed(() => !!props.name && !isDesktop.value)
       section="payslip-latest"
       class="mb-6"
       :resource="payslips"
+      :loading="payslips.loading && !latest"
       :empty="!latest"
       empty-title="No payslips yet"
       empty-body="Your payslips appear here after the first payroll run. Ask HR if you think one is missing."

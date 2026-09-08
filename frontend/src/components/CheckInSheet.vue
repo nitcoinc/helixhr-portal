@@ -110,14 +110,28 @@ function plainError(error) {
     .trim()
 }
 
+// P3-R6. One fix per opening of the sheet, and only the current opening's
+// fix is allowed to land. A high-accuracy request runs for up to ten seconds
+// (lib/geolocation.js), which is long enough to close the sheet and reopen
+// it: the superseded promise then resolves last and overwrites `position` and
+// `state`, which showed the allow-location advice over a perfectly good fix
+// and -- worse -- left a coordinate from the previous attempt on screen for
+// the punch to send at a geofence. The counter is bumped on every locate and
+// on every close, so a result from any earlier generation is dropped.
+let locateGeneration = 0
+
 async function locate() {
+  const generation = (locateGeneration += 1)
   state.value = STATE.LOCATING
   message.value = ''
   position.value = null
   try {
-    position.value = await getPosition()
+    const fix = await getPosition()
+    if (generation !== locateGeneration) return
+    position.value = fix
     state.value = STATE.CONFIRM
   } catch (error) {
+    if (generation !== locateGeneration) return
     blockedKind.value = error?.kind || GEO_UNAVAILABLE
     state.value = STATE.BLOCKED
   }
@@ -155,6 +169,8 @@ watch(
   () => props.modelValue,
   (open) => {
     if (open) locate()
+    // Closing retires the in-flight fix rather than letting it land later.
+    else locateGeneration += 1
   },
 )
 

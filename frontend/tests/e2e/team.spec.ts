@@ -67,6 +67,50 @@ test.describe('manager', () => {
     await expect(page.getByText(/Reasons for leave aren't shown here/)).toBeVisible()
   })
 
+  // P3-U9 regression. `empty` used to be "this week has no leave in it",
+  // which collapsed the whole region on a quiet week -- taking the anchored
+  // block with it. Neither half of that block is week-scoped: "out today" is
+  // about today, and the waiting count is this manager's whole queue.
+  test('a week with no leave still shows out today and the waiting queue', async ({
+    page,
+    baseURL,
+  }) => {
+    await seedTeamWeek(baseURL!)
+
+    // The real payload with its leave taken out, so only the quiet week is
+    // the test's invention and every other shape stays the server's.
+    const response = await page.request.get('/api/method/helixhr.api.get_my_team_week')
+    const real = (await response.json()).message
+    await page.route('**/api/method/helixhr.api.get_my_team_week*', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          message: {
+            ...real,
+            reports: real.reports.map((row: object) => ({ ...row, leaves: [] })),
+            out_today: [],
+            waiting_count: 2,
+          },
+        }),
+      }),
+    )
+
+    await page.goto('/helixhr/team')
+    await page.waitForLoadState('networkidle')
+
+    // The block, its today-shaped sentence, and the decision link -- none of
+    // which the week decides.
+    const outToday = page.locator('section[aria-label="Out today"]')
+    await expect(outToday).toBeVisible()
+    await expect(outToday).toContainText('Everyone on your team is in today.')
+    await expect(outToday.getByRole('link', { name: /2 requests still waiting/ })).toBeVisible()
+    // And the quiet week says so rather than rendering a grid with no
+    // explanation.
+    await expect(page.getByText('Nobody on your team is booked off this week')).toBeVisible()
+    await expect(page.locator('[data-testid="team-row"]').first()).toBeVisible()
+  })
+
   test('the payload carries no leave reason', async ({ page, baseURL }) => {
     await seedTeamWeek(baseURL!)
 
@@ -102,11 +146,11 @@ test.describe('manager', () => {
     await expect(weekLabel(page)).not.toHaveText(thisWeek!)
     await page.waitForLoadState('networkidle')
     // Another week cannot answer "who is out today", and says so instead of
-    // claiming a full office. Asserted on the whole async region because a
-    // week with no leave in it renders the named empty state instead of the
-    // field block.
-    await expect(page.locator('[data-async-state^="team:"]')).toContainText(
-      /looking at another week|Nobody on your team is booked off/,
+    // claiming a full office. The field block is there whether or not that
+    // week has any leave in it (P3-U9): the region is empty only when nobody
+    // reports to this manager.
+    await expect(page.locator('section[aria-label="Out today"]')).toContainText(
+      'looking at another week',
     )
 
     await page.getByRole('button', { name: 'This week', exact: true }).click()
