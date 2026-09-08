@@ -3859,3 +3859,380 @@ def _holiday_years(employee, current_year, requested):
 				if _HOLIDAY_MIN_YEAR <= candidate <= _HOLIDAY_MAX_YEAR:
 					years.add(candidate)
 	return sorted(years)
+
+
+# ---------------------------------------------------------------------------
+# Directory (P3-U8, P3-R22, P3-R23)
+#
+# Everyone's colleagues, as a server projection rather than as a list route.
+#
+# Role Employee cannot read another Employee at all: the User Permission each
+# fixture and every real site creates scopes the doctype to the signed-in
+# person's own record, and P2-R26 keeps strict user permissions on. So this
+# method reads with `ignore_permissions=True` and owns the scope itself --
+# Active only, this employee's own company only, and a fixed field allow-list
+# (P3-KTD1). The generic Employee list stays exactly as denied as it was;
+# `test_fixtures.TestStrictPermissionParity` pins that.
+#
+# The allow-list is the privacy boundary, not a convenience: `user_id` is a
+# login identifier and never leaves the server, so the work email comes from
+# `company_email` alone and the key is absent when HR has not filled it in.
+# No photo and no phone number, for the same reason -- neither is needed to
+# find a colleague's role and reach them (P3-R22).
+# ---------------------------------------------------------------------------
+
+# One bounded page, and the ceiling Load More may climb to (P3-R25).
+_DIRECTORY_PAGE = 50
+_DIRECTORY_MAX_PAGE = 200
+
+# A search is a name, a role or a department -- 60 characters is longer than
+# any of the three, and below two the needle matches most of the company, so
+# it is ignored rather than run.
+_DIRECTORY_QUERY_MAX = 60
+_DIRECTORY_QUERY_MIN = 2
+
+_DIRECTORY_FIELDS = (
+	"name",
+	"employee_name",
+	"designation",
+	"department",
+	"reports_to",
+	"company_email",
+)
+
+
+def _directory_manager_names(rows):
+	"""Every manager named by `rows`, in one query rather than one per row."""
+	ids = {row.reports_to for row in rows if row.reports_to}
+	if not ids:
+		return {}
+	return {
+		row.name: row.employee_name
+		for row in frappe.get_all(
+			"Employee",
+			filters={"name": ["in", list(ids)]},
+			fields=["name", "employee_name"],
+			ignore_permissions=True,
+		)
+	}
+
+
+def _directory_projection(row, manager_names):
+	person = {
+		"name": row.name,
+		"employee_name": row.employee_name,
+		"designation": row.designation or None,
+		"department": row.department or None,
+		"manager": row.reports_to or None,
+		"manager_name": manager_names.get(row.reports_to) if row.reports_to else None,
+	}
+	# Absent, not empty: a key with "" in it reads on the page as an address
+	# that failed to load rather than as one HR has not published.
+	if row.company_email:
+		person["email"] = row.company_email
+	return person
+
+
+def _aggregate_count(row):
+	"""The count out of an aggregated `frappe.get_all` row.
+
+	Frappe v16 refuses a `"count(name) as total"` string in `fields` and
+	returns the aggregate under SQL's own name instead (`COUNT(*)`), so the
+	one value in the row is read for what it is rather than by a label this
+	app is free to choose.
+	"""
+	return cint(next(value for key, value in row.items() if key.upper().startswith("COUNT")))
+
+
+def _directory_departments(company):
+	"""The departments this company's active people are in, with a headcount
+	each -- the desktop chips. Counted over the whole company rather than over
+	the current page or search, so a chip does not move while it is being
+	used."""
+	rows = frappe.get_all(
+		"Employee",
+		filters={"status": "Active", "company": company},
+		fields=["department", {"COUNT": "name"}],
+		group_by="department",
+		order_by="department asc",
+		ignore_permissions=True,
+	)
+	return [
+		{"name": row.department, "count": _aggregate_count(row)} for row in rows if row.department
+	]
+
+
+@frappe.whitelist()
+def get_directory(query=None, department=None, start=0, limit=None):
+	"""A bounded page of active colleagues in this employee's own company,
+	by name, with the role, department, manager and work email each one has
+	published (P3-R22, P3-R23).
+
+	An employee whose record carries no company gets an empty page rather
+	than an error: "we cannot tell which company you are in" is a thing for
+	HR to fix, and the page says so in its own words.
+	"""
+	rate_limit_per_user("get_directory")
+	employee = get_current_employee()
+	limit = min(max(cint(limit) or _DIRECTORY_PAGE, 1), _DIRECTORY_MAX_PAGE)
+	start = max(cint(start), 0)
+
+	company = frappe.db.get_value("Employee", employee, "company")
+	if not company:
+		return {"people": [], "total": 0, "limit": limit, "start": start, "departments": []}
+
+	filters = {"status": "Active", "company": company}
+	if department:
+		filters["department"] = department
+
+	needle = (query or "").strip()[:_DIRECTORY_QUERY_MAX]
+	or_filters = None
+	if len(needle) >= _DIRECTORY_QUERY_MIN:
+		or_filters = [
+			["employee_name", "like", f"%{needle}%"],
+			["designation", "like", f"%{needle}%"],
+			["department", "like", f"%{needle}%"],
+		]
+
+	scope = {"filters": filters, "or_filters": or_filters, "ignore_permissions": True}
+	rows = frappe.get_all(
+		"Employee",
+		fields=list(_DIRECTORY_FIELDS),
+		order_by="employee_name asc",
+		limit_start=start,
+		limit_page_length=limit,
+		**scope,
+	)
+	# `frappe.db.count` takes no or_filters, so the total comes from the same
+	# scope aggregated -- one row, whether or not a search is running.
+	total = _aggregate_count(frappe.get_all("Employee", fields=[{"COUNT": "*"}], **scope)[0])
+
+	manager_names = _directory_manager_names(rows)
+	return {
+		"people": [_directory_projection(row, manager_names) for row in rows],
+		"total": total,
+		"limit": limit,
+		"start": start,
+		"departments": _directory_departments(company),
+	}
+
+
+# ---------------------------------------------------------------------------
+# Team leave calendar (P3-U7 / P3-R20, P3-R21, P3-R23)
+#
+# One week, one row per active direct report, and nothing else. Three rules
+# hold this section together:
+#
+#   * The report set is derived on the server from `Employee.reports_to`
+#     plus `status == "Active"` -- the same filter `_count_direct_reports`
+#     gates the nav item on (P3-KTD11) -- and the caller cannot steer it.
+#     There is no `employee` parameter, so there is no team but your own.
+#   * Leave rows are read as a *projection* with an explicit field list
+#     (P3-KTD1, P3-R23): role Employee has no read on another person's
+#     Leave Application at all, and the nested-set User Permission that
+#     would grant a manager one is not something this endpoint depends on.
+#   * `description` is never selected and never returned (P3-R21). A leave
+#     reason is between the employee and their approver; "who is out on
+#     Thursday" is a scheduling fact and is all this page is for.
+#
+# Holiday shading is resolved **per report**, not once for the manager. The
+# plan named the manager's own holiday dates, but HRMS resolves a holiday
+# list per employee (Holiday List Assignment, per date -- see the Holidays
+# section above), so on a company with more than one list the manager's
+# calendar is the wrong calendar for half the team. Each report is already
+# being visited, and the Holiday rows are cached per resolved list, so the
+# cost is one query per *distinct* list rather than one per person. The
+# manager's own dates still shade the column headers, because a column is
+# one date across everybody and has to be labelled from somebody's list.
+# ---------------------------------------------------------------------------
+
+# One screen, one week. A manager with more direct reports than this has an
+# org chart problem rather than a paging problem -- `total_reports` stays
+# exact so the page can say how many rows are not drawn (P3-R25).
+_TEAM_REPORT_LIMIT = 50
+# Seven days times the report cap, with room to spare for the long leaves
+# that overlap the window from outside it. A bound, not a page.
+_TEAM_LEAVE_LIMIT = 500
+
+
+@frappe.whitelist()
+def get_my_team_week(week_start=None):
+	"""The week's approved and waiting leave for the logged-in manager's
+	active direct reports (P3-R20, P3-R21, P3-R23).
+
+	Refused with a permission error when the caller has nobody reporting to
+	them: the page is gated on `has_reports` in the bootstrap (P3-KTD11) and
+	the server holds the same line, so a leave approver who manages nobody
+	gets a refusal rather than an empty grid that looks like a broken page.
+
+	The week is Monday..Sunday through `helixhr.utils.get_week_bounds`, the
+	same normalisation Timesheet uses, so "this week" means one thing across
+	the portal whatever the site's week-start setting says.
+	"""
+	manager = get_current_employee()
+	today = user_today()
+	monday, sunday = get_week_bounds(week_start or today)
+
+	total_reports = _count_direct_reports(manager)
+	if not total_reports:
+		frappe.throw(
+			_("Only a manager with people reporting to them has a team week to show."),
+			frappe.PermissionError,
+		)
+
+	reports = frappe.get_all(
+		"Employee",
+		filters={"reports_to": manager, "status": "Active"},
+		fields=["name", "employee_name"],
+		order_by="employee_name asc",
+		limit=_TEAM_REPORT_LIMIT,
+		ignore_permissions=True,
+	)
+
+	holiday_cache = {}
+	column_holidays = _team_holiday_dates(manager, monday, sunday, holiday_cache)
+	days = [
+		{
+			"date": str(date),
+			"weekday": date.strftime("%A"),
+			"is_weekend": date.weekday() >= 5,
+			"is_holiday": str(date) in column_holidays,
+		}
+		for date in (add_days(monday, offset) for offset in range(7))
+	]
+
+	by_employee = {}
+	waiting_count = 0
+	if reports:
+		# Explicitly *not* `description`, and explicitly not `*` (P3-R21).
+		# `docstatus` and `status` are read to decide `waiting` and are
+		# translated into that one flag rather than passed through -- the
+		# screen has no use for either word (design system copy rules).
+		for row in frappe.get_all(
+			"Leave Application",
+			filters={
+				"employee": ["in", [report.name for report in reports]],
+				"docstatus": ["<", 2],
+				"status": ["in", ["Open", "Approved"]],
+				"from_date": ["<=", str(sunday)],
+				"to_date": [">=", str(monday)],
+			},
+			fields=[
+				"name",
+				"employee",
+				"leave_type",
+				"from_date",
+				"to_date",
+				"half_day",
+				"half_day_date",
+				"status",
+				"docstatus",
+			],
+			order_by="from_date asc, name asc",
+			limit=_TEAM_LEAVE_LIMIT,
+			ignore_permissions=True,
+		):
+			waiting = not (cint(row.docstatus) == 1 and row.status == "Approved")
+			waiting_count += 1 if waiting else 0
+			by_employee.setdefault(row.employee, []).append(
+				{
+					"name": row.name,
+					"leave_type": row.leave_type,
+					# The true range, because the phone list says it in
+					# words and a bar that lies about its dates on the week
+					# it starts in is worse than no bar.
+					"from_date": str(getdate(row.from_date)),
+					"to_date": str(getdate(row.to_date)),
+					# ...and the range clipped to this week, which is the
+					# bar's geometry. Clipping on the server keeps the rule
+					# in one place and makes "a two-week leave shows in both
+					# weeks" assertable without a browser.
+					"start": str(max(getdate(row.from_date), monday)),
+					"end": str(min(getdate(row.to_date), sunday)),
+					"half_day": bool(row.half_day),
+					"half_day_date": str(getdate(row.half_day_date)) if row.half_day_date else None,
+					"waiting": waiting,
+				}
+			)
+
+	rows = [
+		{
+			"employee": report.name,
+			"employee_name": report.employee_name,
+			"initials": _initials(report.employee_name),
+			"leaves": by_employee.get(report.name, []),
+			# This person's own non-working days, which are not necessarily
+			# the column's (see the section note above).
+			"holidays": sorted(_team_holiday_dates(report.name, monday, sunday, holiday_cache)),
+		}
+		for report in reports
+	]
+
+	# "Who is out today" is about today, and the rows in hand only cover the
+	# week on screen -- so paging to another week says so rather than
+	# claiming an empty office (the page reads `is_current_week`).
+	is_current_week = str(monday) <= today <= str(sunday)
+	out_today = (
+		[
+			{
+				"employee": row["employee"],
+				"employee_name": row["employee_name"],
+				"initials": row["initials"],
+				"leave_type": leave["leave_type"],
+				"half_day": leave["half_day"] and leave["half_day_date"] == today,
+				"waiting": leave["waiting"],
+			}
+			for row in rows
+			for leave in row["leaves"]
+			if leave["from_date"] <= today <= leave["to_date"]
+		]
+		if is_current_week
+		else []
+	)
+
+	return {
+		"week_start": str(monday),
+		"week_end": str(sunday),
+		"today": today,
+		"is_current_week": is_current_week,
+		"days": days,
+		"reports": rows,
+		"out_today": out_today,
+		"total_reports": total_reports,
+		"waiting_count": waiting_count,
+	}
+
+
+def _team_holiday_dates(employee, start, end, cache):
+	"""The holiday dates HRMS resolves for `employee` across `start`..`end`,
+	as a set of `YYYY-MM-DD` strings.
+
+	Reuses the Holidays section's span resolver (P3-U3) rather than adding a
+	third holiday resolver to this module. `cache` is keyed by the resolved
+	span, so a team on one holiday list costs one Holiday query however many
+	people are in it.
+
+	Weekly offs are excluded, as on the Holidays page: Saturday and Sunday
+	are already dimmed as weekends, and a list that carries one Holiday row
+	per weekend day would otherwise report every weekend as a named holiday.
+	"""
+	dates = set()
+	for span in _holiday_list_spans(employee, getdate(start), getdate(end)):
+		key = (span["holiday_list"], str(span["from_date"]), str(span["to_date"]))
+		if key not in cache:
+			cache[key] = {
+				str(getdate(value))
+				for value in frappe.get_all(
+					"Holiday",
+					filters={
+						"parent": span["holiday_list"],
+						"parenttype": "Holiday List",
+						"holiday_date": ["between", [str(span["from_date"]), str(span["to_date"])]],
+						"weekly_off": 0,
+					},
+					pluck="holiday_date",
+					ignore_permissions=True,
+				)
+			}
+		dates |= cache[key]
+	return dates

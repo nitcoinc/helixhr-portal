@@ -437,6 +437,22 @@ class TestStrictPermissionParity(IntegrationTestCase):
 			for ptype in ("write", "create", "delete", "submit", "cancel", "amend", "share", "report", "export"):
 				self.assertEqual(rule.get(ptype), 0, f"Employee must not hold {ptype} on Salary Slip")
 
+	def test_the_generic_employee_list_still_returns_only_self(self):
+		"""P3-AE12 / P3-R23: the directory is a server projection that reads
+		Employee with `ignore_permissions` (P3-KTD1), which is only defensible
+		while the generic route stays shut. Under strict user permissions an
+		employee's own list route answers with their own record and nothing
+		else -- no colleague, and no employee of another company."""
+		frappe.set_user(EMPLOYEE_USER)
+		names = frappe.get_list("Employee", pluck="name", limit=0)
+		self.assertEqual(names, [self.employee_name])
+		self.assertNotIn(self.outsider_employee, names)
+
+		from frappe.client import get_list as client_get_list
+
+		client = [row["name"] for row in client_get_list("Employee", limit_page_length=0)]
+		self.assertEqual(client, [self.employee_name])
+
 
 class TestPermissionDeltas(IntegrationTestCase):
 	"""P2-U1: `patches.v1_0.apply_permission_deltas` replaced the three Custom

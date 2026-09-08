@@ -61,6 +61,12 @@ class TestPortalLanding(IntegrationTestCase):
 		employee = frappe.db.get_value("Employee", {"user_id": EMPLOYEE_USER}, "name")
 		frappe.db.set_value("Employee", employee, "status", "Left")
 		self.addCleanup(frappe.db.set_value, "Employee", employee, "status", "Active")
+		# `set_value` runs no doc hooks, so ERPNext does not disable the login
+		# here -- but any *other* suite that saves this Employee while the
+		# status reads Left does, and then the fixture identity cannot sign in
+		# for the rest of the run. Restoring it costs one write and makes the
+		# order these suites happen to run in stop mattering.
+		self.addCleanup(frappe.db.set_value, "User", EMPLOYEE_USER, "enabled", 1)
 
 		self.assertIsNone(portal_home_page(EMPLOYEE_USER))
 

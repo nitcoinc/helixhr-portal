@@ -366,6 +366,11 @@ def setup_playwright_fixtures():
 		employee_name, str(period_start), str(frappe.utils.get_last_day(period_start))
 	)
 
+	# P3-U8 scenario 5: `directory.spec.ts` needs colleagues to find and a
+	# published work email on the manager fixture, so the person sheet has a
+	# real mailto: action (`ensure_directory_fixtures`).
+	ensure_directory_fixtures()
+
 	frappe.db.commit()  # nosemgrep
 
 
@@ -1111,3 +1116,218 @@ def playwright_holiday_date():
 	from frappe.utils import add_days, get_year_ending, getdate, today
 
 	return str(min(getdate(add_days(today(), 12)), getdate(get_year_ending(today()))))
+
+
+# --- Directory fixtures (P3-U8) --------------------------------------------
+
+DIRECTORY_DESIGNATION = "_Test Directory Role"
+DIRECTORY_DEPARTMENT = "_Test Directory Department"
+DIRECTORY_COLLEAGUE_EMAIL = "directory-colleague@helixhr.test"
+# The manager fixture's published work email -- what `directory.spec.ts` opens
+# the sheet for, and the only thing on that row that becomes a mailto: action
+# (P3-R22).
+DIRECTORY_MANAGER_EMAIL = "manager.work@helixhr.test"
+_DIRECTORY_TAG = "P3U8-DIR"
+
+
+def _ensure_directory_masters(company):
+	"""The Designation and Department the directory searches by. Both are
+	master data a real site gets from the setup wizard; a headless install has
+	none, and `make_test_employee_and_manager` deliberately leaves both fields
+	empty, so the search-by-role and search-by-department scenarios need their
+	own rows rather than the fixture employee's."""
+	if not frappe.db.exists("Designation", DIRECTORY_DESIGNATION):
+		frappe.get_doc(
+			{"doctype": "Designation", "designation_name": DIRECTORY_DESIGNATION}
+		).insert(ignore_permissions=True)
+
+	department = frappe.db.get_value(
+		"Department", {"department_name": DIRECTORY_DEPARTMENT, "company": company}, "name"
+	)
+	if not department:
+		doc = frappe.get_doc(
+			{
+				"doctype": "Department",
+				"department_name": DIRECTORY_DEPARTMENT,
+				"company": company,
+			}
+		)
+		doc.insert(ignore_permissions=True)
+		department = doc.name
+	return DIRECTORY_DESIGNATION, department
+
+
+def _ensure_directory_employee(suffix, company, status="Active", **fields):
+	"""One Employee with no `user_id` -- no login, no User Permission. These
+	rows exist to be *found* in the directory, not signed in as. Idempotent on
+	`employee_number`."""
+	number = f"{_DIRECTORY_TAG}-{suffix}"
+	name = frappe.db.get_value("Employee", {"employee_number": number}, "name")
+	desired = {"status": status, "company": company, **fields}
+	if status == "Left":
+		desired.setdefault("relieving_date", "2024-12-31")
+
+	if name:
+		employee = frappe.get_doc("Employee", name)
+		changed = False
+		for field, value in desired.items():
+			if employee.get(field) != value:
+				employee.set(field, value)
+				changed = True
+		if changed:
+			employee.save(ignore_permissions=True)
+		return employee.name
+
+	employee = frappe.get_doc(
+		{
+			"doctype": "Employee",
+			"employee_number": number,
+			"first_name": f"Directory {suffix.title()}",
+			"date_of_birth": "1990-01-01",
+			"date_of_joining": "2020-01-01",
+			"gender": ensure_test_gender(),
+			**desired,
+		}
+	)
+	employee.insert(ignore_permissions=True)
+	return employee.name
+
+
+def ensure_directory_fixtures():
+	"""The people P3-U8 needs to see, and the people it must not (P3-AE12).
+
+	One active colleague in the fixture company with a role, a department and
+	a published work email; a colleague who has Left and one who is Inactive
+	in the same company; and an active employee in a second company. The
+	manager fixture gets a work email so the sheet has a mailto: action.
+
+	Idempotent, and returns the names by role so a test can name each one.
+	"""
+	company = ensure_test_company()
+	other_company = ensure_baseline_company()
+	designation, department = _ensure_directory_masters(company)
+
+	employee_name, _, manager_name, _ = make_test_employee_and_manager()
+	if frappe.db.get_value("Employee", manager_name, "company_email") != DIRECTORY_MANAGER_EMAIL:
+		frappe.db.set_value("Employee", manager_name, "company_email", DIRECTORY_MANAGER_EMAIL)
+
+	return {
+		"company": company,
+		"other_company": other_company,
+		"designation": designation,
+		"department": department,
+		"employee": employee_name,
+		"manager": manager_name,
+		"colleague": _ensure_directory_employee(
+			"COLLEAGUE",
+			company,
+			designation=designation,
+			department=department,
+			company_email=DIRECTORY_COLLEAGUE_EMAIL,
+			reports_to=manager_name,
+		),
+		"left": _ensure_directory_employee("LEFT", company, status="Left"),
+		"inactive": _ensure_directory_employee("INACTIVE", company, status="Inactive"),
+		"other": _ensure_directory_employee("OTHERCO", other_company),
+	}
+
+
+# P3-U7: the team week. `team.spec.ts` needs one *report* of the manager
+# fixture who is on leave inside the current week, and it must not be the
+# shared fixture employee: a committed leave row on that person's calendar
+# collides with the overlap validation every other leave suite runs into, and
+# the whole point of this fixture is a row that is simply there whenever the
+# spec runs.
+#
+# So it is a dedicated Employee with no login (it exists to be looked at,
+# never signed in as) and one **approved** leave. Approved on purpose: an
+# Open row would join the manager's Approvals queue and change what every
+# approval scenario on this site sees.
+TEAM_REPORT_NUMBER = "P3U7-TEAM-REPORT"
+TEAM_REPORT_LEAVE_NAME = "_TEST-P3U7-TEAM-LEAVE"
+TEAM_REPORT_NAME = "Team Member"
+TEAM_REPORT_LEAVE_TYPE = "Casual Leave"
+
+
+@frappe.whitelist()
+def ensure_team_week_fixtures():
+	"""One active direct report of the manager fixture, on approved leave
+	across the current week. Idempotent, and re-dated on every call so a run
+	next week still finds the leave under today.
+
+	The leave row is written with `db_insert()`: HRMS validates balance,
+	allocation period and overlap on every save of a Leave Application, and
+	this row is an *input* to a read-only calendar rather than a lifecycle
+	being exercised. Same reasoning as `helixhr/tests/test_api_team.py`.
+	"""
+	if not frappe.conf.get("allow_tests"):
+		frappe.throw("Test fixtures are disabled on this site (allow_tests is off).")
+
+	from frappe.utils import add_days, today
+
+	from helixhr.utils import get_week_bounds
+
+	_, _, manager_name, _ = make_test_employee_and_manager()
+	company = frappe.db.get_value("Employee", manager_name, "company")
+
+	report = frappe.db.get_value("Employee", {"employee_number": TEAM_REPORT_NUMBER}, "name")
+	if not report:
+		doc = frappe.get_doc(
+			{
+				"doctype": "Employee",
+				"employee_number": TEAM_REPORT_NUMBER,
+				"first_name": "Team",
+				"last_name": "Member",
+				"company": company,
+				"date_of_birth": "1990-01-01",
+				"date_of_joining": "2020-01-01",
+				"gender": ensure_test_gender(),
+				"status": "Active",
+				"reports_to": manager_name,
+			}
+		)
+		doc.insert(ignore_permissions=True)
+		report = doc.name
+	else:
+		frappe.db.set_value(
+			"Employee", report, {"status": "Active", "reports_to": manager_name}
+		)
+
+	# A day either side of the week, so the leave covers today whichever
+	# Monday the portal's own week starts on for the signed-in user.
+	monday, sunday = get_week_bounds(today())
+	from_date, to_date = str(add_days(monday, -1)), str(add_days(sunday, 1))
+
+	if frappe.db.exists("Leave Application", TEAM_REPORT_LEAVE_NAME):
+		frappe.db.set_value(
+			"Leave Application",
+			TEAM_REPORT_LEAVE_NAME,
+			{"employee": report, "from_date": from_date, "to_date": to_date},
+		)
+	else:
+		leave = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": report,
+				"employee_name": TEAM_REPORT_NAME,
+				"leave_type": TEAM_REPORT_LEAVE_TYPE,
+				"from_date": from_date,
+				"to_date": to_date,
+				"description": "Seeded by helixhr.tests.utils.ensure_team_week_fixtures",
+				"status": "Approved",
+				"docstatus": 1,
+			}
+		)
+		leave.name = TEAM_REPORT_LEAVE_NAME
+		leave.db_insert()
+
+	frappe.db.commit()  # nosemgrep -- test fixture, as in setup_playwright_fixtures
+	return {
+		"manager": manager_name,
+		"report": report,
+		"report_name": TEAM_REPORT_NAME,
+		"leave": TEAM_REPORT_LEAVE_NAME,
+		"leave_type": TEAM_REPORT_LEAVE_TYPE,
+		"from_date": from_date,
+		"to_date": to_date,
+	}
