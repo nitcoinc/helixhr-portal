@@ -655,6 +655,48 @@ def check_checkin_location_retention():
 	)
 
 
+def check_holiday_list_coverage():
+	"""P3-R26: every active employee needs a Holiday List that resolves for
+	today, through their own Holiday List Assignment or their company's.
+
+	Without one the Holidays page says it cannot tell rather than showing a
+	year (P3-R11), the attendance calendar cannot say which days were working
+	days, and a Fix a day request cannot tell a holiday from a working day --
+	so this is the setting whose absence is quietest and reaches furthest.
+	"""
+	from hrms.utils.holiday_list import get_holiday_list_for_employee
+
+	employees = frappe.get_all(
+		"Employee", filters={"status": "Active"}, fields=["name", "employee_name"], limit=2000
+	)
+	if not employees:
+		return _result("Holiday list coverage", PASS, "no active employees yet")
+
+	uncovered = []
+	for employee in employees:
+		try:
+			if not get_holiday_list_for_employee(employee.name, raise_exception=False):
+				uncovered.append(employee.employee_name or employee.name)
+		except Exception:
+			# A resolver that throws is itself an absent list from the
+			# portal's point of view, and this check must never be the thing
+			# that stops the preflight run.
+			uncovered.append(employee.employee_name or employee.name)
+
+	if not uncovered:
+		return _result(
+			"Holiday list coverage", PASS, f"{len(employees)} active employee(s) resolve a holiday list"
+		)
+	shown = ", ".join(uncovered[:5])
+	more = f" and {len(uncovered) - 5} more" if len(uncovered) > 5 else ""
+	return _result(
+		"Holiday list coverage",
+		FAIL,
+		f"no holiday list resolves for {len(uncovered)} active employee(s): {shown}{more} "
+		"-- assign one per employee or per company (Holiday List Assignment)",
+	)
+
+
 def check_frontend_built():
 	path = frappe.get_app_path("helixhr", "www", "helixhr.html")
 	if os.path.exists(path):
@@ -686,5 +728,6 @@ CHECKS = [
 	check_checkin_settings,
 	check_shift_types,
 	check_checkin_location_retention,
+	check_holiday_list_coverage,
 	check_frontend_built,
 ]

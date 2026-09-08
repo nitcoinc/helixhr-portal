@@ -4,7 +4,7 @@ import { createResource } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
-import { addCalendarDays, formatDateRange, mondayOf, today } from '@/lib/dates'
+import { addCalendarDays, dateTileParts, formatDateRange, mondayOf, today } from '@/lib/dates'
 
 // P3-U7 / P3-R20, P3-R21. One week of the team's leave, and nothing else.
 //
@@ -117,10 +117,11 @@ function offLabel(day) {
   return day.is_weekend ? 'Weekend' : ''
 }
 
-const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
+// The date tile (index.css, `.date-tile`). `|| {}` so a value that is not a
+// calendar date renders as an empty tile rather than throwing -- the week's
+// dates are the server's, so it never happens.
 function tile(date) {
-  const [, month, day] = date.split('-')
-  return { month: MONTHS[Number(month) - 1], day: String(Number(day)) }
+  return dateTileParts(date) || {}
 }
 
 // --- the phone's day-first shape ----------------------------------------

@@ -6,7 +6,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import PayslipBreakdown from '@/components/PayslipBreakdown.vue'
 import Icon from '@/components/Icon.vue'
-import { formatDateRange, isCalendarDate } from '@/lib/dates'
+import { dateTileParts, formatDateRange, isCalendarDate } from '@/lib/dates'
 import { formatMoney } from '@/lib/money'
 import { useIsDesktop } from '@/lib/useIsDesktop'
 
@@ -49,15 +49,11 @@ function filterByYear(value) {
 }
 
 // The tile the canvas puts on every row: 56px, the year over the month
-// (`.date-tile` in index.css). Parsed straight off the date-only string
-// rather than through a Date object -- `new Date('2026-09-30')` is midnight
-// UTC and renders as August west of Greenwich, which is the class of bug
-// P2-R5 exists to prevent.
-const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
+// (`.date-tile` in index.css) -- so this row reads the shared splitter's
+// `year` and `month` and not its `day`. `null` for a period the server could
+// not date, which the template already guards with `v-if`.
 function tile(row) {
-  if (!isCalendarDate(row.end_date)) return null
-  const [tileYear, month] = row.end_date.split('-')
-  return { year: tileYear, month: MONTHS[Number(month) - 1] }
+  return dateTileParts(row.end_date)
 }
 
 /** One run of rows per year, newest first -- the server already orders by

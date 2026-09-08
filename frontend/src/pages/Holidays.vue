@@ -3,7 +3,7 @@ import { ref, computed, watch } from 'vue'
 import { createResource } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
-import { formatDate, today } from '@/lib/dates'
+import { dateTileParts, formatDate, today } from '@/lib/dates'
 
 // P3-U3 / P3-R10, P3-R11. The holidays HRMS resolves for *this* employee,
 // which is not the same thing as "the company's holiday list": the
@@ -48,13 +48,11 @@ const groups = computed(() =>
   ].filter((group) => group.rows.length),
 )
 
-// The date tile (index.css, `.date-tile`), split off the date-only string.
-// `new Date('2026-01-01')` is midnight UTC and renders as the 31st of
-// December west of Greenwich, which is the bug P2-R5 exists to prevent.
-const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
+// The date tile (index.css, `.date-tile`). `|| {}` so a value that is not a
+// calendar date renders as an empty tile rather than throwing -- these dates
+// are the server's, so it never happens.
 function tile(date) {
-  const [, month, day] = date.split('-')
-  return { month: MONTHS[Number(month) - 1], day: String(Number(day)) }
+  return dateTileParts(date) || {}
 }
 
 /** The countdown, in the words a person would use. `days_until` is the

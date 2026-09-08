@@ -137,11 +137,7 @@ def timesheet_before_submit(doc, method=None):
 	stops the employee approving their own via the workflow path; this
 	hook is what stops the same self-approval attempt made directly."""
 	user = frappe.session.user
-	if user == "Administrator":
-		return
-	if set(frappe.get_roles(user)) & {"HR Manager", "System Manager"}:
-		return
-	if user == get_manager_user(doc.employee):
+	if _is_hr(user) or user == get_manager_user(doc.employee):
 		return
 
 	frappe.throw(

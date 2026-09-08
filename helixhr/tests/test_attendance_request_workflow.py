@@ -36,6 +36,7 @@ from helixhr.tests.utils import (
 	MANAGER_USER,
 	OTHER_MANAGER_USER,
 	ensure_holiday_list_assignment,
+	ensure_holiday_list_assignment_from,
 	ensure_hr_manager_user,
 	ensure_test_holiday,
 	make_test_employee_and_manager,
@@ -63,8 +64,13 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 		# 2021..2025, one 3-day window per test method, never overlapping
 		# another method's window (3 days apart per digest step).
 		self.start = add_days(today(), -(450 + 3 * (digest % 600)))
+		# The preview resolves the holiday list per date (P3-U9), so the
+		# window this method books needs an assignment covering it -- not just
+		# the current-year one every other suite reads.
+		ensure_holiday_list_assignment_from(self.company, self.start)
 		self.created = []
 		self.attendance = []
+		self.holiday_lists = []
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
@@ -85,6 +91,18 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 			if row.docstatus == 1:
 				row.cancel()
 			frappe.delete_doc("Attendance", name, force=True, ignore_permissions=True)
+		for list_name in self.holiday_lists:
+			# Explicit, like test_api_holidays' own cleanup: one leftover
+			# assignment decides the next test's holiday list.
+			for name in frappe.get_all(
+				"Holiday List Assignment", filters={"holiday_list": list_name}, pluck="name"
+			):
+				frappe.db.set_value("Holiday List Assignment", name, "docstatus", 2)
+				frappe.delete_doc(
+					"Holiday List Assignment", name, force=True, ignore_permissions=True
+				)
+			if frappe.db.exists("Holiday List", list_name):
+				frappe.delete_doc("Holiday List", list_name, force=True, ignore_permissions=True)
 
 	# --- helpers -----------------------------------------------------------
 
@@ -281,6 +299,67 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 		self.assertEqual(preview["mark"], 1)
 		self.assertEqual(preview["skipped"]["weekly_off"], 1)
 		self.assertEqual(preview["skipped"]["holiday"], 0)
+		self.assertTrue(preview["can_send"])
+
+	def test_the_preview_reads_the_list_in_force_over_each_half_of_the_range(self):
+		"""P3-U9. The holiday list is resolved per date, through Holiday List
+		Assignment, and not once as of today.
+
+		Before this fix the preview asked `get_holiday_list_for_employee` with
+		no `as_on`, so a range straddling an assignment change was previewed
+		entirely against today's list: the new list's holiday was offered as a
+		day to mark, and the old list's rows were honoured for days it no
+		longer covered. The three days below tell those two answers apart --
+		the counts alone do not.
+		"""
+		frappe.set_user("Administrator")
+		# In force over the first half (assigned from the window's start by
+		# `ensure_holiday_list_assignment_from`), with a holiday in each half.
+		ensure_test_holiday(self._day(1))
+		ensure_test_holiday(self._day(8))
+
+		handover = "_Test Handover Holiday List"
+		self.holiday_lists.append(handover)
+		if frappe.db.exists("Holiday List", handover):
+			frappe.delete_doc("Holiday List", handover, force=True, ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "Holiday List",
+				"holiday_list_name": handover,
+				"from_date": self._day(),
+				"to_date": self._day(20),
+				"holidays": [{"holiday_date": self._day(7), "description": "Handover holiday"}],
+			}
+		).insert(ignore_permissions=True)
+		# ...and in force from the middle of the window onwards. A company
+		# assignment, not an employee one: an employee assignment would win
+		# outright at both ends of the range and there would be no split to
+		# resolve.
+		assignment = frappe.get_doc(
+			{
+				"doctype": "Holiday List Assignment",
+				"applicable_for": "Company",
+				"assigned_to": self.company,
+				"holiday_list": handover,
+				"from_date": self._day(5),
+			}
+		)
+		assignment.insert(ignore_permissions=True)
+		assignment.submit()
+
+		frappe.set_user(EMPLOYEE_USER)
+		preview = get_attendance_request_preview(self._day(), self._day(9))
+		self.assertTrue(preview["known"])
+		# The footnote names the list in force where the range starts.
+		self.assertEqual(preview["holiday_list"], "_Test Holiday List")
+		buckets = {day["date"]: day["bucket"] for day in preview["days"]}
+		self.assertEqual(buckets[self._day(1)], "skipped")  # the old list's day
+		self.assertEqual(buckets[self._day(7)], "skipped")  # the new list's day
+		# The old list's row on a day it no longer covers is *not* a holiday:
+		# reading one list for the whole range is exactly the bug.
+		self.assertEqual(buckets[self._day(8)], "mark")
+		self.assertEqual(preview["skipped"]["holiday"], 2)
+		self.assertEqual(preview["mark"], 8)
 		self.assertTrue(preview["can_send"])
 
 	def test_a_request_over_an_existing_present_day_is_an_overwrite_and_refused(self):

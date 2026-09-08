@@ -7,7 +7,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
-import { formatDate, formatDateRange, isCalendarDate, today } from '@/lib/dates'
+import { dateTileParts, formatDate, formatDateRange, today } from '@/lib/dates'
 import { toPlainLeaveError } from '@/lib/errorMap'
 import { useIsDesktop } from '@/lib/useIsDesktop'
 
@@ -69,20 +69,14 @@ function showMore() {
   leave.reload()
 }
 
-// The date tile (index.css, `.date-tile`). Parsed straight off the date-only
-// string rather than through a Date object: `new Date('2026-09-14')` is
-// midnight UTC and renders as the 13th west of Greenwich, which is exactly the
-// class of bug P2-R5 and P2-AE3 exist to prevent.
-const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
+// The date tile (index.css, `.date-tile`), plus the artboard's second line on
+// a multi-day tile ("-16") -- what makes a three-day absence readable without
+// reaching the meta line.
 function tile(app) {
-  if (!isCalendarDate(app.from_date)) return null
-  const [, month, day] = app.from_date.split('-')
-  const parsed = { month: MONTHS[Number(month) - 1], day: String(Number(day)), through: '' }
-  // The artboard's second line on a multi-day tile ("-16"), which is what
-  // makes a three-day absence readable without reaching the meta line.
-  if (isCalendarDate(app.to_date) && app.to_date !== app.from_date) {
-    parsed.through = `–${Number(app.to_date.split('-')[2])}`
-  }
+  const parsed = dateTileParts(app.from_date)
+  if (!parsed) return null
+  const through = app.to_date !== app.from_date ? dateTileParts(app.to_date) : null
+  parsed.through = through ? `–${through.day}` : ''
   return parsed
 }
 

@@ -137,6 +137,23 @@ export function weekDates(value) {
   return Array.from({ length: 7 }, (_, offset) => addCalendarDays(start, offset))
 }
 
+// --- the date tile -----------------------------------------------------
+
+const TILE_MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
+
+/** The three parts of the `.date-tile` in index.css -- year, short month and
+ * day -- split straight off a calendar string, or `null` when the value is
+ * not one (P3-U9; four pages had a copy of this).
+ *
+ * Never through a Date object: `new Date('2026-01-01')` is midnight UTC and
+ * renders as the 31st of December west of Greenwich, which is the class of bug
+ * P2-R5 and P2-AE3 exist to prevent. */
+export function dateTileParts(value) {
+  const p = parts(value)
+  if (!p) return null
+  return { year: String(p.y), month: TILE_MONTHS[p.m - 1], day: String(p.d) }
+}
+
 // --- instants ----------------------------------------------------------
 
 const partFormatters = new Map()

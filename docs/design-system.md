@@ -155,7 +155,7 @@ is supposed to cover.
 
 - Use frappe-ui's `Button`, `FormControl` and `Dialog` as-is. Do not restyle their internals — only the theme tokens above change their color. **Reaching for another frappe-ui component is a build decision as well as a design one:** `tailwind.config.cjs` scans a named list of frappe-ui components rather than all of them (scanning all of them cost 167,821 bytes of CSS against U0's 162,906-byte budget), so a new one has to be added to `FRAPPE_UI_IN_USE` or it renders unstyled. `frontend/src/lib/frappeUiComponents.test.js` fails until it is.
 - Never pass `icon`, `iconLeft` or `iconRight` to a frappe-ui component. Those render `FeatherIcon`, and the Feather set is aliased away in `vite.config.js` (96KB of glyphs this portal does not draw). Add the path to `lib/icons.js` and use `Icon.vue`, which is the design system's rule anyway.
-- Status badges use `StatusBadge.vue`, not frappe-ui's `Badge`. It takes a raw Frappe status plus the document kind (`leave` / `timesheet` / `request`) and answers with this product's word — the same status value means different things on different documents, and five pages used to hold five drifting copies of that mapping. The word carries the meaning; the tint is a redundant second channel, so nothing here relies on colour alone.
+- Status badges use `StatusBadge.vue`, not frappe-ui's `Badge`. It takes a raw Frappe status plus the document kind (`leave` / `timesheet` / `request` / `attendance`) and answers with this product's word — the same status value means different things on different documents, and five pages used to hold five drifting copies of that mapping. The word carries the meaning; the tint is a redundant second channel, so nothing here relies on colour alone. The table itself lives in `frontend/src/lib/statusBadge.js` with a vitest file beside it (a `<script setup>` component cannot export, so the mapping had to leave the component to be testable), and `Cancelled` is keyed on `docstatus === 2` ahead of the table — an attendance request cancelled after approval still stores the state `Approved`, and reading it as "Counted" would be a lie.
 - Icons: SVG only (Lucide, matching frappe-ui's own icon set). No emoji as icons anywhere, including empty states.
 - Primary action: one filled `Button` (brand color) per screen. Secondary actions are `Button` with `variant="ghost"` or a plain text link.
 - Motion: 150–300ms transitions only, on hover/focus/state-change. No decorative animation. Respect `prefers-reduced-motion`.
@@ -199,6 +199,65 @@ right on the first painted frame rather than a round trip later.
 | DocType | (never shown) |
 | Employee Self Service role | (never shown) |
 | No data | Nothing here yet — [action hint] |
+| Workflow state: Pending Manager (Attendance Request) | Waiting for [manager] |
+| Workflow state: Pending HR | Waiting for HR |
+| Approve (the manager's button on an attendance request) | Send to HR |
+| Workflow state: Approved (Attendance Request) | Counted |
+| Workflow state: Rejected (Attendance Request) | Sent back |
+| Attendance status: Work From Home | Work from home (calendar legend, day sheet, Approvals) |
+| Attendance Request reason | shown as HRMS spells it — `Work From Home`, `On Duty` — see below |
+| Create Attendance Request | Fix a day |
+| Create HR Request about a day | Report a problem |
+| Salary Slip status: Withheld | Withheld, ask HR |
+| Salary Slip with `amended_from` set | Revised |
+| Employee Checkin | Check in / Check out (a *punch* in prose, never on screen) |
+| Salary Slip | Payslip |
+| Holiday List | your holiday list |
+
+The phase 3 words, and why each one is the word (P3-U9):
+
+- **Waiting for HR** already existed for the one legacy leave defect row, and it
+  now means what it says on an attendance request: the manager has agreed and HR
+  has not confirmed yet. Only `Pending Manager` ever substitutes a person's
+  name; `Pending HR` never names an individual, because HR is a queue, not a
+  person the employee can chase.
+- **Send to HR** is the manager's primary button, not "Approve". Approve would
+  claim the decision is final, and it is not — the day does not count until HR
+  confirms. The label says where the request goes next, which is also what the
+  sentence under the buttons says.
+- **Counted** is the end state, not "Approved". What an employee wants to know
+  is whether the day counts as a working day; "Approved" is a status about a
+  document. It is also the fourth step on `StepStrip`, so the word appears
+  before it is true, as the name of the thing being waited for.
+- **Sent back** is the same word leave and timesheets already use, extended to
+  requests, with the reason quoted next to it. There is no "Rejected" anywhere
+  in the portal.
+- **Work from home** is the sentence-case word everywhere the portal *describes*
+  a day: the calendar legend, the day sheet and the manager's Approvals row.
+  `Work From Home` in title case is a data value — an HRMS field option, an
+  Attendance status and a legend key.
+  **The Fix a day sheet is the exception, and it is a known gap.** Its two
+  reason pills render the strings the server sends
+  (`get_my_attendance_requests().reasons`, falling back to `Work From Home` and
+  `On Duty`), so an employee reads HRMS's own title-case options with no
+  explanatory line — where the canvas draws "Worked from home · Counts as a
+  normal working day" and "On duty elsewhere · Client site, travel or offsite
+  work". The two sentences that *were* written live one level up, on the day
+  sheet's two buttons. Recorded as a deviation in
+  `docs/design-system/screens.md`; the fix is a label map in the sheet, not a
+  server change, because the reason value must stay HRMS's.
+- **Fix a day** and **Report a problem** are two buttons on the day sheet, and
+  the split is the product decision behind P3-KTD10: a work-from-home or
+  on-duty day is a request the manager and HR can approve into real attendance,
+  and anything else — a missed punch, a wrong time — is a conversation with HR.
+  Each carries one sentence saying which is which, so the employee is not asked
+  to know the difference.
+- **Withheld** is HRMS's own status word, kept because HR uses it and an
+  employee will hear it from HR; it is always followed by "ask HR", and the row
+  has no PDF, because a withheld slip is not a document to take away.
+- **Revised** is the portal's word for a slip with `amended_from` set. "Amended"
+  is Frappe vocabulary and "Corrected" would imply the first one was wrong when
+  it may simply have been re-run.
 
 Every empty state names the next action ("You have no leave requests yet. Ask for leave to get started.").
 

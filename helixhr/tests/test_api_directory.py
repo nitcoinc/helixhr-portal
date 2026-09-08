@@ -14,6 +14,10 @@ from helixhr.tests.utils import (
 ALLOWED_KEYS = {
 	"name",
 	"employee_name",
+	# The monogram the page draws, derived from `employee_name` on the server
+	# so the directory's avatar matches every other avatar in the portal
+	# (P3-U9). It publishes nothing the row does not already carry.
+	"initials",
 	"designation",
 	"department",
 	"manager",

@@ -201,6 +201,55 @@ def ensure_hr_manager_user():
 	return HR_MANAGER_USER
 
 
+def ensure_holiday_list_assignment_from(company, from_date):
+	"""The shared company assignment, plus one that actually covers
+	`from_date`.
+
+	P3-U9: the attendance-request preview resolves the holiday list *per date*
+	through Holiday List Assignment (`_holiday_list_spans`) instead of once as
+	of today, which is what makes a range straddling an assignment change read
+	the right list. A suite that books a past-year window therefore needs an
+	assignment covering that window, or the preview correctly answers "cannot
+	tell". Resolution takes the latest `from_date <= as_on`, so this extra row
+	never changes what resolves for today.
+
+	Idempotent, and committed by the callers' own fixtures: an assignment for
+	the same company and `from_date` is a duplicate HRMS refuses.
+	"""
+	from frappe.utils import getdate
+
+	list_name = ensure_holiday_list_assignment(company)
+	holiday_list = frappe.get_doc("Holiday List", list_name)
+	if getdate(from_date) < getdate(holiday_list.from_date):
+		# The assignment's start must fall inside its list's own dates.
+		holiday_list.from_date = str(from_date)
+		holiday_list.save(ignore_permissions=True)
+
+	if frappe.db.exists(
+		"Holiday List Assignment",
+		{
+			"assigned_to": company,
+			"holiday_list": list_name,
+			"from_date": str(from_date),
+			"docstatus": 1,
+		},
+	):
+		return list_name
+
+	assignment = frappe.get_doc(
+		{
+			"doctype": "Holiday List Assignment",
+			"applicable_for": "Company",
+			"assigned_to": company,
+			"holiday_list": list_name,
+			"from_date": str(from_date),
+		}
+	)
+	assignment.insert(ignore_permissions=True)
+	assignment.submit()
+	return list_name
+
+
 def ensure_test_holiday(holiday_date, weekly_off=False):
 	"""One Holiday row on `_Test Holiday List` for `holiday_date`, widening
 	the list's own date range backwards when the date falls before it.

@@ -41,6 +41,7 @@ from helixhr.events import (
 	REQUEST_REJECTED,
 	REQUEST_WITHDRAWABLE,
 	_approver_user,
+	_is_hr,
 )
 from helixhr.utils import (
 	PROFILE_EDITABLE_FIELDS,
@@ -925,43 +926,66 @@ def _attendance_request_summaries(employee, today):
 	]
 
 
-def _requested_day_status(rows):
-	"""What attendance already exists for every day the given requests cover,
-	as one query for the whole queue rather than one per request (P2-R22).
+def _attendance_status_by_date(employees, start, end):
+	"""What attendance already exists for these employees across the range, as
+	`{(employee, "YYYY-MM-DD"): status}` -- one query for the whole set rather
+	than one per person or per request (P2-R22, P3-U9).
 
-	`get_all` on purpose: the rows themselves came back from a permission
-	-checked `get_list`, so the manager may already act on each of them, and
-	the days a request names are exactly the evidence P3-R16 says they must
-	see before deciding.
+	The one lookup behind all three readers: the Approvals queue, one decision's
+	detail and the attendance-request preview. Regardless of shift, deliberately
+	-- HRMS's own lookup is shift-scoped, so an open-ended Shift Assignment
+	(which leaves `shift` empty on the request) would hide exactly the row an
+	approved request goes on to rewrite (P3-KTD14).
+
+	`get_all` on purpose: the queue's rows came back from a permission-checked
+	`get_list`, one detail is gated by `_assert_may_act_on`, and the preview
+	only ever asks about the session's own employee -- and the days a request
+	names are exactly the evidence P3-R16 says the manager must see before
+	deciding.
 	"""
+	if not employees:
+		return {}
+	return {
+		(row.employee, str(row.attendance_date)): row.status
+		for row in frappe.get_all(
+			"Attendance",
+			filters={
+				"employee": ["in", list(employees)],
+				"attendance_date": ["between", [str(start), str(end)]],
+				"docstatus": ["<", 2],
+			},
+			fields=["employee", "attendance_date", "status"],
+		)
+	}
+
+
+def _attendance_days(employee, start, end, statuses):
+	"""One `{date, status}` per day of the range, read out of the map
+	`_attendance_status_by_date` returned (P3-U9)."""
+	days = []
+	date, last = _as_date(start), _as_date(end)
+	while date <= last:
+		iso = str(date)
+		days.append({"date": iso, "status": statuses.get((employee, iso))})
+		date = add_days(date, 1)
+	return days
+
+
+def _requested_day_status(rows):
+	"""What the calendar already shows for every day the given requests cover,
+	by request name -- one query for the whole queue (P2-R22, P3-R16)."""
 	if not rows:
 		return {}
 
-	employees = {row.employee for row in rows}
-	start = min(_as_date(row.from_date) for row in rows)
-	end = max(_as_date(row.to_date) for row in rows)
-	existing = {}
-	for entry in frappe.get_all(
-		"Attendance",
-		filters={
-			"employee": ["in", list(employees)],
-			"attendance_date": ["between", [str(start), str(end)]],
-			"docstatus": ["<", 2],
-		},
-		fields=["employee", "attendance_date", "status"],
-	):
-		existing[(entry.employee, str(entry.attendance_date))] = entry.status
-
-	answer = {}
-	for row in rows:
-		days = []
-		date, last = _as_date(row.from_date), _as_date(row.to_date)
-		while date <= last:
-			iso = str(date)
-			days.append({"date": iso, "status": existing.get((row.employee, iso))})
-			date = add_days(date, 1)
-		answer[row.name] = days
-	return answer
+	statuses = _attendance_status_by_date(
+		{row.employee for row in rows},
+		min(_as_date(row.from_date) for row in rows),
+		max(_as_date(row.to_date) for row in rows),
+	)
+	return {
+		row.name: _attendance_days(row.employee, row.from_date, row.to_date, statuses)
+		for row in rows
+	}
 
 
 # Per-kind, never "not leave means timesheet" (P3-U6 step 0). A third kind
@@ -2083,42 +2107,65 @@ def _request_range(from_date, to_date):
 	return start, end
 
 
-def _holiday_kinds(employee, start, end):
+def _holiday_kinds(employee, start, end, cache=None):
 	"""Which dates in the range are holidays, and which of those are the
 	employee's weekly off -- two different sentences on the screen, and the
-	same row in HRMS's answer (P3-KTD14)."""
-	list_name = get_holiday_list_for_employee(employee, raise_exception=False)
-	if not list_name:
-		return None, None
-	kinds = {}
-	for row in frappe.get_all(
-		"Holiday",
-		filters={"parent": list_name, "holiday_date": ["between", [str(start), str(end)]]},
-		fields=["holiday_date", "weekly_off"],
-	):
-		kinds[str(row.holiday_date)] = "weekly_off" if cint(row.weekly_off) else "holiday"
-	return list_name, kinds
+	same row in HRMS's answer (P3-KTD14).
 
+	Resolved through the Holidays section's `_holiday_list_spans` (P3-U3), so a
+	range that straddles a Holiday List Assignment change reads each half from
+	the list actually in force over it. Resolving the list once, as of today --
+	which is what this did before P3-U9 -- returned the wrong list for exactly
+	that range, and `_holiday_list_spans` is the function that exists to handle
+	it.
 
-def _attendance_rows_by_date(employee, start, end):
-	"""Existing attendance for the range, by date, regardless of shift.
+	The name returned is the list in force at `start`, which is what the
+	preview's footnote says; the map covers the whole range whichever list each
+	day came from. `(None, None)` means no list resolves at all -- the "cannot
+	tell yet, ask HR" state, never a range with no holidays in it (P3-R11).
 
-	HRMS's own lookup is shift-scoped, so an open-ended Shift Assignment
-	(which leaves `shift` empty on the request) would hide exactly the row
-	an approved request goes on to rewrite (P3-KTD14).
+	`cache` is optional and is passed straight to `_holiday_dates_by_span`.
 	"""
-	rows = {}
-	for row in frappe.get_all(
-		"Attendance",
-		filters={
-			"employee": employee,
-			"attendance_date": ["between", [str(start), str(end)]],
-			"docstatus": ["<", 2],
-		},
-		fields=["name", "attendance_date", "status"],
-	):
-		rows[str(row.attendance_date)] = row
-	return rows
+	spans = _holiday_list_spans(employee, _as_date(start), _as_date(end))
+	if not spans:
+		return None, None
+	return spans[0]["holiday_list"], _holiday_dates_by_span(spans, cache)
+
+
+def _holiday_dates_by_span(spans, cache=None):
+	"""Every Holiday row across these spans, as `{date: "holiday" |
+	"weekly_off"}`.
+
+	`cache` (when given) is keyed by the resolved span, so a team on one holiday
+	list costs one Holiday query however many people are in it.
+
+	The rows are read with `ignore_permissions`, deliberately, for the reason
+	the section note above `get_my_holidays` gives: role Employee has no read on
+	Holiday List at all (P2-R26), and the list names here are server-derived
+	from the employee, so there is nothing a caller can steer (P3-KTD1).
+	"""
+	kinds = {}
+	for span in spans:
+		key = (span["holiday_list"], str(span["from_date"]), str(span["to_date"]))
+		found = cache.get(key) if cache is not None else None
+		if found is None:
+			found = {
+				str(getdate(row.holiday_date)): ("weekly_off" if cint(row.weekly_off) else "holiday")
+				for row in frappe.get_all(
+					"Holiday",
+					filters={
+						"parent": span["holiday_list"],
+						"parenttype": "Holiday List",
+						"holiday_date": ["between", [str(span["from_date"]), str(span["to_date"])]],
+					},
+					fields=["holiday_date", "weekly_off"],
+					ignore_permissions=True,
+				)
+			}
+			if cache is not None:
+				cache[key] = found
+		kinds.update(found)
+	return kinds
 
 
 @frappe.whitelist()
@@ -2143,7 +2190,21 @@ def get_attendance_request_preview(
 	employee = get_current_employee()
 	start, end = _request_range(from_date, to_date)
 	reason = _assert_request_reason(reason)
+	return _attendance_request_preview(
+		employee, start, end, half_day=half_day, half_day_date=half_day_date, reason=reason
+	)
 
+
+def _attendance_request_preview(
+	employee, start, end, half_day=0, half_day_date=None, reason="Work From Home"
+):
+	"""The preview itself, on an already-resolved employee and an
+	already-validated range (P3-U9).
+
+	Separate from the whitelisted method so that `send_my_attendance_request`,
+	which re-derives the preview against the stored record, does not spend the
+	caller's preview rate-limit budget on the send.
+	"""
 	list_name, holidays = _holiday_kinds(employee, start, end)
 	total_days = date_diff(end, start) + 1
 	if holidays is None:
@@ -2162,7 +2223,7 @@ def get_attendance_request_preview(
 	warnings = _request_warnings(
 		employee, start, end, half_day=half_day, half_day_date=half_day_date, reason=reason
 	)
-	existing = _attendance_rows_by_date(employee, start, end)
+	existing = _attendance_status_by_date([employee], start, end)
 
 	days = []
 	counts = {"mark": 0, "replaces_absent": 0, "overwrite": 0}
@@ -2179,17 +2240,15 @@ def get_attendance_request_preview(
 			skipped["on_leave"] += 1
 			days.append({"date": iso, "bucket": "skipped", "reason": "on_leave"})
 		else:
-			row = existing.get(iso)
-			if row and row.status in _REQUEST_OVERWRITE_STATUSES:
+			status = existing.get((employee, iso))
+			if status in _REQUEST_OVERWRITE_STATUSES:
 				counts["overwrite"] += 1
-				days.append({"date": iso, "bucket": "overwrite", "reason": row.status})
+				days.append({"date": iso, "bucket": "overwrite", "reason": status})
 			else:
 				counts["mark"] += 1
-				if row:
+				if status:
 					counts["replaces_absent"] += 1
-				days.append(
-					{"date": iso, "bucket": "mark", "reason": row.status if row else None}
-				)
+				days.append({"date": iso, "bucket": "mark", "reason": status})
 		date = add_days(date, 1)
 
 	return {
@@ -2209,7 +2268,7 @@ def _request_warnings(employee, start, end, half_day=0, half_day_date=None, reas
 	Reusing `get_attendance_warnings` rather than reimplementing it keeps the
 	approved-leave rule (including its half-day nuance) in one place -- HRMS's.
 	Only its Holiday and On Leave answers are used; the existing-row question
-	is answered by `_attendance_rows_by_date`, because HRMS's is shift-scoped
+	is answered by `_attendance_status_by_date`, because HRMS's is shift-scoped
 	(P3-KTD14).
 	"""
 	doc = frappe.new_doc("Attendance Request")
@@ -2328,12 +2387,16 @@ def send_my_attendance_request(name, expected_modified=None):
 		frappe.throw(_("This one has already been sent. Reload to see where it is."))
 	_assert_expected_state(expected_modified, current.modified)
 
-	preview = get_attendance_request_preview(
-		current.from_date,
-		current.to_date,
+	# The plain preview, not the whitelisted method: a Send is not a preview
+	# and must not consume the caller's preview budget (P3-U9). The stored
+	# range and reason are still validated, exactly as the method validates a
+	# caller's.
+	preview = _attendance_request_preview(
+		employee,
+		*_request_range(current.from_date, current.to_date),
 		half_day=current.half_day,
 		half_day_date=current.half_day_date,
-		reason=current.reason,
+		reason=_assert_request_reason(current.reason),
 	)
 	if not preview["known"]:
 		frappe.throw(
@@ -3229,24 +3292,17 @@ def get_approval_detail(kind, name):
 
 	doc = frappe.get_doc(doctype, name)
 	_assert_may_act_on(doc)
-	return _APPROVAL_DETAIL[doctype](doc)
+	return _APPROVAL_KINDS[doctype]["detail"](doc)
 
 
-# The three kinds, and the doctype each one names. Every helper below
-# dispatches on the doctype through a map of its own rather than branching on
-# one of them and treating the rest as the other (P3-U6 step 0).
+# The three kinds, and the doctype each one names -- the alias the whitelisted
+# `kind` parameters are validated against. Everything else that is per-kind
+# lives in `_APPROVAL_KINDS`, keyed by the doctype, rather than in a map of its
+# own per question (P3-U6 step 0, P3-U9).
 _APPROVAL_DOCTYPES = {
 	"leave": "Leave Application",
 	"timesheet": "Timesheet",
 	"attendance": "Attendance Request",
-}
-
-# The field each kind's lifecycle lives in, which is what the stale-decision
-# token compares (P2-U7 step 3).
-_APPROVAL_STATE_FIELD = {
-	"Leave Application": "status",
-	"Timesheet": "workflow_state",
-	"Attendance Request": "workflow_state",
 }
 
 
@@ -3365,9 +3421,7 @@ def _attendance_decision_detail(doc):
 	detail = _decision_head(doc, doc.employee_name)
 	start, end = _as_date(doc.from_date), _as_date(doc.to_date)
 	_, holidays = _holiday_kinds(doc.employee, start, end)
-	shown = _requested_day_status(
-		[frappe._dict(name=doc.name, employee=doc.employee, from_date=start, to_date=end)]
-	)
+	statuses = _attendance_status_by_date([doc.employee], start, end)
 	detail.update(
 		{
 			"kind": "attendance",
@@ -3390,20 +3444,13 @@ def _attendance_decision_detail(doc):
 					"status": day["status"],
 					"holiday": (holidays or {}).get(day["date"]),
 				}
-				for day in shown.get(doc.name, [])
+				for day in _attendance_days(doc.employee, start, end, statuses)
 			],
 			"sent_on": str(doc.modified) if doc.modified else None,
 			"age_days": _age_in_days(doc.modified, _as_date(user_today())),
 		}
 	)
 	return detail
-
-
-_APPROVAL_DETAIL = {
-	"Leave Application": _leave_decision_detail,
-	"Timesheet": _timesheet_decision_detail,
-	"Attendance Request": _attendance_decision_detail,
-}
 
 
 def _project_and_task_names(lines):
@@ -3490,8 +3537,12 @@ def act_on_approval(
 	if comment:
 		doc.add_comment("Comment", comment)
 
-	_APPROVAL_ACT[doctype](doc, action)
-	return {"name": doc.name, "action": action, "state": doc.get(_APPROVAL_STATE_FIELD[doctype])}
+	_APPROVAL_KINDS[doctype]["act"](doc, action)
+	return {
+		"name": doc.name,
+		"action": action,
+		"state": doc.get(_APPROVAL_KINDS[doctype]["state_field"]),
+	}
 
 
 def _act_through_workflow(doc, action):
@@ -3534,54 +3585,30 @@ def _may_act_on_attendance_request(doc, user):
 		)
 
 
-_MAY_ACT_ON = {
-	"Leave Application": _may_act_on_leave,
-	"Timesheet": _may_act_on_timesheet,
-	"Attendance Request": _may_act_on_attendance_request,
-}
-
-
 def _assert_may_act_on(doc):
 	"""Refuse anyone but this record's own approver (or HR) before a single
-	side effect runs (P2-U1 step 9)."""
+	side effect runs (P2-U1 step 9).
+
+	`events._is_hr` is the one definition of "HR" in this app (Administrator, HR
+	Manager or System Manager); it is not repeated here. The doctype is indexed
+	directly: both entry points -- `get_approval_detail` and `act_on_approval` --
+	have already refused anything that is not one of `_APPROVAL_DOCTYPES`, so a
+	missing key here would be a programming error, not a caller's input.
+	"""
 	user = frappe.session.user
-	if user == "Administrator" or set(frappe.get_roles(user)) & {"HR Manager", "System Manager"}:
+	if _is_hr(user):
 		return
 
-	checker = _MAY_ACT_ON.get(doc.doctype)
-	if not checker:
-		frappe.throw(_("Not a valid request."))
-	checker(doc, user)
-
-
-# The one state per kind in which the portal has a decision to offer, and the
-# sentence for a caller who arrives after it has moved. Attendance Request is
-# Pending Manager only: HR's second step is Desk's, so an HR Manager acting
-# on a Pending HR item *from the portal* is refused here as already decided
-# (P3-KTD7).
-_STILL_OPEN = {
-	"Leave Application": (
-		lambda doc: cint(doc.docstatus) == 0 and doc.status == "Open",
-		"This leave request has already been decided. Reload to see the result.",
-	),
-	"Timesheet": (
-		lambda doc: doc.workflow_state == "Pending Approval",
-		"This timesheet has already been decided. Reload to see the result.",
-	),
-	"Attendance Request": (
-		lambda doc: cint(doc.docstatus) == 0 and doc.workflow_state == REQUEST_PENDING_MANAGER,
-		"This attendance request has already been decided. Reload to see the result.",
-	),
-}
+	_APPROVAL_KINDS[doc.doctype]["may_act"](doc, user)
 
 
 def _assert_still_open(doc):
 	"""One decision per record. A second decision -- the losing half of a
 	concurrent approve/approve or approve/reject -- is refused here, before
 	it can add a contradicting comment or a second ledger effect."""
-	is_open, message = _STILL_OPEN[doc.doctype]
-	if not is_open(doc):
-		frappe.throw(_(message))
+	kind = _APPROVAL_KINDS[doc.doctype]
+	if not kind["is_open"](doc):
+		frappe.throw(_(kind["open_message"]))
 
 
 def _assert_expected_state(expected_modified, current_modified):
@@ -3597,7 +3624,7 @@ def _assert_expected_workflow_state(doc, expected_state):
 	harmless edit and a decision somebody else already made."""
 	if not expected_state:
 		return
-	current = doc.get(_APPROVAL_STATE_FIELD[doc.doctype])
+	current = doc.get(_APPROVAL_KINDS[doc.doctype]["state_field"])
 	if expected_state != current:
 		frappe.throw(_("This has already been decided. Reload to see the result."))
 
@@ -3632,6 +3659,53 @@ def _act_on_leave_application(doc, action):
 		doc.save()
 
 
+# Everything that is per-kind about a decision, in one doctype-keyed table
+# (P3-U6 step 0, P3-U9). It replaced five parallel maps over the same three
+# doctypes -- five places a fourth kind could be half-registered, which is the
+# `if timesheet else leave` failure mode in a different shape. One table, one
+# completeness test.
+#
+#   state_field    where the kind's lifecycle lives, which is what the
+#                  stale-decision token compares (P2-U7 step 3)
+#   detail         the evidence `get_approval_detail` returns
+#   may_act        who may open or decide this record, checked on the server
+#                  on every read of a detail and every action (P2-R10, R26)
+#   is_open        the one state in which the portal has a decision to offer,
+#                  and `open_message` the sentence for a caller who arrives
+#                  after it has moved. Attendance Request is Pending Manager
+#                  only: HR's second step is Desk's, so an HR Manager acting
+#                  on a Pending HR item *from the portal* is refused as
+#                  already decided (P3-KTD7).
+#   act            the lifecycle a decision actually runs
+_APPROVAL_KINDS = {
+	"Leave Application": {
+		"state_field": "status",
+		"detail": _leave_decision_detail,
+		"may_act": _may_act_on_leave,
+		"is_open": lambda doc: cint(doc.docstatus) == 0 and doc.status == "Open",
+		"open_message": "This leave request has already been decided. Reload to see the result.",
+		"act": _act_on_leave_application,
+	},
+	"Timesheet": {
+		"state_field": "workflow_state",
+		"detail": _timesheet_decision_detail,
+		"may_act": _may_act_on_timesheet,
+		"is_open": lambda doc: doc.workflow_state == "Pending Approval",
+		"open_message": "This timesheet has already been decided. Reload to see the result.",
+		"act": _act_through_workflow,
+	},
+	"Attendance Request": {
+		"state_field": "workflow_state",
+		"detail": _attendance_decision_detail,
+		"may_act": _may_act_on_attendance_request,
+		"is_open": lambda doc: cint(doc.docstatus) == 0
+		and doc.workflow_state == REQUEST_PENDING_MANAGER,
+		"open_message": "This attendance request has already been decided. Reload to see the result.",
+		"act": _act_through_workflow,
+	},
+}
+
+
 # Documents (R19, P2-R19)
 
 
@@ -3655,13 +3729,6 @@ def get_my_documents():
 		fields=["name", "title", "url", "company", "description"],
 		order_by="title asc",
 	)
-
-
-_APPROVAL_ACT = {
-	"Leave Application": _act_on_leave_application,
-	"Timesheet": _act_through_workflow,
-	"Attendance Request": _act_through_workflow,
-}
 
 
 # ---------------------------------------------------------------------------
@@ -4269,6 +4336,9 @@ def _directory_projection(row, manager_names):
 	person = {
 		"name": row.name,
 		"employee_name": row.employee_name,
+		# The monogram, from the server, so the directory's avatar and the
+		# Approvals queue's are the same two letters (P3-U9).
+		"initials": _initials(row.employee_name),
 		"designation": row.designation or None,
 		"department": row.department or None,
 		"manager": row.reports_to or None,
@@ -4417,6 +4487,11 @@ def get_my_team_week(week_start=None):
 	same normalisation Timesheet uses, so "this week" means one thing across
 	the portal whatever the site's week-start setting says.
 	"""
+	# P3-R25: bounded like the directory, and for the same reason -- this is
+	# the one portal read that fans out across other people's rows, so a
+	# script walking weeks is worth a ceiling even though any single
+	# week's payload is small.
+	rate_limit_per_user("get_my_team_week")
 	manager = get_current_employee()
 	today = user_today()
 	monday, sunday = get_week_bounds(week_start or today)
@@ -4555,32 +4630,12 @@ def _team_holiday_dates(employee, start, end, cache):
 	"""The holiday dates HRMS resolves for `employee` across `start`..`end`,
 	as a set of `YYYY-MM-DD` strings.
 
-	Reuses the Holidays section's span resolver (P3-U3) rather than adding a
-	third holiday resolver to this module. `cache` is keyed by the resolved
-	span, so a team on one holiday list costs one Holiday query however many
-	people are in it.
-
-	Weekly offs are excluded, as on the Holidays page: Saturday and Sunday
-	are already dimmed as weekends, and a list that carries one Holiday row
-	per weekend day would otherwise report every weekend as a named holiday.
+	The one resolver every screen shares (`_holiday_kinds`, P3-U3, P3-U9) with
+	the weekly offs dropped, as on the Holidays page: Saturday and Sunday are
+	already dimmed as weekends, and a list that carries one Holiday row per
+	weekend day would otherwise report every weekend as a named holiday. `cache`
+	is the per-span one, so a team on one holiday list costs one Holiday query
+	however many people are in it.
 	"""
-	dates = set()
-	for span in _holiday_list_spans(employee, getdate(start), getdate(end)):
-		key = (span["holiday_list"], str(span["from_date"]), str(span["to_date"]))
-		if key not in cache:
-			cache[key] = {
-				str(getdate(value))
-				for value in frappe.get_all(
-					"Holiday",
-					filters={
-						"parent": span["holiday_list"],
-						"parenttype": "Holiday List",
-						"holiday_date": ["between", [str(span["from_date"]), str(span["to_date"])]],
-						"weekly_off": 0,
-					},
-					pluck="holiday_date",
-					ignore_permissions=True,
-				)
-			}
-		dates |= cache[key]
-	return dates
+	_, kinds = _holiday_kinds(employee, start, end, cache)
+	return {date for date, kind in (kinds or {}).items() if kind != "weekly_off"}

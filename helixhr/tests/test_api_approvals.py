@@ -19,6 +19,7 @@ from helixhr.tests.utils import (
 	MANAGER_USER,
 	OTHER_MANAGER_USER,
 	ensure_holiday_list_assignment,
+	ensure_holiday_list_assignment_from,
 	ensure_hr_manager_user,
 	ensure_leave_allocation,
 	ensure_leave_approver_role,
@@ -1004,6 +1005,10 @@ class TestAttendanceRequestApprovals(IntegrationTestCase):
 
 		digest = int(hashlib.md5(self.id().encode()).hexdigest(), 16)
 		self.start = add_days(today(), -(450 + 3 * (digest % 600)))
+		# The attendance-request preview resolves the holiday list per date
+		# (P3-U9), so this method's past-year window needs an assignment that
+		# covers it and not only the current-year one.
+		ensure_holiday_list_assignment_from(self.company, self.start)
 		self.created = []
 
 	def tearDown(self):
@@ -1194,23 +1199,25 @@ class TestAttendanceRequestApprovals(IntegrationTestCase):
 		self.assertEqual(self._state(name), "Pending Manager")
 
 	def test_every_kind_is_registered_in_every_per_kind_map(self):
-		"""P3-U6 step 0. The maps replaced `if timesheet else leave`, where a
-		third doctype silently became a Timesheet. A kind registered in one
-		map and not another would reintroduce exactly that."""
+		"""P3-U6 step 0, P3-U9. The table replaced `if timesheet else leave`,
+		where a third doctype silently became a Timesheet. A kind missing one
+		of the per-kind answers would reintroduce exactly that."""
 		from helixhr import api
 
 		doctypes = set(api._APPROVAL_DOCTYPES.values())
-		self.assertEqual(set(api._APPROVAL_DETAIL), doctypes)
-		self.assertEqual(set(api._APPROVAL_ACT), doctypes)
-		self.assertEqual(set(api._MAY_ACT_ON), doctypes)
-		self.assertEqual(set(api._STILL_OPEN), doctypes)
-		self.assertEqual(set(api._APPROVAL_STATE_FIELD), doctypes)
+		self.assertEqual(set(api._APPROVAL_KINDS), doctypes)
+		for doctype, kind in api._APPROVAL_KINDS.items():
+			self.assertEqual(
+				set(kind),
+				{"state_field", "detail", "may_act", "is_open", "open_message", "act"},
+				msg=doctype,
+			)
 		self.assertEqual(set(api._QUEUE_TITLE), set(api._APPROVAL_DOCTYPES))
 		self.assertEqual(len(api._APPROVAL_SUMMARY_COLLECTORS), len(doctypes))
 		self.assertEqual(len(api._DECIDED_COLLECTORS), len(doctypes))
 		# Each kind's "already decided" sentence names its own record type.
 		self.assertEqual(
-			len({message for _, message in api._STILL_OPEN.values()}), len(doctypes)
+			len({kind["open_message"] for kind in api._APPROVAL_KINDS.values()}), len(doctypes)
 		)
 
 	def test_a_decided_request_is_the_managers_receipt(self):

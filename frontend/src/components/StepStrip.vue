@@ -1,5 +1,6 @@
 <script setup>
 import { computed } from 'vue'
+import { TONE } from '@/lib/statusBadge'
 
 // P3-U6 / P3-R17. The two steps an attendance request goes through, drawn as
 // the four things an employee actually wants to know: that it left, who has
@@ -22,10 +23,15 @@ const props = defineProps({
   approver: { type: String, default: '' },
 })
 
-const DONE = 'bg-surface-green-2 text-ink-green-3'
-const CURRENT = 'bg-surface-amber-1 text-ink-amber-3'
+// The tones are the badge's (`lib/statusBadge.js`), so a step and the badge
+// beside it cannot disagree about what "done" or "sent back" looks like
+// (P3-U9). The one exception is the resting step: a step that has not been
+// reached yet is a *hint* of a step, one shade lighter than the badge's
+// resting ink, which reads as a real status.
+const DONE = TONE.done
+const CURRENT = TONE.waiting
+const SENT_BACK = TONE.sentBack
 const RESTING = 'bg-surface-gray-2 text-ink-gray-5'
-const SENT_BACK = 'bg-surface-red-2 text-ink-red-4'
 
 // How far along each state is: the index of the step currently in progress,
 // or the number of steps once everything is done.

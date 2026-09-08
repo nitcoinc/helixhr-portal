@@ -1,6 +1,8 @@
 // P2-U3 / P2-R5 / P2-R9, moved out of StatusBadge.vue in P3-U1 step 3 so the
 // mapping is a plain function a unit test can hold (`<script setup>` cannot
-// export). StatusBadge.vue is the only renderer; nothing else imports this.
+// export). StatusBadge.vue is the only renderer of `resolveStatus`;
+// StepStrip.vue imports `TONE` so the strip and the badge cannot disagree
+// about a tone pair (P3-U9).
 
 // Tone is a *pair* (ink, surface), never a hue applied to text alone. Every
 // pair is one of the four measured status pairs in docs/design-system.md.

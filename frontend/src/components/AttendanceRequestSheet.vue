@@ -156,6 +156,8 @@ const sendLabel = computed(() =>
 )
 
 const create = createResource({ url: 'helixhr.api.create_my_attendance_request', method: 'POST' })
+// One resource for the one endpoint, used by both callers: a brand-new
+// request's Send (below) and a stored Draft's Send action (P3-U9).
 const send = createResource({ url: 'helixhr.api.send_my_attendance_request', method: 'POST' })
 
 /**
@@ -167,11 +169,9 @@ const send = createResource({ url: 'helixhr.api.send_my_attendance_request', met
  * Requests column with a Send action, rather than vanishing along with the
  * explanation the employee just typed.
  */
-async function submit() {
+function submit() {
   if (!canSend.value) return
-  error.value = ''
-  sending.value = true
-  try {
+  return run(async () => {
     const draft = await create.submit({
       from_date: fromDate.value,
       to_date: halfDay.value ? fromDate.value : toDate.value,
@@ -180,13 +180,7 @@ async function submit() {
       explanation: explanation.value,
     })
     await send.submit({ name: draft.name, expected_modified: draft.modified })
-    emit('changed')
-    open.value = false
-  } catch (e) {
-    error.value = toPlainMessage(e?.messages?.[0] ?? e?.message)
-  } finally {
-    sending.value = false
-  }
+  })
 }
 
 // --- one existing request ------------------------------------------------
@@ -199,21 +193,28 @@ const request = createResource({
 const shown = computed(() => (props.name ? request.data : null))
 
 const withdraw = createResource({ url: 'helixhr.api.withdraw_my_attendance_request', method: 'POST' })
-const sendDraft = createResource({ url: 'helixhr.api.send_my_attendance_request', method: 'POST' })
 
-async function act(resource, params) {
+/** The half every action on this sheet shares: one in-flight flag, one
+ * plain-sentence error, close on success, and -- when a stored request is on
+ * screen -- reload it on failure, because a refusal usually means it moved
+ * (P3-U9). */
+async function run(action) {
   error.value = ''
   sending.value = true
   try {
-    await resource.submit(params)
+    await action()
     emit('changed')
     open.value = false
   } catch (e) {
     error.value = toPlainMessage(e?.messages?.[0] ?? e?.message)
-    request.fetch()
+    if (props.name) request.fetch()
   } finally {
     sending.value = false
   }
+}
+
+function act(resource, params) {
+  return run(() => resource.submit(params))
 }
 
 // Reopening is a fresh ask, and a stale half-typed explanation must never
@@ -345,7 +346,7 @@ const title = computed(() => {
               theme="blue"
               :loading="sending"
               :disabled="sending || missingApprover"
-              @click="act(sendDraft, { name: shown.name, expected_modified: shown.modified })"
+              @click="act(send, { name: shown.name, expected_modified: shown.modified })"
             >
               {{ sendLabel }}
             </Button>

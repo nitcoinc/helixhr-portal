@@ -559,3 +559,81 @@ class TestPreflightP3U1(IntegrationTestCase):
 			self.assertGreater(limit, 0, action)
 			self.assertGreater(seconds, 0, action)
 		self.assertEqual(preflight.check_rate_limits()["status"], preflight.PASS)
+
+class TestPreflightHolidayCoverage(IntegrationTestCase):
+	"""P3-R26: the holiday-list check, judged against real assignments.
+
+	It is the quietest missing setting in the phase -- the Holidays page says
+	it cannot tell, the attendance calendar cannot name working days, and a
+	Fix a day preview cannot separate a holiday from a working day -- so it
+	fails rather than warns.
+	"""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+
+	def test_it_passes_once_every_active_employee_resolves_a_list(self):
+		from helixhr.preflight import PASS, check_holiday_list_coverage
+		from helixhr.tests.utils import ensure_holiday_list_assignment, ensure_test_company
+
+		ensure_holiday_list_assignment(ensure_test_company())
+		# Anyone left over from another suite without an assignment would
+		# fail this legitimately, so the assertion is about our own company's
+		# employees resolving, not about the whole site being tidy.
+		uncovered = self._uncovered()
+		if uncovered:
+			self.skipTest(f"site carries employees outside the fixture company: {uncovered[:3]}")
+
+		self.assertEqual(check_holiday_list_coverage()["status"], PASS)
+
+	def test_it_fails_and_names_the_people_when_no_list_resolves(self):
+		from helixhr.preflight import FAIL, check_holiday_list_coverage
+		from helixhr.tests.utils import ensure_test_company, ensure_test_gender
+
+		employee = frappe.get_doc(
+			{
+				"doctype": "Employee",
+				"employee_number": "P3-PREFLIGHT-NO-HOLIDAYS",
+				"first_name": "Holidayless Person",
+				"date_of_birth": "1990-01-01",
+				"date_of_joining": "2020-01-01",
+				"gender": ensure_test_gender(),
+				"company": self._company_without_a_holiday_list(),
+				"status": "Active",
+			}
+		).insert(ignore_permissions=True)
+		self.addCleanup(frappe.delete_doc, "Employee", employee.name, force=True)
+
+		result = check_holiday_list_coverage()
+
+		self.assertEqual(result["status"], FAIL)
+		self.assertIn("Holidayless Person", result["detail"])
+		self.assertIn("Holiday List Assignment", result["detail"])
+
+	def _company_without_a_holiday_list(self):
+		"""A company of its own, so the fixture company's assignment cannot
+		cover this employee and the failure is the one being asserted."""
+		name = "_Test Holidayless Company"
+		if not frappe.db.exists("Company", name):
+			frappe.get_doc(
+				{
+					"doctype": "Company",
+					"company_name": name,
+					"abbr": "THC",
+					"default_currency": "USD",
+					"country": "United States",
+				}
+			).insert(ignore_permissions=True)
+		return name
+
+	def _uncovered(self):
+		from hrms.utils.holiday_list import get_holiday_list_for_employee
+
+		names = []
+		for row in frappe.get_all("Employee", filters={"status": "Active"}, pluck="name"):
+			try:
+				if not get_holiday_list_for_employee(row, raise_exception=False):
+					names.append(row)
+			except Exception:
+				names.append(row)
+		return names

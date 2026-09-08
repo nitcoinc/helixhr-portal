@@ -64,18 +64,6 @@ function filterByDepartment(value) {
   directory.reload()
 }
 
-/** Two letters at most, the same monogram the Approvals queue and the leave
- * form use. No photos here: a face is personal data the directory does not
- * need to answer "who do I ask about payroll" (P3-R22). */
-function initials(name) {
-  return (name || '')
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0].toUpperCase())
-    .join('')
-}
-
 /** One run of cards per department, in the order the server sent the people
  * (by name). "No department" is a real group, not a gap: an employee HR has
  * not filed yet is still a colleague you may need to find. */
@@ -231,6 +219,10 @@ const emptyBody = computed(() =>
             :key="person.name"
             class="surface-card elev-1 h-full"
           >
+            <!-- The monogram is the server's (`initials`), the same two
+                 letters the Approvals queue draws. No photos here: a face is
+                 personal data the directory does not need to answer "who do I
+                 ask about payroll" (P3-R22). -->
             <button
               type="button"
               class="flex w-full min-w-0 items-center gap-3 p-3 text-left lg:cursor-default"
@@ -240,7 +232,7 @@ const emptyBody = computed(() =>
               <span
                 class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-sm font-bold text-ink-green-3"
                 aria-hidden="true"
-              >{{ initials(person.employee_name) }}</span>
+              >{{ person.initials }}</span>
 
               <span class="min-w-0 flex-1">
                 <span class="block truncate font-medium text-ink-gray-9">
@@ -324,7 +316,7 @@ const emptyBody = computed(() =>
             <span
               class="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-base font-bold text-ink-green-3"
               aria-hidden="true"
-            >{{ initials(selected.employee_name) }}</span>
+            >{{ selected.initials }}</span>
             <div class="min-w-0">
               <p class="font-medium text-ink-gray-9">
                 {{ selected.employee_name }}
