@@ -170,6 +170,22 @@ class TestHelixHRAttendance(IntegrationTestCase):
 
 	def test_checkins_are_scoped_to_the_caller(self):
 		frappe.set_user("Administrator")
+
+		# Registered before the first insert, and again as the last statement
+		# of the test, because the rows below are committed: a run interrupted
+		# between the insert and the hand cleanup used to leave a punch behind,
+		# and the next run collided with it on HRMS's same-timestamp rule
+		# rather than failing on anything real.
+		def _clear_punches():
+			frappe.set_user("Administrator")
+			frappe.db.delete(
+				"Employee Checkin", {"employee": ["in", [self.employee_name, self.manager_name]]}
+			)
+			frappe.db.commit()  # nosemgrep
+
+		_clear_punches()
+		self.addCleanup(_clear_punches)
+
 		frappe.get_doc(
 			{
 				"doctype": "Employee Checkin",

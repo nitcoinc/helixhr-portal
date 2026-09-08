@@ -151,7 +151,11 @@ class TestStrictPermissionParity(IntegrationTestCase):
 		return make_test_user(self.OUTSIDER, self.OTHER_COMPANY)
 
 	def _seed_records(self):
-		from helixhr.tests.utils import ensure_holiday_list_assignment, ensure_leave_allocation
+		from helixhr.tests.utils import (
+			ensure_holiday_list_assignment,
+			ensure_leave_allocation,
+			make_test_salary_slip,
+		)
 
 		ensure_holiday_list_assignment(self.company)
 		employee_label = frappe.db.get_value("Employee", self.employee_name, "employee_name")
@@ -211,6 +215,13 @@ class TestStrictPermissionParity(IntegrationTestCase):
 				}
 			).insert(ignore_permissions=True).name
 		records["Attendance Request"] = name
+
+		# P3-U2: the record-level half of the Salary Slip matrix (P3-R3).
+		# A closed period of its own, so the payslip suite's own year keeps
+		# its exact counts.
+		records["Salary Slip"] = make_test_salary_slip(
+			self.employee_name, "2021-03-01", "2021-03-31", currency="USD"
+		)
 
 		ensure_leave_allocation(self.employee_name, "Casual Leave", 5)
 		leave_date = add_days(today(), 94)
@@ -346,6 +357,7 @@ class TestStrictPermissionParity(IntegrationTestCase):
 			"Attendance",
 			"Employee Checkin",
 			"Attendance Request",
+			"Salary Slip",
 			"Leave Application",
 			"HR Request",
 			"File",
@@ -379,6 +391,7 @@ class TestStrictPermissionParity(IntegrationTestCase):
 			("Attendance", "Attendance"),
 			("Employee Checkin", "Employee Checkin"),
 			("Attendance Request", "Attendance Request"),
+			("Salary Slip", "Salary Slip"),
 			("Leave Application", "Leave Application"),
 			("Timesheet", "Timesheet"),
 			("HR Request", "HR Request"),
@@ -396,6 +409,7 @@ class TestStrictPermissionParity(IntegrationTestCase):
 			("Attendance", "Attendance"),
 			("Employee Checkin", "Employee Checkin"),
 			("Attendance Request", "Attendance Request"),
+			("Salary Slip", "Salary Slip"),
 			("Leave Application", "Leave Application"),
 			("Timesheet", "Timesheet"),
 			("HR Request", "HR Request"),

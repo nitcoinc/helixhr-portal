@@ -354,6 +354,18 @@ def setup_playwright_fixtures():
 	ensure_test_shift_type()
 	assign_test_shift(employee_name)
 
+	# P3-U3 scenario 5: `holidays.spec.ts` needs one holiday it can name, on
+	# a date it can compute from the site's own today (`playwright_holiday_date`).
+	ensure_test_holiday(playwright_holiday_date())
+
+	# P3-U2 scenario 6: one submitted payslip, for last month, so
+	# `payslips.spec.ts` has a real row to open and a real PDF to fetch
+	# whatever day the suite runs on.
+	period_start = frappe.utils.get_first_day(frappe.utils.add_months(frappe.utils.today(), -1))
+	make_test_salary_slip(
+		employee_name, str(period_start), str(frappe.utils.get_last_day(period_start))
+	)
+
 	frappe.db.commit()  # nosemgrep
 
 
@@ -402,6 +414,187 @@ def ensure_leave_allocation(employee, leave_type, leaves):
 	allocation.insert(ignore_permissions=True)
 	allocation.submit()
 	return allocation.name
+
+
+# P3-U2: payslips. A fresh site has no payroll master data at all, so every
+# payslip scenario needs a Salary Structure with one earning and one
+# deduction, a submitted Salary Structure Assignment, and a submitted Salary
+# Slip. Deliberately not HRMS's own `make_salary_structure`: that helper
+# rebuilds tax slabs, payroll periods and benefit components on every call,
+# deletes the employee's other assignments (this suite needs two, one per
+# currency) and picks a random Account, none of which a payslip *read* test
+# needs.
+PAYSLIP_COMPONENTS = {
+	"Earning": ("_Test Portal Basic", "TPB"),
+	"Deduction": ("_Test Portal Levy", "TPL"),
+}
+
+# Per currency: what one seeded slip pays. The two currencies carry
+# deliberately different figures so a test can tell which row it is reading
+# (P3-AE2) without depending on the currency symbol alone.
+PAYSLIP_AMOUNTS = {"USD": (5000.0, 500.0), "INR": (90000.0, 9000.0)}
+
+
+def _ensure_salary_component(component_type):
+	name, abbr = PAYSLIP_COMPONENTS[component_type]
+	if not frappe.db.exists("Salary Component", name):
+		frappe.get_doc(
+			{
+				"doctype": "Salary Component",
+				"salary_component": name,
+				"salary_component_abbr": abbr,
+				"type": component_type,
+			}
+		).insert(ignore_permissions=True)
+	return name
+
+
+def ensure_test_fiscal_year(any_date):
+	"""The calendar-year Fiscal Year containing `any_date`.
+
+	A headless site has none (the setup wizard creates them), and Salary
+	Structure Assignment resolves the payroll cycle through
+	`erpnext...get_fiscal_year`, which throws without one -- and throws
+	*obscurely*, because formatting its own error message trips a Frappe
+	locale bug on a site with no date format default.
+	"""
+	from frappe.utils import getdate
+
+	date = getdate(any_date)
+	existing = frappe.db.get_value(
+		"Fiscal Year",
+		{"year_start_date": ("<=", date), "year_end_date": (">=", date)},
+		"name",
+	)
+	if existing:
+		return existing
+	doc = frappe.get_doc(
+		{
+			"doctype": "Fiscal Year",
+			"year": str(date.year),
+			"year_start_date": f"{date.year}-01-01",
+			"year_end_date": f"{date.year}-12-31",
+		}
+	)
+	doc.insert(ignore_permissions=True)
+	return doc.name
+
+
+def ensure_test_salary_structure(currency="USD", company=None):
+	"""One submitted Salary Structure per currency, amounts fixed rather
+	than formula-driven so the seeded slip's gross, deductions and net are
+	known numbers. Idempotent."""
+	company = company or ensure_test_company()
+	name = f"_Test Portal Salary {currency}"
+	if frappe.db.exists("Salary Structure", name):
+		return name
+	gross, deduction = PAYSLIP_AMOUNTS[currency]
+	doc = frappe.get_doc(
+		{
+			"doctype": "Salary Structure",
+			"__newname": name,
+			"company": company,
+			"currency": currency,
+			"payroll_frequency": "Monthly",
+			"earnings": [{"salary_component": _ensure_salary_component("Earning"), "amount": gross}],
+			"deductions": [
+				{"salary_component": _ensure_salary_component("Deduction"), "amount": deduction}
+			],
+		}
+	)
+	doc.insert(ignore_permissions=True)
+	doc.submit()
+	return name
+
+
+def make_test_salary_slip(
+	employee,
+	start_date,
+	end_date,
+	currency="USD",
+	docstatus=1,
+	withheld=False,
+	amended_from=None,
+):
+	"""A Salary Slip for `employee` covering `start_date`..`end_date`, in
+	`currency`, at `docstatus` (0 draft, 1 submitted, 2 cancelled).
+
+	Idempotent on the period: HRMS's own `check_existing` refuses a second
+	non-cancelled slip for a period, so a re-run reuses the row it finds.
+
+	`withheld` writes the status straight to the row rather than building a
+	Salary Withholding: the portal reads `status`, and a real withholding
+	cycle is a payroll-entry apparatus that no payslip *read* depends on.
+	"""
+	from frappe.utils import getdate
+
+	company = frappe.db.get_value("Employee", employee, "company")
+	ensure_holiday_list_assignment(company)
+	ensure_test_fiscal_year(start_date)
+	ensure_test_fiscal_year(end_date)
+	structure = ensure_test_salary_structure(currency, company)
+
+	assignment_from = getdate(start_date)
+	if not frappe.db.exists(
+		"Salary Structure Assignment",
+		{
+			"employee": employee,
+			"salary_structure": structure,
+			"from_date": assignment_from,
+			"docstatus": 1,
+		},
+	):
+		assignment = frappe.get_doc(
+			{
+				"doctype": "Salary Structure Assignment",
+				"employee": employee,
+				"salary_structure": structure,
+				"from_date": assignment_from,
+				"company": company,
+				"currency": currency,
+				"base": PAYSLIP_AMOUNTS[currency][0],
+			}
+		)
+		assignment.insert(ignore_permissions=True)
+		assignment.submit()
+
+	existing = frappe.db.get_value(
+		"Salary Slip",
+		{"employee": employee, "start_date": start_date, "docstatus": docstatus},
+		"name",
+	)
+	if existing:
+		if withheld:
+			frappe.db.set_value("Salary Slip", existing, "status", "Withheld")
+		return existing
+
+	gross, deduction = PAYSLIP_AMOUNTS[currency]
+	slip = frappe.get_doc(
+		{
+			"doctype": "Salary Slip",
+			"employee": employee,
+			"company": company,
+			"salary_structure": structure,
+			"payroll_frequency": "Monthly",
+			"currency": currency,
+			"start_date": start_date,
+			"end_date": end_date,
+			"posting_date": end_date,
+			"amended_from": amended_from,
+			"earnings": [{"salary_component": PAYSLIP_COMPONENTS["Earning"][0], "amount": gross}],
+			"deductions": [
+				{"salary_component": PAYSLIP_COMPONENTS["Deduction"][0], "amount": deduction}
+			],
+		}
+	)
+	slip.insert(ignore_permissions=True)
+	if docstatus >= 1:
+		slip.submit()
+	if docstatus == 2:
+		slip.cancel()
+	if withheld:
+		frappe.db.set_value("Salary Slip", slip.name, "status", "Withheld")
+	return slip.name
 
 
 def assert_has_employee_user_permission(user, employee_name):
@@ -906,3 +1099,15 @@ def teardown_baseline_fixtures():
 	frappe.db.set_global(BASELINE_LEDGER_KEY, None)
 	frappe.db.commit()  # nosemgrep
 	return {"removed": True}
+
+
+def playwright_holiday_date():
+	"""The date `holidays.spec.ts` expects a holiday on: twelve days ahead of
+	the *site's* today, clamped inside the calendar year so it stays covered
+	by the year-long `_Test Holiday List` and by the year the Holidays page
+	opens on (P3-U3). The spec computes the same date from `siteToday()`, so
+	this rule has to stay simple enough to restate in one line of TypeScript.
+	"""
+	from frappe.utils import add_days, get_year_ending, getdate, today
+
+	return str(min(getdate(add_days(today(), 12)), getdate(get_year_ending(today()))))

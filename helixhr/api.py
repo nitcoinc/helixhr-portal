@@ -2,6 +2,7 @@ import json
 import math
 import os
 import re
+from urllib.parse import quote
 
 import frappe
 from frappe import _
@@ -20,6 +21,7 @@ from frappe.utils import (
 	now_datetime,
 	time_diff_in_seconds,
 )
+from frappe.utils.print_format import download_pdf
 from hrms.api import (
 	get_attendance_calendar_events,
 	get_current_employee,
@@ -2213,6 +2215,222 @@ def withdraw_my_attendance_request(name):
 	return {"name": name, "withdrawn": True}
 
 
+# Payslips (P3-U2, P3-R1 to P3-R4, P3-KTD1, P3-KTD2)
+
+# Bounded like the leave list (P3-R25): payroll is monthly, so a long-serving
+# employee has a few hundred rows and the screen shows one year at a time.
+_PAYSLIP_PAGE = 20
+_PAYSLIP_MAX_PAGE = 200
+
+# The explicit allow-list KTD1 asks for. Role Employee has `read` and `print`
+# on Salary Slip and nothing else -- no `report` -- so the generic list and
+# report views stay refused and this projection is the only way in (P3-R3).
+_PAYSLIP_FIELDS = [
+	"name",
+	"start_date",
+	"end_date",
+	"posting_date",
+	"gross_pay",
+	"total_deduction",
+	"net_pay",
+	"rounded_total",
+	"currency",
+	"status",
+	"amended_from",
+	"payroll_frequency",
+]
+
+# One sentence for a slip that is missing and for a slip that belongs to
+# somebody else, deliberately unlike `get_my_leave_detail`, which answers
+# "isn't yours" for a foreign record. A Salary Slip's name embeds the
+# employee id (`Sal Slip/<employee>/#####`, SalarySlip.default_series), so
+# telling the two apart is an existence oracle *about another employee*:
+# the caller already knows whose id they put in the name, and a distinct
+# refusal would confirm the slip exists. Leave names are numeric and carry
+# no such fact, which is why the two methods differ (P3-R3).
+_PAYSLIP_NOT_FOUND = "That payslip isn't here."
+
+# What Frappe falls back to when a site has not chosen a default print
+# format for Salary Slip. HRMS ships this one and preflight has no business
+# forcing a choice on a site (P3-KTD2).
+_PAYSLIP_PRINT_FORMAT = "Salary Slip Standard"
+
+
+def _payslip_projection(row):
+	"""One row, in the words the page renders.
+
+	Money stays a number per row with its own `currency` beside it: the
+	amounts of two slips in two currencies are never comparable, so nothing
+	here or on the page ever adds them (P3-R1, P3-U2 step 5).
+	"""
+	status = row.get("status")
+	return {
+		"name": row.get("name"),
+		"start_date": str(row.get("start_date")) if row.get("start_date") else None,
+		"end_date": str(row.get("end_date")) if row.get("end_date") else None,
+		"posting_date": str(row.get("posting_date")) if row.get("posting_date") else None,
+		"gross_pay": flt(row.get("gross_pay")),
+		"total_deduction": flt(row.get("total_deduction")),
+		# `rounded_total` is what payroll actually pays out, unless the site
+		# turned rounding off, in which case HRMS leaves it at zero.
+		"net_pay": flt(row.get("rounded_total")) or flt(row.get("net_pay")),
+		"currency": row.get("currency"),
+		"status": status,
+		# P3-R4. Withheld is listed and named, never silently hidden, and it
+		# has no PDF -- the figures on a withheld slip are not what anybody
+		# was paid.
+		"withheld": status == "Withheld",
+		"can_download": status != "Withheld",
+		# An amended slip is the correction of an earlier one. The employee
+		# needs the word, not the superseded slip's id.
+		"revised": bool(row.get("amended_from")),
+		"payroll_frequency": row.get("payroll_frequency"),
+	}
+
+
+def _payslip_years(employee):
+	"""Every year this employee has a submitted slip in, newest first.
+
+	Derived from the first and last slip rather than by reading every row's
+	date: payroll is monthly and continuous, so the span is the answer, and
+	a year inside it with no slip filters to a list the page renders as its
+	own empty state instead of an error (P3-R25 keeps this bounded at two
+	cheap reads).
+	"""
+	scope = {"employee": employee, "docstatus": 1}
+	newest = frappe.db.get_value("Salary Slip", scope, "end_date", order_by="end_date desc")
+	oldest = frappe.db.get_value("Salary Slip", scope, "end_date", order_by="end_date asc")
+	if not newest:
+		return []
+	return list(range(getdate(newest).year, getdate(oldest).year - 1, -1))
+
+
+@frappe.whitelist()
+def get_my_payslips(year=None, start=0, limit=None):
+	"""A bounded page of this employee's own submitted payslips, newest
+	period first, with the years they can filter by (P3-R1).
+
+	Only `docstatus == 1`: a draft slip is payroll's work in progress and a
+	cancelled one is a slip that was withdrawn, so neither is a payslip the
+	employee has (P3-R4).
+	"""
+	employee = get_current_employee()
+	limit = min(max(cint(limit) or _PAYSLIP_PAGE, 1), _PAYSLIP_MAX_PAGE)
+	start = max(cint(start), 0)
+
+	scope = {"employee": employee, "docstatus": 1}
+	if year:
+		year = cint(year)
+		scope["end_date"] = ["between", [f"{year}-01-01", f"{year}-12-31"]]
+
+	rows = frappe.get_all(
+		"Salary Slip",
+		filters=scope,
+		fields=_PAYSLIP_FIELDS,
+		order_by="end_date desc",
+		limit_start=start,
+		limit_page_length=limit,
+	)
+
+	return {
+		"payslips": [_payslip_projection(row) for row in rows],
+		"total": frappe.db.count("Salary Slip", scope),
+		"limit": limit,
+		"start": start,
+		"year": year or None,
+		"years": _payslip_years(employee),
+	}
+
+
+def _my_payslip(name, employee):
+	"""The row behind `name` once it is established that it is this
+	employee's own submitted slip, or one uniform refusal (see
+	`_PAYSLIP_NOT_FOUND`)."""
+	row = frappe.db.get_value(
+		"Salary Slip", name, [*_PAYSLIP_FIELDS, "employee", "docstatus"], as_dict=True
+	)
+	if not row or row.employee != employee or cint(row.docstatus) != 1:
+		frappe.throw(_(_PAYSLIP_NOT_FOUND), frappe.DoesNotExistError)
+	return row
+
+
+@frappe.whitelist()
+def get_my_payslip(name):
+	"""One payslip with its breakdown (P3-R2).
+
+	The list is bounded, so `/payslips/<name>` has to be answerable on its
+	own -- a slip reached from a bookmark is not necessarily on the page the
+	list returned.
+	"""
+	employee = get_current_employee()
+	row = _my_payslip(name, employee)
+
+	# The child rows, from the document: `salary_component` and `amount`
+	# only. Everything else on an earning row (the formula, the account it
+	# posts to, the year-to-date columns) is payroll's working, not the
+	# employee's payslip.
+	doc = frappe.get_doc("Salary Slip", name)
+	detail = _payslip_projection(row)
+	detail.update(
+		{
+			"payment_days": flt(doc.payment_days),
+			"total_working_days": flt(doc.total_working_days),
+			"leave_without_pay": flt(doc.leave_without_pay),
+			"earnings": [
+				{"salary_component": entry.salary_component, "amount": flt(entry.amount)}
+				for entry in doc.earnings
+			],
+			"deductions": [
+				{"salary_component": entry.salary_component, "amount": flt(entry.amount)}
+				for entry in doc.deductions
+			],
+		}
+	)
+	return detail
+
+
+@frappe.whitelist(methods=["GET"])
+# PDF rendering spawns wkhtmltopdf, which is CPU-bound: a handful of
+# concurrent downloads can take a web worker each and stall every other
+# request on the site. Frappe v16 ships the primitive for exactly this
+# (`frappe.concurrent_limit`, a Redis semaphore across workers, 503 when the
+# wait runs out) and its default limit is derived from the site's own worker
+# count, so no number is invented here (P3-U2 step 3).
+@frappe.concurrent_limit()
+def download_my_payslip(name):
+	"""This employee's own submitted payslip as a PDF attachment, in the
+	print format the site chose for Salary Slip (P3-R2, P3-KTD2).
+
+	A GET, and a real navigation from the page rather than a fetch: that is
+	what lets a phone browser save or open the file itself.
+	"""
+	rate_limit_per_user("download_my_payslip")
+	employee = get_current_employee()
+	row = _my_payslip(name, employee)
+	if row.status == "Withheld":
+		# Ownership is already established, so this one says what is wrong.
+		frappe.throw(_("This payslip is on hold. Ask HR about it."))
+
+	download_pdf(
+		"Salary Slip",
+		name,
+		format=frappe.get_meta("Salary Slip").default_print_format or _PAYSLIP_PRINT_FORMAT,
+	)
+
+	# `frappe.utils.response.as_pdf` writes `Content-Disposition: inline`,
+	# which renders the payslip in the tab instead of saving it, and no
+	# cache directive at all. `frappe.local.response_headers` is merged over
+	# the response's own headers in `frappe.app.application`, so this is the
+	# supported way to correct both after the fact. The filename is the
+	# period, because "Sal Slip-HR-EMP-00001-00003.pdf" is not a name anybody
+	# wants in their downloads folder.
+	period = str(row.end_date or row.start_date or "")[:7]
+	frappe.local.response_headers["Content-Disposition"] = (
+		f"attachment; filename*=UTF-8''{quote(f'Payslip {period}.pdf')}"
+	)
+	frappe.local.response_headers["Cache-Control"] = "no-store"
+
+
 # Timesheets (U8, KTD7, KTD10, KTD11)
 
 # A week is written whole: every save below replaces the week's rows
@@ -3473,3 +3691,171 @@ def attach_to_my_request(name):
 	)
 	doc.insert(ignore_permissions=True)
 	return {**_attachment(doc), "created": True}
+
+
+# ---------------------------------------------------------------------------
+# Holidays (P3-U3 / P3-R10, P3-R11)
+#
+# HRMS v16 resolves a holiday list through Holiday List Assignment, per date:
+# the employee's own assignment wins, the company's is the fallback, and an
+# assignment that starts mid-year splits the year between two lists. So the
+# year is resolved as *ranges* -- the same shape
+# `hrms.utils.holiday_list.get_holiday_dates_between_range` uses -- and not
+# as one list name resolved once, which would silently show the wrong list
+# for half the year.
+#
+# The Holiday rows are read with `ignore_permissions`, deliberately: role
+# Employee has no read on Holiday List at all (P2-R26 strict permissions),
+# and the list names here are server-derived from the session's employee, so
+# there is nothing a caller can steer (P3-KTD1).
+# ---------------------------------------------------------------------------
+
+# A typo or a probe, answered before any read. Payroll-era dates and a
+# couple of years of planning ahead are the whole legitimate range.
+_HOLIDAY_MIN_YEAR = 2000
+_HOLIDAY_MAX_YEAR = 2100
+
+
+@frappe.whitelist()
+def get_my_holidays(year=None):
+	"""The holidays HRMS resolves for the logged-in employee in one calendar
+	year (P3-R10), with the next one and how many days away it is.
+
+	Weekly offs are excluded: a list with a weekly off configured carries one
+	Holiday row per Saturday and Sunday, and 104 of those would bury the
+	eight days this page exists to show. The footnote says so.
+
+	`known` is false when no list resolves for either the employee or their
+	company -- the same "cannot tell" contract `get_my_attendance` uses for
+	`working_days_known` (P3-R11). It is never an empty holiday year.
+	"""
+	employee = get_current_employee()
+	today = user_today()
+	current_year = getdate(today).year
+	year = cint(year) or current_year
+	if year < _HOLIDAY_MIN_YEAR or year > _HOLIDAY_MAX_YEAR:
+		frappe.throw(_("Pick a year between {0} and {1}.").format(_HOLIDAY_MIN_YEAR, _HOLIDAY_MAX_YEAR))
+
+	start, end = getdate(f"{year}-01-01"), getdate(f"{year}-12-31")
+	spans = _holiday_list_spans(employee, start, end)
+	years = _holiday_years(employee, current_year, year)
+
+	if not spans:
+		return {
+			"known": False,
+			"holiday_list": None,
+			"year": year,
+			"years": years,
+			"holidays": [],
+			"next": None,
+		}
+
+	holidays = {}
+	for span in spans:
+		rows = frappe.get_all(
+			"Holiday",
+			filters={
+				"parent": span["holiday_list"],
+				"parenttype": "Holiday List",
+				"holiday_date": ["between", [str(span["from_date"]), str(span["to_date"])]],
+				"weekly_off": 0,
+			},
+			fields=["holiday_date", "description", "is_half_day"],
+			ignore_permissions=True,
+		)
+		for row in rows:
+			date = getdate(row.holiday_date)
+			holidays[str(date)] = {
+				"date": str(date),
+				# HR pastes rich text into these often enough that the raw
+				# value reaches the screen as markup.
+				"description": (frappe.utils.strip_html(row.description or "").strip() or None),
+				"is_half_day": bool(row.is_half_day),
+				"weekday": date.strftime("%A"),
+			}
+
+	ordered = [holidays[key] for key in sorted(holidays)]
+	upcoming = next((row for row in ordered if row["date"] >= str(today)), None)
+
+	return {
+		"known": True,
+		# The list covering the reference day, which is what the footnote
+		# names. With a mid-year reassignment the year has two, and naming the
+		# one in force is more use than naming both.
+		"holiday_list": _holiday_list_at(spans, min(max(getdate(today), start), end)),
+		"year": year,
+		"years": years,
+		"holidays": ordered,
+		"next": (
+			{
+				"date": upcoming["date"],
+				"description": upcoming["description"],
+				"days_until": date_diff(upcoming["date"], today),
+			}
+			if upcoming
+			else None
+		),
+	}
+
+
+def _holiday_list_spans(employee, start, end):
+	"""The holiday lists in force across `start`..`end`, as
+	`{holiday_list, from_date, to_date}` spans in date order.
+
+	Mirrors `hrms.utils.holiday_list.get_holiday_dates_between_range`: HRMS
+	resolves the list at each end of the range and splits at the later
+	assignment's start date. `raise_exception=False` because "no list" is a
+	state this page renders (P3-R11), not an error.
+	"""
+	from_list = (
+		get_holiday_list_for_employee(employee, raise_exception=False, as_on=start, as_dict=True) or {}
+	)
+	to_list = get_holiday_list_for_employee(employee, raise_exception=False, as_on=end, as_dict=True) or {}
+
+	if (
+		from_list.get("holiday_list")
+		and to_list.get("holiday_list")
+		and from_list.get("holiday_list") != to_list.get("holiday_list")
+	):
+		split = getdate(to_list.get("from_date"))
+		return [
+			{"holiday_list": from_list["holiday_list"], "from_date": start, "to_date": add_days(split, -1)},
+			{"holiday_list": to_list["holiday_list"], "from_date": split, "to_date": end},
+		]
+
+	resolved = from_list.get("holiday_list") or to_list.get("holiday_list")
+	if resolved:
+		return [{"holiday_list": resolved, "from_date": start, "to_date": end}]
+	return []
+
+
+def _holiday_list_at(spans, on):
+	for span in spans:
+		if getdate(span["from_date"]) <= getdate(on) <= getdate(span["to_date"]):
+			return span["holiday_list"]
+	return spans[0]["holiday_list"]
+
+
+def _holiday_years(employee, current_year, requested):
+	"""The years the year chip can offer: every calendar year an assigned
+	holiday list covers, plus the current and requested ones so the chip
+	always contains what is on screen."""
+	company = frappe.db.get_value("Employee", employee, "company")
+	assigned = frappe.get_all(
+		"Holiday List Assignment",
+		filters={"assigned_to": ["in", [employee, company]], "docstatus": 1},
+		pluck="holiday_list",
+		ignore_permissions=True,
+	)
+	years = {current_year, requested}
+	if assigned:
+		for row in frappe.get_all(
+			"Holiday List",
+			filters={"name": ["in", list(set(assigned))]},
+			fields=["from_date", "to_date"],
+			ignore_permissions=True,
+		):
+			for candidate in range(getdate(row.from_date).year, getdate(row.to_date).year + 1):
+				if _HOLIDAY_MIN_YEAR <= candidate <= _HOLIDAY_MAX_YEAR:
+					years.add(candidate)
+	return sorted(years)

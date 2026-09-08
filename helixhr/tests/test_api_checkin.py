@@ -483,6 +483,12 @@ class TestLocationRetention(CheckinTestCase):
 			employee.status = "Active"
 			employee.relieving_date = None
 			employee.save(ignore_permissions=True)
+			# ERPNext disables the linked User when an Employee goes to Left,
+			# and putting the status back does not re-enable it. Without this
+			# the fixture identity stays locked out and every later Playwright
+			# run fails at `auth.setup.ts` instead of at anything real.
+			if employee.user_id:
+				frappe.db.set_value("User", employee.user_id, "enabled", 1)
 
 	def test_a_punch_of_a_still_active_employee_keeps_its_coordinates(self):
 		recent = self._punch_with_version(1)
