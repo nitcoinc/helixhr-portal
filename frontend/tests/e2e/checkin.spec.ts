@@ -78,6 +78,56 @@ test.describe('employee', () => {
     ).toBeVisible()
   })
 
+  // P3-R9. The one sentence only the day sheet can say: the day has punches
+  // and no Attendance row yet, because HRMS's nightly job has not run. Both
+  // halves of that state are stubbed -- a real site cannot be made to hold a
+  // punched day with no attendance on demand, and the state is computed in
+  // the browser from the two responses, which is exactly what this checks.
+  test('a day with punches and no attendance row is not "No record"', async ({ page }) => {
+    const today = await siteToday(page)
+    const [year, month] = today.split('-')
+
+    // The real month payload, re-served with no Attendance rows in it.
+    const response = await page.request.get(
+      `/api/method/helixhr.api.get_my_attendance?from_date=${year}-${month}-01&to_date=${today}`,
+    )
+    const real = (await response.json()).message
+    await page.route('**/api/method/helixhr.api.get_my_attendance*', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          message: { ...real, days: {}, missing: [], summary: {} },
+        }),
+      }),
+    )
+    await page.route('**/api/method/helixhr.api.get_my_checkins*', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          message: [
+            {
+              name: 'P3-R9-punch',
+              time: `${today} 09:05:00`,
+              log_type: 'IN',
+              has_location: true,
+            },
+          ],
+        }),
+      }),
+    )
+
+    await page.goto('/helixhr/attendance')
+    await page.waitForLoadState('networkidle')
+
+    await page.locator('button[data-day]').first().click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByText('Checked in, attendance not marked yet')).toBeVisible()
+    await expect(dialog.getByText('No record')).toHaveCount(0)
+  })
+
   test('a denied permission records nothing and explains the browser setting', async ({
     browser,
   }) => {

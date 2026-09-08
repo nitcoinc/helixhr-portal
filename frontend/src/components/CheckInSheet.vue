@@ -31,6 +31,13 @@ import {
 // Location is asked for when the sheet opens, which is a tap on the strip and
 // never a page load (P3-R6). It is captured once, at that tap, and is not
 // watched between punches -- which is exactly what the notice says.
+//
+// P3-R24 asks every *resource region* to be an `AsyncState`, and this sheet
+// deliberately is not one: there is no resource behind it to be pending,
+// empty or failed. Its four states come from the browser's geolocation
+// permission and from HRMS's answer to one write, and each failure needs its
+// own advice rather than AsyncState's one error slot. The regions that do
+// read a resource (the day sheet's punches, the month grid) stay AsyncState.
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },

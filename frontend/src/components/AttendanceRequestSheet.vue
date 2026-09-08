@@ -5,6 +5,7 @@ import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import StepStrip from '@/components/StepStrip.vue'
 import { FALLBACK_ERROR, toPlainMessage } from '@/lib/errorMap'
+import { HOLIDAY_LIST_UNKNOWN } from '@/lib/holidays'
 import { formatDate, formatDateRange, today } from '@/lib/dates'
 
 // P3-U6 step 2 / P3-R12, P3-R13, P3-R17. "Fix a day": the sheet that raises
@@ -472,21 +473,22 @@ const title = computed(() => {
             v-else-if="unknownDays"
             class="text-sm text-ink-gray-7"
           >
-            We can't tell which of those days are working days yet. Ask HR about your holiday list.
+            {{ HOLIDAY_LIST_UNKNOWN }}
           </p>
           <template v-else-if="preview.data">
-            <p class="text-sm text-ink-gray-9">
+            <!-- P3-R24: counts are numbers, so they line up (`.tabular`). -->
+            <p class="tabular text-sm text-ink-gray-9">
               {{ markLine }}
             </p>
             <p
               v-if="skippedLine"
-              class="mt-0.5 text-sm text-ink-gray-6"
+              class="tabular mt-0.5 text-sm text-ink-gray-6"
             >
               {{ skippedLine }}
             </p>
             <p
               v-if="overwriteLine"
-              class="mt-1 text-sm text-ink-red-4"
+              class="tabular mt-1 text-sm text-ink-red-4"
             >
               {{ overwriteLine }}
               <router-link

@@ -136,6 +136,40 @@ test.describe('employee', () => {
     await expect(page.getByText(`No holidays listed for ${quiet}`)).toHaveCount(0)
   })
 
+  // P3-R11. No holiday list resolves -> the cannot-tell state, in the same
+  // words the attendance-request preview uses (@/lib/holidays), never an
+  // empty list. Stubbed rather than un-assigned: the company's assignment is
+  // shared with every other suite on this site.
+  test('no holiday list at all shows the cannot-tell state', async ({ page }) => {
+    const year = Number((await siteToday(page)).slice(0, 4))
+    await page.route('**/api/method/helixhr.api.get_my_holidays*', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          message: {
+            known: false,
+            holiday_list: null,
+            year,
+            years: [year],
+            holidays: [],
+            next: null,
+          },
+        }),
+      }),
+    )
+
+    await page.goto('/helixhr/holidays')
+    await page.waitForLoadState('networkidle')
+
+    await expect(page.getByText("We can't tell your holidays yet")).toBeVisible()
+    await expect(
+      page.getByText(
+        "No holiday list is assigned to you or your company yet, so we can't tell which days are working days. Ask HR about your holiday list.",
+      ),
+    ).toBeVisible()
+  })
+
   test('the footnote names the list and says weekly offs are not in it', async ({ page }) => {
     await page.goto('/helixhr/holidays')
     await page.waitForLoadState('networkidle')

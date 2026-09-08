@@ -4,6 +4,7 @@ import { createResource } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import { dateTileParts, formatDate, today } from '@/lib/dates'
+import { HOLIDAY_LIST_UNKNOWN } from '@/lib/holidays'
 
 // P3-U3 / P3-R10, P3-R11. The holidays HRMS resolves for *this* employee,
 // which is not the same thing as "the company's holiday list": the
@@ -80,7 +81,9 @@ const emptyTitle = computed(() =>
 const emptyBody = computed(() =>
   known.value
     ? 'Your holiday list has no holidays in this year. Ask HR if you think that is wrong.'
-    : 'No holiday list is assigned to you or your company yet, so there is nothing to show. Ask HR to assign one.',
+    : // P3-R11: the same cannot-tell sentence the attendance-request preview
+      // says, from one place (@/lib/holidays).
+      HOLIDAY_LIST_UNKNOWN,
 )
 </script>
 

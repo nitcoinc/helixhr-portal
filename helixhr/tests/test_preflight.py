@@ -75,6 +75,30 @@ class TestPreflight(IntegrationTestCase):
 	def test_fixtures_are_installed_on_this_site(self):
 		self.assertEqual(preflight.check_fixtures()["status"], preflight.PASS)
 
+	def test_a_fixture_that_never_installed_fails_and_is_named(self):
+		"""P3-AE13. The check only earns its place if it fails on a site that
+		missed a fixture -- and it has to say *which* one, because the fix is
+		per fixture. The lookup is stubbed rather than a real row removed: a
+		Workflow State is linked from live Workflows, so deleting one to make
+		the check fail would break more than it proves.
+		"""
+		from unittest.mock import patch
+
+		absent = ("Workflow State", "Pending HR")
+		real_exists = frappe.db.exists
+
+		def _exists(doctype, name=None, *args, **kwargs):
+			if (doctype, name) == absent:
+				return None
+			return real_exists(doctype, name, *args, **kwargs)
+
+		with patch.object(frappe.db, "exists", side_effect=_exists):
+			result = preflight.check_fixtures()
+
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("Pending HR", result["detail"])
+		self.assertIn("bench migrate", result["detail"])
+
 	def test_run_exits_non_zero_when_something_fails(self):
 		def _run():
 			with self.assertRaises(SystemExit):

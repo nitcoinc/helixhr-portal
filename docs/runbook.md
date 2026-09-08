@@ -939,15 +939,19 @@ bound**, site `rate_limit`, **test mode**, **CSRF**, the **HTTPS header and cook
 HR contact address, the five fixtures the app cannot work without, and the frontend being built.
 The checks and their rationale live in `helixhr/preflight.py`.
 
-Three more arrived with P3-U1, and all three can only **WARN** — each is a setup choice a site is
-allowed to make, and the portal tells the employee the truth either way: `Check-in settings` (the
-two HR Settings flags, with geolocation tracking reported rather than judged), `Shift Types`
-(auto attendance, `Process Attendance After`, and a `last_sync_of_checkin` that is actually
-advancing) and `Check-in location retention` (the site config key). The one phase 3 check that
-FAILs lives inside the HTTPS probe: the effective `Permissions-Policy` must allow
-`geolocation=(self)`. **Holiday-list coverage is not checked**, although P3-R26 asked for it: the
-per-employee report is the Holidays page's own "we can't tell your holidays yet" state and the Fix
-a day sheet refusing to send. Worth adding if HR asks for a site-wide answer.
+Four more arrived with phase 3. Three can only **WARN** — each is a setup choice a site is allowed
+to make, and the portal tells the employee the truth either way: `Check-in settings` (the two HR
+Settings flags, with geolocation tracking reported rather than judged), `Shift Types` (auto
+attendance, `Process Attendance After`, and a `last_sync_of_checkin` that is actually advancing)
+and `Check-in location retention` (the site config key).
+
+`Holiday list coverage` **FAILs** and names the people: it walks every active employee and asks
+HRMS which list resolves for them today, through their own Holiday List Assignment or their
+company's. A missing list is the quietest setting in the phase and it reaches furthest — the
+Holidays page can only say it cannot tell, the attendance calendar cannot name working days, and
+the Fix a day preview cannot separate a holiday from a working day, so it refuses to send. The
+other phase 3 FAIL lives inside the HTTPS probe: the effective `Permissions-Policy` must allow
+`geolocation=(self)`, and a proxy that appends a second `geolocation=()` fails it too.
 
 Three of those are new in P2-U9 and judge *values*, not presence:
 

@@ -234,8 +234,10 @@ then the company's. Confirm one of the two covers every active employee:
   warning call raises rather than answering, and the sheet cannot say which
   days it would mark.
 
-There is no preflight check for holiday coverage — P3-R26 asked for one and it
-did not ship. The two screens above are the report until it does.
+`bench --site <site> execute helixhr.preflight.run` reports this directly:
+**Holiday list coverage** walks every active employee, asks HRMS which list
+resolves for them today, and FAILs naming the people it found none for. Run it
+after assigning lists and again after any bulk employee import (P3-R26).
 
 ### Payslips need payroll to have run in ERPNext
 
