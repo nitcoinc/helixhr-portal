@@ -698,3 +698,31 @@ class TestPreflightHolidayCoverage(IntegrationTestCase):
 			except Exception:
 				names.append(row)
 		return names
+
+class TestPreflightPdfGenerator(IntegrationTestCase):
+	"""P3-R2: a payslip download is only as available as the binary that
+	renders it, and its absence looks like a server fault rather than a
+	setup gap -- which is how it first surfaced, as a 500 in CI."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+
+	def test_it_passes_when_the_generator_is_on_the_path(self):
+		from helixhr.preflight import PASS, check_pdf_generator
+
+		result = check_pdf_generator()
+
+		self.assertEqual(result["status"], PASS)
+		self.assertIn("wkhtmltopdf", result["detail"])
+
+	def test_it_fails_and_names_the_missing_binary(self):
+		from unittest.mock import patch
+
+		from helixhr.preflight import FAIL, check_pdf_generator
+
+		with patch("shutil.which", return_value=None):
+			result = check_pdf_generator()
+
+		self.assertEqual(result["status"], FAIL)
+		self.assertIn("wkhtmltopdf", result["detail"])
+		self.assertIn("500", result["detail"])

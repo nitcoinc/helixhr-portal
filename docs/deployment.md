@@ -254,6 +254,12 @@ employee's own slips with `docstatus == 1`, so:
   they are used to. It is the doctype's own `default_print_format`, set from a
   Salary Slip's print view or through Customize Form — per-site data, so no
   release is needed.
+- **The host needs a PDF generator.** `download_my_payslip` renders through
+  Frappe's own PDF path, which shells out to `wkhtmltopdf` (or Chrome when the
+  site sets `pdf_generator`). The Frappe production images carry it; a
+  hand-built bench may not, and without it the download answers 500 while
+  every other payslip screen looks correct. Preflight's **PDF generator**
+  line FAILs when the binary is missing.
 
 Payslip email settings stay HRMS's own (Payroll Settings). The portal never
 sends a slip.

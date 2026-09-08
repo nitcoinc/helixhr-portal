@@ -739,6 +739,29 @@ def check_holiday_list_coverage():
 	)
 
 
+def check_pdf_generator():
+	"""P3-R2: the payslip PDF is rendered by a binary on the host, not by this
+	app, so a site without one answers 500 on a download that looks fine in
+	every other respect. The Frappe production images ship wkhtmltopdf; a
+	hand-built bench or a slim container may not."""
+	import shutil
+
+	generator = frappe.conf.get("pdf_generator") or "wkhtmltopdf"
+	if generator == "chrome":
+		found = shutil.which("chromium") or shutil.which("chrome") or shutil.which("google-chrome")
+	else:
+		found = shutil.which("wkhtmltopdf")
+
+	if found:
+		return _result("PDF generator", PASS, f"{generator} at {found}")
+	return _result(
+		"PDF generator",
+		FAIL,
+		f"{generator} is not on PATH -- payslip downloads answer 500 "
+		"(install it, or set the site's `pdf_generator`)",
+	)
+
+
 def check_frontend_built():
 	path = frappe.get_app_path("helixhr", "www", "helixhr.html")
 	if os.path.exists(path):
@@ -771,5 +794,6 @@ CHECKS = [
 	check_shift_types,
 	check_checkin_location_retention,
 	check_holiday_list_coverage,
+	check_pdf_generator,
 	check_frontend_built,
 ]
