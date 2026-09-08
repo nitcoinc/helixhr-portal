@@ -167,6 +167,24 @@ for 60 seconds; Desk records are not cached at all):
 Approving leave or a timesheet in Desk works too, and the portal reflects it —
 the portal's approval path exists for convenience, not as the only route.
 
+## Before the migrate that ships the attendance workflow (P3-U5)
+
+`Attendance Request Approval` (P3-KTD6) gives Attendance Request a
+`workflow_state`, and Frappe backfills every row that already exists by
+docstatus: drafts become `Draft`, submitted ones `Approved`, cancelled ones
+keep a null state. Count the drafts first:
+
+```bash
+bench --site <site> execute frappe.db.count   --args '["Attendance Request", {"docstatus": 0}]'
+```
+
+Either have HR submit those in Desk before the migrate, or afterwards move
+each of them along with the workflow's HR-only `Approve` action, which takes an
+old draft straight to `Pending HR`. Confirmers need the **HR Manager** role —
+HR User is refused at the final step on purpose. Employees never submit an
+attendance request themselves; the manager's approve is a save and HR's is the
+submit that writes Attendance.
+
 ## Before you let anyone in
 
 ```bash

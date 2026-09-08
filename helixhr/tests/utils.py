@@ -4,6 +4,10 @@ TEST_COMPANY = "_Test Company"
 MANAGER_USER = "manager@helixhr.test"
 EMPLOYEE_USER = "employee@helixhr.test"
 ORPHAN_USER = "no-employee@helixhr.test"
+# P3-U5: the HR step of the attendance-request workflow (P3-KTD6) and a
+# second manager the fixture employee does not report to (P3-AE8).
+HR_MANAGER_USER = "hr-manager@helixhr.test"
+OTHER_MANAGER_USER = "other-manager@helixhr.test"
 # Not "password" -- some sites (any with System Settings' password policy
 # enabled, unlike a barebones fresh test site) reject it as a top-10
 # common password.
@@ -176,6 +180,55 @@ def make_test_employee_and_manager():
 	assert_has_employee_user_permission(EMPLOYEE_USER, employee_name)
 
 	return employee_name, EMPLOYEE_USER, manager_name, MANAGER_USER
+
+
+def ensure_hr_manager_user():
+	"""A login holding HR Manager and nothing else -- no Employee record, so
+	it reaches every Attendance Request through the role alone, the way HR
+	confirms in Desk (P3-KTD7). Idempotent."""
+	if not frappe.db.exists("User", HR_MANAGER_USER):
+		frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": HR_MANAGER_USER,
+				"first_name": "HR",
+				"last_name": "Manager",
+				"new_password": TEST_PASSWORD,
+				"send_welcome_email": 0,
+				"roles": [{"doctype": "Has Role", "role": "HR Manager"}],
+			}
+		).insert(ignore_permissions=True)
+	return HR_MANAGER_USER
+
+
+def ensure_test_holiday(holiday_date, weekly_off=False):
+	"""One Holiday row on `_Test Holiday List` for `holiday_date`, widening
+	the list's own date range backwards when the date falls before it.
+
+	`erpnext...employee.is_holiday` resolves the list as of *today* and then
+	looks the given date up among that list's rows, so a past-year row on
+	the current list is how a test puts a holiday under a past-year request
+	without touching the assignment every other suite relies on (P3-U5).
+	"""
+	from frappe.utils import getdate
+
+	list_name = "_Test Holiday List"
+	holiday_list = frappe.get_doc("Holiday List", list_name)
+	if getdate(holiday_date) < getdate(holiday_list.from_date):
+		holiday_list.from_date = holiday_date
+	for row in holiday_list.holidays:
+		if getdate(row.holiday_date) == getdate(holiday_date):
+			return list_name
+	holiday_list.append(
+		"holidays",
+		{
+			"holiday_date": holiday_date,
+			"description": "Weekly Off" if weekly_off else "_Test Holiday",
+			"weekly_off": 1 if weekly_off else 0,
+		},
+	)
+	holiday_list.save(ignore_permissions=True)
+	return list_name
 
 
 def make_test_user_without_employee():
