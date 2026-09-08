@@ -192,6 +192,26 @@ class TestStrictPermissionParity(IntegrationTestCase):
 			).insert(ignore_permissions=True).name
 		records["Employee Checkin"] = name
 
+		# P3-U1 step 5a: a draft Attendance Request, far enough back to
+		# overlap nothing another suite writes.
+		request_date = add_days(today(), -410)
+		name = frappe.db.get_value(
+			"Attendance Request", {"employee": self.employee_name, "from_date": request_date}, "name"
+		)
+		if not name:
+			name = frappe.get_doc(
+				{
+					"doctype": "Attendance Request",
+					"employee": self.employee_name,
+					"company": self.company,
+					"from_date": request_date,
+					"to_date": request_date,
+					"reason": "Work From Home",
+					"explanation": "P3-AE9 parity",
+				}
+			).insert(ignore_permissions=True).name
+		records["Attendance Request"] = name
+
 		ensure_leave_allocation(self.employee_name, "Casual Leave", 5)
 		leave_date = add_days(today(), 94)
 		name = frappe.db.get_value(
@@ -325,6 +345,7 @@ class TestStrictPermissionParity(IntegrationTestCase):
 		for label in (
 			"Attendance",
 			"Employee Checkin",
+			"Attendance Request",
 			"Leave Application",
 			"HR Request",
 			"File",
@@ -357,6 +378,7 @@ class TestStrictPermissionParity(IntegrationTestCase):
 		for label, doctype in (
 			("Attendance", "Attendance"),
 			("Employee Checkin", "Employee Checkin"),
+			("Attendance Request", "Attendance Request"),
 			("Leave Application", "Leave Application"),
 			("Timesheet", "Timesheet"),
 			("HR Request", "HR Request"),
@@ -373,6 +395,7 @@ class TestStrictPermissionParity(IntegrationTestCase):
 		for label, doctype in (
 			("Attendance", "Attendance"),
 			("Employee Checkin", "Employee Checkin"),
+			("Attendance Request", "Attendance Request"),
 			("Leave Application", "Leave Application"),
 			("Timesheet", "Timesheet"),
 			("HR Request", "HR Request"),
@@ -385,6 +408,20 @@ class TestStrictPermissionParity(IntegrationTestCase):
 		links = frappe.get_list("HelixHR Document Link", pluck="name", limit=0)
 		self.assertIn(self.records["HelixHR Document Link (other company)"], links)
 		self.assertNotIn(self.records["HelixHR Document Link"], links)
+
+	def test_salary_slips_are_read_and_print_only_for_the_employee_role(self):
+		"""P3-KTD2 / P3-R3: HRMS ships role Employee with `read` and `print`
+		on Salary Slip and nothing else, which is exactly what the payslip
+		wrapper and its PDF endpoint rely on -- no delta is needed, so this
+		pins the shipped shape. P3-U2 seeds real slips for the record-level
+		half of the matrix."""
+		rules = _rules("Salary Slip", "Employee")
+		self.assertTrue(rules, "the Employee role lost its Salary Slip rules entirely")
+		for rule in rules:
+			self.assertEqual(rule.read, 1)
+			self.assertEqual(rule.print, 1)
+			for ptype in ("write", "create", "delete", "submit", "cancel", "amend", "share", "report", "export"):
+				self.assertEqual(rule.get(ptype), 0, f"Employee must not hold {ptype} on Salary Slip")
 
 
 class TestPermissionDeltas(IntegrationTestCase):
@@ -400,7 +437,18 @@ class TestPermissionDeltas(IntegrationTestCase):
 	than the contents of a file.
 	"""
 
-	CUSTOMISED = ("Employee", "Leave Application", "Timesheet")
+	# P3-KTD13 added Employee Checkin and Attendance Request to the delta
+	# table; Salary Slip is here because HRMS gives it Custom DocPerm rows of
+	# its own (Employee Self Service) and the payslip pages depend on no
+	# standard role having been stripped from it.
+	CUSTOMISED = (
+		"Employee",
+		"Leave Application",
+		"Timesheet",
+		"Employee Checkin",
+		"Attendance Request",
+		"Salary Slip",
+	)
 
 	def test_no_standard_role_lost_access_to_a_customised_doctype(self):
 		"""The regression this patch exists for. Fails the moment a change
@@ -475,6 +523,67 @@ class TestPermissionDeltas(IntegrationTestCase):
 		the employee, and the base Timesheet DocPerm for role Employee has no
 		`submit`."""
 		self.assertEqual(_rule("Timesheet", "Employee").submit, 1)
+
+	def test_the_employee_role_cannot_create_edit_or_delete_punches(self):
+		"""P3-KTD13 / P3-R7a: the portal method is the only way an employee
+		writes an Employee Checkin; `read` stays for the Attendance page."""
+		rule = _rule("Employee Checkin", "Employee")
+		self.assertIsNotNone(rule, "the Employee role lost its Employee Checkin rule")
+		self.assertEqual(rule.read, 1)
+		for ptype in ("create", "write", "delete"):
+			self.assertEqual(rule.get(ptype), 0, f"Employee must not hold {ptype} on Employee Checkin")
+
+	def test_the_employee_role_cannot_share_an_attendance_request(self):
+		"""P3-KTD13 / P3-R17a: `share` would let an employee grant a colleague
+		`submit` on their own request and skip both approval steps."""
+		rules = _rules("Attendance Request", "Employee")
+		self.assertTrue(rules, "the Employee role lost its Attendance Request rules entirely")
+		for rule in rules:
+			self.assertEqual(rule.share, 0, "this app must not grant the Employee role sharing")
+			self.assertEqual(rule.submit, 0, "the HR step is the only submit")
+
+	def test_generic_punch_routes_are_closed_to_an_employee(self):
+		"""P3-AE5a. After the delta an employee's `frappe.client.insert`,
+		`set_value` and `delete` on Employee Checkin are all refused, while
+		reading their own punch still works."""
+		from frappe.client import delete as client_delete
+		from frappe.client import insert as client_insert
+		from frappe.client import set_value as client_set_value
+
+		frappe.set_user("Administrator")
+		employee_name, _, _, _ = make_test_employee_and_manager()
+		employee_label = frappe.db.get_value("Employee", employee_name, "employee_name")
+		punch_time = f"{add_days(today(), -430)} 09:00:00"
+		punch = frappe.db.get_value("Employee Checkin", {"employee": employee_name, "time": punch_time}, "name")
+		if not punch:
+			punch = frappe.get_doc(
+				{
+					"doctype": "Employee Checkin",
+					"employee": employee_name,
+					"employee_name": employee_label,
+					"time": punch_time,
+					"log_type": "IN",
+				}
+			).insert(ignore_permissions=True).name
+
+		frappe.set_user(EMPLOYEE_USER)
+		self.addCleanup(frappe.set_user, "Administrator")
+		self.assertTrue(frappe.has_permission("Employee Checkin", "read", punch))
+
+		with self.assertRaises(frappe.PermissionError):
+			client_insert(
+				{
+					"doctype": "Employee Checkin",
+					"employee": employee_name,
+					"time": f"{add_days(today(), -431)} 09:00:00",
+					"log_type": "IN",
+				}
+			)
+		with self.assertRaises(frappe.PermissionError):
+			client_set_value("Employee Checkin", punch, "time", f"{add_days(today(), -430)} 10:00:00")
+		with self.assertRaises(frappe.PermissionError):
+			client_delete("Employee Checkin", punch)
+		self.assertEqual(frappe.db.get_value("Employee Checkin", punch, "time"), get_datetime(punch_time))
 
 	def test_the_patch_is_idempotent(self):
 		"""It runs once through the patch log, but a re-run by hand (or a

@@ -22,7 +22,11 @@ test.describe('desktop side nav', () => {
       { link: 'Timesheet', url: /\/helixhr\/timesheet$/, heading: 'Timesheet' },
       { link: 'Requests', url: /\/helixhr\/requests$/, heading: 'Requests' },
       { link: 'Attendance', url: /\/helixhr\/attendance$/, heading: 'Attendance' },
+      // P3-U1 step 1: the three destinations everybody gets.
+      { link: 'Payslips', url: /\/helixhr\/payslips$/, heading: 'Payslips' },
+      { link: 'Holidays', url: /\/helixhr\/holidays$/, heading: 'Holidays' },
       { link: 'Documents', url: /\/helixhr\/documents$/, heading: 'Documents' },
+      { link: 'Directory', url: /\/helixhr\/directory$/, heading: 'Directory' },
       { link: 'Notifications', url: /\/helixhr\/notifications$/, heading: 'Notifications' },
       { link: 'Profile', url: /\/helixhr\/profile$/, heading: 'Your profile' },
     ]
@@ -47,6 +51,21 @@ test.describe('desktop side nav', () => {
     await page.goto('/helixhr')
     await expect(mainNav(page).getByRole('link', { name: 'Leave' })).toBeVisible()
     await expect(mainNav(page).getByRole('link', { name: 'Approvals' })).toHaveCount(0)
+    // P3-KTD11: Team follows direct reports, and this employee has none.
+    await expect(mainNav(page).getByRole('link', { name: 'Team' })).toHaveCount(0)
+  })
+
+  test('shows Team to a manager with reports and opens it (P3-KTD11)', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'manager', 'manager-only scenario')
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/helixhr')
+    await mainNav(page).getByRole('link', { name: 'Team' }).click()
+    await expect(page).toHaveURL(/\/helixhr\/team$/)
+    await expect(page.getByRole('heading', { level: 1, name: 'Team' })).toBeVisible()
+    await expect(mainNav(page).getByRole('link', { name: 'Team' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    )
   })
 
   test('shows Approvals to a manager and opens it (U12)', async ({ page }, testInfo) => {

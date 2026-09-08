@@ -8,8 +8,11 @@ import { ensureBootstrap, session } from './lib/session'
 //   ---------------------------------------------------------------------
 //   /leave           /leave/:name                      Leave Application id
 //   /requests        /requests/:name                   HR Request id
-//   /approvals       /approvals/:kind/:name            kind = leave|timesheet
+//   /approvals       /approvals/:kind/:name            kind = leave|timesheet|attendance
 //   /timesheet       /timesheet/:weekStart             Monday, YYYY-MM-DD
+//   /payslips        /payslips/:name                   Salary Slip id (P3-U2)
+//   /attendance      /attendance/requests/:name        Attendance Request id (P3-U6)
+//   /holidays, /team, /directory                       lists only (P3-U3, U7, U8)
 //   /notifications   (opens the target record's route above)
 //
 // Rules that go with it:
@@ -52,6 +55,40 @@ const routes = [
     path: '/attendance',
     name: 'Attendance',
     component: () => import('@/pages/Attendance.vue'),
+  },
+  {
+    // P3-U1 step 7: resolves to the Attendance page until P3-U6 builds the
+    // request detail.
+    path: '/attendance/requests/:name',
+    name: 'AttendanceRequestDetail',
+    component: () => import('@/pages/Attendance.vue'),
+    props: true,
+  },
+  {
+    path: '/payslips',
+    name: 'Payslips',
+    component: () => import('@/pages/Payslips.vue'),
+  },
+  {
+    path: '/payslips/:name',
+    name: 'PayslipDetail',
+    component: () => import('@/pages/Payslips.vue'),
+    props: true,
+  },
+  {
+    path: '/holidays',
+    name: 'Holidays',
+    component: () => import('@/pages/Holidays.vue'),
+  },
+  {
+    path: '/team',
+    name: 'Team',
+    component: () => import('@/pages/Team.vue'),
+  },
+  {
+    path: '/directory',
+    name: 'Directory',
+    component: () => import('@/pages/Directory.vue'),
   },
   {
     path: '/timesheet',
@@ -98,7 +135,7 @@ const routes = [
     component: () => import('@/pages/Approvals.vue'),
   },
   {
-    path: '/approvals/:kind(leave|timesheet)/:name',
+    path: '/approvals/:kind(leave|timesheet|attendance)/:name',
     name: 'ApprovalDetail',
     component: () => import('@/pages/Approvals.vue'),
     props: true,

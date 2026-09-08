@@ -21,12 +21,19 @@ P2-U9 added the checks that judge *values* rather than presence: the exact
 upload extension/size/privacy policy, every named per-user write bound,
 `allow_tests`, `ignore_csrf`, and -- given `helixhr_public_url` -- a real
 HTTPS fetch that inspects the security headers and the sid cookie's flags.
+
+P3-U1 (P3-R26) added the check-in prerequisites: the attendance workflow
+fixture, the HR Settings check-in flags, at least one Shift Type with auto
+attendance that can still mark attendance, the effective `Permissions-Policy`
+allowing geolocation for self, the coordinate retention key, and a FAIL when
+a doctype in the permission-delta table carries no Custom DocPerm row at all.
 """
 
 import os
 
 import frappe
 
+from helixhr.patches.v1_0.apply_permission_deltas import DELTAS
 from helixhr.utils import (
 	ALLOWED_UPLOAD_EXTENSIONS,
 	RATE_LIMIT_POLICY,
@@ -115,11 +122,18 @@ def check_custom_docperm_coverage():
 	so this is the standing guard afterwards -- an operator editing rules in
 	the Role Permissions Manager, or a restored site that missed the patch,
 	shows up here. FAIL names the roles that have been left with nothing.
+
+	P3-KTD13: the doctype list is the patch's own delta table, and a doctype
+	named there with *no* Custom DocPerm row is a FAIL too -- it means the
+	delta never ran (a site migrated before its dated re-run line landed in
+	patches.txt), so an employee still holds HRMS's shipped create, write
+	and delete on Employee Checkin.
 	"""
 	problems = []
-	for doctype in ("Employee", "Leave Application", "Timesheet"):
+	for doctype in DELTAS:
 		custom = set(frappe.get_all("Custom DocPerm", filters={"parent": doctype}, pluck="role"))
 		if not custom:
+			problems.append(f"{doctype}: no Custom DocPerm row at all, the permission delta never ran")
 			continue
 		standard = set(
 			frappe.get_all("DocPerm", filters={"parent": doctype}, pluck="role", parent_doctype="DocType")
@@ -131,11 +145,13 @@ def check_custom_docperm_coverage():
 		return _result(
 			"Custom DocPerm coverage",
 			FAIL,
-			"Custom DocPerm rows replaced the standard ones and left these roles with no access -- "
-			+ "; ".join(problems)
-			+ " -- re-run helixhr.patches.v1_0.apply_permission_deltas",
+			"; ".join(problems) + " -- re-run helixhr.patches.v1_0.apply_permission_deltas",
 		)
-	return _result("Custom DocPerm coverage", PASS, "no role lost access to a customised doctype")
+	return _result(
+		"Custom DocPerm coverage",
+		PASS,
+		f"{len(DELTAS)} customised doctypes carry their deltas and no role lost access",
+	)
 
 
 def check_leave_approver_mandatory():
@@ -486,8 +502,14 @@ def check_public_endpoint():
 		problems.append("no X-Content-Type-Options: nosniff")
 	if "referrer-policy" not in headers:
 		problems.append("no Referrer-Policy")
-	if "permissions-policy" not in headers:
+	# P3-KTD12 / P3-AE13: the value, not the presence. A proxy that sets
+	# `geolocation=()` wins over the app's `setdefault`, and the browser then
+	# reports a denial the check-in sheet cannot tell from the user's choice.
+	permissions_policy = headers.get("permissions-policy")
+	if permissions_policy is None:
 		problems.append("no Permissions-Policy")
+	elif "geolocation=(self)" not in permissions_policy.replace(" ", ""):
+		problems.append(f"Permissions-Policy does not allow geolocation for self: {permissions_policy!r}")
 
 	# requests folds repeated Set-Cookie headers into one comma-joined string
 	# on `.headers`; urllib3 keeps them separate on `.raw`. Prefer the raw
@@ -539,6 +561,8 @@ def check_hr_contact():
 def check_fixtures():
 	expected = [
 		("Workflow", "Timesheet Approval"),
+		# P3-KTD6 / P3-R26: the two-step attendance approval (P3-U5).
+		("Workflow", "Attendance Request Approval"),
 		("Activity Type", "General"),
 		("Notification", "HelixHR Timesheet Status Changed"),
 		("Notification", "HelixHR Leave Status Changed"),
@@ -547,6 +571,88 @@ def check_fixtures():
 	if missing:
 		return _result("Fixtures installed", FAIL, "missing " + ", ".join(missing) + " -- run bench migrate")
 	return _result("Fixtures installed", PASS, f"{len(expected)} checked")
+
+
+# --- check-in (P3-U1 step 6, P3-R26) ---------------------------------------
+
+
+def check_checkin_settings():
+	"""P3-R8: the portal offers the check-in button only while HR Settings
+	allows check-in from the mobile app, so a site with it off has a
+	feature that never appears -- a WARN, because a site may not want
+	check-in at all. `allow_geolocation_tracking` is reported, not judged
+	(P3-KTD4): the portal requires coordinates on its own, and turning the
+	flag on also makes HRMS refuse coordinate-less device and Desk punches."""
+	mobile = frappe.utils.cint(_hr_setting("allow_employee_checkin_from_mobile_app"))
+	tracking = frappe.utils.cint(_hr_setting("allow_geolocation_tracking"))
+	tracking_note = (
+		"HRMS geolocation tracking on (every punch, from any source, needs coordinates)"
+		if tracking
+		else "HRMS geolocation tracking off (the portal still requires coordinates for its own punches)"
+	)
+	if not mobile:
+		return _result(
+			"Check-in settings",
+			WARN,
+			"Allow Employee Checkin From Mobile App is off -- the portal never shows the check-in button; "
+			+ tracking_note,
+		)
+	return _result("Check-in settings", PASS, "mobile check-in allowed; " + tracking_note)
+
+
+_LAST_SYNC_STALE_DAYS = 2
+
+
+def check_shift_types():
+	"""P3-KTD5 / P3-R26: a punch only ever becomes Attendance through a Shift
+	Type with auto attendance whose `last_sync_of_checkin` keeps advancing
+	(HRMS marks attendance only for punches before that timestamp) and whose
+	`process_attendance_after` is set. Without one the button never appears;
+	with a stalled one every punch stays a bare Employee Checkin and later
+	reads as a missing day."""
+	shifts = frappe.get_all(
+		"Shift Type",
+		filters={"enable_auto_attendance": 1},
+		fields=["name", "process_attendance_after", "auto_update_last_sync", "last_sync_of_checkin"],
+	)
+	if not shifts:
+		return _result(
+			"Shift Types",
+			WARN,
+			"no Shift Type has Enable Auto Attendance -- check-in is not offered and punches never become attendance",
+		)
+	problems = []
+	stale_before = frappe.utils.add_days(frappe.utils.now_datetime(), -_LAST_SYNC_STALE_DAYS)
+	for shift in shifts:
+		if not shift.process_attendance_after:
+			problems.append(f"{shift.name}: Process Attendance After is empty")
+		if not frappe.utils.cint(shift.auto_update_last_sync):
+			last_sync = shift.last_sync_of_checkin and frappe.utils.get_datetime(shift.last_sync_of_checkin)
+			if not last_sync:
+				problems.append(f"{shift.name}: Last Sync of Checkin is empty and not auto-updated")
+			elif last_sync < stale_before:
+				problems.append(
+					f"{shift.name}: Last Sync of Checkin is {shift.last_sync_of_checkin}, older than "
+					f"{_LAST_SYNC_STALE_DAYS} days, and not auto-updated"
+				)
+	if problems:
+		return _result("Shift Types", WARN, "; ".join(problems))
+	return _result("Shift Types", PASS, f"{len(shifts)} auto-attendance shift type(s) can mark attendance")
+
+
+def check_checkin_location_retention():
+	"""P3-KTD15 / P3-R28: punch coordinates are erased after a site-configured
+	number of days. The number is HR and legal's decision, so the job stays
+	idle -- and this stays a WARN -- until the key is set."""
+	days = frappe.conf.get("helixhr_checkin_location_retention_days")
+	if days:
+		return _result("Check-in location retention", PASS, f"coordinates erased after {days} days")
+	return _result(
+		"Check-in location retention",
+		WARN,
+		"helixhr_checkin_location_retention_days unset -- punch coordinates are kept indefinitely "
+		"(bench --site <site> set-config helixhr_checkin_location_retention_days <days>)",
+	)
 
 
 def check_frontend_built():
@@ -577,5 +683,8 @@ CHECKS = [
 	check_public_endpoint,
 	check_hr_contact,
 	check_fixtures,
+	check_checkin_settings,
+	check_shift_types,
+	check_checkin_location_retention,
 	check_frontend_built,
 ]

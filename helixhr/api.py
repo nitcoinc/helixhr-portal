@@ -172,6 +172,10 @@ def get_portal_bootstrap():
 		"week_start": str(monday),
 		"week_end": str(sunday),
 		"can_approve": False,
+		# P3-KTD11: Team is gated on direct reports, not on `can_approve` --
+		# a leave approver with no reports would otherwise open an empty
+		# Team page. Same rule as `can_approve`: a nav decision, not a grant.
+		"has_reports": False,
 		"unread_notifications": 0,
 	}
 
@@ -186,10 +190,11 @@ def get_portal_bootstrap():
 	# pending work may be a timesheet -- gating the Approvals nav item on
 	# direct reports alone hid the entry from both (P2-R11). The count is
 	# still tried first because it is one indexed count and short-circuits
-	# the two list reads for the common case; it is a local, not part of
-	# the response, because `can_approve` is the only thing the shell reads.
+	# the two list reads for the common case. P3-KTD11 also surfaces it as
+	# `has_reports`, which is what the Team nav item reads.
 	title = "HelixHR portal bootstrap failed"
 	report_count = _safe(lambda: _count_direct_reports(employee["name"]), title=title) or 0
+	boot["has_reports"] = report_count > 0
 	boot["can_approve"] = report_count > 0 or bool(
 		_safe(lambda: _pending_approvals(employee["name"]), title=title)
 	)

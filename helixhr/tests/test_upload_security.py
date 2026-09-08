@@ -220,6 +220,15 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"create_my_request": (10, 3600),
 			"attach_to_my_request": (20, 3600),
 			"mark_notifications_read": (60, 60),
+			# P3-U1 step 5 / P3-R25.
+			"punch_my_checkin": (12, 60),
+			"create_my_attendance_request": (10, 60),
+			"send_my_attendance_request": (10, 60),
+			"withdraw_my_attendance_request": (10, 60),
+			"get_attendance_request_preview": (30, 60),
+			"download_my_payslip": (10, 60),
+			"get_directory": (60, 60),
+			"get_my_team_week": (60, 60),
 		}
 		self.assertEqual(utils.RATE_LIMIT_POLICY, expected)
 		self.assertEqual(preflight.check_rate_limits()["status"], preflight.PASS)
@@ -255,7 +264,12 @@ class TestResponseHardening(IntegrationTestCase):
 		self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
 		self.assertEqual(response.headers["Content-Security-Policy"], "frame-ancestors 'none'")
 		self.assertIn("Referrer-Policy", response.headers)
-		self.assertIn("Permissions-Policy", response.headers)
+		# P3-KTD12: the exact value. `geolocation=()` made the browser report
+		# a denial the check-in sheet could not tell from the user's choice.
+		self.assertEqual(
+			response.headers["Permissions-Policy"],
+			"camera=(), microphone=(), geolocation=(self), payment=(), usb=()",
+		)
 
 	def test_hsts_only_over_https(self):
 		plain = Response("ok")

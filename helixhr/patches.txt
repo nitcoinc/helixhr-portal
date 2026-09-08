@@ -12,3 +12,7 @@ helixhr.patches.v1_0.report_unsubmitted_approved_leave
 # permission deltas -- shipping them as fixtures stripped every role the
 # fixture filter did not name.
 helixhr.patches.v1_0.apply_permission_deltas
+# P3-KTD13: same module, new deltas (Employee Checkin, Attendance Request).
+# Frappe skips a patch whose exact line is already in the Patch Log, so a
+# migrated site needs a fresh line to re-run it; the module is idempotent.
+helixhr.patches.v1_0.apply_permission_deltas #2026-09-09 P3-KTD13 Employee Checkin and Attendance Request

@@ -100,6 +100,16 @@ RATE_LIMIT_POLICY = {
 	"create_my_request": (10, 3600),
 	"attach_to_my_request": (20, 3600),
 	"mark_notifications_read": (60, 60),
+	# P3-U1 step 5 / P3-R25. Writes first; the two reads are bounded too
+	# because each one fans out to a per-employee lookup.
+	"punch_my_checkin": (12, 60),
+	"create_my_attendance_request": (10, 60),
+	"send_my_attendance_request": (10, 60),
+	"withdraw_my_attendance_request": (10, 60),
+	"get_attendance_request_preview": (30, 60),
+	"download_my_payslip": (10, 60),
+	"get_directory": (60, 60),
+	"get_my_team_week": (60, 60),
 }
 
 
@@ -302,9 +312,14 @@ def validate_portal_upload(file_name, content):
 SECURITY_HEADERS = {
 	"X-Content-Type-Options": "nosniff",
 	"Referrer-Policy": "strict-origin-when-cross-origin",
-	# The portal needs none of these, and Frappe Desk sets its own where it
-	# does. Naming them denies them for this site's whole surface.
-	"Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+	# P3-KTD12: geolocation is allowed for this origin only, because the
+	# check-in button asks the browser for a position (P3-R6). Everything
+	# else the portal never needs, and Frappe Desk sets its own where it
+	# does; naming them denies them for this site's whole surface. A
+	# reverse proxy that sets `geolocation=()` wins over this default and
+	# makes every punch read as a user denial -- `preflight
+	# .check_public_endpoint` asserts the effective value for that reason.
+	"Permissions-Policy": "camera=(), microphone=(), geolocation=(self), payment=(), usb=()",
 	# frame-ancestors, not X-Frame-Options: the portal is never framed, and
 	# CSP's directive is the one modern browsers honour. Deliberately not a
 	# full CSP -- `script-src` would have to allow Desk's own inline

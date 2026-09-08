@@ -36,13 +36,40 @@ export const icons = {
   signOut: ['M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4', 'm16 17 5-5-5-5', 'M21 12H9'],
   chevronLeft: ['m15 18-6-6 6-6'],
   chevronRight: ['m9 18 6-6-6-6'],
+  // P3-U1 step 2: Payslips, Holidays, Directory/Team, and the pin a punch
+  // with location wears in the day sheet.
+  wallet: [
+    'M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1',
+    'M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4',
+  ],
+  sun: [
+    'M12 2v2',
+    'M12 20v2',
+    'm4.93 4.93 1.41 1.41',
+    'm17.66 17.66 1.41 1.41',
+    'M2 12h2',
+    'M20 12h2',
+    'm6.34 17.66-1.41 1.41',
+    'm19.07 4.93-1.41 1.41',
+    'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z',
+  ],
+  users: [
+    'M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2',
+    'M22 21v-2a4 4 0 0 0-3-3.87',
+    'M16 3.13a4 4 0 0 1 0 7.75',
+    'M9 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8z',
+  ],
+  pin: [
+    'M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0',
+    'M12 7a3 3 0 1 0 0 6 3 3 0 0 0 0-6z',
+  ],
 }
 
 // Every kind `helixhr.api._get_needs_you` emits, and the glyph its row draws.
 // It lives here, next to the glyphs, because `<script setup>` cannot export
 // and this map has to be assertable: a kind with no entry falls back silently,
 // which is how a sent-back *leave* rendered with the Requests icon for a whole
-// unit. `icons.test.js` holds the six kinds against the server's own list.
+// unit. `icons.test.js` holds the kinds against the server's own list.
 export const NEEDS_YOU_ICON = {
   timesheet_rejected: 'timesheet',
   leave_rejected: 'leave',
@@ -50,4 +77,8 @@ export const NEEDS_YOU_ICON = {
   approval_leave: 'approvals',
   approval_timesheet: 'approvals',
   leave_waiting: 'leave',
+  // P3-U1 step 2 / P3-R16, P3-R17: the attendance request kinds P3-U5 emits.
+  approval_attendance: 'approvals',
+  attendance_request_rejected: 'attendance',
+  attendance_request_waiting: 'attendance',
 }

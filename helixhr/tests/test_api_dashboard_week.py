@@ -267,6 +267,17 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 
 		self.assertTrue(boot["can_approve"])
 
+	def test_has_reports_follows_active_direct_reports(self):
+		"""P3-U1 scenario 1 / P3-KTD11: a manager with an active report has
+		`has_reports`; their report, who manages nobody, does not."""
+		from helixhr.api import get_portal_bootstrap
+
+		frappe.set_user(MANAGER_USER)
+		self.assertTrue(get_portal_bootstrap()["has_reports"])
+
+		frappe.set_user(EMPLOYEE_USER)
+		self.assertFalse(get_portal_bootstrap()["has_reports"])
+
 	def test_an_older_rejection_outranks_a_newer_one_and_reports_its_age(self):
 		"""The direction's named risk: a stale item must not sort under a
 		fresh one just because the fresh one belongs to this week."""

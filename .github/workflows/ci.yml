@@ -284,7 +284,9 @@ jobs:
           echo "$shell" | grep -iq "content-security-policy:.*frame-ancestors 'none'" \
             || { echo 'FAIL: no frame-ancestors'; exit 1; }
           echo "$shell" | grep -iq 'referrer-policy:' || { echo 'FAIL: no Referrer-Policy'; exit 1; }
-          echo "$shell" | grep -iq 'permissions-policy:' || { echo 'FAIL: no Permissions-Policy'; exit 1; }
+          # P3-KTD12: the value, not the presence -- geolocation must be allowed for self.
+          echo "$shell" | grep -iq 'permissions-policy:.*geolocation=(self)' \
+            || { echo 'FAIL: Permissions-Policy does not allow geolocation=(self)'; exit 1; }
 
           entry=$(grep -o 'assets/index-[A-Za-z0-9_-]*\.js' \
             frappe-bench/apps/helixhr/helixhr/www/helixhr.html | head -1)

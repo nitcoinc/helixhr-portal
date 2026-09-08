@@ -102,6 +102,18 @@ DELTAS = {
 	# R17: the portal sends a week for approval through the Timesheet Approval
 	# workflow, which submits the document as the employee.
 	"Timesheet": ((("Employee", 0, 0), {"submit": 1}),),
+	# P3-KTD13 / P3-R7a: HRMS ships role Employee with create, write and
+	# delete on Employee Checkin, so an employee could insert a backdated
+	# punch with any coordinates and edit or delete punches until the nightly
+	# job links them. The portal method `punch_my_checkin` is the create rule
+	# (it inserts with `ignore_permissions`), as `create_my_request` is for HR
+	# Request; `read` stays so the Attendance page keeps listing punches.
+	"Employee Checkin": ((("Employee", 0, 0), {"create": 0, "write": 0, "delete": 0}),),
+	# P3-KTD13 / P3-R17a: with `share` an employee could grant a colleague
+	# `submit` on their own Attendance Request and skip both approval steps.
+	# The DocShare to the manager is written by `events._reconcile_share`
+	# with `ignore_permissions`, so it does not need this right.
+	"Attendance Request": ((("Employee", 0, 0), {"share": 0}),),
 }
 
 
