@@ -1331,3 +1331,39 @@ def ensure_team_week_fixtures():
 		"from_date": from_date,
 		"to_date": to_date,
 	}
+
+
+def leaving_employee_fixture():
+	"""An Employee with no `user_id`, for the one test that has to set a
+	status of Left (P3-U4 scenario 3b).
+
+	ERPNext disables the linked User when an Employee leaves, and that write
+	survives a test's rollback while the restore inside the test does not --
+	so a suite that borrows a shared fixture identity for this leaves it
+	unable to sign in for the rest of the run. This row has no login to lose.
+	Idempotent, and always handed back as Active.
+	"""
+	number = "P3U4-LEAVER"
+	name = frappe.db.get_value("Employee", {"employee_number": number}, "name")
+	if name:
+		employee = frappe.get_doc("Employee", name)
+		if employee.status != "Active" or employee.relieving_date:
+			employee.status = "Active"
+			employee.relieving_date = None
+			employee.save(ignore_permissions=True)
+		return employee.name
+
+	employee = frappe.get_doc(
+		{
+			"doctype": "Employee",
+			"employee_number": number,
+			"first_name": "Checkin Leaver",
+			"date_of_birth": "1990-01-01",
+			"date_of_joining": "2020-01-01",
+			"gender": ensure_test_gender(),
+			"company": ensure_test_company(),
+			"status": "Active",
+		}
+	)
+	employee.insert(ignore_permissions=True)
+	return employee.name

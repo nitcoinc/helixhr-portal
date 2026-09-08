@@ -66,19 +66,75 @@ const PATTERNS = [
   },
 ]
 
-function stripHtml(text) {
-  return String(text || '')
-    .replace(/<[^>]*>/g, '')
-    .trim()
+/**
+ * One plain sentence out of whatever shape Frappe put a refusal in (P3-U6
+ * step 0).
+ *
+ * Three shapes reach here, and two of them are not strings:
+ *
+ *   * a plain sentence -- the portal's own refusals;
+ *   * HTML -- `frappe.throw` with `frappe.bold()` and `get_link_to_form()`,
+ *     which is how HRMS reports an overlapping Attendance Request;
+ *   * a **list of lists** -- `frappe.msgprint(..., as_table=True)`, which is
+ *     how HRMS reports "no attendance records to create". frappe-ui hands
+ *     that array straight through as `error.messages[0]`, so rendering it
+ *     printed a JSON blob, and stripping its tags after a naive join glued
+ *     the cells into one unreadable word ("3 SeptemberHolidaySkip").
+ *
+ * Cells are joined with a middot and rows with a full stop, so a table
+ * arrives as sentences a person can read.
+ */
+export function toPlainMessage(value) {
+  if (Array.isArray(value)) {
+    return joinRows(
+      value.map((row) =>
+        Array.isArray(row) ? joinCells(row.map(toPlainMessage)) : toPlainMessage(row),
+      ),
+    )
+  }
+  const text = String(value ?? '')
+  // A table or a list arrives as markup, and its separators live in the
+  // tags: split on the row and cell boundaries *before* stripping, so the
+  // separators survive and an empty trailing cell or row disappears instead
+  // of leaving punctuation behind. A plain sentence takes neither branch, so
+  // one that simply ends in a full stop is never rewritten.
+  if (/<(?:td|th|tr|li|br)\b/i.test(text)) {
+    return joinRows(
+      text
+        .split(/<\/(?:tr|li)>|<br\s*\/?>/i)
+        .map((row) => joinCells(row.split(/<\/(?:td|th)>/i).map(stripTags))),
+    )
+  }
+  return collapse(stripTags(text))
+}
+
+function stripTags(text) {
+  return text.replace(/<[^>]*>/g, ' ')
+}
+
+function collapse(text) {
+  return text.replace(/\s+/g, ' ').trim()
+}
+
+function joinCells(cells) {
+  return cells.map(collapse).filter(Boolean).join(' · ')
+}
+
+function joinRows(rows) {
+  return rows
+    .map((row) => collapse(row).replace(/\.$/, ''))
+    .filter(Boolean)
+    .join('. ')
 }
 
 /** Map a raw Frappe error (an Error thrown by apiRequest, with `.messages`
  * and/or `.message`) to one plain sentence. */
 export function toPlainLeaveError(error) {
-  const raw = error?.messages?.[0] || error?.message || String(error || '')
+  const first = error?.messages?.[0]
+  const raw = toPlainMessage(first ?? error?.message ?? error ?? '')
   for (const { test, message } of PATTERNS) {
     const match = raw.match(test)
     if (match) return message(match)
   }
-  return stripHtml(raw) || 'Something went wrong. Please try again.'
+  return raw || 'Something went wrong. Please try again.'
 }

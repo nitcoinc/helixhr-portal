@@ -31,5 +31,7 @@ export const ATTENDANCE_LABEL = {
   Absent: 'Absent',
   'Half Day': 'Half day',
   'On Leave': 'On leave',
+  // P3-R19. What an approved attendance request writes onto the day.
+  'Work From Home': 'Work from home',
   Holiday: 'Holiday',
 }

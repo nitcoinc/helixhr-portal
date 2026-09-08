@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { toPlainLeaveError } from './errorMap'
+import { toPlainLeaveError, toPlainMessage } from './errorMap'
 
 function err(message) {
   return { messages: [message] }
@@ -98,5 +98,48 @@ describe('P2-U5 leave lifecycle messages', () => {
     expect(
       toPlainLeaveError({ messages: ['The end date must be on or after the start date.'] }),
     ).toBe('The end date must be on or after the start date.')
+  })
+})
+
+// P3-U6 step 0 / P3-U6 scenario 7. HRMS reports two of its Attendance
+// Request refusals in shapes that are not a plain sentence, and both reach a
+// manager mid-decision.
+describe('toPlainMessage', () => {
+  it('flattens an as_table msgprint, which frappe-ui hands over as a list of lists', () => {
+    expect(
+      toPlainMessage([
+        ['Date', 'Reason', 'Action'],
+        ['03-09-2026', 'Holiday', 'Skip'],
+      ]),
+    ).toBe('Date · Reason · Action. 03-09-2026 · Holiday · Skip')
+  })
+
+  it('flattens the same table when it arrives as markup', () => {
+    expect(
+      toPlainMessage(
+        '<table><tr><td>Date</td><td>Reason</td></tr><tr><td>03-09-2026</td><td>Holiday</td></tr></table>',
+      ),
+    ).toBe('Date · Reason. 03-09-2026 · Holiday')
+  })
+
+  it("reads HRMS's overlap error as one sentence", () => {
+    expect(
+      toPlainMessage(
+        'Employee <b>HR-EMP-00001</b> already has an Attendance Request ' +
+          '<a href="/app/attendance-request/HR-ARQ-00001">HR-ARQ-00001</a> that overlaps with this period',
+      ),
+    ).toBe(
+      'Employee HR-EMP-00001 already has an Attendance Request HR-ARQ-00001 that overlaps with this period',
+    )
+  })
+
+  it('leaves a plain sentence exactly as written, full stop included', () => {
+    expect(toPlainMessage('This has already been decided. Reload to see the result.')).toBe(
+      'This has already been decided. Reload to see the result.',
+    )
+  })
+
+  it('has an answer for nothing at all', () => {
+    expect(toPlainMessage(null)).toBe('')
   })
 })

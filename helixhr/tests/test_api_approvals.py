@@ -6,23 +6,35 @@ from frappe.model.workflow import apply_workflow
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, today
 
-from helixhr.api import act_on_approval, get_approval_detail, get_my_approvals, save_my_week
+from helixhr.api import (
+	act_on_approval,
+	create_my_attendance_request,
+	get_approval_detail,
+	get_my_approvals,
+	save_my_week,
+	send_my_attendance_request,
+)
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	MANAGER_USER,
+	OTHER_MANAGER_USER,
 	ensure_holiday_list_assignment,
+	ensure_hr_manager_user,
 	ensure_leave_allocation,
 	ensure_leave_approver_role,
 	make_test_employee_and_manager,
+	make_test_user,
 )
 from helixhr.utils import get_week_bounds
+
+DOCTYPE = "Attendance Request"
 
 
 def token(doctype, name):
 	"""The concurrency token the screen always sends (P2-U7 step 3):
 	`get_approval_detail` hands the manager a `modified` and a state, and
 	`act_on_approval` refuses a decision that does not carry them back."""
-	field = "workflow_state" if doctype == "Timesheet" else "status"
+	field = "status" if doctype == "Leave Application" else "workflow_state"
 	row = frappe.db.get_value(doctype, name, ["modified", field], as_dict=True)
 	return {"expected_modified": str(row.modified), "expected_state": row.get(field)}
 
@@ -968,3 +980,246 @@ class TestLeaveApprovalIsNative(IntegrationTestCase):
 		result = check_unsubmitted_approved_leave()
 		self.assertEqual(result["status"], WARN)
 		self.assertIn("never submitted", result["detail"])
+
+
+class TestAttendanceRequestApprovals(IntegrationTestCase):
+	"""P3-U6. The third kind in the manager's queue: what it lists, what the
+	manager reads before deciding, and every refusal (P3-R16, P3-KTD7,
+	P3-AE7, P3-AE8).
+
+	Each method picks its own past-year window, hashed from the test id and
+	never nearer than 450 days back, and removes what it wrote in tearDown:
+	IntegrationTestCase does not roll back between methods here
+	(docs/runbook.md) and HRMS refuses two overlapping requests for one
+	employee.
+	"""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		frappe.db.set_value("Employee", self.employee_name, "reports_to", self.manager_name)
+		self.company = frappe.db.get_value("Employee", self.employee_name, "company")
+		ensure_holiday_list_assignment(self.company)
+		self.hr_user = ensure_hr_manager_user()
+
+		digest = int(hashlib.md5(self.id().encode()).hexdigest(), 16)
+		self.start = add_days(today(), -(450 + 3 * (digest % 600)))
+		self.created = []
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		for name in self.created:
+			if not frappe.db.exists(DOCTYPE, name):
+				continue
+			doc = frappe.get_doc(DOCTYPE, name)
+			if doc.docstatus == 1:
+				doc.cancel()
+			for row in frappe.get_all("Attendance", filters={"attendance_request": name}, pluck="name"):
+				attendance = frappe.get_doc("Attendance", row)
+				if attendance.docstatus == 1:
+					attendance.cancel()
+				frappe.delete_doc("Attendance", row, force=True, ignore_permissions=True)
+			frappe.db.delete("DocShare", {"share_doctype": DOCTYPE, "share_name": name})
+			frappe.delete_doc(DOCTYPE, name, force=True, ignore_permissions=True)
+		frappe.db.set_value("Employee", self.employee_name, "reports_to", self.manager_name)
+
+	# --- helpers -----------------------------------------------------------
+
+	def _day(self, offset=0):
+		return str(add_days(self.start, offset))
+
+	def _pending_manager(self, days=1, reason="Work From Home", explanation="Router died"):
+		frappe.set_user(EMPLOYEE_USER)
+		created = create_my_attendance_request(
+			from_date=self._day(),
+			to_date=self._day(days - 1),
+			reason=reason,
+			explanation=explanation,
+		)
+		self.created.append(created["name"])
+		send_my_attendance_request(created["name"], expected_modified=created["modified"])
+		frappe.set_user("Administrator")
+		return created["name"]
+
+	def _state(self, name):
+		return frappe.db.get_value(DOCTYPE, name, "workflow_state")
+
+	def _queue_names(self, kind="attendance"):
+		return [row["name"] for row in get_my_approvals()["pending"] if row["kind"] == kind]
+
+	# --- the queue and the evidence (P3-AE7) --------------------------------
+
+	def test_the_queue_carries_the_reason_dates_explanation_and_what_the_calendar_shows(self):
+		name = self._pending_manager(days=2)
+
+		frappe.set_user(MANAGER_USER)
+		row = next(entry for entry in get_my_approvals()["pending"] if entry["name"] == name)
+		self.assertEqual(row["kind"], "attendance")
+		self.assertEqual(row["doctype"], DOCTYPE)
+		self.assertEqual(row["reason"], "Work From Home")
+		self.assertEqual(row["explanation"], "Router died")
+		self.assertEqual(row["status"], "Pending Manager")
+		self.assertEqual(row["total_days"], 2)
+		self.assertFalse(row["half_day"])
+		self.assertEqual([day["date"] for day in row["calendar"]], [self._day(), self._day(1)])
+		self.assertEqual({day["status"] for day in row["calendar"]}, {None})
+
+		detail = get_approval_detail("attendance", name)
+		self.assertEqual(detail["kind"], "attendance")
+		self.assertEqual(detail["explanation"], "Router died")
+		self.assertEqual(detail["state"], "Pending Manager")
+		self.assertEqual(detail["total_days"], 2)
+		self.assertTrue(detail["working_days_known"])
+		self.assertEqual(len(detail["days"]), 2)
+		self.assertEqual(detail["modified"], str(frappe.db.get_value(DOCTYPE, name, "modified")))
+
+	def test_send_to_hr_moves_the_state_and_writes_no_attendance(self):
+		name = self._pending_manager()
+
+		frappe.set_user(MANAGER_USER)
+		result = act_on_approval(DOCTYPE, name, "Approve", **token(DOCTYPE, name))
+		self.assertEqual(result["state"], "Pending HR")
+
+		frappe.set_user("Administrator")
+		self.assertEqual(self._state(name), "Pending HR")
+		self.assertEqual(frappe.get_all("Attendance", filters={"attendance_request": name}), [])
+		self.assertEqual(
+			frappe.get_all("DocShare", filters={"share_doctype": DOCTYPE, "share_name": name}),
+			[],
+			"the manager's access ends with their decision",
+		)
+
+	# --- refusals (P3-AE8) --------------------------------------------------
+
+	def test_send_back_without_a_reason_is_refused_and_leaves_no_comment(self):
+		name = self._pending_manager()
+
+		frappe.set_user(MANAGER_USER)
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval(DOCTYPE, name, "Reject", **token(DOCTYPE, name))
+
+		frappe.set_user("Administrator")
+		self.assertEqual(self._state(name), "Pending Manager")
+		self.assertEqual(
+			frappe.get_all(
+				"Comment",
+				filters={"reference_doctype": DOCTYPE, "reference_name": name, "comment_type": "Comment"},
+				pluck="content",
+			),
+			[],
+		)
+
+	def test_send_back_with_a_reason_records_it(self):
+		name = self._pending_manager()
+
+		frappe.set_user(MANAGER_USER)
+		act_on_approval(DOCTYPE, name, "Reject", comment="Pick the Tuesday", **token(DOCTYPE, name))
+
+		frappe.set_user("Administrator")
+		self.assertEqual(self._state(name), "Rejected")
+		self.assertEqual(
+			frappe.utils.strip_html(
+				frappe.db.get_value(
+					"Comment",
+					{"reference_doctype": DOCTYPE, "reference_name": name, "comment_type": "Comment"},
+					"content",
+				)
+			).strip(),
+			"Pick the Tuesday",
+		)
+
+	# P3-U6 scenario 5
+
+	def test_an_unrelated_manager_gets_no_detail_and_cannot_act(self):
+		frappe.set_user("Administrator")
+		make_test_user(OTHER_MANAGER_USER, self.company)
+		name = self._pending_manager()
+
+		frappe.set_user(OTHER_MANAGER_USER)
+		with self.assertRaises(frappe.PermissionError):
+			get_approval_detail("attendance", name)
+		with self.assertRaises(frappe.PermissionError):
+			act_on_approval(DOCTYPE, name, "Approve", **token(DOCTYPE, name))
+		self.assertNotIn(name, self._queue_names())
+
+		frappe.set_user("Administrator")
+		self.assertEqual(self._state(name), "Pending Manager")
+
+	# P3-U6 scenario 6 / P3-KTD7
+
+	def test_a_pending_hr_request_is_in_nobodys_portal_queue_and_cannot_be_acted_on(self):
+		name = self._pending_manager()
+		frappe.set_user(MANAGER_USER)
+		act_on_approval(DOCTYPE, name, "Approve", **token(DOCTYPE, name))
+		self.assertNotIn(name, self._queue_names())
+
+		# The manager's own second attempt, and an HR Manager's from the
+		# portal: HR's step is Desk's, so both are refused as already decided.
+		with self.assertRaises(frappe.ValidationError) as refused:
+			act_on_approval(DOCTYPE, name, "Approve", **token(DOCTYPE, name))
+		self.assertIn("already been decided", str(refused.exception))
+
+		# The HR Manager fixture holds the role and no Employee record, so
+		# it has no portal queue at all -- only the action to refuse.
+		frappe.set_user(self.hr_user)
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval(DOCTYPE, name, "Approve", **token(DOCTYPE, name))
+
+		frappe.set_user("Administrator")
+		self.assertEqual(self._state(name), "Pending HR")
+
+	def test_a_stale_token_is_refused(self):
+		name = self._pending_manager()
+		stale = token(DOCTYPE, name)
+
+		frappe.set_user("Administrator")
+		frappe.db.set_value(DOCTYPE, name, "explanation", "HR touched this")
+
+		frappe.set_user(MANAGER_USER)
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval(DOCTYPE, name, "Approve", **stale)
+		# And the other half of the token: the state, read from
+		# `workflow_state` rather than from a `status` field this doctype
+		# does not have (P3-U6 step 0).
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval(
+				DOCTYPE,
+				name,
+				"Approve",
+				expected_modified=frappe.db.get_value(DOCTYPE, name, "modified"),
+				expected_state="Pending HR",
+			)
+
+		frappe.set_user("Administrator")
+		self.assertEqual(self._state(name), "Pending Manager")
+
+	def test_every_kind_is_registered_in_every_per_kind_map(self):
+		"""P3-U6 step 0. The maps replaced `if timesheet else leave`, where a
+		third doctype silently became a Timesheet. A kind registered in one
+		map and not another would reintroduce exactly that."""
+		from helixhr import api
+
+		doctypes = set(api._APPROVAL_DOCTYPES.values())
+		self.assertEqual(set(api._APPROVAL_DETAIL), doctypes)
+		self.assertEqual(set(api._APPROVAL_ACT), doctypes)
+		self.assertEqual(set(api._MAY_ACT_ON), doctypes)
+		self.assertEqual(set(api._STILL_OPEN), doctypes)
+		self.assertEqual(set(api._APPROVAL_STATE_FIELD), doctypes)
+		self.assertEqual(set(api._QUEUE_TITLE), set(api._APPROVAL_DOCTYPES))
+		self.assertEqual(len(api._APPROVAL_SUMMARY_COLLECTORS), len(doctypes))
+		self.assertEqual(len(api._DECIDED_COLLECTORS), len(doctypes))
+		# Each kind's "already decided" sentence names its own record type.
+		self.assertEqual(
+			len({message for _, message in api._STILL_OPEN.values()}), len(doctypes)
+		)
+
+	def test_a_decided_request_is_the_managers_receipt(self):
+		name = self._pending_manager()
+		frappe.set_user(MANAGER_USER)
+		act_on_approval(DOCTYPE, name, "Approve", **token(DOCTYPE, name))
+
+		receipts = [row for row in get_my_approvals()["decided"] if row["name"] == name]
+		self.assertEqual(len(receipts), 1)
+		self.assertEqual(receipts[0]["kind"], "attendance")
+		self.assertEqual(receipts[0]["label"], "Attendance request")
+		self.assertEqual(receipts[0]["status"], "Pending HR")

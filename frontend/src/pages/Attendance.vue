@@ -1,18 +1,40 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { createResource, Dialog } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
 import CheckInSheet from '@/components/CheckInSheet.vue'
-import { formatDate, formatTime, today } from '@/lib/dates'
+import AttendanceRequestSheet from '@/components/AttendanceRequestSheet.vue'
+import StatusBadge from '@/components/StatusBadge.vue'
+import StepStrip from '@/components/StepStrip.vue'
+import { formatDate, formatDateRange, formatTime, today } from '@/lib/dates'
 import { ATTENDANCE_LABEL } from '@/lib/week'
+
+// P3-U6 step 7 / P3-R17. `/attendance/requests/:name` resolves here rather
+// than to a page of its own: a request is four fields and two steps, the
+// sheet already renders exactly that, and a second surface would be a second
+// place for the copy and the actions to drift. The route opens the sheet over
+// the calendar, which is also the context the request is about.
+const props = defineProps({
+  name: { type: String, default: '' },
+})
+
+const route = useRoute()
+const router = useRouter()
 
 const STATUS_COLOR = {
   Present: 'bg-surface-green-3',
   Absent: 'bg-surface-red-3',
   'Half Day': 'bg-surface-amber-3',
   'On Leave': 'bg-surface-blue-3',
+  // P3-R19. A day an approved attendance request marked. The palette adds no
+  // new colour (P3-R24), so this is the light green of the Approved pair
+  // against Present's solid one -- and the word is in the day's accessible
+  // name, in the legend and in the sheet, so the dot is never the only
+  // reading of it.
+  'Work From Home': 'bg-surface-green-2',
   Holiday: 'bg-surface-gray-4',
 }
 
@@ -102,16 +124,11 @@ const lastPunchLine = computed(() => {
   return `${kind} at ${formatTime(last.time)} · ${place}`
 })
 
-/** The fallback when a punch cannot happen: one HR Request with today
- * already written into it. P3-U6 replaces this with the Attendance Request
- * sheet; the pointer is a route so only the target changes. */
-const todayFixRoute = computed(() => ({
-  name: 'Requests',
-  query: {
-    category: 'Other',
-    subject: `Attendance problem on ${formatDate(today())}`,
-  },
-}))
+/** The fallback when a punch cannot happen: the Fix a day sheet, with today
+ * already in it (P3-U6 step 1). A route rather than an event, because
+ * CheckInSheet offers it as a link and because `?fix=` makes "fix this day"
+ * something Home, a notification or another person can send you to. */
+const todayFixRoute = computed(() => ({ name: 'Attendance', query: { fix: today() } }))
 
 /** Two different reasons for an empty day sheet, and only one of them is
  * about this employee's day. */
@@ -250,8 +267,79 @@ const dayOpen = computed({
   },
 })
 
+// --- attendance requests (P3-U6 steps 1 and 2 / P3-R12, P3-R17) ----------
+//
+// One bounded read for the whole column, and it also carries the two reasons
+// HRMS offers and the manager's name, so opening the sheet costs nothing
+// extra (P3-R25).
+const requests = createResource({
+  url: 'helixhr.api.get_my_attendance_requests',
+  auto: true,
+})
+
+const requestRows = computed(() => requests.data?.requests || [])
+const requestOverflow = computed(() =>
+  Math.max(0, (requests.data?.total || 0) - requestRows.value.length),
+)
+const approverName = computed(() => requests.data?.approver_name || '')
+const requestReasons = computed(() => requests.data?.reasons || [])
+
+const requestSheetOpen = ref(false)
+const requestName = ref('')
+const requestDate = ref('')
+
+/** Raise one, for a named day. The day sheet, the header action and the
+ * check-in sheet's fallback all land here. */
+function fixADay(iso) {
+  selectedDay.value = null
+  requestName.value = ''
+  requestDate.value = iso || today()
+  requestSheetOpen.value = true
+}
+
+function openRequest(name) {
+  requestDate.value = ''
+  requestName.value = name
+  requestSheetOpen.value = true
+}
+
+// Two ways in from the URL: `/attendance/requests/:name` opens that request,
+// and `?fix=<date>` opens the ask for that day. Both are replaced on close,
+// so Back does not reopen the sheet the employee just dismissed.
+watch(
+  () => props.name,
+  (name) => {
+    if (name) openRequest(name)
+  },
+  { immediate: true },
+)
+watch(
+  () => route.query.fix,
+  (fix) => {
+    if (fix) {
+      sheetOpen.value = false
+      fixADay(String(fix))
+    }
+  },
+  { immediate: true },
+)
+watch(requestSheetOpen, (open) => {
+  if (open) return
+  requestName.value = ''
+  requestDate.value = ''
+  if (props.name || route.query.fix) router.replace({ name: 'Attendance' })
+})
+
+/** A request that was sent, withdrawn or decided changes both the list and
+ * what the calendar shows for those days. */
+function onRequestChanged() {
+  requests.reload()
+  calendar.reload()
+}
+
 const LEGEND = [
   { label: 'Present', class: STATUS_COLOR.Present },
+  { label: 'Work from home', class: STATUS_COLOR['Work From Home'] },
   { label: 'Half day', class: STATUS_COLOR['Half Day'] },
   { label: 'Absent', class: STATUS_COLOR.Absent },
   { label: 'On leave', class: STATUS_COLOR['On Leave'] },
@@ -260,7 +348,19 @@ const LEGEND = [
 
 <template>
   <div class="space-y-4">
-    <PageHeader title="Attendance" />
+    <PageHeader title="Attendance">
+      <template #actions>
+        <!-- P3-U6 step 1. The page-level way in, for a day the employee has
+             to scroll to find. The day sheet offers the same thing with the
+             day already named. -->
+        <button
+          class="min-h-11 cursor-pointer rounded-full border border-outline-gray-2 bg-surface-white px-4 text-sm font-medium text-ink-gray-8 hover:bg-surface-gray-2"
+          @click="fixADay(today())"
+        >
+          Fix a day
+        </button>
+      </template>
+    </PageHeader>
 
     <div class="flex max-w-xl items-center justify-between">
       <button
@@ -288,184 +388,257 @@ const LEGEND = [
       </button>
     </div>
 
-    <AsyncState
-      class="max-w-xl"
-      section="attendance-month"
-      :resource="calendar"
-      :empty="false"
-      skeleton="field"
-      skeleton-height="h-[26rem]"
-    >
-      <!-- The anchored region: this month, counted, on the field. The dot is
+    <div class="lg:flex lg:items-start lg:gap-6">
+      <AsyncState
+        class="max-w-xl lg:flex-1"
+        section="attendance-month"
+        :resource="calendar"
+        :empty="false"
+        skeleton="field"
+        skeleton-height="h-[26rem]"
+      >
+        <!-- The anchored region: this month, counted, on the field. The dot is
            a second reading of a word that is always present, so nothing here
            is carried by colour alone. -->
-      <section
-        class="surface-field elev-2 mb-4 p-4"
-        aria-label="This month"
-      >
-        <div
-          v-if="Object.keys(summary).length"
-          class="flex flex-wrap gap-x-5 gap-y-2"
+        <section
+          class="surface-field elev-2 mb-4 p-4"
+          aria-label="This month"
         >
-          <p
-            v-for="(count, status) in summary"
-            :key="status"
-            class="flex items-center gap-2 text-sm text-blue-100"
+          <div
+            v-if="Object.keys(summary).length"
+            class="flex flex-wrap gap-x-5 gap-y-2"
           >
-            <span
-              class="h-2 w-2 shrink-0 rounded-full"
-              :class="STATUS_COLOR[status] || 'bg-surface-gray-4'"
-              aria-hidden="true"
-            />
-            <span class="tabular font-heading text-base font-bold text-white">{{ count }}</span>
-            {{ ATTENDANCE_LABEL[status] || status }}
+            <p
+              v-for="(count, status) in summary"
+              :key="status"
+              class="flex items-center gap-2 text-sm text-blue-100"
+            >
+              <span
+                class="h-2 w-2 shrink-0 rounded-full"
+                :class="STATUS_COLOR[status] || 'bg-surface-gray-4'"
+                aria-hidden="true"
+              />
+              <span class="tabular font-heading text-base font-bold text-white">{{ count }}</span>
+              {{ ATTENDANCE_LABEL[status] || status }}
+            </p>
+          </div>
+          <p
+            v-else
+            class="text-sm text-blue-100"
+          >
+            No attendance recorded yet this month.
           </p>
-        </div>
-        <p
-          v-else
-          class="text-sm text-blue-100"
-        >
-          No attendance recorded yet this month.
-        </p>
 
-        <!-- P3-R5. The Today strip: the next punch, the last one, and
+          <!-- P3-R5. The Today strip: the next punch, the last one, and
              whether it carried a location. Inside the field block because
              it is this page's one anchored action, which is also the only
              place signal yellow is legal. -->
-        <div class="mt-4 border-t border-white/15 pt-3">
-          <h2 class="label !text-blue-200 mb-2">
-            Today
-          </h2>
-          <template v-if="checkin.enabled">
-            <button
-              class="min-h-11 cursor-pointer rounded-full bg-signal px-5 text-sm font-bold text-field hover:brightness-95"
-              @click="sheetOpen = true"
+          <div class="mt-4 border-t border-white/15 pt-3">
+            <h2 class="label !text-blue-200 mb-2">
+              Today
+            </h2>
+            <template v-if="checkin.enabled">
+              <button
+                class="min-h-11 cursor-pointer rounded-full bg-signal px-5 text-sm font-bold text-field hover:brightness-95"
+                @click="sheetOpen = true"
+              >
+                {{ punchLabel }}
+              </button>
+              <p class="mt-2 flex items-center gap-1.5 text-sm text-blue-100">
+                <Icon
+                  v-if="checkin.last?.has_location"
+                  name="pin"
+                  size="h-3.5 w-3.5"
+                  class="shrink-0 text-blue-200"
+                />
+                {{ lastPunchLine }}
+              </p>
+            </template>
+            <p
+              v-else
+              class="text-sm text-blue-200"
             >
-              {{ punchLabel }}
-            </button>
-            <p class="mt-2 flex items-center gap-1.5 text-sm text-blue-100">
-              <Icon
-                v-if="checkin.last?.has_location"
-                name="pin"
-                size="h-3.5 w-3.5"
-                class="shrink-0 text-blue-200"
-              />
-              {{ lastPunchLine }}
+              {{ checkin.reason }}
             </p>
-          </template>
-          <p
-            v-else
-            class="text-sm text-blue-200"
-          >
-            {{ checkin.reason }}
-          </p>
-        </div>
+          </div>
 
-        <!-- R16's exceptions. Dormant by design: with no check-in device the
+          <!-- R16's exceptions. Dormant by design: with no check-in device the
              server reports nothing missing, so this resolves to the one
              explanatory line rather than a wall of red. It starts working the
              day real records arrive, with no change here. -->
-        <div class="mt-4 border-t border-white/15 pt-3">
-          <h2 class="label !text-blue-200 mb-2">
-            Exceptions
-          </h2>
-          <div
-            v-if="exceptionEntries.length"
-            class="flex flex-wrap gap-2 text-sm"
-          >
-            <span
-              v-for="[label, count] in exceptionEntries"
-              :key="label"
-              class="rounded-full bg-signal px-3 py-1 font-medium text-field"
+          <div class="mt-4 border-t border-white/15 pt-3">
+            <h2 class="label !text-blue-200 mb-2">
+              Exceptions
+            </h2>
+            <div
+              v-if="exceptionEntries.length"
+              class="flex flex-wrap gap-2 text-sm"
             >
-              {{ label }}: <span class="tabular">{{ count }}</span>
-            </span>
+              <span
+                v-for="[label, count] in exceptionEntries"
+                :key="label"
+                class="rounded-full bg-signal px-3 py-1 font-medium text-field"
+              >
+                {{ label }}: <span class="tabular">{{ count }}</span>
+              </span>
+            </div>
+            <p
+              v-else-if="!isTracked"
+              class="text-sm text-blue-200"
+            >
+              Check-in isn't set up yet, so there's nothing to flag. Once it is,
+              late arrivals and days with no record will show up here.
+            </p>
+            <p
+              v-else
+              class="text-sm text-blue-200"
+            >
+              Nothing to flag this month.
+            </p>
           </div>
-          <p
-            v-else-if="!isTracked"
-            class="text-sm text-blue-200"
-          >
-            Check-in isn't set up yet, so there's nothing to flag. Once it is,
-            late arrivals and days with no record will show up here.
-          </p>
-          <p
-            v-else
-            class="text-sm text-blue-200"
-          >
-            Nothing to flag this month.
-          </p>
-        </div>
-      </section>
+        </section>
 
-      <div class="surface-card elev-1 p-3">
-        <div class="grid grid-cols-7 gap-1 text-center text-xs text-ink-gray-5">
-          <span
-            v-for="d in ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']"
-            :key="d"
-          >{{ d }}</span>
-        </div>
-        <div class="mt-1 grid grid-cols-7 gap-1">
-          <!-- The blanks before the 1st are spacing, not controls. They used to
+        <div class="surface-card elev-1 p-3">
+          <div class="grid grid-cols-7 gap-1 text-center text-xs text-ink-gray-5">
+            <span
+              v-for="d in ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']"
+              :key="d"
+            >{{ d }}</span>
+          </div>
+          <div class="mt-1 grid grid-cols-7 gap-1">
+            <!-- The blanks before the 1st are spacing, not controls. They used to
              render as disabled <button>s with no text, which put four unnamed
              buttons per month into the accessibility tree. -->
-          <component
-            :is="day ? 'button' : 'span'"
-            v-for="(day, index) in days"
-            :key="index"
-            class="tabular flex aspect-square min-h-11 flex-col items-center justify-center rounded-md text-sm"
-            :class="[
-              day ? 'cursor-pointer text-ink-gray-8 hover:bg-surface-gray-2' : '',
-              day?.missing ? 'border border-dashed border-outline-gray-3' : '',
-            ]"
-            :data-day="day?.iso"
-            :aria-label="day ? dayLabel(day) : undefined"
-            @click="day && openDay(day)"
-          >
-            <span>{{ day?.day }}</span>
-            <span
-              v-if="day?.status"
-              class="mt-0.5 h-2 w-2 rounded-full"
+            <component
+              :is="day ? 'button' : 'span'"
+              v-for="(day, index) in days"
+              :key="index"
+              class="tabular flex aspect-square min-h-11 flex-col items-center justify-center rounded-md text-sm"
               :class="[
-                STATUS_COLOR[day.status] || 'bg-surface-gray-4',
-                day.late ? 'ring-2 ring-amber-500 ring-offset-1' : '',
+                day ? 'cursor-pointer text-ink-gray-8 hover:bg-surface-gray-2' : '',
+                day?.missing ? 'border border-dashed border-outline-gray-3' : '',
               ]"
-            />
-          </component>
+              :data-day="day?.iso"
+              :aria-label="day ? dayLabel(day) : undefined"
+              @click="day && openDay(day)"
+            >
+              <span>{{ day?.day }}</span>
+              <span
+                v-if="day?.status"
+                class="mt-0.5 h-2 w-2 rounded-full"
+                :class="[
+                  STATUS_COLOR[day.status] || 'bg-surface-gray-4',
+                  day.late ? 'ring-2 ring-amber-500 ring-offset-1' : '',
+                ]"
+              />
+            </component>
+          </div>
         </div>
-      </div>
 
-      <!-- The legend. The grid's dots are a second reading of a word that
+        <!-- The legend. The grid's dots are a second reading of a word that
            lives in the day's accessible name and in the sheet; without this
            they are a second reading of nothing (P2-R5). -->
-      <ul class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-gray-6">
-        <li
-          v-for="entry in LEGEND"
-          :key="entry.label"
-          class="flex items-center gap-1.5"
+        <ul class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-gray-6">
+          <li
+            v-for="entry in LEGEND"
+            :key="entry.label"
+            class="flex items-center gap-1.5"
+          >
+            <span
+              class="h-2 w-2 shrink-0 rounded-full"
+              :class="entry.class"
+              aria-hidden="true"
+            />
+            {{ entry.label }}
+          </li>
+          <li class="flex items-center gap-1.5">
+            <span
+              class="h-2 w-2 shrink-0 rounded-full ring-2 ring-amber-500"
+              aria-hidden="true"
+            />
+            Late
+          </li>
+          <li class="flex items-center gap-1.5">
+            <span
+              class="h-3 w-3 shrink-0 rounded-sm border border-dashed border-outline-gray-3"
+              aria-hidden="true"
+            />
+            No record
+          </li>
+        </ul>
+      </AsyncState>
+
+      <!-- P3-U6 step 1 / P3-R17. The employee's own requests, each with its
+           two steps and, when it came back, the reason inline -- so following
+           one never means opening it. -->
+      <section
+        class="min-w-0 lg:w-80 lg:shrink-0"
+        aria-labelledby="attendance-requests-heading"
+        data-testid="attendance-requests"
+      >
+        <h2
+          id="attendance-requests-heading"
+          class="label mb-2"
         >
-          <span
-            class="h-2 w-2 shrink-0 rounded-full"
-            :class="entry.class"
-            aria-hidden="true"
-          />
-          {{ entry.label }}
-        </li>
-        <li class="flex items-center gap-1.5">
-          <span
-            class="h-2 w-2 shrink-0 rounded-full ring-2 ring-amber-500"
-            aria-hidden="true"
-          />
-          Late
-        </li>
-        <li class="flex items-center gap-1.5">
-          <span
-            class="h-3 w-3 shrink-0 rounded-sm border border-dashed border-outline-gray-3"
-            aria-hidden="true"
-          />
-          No record
-        </li>
-      </ul>
-    </AsyncState>
+          Your requests
+        </h2>
+        <AsyncState
+          section="attendance-requests"
+          :resource="requests"
+          :empty="requestRows.length === 0"
+          empty-title="No requests yet"
+          empty-body="Ask to have a work-from-home or on-duty day counted, and it shows up here."
+          :skeleton-rows="2"
+        >
+          <ul class="space-y-2">
+            <li
+              v-for="row in requestRows"
+              :key="row.name"
+              class="surface-card elev-1"
+              :data-request-name="row.name"
+            >
+              <button
+                type="button"
+                class="w-full cursor-pointer p-3 text-left"
+                @click="openRequest(row.name)"
+              >
+                <span class="flex items-baseline justify-between gap-2">
+                  <span class="min-w-0 truncate text-sm font-medium text-ink-gray-9">
+                    {{ row.reason }}
+                  </span>
+                  <StatusBadge
+                    kind="attendance"
+                    :status="row.workflow_state"
+                    :docstatus="row.docstatus"
+                    :approver="approverName"
+                  />
+                </span>
+                <span class="tabular mt-0.5 block text-xs text-ink-gray-6">
+                  {{ formatDateRange(row.from_date, row.to_date) }}
+                </span>
+                <StepStrip
+                  class="mt-2"
+                  :state="row.workflow_state"
+                  :docstatus="row.docstatus"
+                  :approver="approverName"
+                />
+                <span
+                  v-if="row.reason_sent_back"
+                  class="mt-2 block text-sm text-ink-red-4"
+                >“{{ row.reason_sent_back }}”</span>
+              </button>
+            </li>
+          </ul>
+          <p
+            v-if="requestOverflow"
+            class="mt-2 text-sm text-ink-gray-5"
+          >
+            <span class="tabular">{{ requestOverflow }}</span> older
+            {{ requestOverflow === 1 ? 'request' : 'requests' }} not shown here.
+          </p>
+        </AsyncState>
+      </section>
+    </div>
 
     <Dialog
       v-model="dayOpen"
@@ -518,15 +691,34 @@ const LEGEND = [
           </ul>
         </AsyncState>
 
-        <!-- Attendance correction stays in Frappe HR (P2-R15). What the
-             portal owns is asking for it, with the day already named. -->
-        <div class="mt-4 border-t border-outline-gray-1 pt-3">
-          <router-link
-            class="flex min-h-11 w-full items-center justify-center rounded-md border border-outline-gray-2 px-4 text-sm font-medium text-ink-gray-8 hover:bg-surface-gray-2"
-            :to="reportRoute"
-          >
-            Report a problem with this day
-          </router-link>
+        <!-- P3-KTD10. Two different jobs, one sentence each. Work from home
+             and on duty are the two reasons HRMS can turn into attendance by
+             itself, so those go to the manager as a request; a forgotten
+             punch on an office day is HR's call, and that keeps the prefilled
+             HR Request it always had (P2-R15). -->
+        <div class="mt-4 space-y-3 border-t border-outline-gray-1 pt-3">
+          <div>
+            <button
+              class="flex min-h-11 w-full cursor-pointer items-center justify-center rounded-md bg-field px-4 text-sm font-medium text-white hover:brightness-95"
+              @click="fixADay(selectedDay?.iso)"
+            >
+              Fix a day
+            </button>
+            <p class="mt-1 text-xs text-ink-gray-5">
+              You worked from home or were on duty. Your manager and then HR agree, and the day counts.
+            </p>
+          </div>
+          <div>
+            <router-link
+              class="flex min-h-11 w-full items-center justify-center rounded-md border border-outline-gray-2 px-4 text-sm font-medium text-ink-gray-8 hover:bg-surface-gray-2"
+              :to="reportRoute"
+            >
+              Report a problem
+            </router-link>
+            <p class="mt-1 text-xs text-ink-gray-5">
+              Anything else — a missed punch, the wrong time, a day that looks wrong. HR reads it and replies.
+            </p>
+          </div>
         </div>
       </template>
     </Dialog>
@@ -538,6 +730,17 @@ const LEGEND = [
       :log-type="nextLogType"
       :fix-a-day-to="todayFixRoute"
       @punched="onPunched"
+    />
+
+    <!-- P3-U6 step 2. One sheet for both moments: raising a request, and
+         following the one the route or the column opened. -->
+    <AttendanceRequestSheet
+      v-model="requestSheetOpen"
+      :date="requestDate"
+      :name="requestName"
+      :reasons="requestReasons"
+      :approver-name="approverName"
+      @changed="onRequestChanged"
     />
   </div>
 </template>

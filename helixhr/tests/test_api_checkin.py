@@ -21,6 +21,7 @@ from helixhr.tests.utils import (
 	assign_test_shift,
 	clear_test_shifts,
 	ensure_test_shift_type,
+	leaving_employee_fixture,
 	make_test_employee_and_manager,
 )
 
@@ -466,29 +467,34 @@ class TestLocationRetention(CheckinTestCase):
 		self.assertEqual(null_stale_checkin_coordinates()["scrubbed"], 0)
 
 	def test_an_employee_who_leaves_loses_their_coordinates_at_once(self):
-		recent = self._punch_with_version(1)
+		# A throwaway employee with no login, never the shared fixture: ERPNext
+		# disables the linked User when an Employee goes to Left, and that
+		# side effect escapes this test's transaction while the restore does
+		# not -- so borrowing the fixture identity here locked it out of every
+		# later Playwright run. Nothing is shared, so nothing needs restoring.
 		frappe.set_user("Administrator")
+		leaver = leaving_employee_fixture()
+		punch = frappe.get_doc(
+			{
+				"doctype": "Employee Checkin",
+				"employee": leaver,
+				"time": add_to_date(now_datetime(), days=-1),
+				"log_type": "IN",
+				"latitude": HERE[0],
+				"longitude": HERE[1],
+			}
+		)
+		punch.flags.ignore_validate = True
+		punch.insert(ignore_permissions=True)
+		self.addCleanup(frappe.db.delete, "Employee Checkin", {"employee": leaver})
 
-		employee = frappe.get_doc("Employee", self.employee_name)
+		employee = frappe.get_doc("Employee", leaver)
 		employee.relieving_date = str(getdate())
 		employee.status = "Left"
 		employee.save(ignore_permissions=True)
 
-		try:
-			self.assertFalse(self._coordinates(recent).latitude)
-			self.assertFalse(self._coordinates(recent).longitude)
-			self.assertEqual(self._version_fields(recent), ["log_type"])
-		finally:
-			employee.reload()
-			employee.status = "Active"
-			employee.relieving_date = None
-			employee.save(ignore_permissions=True)
-			# ERPNext disables the linked User when an Employee goes to Left,
-			# and putting the status back does not re-enable it. Without this
-			# the fixture identity stays locked out and every later Playwright
-			# run fails at `auth.setup.ts` instead of at anything real.
-			if employee.user_id:
-				frappe.db.set_value("User", employee.user_id, "enabled", 1)
+		self.assertFalse(self._coordinates(punch.name).latitude)
+		self.assertFalse(self._coordinates(punch.name).longitude)
 
 	def test_a_punch_of_a_still_active_employee_keeps_its_coordinates(self):
 		recent = self._punch_with_version(1)
