@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 
@@ -6,6 +7,7 @@ import frappe
 from frappe import _
 from frappe.utils import (
 	add_days,
+	add_to_date,
 	cint,
 	date_diff,
 	flt,
@@ -15,6 +17,8 @@ from frappe.utils import (
 	get_last_day,
 	get_system_timezone,
 	getdate,
+	now_datetime,
+	time_diff_in_seconds,
 )
 from hrms.api import (
 	get_attendance_calendar_events,
@@ -1407,6 +1411,14 @@ def get_my_attendance(from_date, to_date):
 		"days": days,
 		"missing": missing,
 		"summary": summary,
+		# P3-U4 step 1 / P3-R5, P3-R8. The Today strip's whole input: may this
+		# employee punch right now, what the next punch is, and what to say
+		# when they may not.
+		"checkin": _safe(
+			lambda: _checkin_state(employee),
+			"HelixHR check-in state failed",
+			_checkin_unavailable(),
+		),
 		"exceptions": {
 			"absent": summary.get("Absent", 0),
 			"half_day": summary.get("Half Day", 0),
@@ -1456,6 +1468,274 @@ def _missing_attendance_days(employee, start, end, days, tracking_since, holiday
 	return missing
 
 
+# Check-in (P3-U4, P3-R5 to P3-R9)
+#
+# The punch is a server decision (P3-KTD3). The browser contributes exactly
+# two things -- a location and which button the employee thinks they are
+# pressing -- and the server decides the type, the time and whether a punch
+# happens at all. HRMS owns the rest: it resolves the shift, refuses a punch
+# outside a geofence and refuses a coordinate-less punch when HR Settings'
+# geolocation tracking is on.
+
+# Every portal punch is stamped with this, so a device punch and a portal
+# punch are still distinguishable in Desk (P3-R7).
+_PORTAL_DEVICE_ID = "HelixHR Portal"
+# A second tap inside a minute is the same punch, not a check-out: a slow
+# network, a double tap or a retry must not book two rows (P3-R7).
+_PUNCH_DEBOUNCE_SECONDS = 60
+# "Not set up" copy, used for the HR flag being off and for an employee with
+# no shift at all -- from their side those are the same situation, and both
+# are HR's to fix (P3-R8).
+_CHECKIN_NOT_SET_UP = "Check-in isn't set up for you yet. Ask HR if you think it should be."
+
+
+def _checkin_unavailable(reason=None, window=None, last=None):
+	return {"enabled": False, "reason": reason or _(_CHECKIN_NOT_SET_UP), "window": window, "last": last}
+
+
+def _mobile_checkin_allowed():
+	return bool(cint(frappe.db.get_single_value("HR Settings", "allow_employee_checkin_from_mobile_app")))
+
+
+def _shift_windows(employee, at):
+	"""HRMS's own shift resolution for one instant: `(window_now, upcoming)`.
+
+	`window_now` is the window `at` falls inside, grace periods included --
+	the same call `EmployeeCheckin.fetch_shift` makes, so the portal offers a
+	punch exactly when HRMS would attach one to a shift (P3-KTD5). A punch
+	outside it is stored `offshift` and never becomes Attendance, which
+	later reads as a missing day.
+
+	`upcoming` is the next window that has not closed yet, which is what
+	lets the strip say when check-in opens instead of claiming it is not set
+	up. HRMS has no call for that: every one of its resolvers answers "which
+	shift is this instant inside", and `get_employee_shift(..., "forward")`
+	looks for an assignment starting *after* today, so an open-ended
+	assignment that started last month answers nothing at all. So the
+	upcoming window is built from the assignments HRMS itself lists for the
+	day, using HRMS's own timings for each -- today first, then tomorrow,
+	which is where the next window lives once today's has closed.
+	"""
+	from hrms.hr.doctype.shift_assignment.shift_assignment import (
+		get_actual_start_end_datetime_of_shift,
+		get_shift_details,
+		get_shifts_for_date,
+	)
+
+	exact = get_actual_start_end_datetime_of_shift(employee, at, True) or None
+	if exact:
+		return exact, exact
+
+	for moment in (at, add_to_date(at, days=1)):
+		upcoming = None
+		for assignment in get_shifts_for_date(employee, moment):
+			details = get_shift_details(assignment.shift_type, moment)
+			if not details or not details.get("actual_start") or not details.get("actual_end"):
+				continue
+			# The assignment has to cover the day the window falls on. This
+			# is a looser reading than HRMS's own midnight-shift arithmetic,
+			# which is right for a sentence about when check-in opens: the
+			# punch itself is still gated by HRMS's resolution above.
+			opens_on = getdate(details.actual_start)
+			if opens_on < getdate(assignment.start_date):
+				continue
+			if assignment.end_date and opens_on > getdate(assignment.end_date):
+				continue
+			if details.actual_end < at:
+				continue
+			if upcoming is None or details.actual_start < upcoming.actual_start:
+				upcoming = details
+		if upcoming:
+			return exact, upcoming
+	return exact, None
+
+
+def _window_bounds(shift):
+	"""The `{start, end}` of a resolved HRMS shift, or None."""
+	if not shift:
+		return None
+	return {"start": shift.actual_start, "end": shift.actual_end}
+
+
+def _shift_window(employee, at):
+	"""The window `at` falls inside, or None. The punch's own gate."""
+	exact, _upcoming = _shift_windows(employee, at)
+	return _window_bounds(exact)
+
+
+def _last_punch_in_window(employee, start, end):
+	"""The employee's newest punch inside one shift window.
+
+	The window, not the calendar day: a night shift spans two dates and a
+	traveller's local day is a third answer again (P3-AE4). Whatever HRMS
+	would attach this punch to is what decides which punches count as "the
+	shift so far".
+	"""
+	rows = frappe.get_all(
+		"Employee Checkin",
+		filters={"employee": employee, "time": ["between", [str(start), str(end)]]},
+		fields=["name", "time", "log_type", "latitude", "longitude"],
+		order_by="time desc, creation desc",
+		limit=1,
+	)
+	return rows[0] if rows else None
+
+
+def _next_log_type(last):
+	"""No punch yet is a check-in; anything else alternates (P3-R7)."""
+	if last and last.log_type == "IN":
+		return "OUT"
+	return "IN"
+
+
+def _has_location(row):
+	return bool(row.get("latitude")) and bool(row.get("longitude"))
+
+
+def _punch_projection(row, existing=False):
+	return {
+		"name": row.get("name"),
+		"log_type": row.get("log_type"),
+		"time": str(row.get("time")),
+		"has_location": _has_location(row),
+		"existing": existing,
+	}
+
+
+def _checkin_state(employee):
+	"""P3-R5, P3-R8. What the Today strip renders: the next action if there
+	is one, and one plain sentence if there is not."""
+	if not _mobile_checkin_allowed():
+		return _checkin_unavailable()
+
+	now = now_datetime()
+	exact, upcoming = _shift_windows(employee, now)
+	window = _window_bounds(exact) or _window_bounds(upcoming)
+	if not exact:
+		if not upcoming:
+			return _checkin_unavailable()
+		return _checkin_unavailable(
+			_("Check-in opens at {0}.").format(_when(upcoming.actual_start)), window=window
+		)
+
+	last = _last_punch_in_window(employee, window["start"], window["end"])
+	return {
+		"enabled": True,
+		"reason": None,
+		"window": {"start": str(window["start"]), "end": str(window["end"])},
+		"last": _punch_last(last),
+		"next_log_type": _next_log_type(last),
+	}
+
+
+def _punch_last(last):
+	if not last:
+		return None
+	return {
+		"log_type": last.log_type,
+		"time": str(last.time),
+		"has_location": _has_location(last),
+	}
+
+
+def _when(moment):
+	""""08:45" for a window that opens today, "08:45 on 12 Sep" when it does
+	not -- the sentence has to be true for a night shift and for a Monday
+	read on a Saturday."""
+	moment = get_datetime(moment)
+	clock = moment.strftime("%H:%M")
+	if getdate(moment) == getdate(user_today()):
+		return clock
+	return _("{0} on {1}").format(clock, frappe.utils.formatdate(str(getdate(moment)), "d MMM"))
+
+
+def _punch_coordinates(latitude, longitude):
+	"""P3-R7a / P3-AE5. Two floats that name a place on Earth, or a plain
+	refusal. A browser that fails to fix a position sends nothing at all;
+	`NaN`, an infinity and a 95th parallel come from a caller that is not
+	the portal, and 0,0 is the null-island reading a broken sensor gives."""
+	missing = _("Your location didn't come through, so nothing was recorded. Try again.")
+	try:
+		lat, lon = float(latitude), float(longitude)
+	except (TypeError, ValueError):
+		frappe.throw(missing)
+	if not (math.isfinite(lat) and math.isfinite(lon)):
+		frappe.throw(missing)
+	if abs(lat) > 90 or abs(lon) > 180:
+		frappe.throw(_("That location isn't a real place on the map, so nothing was recorded."))
+	if lat == 0 and lon == 0:
+		frappe.throw(missing)
+	return lat, lon
+
+
+@frappe.whitelist(methods=["POST"])
+def punch_my_checkin(latitude, longitude, expected_log_type):
+	"""One check-in or check-out for the logged-in employee, at server time,
+	with the location the browser captured at the tap (P3-KTD3, P3-R6, P3-R7).
+
+	`expected_log_type` is what the screen was offering, not an instruction:
+	the server derives the type from the last punch in the window and refuses
+	a mismatch, so a strip left open on a phone since this morning cannot
+	book a second check-in. HRMS's own validation (geofence, strict log type,
+	inactive employee) runs on insert and its messages are surfaced unchanged
+	-- they are already plain sentences about a place and a distance.
+	"""
+	rate_limit_per_user("punch_my_checkin")
+	employee = get_current_employee()
+
+	expected = str(expected_log_type or "").strip().upper()
+	if expected not in ("IN", "OUT"):
+		frappe.throw(_("That's neither a check-in nor a check-out. Reload and try again."))
+	latitude, longitude = _punch_coordinates(latitude, longitude)
+
+	if not _mobile_checkin_allowed():
+		frappe.throw(_(_CHECKIN_NOT_SET_UP))
+
+	# Serialise the punches of one employee against each other, so two taps
+	# that arrive together cannot both read "no punch yet" and both insert
+	# (the same rule `submit_my_week` follows for a week's Timesheet).
+	_lock_employee(employee)
+
+	now = now_datetime()
+	window = _shift_window(employee, now)
+	if not window:
+		frappe.throw(
+			_("Check-in isn't open right now. Reload to see when it opens, or use Fix a day.")
+		)
+
+	last = _last_punch_in_window(employee, window["start"], window["end"])
+	if last and abs(time_diff_in_seconds(now, last.time)) < _PUNCH_DEBOUNCE_SECONDS:
+		# The same punch, tapped twice. Returning it (rather than refusing)
+		# is what makes a retry after a timeout safe.
+		return _punch_projection(last, existing=True)
+
+	derived = _next_log_type(last)
+	if derived != expected:
+		frappe.throw(
+			_("Your check-in has moved on since this screen loaded. Reload and try again.")
+		)
+
+	doc = frappe.get_doc(
+		{
+			"doctype": "Employee Checkin",
+			"employee": employee,
+			# Server time, never the caller's: the method takes no timestamp
+			# at all, which is the whole reason it exists rather than
+			# `add_log_based_on_employee_field` (P3-KTD3).
+			"time": now,
+			"log_type": derived,
+			"device_id": _PORTAL_DEVICE_ID,
+			"latitude": latitude,
+			"longitude": longitude,
+		}
+	)
+	# Role Employee has no `create` on Employee Checkin after P3-KTD13's
+	# delta: this method is the create rule, exactly as `create_my_request`
+	# is for HR Request.
+	doc.insert(ignore_permissions=True)
+	return _punch_projection(doc.as_dict())
+
+
 @frappe.whitelist()
 def get_my_checkins(date):
 	"""The caller's own check-ins for one day, for the attendance day sheet.
@@ -1468,16 +1748,29 @@ def get_my_checkins(date):
 	"""
 	employee = get_current_employee()
 	day = _as_date(date)
-	return frappe.get_all(
+	rows = frappe.get_all(
 		"Employee Checkin",
 		filters={
 			"employee": employee,
 			"time": ["between", [f"{day} 00:00:00", f"{day} 23:59:59"]],
 		},
-		fields=["name", "time", "log_type"],
+		fields=["name", "time", "log_type", "latitude", "longitude"],
 		order_by="time asc",
 		limit=_CHECKIN_LIMIT,
 	)
+	# P3-R9: the day sheet draws a pin, so it needs to know *whether* the
+	# punch has a location, not where it was. The coordinates stay on the
+	# server (P3-KTD15 erases them there on a schedule); a payload that
+	# carried them would put a location history in every browser cache.
+	return [
+		{
+			"name": row.name,
+			"time": row.time,
+			"log_type": row.log_type,
+			"has_location": _has_location(row),
+		}
+		for row in rows
+	]
 
 
 # Attendance requests -- "Fix a day" (P3-U5, P3-R12 to P3-R18)

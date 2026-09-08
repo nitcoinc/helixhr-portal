@@ -97,6 +97,16 @@ def employee_on_update(doc, method=None):
 		for report in frappe.get_all("Employee", filters={"reports_to": doc.name}, pluck="name"):
 			_reconcile_pending_documents(report)
 
+	# P3-U4 step 2a / P3-KTD15 / P3-R28. Somebody who has left has no
+	# purpose left for their punch coordinates to serve, so they go now
+	# rather than at the end of the retention period. Inside the Employee
+	# save's own transaction: the status change and the erasure commit
+	# together or not at all.
+	if before.status != doc.status and doc.status == "Left":
+		from helixhr.tasks import scrub_employee_checkin_locations
+
+		scrub_employee_checkin_locations(doc.name)
+
 
 def _reconcile_pending_documents(employee):
 	"""Point everything `employee` has waiting at whoever may act on it now

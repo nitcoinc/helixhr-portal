@@ -527,6 +527,63 @@ own `late_entry` flag, which only a device (or HR) sets, so it stays at zero unt
 `helixhr/tests/test_api_attendance.py` covers the no-data case first, because that is the one that
 ships today.
 
+## The check-in button is invisible until three things are true (P3-U4)
+
+The Today strip on Attendance offers a punch only when **all** of these hold, and the reason it
+shows names the one that does not:
+
+1. HR Settings → **Allow Employee Checkin From Mobile App** is on. Off, and the strip reads
+   "Check-in isn't set up for you yet" — the same sentence as no shift at all, because from the
+   employee's side they are the same situation.
+2. The employee has a submitted, Active **Shift Assignment** whose Shift Type window (grace
+   periods included) contains *now*. This is HRMS's own rule: `fetch_shift` resolves a punch to a
+   shift by timestamp, and a punch outside the window is stored `offshift`, never becomes
+   Attendance, and later reads as a missing day. Inside an assignment but outside the window, the
+   strip says when check-in opens.
+3. The browser gives a location. There is no coordinate-less punch from the portal, whatever HR
+   Settings' `allow_geolocation_tracking` says — the sheet's fallback is Fix a day.
+
+**A fresh site has no Shift Type at all**, so the button never appears until somebody creates one.
+`preflight.check_shift_types` warns about that, and about a Shift Type whose `last_sync_of_checkin`
+has stalled (punches pile up as bare Employee Checkin rows that never become Attendance).
+
+Debugging "why is the button missing": read `checkin` out of the API rather than the DOM.
+
+```bash
+bench --site <site> console
+# >>> frappe.set_user("someone@example.com")
+# >>> helixhr.api.get_my_attendance("2026-09-01", "2026-09-30")["checkin"]
+```
+
+The seeders `helixhr.tests.utils.ensure_test_shift_type` / `assign_test_shift` create a window that
+covers the whole site day, which is what makes the Python and Playwright check-in suites runnable at
+any hour. HRMS refuses a Shift Type whose window *plus grace* overlaps itself across midnight, so
+that seeded window has zero grace on both sides.
+
+## Punch coordinates are erased on a schedule, and the period is unset by default (P3-R28)
+
+`helixhr.tasks.null_stale_checkin_coordinates` runs daily and does nothing at all until an operator
+sets the period:
+
+```bash
+bench --site <site> set-config helixhr_checkin_location_retention_days 90
+```
+
+It nulls `latitude`, `longitude` and `geolocation` on Employee Checkin rows older than that **and**
+strips the same three fields out of their `tabVersion` rows — Employee Checkin has `track_changes`,
+so erasing the row alone erases nothing. `events.employee_on_update` does the same immediately when
+an Employee's status becomes `Left`. Both paths are idempotent: an erased row no longer matches the
+`is set` filter that selects them.
+
+Two things to know before changing it:
+
+- The job never restores anything. A period set too short is a one-way loss, which is why it is
+  unset until HR and legal choose a number (`preflight.check_checkin_location_retention` warns
+  while it is).
+- It writes with `frappe.db.set_value(..., update_modified=False)` rather than saving the document.
+  A save would rerun HRMS's `validate`, which refuses a coordinate-less punch while geolocation
+  tracking is on — that is, it would refuse to erase anything.
+
 ## Performance baseline (P2-U0)
 
 `frontend/tests/e2e/performance.spec.ts` is the frozen measurement protocol behind P2-R21..P2-R24.

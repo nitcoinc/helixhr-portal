@@ -4,6 +4,7 @@ import { createResource, Dialog } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
+import CheckInSheet from '@/components/CheckInSheet.vue'
 import { formatDate, formatTime, today } from '@/lib/dates'
 import { ATTENDANCE_LABEL } from '@/lib/week'
 
@@ -81,6 +82,52 @@ const exceptionEntries = computed(() =>
     .filter(([, count]) => count > 0),
 )
 
+// --- the Today strip (P3-U4 step 1 / P3-R5, P3-R8) -----------------------
+//
+// One strip, inside the field block, and the server decides everything on
+// it: whether a punch is possible at all, which punch is next, and the one
+// sentence to show when it is not (P3-KTD5). The page never derives IN/OUT
+// itself -- the same derivation the punch uses is the one rendered here, so
+// the button and the server cannot disagree.
+const checkin = computed(() => calendar.data?.checkin || { enabled: false, reason: null })
+const nextLogType = computed(() => checkin.value.next_log_type || 'IN')
+const punchLabel = computed(() => (nextLogType.value === 'OUT' ? 'Check out' : 'Check in'))
+const sheetOpen = ref(false)
+
+const lastPunchLine = computed(() => {
+  const last = checkin.value.last
+  if (!last) return 'No punches yet in this shift.'
+  const kind = last.log_type === 'OUT' ? 'Checked out' : 'Checked in'
+  const place = last.has_location ? 'location captured' : 'no location captured'
+  return `${kind} at ${formatTime(last.time)} · ${place}`
+})
+
+/** The fallback when a punch cannot happen: one HR Request with today
+ * already written into it. P3-U6 replaces this with the Attendance Request
+ * sheet; the pointer is a route so only the target changes. */
+const todayFixRoute = computed(() => ({
+  name: 'Requests',
+  query: {
+    category: 'Other',
+    subject: `Attendance problem on ${formatDate(today())}`,
+  },
+}))
+
+/** Two different reasons for an empty day sheet, and only one of them is
+ * about this employee's day. */
+const dayEmptyBody = computed(() =>
+  checkin.value.enabled
+    ? 'Nothing was recorded on this day.'
+    : "Check-in isn't set up yet, so there's nothing recorded here.",
+)
+
+function onPunched() {
+  // The month grid, the exceptions and the strip are one response, so one
+  // reload keeps the button and the day sheet from disagreeing.
+  calendar.reload()
+  if (selectedDay.value?.iso === today()) checkins.fetch()
+}
+
 watch([year, month], () => calendar.fetch())
 
 const daysInMonth = computed(() => utc(year.value, month.value + 1, 0).getUTCDate())
@@ -148,6 +195,19 @@ function statusLabel(day) {
   if (day.status) return ATTENDANCE_LABEL[day.status] || day.status
   return day.missing ? 'No record' : 'Nothing recorded'
 }
+
+/** P3-R9. A day with punches and no Attendance row is not "No record" --
+ * the employee did check in, and HRMS's nightly job has not turned those
+ * punches into attendance yet. Saying "No record" there reads as "we lost
+ * it" and sends somebody to HR about a day that is fine. Only the sheet can
+ * say it: the grid does not load punches. */
+const daySheetLabel = computed(() => {
+  const day = selectedDay.value
+  if (!day) return ''
+  if (day.status) return statusLabel(day)
+  if (checkins.data?.length) return 'Checked in, attendance not marked yet'
+  return statusLabel(day)
+})
 
 function dayLabel(day) {
   const parts = [`${monthLabel.value} ${day.day}`]
@@ -268,6 +328,39 @@ const LEGEND = [
           No attendance recorded yet this month.
         </p>
 
+        <!-- P3-R5. The Today strip: the next punch, the last one, and
+             whether it carried a location. Inside the field block because
+             it is this page's one anchored action, which is also the only
+             place signal yellow is legal. -->
+        <div class="mt-4 border-t border-white/15 pt-3">
+          <h2 class="label !text-blue-200 mb-2">
+            Today
+          </h2>
+          <template v-if="checkin.enabled">
+            <button
+              class="min-h-11 cursor-pointer rounded-full bg-signal px-5 text-sm font-bold text-field hover:brightness-95"
+              @click="sheetOpen = true"
+            >
+              {{ punchLabel }}
+            </button>
+            <p class="mt-2 flex items-center gap-1.5 text-sm text-blue-100">
+              <Icon
+                v-if="checkin.last?.has_location"
+                name="pin"
+                size="h-3.5 w-3.5"
+                class="shrink-0 text-blue-200"
+              />
+              {{ lastPunchLine }}
+            </p>
+          </template>
+          <p
+            v-else
+            class="text-sm text-blue-200"
+          >
+            {{ checkin.reason }}
+          </p>
+        </div>
+
         <!-- R16's exceptions. Dormant by design: with no check-in device the
              server reports nothing missing, so this resolves to the one
              explanatory line rather than a wall of red. It starts working the
@@ -383,7 +476,7 @@ const LEGEND = [
           v-if="selectedDay"
           class="-mt-2 mb-3 text-sm text-ink-gray-6"
         >
-          {{ statusLabel(selectedDay) }}
+          {{ daySheetLabel }}
           <span v-if="selectedDay.late"> · late arrival</span>
         </p>
 
@@ -392,7 +485,7 @@ const LEGEND = [
           :resource="checkins"
           :empty="!checkins.data?.length"
           empty-title="No check-ins for this day"
-          empty-body="Check-in isn't set up yet, so there's nothing recorded here."
+          :empty-body="dayEmptyBody"
           skeleton="row"
           :skeleton-rows="2"
         >
@@ -404,6 +497,17 @@ const LEGEND = [
             >
               <span>{{ row.log_type === 'IN' ? 'Check-in' : 'Check-out' }}</span>
               <span class="flex items-center gap-2">
+                <!-- P3-R9. A pin, with a name of its own: whether the punch
+                     carried a location is the one thing an employee is
+                     asked about afterwards. -->
+                <template v-if="row.has_location">
+                  <Icon
+                    name="pin"
+                    size="h-3.5 w-3.5"
+                    class="shrink-0 text-ink-gray-5"
+                  />
+                  <span class="sr-only">Location captured</span>
+                </template>
                 <span class="tabular">{{ formatTime(row.time) }}</span>
                 <span
                   v-if="row.log_type === 'IN' && selectedDay?.late"
@@ -426,5 +530,14 @@ const LEGEND = [
         </div>
       </template>
     </Dialog>
+
+    <!-- P3-U4 step 4. Mounted, not conditionally rendered: it asks for a
+         location when it *opens*, and opening it is always a tap (P3-R6). -->
+    <CheckInSheet
+      v-model="sheetOpen"
+      :log-type="nextLogType"
+      :fix-a-day-to="todayFixRoute"
+      @punched="onPunched"
+    />
   </div>
 </template>

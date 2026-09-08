@@ -271,6 +271,17 @@ has_permission = {
 # Scheduled Tasks
 # ---------------
 
+# P3-U4 step 2a / P3-KTD15 / P3-R28. Punch coordinates have a retention
+# period, and this is what enforces it. The job is idle until the site config
+# key `helixhr_checkin_location_retention_days` is set; preflight warns while
+# it is unset. Daily rather than hourly: the period is measured in days, so
+# an hourly pass would do the same work 24 times.
+scheduler_events = {
+	"daily": [
+		"helixhr.tasks.null_stale_checkin_coordinates",
+	],
+}
+
 # scheduler_events = {
 # 	"all": [
 # 		"helixhr.tasks.all"

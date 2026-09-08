@@ -231,6 +231,85 @@ def ensure_test_holiday(holiday_date, weekly_off=False):
 	return list_name
 
 
+# P3-U4: a test site has no Shift Type at all, and the portal offers a punch
+# only inside the window HRMS resolves for the moment of the punch (P3-KTD5),
+# so every check-in scenario needs one of these plus an assignment.
+PORTAL_SHIFT_TYPE = "_Test Portal Shift"
+NIGHT_SHIFT_TYPE = "_Test Portal Night Shift"
+
+
+def ensure_test_shift_type(
+	name=PORTAL_SHIFT_TYPE,
+	start_time="00:00:00",
+	end_time="23:59:00",
+	begin_before=0,
+	allow_after=0,
+):
+	"""A Shift Type with auto attendance whose window covers the whole site
+	day by default, so `get_actual_start_end_datetime_of_shift` resolves
+	whatever time of day the suite runs at (P3-U4). The default grace periods
+	are zero because HRMS refuses a window that, grace included, overlaps
+	itself across midnight.
+
+	The window is rewritten on reuse: a test that wants a narrow or a night
+	window asks for one by name, and a stale window left over from an earlier
+	run would silently decide the answer.
+	"""
+	fields = {
+		"start_time": start_time,
+		"end_time": end_time,
+		"begin_check_in_before_shift_start_time": begin_before,
+		"allow_check_out_after_shift_end_time": allow_after,
+		"enable_auto_attendance": 1,
+		# The portal derives IN/OUT itself and always sends a log type, so
+		# either option works; alternating is HRMS's own default.
+		"determine_check_in_and_check_out": "Alternating entries as IN and OUT during the same shift",
+		"working_hours_calculation_based_on": "First Check-in and Last Check-out",
+		"process_attendance_after": str(frappe.utils.add_days(frappe.utils.today(), -365)),
+		"auto_update_last_sync": 1,
+	}
+	if frappe.db.exists("Shift Type", name):
+		doc = frappe.get_doc("Shift Type", name)
+		doc.update(fields)
+		doc.save(ignore_permissions=True)
+		return name
+	doc = frappe.get_doc({"doctype": "Shift Type", "__newname": name, **fields})
+	doc.insert(ignore_permissions=True)
+	return doc.name
+
+
+def assign_test_shift(employee, shift_type=PORTAL_SHIFT_TYPE, start_date=None, shift_location=None):
+	"""One submitted, Active, open-ended Shift Assignment for `employee`.
+
+	Every other assignment of theirs is removed first: HRMS refuses
+	overlapping assignments, so a test that wants a different window cannot
+	add one alongside the last test's. The rows are deleted at the table
+	(they are submitted documents, and nothing links to them).
+	"""
+	frappe.db.delete("Shift Assignment", {"employee": employee})
+	doc = frappe.get_doc(
+		{
+			"doctype": "Shift Assignment",
+			"employee": employee,
+			"shift_type": shift_type,
+			"company": frappe.db.get_value("Employee", employee, "company"),
+			"start_date": start_date or str(frappe.utils.add_days(frappe.utils.today(), -30)),
+			"status": "Active",
+			"shift_location": shift_location,
+		}
+	)
+	doc.insert(ignore_permissions=True)
+	doc.submit()
+	return doc.name
+
+
+def clear_test_shifts(employee):
+	"""Back to a site with no shift at all -- the state P3-R8's "check-in is
+	not set up" copy describes."""
+	frappe.db.delete("Shift Assignment", {"employee": employee})
+	frappe.db.set_value("Employee", employee, "default_shift", None)
+
+
 def make_test_user_without_employee():
 	"""A logged-in user with no active Employee -- for the R3 "not linked"
 	page. Password login only (this fixture is for local/CI, no Entra)."""
@@ -266,6 +345,14 @@ def setup_playwright_fixtures():
 	company = frappe.db.get_value("Employee", employee_name, "company")
 	ensure_leave_allocation(employee_name, "Casual Leave", 5)
 	ensure_holiday_list_assignment(company)
+
+	# P3-U4 scenario 8: the check-in button exists only while HR Settings
+	# allows mobile check-in and HRMS resolves a shift window for now
+	# (P3-KTD5), so `checkin.spec.ts` needs both. The seeded window covers
+	# the whole site day, which is what makes the spec runnable at any hour.
+	frappe.db.set_single_value("HR Settings", "allow_employee_checkin_from_mobile_app", 1)
+	ensure_test_shift_type()
+	assign_test_shift(employee_name)
 
 	frappe.db.commit()  # nosemgrep
 
