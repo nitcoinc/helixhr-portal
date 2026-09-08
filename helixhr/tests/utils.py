@@ -390,13 +390,20 @@ def ensure_leave_approver_role(user):
 
 
 def ensure_leave_allocation(employee, leave_type, leaves):
-	"""A submitted Leave Allocation covering the current year -- Leave
+	"""A submitted Leave Allocation covering this year and the next -- Leave
 	Application only counts an allocation toward balance once it's
 	docstatus 1 (hrms.hr.doctype.leave_application.leave_application.
 	get_allocation_based_on_application_dates filters on docstatus == 1),
 	so plain insert() alone leaves every application "outside leave
-	allocation period" even with a matching date range."""
-	from frappe.utils import get_year_ending, get_year_start, today
+	allocation period" even with a matching date range.
+
+	It ends with *next* year, not this one, because the suites book leave at
+	fixed offsets from today -- up to 114 days out -- and a single calendar
+	year silently stops covering them as the year runs down. That is a clock,
+	not a code change: the same tests passed in CI on 6 September 2026 and
+	errored on the 9th, when offset 114 first crossed into January.
+	"""
+	from frappe.utils import add_days, get_year_ending, get_year_start, today
 
 	company = frappe.db.get_value("Employee", employee, "company")
 	existing = frappe.db.exists(
@@ -411,7 +418,7 @@ def ensure_leave_allocation(employee, leave_type, leaves):
 			"employee": employee,
 			"leave_type": leave_type,
 			"from_date": get_year_start(today()),
-			"to_date": get_year_ending(today()),
+			"to_date": get_year_ending(add_days(today(), 365)),
 			"new_leaves_allocated": leaves,
 			"company": company,
 		}
