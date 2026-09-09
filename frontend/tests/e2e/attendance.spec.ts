@@ -92,6 +92,10 @@ test.describe('employee', () => {
     await context.close()
   })
 
+  // P3-U6 step 1 / P3-KTD10: the day sheet now offers two things -- Fix a
+  // day (an Attendance Request) and Report a problem (this) -- so the link is
+  // "Report a problem" with its own sentence under it rather than one long
+  // label.
   test('Report a problem opens one request with the date and status already in it', async ({
     page,
   }) => {
@@ -104,7 +108,7 @@ test.describe('employee', () => {
 
     const dialog = page.getByRole('dialog')
     await expect(dialog).toBeVisible()
-    await dialog.getByRole('link', { name: 'Report a problem with this day' }).click()
+    await dialog.getByRole('link', { name: 'Report a problem' }).click()
 
     // One request, on the Requests route, with its subject already written --
     // attendance correction stays in Frappe HR (P2-R15).
@@ -118,7 +122,9 @@ test.describe('employee', () => {
     const dayNumber = (label || '').match(/\b(\d{1,2})\b/)?.[1]
     expect(value).toContain(String(Number(dayNumber)))
     // And its status, so HR does not have to ask what was wrong with it.
-    expect(value).toMatch(/\((Present|Absent|Half day|On leave|Holiday|No record|Nothing recorded)\)/)
+    expect(value).toMatch(
+      /\((Present|Absent|Half day|On leave|Work from home|Holiday|No record|Nothing recorded)\)/,
+    )
   })
 
   test('the month bounds are the API contract, not just the picker (P2-R22)', async ({

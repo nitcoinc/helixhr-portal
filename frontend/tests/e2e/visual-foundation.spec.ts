@@ -9,6 +9,11 @@ import { test, expect, Page } from '@playwright/test'
 // third-party accessibility package -- the plan defers both -- so each check
 // reads a computed value out of the real rendered page.
 
+// Every employee route the portal has, phase by phase. The sweep is the
+// whole list on purpose: a foundation check that covers the routes that
+// existed when it was written stops being a foundation check the next time a
+// page is added, which is how /payslips shipped fifty inert tab stops on
+// /directory past a 44px floor that was already in this file (P3-U9).
 const ROUTES = [
   '/helixhr/',
   '/helixhr/leave',
@@ -19,7 +24,67 @@ const ROUTES = [
   '/helixhr/documents',
   '/helixhr/notifications',
   '/helixhr/profile',
+  // Phase 3.
+  '/helixhr/payslips',
+  '/helixhr/holidays',
+  '/helixhr/directory',
 ]
+
+/** The manager-only routes. `/team` is refused outright for an employee, so
+ * it is swept in the manager project rather than excluded. */
+const MANAGER_ROUTES = ['/helixhr/team']
+
+/** The 44px floor, read off a real coarse-pointer context. Returns one line
+ * per undersized control so a failure names them. */
+async function undersizedControls(page: Page, routes: string[]) {
+  const findings: string[] = []
+  for (const route of routes) {
+    await page.goto(route)
+    await page.waitForLoadState('networkidle')
+    findings.push(
+      ...(await page.evaluate(() => {
+        const small: string[] = []
+        const nodes = document.querySelectorAll('button, a[href], [role="button"], select, input')
+        for (const node of nodes) {
+          const element = node as HTMLElement
+          if (element.hasAttribute('disabled')) continue
+          const style = getComputedStyle(element)
+          if (style.display === 'none' || style.visibility === 'hidden') continue
+          // Inline links inside a sentence are text, not targets; `min-height`
+          // does not apply to them and WCAG 2.5.8 exempts them.
+          if (style.display === 'inline') continue
+          const box = element.getBoundingClientRect()
+          if (box.height === 0 && box.width === 0) continue
+          if (box.height < 44) {
+            small.push(
+              `${location.pathname} ${element.tagName}.${element.className
+                .toString()
+                .split(/\s+/)
+                .slice(0, 3)
+                .join('.')} = ${box.height.toFixed(1)}px`,
+            )
+          }
+        }
+        return small
+      })),
+    )
+  }
+  return findings
+}
+
+/** The reduced-motion contract, read off one held region. Both skeleton
+ * shapes are checked -- 'card' on /requests and 'field' on the anchored
+ * blocks phase 3 added -- because the resting tint is pinned per shape in
+ * index.css and a rule that only covers one of them proves nothing about the
+ * other. */
+async function heldSkeletonStyle(page: Page, region: string) {
+  const skeleton = page.locator(`[data-async-state="${region}:pending"] .animate-pulse`).first()
+  await expect(skeleton).toBeVisible()
+  return skeleton.evaluate((node) => {
+    const computed = getComputedStyle(node)
+    return { duration: computed.animationDuration, opacity: computed.opacity }
+  })
+}
 
 /** Horizontal overflow of the document, in CSS pixels. Zero is the only
  * acceptable value at every supported width (P2-R3). */
@@ -192,7 +257,16 @@ test.describe('employee', () => {
         document.documentElement.style.fontSize = '32px'
       })
     })
-    for (const route of ['/helixhr/', '/helixhr/leave', '/helixhr/profile']) {
+    for (const route of [
+      '/helixhr/',
+      '/helixhr/leave',
+      '/helixhr/profile',
+      // Phase 3: three number-heavy pages, which is where doubled text runs
+      // out of room first.
+      '/helixhr/payslips',
+      '/helixhr/holidays',
+      '/helixhr/directory',
+    ]) {
       await page.goto(route)
       await page.waitForLoadState('networkidle')
       expect(await horizontalOverflow(page), `${route} at 200% text`).toBe(0)
@@ -259,39 +333,7 @@ test.describe('employee', () => {
       isMobile: true,
     })
     const page = await context.newPage()
-    const findings: string[] = []
-
-    for (const route of ROUTES) {
-      await page.goto(route)
-      await page.waitForLoadState('networkidle')
-      findings.push(
-        ...(await page.evaluate(() => {
-          const small: string[] = []
-          const nodes = document.querySelectorAll('button, a[href], [role="button"], select, input')
-          for (const node of nodes) {
-            const element = node as HTMLElement
-            if (element.hasAttribute('disabled')) continue
-            const style = getComputedStyle(element)
-            if (style.display === 'none' || style.visibility === 'hidden') continue
-            // Inline links inside a sentence are text, not targets; `min-height`
-            // does not apply to them and WCAG 2.5.8 exempts them.
-            if (style.display === 'inline') continue
-            const box = element.getBoundingClientRect()
-            if (box.height === 0 && box.width === 0) continue
-            if (box.height < 44) {
-              small.push(
-                `${location.pathname} ${element.tagName}.${element.className
-                  .toString()
-                  .split(/\s+/)
-                  .slice(0, 3)
-                  .join('.')} = ${box.height.toFixed(1)}px`,
-              )
-            }
-          }
-          return small
-        })),
-      )
-    }
+    const findings = await undersizedControls(page, ROUTES)
     await context.close()
     expect(findings, findings.join('\n')).toEqual([])
   })
@@ -331,13 +373,7 @@ test.describe('employee', () => {
     })
 
     await page.goto('/helixhr/requests', { waitUntil: 'commit' })
-    const skeleton = page.locator('[data-async-state="requests-list:pending"] .animate-pulse').first()
-    await expect(skeleton).toBeVisible()
-
-    const style = await skeleton.evaluate((node) => {
-      const computed = getComputedStyle(node)
-      return { duration: computed.animationDuration, opacity: computed.opacity }
-    })
+    const style = await heldSkeletonStyle(page, 'requests-list')
     // The blanket reduced-motion rule would otherwise freeze the pulse at
     // whatever opacity one iteration lands on; index.css pins it to a legible
     // resting tint instead.
@@ -347,7 +383,24 @@ test.describe('employee', () => {
     // stopped animation cannot carry.
     await expect(page.getByRole('status')).toHaveAttribute('aria-busy', 'true')
 
+    // And the other skeleton shape, on a phase 3 anchored block: 'field'
+    // draws its pulse on `bg-field/10` rather than `bg-surface-gray-2`, so
+    // the resting tint is a second rule and needs its own reading.
+    let releaseSlips: () => void = () => {}
+    const heldSlips = new Promise<void>((resolve) => {
+      releaseSlips = resolve
+    })
+    await page.route('**/api/method/helixhr.api.get_my_payslips*', async (route) => {
+      await heldSlips
+      return route.continue()
+    })
+    await page.goto('/helixhr/payslips', { waitUntil: 'commit' })
+    const fieldStyle = await heldSkeletonStyle(page, 'payslip-latest')
+    expect(parseFloat(fieldStyle.duration)).toBeLessThan(0.05)
+    expect(parseFloat(fieldStyle.opacity)).toBe(1)
+
     release()
+    releaseSlips()
     await context.close()
   })
 
@@ -372,6 +425,82 @@ test.describe('employee', () => {
       .first()
       .evaluate((node) => getComputedStyle(node).fontFamily)
     expect(family).toContain('Archivo')
+    await context.close()
+  })
+})
+
+// P3-U9. The manager half of the same foundation. `/team` is a manager
+// surface -- the server refuses it for an employee identity -- so it cannot
+// join the employee sweep above and gets the same four checks here: the 44px
+// floor under a coarse pointer, no second scrollbar from 320px to 1440px,
+// 200% text, and the reduced-motion resting tint.
+test.describe('manager', () => {
+  test.beforeEach(async ({}, testInfo) => {
+    test.skip(testInfo.project.name !== 'manager', 'manager-only routes')
+  })
+
+  test('every control on a manager route is at least 44px tall under a coarse pointer', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({
+      storageState: 'tests/.auth/manager.json',
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
+    })
+    const page = await context.newPage()
+    const findings = await undersizedControls(page, MANAGER_ROUTES)
+    await context.close()
+    expect(findings, findings.join('\n')).toEqual([])
+  })
+
+  test('a manager route scrolls in one dimension from 320px to 1440px', async ({ page }) => {
+    for (const width of [320, 360, 768, 1024, 1440]) {
+      await page.setViewportSize({ width, height: 900 })
+      for (const route of MANAGER_ROUTES) {
+        await page.goto(route)
+        await page.waitForLoadState('networkidle')
+        expect(await horizontalOverflow(page), `${route} at ${width}px`).toBe(0)
+      }
+    }
+  })
+
+  test('200% text zoom does not create horizontal scroll on a manager route', async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 720 })
+    await page.addInitScript(() => {
+      document.addEventListener('DOMContentLoaded', () => {
+        document.documentElement.style.fontSize = '32px'
+      })
+    })
+    for (const route of MANAGER_ROUTES) {
+      await page.goto(route)
+      await page.waitForLoadState('networkidle')
+      expect(await horizontalOverflow(page), `${route} at 200% text`).toBe(0)
+    }
+  })
+
+  test('reduced motion stops the pulse on the team week too', async ({ browser }) => {
+    const context = await browser.newContext({
+      storageState: 'tests/.auth/manager.json',
+      reducedMotion: 'reduce',
+    })
+    const page = await context.newPage()
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await page.route('**/api/method/helixhr.api.get_my_team_week*', async (route) => {
+      await held
+      return route.continue()
+    })
+
+    await page.goto('/helixhr/team', { waitUntil: 'commit' })
+    const style = await heldSkeletonStyle(page, 'team')
+    expect(parseFloat(style.duration)).toBeLessThan(0.05)
+    expect(parseFloat(style.opacity)).toBe(1)
+    await expect(page.getByRole('status')).toHaveAttribute('aria-busy', 'true')
+
+    release()
     await context.close()
   })
 })

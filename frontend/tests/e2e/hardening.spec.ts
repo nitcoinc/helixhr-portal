@@ -22,6 +22,12 @@ const LAZY_ROUTES = [
   { path: '/helixhr/documents', chunk: 'Documents' },
   { path: '/helixhr/notifications', chunk: 'Notifications' },
   { path: '/helixhr/profile', chunk: 'Profile' },
+  // P3-U1 scenario 2. Team is reachable by URL here even though the nav
+  // hides it from an employee; the property under test is the chunk split.
+  { path: '/helixhr/payslips', chunk: 'Payslips' },
+  { path: '/helixhr/holidays', chunk: 'Holidays' },
+  { path: '/helixhr/directory', chunk: 'Directory' },
+  { path: '/helixhr/team', chunk: 'Team' },
 ]
 
 function scriptUrls(page: Page) {

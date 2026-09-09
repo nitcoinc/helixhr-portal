@@ -6,8 +6,9 @@ import { icons, NEEDS_YOU_ICON } from './icons'
 // sent-back leave shipped wearing the Requests icon. Asserting the whole set
 // against the server's list is what stops the map drifting again.
 describe('NEEDS_YOU_ICON', () => {
-  // `helixhr.api._get_needs_you`, as of P2. A kind added there fails here
-  // first.
+  // `helixhr.api._get_needs_you`, as of P2 plus the three attendance
+  // request kinds P3-U5 adds (pinned here first, in P3-U1). A kind added
+  // there fails here first.
   const SERVER_KINDS = [
     'timesheet_rejected',
     'leave_rejected',
@@ -15,6 +16,9 @@ describe('NEEDS_YOU_ICON', () => {
     'approval_leave',
     'approval_timesheet',
     'leave_waiting',
+    'approval_attendance',
+    'attendance_request_rejected',
+    'attendance_request_waiting',
   ]
 
   it('covers every kind the server emits, and nothing else', () => {
@@ -29,5 +33,11 @@ describe('NEEDS_YOU_ICON', () => {
 
   it('sends a sent-back leave to the leave glyph, not the request one', () => {
     expect(NEEDS_YOU_ICON.leave_rejected).toBe('leave')
+  })
+
+  it('sends attendance request kinds to the attendance glyph, and the decision to approvals', () => {
+    expect(NEEDS_YOU_ICON.attendance_request_rejected).toBe('attendance')
+    expect(NEEDS_YOU_ICON.attendance_request_waiting).toBe('attendance')
+    expect(NEEDS_YOU_ICON.approval_attendance).toBe('approvals')
   })
 })

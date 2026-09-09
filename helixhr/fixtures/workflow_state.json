@@ -16,5 +16,23 @@
   "name": "Pending Approval",
   "style": "",
   "workflow_state_name": "Pending Approval"
+ },
+ {
+  "docstatus": 0,
+  "doctype": "Workflow State",
+  "icon": "",
+  "modified": "2026-09-09 10:00:00.000000",
+  "name": "Pending Manager",
+  "style": "",
+  "workflow_state_name": "Pending Manager"
+ },
+ {
+  "docstatus": 0,
+  "doctype": "Workflow State",
+  "icon": "",
+  "modified": "2026-09-09 10:00:00.000000",
+  "name": "Pending HR",
+  "style": "",
+  "workflow_state_name": "Pending HR"
  }
 ]

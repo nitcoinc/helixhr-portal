@@ -7,7 +7,9 @@ import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
 import { formatDate, formatDateRange } from '@/lib/dates'
+import { toPlainMessage } from '@/lib/errorMap'
 import { useIsDesktop } from '@/lib/useIsDesktop'
+import { ATTENDANCE_LABEL } from '@/lib/week'
 
 // P2-U7 / KTD5. `/approvals` and `/approvals/:kind/:name` are one component:
 // the selected decision is a route parameter, so a manager can be sent the
@@ -128,8 +130,14 @@ async function decide(action) {
     // so the item that is genuinely gone leaves -- but nothing else on the
     // list is touched, and the manager is told what happened rather than
     // being shown a queue that silently changed under them.
+    // P3-U6 scenario 7. HRMS reports two of its Attendance Request
+    // refusals as an HTML table or a list of lists, not as a sentence, and
+    // both can arrive mid-decision -- an overlapping request, or a range
+    // that would mark nothing. `toPlainMessage` flattens either into one
+    // readable line; anything already plain passes through untouched.
     actionError.value =
-      error?.messages?.[0] || "We couldn't record that decision. Reload and try again."
+      toPlainMessage(error?.messages?.[0]) ||
+      "We couldn't record that decision. Reload and try again."
     queue.reload()
     if (props.name) detail.fetch()
   } finally {
@@ -152,18 +160,51 @@ function barHeight(hours) {
   return `${Math.round((Math.min(hours, dayScale.value) / dayScale.value) * 100)}%`
 }
 
+// P3-U6 step 0. One entry per kind, named explicitly. These three used to
+// branch on `kind === 'leave'` and let everything else fall through to the
+// timesheet copy, so the attendance request P3-U5 added would have arrived in
+// this queue reading "Timesheet · 3 September" with an hours total of
+// `undefined h`. A kind missing from this map is now visible as itself.
+const KIND = {
+  leave: {
+    summary: (row) => `${row.leave_type} · ${formatDateRange(row.from_date, row.to_date)}`,
+    amount: (row) => `${row.total_days} day${row.total_days === 1 ? '' : 's'}`,
+    approve: (item) => `Approve ${item.total_days} day${item.total_days === 1 ? '' : 's'}`,
+    quote: (item) => item.reason,
+  },
+  timesheet: {
+    summary: (row) => `Timesheet · ${formatDateRange(row.from_date, row.to_date)}`,
+    amount: (row) => `${row.total_hours} h`,
+    approve: (item) => `Approve ${item.total_hours} h`,
+    quote: (item) => item.note,
+  },
+  attendance: {
+    summary: (row) => `${row.reason} · ${formatDateRange(row.from_date, row.to_date)}`,
+    amount: (row) => `${row.total_days} day${row.total_days === 1 ? '' : 's'}`,
+    // P3-KTD7. Approving is not the end of this one: the manager agrees and
+    // HR confirms, and the button says which of the two this is.
+    approve: () => 'Send to HR',
+    quote: (item) => item.explanation,
+  },
+}
+
+const FALLBACK_KIND = {
+  summary: (row) => formatDateRange(row.from_date, row.to_date),
+  amount: () => '',
+  approve: () => 'Approve',
+  quote: () => null,
+}
+
+function spec(kind) {
+  return KIND[kind] || FALLBACK_KIND
+}
+
 function rowSummary(row) {
-  if (row.kind === 'leave') {
-    return `${row.leave_type} · ${formatDateRange(row.from_date, row.to_date)}`
-  }
-  return `Timesheet · ${formatDateRange(row.from_date, row.to_date)}`
+  return spec(row.kind).summary(row)
 }
 
 function rowAmount(row) {
-  if (row.kind === 'leave') {
-    return `${row.total_days} day${row.total_days === 1 ? '' : 's'}`
-  }
-  return `${row.total_hours} h`
+  return spec(row.kind).amount(row)
 }
 
 /** "2 d" beside a row: how long this person has been waiting on the manager.
@@ -176,16 +217,25 @@ function ageLabel(row) {
 
 /** The quantity on the primary button. A decision that consumes 38.5 hours or
  * 3 days of somebody's balance says so on the control that does it. */
-const approveLabel = computed(() => {
-  const item = selected.value
-  if (!item) return 'Approve'
-  if (item.kind === 'leave') {
-    return `Approve ${item.total_days} day${item.total_days === 1 ? '' : 's'}`
-  }
-  return `Approve ${item.total_hours} h`
-})
+const approveLabel = computed(() =>
+  selected.value ? spec(selected.value.kind).approve(selected.value) : 'Approve',
+)
+
+/** The employee's own words, wherever this kind keeps them. */
+const quote = computed(() => (selected.value ? spec(selected.value.kind).quote(selected.value) : null))
 
 const firstName = computed(() => (selected.value?.employee_name || '').split(/\s+/)[0])
+
+/** P3-R16. What the calendar shows for each day a request names -- the
+ * difference between a correction and a request over a day that is already
+ * accounted for. */
+const DAY_SHOWS = { holiday: 'holiday', weekly_off: 'weekly off' }
+
+function requestedDayLabel(day) {
+  if (day.holiday) return DAY_SHOWS[day.holiday] || day.holiday
+  if (day.status) return ATTENDANCE_LABEL[day.status] || day.status
+  return 'nothing recorded'
+}
 </script>
 
 <template>
@@ -220,7 +270,7 @@ const firstName = computed(() => (selected.value?.employee_name || '').split(/\s
           :resource="queue"
           :empty="pending.length === 0"
           empty-title="Nothing waiting on you"
-          empty-body="Leave and weeks your team sends for approval appear here."
+          empty-body="Leave, weeks and attendance requests your team sends for approval appear here."
           :skeleton-rows="3"
         >
           <ul class="space-y-2">
@@ -358,7 +408,7 @@ const firstName = computed(() => (selected.value?.employee_name || '').split(/\s
                     </dl>
 
                     <dl
-                      v-else
+                      v-else-if="selected.kind === 'leave'"
                       class="border-t border-outline-gray-2 pt-3 text-sm"
                     >
                       <div class="flex justify-between gap-3">
@@ -391,11 +441,51 @@ const firstName = computed(() => (selected.value?.employee_name || '').split(/\s
                       </div>
                     </dl>
 
+                    <!-- P3-R16. The days themselves, and what the calendar
+                         already shows for each: the manager is agreeing that
+                         these particular days were worked. -->
+                    <dl
+                      v-else-if="selected.kind === 'attendance'"
+                      class="border-t border-outline-gray-2 pt-3 text-sm"
+                    >
+                      <div class="flex justify-between gap-3">
+                        <dt class="text-ink-gray-6">
+                          {{ selected.reason }}
+                        </dt>
+                        <dd class="text-ink-gray-9">
+                          {{ formatDateRange(selected.from_date, selected.to_date) }}
+                        </dd>
+                      </div>
+                      <div
+                        v-for="day in selected.days"
+                        :key="day.date"
+                        class="mt-1 flex justify-between gap-3"
+                      >
+                        <dt class="tabular text-ink-gray-6">
+                          {{ formatDate(day.date) }}
+                        </dt>
+                        <dd class="text-ink-gray-9">
+                          {{ requestedDayLabel(day) }}
+                        </dd>
+                      </div>
+                      <div
+                        v-if="selected.half_day"
+                        class="mt-1 flex justify-between gap-3"
+                      >
+                        <dt class="text-ink-gray-6">
+                          Half day
+                        </dt>
+                        <dd class="text-ink-gray-9">
+                          {{ formatDate(selected.half_day_date) }}
+                        </dd>
+                      </div>
+                    </dl>
+
                     <p
-                      v-if="selected.note || selected.reason"
+                      v-if="quote"
                       class="surface-inset mt-3 p-3 text-sm text-ink-gray-7"
                     >
-                      {{ firstName }}: “{{ selected.note || selected.reason }}”
+                      {{ firstName }}: “{{ quote }}”
                     </p>
 
                     <p
@@ -535,6 +625,10 @@ const firstName = computed(() => (selected.value?.employee_name || '').split(/\s
                   <template v-if="selected.kind === 'timesheet'">
                     Timesheet · {{ formatDateRange(selected.week_start, selected.week_end) }}
                   </template>
+                  <template v-else-if="selected.kind === 'attendance'">
+                    {{ selected.reason }} ·
+                    {{ formatDateRange(selected.from_date, selected.to_date) }}
+                  </template>
                   <template v-else>
                     {{ selected.leave_type }} ·
                     {{ formatDateRange(selected.from_date, selected.to_date) }}
@@ -555,8 +649,9 @@ const firstName = computed(() => (selected.value?.employee_name || '').split(/\s
               </p>
               <StatusBadge
                 v-else
-                kind="leave"
+                :kind="selected.kind"
                 :status="selected.status"
+                :docstatus="selected.docstatus"
               />
             </div>
 
@@ -641,6 +736,46 @@ const firstName = computed(() => (selected.value?.employee_name || '').split(/\s
               </table>
             </div>
 
+            <!-- P3-R16. One row per day the request names, with what the
+                 calendar shows for it beside the date. -->
+            <div
+              v-else-if="selected.kind === 'attendance'"
+              class="mt-4"
+            >
+              <p
+                v-if="!selected.working_days_known"
+                class="surface-alert mb-3 p-3 text-sm"
+              >
+                We can't tell which of these are working days --
+                {{ firstName }} has no holiday list. Ask HR before deciding.
+              </p>
+              <dl class="divide-y divide-outline-gray-2 border-t border-outline-gray-2">
+                <div
+                  v-for="day in selected.days"
+                  :key="day.date"
+                  class="flex items-baseline justify-between gap-3 py-2"
+                >
+                  <dt class="tabular text-sm text-ink-gray-9">
+                    {{ formatDate(day.date) }}
+                  </dt>
+                  <dd class="text-sm text-ink-gray-6">
+                    the calendar shows {{ requestedDayLabel(day) }}
+                  </dd>
+                </div>
+                <div
+                  v-if="selected.half_day"
+                  class="flex items-baseline justify-between gap-3 py-2"
+                >
+                  <dt class="text-sm text-ink-gray-9">
+                    Half day
+                  </dt>
+                  <dd class="text-sm text-ink-gray-6">
+                    {{ formatDate(selected.half_day_date) }}
+                  </dd>
+                </div>
+              </dl>
+            </div>
+
             <dl
               v-else
               class="mt-4 grid grid-cols-2 gap-4"
@@ -681,10 +816,10 @@ const firstName = computed(() => (selected.value?.employee_name || '').split(/\s
             </dl>
 
             <p
-              v-if="selected.note || selected.reason"
+              v-if="quote"
               class="surface-inset mt-4 p-3 text-sm text-ink-gray-7"
             >
-              {{ firstName }}: “{{ selected.note || selected.reason }}”
+              {{ firstName }}: “{{ quote }}”
             </p>
 
             <p

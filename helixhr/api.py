@@ -1,11 +1,14 @@
 import json
+import math
 import os
 import re
+from urllib.parse import quote
 
 import frappe
 from frappe import _
 from frappe.utils import (
 	add_days,
+	add_to_date,
 	cint,
 	date_diff,
 	flt,
@@ -15,7 +18,10 @@ from frappe.utils import (
 	get_last_day,
 	get_system_timezone,
 	getdate,
+	now_datetime,
+	time_diff_in_seconds,
 )
+from frappe.utils.print_format import download_pdf
 from hrms.api import (
 	get_attendance_calendar_events,
 	get_current_employee,
@@ -24,8 +30,19 @@ from hrms.api import (
 	get_leave_balance_map,
 	get_leave_types,
 )
+from hrms.utils.holiday_list import get_holiday_list_for_employee
 
-from helixhr.events import HR_REPLY_SUBJECT_PREFIX
+from helixhr.events import (
+	HR_REPLY_SUBJECT_PREFIX,
+	REQUEST_APPROVED,
+	REQUEST_DRAFT,
+	REQUEST_PENDING_HR,
+	REQUEST_PENDING_MANAGER,
+	REQUEST_REJECTED,
+	REQUEST_WITHDRAWABLE,
+	_approver_user,
+	_is_hr,
+)
 from helixhr.utils import (
 	PROFILE_EDITABLE_FIELDS,
 	UPLOAD_MAX_BYTES,
@@ -172,6 +189,10 @@ def get_portal_bootstrap():
 		"week_start": str(monday),
 		"week_end": str(sunday),
 		"can_approve": False,
+		# P3-KTD11: Team is gated on direct reports, not on `can_approve` --
+		# a leave approver with no reports would otherwise open an empty
+		# Team page. Same rule as `can_approve`: a nav decision, not a grant.
+		"has_reports": False,
 		"unread_notifications": 0,
 	}
 
@@ -186,10 +207,11 @@ def get_portal_bootstrap():
 	# pending work may be a timesheet -- gating the Approvals nav item on
 	# direct reports alone hid the entry from both (P2-R11). The count is
 	# still tried first because it is one indexed count and short-circuits
-	# the two list reads for the common case; it is a local, not part of
-	# the response, because `can_approve` is the only thing the shell reads.
+	# the two list reads for the common case. P3-KTD11 also surfaces it as
+	# `has_reports`, which is what the Team nav item reads.
 	title = "HelixHR portal bootstrap failed"
 	report_count = _safe(lambda: _count_direct_reports(employee["name"]), title=title) or 0
+	boot["has_reports"] = report_count > 0
 	boot["can_approve"] = report_count > 0 or bool(
 		_safe(lambda: _pending_approvals(employee["name"]), title=title)
 	)
@@ -436,7 +458,7 @@ def _get_needs_you(employee, once):
 		order_by="start_date asc",
 		limit=_QUEUE_FETCH,
 	)
-	reasons = _rejection_comments([row.name for row in rejected])
+	reasons = _rejection_comments("Timesheet", [row.name for row in rejected], employee)
 	for row in rejected:
 		items.append(
 			_queue_item(
@@ -492,6 +514,36 @@ def _get_needs_you(employee, once):
 				owner="you",
 				urgency="blocked",
 				to={"name": "LeaveDetail", "params": {"name": row.name}},
+			)
+		)
+
+	# A sent-back attendance request, with the reason quoted on the row
+	# (P3-R17, P3-AE10). It stays at docstatus 0, and the Edit transition
+	# takes it back to Draft, so this is blocked work the employee can move.
+	rejected_requests = frappe.get_all(
+		"Attendance Request",
+		filters={"employee": employee, "workflow_state": REQUEST_REJECTED, "docstatus": 0},
+		fields=["name", "from_date", "to_date", "reason"],
+		order_by="from_date asc",
+		limit=_QUEUE_FETCH,
+	)
+	request_reasons = _rejection_comments(
+		"Attendance Request", [row.name for row in rejected_requests], employee
+	)
+	for row in rejected_requests:
+		items.append(
+			_queue_item(
+				kind="attendance_request_rejected",
+				name=row.name,
+				title="Your attendance request was sent back",
+				detail=request_reasons.get(row.name),
+				date=str(row.from_date),
+				day=day_for(row.from_date),
+				age_days=age_days(row.from_date),
+				action="Edit and resend",
+				owner="you",
+				urgency="blocked",
+				to={"name": "AttendanceRequestDetail", "params": {"name": row.name}},
 			)
 		)
 
@@ -568,6 +620,36 @@ def _get_needs_you(employee, once):
 			)
 		)
 
+	# Both pending steps, with the step's owner named -- the employee's own
+	# request is waiting on somebody else either way (P3-R17).
+	for row in frappe.get_all(
+		"Attendance Request",
+		filters={
+			"employee": employee,
+			"workflow_state": ["in", [REQUEST_PENDING_MANAGER, REQUEST_PENDING_HR]],
+			"docstatus": 0,
+		},
+		fields=["name", "from_date", "to_date", "reason", "workflow_state"],
+		order_by="from_date asc",
+		limit=_QUEUE_FETCH,
+	):
+		with_hr = row.workflow_state == REQUEST_PENDING_HR
+		waiting.append(
+			_queue_item(
+				kind="attendance_request_waiting",
+				name=row.name,
+				title=f"{row.reason} request waiting for {'HR' if with_hr else 'your manager'}",
+				detail=None,
+				date=str(row.from_date),
+				day=day_for(row.from_date),
+				age_days=age_days(row.from_date),
+				action="View",
+				owner="hr" if with_hr else "manager",
+				urgency="waiting",
+				to={"name": "AttendanceRequestDetail", "params": {"name": row.name}},
+			)
+		)
+
 	items.sort(key=lambda item: (_URGENCY_RANK[item["urgency"]], -(item["age_days"] or 0)))
 	waiting.sort(key=lambda item: -(item["age_days"] or 0))
 	shown = items[:_QUEUE_LIMIT]
@@ -608,6 +690,9 @@ def _queue_item(
 # tables hold a handful of rows per employee.
 _QUEUE_LIMIT = 8
 _QUEUE_FETCH = 50
+# The bound on the one comment read that spans many records: a handful of
+# comments per sent-back record, over a page of records (P3-R25).
+_COMMENT_FETCH = 200
 # blocked work, then an answer waiting to be read, then a decision this
 # person owes somebody else. "waiting" never enters the queue; it is the
 # urgency of the separate Waiting-on-others list.
@@ -634,27 +719,45 @@ def _notification_text(description):
 	return unescape(frappe.utils.strip_html(description)).strip() or None
 
 
-def _rejection_comments(timesheets):
-	"""The manager's reason for every sent-back timesheet, in one query
-	(P2-R22: server queries avoid per-record comment lookups). This was one
-	Comment read per queue row."""
-	if not timesheets:
+def _rejection_comments(doctype, names, employee=None):
+	"""The approver's reason for every sent-back record of `doctype`, in one
+	query (P2-R22: server queries avoid per-record comment lookups). This was
+	one Comment read per queue row.
+
+	Generalised by doctype in P3-U5: a sent-back Attendance Request carries
+	its reason the same way a sent-back Timesheet does (P3-KTD9).
+
+	Scoped to comments somebody *other than* the employee wrote, the way
+	`_leave_reason` already is: the newest comment on a sent-back record is
+	otherwise whatever the employee themselves last typed on it, which is not
+	a reason it came back.
+
+	Newest first and bounded (P3-R25: every read has a limit). Descending
+	with "first one seen wins" is what makes the bound safe -- a truncated
+	page can only cost an older record its reason, never replace a reason
+	with a staler one.
+	"""
+	if not names:
 		return {}
 
+	employee_user = frappe.db.get_value("Employee", employee, "user_id") if employee else None
 	latest = {}
 	for row in frappe.get_all(
 		"Comment",
 		filters={
-			"reference_doctype": "Timesheet",
-			"reference_name": ["in", timesheets],
+			"reference_doctype": doctype,
+			"reference_name": ["in", names],
 			"comment_type": "Comment",
 		},
-		fields=["reference_name", "content"],
-		# Ascending, so the newest comment is the last one written into the
-		# map and wins.
-		order_by="creation asc",
+		fields=["reference_name", "content", "owner"],
+		order_by="creation desc",
+		limit=_COMMENT_FETCH,
 	):
-		latest[row.reference_name] = frappe.utils.strip_html(row.content).strip() if row.content else None
+		if row.reference_name in latest or (employee_user and row.owner == employee_user):
+			continue
+		text = frappe.utils.strip_html(row.content).strip() if row.content else None
+		if text:
+			latest[row.reference_name] = text
 	return latest
 
 
@@ -670,9 +773,253 @@ def _last_rejection_comment(timesheet):
 	return frappe.utils.strip_html(comment).strip() if comment else None
 
 
+def _summary_row(
+	kind, doctype, name, employee, employee_name, from_date, to_date, sent_on, status, today, **extra
+):
+	"""One queue row, in the one shape every kind answers in (P3-U6 step 0).
+
+	The keys are fixed, so the screen reads the same fields whichever kind a
+	row is, and a kind that has nothing to say about `total_hours` says None
+	rather than leaving the key out.
+	"""
+	row = {
+		# Stable identity, and the Vue list key.
+		"id": f"{kind}:{name}",
+		"kind": kind,
+		"doctype": doctype,
+		"name": name,
+		"employee": employee,
+		"employee_name": employee_name,
+		"initials": _initials(employee_name),
+		"leave_type": None,
+		"from_date": str(from_date) if from_date else None,
+		"to_date": str(to_date) if to_date else None,
+		"total_days": None,
+		"total_hours": None,
+		"status": status,
+		"sent_on": str(sent_on) if sent_on else None,
+		"age_days": _age_in_days(sent_on, today),
+	}
+	row.update(extra)
+	return row
+
+
+def _leave_summaries(employee, today):
+	"""HRMS filters leave by `leave_approver`, so this read is already
+	scoped to decisions this session may make."""
+	from hrms.api import get_leave_applications
+
+	rows = []
+	for row in get_leave_applications(employee, approver_id=frappe.session.user, for_approval=True):
+		sent_on = row.get("creation") or row.get("posting_date")
+		rows.append(
+			_summary_row(
+				"leave",
+				"Leave Application",
+				row["name"],
+				row.get("employee"),
+				row.get("employee_name"),
+				row.get("from_date"),
+				row.get("to_date"),
+				sent_on,
+				row.get("status"),
+				today,
+				leave_type=row.get("leave_type"),
+				total_days=flt(row.get("total_leave_days")),
+			)
+		)
+	return rows
+
+
+def _timesheet_summaries(employee, today):
+	"""A timesheet reaches its approver through the Pending-Approval DocShare
+	`timesheet_on_update` grants plus the nested-set User Permission a manager
+	holds over their reports.
+
+	This read used `frappe.get_all` until P2-U7. `get_all` is `get_list` with
+	`ignore_permissions=True`, so it answered with *every* pending timesheet
+	on the site regardless of who was asking -- the employee name and week of
+	every person in the company, to anyone with a session.
+	"""
+	return [
+		# `modified` is when the week last moved, which for a Pending
+		# Approval timesheet is when it was sent. Timesheet has no
+		# submitted-on field of its own and the workflow transition is a
+		# plain field update, so this is the closest honest answer.
+		_summary_row(
+			"timesheet",
+			"Timesheet",
+			row.name,
+			row.employee,
+			row.employee_name,
+			row.start_date,
+			row.end_date,
+			row.modified,
+			"Pending Approval",
+			today,
+			total_hours=flt(row.total_hours),
+		)
+		for row in frappe.get_list(
+			"Timesheet",
+			filters={
+				"workflow_state": "Pending Approval",
+				"docstatus": 0,
+				"employee": ["!=", employee],
+			},
+			fields=[
+				"name",
+				"employee",
+				"employee_name",
+				"start_date",
+				"end_date",
+				"total_hours",
+				"modified",
+			],
+			order_by="start_date asc",
+			limit=_QUEUE_FETCH,
+		)
+	]
+
+
+def _attendance_request_summaries(employee, today):
+	"""Pending Manager rows only (P3-KTD7, P3-R16).
+
+	HR's confirmation happens in Desk, so a request that has already reached
+	Pending HR is not a decision this queue owns -- listing it would offer a
+	manager (or an HR Manager who is also a line manager) a second, portal
+	version of a step that has been taken.
+
+	`frappe.get_list` as the session user: the manager reaches a report's
+	request through the `write` DocShare `events.attendance_request_on_update`
+	grants for exactly this state, and through nothing else.
+	"""
+	rows = frappe.get_list(
+		"Attendance Request",
+		filters={
+			"workflow_state": REQUEST_PENDING_MANAGER,
+			"docstatus": 0,
+			"employee": ["!=", employee],
+		},
+		fields=[
+			"name",
+			"employee",
+			"employee_name",
+			"from_date",
+			"to_date",
+			"half_day",
+			"half_day_date",
+			"reason",
+			"explanation",
+			"modified",
+		],
+		order_by="modified asc",
+		limit=_QUEUE_FETCH,
+	)
+	# The Submit transition is a plain field update, so `modified` is when the
+	# employee sent it -- the same reasoning as the timesheet's.
+	shown = _requested_day_status(rows)
+	return [
+		_summary_row(
+			"attendance",
+			"Attendance Request",
+			row.name,
+			row.employee,
+			row.employee_name,
+			row.from_date,
+			row.to_date,
+			row.modified,
+			REQUEST_PENDING_MANAGER,
+			today,
+			total_days=date_diff(row.to_date, row.from_date) + 1,
+			reason=row.reason,
+			explanation=(row.explanation or "").strip() or None,
+			half_day=bool(cint(row.half_day)),
+			half_day_date=str(row.half_day_date) if row.half_day_date else None,
+			# What the calendar already shows for those days -- the manager's
+			# evidence, and the reason a "fix Tuesday" request over a Present
+			# Tuesday is visibly not a correction.
+			calendar=shown.get(row.name, []),
+		)
+		for row in rows
+	]
+
+
+def _attendance_status_by_date(employees, start, end):
+	"""What attendance already exists for these employees across the range, as
+	`{(employee, "YYYY-MM-DD"): status}` -- one query for the whole set rather
+	than one per person or per request (P2-R22, P3-U9).
+
+	The one lookup behind all three readers: the Approvals queue, one decision's
+	detail and the attendance-request preview. Regardless of shift, deliberately
+	-- HRMS's own lookup is shift-scoped, so an open-ended Shift Assignment
+	(which leaves `shift` empty on the request) would hide exactly the row an
+	approved request goes on to rewrite (P3-KTD14).
+
+	`get_all` on purpose: the queue's rows came back from a permission-checked
+	`get_list`, one detail is gated by `_assert_may_act_on`, and the preview
+	only ever asks about the session's own employee -- and the days a request
+	names are exactly the evidence P3-R16 says the manager must see before
+	deciding.
+	"""
+	if not employees:
+		return {}
+	return {
+		(row.employee, str(row.attendance_date)): row.status
+		for row in frappe.get_all(
+			"Attendance",
+			filters={
+				"employee": ["in", list(employees)],
+				"attendance_date": ["between", [str(start), str(end)]],
+				"docstatus": ["<", 2],
+			},
+			fields=["employee", "attendance_date", "status"],
+		)
+	}
+
+
+def _attendance_days(employee, start, end, statuses):
+	"""One `{date, status}` per day of the range, read out of the map
+	`_attendance_status_by_date` returned (P3-U9)."""
+	days = []
+	date, last = _as_date(start), _as_date(end)
+	while date <= last:
+		iso = str(date)
+		days.append({"date": iso, "status": statuses.get((employee, iso))})
+		date = add_days(date, 1)
+	return days
+
+
+def _requested_day_status(rows):
+	"""What the calendar already shows for every day the given requests cover,
+	by request name -- one query for the whole queue (P2-R22, P3-R16)."""
+	if not rows:
+		return {}
+
+	statuses = _attendance_status_by_date(
+		{row.employee for row in rows},
+		min(_as_date(row.from_date) for row in rows),
+		max(_as_date(row.to_date) for row in rows),
+	)
+	return {
+		row.name: _attendance_days(row.employee, row.from_date, row.to_date, statuses)
+		for row in rows
+	}
+
+
+# Per-kind, never "not leave means timesheet" (P3-U6 step 0). A third kind
+# landed in P3-U5, and every one of these helpers used to branch on one
+# doctype and treat everything else as the other.
+_APPROVAL_SUMMARY_COLLECTORS = (
+	_leave_summaries,
+	_timesheet_summaries,
+	_attendance_request_summaries,
+)
+
+
 def _approval_summaries(employee):
 	"""Every decision the session user may make right now, as one bounded,
-	typed, oldest-first list -- leave *and* timesheet (P2-R11, P2-U7 step 1).
+	typed, oldest-first list -- leave, timesheet *and* attendance request
+	(P2-R11, P2-U7 step 1, P3-R16).
 
 	This is the single source of the three things that used to be answered
 	separately and could therefore disagree: what the Approvals queue shows,
@@ -681,80 +1028,13 @@ def _approval_summaries(employee):
 	decision -- `_assert_may_act_on` re-checks who may act, on the server,
 	on every read of a detail and on every action.
 
-	Both reads run as the session user through `frappe.get_list`, so
-	Frappe's own permissions decide what comes back: HRMS filters leave by
-	`leave_approver`, and a timesheet reaches its approver through the
-	Pending-Approval DocShare `timesheet_on_update` grants plus the nested-set
-	User Permission a manager holds over their reports.
-
-	The timesheet read used `frappe.get_all` until P2-U7. `get_all` is
-	`get_list` with `ignore_permissions=True`, so it answered with *every*
-	pending timesheet on the site regardless of who was asking -- the
-	employee-name and week of every person in the company, to anyone with a
-	session, through Home and through this queue.
+	Each kind's read runs as the session user, so Frappe's own permissions
+	decide what comes back; the per-kind collector says how.
 	"""
-	from hrms.api import get_leave_applications
-
 	today = _as_date(user_today())
 	rows = []
-
-	for row in get_leave_applications(employee, approver_id=frappe.session.user, for_approval=True):
-		sent_on = row.get("creation") or row.get("posting_date")
-		rows.append(
-			{
-				# Stable identity, and the Vue list key.
-				"id": f"leave:{row['name']}",
-				"kind": "leave",
-				"doctype": "Leave Application",
-				"name": row["name"],
-				"employee": row.get("employee"),
-				"employee_name": row.get("employee_name"),
-				"initials": _initials(row.get("employee_name")),
-				"leave_type": row.get("leave_type"),
-				"from_date": str(row["from_date"]) if row.get("from_date") else None,
-				"to_date": str(row["to_date"]) if row.get("to_date") else None,
-				"total_days": flt(row.get("total_leave_days")),
-				"total_hours": None,
-				"status": row.get("status"),
-				"sent_on": str(sent_on) if sent_on else None,
-				"age_days": _age_in_days(sent_on, today),
-			}
-		)
-
-	for row in frappe.get_list(
-		"Timesheet",
-		filters={
-			"workflow_state": "Pending Approval",
-			"docstatus": 0,
-			"employee": ["!=", employee],
-		},
-		fields=["name", "employee", "employee_name", "start_date", "end_date", "total_hours", "modified"],
-		order_by="start_date asc",
-		limit=_QUEUE_FETCH,
-	):
-		# `modified` is when the week last moved, which for a Pending
-		# Approval timesheet is when it was sent. Timesheet has no
-		# submitted-on field of its own and the workflow transition is a
-		# plain field update, so this is the closest honest answer.
-		rows.append(
-			{
-				"id": f"timesheet:{row.name}",
-				"kind": "timesheet",
-				"doctype": "Timesheet",
-				"name": row.name,
-				"employee": row.employee,
-				"employee_name": row.employee_name,
-				"initials": _initials(row.employee_name),
-				"leave_type": None,
-				"from_date": str(row.start_date) if row.start_date else None,
-				"to_date": str(row.end_date) if row.end_date else None,
-				"total_days": None,
-				"total_hours": flt(row.total_hours),
-				"status": "Pending Approval",
-				"sent_on": str(row.modified) if row.modified else None,
-				"age_days": _age_in_days(row.modified, today),
-			}
-		)
+	for collect in _APPROVAL_SUMMARY_COLLECTORS:
+		rows.extend(collect(employee, today))
 
 	# Oldest first: the queue is a backlog, and the person who has waited
 	# longest is the one the manager is holding up (P2-U7 step 7).
@@ -786,21 +1066,26 @@ def _pending_approvals(employee):
 	"""
 	decisions = []
 	for row in _approval_summaries(employee):
-		if row["kind"] == "leave":
-			title = f"{row['employee_name']} asked for {row['leave_type']}"
-		else:
-			title = f"{row['employee_name']} sent a week for your approval"
 		decisions.append(
 			{
-				"kind": "approval_leave" if row["kind"] == "leave" else "approval_timesheet",
+				"kind": f"approval_{row['kind']}",
 				"reference_doctype": row["doctype"],
 				"reference_name": row["name"],
 				"route_kind": row["kind"],
-				"title": title,
+				"title": _QUEUE_TITLE[row["kind"]](row),
 				"date": row["from_date"],
 			}
 		)
 	return decisions
+
+
+# One sentence per kind, named explicitly (P3-U6 step 0). "Not leave" used to
+# mean "sent a week for your approval", which an attendance request is not.
+_QUEUE_TITLE = {
+	"leave": lambda row: f"{row['employee_name']} asked for {row['leave_type']}",
+	"timesheet": lambda row: f"{row['employee_name']} sent a week for your approval",
+	"attendance": lambda row: f"{row['employee_name']} asked for {row['reason']}",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -1291,7 +1576,7 @@ def get_my_attendance(from_date, to_date):
 			"attendance_date": ["between", [str(start), str(end)]],
 			"docstatus": 1,
 		},
-		fields=["attendance_date", "status", "late_entry", "early_exit"],
+		fields=["attendance_date", "status", "late_entry", "early_exit", "attendance_request"],
 	)
 
 	days = {
@@ -1299,6 +1584,10 @@ def get_my_attendance(from_date, to_date):
 			"status": row.status,
 			"late": bool(row.late_entry),
 			"early": bool(row.early_exit),
+			# P3-R19. A day an approved attendance request marked is a day
+			# the employee already had corrected: it shows on the calendar
+			# with its status, and it is never an exception again.
+			"by_request": bool(row.attendance_request),
 		}
 		for row in records
 	}
@@ -1330,10 +1619,31 @@ def get_my_attendance(from_date, to_date):
 		"days": days,
 		"missing": missing,
 		"summary": summary,
+		# P3-U4 step 1 / P3-R5, P3-R8. The Today strip's whole input: may this
+		# employee punch right now, what the next punch is, and what to say
+		# when they may not.
+		"checkin": _safe(
+			lambda: _checkin_state(employee),
+			"HelixHR check-in state failed",
+			_checkin_unavailable(),
+		),
+		# P3-R19. Counted over the days a request did *not* mark: a
+		# half-day Work From Home request writes a Half Day row, and
+		# flagging it would send the employee back to HR about a day they
+		# have already had fixed. `missing` cannot contain such a day
+		# anyway -- a request-marked day has an Attendance row.
 		"exceptions": {
-			"absent": summary.get("Absent", 0),
-			"half_day": summary.get("Half Day", 0),
-			"late": sum(1 for entry in days.values() if entry["late"]),
+			"absent": sum(
+				1
+				for entry in days.values()
+				if entry["status"] == "Absent" and not entry["by_request"]
+			),
+			"half_day": sum(
+				1
+				for entry in days.values()
+				if entry["status"] == "Half Day" and not entry["by_request"]
+			),
+			"late": sum(1 for entry in days.values() if entry["late"] and not entry["by_request"]),
 			"missing": len(missing),
 		},
 	}
@@ -1379,6 +1689,290 @@ def _missing_attendance_days(employee, start, end, days, tracking_since, holiday
 	return missing
 
 
+# Check-in (P3-U4, P3-R5 to P3-R9)
+#
+# The punch is a server decision (P3-KTD3). The browser contributes exactly
+# two things -- a location and which button the employee thinks they are
+# pressing -- and the server decides the type, the time and whether a punch
+# happens at all. HRMS owns the rest: it resolves the shift, refuses a punch
+# outside a geofence and refuses a coordinate-less punch when HR Settings'
+# geolocation tracking is on.
+
+# Every portal punch is stamped with this, so a device punch and a portal
+# punch are still distinguishable in Desk (P3-R7).
+_PORTAL_DEVICE_ID = "HelixHR Portal"
+# A second tap inside a minute is the same punch, not a check-out: a slow
+# network, a double tap or a retry must not book two rows (P3-R7).
+_PUNCH_DEBOUNCE_SECONDS = 60
+# "Not set up" copy, used for the HR flag being off and for an employee with
+# no shift at all -- from their side those are the same situation, and both
+# are HR's to fix (P3-R8).
+_CHECKIN_NOT_SET_UP = "Check-in isn't set up for you yet. Ask HR if you think it should be."
+
+
+def _checkin_unavailable(reason=None, window=None, last=None):
+	return {"enabled": False, "reason": reason or _(_CHECKIN_NOT_SET_UP), "window": window, "last": last}
+
+
+def _mobile_checkin_allowed():
+	return bool(cint(frappe.db.get_single_value("HR Settings", "allow_employee_checkin_from_mobile_app")))
+
+
+def _shift_windows(employee, at):
+	"""HRMS's own shift resolution for one instant: `(window_now, upcoming)`.
+
+	`window_now` is the window `at` falls inside, grace periods included --
+	the same call `EmployeeCheckin.fetch_shift` makes, so the portal offers a
+	punch exactly when HRMS would attach one to a shift (P3-KTD5). A punch
+	outside it is stored `offshift` and never becomes Attendance, which
+	later reads as a missing day.
+
+	`upcoming` is the next window that has not closed yet, which is what
+	lets the strip say when check-in opens instead of claiming it is not set
+	up. HRMS has no call for that: every one of its resolvers answers "which
+	shift is this instant inside", and `get_employee_shift(..., "forward")`
+	looks for an assignment starting *after* today, so an open-ended
+	assignment that started last month answers nothing at all. So the
+	upcoming window is built from the assignments HRMS itself lists for the
+	day, using HRMS's own timings for each -- today first, then tomorrow,
+	which is where the next window lives once today's has closed.
+	"""
+	from hrms.hr.doctype.shift_assignment.shift_assignment import (
+		get_actual_start_end_datetime_of_shift,
+		get_shift_details,
+		get_shifts_for_date,
+	)
+
+	exact = get_actual_start_end_datetime_of_shift(employee, at, True) or None
+	if exact:
+		return exact, exact
+
+	for moment in (at, add_to_date(at, days=1)):
+		upcoming = None
+		for assignment in get_shifts_for_date(employee, moment):
+			details = get_shift_details(assignment.shift_type, moment)
+			if not details or not details.get("actual_start") or not details.get("actual_end"):
+				continue
+			# The assignment has to cover the day the window falls on. This
+			# is a looser reading than HRMS's own midnight-shift arithmetic,
+			# which is right for a sentence about when check-in opens: the
+			# punch itself is still gated by HRMS's resolution above.
+			opens_on = getdate(details.actual_start)
+			if opens_on < getdate(assignment.start_date):
+				continue
+			if assignment.end_date and opens_on > getdate(assignment.end_date):
+				continue
+			if details.actual_end < at:
+				continue
+			if upcoming is None or details.actual_start < upcoming.actual_start:
+				upcoming = details
+		if upcoming:
+			return exact, upcoming
+	return exact, None
+
+
+def _window_bounds(shift):
+	"""The `{start, end}` of a resolved HRMS shift, or None."""
+	if not shift:
+		return None
+	return {"start": shift.actual_start, "end": shift.actual_end}
+
+
+def _shift_window(employee, at):
+	"""The window `at` falls inside, or None. The punch's own gate."""
+	exact, _upcoming = _shift_windows(employee, at)
+	return _window_bounds(exact)
+
+
+def _last_punch_in_window(employee, start, end):
+	"""The employee's newest punch inside one shift window.
+
+	The window, not the calendar day: a night shift spans two dates and a
+	traveller's local day is a third answer again (P3-AE4). Whatever HRMS
+	would attach this punch to is what decides which punches count as "the
+	shift so far".
+	"""
+	rows = frappe.get_all(
+		"Employee Checkin",
+		filters={"employee": employee, "time": ["between", [str(start), str(end)]]},
+		fields=["name", "time", "log_type", "latitude", "longitude"],
+		order_by="time desc, creation desc",
+		limit=1,
+	)
+	return rows[0] if rows else None
+
+
+def _next_log_type(last):
+	"""No punch yet is a check-in; anything else alternates (P3-R7)."""
+	if last and last.log_type == "IN":
+		return "OUT"
+	return "IN"
+
+
+def _has_location(row):
+	"""P3-R9. Whether this punch still carries coordinates at all.
+
+	The sentinel is the *pair* (0, 0) -- what `tasks.ERASED` writes when the
+	retention period expires, and the one reading `_punch_coordinates`
+	refuses as input -- never either value on its own. Testing each
+	coordinate for truth reported "no location" for a real punch on the
+	equator or the prime meridian.
+	"""
+	return not (flt(row.get("latitude")) == 0 and flt(row.get("longitude")) == 0)
+
+
+def _punch_projection(row, existing=False):
+	return {
+		"name": row.get("name"),
+		"log_type": row.get("log_type"),
+		"time": str(row.get("time")),
+		"has_location": _has_location(row),
+		"existing": existing,
+	}
+
+
+def _checkin_state(employee):
+	"""P3-R5, P3-R8. What the Today strip renders: the next action if there
+	is one, and one plain sentence if there is not."""
+	if not _mobile_checkin_allowed():
+		return _checkin_unavailable()
+
+	now = now_datetime()
+	exact, upcoming = _shift_windows(employee, now)
+	window = _window_bounds(exact) or _window_bounds(upcoming)
+	if not exact:
+		if not upcoming:
+			return _checkin_unavailable()
+		return _checkin_unavailable(
+			_("Check-in opens at {0}.").format(_when(upcoming.actual_start)), window=window
+		)
+
+	last = _last_punch_in_window(employee, window["start"], window["end"])
+	return {
+		"enabled": True,
+		"reason": None,
+		"window": {"start": str(window["start"]), "end": str(window["end"])},
+		"last": _punch_last(last),
+		"next_log_type": _next_log_type(last),
+	}
+
+
+def _punch_last(last):
+	if not last:
+		return None
+	return {
+		"log_type": last.log_type,
+		"time": str(last.time),
+		"has_location": _has_location(last),
+	}
+
+
+def _when(moment):
+	""""08:45" for a window that opens today, "08:45 on 12 Sep" when it does
+	not -- the sentence has to be true for a night shift and for a Monday
+	read on a Saturday."""
+	moment = get_datetime(moment)
+	clock = moment.strftime("%H:%M")
+	if getdate(moment) == getdate(user_today()):
+		return clock
+	return _("{0} on {1}").format(clock, frappe.utils.formatdate(str(getdate(moment)), "d MMM"))
+
+
+def _punch_coordinates(latitude, longitude):
+	"""P3-R7a / P3-AE5. Two floats that name a place on Earth, or a plain
+	refusal. A browser that fails to fix a position sends nothing at all;
+	`NaN`, an infinity and a 95th parallel come from a caller that is not
+	the portal, and 0,0 is the null-island reading a broken sensor gives."""
+	missing = _("Your location didn't come through, so nothing was recorded. Try again.")
+	try:
+		lat, lon = float(latitude), float(longitude)
+	except (TypeError, ValueError):
+		frappe.throw(missing)
+	if not (math.isfinite(lat) and math.isfinite(lon)):
+		frappe.throw(missing)
+	if abs(lat) > 90 or abs(lon) > 180:
+		frappe.throw(_("That location isn't a real place on the map, so nothing was recorded."))
+	if lat == 0 and lon == 0:
+		frappe.throw(missing)
+	return lat, lon
+
+
+@frappe.whitelist(methods=["POST"])
+def punch_my_checkin(latitude, longitude, expected_log_type):
+	"""One check-in or check-out for the logged-in employee, at server time,
+	with the location the browser captured at the tap (P3-KTD3, P3-R6, P3-R7).
+
+	`expected_log_type` is what the screen was offering, not an instruction:
+	the server derives the type from the last punch in the window and refuses
+	a mismatch, so a strip left open on a phone since this morning cannot
+	book a second check-in. HRMS's own validation (geofence, strict log type,
+	inactive employee) runs on insert and its messages are surfaced unchanged
+	-- they are already plain sentences about a place and a distance.
+	"""
+	rate_limit_per_user("punch_my_checkin")
+	employee = get_current_employee()
+
+	expected = str(expected_log_type or "").strip().upper()
+	if expected not in ("IN", "OUT"):
+		frappe.throw(_("That's neither a check-in nor a check-out. Reload and try again."))
+	latitude, longitude = _punch_coordinates(latitude, longitude)
+
+	if not _mobile_checkin_allowed():
+		frappe.throw(_(_CHECKIN_NOT_SET_UP))
+
+	# Serialise the punches of one employee against each other, so two taps
+	# that arrive together cannot both read "no punch yet" and both insert
+	# (the same rule `submit_my_week` follows for a week's Timesheet).
+	_lock_employee(employee)
+
+	now = now_datetime()
+	window = _shift_window(employee, now)
+	if not window:
+		frappe.throw(
+			_("Check-in isn't open right now. Reload to see when it opens, or use Fix a day.")
+		)
+
+	last = _last_punch_in_window(employee, window["start"], window["end"])
+	if (
+		last
+		and last.log_type == expected
+		# The type has to match too: a double tap always asks for what it
+		# already got, while a genuine check-out half a minute after the
+		# check-in asks for the other one -- and returning the check-in for
+		# it reported a punch that never happened.
+		and abs(time_diff_in_seconds(now, last.time)) < _PUNCH_DEBOUNCE_SECONDS
+	):
+		# The same punch, tapped twice. Returning it (rather than refusing)
+		# is what makes a retry after a timeout safe.
+		return _punch_projection(last, existing=True)
+
+	derived = _next_log_type(last)
+	if derived != expected:
+		frappe.throw(
+			_("Your check-in has moved on since this screen loaded. Reload and try again.")
+		)
+
+	doc = frappe.get_doc(
+		{
+			"doctype": "Employee Checkin",
+			"employee": employee,
+			# Server time, never the caller's: the method takes no timestamp
+			# at all, which is the whole reason it exists rather than
+			# `add_log_based_on_employee_field` (P3-KTD3).
+			"time": now,
+			"log_type": derived,
+			"device_id": _PORTAL_DEVICE_ID,
+			"latitude": latitude,
+			"longitude": longitude,
+		}
+	)
+	# Role Employee has no `create` on Employee Checkin after P3-KTD13's
+	# delta: this method is the create rule, exactly as `create_my_request`
+	# is for HR Request.
+	doc.insert(ignore_permissions=True)
+	return _punch_projection(doc.as_dict())
+
+
 @frappe.whitelist()
 def get_my_checkins(date):
 	"""The caller's own check-ins for one day, for the attendance day sheet.
@@ -1391,16 +1985,725 @@ def get_my_checkins(date):
 	"""
 	employee = get_current_employee()
 	day = _as_date(date)
-	return frappe.get_all(
+	rows = frappe.get_all(
 		"Employee Checkin",
 		filters={
 			"employee": employee,
 			"time": ["between", [f"{day} 00:00:00", f"{day} 23:59:59"]],
 		},
-		fields=["name", "time", "log_type"],
+		fields=["name", "time", "log_type", "latitude", "longitude"],
 		order_by="time asc",
 		limit=_CHECKIN_LIMIT,
 	)
+	# P3-R9: the day sheet draws a pin, so it needs to know *whether* the
+	# punch has a location, not where it was. The coordinates stay on the
+	# server (P3-KTD15 erases them there on a schedule); a payload that
+	# carried them would put a location history in every browser cache.
+	return [
+		{
+			"name": row.name,
+			"time": row.time,
+			"log_type": row.log_type,
+			"has_location": _has_location(row),
+		}
+		for row in rows
+	]
+
+
+# Attendance requests -- "Fix a day" (P3-U5, P3-R12 to P3-R18)
+#
+# Every method here is the employee's own half of the two-step approval: the
+# manager's half is `act_on_approval` (P3-U6) and HR's is Desk. The workflow
+# fixture decides who may move the state; `helixhr.events` carries the rules
+# Frappe does not enforce; these six carry the bounds, the allow-lists and the
+# plain-words refusals.
+
+# HRMS offers exactly two reasons (P3-KTD10); anything else is an HR Request.
+_REQUEST_REASONS = ("Work From Home", "On Duty")
+# A correction is a handful of days, and the preview walks every one of them
+# through a holiday, leave and attendance lookup (P3-R25).
+_REQUEST_MAX_SPAN_DAYS = 31
+_REQUEST_EXPLANATION_MAX = 1000
+_REQUEST_PAGE_SIZE = 20
+_REQUEST_MAX_PAGE_SIZE = 100
+
+# An existing Attendance row an approved request would rewrite in place, and
+# never revert (P3-KTD14) -- so a request over one of these days is refused
+# rather than previewed away. An `Absent` row is the opposite case: replacing
+# the Absent that auto attendance wrote overnight is the whole feature.
+_REQUEST_OVERWRITE_STATUSES = ("Present", "Half Day", "Work From Home", "On Leave")
+
+_ATTENDANCE_REQUEST_FIELDS = [
+	"name",
+	"from_date",
+	"to_date",
+	"half_day",
+	"half_day_date",
+	"reason",
+	"explanation",
+	"shift",
+	"workflow_state",
+	"docstatus",
+	"modified",
+	"creation",
+]
+
+
+def _request_projection(row, reasons):
+	state = row.get("workflow_state") or REQUEST_DRAFT
+	return {
+		"name": row.get("name"),
+		"from_date": str(row.get("from_date")) if row.get("from_date") else None,
+		"to_date": str(row.get("to_date")) if row.get("to_date") else None,
+		"half_day": bool(cint(row.get("half_day"))),
+		"half_day_date": str(row.get("half_day_date")) if row.get("half_day_date") else None,
+		"reason": row.get("reason"),
+		"explanation": row.get("explanation"),
+		"shift": row.get("shift"),
+		"workflow_state": state,
+		"docstatus": cint(row.get("docstatus")),
+		"can_withdraw": state in REQUEST_WITHDRAWABLE and cint(row.get("docstatus")) == 0,
+		# Only ever populated for a sent-back request.
+		"reason_sent_back": reasons.get(row.get("name")),
+		"modified": str(row.get("modified")) if row.get("modified") else None,
+		"creation": str(row.get("creation")) if row.get("creation") else None,
+	}
+
+
+@frappe.whitelist()
+def get_my_attendance_requests(limit=None, start=0):
+	"""A bounded page of this employee's own attendance requests, newest
+	first, with the sent-back reason and the manager's name already resolved
+	(P3-R17).
+
+	Cancelled requests are excluded: an approved request that HR later
+	cancelled is HR's record, not an item the employee can act on.
+	"""
+	employee = get_current_employee()
+	limit = min(max(cint(limit) or _REQUEST_PAGE_SIZE, 1), _REQUEST_MAX_PAGE_SIZE)
+	start = max(cint(start), 0)
+	scope = {"employee": employee, "docstatus": ["<", 2]}
+
+	rows = frappe.get_all(
+		"Attendance Request",
+		filters=scope,
+		fields=_ATTENDANCE_REQUEST_FIELDS,
+		order_by="from_date desc, creation desc",
+		limit_start=start,
+		limit_page_length=limit,
+	)
+	reasons = _rejection_comments(
+		"Attendance Request",
+		[row.name for row in rows if row.workflow_state == REQUEST_REJECTED],
+		employee,
+	)
+
+	return {
+		"requests": [_request_projection(row, reasons) for row in rows],
+		"total": frappe.db.count("Attendance Request", scope),
+		"limit": limit,
+		"start": start,
+		"approver_name": _approver_name(employee),
+		"reasons": list(_REQUEST_REASONS),
+		"today": user_today(),
+	}
+
+
+@frappe.whitelist()
+def get_my_attendance_request(name):
+	"""One request, by name -- the list is bounded, so a request reached from
+	a notification or a bookmark has to be answerable on its own."""
+	employee = get_current_employee()
+	row = frappe.db.get_value(
+		"Attendance Request",
+		name,
+		[*_ATTENDANCE_REQUEST_FIELDS, "employee"],
+		as_dict=True,
+	)
+	if not row:
+		frappe.throw(_("That attendance request no longer exists."), frappe.DoesNotExistError)
+	if row.employee != employee:
+		frappe.throw(_("That attendance request isn't yours."), frappe.PermissionError)
+
+	reasons = _rejection_comments(
+		"Attendance Request", [name] if row.workflow_state == REQUEST_REJECTED else [], employee
+	)
+	detail = _request_projection(row, reasons)
+	detail["approver_name"] = _approver_name(employee)
+	return detail
+
+
+def _request_range(from_date, to_date):
+	start, end = _as_date(from_date), _as_date(to_date)
+	if end < start:
+		frappe.throw(_("Those dates are the wrong way round."))
+	if date_diff(end, start) + 1 > _REQUEST_MAX_SPAN_DAYS:
+		frappe.throw(_("Ask for a shorter date range -- a month at most."))
+	return start, end
+
+
+def _holiday_kinds(employee, start, end, cache=None):
+	"""Which dates in the range are holidays, and which of those are the
+	employee's weekly off -- two different sentences on the screen, and the
+	same row in HRMS's answer (P3-KTD14).
+
+	Resolved through the Holidays section's `_holiday_list_spans` (P3-U3), so a
+	range that straddles a Holiday List Assignment change reads each half from
+	the list actually in force over it. Resolving the list once, as of today --
+	which is what this did before P3-U9 -- returned the wrong list for exactly
+	that range, and `_holiday_list_spans` is the function that exists to handle
+	it.
+
+	The name returned is the list in force at `start`, which is what the
+	preview's footnote says; the map covers the whole range whichever list each
+	day came from. `(None, None)` means no list resolves at all -- the "cannot
+	tell yet, ask HR" state, never a range with no holidays in it (P3-R11).
+
+	`cache` is optional and is passed straight to `_holiday_dates_by_span`.
+	"""
+	spans = _holiday_list_spans(employee, _as_date(start), _as_date(end))
+	if not spans:
+		return None, None
+	return spans[0]["holiday_list"], _holiday_dates_by_span(spans, cache)
+
+
+def _holiday_dates_by_span(spans, cache=None):
+	"""Every Holiday row across these spans, as `{date: "holiday" |
+	"weekly_off"}`.
+
+	`cache` (when given) is keyed by the resolved span, so a team on one holiday
+	list costs one Holiday query however many people are in it.
+
+	The rows are read with `ignore_permissions`, deliberately, for the reason
+	the section note above `get_my_holidays` gives: role Employee has no read on
+	Holiday List at all (P2-R26), and the list names here are server-derived
+	from the employee, so there is nothing a caller can steer (P3-KTD1).
+	"""
+	kinds = {}
+	for span in spans:
+		key = (span["holiday_list"], str(span["from_date"]), str(span["to_date"]))
+		found = cache.get(key) if cache is not None else None
+		if found is None:
+			found = {
+				str(getdate(row.holiday_date)): ("weekly_off" if cint(row.weekly_off) else "holiday")
+				for row in frappe.get_all(
+					"Holiday",
+					filters={
+						"parent": span["holiday_list"],
+						"parenttype": "Holiday List",
+						"holiday_date": ["between", [str(span["from_date"]), str(span["to_date"])]],
+					},
+					fields=["holiday_date", "weekly_off"],
+					ignore_permissions=True,
+				)
+			}
+			if cache is not None:
+				cache[key] = found
+		kinds.update(found)
+	return kinds
+
+
+@frappe.whitelist()
+def get_attendance_request_preview(
+	from_date, to_date, half_day=0, half_day_date=None, reason="Work From Home"
+):
+	"""What sending this request would actually do, day by day (P3-R13).
+
+	Three buckets, per P3-KTD14: `mark` (no attendance yet, or an Absent row
+	the request replaces), `skipped` (a holiday, a weekly off, or a day the
+	employee is already on approved leave) and `overwrite` (a day that
+	already carries real attendance). Any overwrite day refuses the send,
+	because HRMS rewrites such a row in place at HR's submit and cancels it
+	outright on cancel -- so a request over one can erase attendance rather
+	than revert it. The HR Request is the pointer for that case.
+
+	`known: false` is the Attendance page's "cannot tell yet, ask HR" shape:
+	with no resolvable holiday list, HRMS's own preview raises instead of
+	answering, and the screen has to disable Send rather than guess.
+	"""
+	rate_limit_per_user("get_attendance_request_preview")
+	employee = get_current_employee()
+	start, end = _request_range(from_date, to_date)
+	reason = _assert_request_reason(reason)
+	return _attendance_request_preview(
+		employee, start, end, half_day=half_day, half_day_date=half_day_date, reason=reason
+	)
+
+
+def _attendance_request_preview(
+	employee, start, end, half_day=0, half_day_date=None, reason="Work From Home"
+):
+	"""The preview itself, on an already-resolved employee and an
+	already-validated range (P3-U9).
+
+	Separate from the whitelisted method so that `send_my_attendance_request`,
+	which re-derives the preview against the stored record, does not spend the
+	caller's preview rate-limit budget on the send.
+	"""
+	list_name, holidays = _holiday_kinds(employee, start, end)
+	total_days = date_diff(end, start) + 1
+	if holidays is None:
+		return {
+			"known": False,
+			"holiday_list": None,
+			"total_days": total_days,
+			"mark": 0,
+			"replaces_absent": 0,
+			"overwrite": 0,
+			"skipped": {"holiday": 0, "weekly_off": 0, "on_leave": 0},
+			"days": [],
+			"can_send": False,
+		}
+
+	warnings = _request_warnings(
+		employee, start, end, half_day=half_day, half_day_date=half_day_date, reason=reason
+	)
+	existing = _attendance_status_by_date([employee], start, end)
+
+	days = []
+	counts = {"mark": 0, "replaces_absent": 0, "overwrite": 0}
+	skipped = {"holiday": 0, "weekly_off": 0, "on_leave": 0}
+	date = start
+	while date <= end:
+		iso = str(date)
+		warning = warnings.get(iso) or {}
+		if iso in holidays:
+			kind = holidays[iso]
+			skipped[kind] += 1
+			days.append({"date": iso, "bucket": "skipped", "reason": kind})
+		elif warning.get("reason") == "On Leave":
+			skipped["on_leave"] += 1
+			days.append({"date": iso, "bucket": "skipped", "reason": "on_leave"})
+		else:
+			status = existing.get((employee, iso))
+			if status in _REQUEST_OVERWRITE_STATUSES:
+				counts["overwrite"] += 1
+				days.append({"date": iso, "bucket": "overwrite", "reason": status})
+			else:
+				counts["mark"] += 1
+				if status:
+					counts["replaces_absent"] += 1
+				days.append({"date": iso, "bucket": "mark", "reason": status})
+		date = add_days(date, 1)
+
+	return {
+		"known": True,
+		"holiday_list": list_name,
+		"total_days": total_days,
+		**counts,
+		"skipped": skipped,
+		"days": days,
+		"can_send": counts["mark"] >= 1 and counts["overwrite"] == 0,
+	}
+
+
+def _request_warnings(employee, start, end, half_day=0, half_day_date=None, reason="Work From Home"):
+	"""HRMS's own day-by-day warnings, asked of an unsaved request.
+
+	Reusing `get_attendance_warnings` rather than reimplementing it keeps the
+	approved-leave rule (including its half-day nuance) in one place -- HRMS's.
+	Only its Holiday and On Leave answers are used; the existing-row question
+	is answered by `_attendance_status_by_date`, because HRMS's is shift-scoped
+	(P3-KTD14).
+	"""
+	doc = frappe.new_doc("Attendance Request")
+	doc.employee = employee
+	doc.company = frappe.db.get_value("Employee", employee, "company")
+	doc.from_date = str(start)
+	doc.to_date = str(end)
+	doc.half_day = cint(half_day)
+	doc.half_day_date = str(half_day_date) if half_day_date else None
+	doc.reason = reason
+	return {str(warning["date"]): warning for warning in doc.get_attendance_warnings()}
+
+
+def _assert_request_reason(reason):
+	if reason not in _REQUEST_REASONS:
+		frappe.throw(
+			_("Pick Work From Home or On Duty. Anything else is a request to HR instead.")
+		)
+	return reason
+
+
+def _request_shift(employee, from_date):
+	"""The shift an approved request writes onto the Attendance rows.
+
+	HRMS fills `shift` from a Shift Assignment that fully covers the range;
+	an open-ended assignment leaves it empty, so this falls back to the shift
+	HRMS resolves for the first day, default shift included (P3-KTD14).
+	"""
+	from hrms.hr.doctype.shift_assignment.shift_assignment import get_employee_shift
+
+	details = get_employee_shift(employee, get_datetime(f"{from_date} 12:00:00"), True) or {}
+	shift_type = details.get("shift_type")
+	return shift_type.name if shift_type else None
+
+
+@frappe.whitelist(methods=["POST"])
+def create_my_attendance_request(
+	from_date, to_date, reason, explanation=None, half_day=0, half_day_date=None
+):
+	"""Create this employee's own attendance request as a Draft (P3-R12).
+
+	Field-allow-listed and session-scoped: `employee` and `company` come from
+	the session and `half_day_date` from `from_date` for a one-day range, so
+	none of the three is a caller input. Nothing is sent here -- the employee
+	sees the preview first, and `send_my_attendance_request` is the step that
+	moves it to the manager.
+	"""
+	rate_limit_per_user("create_my_attendance_request")
+	employee = get_current_employee()
+	start, end = _request_range(from_date, to_date)
+	reason = _assert_request_reason(reason)
+
+	explanation = (explanation or "").strip() or None
+	if explanation and len(explanation) > _REQUEST_EXPLANATION_MAX:
+		frappe.throw(
+			_("Keep the explanation under {0} characters.").format(_REQUEST_EXPLANATION_MAX)
+		)
+
+	half_day = cint(half_day)
+	if half_day:
+		if start == end:
+			# A half day on a one-day range is that day, always -- accepting
+			# the form's value here is how "half day, 14th, on the 20th"
+			# would get in.
+			half_day_date = str(start)
+		elif not half_day_date or not (start <= _as_date(half_day_date) <= end):
+			frappe.throw(_("Pick which day of the range is the half day."))
+		else:
+			half_day_date = str(_as_date(half_day_date))
+	else:
+		half_day_date = None
+
+	doc = frappe.get_doc(
+		{
+			"doctype": "Attendance Request",
+			"employee": employee,
+			"company": frappe.db.get_value("Employee", employee, "company"),
+			"from_date": str(start),
+			"to_date": str(end),
+			"half_day": half_day,
+			"half_day_date": half_day_date,
+			"reason": reason,
+			"explanation": explanation,
+			"shift": _request_shift(employee, start),
+		}
+	)
+	doc.insert()
+	return _request_projection(doc.as_dict(), {})
+
+
+@frappe.whitelist(methods=["POST"])
+def send_my_attendance_request(name, expected_modified=None):
+	"""Send one Draft request to the manager (P3-R13, P3-R14, P3-R15).
+
+	The preview is re-derived here rather than trusted from the screen: a
+	holiday list, an approved leave or an attendance row can all have landed
+	between rendering the sheet and tapping Send, and the refusals are the
+	same ones the sheet showed.
+	"""
+	from frappe.model.workflow import apply_workflow
+
+	rate_limit_per_user("send_my_attendance_request")
+	employee = get_current_employee()
+	current = frappe.db.get_value(
+		"Attendance Request",
+		name,
+		["employee", "docstatus", "workflow_state", "modified", "from_date", "to_date", "half_day", "half_day_date", "reason"],
+		as_dict=True,
+		for_update=True,
+	)
+	if not current:
+		frappe.throw(_("That attendance request no longer exists."), frappe.DoesNotExistError)
+	if current.employee != employee:
+		frappe.throw(_("That attendance request isn't yours."), frappe.PermissionError)
+	if (current.workflow_state or REQUEST_DRAFT) != REQUEST_DRAFT:
+		frappe.throw(_("This one has already been sent. Reload to see where it is."))
+	_assert_expected_state(expected_modified, current.modified)
+
+	# The plain preview, not the whitelisted method: a Send is not a preview
+	# and must not consume the caller's preview budget (P3-U9). The stored
+	# range and reason are still validated, exactly as the method validates a
+	# caller's.
+	preview = _attendance_request_preview(
+		employee,
+		*_request_range(current.from_date, current.to_date),
+		half_day=current.half_day,
+		half_day_date=current.half_day_date,
+		reason=_assert_request_reason(current.reason),
+	)
+	if not preview["known"]:
+		frappe.throw(
+			_("We can't tell which of those days are working days yet. Ask HR about your holiday list.")
+		)
+	if preview["overwrite"]:
+		frappe.throw(
+			_(
+				"Some of those days already have attendance, so this can't fix them. "
+				"Raise a request to HR for those days instead."
+			)
+		)
+	if not preview["mark"]:
+		frappe.throw(_("None of those days would change. Pick different dates."))
+
+	doc = frappe.get_doc("Attendance Request", name)
+	apply_workflow(doc, "Submit")
+	doc.reload()
+	return {
+		"name": doc.name,
+		"workflow_state": doc.workflow_state,
+		"modified": str(doc.modified),
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+def withdraw_my_attendance_request(name):
+	"""Remove one of the caller's own requests while it is still theirs to
+	remove -- Draft, with the manager, or sent back (P3-R17).
+
+	Once it has reached HR the honest path is HR, and `events
+	.attendance_request_on_trash` refuses the same states through every
+	other route.
+	"""
+	rate_limit_per_user("withdraw_my_attendance_request")
+	employee = get_current_employee()
+	current = frappe.db.get_value(
+		"Attendance Request",
+		name,
+		["employee", "docstatus", "workflow_state"],
+		as_dict=True,
+		for_update=True,
+	)
+	if not current:
+		frappe.throw(_("That attendance request no longer exists."), frappe.DoesNotExistError)
+	if current.employee != employee:
+		frappe.throw(_("That attendance request isn't yours."), frappe.PermissionError)
+
+	state = current.workflow_state or REQUEST_DRAFT
+	if cint(current.docstatus) != 0 or state not in REQUEST_WITHDRAWABLE:
+		if state == REQUEST_APPROVED:
+			frappe.throw(_("This one already counts. Ask HR to cancel it."))
+		frappe.throw(_("This one is with HR now. Ask HR to sort it out."))
+
+	frappe.delete_doc("Attendance Request", name)
+	return {"name": name, "withdrawn": True}
+
+
+# Payslips (P3-U2, P3-R1 to P3-R4, P3-KTD1, P3-KTD2)
+
+# Bounded like the leave list (P3-R25): payroll is monthly, so a long-serving
+# employee has a few hundred rows and the screen shows one year at a time.
+_PAYSLIP_PAGE = 20
+_PAYSLIP_MAX_PAGE = 200
+
+# The explicit allow-list KTD1 asks for. Role Employee has `read` and `print`
+# on Salary Slip and nothing else -- no `report` -- so the generic list and
+# report views stay refused and this projection is the only way in (P3-R3).
+_PAYSLIP_FIELDS = [
+	"name",
+	"start_date",
+	"end_date",
+	"posting_date",
+	"gross_pay",
+	"total_deduction",
+	"net_pay",
+	"rounded_total",
+	"currency",
+	"status",
+	"amended_from",
+	"payroll_frequency",
+]
+
+# One sentence for a slip that is missing and for a slip that belongs to
+# somebody else, deliberately unlike `get_my_leave_detail`, which answers
+# "isn't yours" for a foreign record. A Salary Slip's name embeds the
+# employee id (`Sal Slip/<employee>/#####`, SalarySlip.default_series), so
+# telling the two apart is an existence oracle *about another employee*:
+# the caller already knows whose id they put in the name, and a distinct
+# refusal would confirm the slip exists. Leave names are numeric and carry
+# no such fact, which is why the two methods differ (P3-R3).
+_PAYSLIP_NOT_FOUND = "That payslip isn't here."
+
+# What Frappe falls back to when a site has not chosen a default print
+# format for Salary Slip. HRMS ships this one and preflight has no business
+# forcing a choice on a site (P3-KTD2).
+_PAYSLIP_PRINT_FORMAT = "Salary Slip Standard"
+
+
+def _payslip_projection(row):
+	"""One row, in the words the page renders.
+
+	Money stays a number per row with its own `currency` beside it: the
+	amounts of two slips in two currencies are never comparable, so nothing
+	here or on the page ever adds them (P3-R1, P3-U2 step 5).
+	"""
+	status = row.get("status")
+	return {
+		"name": row.get("name"),
+		"start_date": str(row.get("start_date")) if row.get("start_date") else None,
+		"end_date": str(row.get("end_date")) if row.get("end_date") else None,
+		"posting_date": str(row.get("posting_date")) if row.get("posting_date") else None,
+		"gross_pay": flt(row.get("gross_pay")),
+		"total_deduction": flt(row.get("total_deduction")),
+		# `rounded_total` is what payroll actually pays out, unless the site
+		# turned rounding off, in which case HRMS leaves it at zero.
+		"net_pay": flt(row.get("rounded_total")) or flt(row.get("net_pay")),
+		"currency": row.get("currency"),
+		"status": status,
+		# P3-R4. Withheld is listed and named, never silently hidden, and it
+		# has no PDF -- the figures on a withheld slip are not what anybody
+		# was paid.
+		"withheld": status == "Withheld",
+		"can_download": status != "Withheld",
+		# An amended slip is the correction of an earlier one. The employee
+		# needs the word, not the superseded slip's id.
+		"revised": bool(row.get("amended_from")),
+		"payroll_frequency": row.get("payroll_frequency"),
+	}
+
+
+def _payslip_years(employee):
+	"""Every year this employee has a submitted slip in, newest first.
+
+	Derived from the first and last slip rather than by reading every row's
+	date: payroll is monthly and continuous, so the span is the answer, and
+	a year inside it with no slip filters to a list the page renders as its
+	own empty state instead of an error (P3-R25 keeps this bounded at two
+	cheap reads).
+	"""
+	scope = {"employee": employee, "docstatus": 1}
+	newest = frappe.db.get_value("Salary Slip", scope, "end_date", order_by="end_date desc")
+	oldest = frappe.db.get_value("Salary Slip", scope, "end_date", order_by="end_date asc")
+	if not newest:
+		return []
+	return list(range(getdate(newest).year, getdate(oldest).year - 1, -1))
+
+
+@frappe.whitelist()
+def get_my_payslips(year=None, start=0, limit=None):
+	"""A bounded page of this employee's own submitted payslips, newest
+	period first, with the years they can filter by (P3-R1).
+
+	Only `docstatus == 1`: a draft slip is payroll's work in progress and a
+	cancelled one is a slip that was withdrawn, so neither is a payslip the
+	employee has (P3-R4).
+	"""
+	employee = get_current_employee()
+	limit = min(max(cint(limit) or _PAYSLIP_PAGE, 1), _PAYSLIP_MAX_PAGE)
+	start = max(cint(start), 0)
+
+	scope = {"employee": employee, "docstatus": 1}
+	if year:
+		year = cint(year)
+		scope["end_date"] = ["between", [f"{year}-01-01", f"{year}-12-31"]]
+
+	rows = frappe.get_all(
+		"Salary Slip",
+		filters=scope,
+		fields=_PAYSLIP_FIELDS,
+		order_by="end_date desc",
+		limit_start=start,
+		limit_page_length=limit,
+	)
+
+	return {
+		"payslips": [_payslip_projection(row) for row in rows],
+		"total": frappe.db.count("Salary Slip", scope),
+		"limit": limit,
+		"start": start,
+		"year": year or None,
+		"years": _payslip_years(employee),
+	}
+
+
+def _my_payslip(name, employee):
+	"""The row behind `name` once it is established that it is this
+	employee's own submitted slip, or one uniform refusal (see
+	`_PAYSLIP_NOT_FOUND`)."""
+	row = frappe.db.get_value(
+		"Salary Slip", name, [*_PAYSLIP_FIELDS, "employee", "docstatus"], as_dict=True
+	)
+	if not row or row.employee != employee or cint(row.docstatus) != 1:
+		frappe.throw(_(_PAYSLIP_NOT_FOUND), frappe.DoesNotExistError)
+	return row
+
+
+@frappe.whitelist()
+def get_my_payslip(name):
+	"""One payslip with its breakdown (P3-R2).
+
+	The list is bounded, so `/payslips/<name>` has to be answerable on its
+	own -- a slip reached from a bookmark is not necessarily on the page the
+	list returned.
+	"""
+	employee = get_current_employee()
+	row = _my_payslip(name, employee)
+
+	# The child rows, from the document: `salary_component` and `amount`
+	# only. Everything else on an earning row (the formula, the account it
+	# posts to, the year-to-date columns) is payroll's working, not the
+	# employee's payslip.
+	doc = frappe.get_doc("Salary Slip", name)
+	detail = _payslip_projection(row)
+	detail.update(
+		{
+			"payment_days": flt(doc.payment_days),
+			"total_working_days": flt(doc.total_working_days),
+			"leave_without_pay": flt(doc.leave_without_pay),
+			"earnings": [
+				{"salary_component": entry.salary_component, "amount": flt(entry.amount)}
+				for entry in doc.earnings
+			],
+			"deductions": [
+				{"salary_component": entry.salary_component, "amount": flt(entry.amount)}
+				for entry in doc.deductions
+			],
+		}
+	)
+	return detail
+
+
+@frappe.whitelist(methods=["GET"])
+# PDF rendering spawns wkhtmltopdf, which is CPU-bound: a handful of
+# concurrent downloads can take a web worker each and stall every other
+# request on the site. Frappe v16 ships the primitive for exactly this
+# (`frappe.concurrent_limit`, a Redis semaphore across workers, 503 when the
+# wait runs out) and its default limit is derived from the site's own worker
+# count, so no number is invented here (P3-U2 step 3).
+@frappe.concurrent_limit()
+def download_my_payslip(name):
+	"""This employee's own submitted payslip as a PDF attachment, in the
+	print format the site chose for Salary Slip (P3-R2, P3-KTD2).
+
+	A GET, and a real navigation from the page rather than a fetch: that is
+	what lets a phone browser save or open the file itself.
+	"""
+	rate_limit_per_user("download_my_payslip")
+	employee = get_current_employee()
+	row = _my_payslip(name, employee)
+	if row.status == "Withheld":
+		# Ownership is already established, so this one says what is wrong.
+		frappe.throw(_("This payslip is on hold. Ask HR about it."))
+
+	download_pdf(
+		"Salary Slip",
+		name,
+		format=frappe.get_meta("Salary Slip").default_print_format or _PAYSLIP_PRINT_FORMAT,
+	)
+
+	# `frappe.utils.response.as_pdf` writes `Content-Disposition: inline`,
+	# which renders the payslip in the tab instead of saving it, and no
+	# cache directive at all. `frappe.local.response_headers` is merged over
+	# the response's own headers in `frappe.app.application`, so this is the
+	# supported way to correct both after the fact. The filename is the
+	# period, because "Sal Slip-HR-EMP-00001-00003.pdf" is not a name anybody
+	# wants in their downloads folder.
+	period = str(row.end_date or row.start_date or "")[:7]
+	frappe.local.response_headers["Content-Disposition"] = (
+		f"attachment; filename*=UTF-8''{quote(f'Payslip {period}.pdf')}"
+	)
+	frappe.local.response_headers["Cache-Control"] = "no-store"
 
 
 # Timesheets (U8, KTD7, KTD10, KTD11)
@@ -1512,7 +2815,9 @@ def get_my_timesheet_history(limit=12, start=0):
 		limit_start=start,
 		limit_page_length=limit,
 	)
-	reasons = _rejection_comments([row.name for row in rows if row.workflow_state == "Rejected"])
+	reasons = _rejection_comments(
+		"Timesheet", [row.name for row in rows if row.workflow_state == "Rejected"], employee
+	)
 
 	weeks = []
 	for row in rows:
@@ -1698,12 +3003,13 @@ def _lock_employee(employee):
 	week shares, so two concurrent writes serialise instead of both
 	inserting a Timesheet for the same week.
 
-	It lives in `_write_my_week` because a lock only excludes statements
-	that also take it: `submit_my_week` held it while `save_my_week` took
-	nothing at all, so a save walked straight past a concurrent submit and
-	the double-insert the lock exists to stop was still reachable. The
-	first write of a week has no Timesheet row to lock yet, which is
-	exactly the case that matters.
+	Taken by every writer that has to serialise against another, because a
+	lock only excludes statements that also take it: `submit_my_week` held
+	it while `save_my_week` took nothing at all, so a save walked straight
+	past a concurrent submit and the double-insert the lock exists to stop
+	was still reachable. The first write of a week has no Timesheet row to
+	lock yet, which is exactly the case that matters. `punch_my_checkin`
+	takes the same lock for the same reason on the same row (P3-R7).
 	"""
 	return frappe.db.get_value("Employee", employee, "name", for_update=True)
 
@@ -1874,72 +3180,123 @@ def get_my_approvals():
 	}
 
 
+def _decided_row(kind, name, employee_name, label, from_date, to_date, status, decided_on):
+	return {
+		"id": f"{kind}:{name}",
+		"kind": kind,
+		"name": name,
+		"employee_name": employee_name,
+		"initials": _initials(employee_name),
+		"label": label,
+		"from_date": str(from_date) if from_date else None,
+		"to_date": str(to_date) if to_date else None,
+		"status": status,
+		"decided_on": str(decided_on) if decided_on else None,
+	}
+
+
+def _decided_leave(employee, since):
+	return [
+		_decided_row(
+			"leave",
+			row.name,
+			row.employee_name,
+			row.leave_type,
+			row.from_date,
+			row.to_date,
+			row.status,
+			row.modified,
+		)
+		for row in frappe.get_list(
+			"Leave Application",
+			filters={
+				"leave_approver": frappe.session.user,
+				"employee": ["!=", employee],
+				"status": ["in", ["Approved", "Rejected"]],
+				"modified": [">=", str(since)],
+			},
+			fields=["name", "employee_name", "leave_type", "from_date", "to_date", "status", "modified"],
+			order_by="modified desc",
+			limit=_DECIDED_LIMIT,
+		)
+	]
+
+
+def _decided_timesheets(employee, since):
+	return [
+		_decided_row(
+			"timesheet",
+			row.name,
+			row.employee_name,
+			"Timesheet",
+			row.start_date,
+			row.end_date,
+			row.workflow_state,
+			row.modified,
+		)
+		for row in frappe.get_list(
+			"Timesheet",
+			filters={
+				"employee": ["!=", employee],
+				"workflow_state": ["in", ["Approved", "Rejected"]],
+				"modified": [">=", str(since)],
+			},
+			fields=["name", "employee_name", "start_date", "end_date", "workflow_state", "modified"],
+			order_by="modified desc",
+			limit=_DECIDED_LIMIT,
+		)
+	]
+
+
+def _decided_attendance_requests(employee, since):
+	"""A request the manager sent on reads "Waiting for HR" here, which is
+	the honest receipt: their step is done and HR's has not happened yet
+	(P3-KTD7). Approved and Rejected are the later outcomes of the same row.
+	"""
+	return [
+		_decided_row(
+			"attendance",
+			row.name,
+			row.employee_name,
+			"Attendance request",
+			row.from_date,
+			row.to_date,
+			row.workflow_state,
+			row.modified,
+		)
+		for row in frappe.get_list(
+			"Attendance Request",
+			filters={
+				"employee": ["!=", employee],
+				"workflow_state": ["in", [REQUEST_PENDING_HR, REQUEST_APPROVED, REQUEST_REJECTED]],
+				"modified": [">=", str(since)],
+			},
+			fields=["name", "employee_name", "from_date", "to_date", "workflow_state", "modified"],
+			order_by="modified desc",
+			limit=_DECIDED_LIMIT,
+		)
+	]
+
+
+_DECIDED_COLLECTORS = (_decided_leave, _decided_timesheets, _decided_attendance_requests)
+
+
 def _recently_decided(employee):
 	"""What this approver decided in the last week, newest first.
 
 	Best effort by design. A Timesheet's DocShare is removed the moment it
-	is decided (P2-U7 scenario 8), so a decided week is only still visible
-	to a manager who can read it some other way -- the nested-set User
-	Permission over their own reports. An approver who is nobody's manager
-	sees their leave decisions here and nothing else, which is correct: the
-	group is a receipt for work this user did, not a record they own.
+	is decided (P2-U7 scenario 8), and an Attendance Request's the moment it
+	leaves Pending Manager, so a decided record is only still visible to a
+	manager who can read it some other way -- the nested-set User Permission
+	over their own reports. An approver who is nobody's manager sees their
+	leave decisions here and nothing else, which is correct: the group is a
+	receipt for work this user did, not a record they own.
 	"""
 	since = add_days(user_today(), -_DECIDED_DAYS)
 	today = _as_date(user_today())
 	decided = []
-
-	for row in frappe.get_list(
-		"Leave Application",
-		filters={
-			"leave_approver": frappe.session.user,
-			"employee": ["!=", employee],
-			"status": ["in", ["Approved", "Rejected"]],
-			"modified": [">=", str(since)],
-		},
-		fields=["name", "employee_name", "leave_type", "from_date", "to_date", "status", "modified"],
-		order_by="modified desc",
-		limit=_DECIDED_LIMIT,
-	):
-		decided.append(
-			{
-				"id": f"leave:{row.name}",
-				"kind": "leave",
-				"name": row.name,
-				"employee_name": row.employee_name,
-				"initials": _initials(row.employee_name),
-				"label": row.leave_type,
-				"from_date": str(row.from_date) if row.from_date else None,
-				"to_date": str(row.to_date) if row.to_date else None,
-				"status": row.status,
-				"decided_on": str(row.modified) if row.modified else None,
-			}
-		)
-
-	for row in frappe.get_list(
-		"Timesheet",
-		filters={
-			"employee": ["!=", employee],
-			"workflow_state": ["in", ["Approved", "Rejected"]],
-			"modified": [">=", str(since)],
-		},
-		fields=["name", "employee_name", "start_date", "end_date", "workflow_state", "modified"],
-		order_by="modified desc",
-		limit=_DECIDED_LIMIT,
-	):
-		decided.append(
-			{
-				"id": f"timesheet:{row.name}",
-				"kind": "timesheet",
-				"name": row.name,
-				"employee_name": row.employee_name,
-				"initials": _initials(row.employee_name),
-				"label": "Timesheet",
-				"from_date": str(row.start_date) if row.start_date else None,
-				"to_date": str(row.end_date) if row.end_date else None,
-				"status": row.workflow_state,
-				"decided_on": str(row.modified) if row.modified else None,
-			}
-		)
+	for collect in _DECIDED_COLLECTORS:
+		decided.extend(collect(employee, since))
 
 	decided.sort(key=lambda entry: entry["decided_on"] or "", reverse=True)
 	for entry in decided:
@@ -1971,13 +3328,18 @@ def get_approval_detail(kind, name):
 
 	doc = frappe.get_doc(doctype, name)
 	_assert_may_act_on(doc)
-
-	if doctype == "Leave Application":
-		return _leave_decision_detail(doc)
-	return _timesheet_decision_detail(doc)
+	return _APPROVAL_KINDS[doctype]["detail"](doc)
 
 
-_APPROVAL_DOCTYPES = {"leave": "Leave Application", "timesheet": "Timesheet"}
+# The three kinds, and the doctype each one names -- the alias the whitelisted
+# `kind` parameters are validated against. Everything else that is per-kind
+# lives in `_APPROVAL_KINDS`, keyed by the doctype, rather than in a map of its
+# own per question (P3-U6 step 0, P3-U9).
+_APPROVAL_DOCTYPES = {
+	"leave": "Leave Application",
+	"timesheet": "Timesheet",
+	"attendance": "Attendance Request",
+}
 
 
 def _decision_head(doc, employee_name):
@@ -2082,6 +3444,51 @@ def _timesheet_decision_detail(doc):
 	return detail
 
 
+def _attendance_decision_detail(doc):
+	"""The days a request covers, what the calendar already shows for each of
+	them, and the employee's own explanation -- everything P3-R16 says the
+	manager reads before sending it to HR.
+
+	`working_days_known` is false when no holiday list resolves for the
+	employee, in which case the holiday column is unknowable rather than
+	empty, and the screen says so instead of implying every day is a working
+	day (the Attendance page's own "cannot tell yet" shape).
+	"""
+	detail = _decision_head(doc, doc.employee_name)
+	start, end = _as_date(doc.from_date), _as_date(doc.to_date)
+	_, holidays = _holiday_kinds(doc.employee, start, end)
+	statuses = _attendance_status_by_date([doc.employee], start, end)
+	detail.update(
+		{
+			"kind": "attendance",
+			"state": doc.workflow_state,
+			"status": doc.workflow_state,
+			"docstatus": cint(doc.docstatus),
+			"reason": doc.reason,
+			"from_date": str(start),
+			"to_date": str(end),
+			"total_days": date_diff(end, start) + 1,
+			"half_day": bool(cint(doc.half_day)),
+			"half_day_date": str(doc.half_day_date) if doc.half_day_date else None,
+			# The employee's own words. Kept separate from `reason`, which for
+			# this kind is the HRMS reason code (Work From Home / On Duty).
+			"explanation": (doc.explanation or "").strip() or None,
+			"working_days_known": holidays is not None,
+			"days": [
+				{
+					"date": day["date"],
+					"status": day["status"],
+					"holiday": (holidays or {}).get(day["date"]),
+				}
+				for day in _attendance_days(doc.employee, start, end, statuses)
+			],
+			"sent_on": str(doc.modified) if doc.modified else None,
+			"age_days": _age_in_days(doc.modified, _as_date(user_today())),
+		}
+	)
+	return detail
+
+
 def _project_and_task_names(lines):
 	"""Two queries for the whole week, not two per row (P2-R22)."""
 	projects = {project for project, _ in lines if project}
@@ -2139,7 +3546,7 @@ def act_on_approval(
 	and "somebody already decided this", and the manager is told which.
 	"""
 	rate_limit_per_user("act_on_approval")
-	if doctype not in ("Leave Application", "Timesheet"):
+	if doctype not in _APPROVAL_DOCTYPES.values():
 		frappe.throw(_("Not a valid request."))
 	if action not in ("Approve", "Reject"):
 		frappe.throw(_("Not a valid action."))
@@ -2161,56 +3568,83 @@ def act_on_approval(
 	_assert_expected_state(expected_modified, current_modified)
 	_assert_expected_workflow_state(doc, expected_state)
 
+	# Before the transition, so a Send back carries its reason into the
+	# notification the transition writes (P3-KTD9).
 	if comment:
 		doc.add_comment("Comment", comment)
 
-	if doctype == "Timesheet":
-		from frappe.model.workflow import apply_workflow
-
-		apply_workflow(doc, action)
-		return {"name": doc.name, "action": action, "state": doc.workflow_state}
-
-	_act_on_leave_application(doc, action)
-	return {"name": doc.name, "action": action, "state": doc.status}
+	_APPROVAL_KINDS[doctype]["act"](doc, action)
+	return {
+		"name": doc.name,
+		"action": action,
+		"state": doc.get(_APPROVAL_KINDS[doctype]["state_field"]),
+	}
 
 
-def _assert_may_act_on(doc):
-	"""Refuse anyone but this record's own approver (or HR) before a single
-	side effect runs (P2-U1 step 9)."""
-	user = frappe.session.user
-	if user == "Administrator" or set(frappe.get_roles(user)) & {"HR Manager", "System Manager"}:
-		return
+def _act_through_workflow(doc, action):
+	"""Timesheet and Attendance Request both move through their own Workflow,
+	whose transition condition and role are the real check; this runs the
+	same transition the Desk actions run."""
+	from frappe.model.workflow import apply_workflow
 
-	if doc.doctype == "Timesheet":
-		# The same rule events.timesheet_before_submit enforces on submit,
-		# applied here so a Reject (which never submits) and the comment
-		# that goes with it are covered by it too.
-		if user == get_manager_user(doc.employee):
-			return
+	apply_workflow(doc, action)
+
+
+def _may_act_on_leave(doc, user):
+	if user != doc.leave_approver:
+		frappe.throw(
+			_("Only {0}'s approver or HR can act on this leave request.").format(doc.employee),
+			frappe.PermissionError,
+		)
+
+
+def _may_act_on_timesheet(doc, user):
+	# The same rule events.timesheet_before_submit enforces on submit,
+	# applied here so a Reject (which never submits) and the comment that
+	# goes with it are covered by it too.
+	if user != get_manager_user(doc.employee):
 		frappe.throw(
 			_("Only {0}'s manager or HR can act on this timesheet.").format(doc.employee),
 			frappe.PermissionError,
 		)
 
-	if user == doc.leave_approver:
+
+def _may_act_on_attendance_request(doc, user):
+	"""`events._approver_user` is the single source for who the manager is
+	(P3-KTD7): stricter than `get_manager_user` because it also requires the
+	manager's own Employee record to be Active, which is what the DocShare
+	and the workflow condition already assume."""
+	if user != _approver_user(doc.employee):
+		frappe.throw(
+			_("Only {0}'s manager or HR can act on this attendance request.").format(doc.employee),
+			frappe.PermissionError,
+		)
+
+
+def _assert_may_act_on(doc):
+	"""Refuse anyone but this record's own approver (or HR) before a single
+	side effect runs (P2-U1 step 9).
+
+	`events._is_hr` is the one definition of "HR" in this app (Administrator, HR
+	Manager or System Manager); it is not repeated here. The doctype is indexed
+	directly: both entry points -- `get_approval_detail` and `act_on_approval` --
+	have already refused anything that is not one of `_APPROVAL_DOCTYPES`, so a
+	missing key here would be a programming error, not a caller's input.
+	"""
+	user = frappe.session.user
+	if _is_hr(user):
 		return
-	frappe.throw(
-		_("Only {0}'s approver or HR can act on this leave request.").format(doc.employee),
-		frappe.PermissionError,
-	)
+
+	_APPROVAL_KINDS[doc.doctype]["may_act"](doc, user)
 
 
 def _assert_still_open(doc):
 	"""One decision per record. A second decision -- the losing half of a
 	concurrent approve/approve or approve/reject -- is refused here, before
 	it can add a contradicting comment or a second ledger effect."""
-	if doc.doctype == "Timesheet":
-		if doc.workflow_state != "Pending Approval":
-			frappe.throw(_("This timesheet has already been decided. Reload to see the result."))
-		return
-
-	if doc.docstatus != 0 or doc.status != "Open":
-		frappe.throw(_("This leave request has already been decided. Reload to see the result."))
+	kind = _APPROVAL_KINDS[doc.doctype]
+	if not kind["is_open"](doc):
+		frappe.throw(_(kind["open_message"]))
 
 
 def _assert_expected_state(expected_modified, current_modified):
@@ -2226,7 +3660,7 @@ def _assert_expected_workflow_state(doc, expected_state):
 	harmless edit and a decision somebody else already made."""
 	if not expected_state:
 		return
-	current = doc.workflow_state if doc.doctype == "Timesheet" else doc.status
+	current = doc.get(_APPROVAL_KINDS[doc.doctype]["state_field"])
 	if expected_state != current:
 		frappe.throw(_("This has already been decided. Reload to see the result."))
 
@@ -2259,6 +3693,53 @@ def _act_on_leave_application(doc, action):
 	else:
 		doc.status = "Rejected"
 		doc.save()
+
+
+# Everything that is per-kind about a decision, in one doctype-keyed table
+# (P3-U6 step 0, P3-U9). It replaced five parallel maps over the same three
+# doctypes -- five places a fourth kind could be half-registered, which is the
+# `if timesheet else leave` failure mode in a different shape. One table, one
+# completeness test.
+#
+#   state_field    where the kind's lifecycle lives, which is what the
+#                  stale-decision token compares (P2-U7 step 3)
+#   detail         the evidence `get_approval_detail` returns
+#   may_act        who may open or decide this record, checked on the server
+#                  on every read of a detail and every action (P2-R10, R26)
+#   is_open        the one state in which the portal has a decision to offer,
+#                  and `open_message` the sentence for a caller who arrives
+#                  after it has moved. Attendance Request is Pending Manager
+#                  only: HR's second step is Desk's, so an HR Manager acting
+#                  on a Pending HR item *from the portal* is refused as
+#                  already decided (P3-KTD7).
+#   act            the lifecycle a decision actually runs
+_APPROVAL_KINDS = {
+	"Leave Application": {
+		"state_field": "status",
+		"detail": _leave_decision_detail,
+		"may_act": _may_act_on_leave,
+		"is_open": lambda doc: cint(doc.docstatus) == 0 and doc.status == "Open",
+		"open_message": "This leave request has already been decided. Reload to see the result.",
+		"act": _act_on_leave_application,
+	},
+	"Timesheet": {
+		"state_field": "workflow_state",
+		"detail": _timesheet_decision_detail,
+		"may_act": _may_act_on_timesheet,
+		"is_open": lambda doc: doc.workflow_state == "Pending Approval",
+		"open_message": "This timesheet has already been decided. Reload to see the result.",
+		"act": _act_through_workflow,
+	},
+	"Attendance Request": {
+		"state_field": "workflow_state",
+		"detail": _attendance_decision_detail,
+		"may_act": _may_act_on_attendance_request,
+		"is_open": lambda doc: cint(doc.docstatus) == 0
+		and doc.workflow_state == REQUEST_PENDING_MANAGER,
+		"open_message": "This attendance request has already been decided. Reload to see the result.",
+		"act": _act_through_workflow,
+	},
+}
 
 
 # Documents (R19, P2-R19)
@@ -2661,3 +4142,539 @@ def attach_to_my_request(name):
 	)
 	doc.insert(ignore_permissions=True)
 	return {**_attachment(doc), "created": True}
+
+
+# ---------------------------------------------------------------------------
+# Holidays (P3-U3 / P3-R10, P3-R11)
+#
+# HRMS v16 resolves a holiday list through Holiday List Assignment, per date:
+# the employee's own assignment wins, the company's is the fallback, and an
+# assignment that starts mid-year splits the year between two lists. So the
+# year is resolved as *ranges* -- the same shape
+# `hrms.utils.holiday_list.get_holiday_dates_between_range` uses -- and not
+# as one list name resolved once, which would silently show the wrong list
+# for half the year.
+#
+# The Holiday rows are read with `ignore_permissions`, deliberately: role
+# Employee has no read on Holiday List at all (P2-R26 strict permissions),
+# and the list names here are server-derived from the session's employee, so
+# there is nothing a caller can steer (P3-KTD1).
+# ---------------------------------------------------------------------------
+
+# A typo or a probe, answered before any read. Payroll-era dates and a
+# couple of years of planning ahead are the whole legitimate range.
+_HOLIDAY_MIN_YEAR = 2000
+_HOLIDAY_MAX_YEAR = 2100
+
+
+@frappe.whitelist()
+def get_my_holidays(year=None):
+	"""The holidays HRMS resolves for the logged-in employee in one calendar
+	year (P3-R10), with the next one and how many days away it is.
+
+	Weekly offs are excluded: a list with a weekly off configured carries one
+	Holiday row per Saturday and Sunday, and 104 of those would bury the
+	eight days this page exists to show. The footnote says so.
+
+	`known` is false when no list resolves for either the employee or their
+	company -- the same "cannot tell" contract `get_my_attendance` uses for
+	`working_days_known` (P3-R11). It is never an empty holiday year.
+	"""
+	employee = get_current_employee()
+	today = user_today()
+	current_year = getdate(today).year
+	year = cint(year) or current_year
+	if year < _HOLIDAY_MIN_YEAR or year > _HOLIDAY_MAX_YEAR:
+		frappe.throw(_("Pick a year between {0} and {1}.").format(_HOLIDAY_MIN_YEAR, _HOLIDAY_MAX_YEAR))
+
+	start, end = getdate(f"{year}-01-01"), getdate(f"{year}-12-31")
+	spans = _holiday_list_spans(employee, start, end)
+	years = _holiday_years(employee, current_year, year)
+
+	if not spans:
+		return {
+			"known": False,
+			"holiday_list": None,
+			"year": year,
+			"years": years,
+			"holidays": [],
+			"next": None,
+		}
+
+	holidays = {}
+	for span in spans:
+		rows = frappe.get_all(
+			"Holiday",
+			filters={
+				"parent": span["holiday_list"],
+				"parenttype": "Holiday List",
+				"holiday_date": ["between", [str(span["from_date"]), str(span["to_date"])]],
+				"weekly_off": 0,
+			},
+			fields=["holiday_date", "description", "is_half_day"],
+			ignore_permissions=True,
+		)
+		for row in rows:
+			date = getdate(row.holiday_date)
+			holidays[str(date)] = {
+				"date": str(date),
+				# HR pastes rich text into these often enough that the raw
+				# value reaches the screen as markup.
+				"description": (frappe.utils.strip_html(row.description or "").strip() or None),
+				"is_half_day": bool(row.is_half_day),
+				"weekday": date.strftime("%A"),
+			}
+
+	ordered = [holidays[key] for key in sorted(holidays)]
+	upcoming = next((row for row in ordered if row["date"] >= str(today)), None)
+
+	return {
+		"known": True,
+		# The list covering the reference day, which is what the footnote
+		# names. With a mid-year reassignment the year has two, and naming the
+		# one in force is more use than naming both.
+		"holiday_list": _holiday_list_at(spans, min(max(getdate(today), start), end)),
+		"year": year,
+		"years": years,
+		"holidays": ordered,
+		"next": (
+			{
+				"date": upcoming["date"],
+				"description": upcoming["description"],
+				"days_until": date_diff(upcoming["date"], today),
+			}
+			if upcoming
+			else None
+		),
+	}
+
+
+def _holiday_list_spans(employee, start, end):
+	"""The holiday lists in force across `start`..`end`, as
+	`{holiday_list, from_date, to_date}` spans in date order.
+
+	At most two spans, because it mirrors
+	`hrms.utils.holiday_list.get_holiday_dates_between_range` exactly: HRMS
+	resolves the list at each end of the range and splits at the later
+	assignment's start date, so a third assignment starting inside the range
+	is not seen -- by HRMS either, which is the resolver every other page
+	agrees with. `raise_exception=False` because "no list" is a state this
+	page renders (P3-R11), not an error.
+	"""
+	from_list = (
+		get_holiday_list_for_employee(employee, raise_exception=False, as_on=start, as_dict=True) or {}
+	)
+	to_list = get_holiday_list_for_employee(employee, raise_exception=False, as_on=end, as_dict=True) or {}
+
+	if (
+		from_list.get("holiday_list")
+		and to_list.get("holiday_list")
+		and from_list.get("holiday_list") != to_list.get("holiday_list")
+	):
+		split = getdate(to_list.get("from_date"))
+		return [
+			{"holiday_list": from_list["holiday_list"], "from_date": start, "to_date": add_days(split, -1)},
+			{"holiday_list": to_list["holiday_list"], "from_date": split, "to_date": end},
+		]
+
+	resolved = from_list.get("holiday_list") or to_list.get("holiday_list")
+	if resolved:
+		return [{"holiday_list": resolved, "from_date": start, "to_date": end}]
+	return []
+
+
+def _holiday_list_at(spans, on):
+	for span in spans:
+		if getdate(span["from_date"]) <= getdate(on) <= getdate(span["to_date"]):
+			return span["holiday_list"]
+	return spans[0]["holiday_list"]
+
+
+def _holiday_years(employee, current_year, requested):
+	"""The years the year chip can offer: every calendar year an assigned
+	holiday list covers, plus the current and requested ones so the chip
+	always contains what is on screen."""
+	company = frappe.db.get_value("Employee", employee, "company")
+	assigned = frappe.get_all(
+		"Holiday List Assignment",
+		filters={"assigned_to": ["in", [employee, company]], "docstatus": 1},
+		pluck="holiday_list",
+		ignore_permissions=True,
+	)
+	years = {current_year, requested}
+	if assigned:
+		for row in frappe.get_all(
+			"Holiday List",
+			filters={"name": ["in", list(set(assigned))]},
+			fields=["from_date", "to_date"],
+			ignore_permissions=True,
+		):
+			for candidate in range(getdate(row.from_date).year, getdate(row.to_date).year + 1):
+				if _HOLIDAY_MIN_YEAR <= candidate <= _HOLIDAY_MAX_YEAR:
+					years.add(candidate)
+	return sorted(years)
+
+
+# ---------------------------------------------------------------------------
+# Directory (P3-U8, P3-R22, P3-R23)
+#
+# Everyone's colleagues, as a server projection rather than as a list route.
+#
+# Role Employee cannot read another Employee at all: the User Permission each
+# fixture and every real site creates scopes the doctype to the signed-in
+# person's own record, and P2-R26 keeps strict user permissions on. So this
+# method reads with `ignore_permissions=True` and owns the scope itself --
+# Active only, this employee's own company only, and a fixed field allow-list
+# (P3-KTD1). The generic Employee list stays exactly as denied as it was;
+# `test_fixtures.TestStrictPermissionParity` pins that.
+#
+# The allow-list is the privacy boundary, not a convenience: `user_id` is a
+# login identifier and never leaves the server, so the work email comes from
+# `company_email` alone and the key is absent when HR has not filled it in.
+# No photo and no phone number, for the same reason -- neither is needed to
+# find a colleague's role and reach them (P3-R22).
+# ---------------------------------------------------------------------------
+
+# One bounded page, and the ceiling Load More may climb to (P3-R25).
+_DIRECTORY_PAGE = 50
+_DIRECTORY_MAX_PAGE = 200
+
+# A search is a name, a role or a department -- 60 characters is longer than
+# any of the three, and below two the needle matches most of the company, so
+# it is ignored rather than run.
+_DIRECTORY_QUERY_MAX = 60
+_DIRECTORY_QUERY_MIN = 2
+
+_DIRECTORY_FIELDS = (
+	"name",
+	"employee_name",
+	"designation",
+	"department",
+	"reports_to",
+	"company_email",
+)
+
+
+def _directory_manager_names(rows):
+	"""Every manager named by `rows`, in one query rather than one per row."""
+	ids = {row.reports_to for row in rows if row.reports_to}
+	if not ids:
+		return {}
+	return {
+		row.name: row.employee_name
+		for row in frappe.get_all(
+			"Employee",
+			filters={"name": ["in", list(ids)]},
+			fields=["name", "employee_name"],
+			ignore_permissions=True,
+		)
+	}
+
+
+def _directory_projection(row, manager_names):
+	person = {
+		"name": row.name,
+		"employee_name": row.employee_name,
+		# The monogram, from the server, so the directory's avatar and the
+		# Approvals queue's are the same two letters (P3-U9).
+		"initials": _initials(row.employee_name),
+		"designation": row.designation or None,
+		"department": row.department or None,
+		"manager": row.reports_to or None,
+		"manager_name": manager_names.get(row.reports_to) if row.reports_to else None,
+	}
+	# Absent, not empty: a key with "" in it reads on the page as an address
+	# that failed to load rather than as one HR has not published.
+	if row.company_email:
+		person["email"] = row.company_email
+	return person
+
+
+def _aggregate_count(row):
+	"""The count out of an aggregated `frappe.get_all` row.
+
+	Frappe v16 refuses a `"count(name) as total"` string in `fields` and
+	returns the aggregate under SQL's own name instead (`COUNT(*)`), so the
+	one value in the row is read for what it is rather than by a label this
+	app is free to choose.
+	"""
+	return cint(next(value for key, value in row.items() if key.upper().startswith("COUNT")))
+
+
+def _directory_departments(company):
+	"""The departments this company's active people are in, with a headcount
+	each -- the desktop chips. Counted over the whole company rather than over
+	the current page or search, so a chip does not move while it is being
+	used."""
+	rows = frappe.get_all(
+		"Employee",
+		filters={"status": "Active", "company": company},
+		fields=["department", {"COUNT": "name"}],
+		group_by="department",
+		order_by="department asc",
+		ignore_permissions=True,
+	)
+	return [
+		{"name": row.department, "count": _aggregate_count(row)} for row in rows if row.department
+	]
+
+
+@frappe.whitelist()
+def get_directory(query=None, department=None, start=0, limit=None):
+	"""A bounded page of active colleagues in this employee's own company,
+	by name, with the role, department, manager and work email each one has
+	published (P3-R22, P3-R23).
+
+	An employee whose record carries no company gets an empty page rather
+	than an error: "we cannot tell which company you are in" is a thing for
+	HR to fix, and the page says so in its own words.
+	"""
+	rate_limit_per_user("get_directory")
+	employee = get_current_employee()
+	limit = min(max(cint(limit) or _DIRECTORY_PAGE, 1), _DIRECTORY_MAX_PAGE)
+	start = max(cint(start), 0)
+
+	company = frappe.db.get_value("Employee", employee, "company")
+	if not company:
+		return {"people": [], "total": 0, "limit": limit, "start": start, "departments": []}
+
+	filters = {"status": "Active", "company": company}
+	if department:
+		filters["department"] = department
+
+	needle = (query or "").strip()[:_DIRECTORY_QUERY_MAX]
+	or_filters = None
+	if len(needle) >= _DIRECTORY_QUERY_MIN:
+		or_filters = [
+			["employee_name", "like", f"%{needle}%"],
+			["designation", "like", f"%{needle}%"],
+			["department", "like", f"%{needle}%"],
+		]
+
+	scope = {"filters": filters, "or_filters": or_filters, "ignore_permissions": True}
+	rows = frappe.get_all(
+		"Employee",
+		fields=list(_DIRECTORY_FIELDS),
+		order_by="employee_name asc",
+		limit_start=start,
+		limit_page_length=limit,
+		**scope,
+	)
+	# `frappe.db.count` takes no or_filters, so the total comes from the same
+	# scope aggregated -- one row, whether or not a search is running.
+	total = _aggregate_count(frappe.get_all("Employee", fields=[{"COUNT": "*"}], **scope)[0])
+
+	manager_names = _directory_manager_names(rows)
+	return {
+		"people": [_directory_projection(row, manager_names) for row in rows],
+		"total": total,
+		"limit": limit,
+		"start": start,
+		"departments": _directory_departments(company),
+	}
+
+
+# ---------------------------------------------------------------------------
+# Team leave calendar (P3-U7 / P3-R20, P3-R21, P3-R23)
+#
+# One week, one row per active direct report, and nothing else. Three rules
+# hold this section together:
+#
+#   * The report set is derived on the server from `Employee.reports_to`
+#     plus `status == "Active"` -- the same filter `_count_direct_reports`
+#     gates the nav item on (P3-KTD11) -- and the caller cannot steer it.
+#     There is no `employee` parameter, so there is no team but your own.
+#   * Leave rows are read as a *projection* with an explicit field list
+#     (P3-KTD1, P3-R23): role Employee has no read on another person's
+#     Leave Application at all, and the nested-set User Permission that
+#     would grant a manager one is not something this endpoint depends on.
+#   * `description` is never selected and never returned (P3-R21). A leave
+#     reason is between the employee and their approver; "who is out on
+#     Thursday" is a scheduling fact and is all this page is for.
+#
+# Holiday shading is resolved **per report**, not once for the manager. The
+# plan named the manager's own holiday dates, but HRMS resolves a holiday
+# list per employee (Holiday List Assignment, per date -- see the Holidays
+# section above), so on a company with more than one list the manager's
+# calendar is the wrong calendar for half the team. Each report is already
+# being visited, and the Holiday rows are cached per resolved list, so the
+# cost is one query per *distinct* list rather than one per person. The
+# manager's own dates still shade the column headers, because a column is
+# one date across everybody and has to be labelled from somebody's list.
+# ---------------------------------------------------------------------------
+
+# One screen, one week. A manager with more direct reports than this has an
+# org chart problem rather than a paging problem -- `total_reports` stays
+# exact so the page can say how many rows are not drawn (P3-R25).
+_TEAM_REPORT_LIMIT = 50
+# Seven days times the report cap, with room to spare for the long leaves
+# that overlap the window from outside it. A bound, not a page.
+_TEAM_LEAVE_LIMIT = 500
+
+
+@frappe.whitelist()
+def get_my_team_week(week_start=None):
+	"""The week's approved and waiting leave for the logged-in manager's
+	active direct reports (P3-R20, P3-R21, P3-R23).
+
+	Refused with a permission error when the caller has nobody reporting to
+	them: the page is gated on `has_reports` in the bootstrap (P3-KTD11) and
+	the server holds the same line, so a leave approver who manages nobody
+	gets a refusal rather than an empty grid that looks like a broken page.
+
+	The week is Monday..Sunday through `helixhr.utils.get_week_bounds`, the
+	same normalisation Timesheet uses, so "this week" means one thing across
+	the portal whatever the site's week-start setting says.
+	"""
+	# P3-R25: bounded like the directory, and for the same reason -- this is
+	# the one portal read that fans out across other people's rows, so a
+	# script walking weeks is worth a ceiling even though any single
+	# week's payload is small.
+	rate_limit_per_user("get_my_team_week")
+	manager = get_current_employee()
+	today = user_today()
+	monday, sunday = get_week_bounds(week_start or today)
+
+	total_reports = _count_direct_reports(manager)
+	if not total_reports:
+		frappe.throw(
+			_("Only a manager with people reporting to them has a team week to show."),
+			frappe.PermissionError,
+		)
+
+	reports = frappe.get_all(
+		"Employee",
+		filters={"reports_to": manager, "status": "Active"},
+		fields=["name", "employee_name"],
+		order_by="employee_name asc",
+		limit=_TEAM_REPORT_LIMIT,
+		ignore_permissions=True,
+	)
+
+	holiday_cache = {}
+	column_holidays = _team_holiday_dates(manager, monday, sunday, holiday_cache)
+	days = [
+		{
+			"date": str(date),
+			"weekday": date.strftime("%A"),
+			"is_weekend": date.weekday() >= 5,
+			"is_holiday": str(date) in column_holidays,
+		}
+		for date in (add_days(monday, offset) for offset in range(7))
+	]
+
+	by_employee = {}
+	waiting_count = 0
+	if reports:
+		# Explicitly *not* `description`, and explicitly not `*` (P3-R21).
+		# `docstatus` and `status` are read to decide `waiting` and are
+		# translated into that one flag rather than passed through -- the
+		# screen has no use for either word (design system copy rules).
+		for row in frappe.get_all(
+			"Leave Application",
+			filters={
+				"employee": ["in", [report.name for report in reports]],
+				"docstatus": ["<", 2],
+				"status": ["in", ["Open", "Approved"]],
+				"from_date": ["<=", str(sunday)],
+				"to_date": [">=", str(monday)],
+			},
+			fields=[
+				"name",
+				"employee",
+				"leave_type",
+				"from_date",
+				"to_date",
+				"half_day",
+				"half_day_date",
+				"status",
+				"docstatus",
+			],
+			order_by="from_date asc, name asc",
+			limit=_TEAM_LEAVE_LIMIT,
+			ignore_permissions=True,
+		):
+			waiting = not (cint(row.docstatus) == 1 and row.status == "Approved")
+			waiting_count += 1 if waiting else 0
+			by_employee.setdefault(row.employee, []).append(
+				{
+					"name": row.name,
+					"leave_type": row.leave_type,
+					# The true range, because the phone list says it in
+					# words and a bar that lies about its dates on the week
+					# it starts in is worse than no bar.
+					"from_date": str(getdate(row.from_date)),
+					"to_date": str(getdate(row.to_date)),
+					# ...and the range clipped to this week, which is the
+					# bar's geometry. Clipping on the server keeps the rule
+					# in one place and makes "a two-week leave shows in both
+					# weeks" assertable without a browser.
+					"start": str(max(getdate(row.from_date), monday)),
+					"end": str(min(getdate(row.to_date), sunday)),
+					"half_day": bool(row.half_day),
+					"half_day_date": str(getdate(row.half_day_date)) if row.half_day_date else None,
+					"waiting": waiting,
+				}
+			)
+
+	rows = [
+		{
+			"employee": report.name,
+			"employee_name": report.employee_name,
+			"initials": _initials(report.employee_name),
+			"leaves": by_employee.get(report.name, []),
+			# This person's own non-working days, which are not necessarily
+			# the column's (see the section note above).
+			"holidays": sorted(_team_holiday_dates(report.name, monday, sunday, holiday_cache)),
+		}
+		for report in reports
+	]
+
+	# "Who is out today" is about today, and the rows in hand only cover the
+	# week on screen -- so paging to another week says so rather than
+	# claiming an empty office (the page reads `is_current_week`).
+	is_current_week = str(monday) <= today <= str(sunday)
+	out_today = (
+		[
+			{
+				"employee": row["employee"],
+				"employee_name": row["employee_name"],
+				"initials": row["initials"],
+				"leave_type": leave["leave_type"],
+				"half_day": leave["half_day"] and leave["half_day_date"] == today,
+				"waiting": leave["waiting"],
+			}
+			for row in rows
+			for leave in row["leaves"]
+			if leave["from_date"] <= today <= leave["to_date"]
+		]
+		if is_current_week
+		else []
+	)
+
+	return {
+		"week_start": str(monday),
+		"week_end": str(sunday),
+		"today": today,
+		"is_current_week": is_current_week,
+		"days": days,
+		"reports": rows,
+		"out_today": out_today,
+		"total_reports": total_reports,
+		"waiting_count": waiting_count,
+	}
+
+
+def _team_holiday_dates(employee, start, end, cache):
+	"""The holiday dates HRMS resolves for `employee` across `start`..`end`,
+	as a set of `YYYY-MM-DD` strings.
+
+	The one resolver every screen shares (`_holiday_kinds`, P3-U3, P3-U9) with
+	the weekly offs dropped, as on the Holidays page: Saturday and Sunday are
+	already dimmed as weekends, and a list that carries one Holiday row per
+	weekend day would otherwise report every weekend as a named holiday. `cache`
+	is the per-span one, so a team on one holiday list costs one Holiday query
+	however many people are in it.
+	"""
+	_, kinds = _holiday_kinds(employee, start, end, cache)
+	return {date for date, kind in (kinds or {}).items() if kind != "weekly_off"}

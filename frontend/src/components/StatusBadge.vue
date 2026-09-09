@@ -1,5 +1,6 @@
 <script setup>
 import { computed } from 'vue'
+import { KINDS, resolveStatus } from '@/lib/statusBadge'
 
 // P2-U3 / P2-R5 / P2-R9. One place that turns a Frappe status value into the
 // word an employee reads.
@@ -18,9 +19,12 @@ import { computed } from 'vue'
 // `blue`/`green`/`orange` scales rather than to the measured status pairs in
 // docs/design-system.md, each of which is a specific ink on a specific tinted
 // surface (5.07-5.28:1).
+//
+// The mapping itself lives in `lib/statusBadge.js` (P3-U1 step 3) so it can
+// be unit-tested; this file only renders its answer.
 const props = defineProps({
-  /** The raw Frappe value: Leave Application status, Timesheet
-   * workflow_state, or HR Request status. */
+  /** The raw Frappe value: Leave Application status, Timesheet or
+   * Attendance Request workflow_state, or HR Request status. */
   status: { type: String, default: '' },
   /** Which document it came from. The same word means different things:
    * an HR Request "Open" is untouched, a Leave Application "Open" is
@@ -28,57 +32,20 @@ const props = defineProps({
   kind: {
     type: String,
     default: 'leave',
-    validator: (value) => ['leave', 'timesheet', 'request'].includes(value),
+    validator: (value) => KINDS.includes(value),
   },
   /** Who it is waiting on, when the portal knows. Turns "Waiting" into
    * "Waiting for Priya" -- the single most useful word on the row. */
   approver: { type: String, default: '' },
+  /** The document's docstatus, when the state alone cannot say it was
+   * cancelled (P3-KTD6: a cancelled attendance request keeps its Approved
+   * state). 2 renders Cancelled whatever `status` says. */
+  docstatus: { type: Number, default: null },
 })
 
-// Tone is a *pair* (ink, surface), never a hue applied to text alone. Every
-// pair is one of the four measured status pairs in docs/design-system.md.
-const TONE = {
-  waiting: 'bg-surface-amber-1 text-ink-amber-3',
-  done: 'bg-surface-green-2 text-ink-green-3',
-  sentBack: 'bg-surface-red-2 text-ink-red-4',
-  resting: 'bg-surface-gray-2 text-ink-gray-7',
-}
-
-const MAP = {
-  leave: {
-    Open: { label: 'Waiting', tone: 'waiting', waiting: true },
-    Approved: { label: 'Approved', tone: 'done' },
-    Rejected: { label: 'Sent back', tone: 'sentBack' },
-    Cancelled: { label: 'Withdrawn', tone: 'resting' },
-  },
-  timesheet: {
-    Draft: { label: 'Draft', tone: 'resting' },
-    'Pending Approval': { label: 'Waiting', tone: 'waiting', waiting: true },
-    Approved: { label: 'Approved', tone: 'done' },
-    Rejected: { label: 'Sent back', tone: 'sentBack' },
-    Cancelled: { label: 'Cancelled', tone: 'resting' },
-  },
-  request: {
-    Open: { label: 'Open', tone: 'resting' },
-    'In Progress': { label: 'In progress', tone: 'waiting' },
-    Done: { label: 'Done', tone: 'done' },
-    Rejected: { label: 'Sent back', tone: 'sentBack' },
-  },
-}
-
-const entry = computed(() => MAP[props.kind]?.[props.status] || null)
-
-const label = computed(() => {
-  const mapped = entry.value
-  // An unmapped status is shown as itself rather than swallowed: a workflow
-  // someone adds in Desk should look unfamiliar on screen, not invisible.
-  if (!mapped) return props.status || '—'
-  if (mapped.waiting && props.approver) return `Waiting for ${props.approver}`
-  if (mapped.waiting && props.kind === 'timesheet') return 'Waiting for manager'
-  return mapped.label
-})
-
-const toneClass = computed(() => TONE[entry.value?.tone] || TONE.resting)
+const resolved = computed(() => resolveStatus(props))
+const label = computed(() => resolved.value.label)
+const toneClass = computed(() => resolved.value.toneClass)
 </script>
 
 <template>

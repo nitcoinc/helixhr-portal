@@ -29,6 +29,9 @@ const state = reactive({
   status: 'idle',
   employee: null,
   canApprove: false,
+  /** P3-KTD11: gates the Team nav item. Direct reports, not approval
+   * capability -- a leave approver with no reports has no team to show. */
+  hasReports: false,
   unread: 0,
   /** The authoritative calendar (P2-R5). Mirrored into lib/dates.js. */
   timeZone: null,
@@ -82,6 +85,7 @@ function apply(boot) {
   const employee = boot?.employee || null
   state.employee = employee
   state.canApprove = !!boot?.can_approve
+  state.hasReports = !!boot?.has_reports
   state.unread = boot?.unread_notifications ?? 0
   state.timeZone = boot?.time_zone || null
   state.systemTimeZone = boot?.system_time_zone || null

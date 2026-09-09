@@ -33,12 +33,17 @@ const ROUTE_FOR_DOCTYPE = {
   // now opens the week it is about rather than the list containing it.
   // Past weeks stays the fallback for a record that no longer resolves.
   Timesheet: { detail: 'TimesheetWeek', list: 'TimesheetHistory' },
+  // P3-U6 / P3-R17. Every state change writes one of these, so the row has
+  // to open the request it is about -- the sheet over the Attendance page,
+  // which is where the days it names live.
+  'Attendance Request': { detail: 'AttendanceRequestDetail', list: 'Attendance' },
 }
 
 const ICON_FOR_DOCTYPE = {
   'Leave Application': 'leave',
   Timesheet: 'timesheet',
   'HR Request': 'requests',
+  'Attendance Request': 'attendance',
 }
 
 const timesheetWeek = createResource({ url: 'helixhr.api.get_timesheet_week_start' })

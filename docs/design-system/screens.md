@@ -1,9 +1,22 @@
 # Screen layout notes
 
-**Source of truth: the approved redesign canvas**, exported as PNGs to `.impeccable/review/redesign/`
-(390×844 phone, 1440×900 desktop, 2× DPR). This file is that canvas written down, so the target
-survives without the link; the artboards themselves settle anything this text leaves ambiguous. The
-palette, type roles, copy rules and the shared patterns below live in `../design-system.md`.
+**Source of truth: the approved design canvases.** Two of them now:
+
+| Canvas | Covers | Link |
+|---|---|---|
+| HelixHR Portal Redesign | Dashboard, Profile, Leave, Attendance, Timesheet, Requests, Documents, Approvals, Notifications | the canvas link recorded in `docs/plans/2026-09-04-2319-feat-portal-experience-hardening-plan.md` |
+| HelixHR Phase 3 Screens | Payslips, Holidays, check-in, Fix a day, Approvals' attendance kind, Team, Directory | https://claude.ai/code/artifact/b358706d-0ba2-413f-b677-1a0a341017ea |
+
+**The link is the target of record.** `.impeccable/review/` is gitignored, so the PNG exports under
+it — `redesign/`, and the `phase3/` export P3-U1 was asked to make — are a local convenience that
+no clone and no CI run has. Where this text and a local export disagree, the canvas wins; where
+this text and the canvas disagree, the *recorded deviation* below is the decision, and the canvas
+is the thing that was traded away. (At the time of writing, `.impeccable/review/phase3/` does not
+exist in this working tree, which is exactly why the notes below quote what the artboards show
+rather than pointing at a file.)
+
+390×844 phone, 1440×900 desktop, 2× DPR in both canvases. The palette, type roles, copy rules and
+the shared patterns below live in `../design-system.md`.
 
 Each note names the unit that builds it. A screen not yet built to its artboard says so — do not
 read the difference as the canvas having changed.
@@ -397,6 +410,251 @@ in the same interaction, and opens the record — the list is *not* reloaded to 
   P2-U6 added `helixhr.api.get_timesheet_week_start` — one indexed, session-scoped read, issued
   only when a timesheet row is actually opened. Every notification kind now opens its exact record.
   Past weeks remains the fallback for a record that no longer resolves.
+
+## Payslips · phone, detail, desktop (P3-U2 — **built**)
+
+One component serves `/payslips` and `/payslips/:name`. **Field block**: `LATEST PAYSLIP`, the
+newest slip's net pay as the display figure in its own currency with no decimals, the period
+beneath it, and a signal-yellow **Download PDF** anchor — the page's only use of the accent, and it
+is inside the field, as the rule requires. Below, one `.label` run per year of resting cards, each
+led by a **date tile**, carrying period, `Gross`, `Deductions` and the net figure in `.tabular`,
+with a trailing chevron. Desktop opens the selected slip in a 24rem aside at the same URL; a phone
+opens the same `PayslipBreakdown` in a bottom sheet. The breakdown is days paid, unpaid leave,
+earnings rows to `Gross pay`, deduction rows to `Total deductions`, `Net pay` on a rule, then the
+PDF link — or, for a withheld slip, the on-hold sentence instead.
+
+Amounts are always formatted with the row's **own** `currency` and are never summed across rows;
+`lib/money.js` returns an empty string rather than an unlabelled number when a currency is missing.
+The PDF is a real GET link the browser follows, never a fetched blob, which is what lets a phone
+save or open the file itself.
+
+*Deviations from the artboard, recorded:*
+
+- **The date tile is inverted here**: year over month (`2026` / `AUG`), where every other tile in
+  the portal is month over day. It follows the artboard, and it is right for a row that is about a
+  *month* rather than a day — but it does mean `.date-tile` carries two semantics across screens,
+  which is worth knowing before a third one appears.
+- **Years are chips plus count paging, not the artboard's "Show 2025" link.** The list is bounded
+  at 20 with a "Show N more" carrying the true remainder (the Leave and Past-weeks rule), and the
+  year chips only render when the employee actually has slips in more than one year.
+- The breakdown says **`Unpaid leave`** where the artboard says "LEAVE WITHOUT PAY", and
+  `Gross pay` / `Total deductions` where it says "Gross" / "Total deductions". "Leave without pay"
+  is HRMS's field label, not a sentence anybody says.
+- Deductions print with a real minus sign (`−1,234`), which the artboard does not show. A column of
+  positive numbers under a heading called Deductions relies on the heading alone to say they come
+  off.
+- `Withheld` and `Revised` are **mutually exclusive** pills in the breakdown; the artboard draws
+  neither. A slip is either on hold or a re-run, and the list row carries the fuller
+  "Withheld, ask HR" because there is room for it there.
+
+## Holidays · one column at every width (P3-U3 — **built**)
+
+**Field block**: `NEXT HOLIDAY`, its name, its date, and the countdown in a signal-yellow pill —
+`Today`, `Tomorrow` or `in N days`. Below, `COMING UP` and `EARLIER THIS YEAR` runs of resting
+cards, each led by a date tile, with the holiday's name, the weekday and the date, and a `Half day`
+pill where HRMS says so. Year chips when there is more than one year to show. A footnote naming the
+list the days came from and stating that weekly days off are not listed.
+
+The whole page is **one** async region, so the field block, the chips, both groups and the footnote
+arrive together — the same rule the Dashboard follows, for the same CLS reason. All date arithmetic
+is the server's: `known: false` (no Holiday List Assignment for the employee or their company)
+renders the Attendance page's "we can't tell yet, ask HR" wording as the empty state rather than an
+empty year.
+
+*Deviations from the artboard, recorded:*
+
+- **No "falls on a weekly off" row.** The artboard draws Diwali as "Sunday · falls on a weekly
+  off". `get_my_holidays` excludes weekly-off rows outright (R10), so such a row cannot reach the
+  page. The information the artboard was carrying — that some holidays land on days you were off
+  anyway — is not lost, it is just not a row: the footnote says weekly offs are not listed.
+- The footnote does **not name the days** ("Weekly offs (Sat, Sun) are not listed"). The payload
+  carries the holiday rows, not the weekly-off pattern, so naming Saturday and Sunday would be a
+  guess that is wrong for anyone on a different week.
+- The countdown is a signal pill reading `in 23 days`, not the artboard's large yellow `23` with
+  `days` beside it. A display figure next to the holiday's name would compete with it; the pill is
+  one reading.
+- There is no separate desktop layout. The page is a single `max-w-xl` column at every width —
+  there is one list of at most a couple of dozen dates, and a second column would have nothing in
+  it.
+
+## Attendance · Today strip and the check-in sheet (P3-U4 — **built**)
+
+The field block gains a second and third band above the existing month counts. **Today**: the
+next punch as a signal-yellow `Check in` / `Check out` button — the type comes from the server,
+never derived in the browser — plus a line reading `Checked in at 09:14 · location captured` (with
+a pin glyph) or `No punches yet in this shift.` When check-in is not available the button is absent
+and the server's own `reason` sentence is printed verbatim, so "not set up for you" and "opens at
+09:00" are one code path. **Exceptions** keeps its P2-U3 shape and now skips days an approved
+request marked.
+
+Tapping the button opens the **check-in sheet**, and opening the sheet *is* the tap that asks the
+browser for a location — nothing asks on page load. Four states: `locating` and `confirm` render as
+one region (the same button, disabled while the fix is taken, so the sheet cannot reflow under the
+thumb); `blocked` gives a per-cause title and instruction plus `Try again` where trying again can
+help and a `Fix a day` link always; `range` shows HRMS's own distance sentence verbatim and never
+the allow-location advice, because location worked perfectly and the employee is simply somewhere
+else. The day sheet lists punches with a pin where the punch carried a location, and a day with
+punches but no Attendance row reads **"Checked in, attendance not marked yet"** rather than "No
+record".
+
+*Deviations from the artboard, recorded:*
+
+- **The confirmation sheet does not name a place.** The artboard reads "Accurate to about 20 m ·
+  Nitco office, Hyderabad". Turning coordinates into a place name needs a reverse-geocoding
+  service — a new dependency, a request to a third party carrying an employee's location, and a
+  new residency question. The sheet shows the accuracy and nothing else. Accuracy itself is shown
+  but not stored: Employee Checkin has no field for it.
+- **The notice text is not the artboard's.** The artboard says the location "is not shown to your
+  team"; the shipped sentence says "so HR and your manager can see where you checked in from". The
+  artboard was simply wrong about who can read it — Employee is a nested set, so every manager up
+  the chain can read a report's punches in Desk. A disclosure that describes an access model the
+  site does not have is worse than no disclosure, so the accurate sentence won. It is the only
+  disclosure kept (no consent record), which is why it is quoted in full in `docs/deployment.md`.
+- The sheet title is `Check in` / `Check out`, not "Check in now?" with a `Tuesday 9 Sep · 09:14`
+  subtitle. The server stamps the time, not the screen, and printing a clock reading the punch will
+  not use is a small lie; the strip above already says what day it is.
+- The secondary button is **Cancel**, not "Not now", and the blocked state's primary is **Try
+  again** rather than the artboard's "How to allow location". The how-to is two lines of text in
+  the sheet; a button that only reveals instructions is a click in front of a sentence.
+- **Five blocked causes, not one.** Denied, unavailable, timeout, unsupported and insecure each get
+  their own title and body, and the last two do not offer Try again because retrying cannot help.
+  The artboard draws the denied case only.
+
+## Fix a day · sheet and stepper (P3-U6 — **built**)
+
+One `Dialog`, two modes on one surface: the **ask** (no `name`) and **one request** (`name` set).
+The ask is `WHAT HAPPENED` reason pills, `From` / `To` dates, a `Half day` checkbox, a
+server-derived preview block, the approver line `Goes to {manager} first, then HR.`, an optional
+explanation, and a sticky `Send to {first name}`. The preview block is the whole point of the sheet
+being server-backed: it names how many days would be marked, how many are skipped as a holiday, a
+weekly off or approved leave, and — when any day already carries real attendance — says so and
+disables Send with a pointer to HR (P3-KTD14). Send is two calls on purpose, create then send, so a
+failed send leaves a draft the employee can retry rather than losing what they typed.
+
+**`StepStrip`** is the request's own progress: four pills, `Sent · {manager} · HR · Counted`, with
+done in green, the current step in amber, and a sent-back request tinted red at the step that sent
+it back. It appears on the request view and on each row of the Attendance page's `Your requests`
+column.
+
+*Deviations from the artboard, recorded:*
+
+- **The reason choices are pills carrying HRMS's own words, not the artboard's explained tiles.**
+  The artboard draws "Worked from home · Counts as a normal working day" and "On duty elsewhere ·
+  Client site, travel or offsite work" as two icon tiles; the sheet renders the reason strings the
+  server sends (`Work From Home`, `On Duty`). This is the one place in the portal where an employee
+  reads a Frappe field option verbatim, and it is a gap rather than a decision — the two explaining
+  sentences exist one level up, on the day sheet's `Fix a day` and `Report a problem` buttons.
+  Closing it is a label map in the sheet; the value sent to the server must stay HRMS's.
+- **A preview line the artboard does not have.** Nothing on the canvas tells the employee what
+  sending would do. It is the feature's main safety property, so it is on the surface that sends.
+- Half day is a **checkbox**, not the artboard's toggle switch. The portal has no switch component
+  and adding one for a single field would be a seventh pattern.
+- The title is `Fix {date}` without the artboard's "There is no attendance record for this day"
+  subtitle; the day sheet the employee just came from already said it, and the preview says it
+  again in numbers.
+- The explanation label reads `Anything your manager should know (optional)`, not "TELL YOUR
+  MANAGER". It is genuinely optional, and a label that does not say so reads as a required field.
+- The primary button is `Send to {first name}`, not "Send request". The name is the useful half.
+- **`StepStrip` cannot show an HR send-back at the HR step.** A rejected request always rests at
+  step 2 (the manager's), because `workflow_state` stores `Rejected` from either pending state and
+  does not record which one it left. HR's send-back is still identifiable from the reason quoted
+  beside the strip. The upgrade path is one more field on the request projection, and it is noted
+  in the component.
+
+## Approvals · the attendance kind (P3-U6 — **built**)
+
+A third kind in the same mixed queue, oldest first, with the same row shape: initials tile, the
+employee's name, `{reason} · {dates}` as the summary line, `N days` as the amount. The evidence is
+the explanation quoted, then one line per requested day saying **what the calendar already shows**
+for it (`nothing recorded`, `holiday`, `weekly off`, or the status word), and a warning where the
+employee has no holiday list so working days cannot be told. The primary button reads **Send to
+HR**; `Send back` still requires its reason on the same surface as the evidence.
+
+The `if timesheet else leave` branches that used to run this page and its server helpers were
+replaced by an explicit per-kind map first, with a named fallback, so an unknown kind renders as
+itself instead of silently inheriting timesheet copy. Pending HR requests are **not** in the queue
+at all, and an HR Manager who is also a line manager is refused when they try to act on one from
+the portal — the two steps must not collapse (P3-KTD7).
+
+*Deviations from the artboard, recorded:*
+
+- **The primary button says `Send to HR`, where the artboard says `Approve`.** The manager's
+  decision is not final and the label must not claim it is. This is the one deliberate override of
+  the comp on this screen, and it is the plan's (P3-KTD7).
+- **The artboard's explanatory sentence — "After you approve, HR confirms before it counts as a
+  working day." — is not on the page.** The button label carries that meaning now, and a sentence
+  restating a button immediately above it is the kind of line people stop reading. Worth revisiting
+  if managers ask what happens next.
+- The day evidence is a `<dl>` of one line per day, not the artboard's single
+  `That day today · No record · not on leave` chip. A request can span up to a month, and the days
+  are not all alike — one holiday inside a range is the thing a manager needs to see.
+
+## Team · desktop grid, phone day list (P3-U7 — **built**)
+
+**Field block**: `OUT TODAY`, then either a headline naming who is out (`Priya and Sam`,
+`Priya, Sam and 2 others`) with one line each, or `Everyone on your team is in today.` — and, when
+a decision is waiting, a signal-yellow link into Approvals reading `N requests still waiting —
+decide`. Week navigation sits **outside** the async region so the arrows keep working while a week
+loads or fails.
+
+Two layouts from one payload. **Desktop**: a `.surface-card` scrolling horizontally in its own
+container, a Mon–Sun header, one row per active report with an initials avatar, and leave drawn as
+bars clipped to the week — amber for waiting, green for approved, labelled with the leave type and
+`half day` where it applies. **Phone**: the same week read downwards, one card per day with a date
+tile, a `Weekend` or `Holiday` pill where it applies, and either the people out that day or
+`Nobody booked off.` Footnote: the legend, then the scope sentence and `Reasons for leave aren't
+shown here.`
+
+The payload never carries a leave `description`, and `status`/`docstatus` are collapsed into one
+`waiting` flag before they leave the server (P3-R21).
+
+*Deviations from the artboard, recorded:*
+
+- **Every day of the week gets a row on the phone, not only the days somebody is out.** The
+  artboard shows three rows and then "Nobody else is out this week." A week with two people out
+  reads as a week when the empty days are visible; a list of only the busy days is a list you have
+  to reconstruct the week from.
+- **Holiday dimming is per person on desktop and per week on the phone.** R20 asked for "the
+  manager's holidays"; the desktop grid dims each row from *that report's own* holiday list, which
+  is the only correct answer for a team split across two lists, while the phone's `Holiday` pill
+  and the desktop column headers use the manager's. Two rules on one screen, recorded because it is
+  a difference somebody will notice before they find the reason.
+- There is no `6 people` count beside the page title. The count that matters is who is *out*, and
+  the field block leads with it; the footnote carries the "N more people are not shown" remainder
+  when the report list is paged.
+- The waiting badge reads `waiting` or `waiting on you` on a bar's label rather than the artboard's
+  `Waiting for you` pill in the row. The bar already carries the amber tint; a pill the width of
+  the row would compete with the bar it sits on.
+
+## Directory · phone sheet, desktop cards (P3-U8 — **built**)
+
+Search first: a labelled field (`Search`, placeholder `Name, role or department`) that queries the
+**server**, debounced, floored at two characters. Department chips on desktop only, `Everyone`
+plus one per department with its count. Rows grouped per department under a `.label`, each a
+resting card with a green initials monogram, the name, and the role — `Role not published` where
+HRMS has none. Desktop adds department, `Reports to {manager}` and a `mailto:` link inline; a phone
+row opens a bottom sheet with the same facts and an `Email {first name}` action, or
+`No work email published. Ask HR if you need to reach them.`
+
+Work email comes from `company_email` only and the key is absent when it is empty, so a login
+address cannot reach the directory. There are no photos and no phone numbers, by scope.
+
+*Deviations from the artboard, recorded:*
+
+- **No "Today · On leave · back Fri" row in the person sheet.** The artboard draws one. Leave is
+  not in the directory's field allow-list (R22) and putting it there would publish everybody's
+  absence to everybody — the manager's view of that is what Team is for.
+- **The search field carries a visible label**, where the artboard shows a magnifier and a
+  placeholder. Same rule, and the same override, as Documents: "visible labels always" outranks the
+  comp.
+- **A person has no URL.** The open person is component state, so a refresh closes the sheet. This
+  is deliberate rather than an omission: an employee id in a shareable link is a leak with no
+  upside. The consequence is that "Reports to" is a link only when the manager is on the fetched
+  page, and on desktop following a manager rewrites the search box instead of navigating.
+- **This is the one screen with no field block.** Every other new screen has its one anchored
+  region; a lookup tool has nothing to anchor — the search field is the thing you came for, and a
+  deep green band above it would push it down the page. Recorded as an exception to "one anchored
+  region per page" rather than a licence for the next screen.
 
 ## Not linked / login states (Phase 1 U3, revised in P2-U2)
 

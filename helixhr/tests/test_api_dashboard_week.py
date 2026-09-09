@@ -267,6 +267,17 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 
 		self.assertTrue(boot["can_approve"])
 
+	def test_has_reports_follows_active_direct_reports(self):
+		"""P3-U1 scenario 1 / P3-KTD11: a manager with an active report has
+		`has_reports`; their report, who manages nobody, does not."""
+		from helixhr.api import get_portal_bootstrap
+
+		frappe.set_user(MANAGER_USER)
+		self.assertTrue(get_portal_bootstrap()["has_reports"])
+
+		frappe.set_user(EMPLOYEE_USER)
+		self.assertFalse(get_portal_bootstrap()["has_reports"])
+
 	def test_an_older_rejection_outranks_a_newer_one_and_reports_its_age(self):
 		"""The direction's named risk: a stale item must not sort under a
 		fresh one just because the fresh one belongs to this week."""
@@ -415,7 +426,10 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 		doc.flags.ignore_mandatory = True
 		doc.insert(ignore_permissions=True)
 		frappe.db.set_value("Timesheet", doc.name, "workflow_state", "Rejected")
-		frappe.get_doc(
+		# Owned by the *manager*, because that is who sends a week back and
+		# the reason is read as theirs: an employee's own comment on their
+		# sent-back week is not the reason it came back (P3-KTD9).
+		comment_doc = frappe.get_doc(
 			{
 				"doctype": "Comment",
 				"comment_type": "Comment",
@@ -424,4 +438,5 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 				"content": comment,
 			}
 		).insert(ignore_permissions=True)
+		frappe.db.set_value("Comment", comment_doc.name, "owner", MANAGER_USER, update_modified=False)
 		return doc.name

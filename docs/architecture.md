@@ -134,8 +134,17 @@ so instead `patches/v1_0/apply_permission_deltas.py` calls
 rows and then applies only this app's deltas on top: the Employee permlevel 1/2
 rules, `if_owner` delete on Leave Application (KTD17), `submit` on Timesheet for
 role Employee, and the removal of the Employee role's unused `share` on Leave
-Application. `preflight.check_custom_docperm_coverage` is the standing guard —
-the patch runs once, so anything that trims these rules later shows up there.
+Application. P3-KTD13 added two more on the same mechanism: role Employee loses
+`create`, `write` and `delete` on **Employee Checkin** (`read` stays) and loses
+`share` on **Attendance Request**. Because Frappe skips a patch whose exact
+line is already in the Patch Log, `patches.txt` carries a second, dated line
+for the same module so a site that migrated before phase 3 applies the new
+deltas — the module is idempotent by construction, every step being "make this
+row look like this". `preflight.check_custom_docperm_coverage` is the standing
+guard — it now walks the patch's own `DELTAS` keys rather than a hard-coded
+list, and FAILs when a doctype named there has no Custom DocPerm row at all,
+which is what a patch that never ran looks like. The patch runs once, so
+anything that trims these rules later shows up there.
 HRMS's own Employee Self Service rules are never touched; removing document
 sharing site-wide is System Settings' "Disable Document Sharing", not a
 permission rule.
@@ -182,8 +191,13 @@ URL that survives refresh and browser Back. One convention, defined in
 |---|---|---|
 | `/leave` | `/leave/:name` | Leave Application name |
 | `/requests` | `/requests/:name` | HR Request name |
-| `/approvals` | `/approvals/:kind/:name` | `kind` is `leave` or `timesheet` |
+| `/approvals` | `/approvals/:kind/:name` | `kind` is `leave`, `timesheet` or `attendance` (P3-U1) |
 | `/timesheet` | `/timesheet/:weekStart` | the week's Monday, `YYYY-MM-DD` |
+| `/payslips` | `/payslips/:name` | Salary Slip name (P3-U2) |
+| `/attendance` | `/attendance/requests/:name` | Attendance Request name (P3-U6) |
+| `/holidays` | — | the year is page state, not a parameter (P3-U3) |
+| `/team` | — | the week is component state, deliberately neither a parameter nor a query (P3-U7) |
+| `/directory` | — | search, department and the open person are page state (P3-U8) |
 | `/notifications` | — | a row links to the target record's route above |
 
 - The parameter is the record's real Frappe name, or for a week its Monday as
@@ -195,6 +209,18 @@ URL that survives refresh and browser Back. One convention, defined in
 - Route names are stable PascalCase — `LeaveDetail`, `RequestDetail`,
   `ApprovalDetail`, `TimesheetWeek`. Link by name.
 - Every detail route sets `props: true`; the page takes the id as a prop.
+- **Three phase 3 screens deliberately carry no parameter**, and the reason is
+  the same in each case: the convention addresses *records*, and a week, a year
+  and a search are views. Team's week, Holidays' year and Directory's search,
+  department and open person are component state, so a refresh returns to this
+  week / this year / the unfiltered first page. Directory goes furthest on
+  purpose — a person sheet has no URL at all, because an employee id in a
+  shareable link is a leak with no upside.
+- Attendance carries one non-record parameter, the query `?fix=<date>`, which
+  opens the Fix a day sheet for that day. It is what lets the check-in sheet,
+  Home and a notification point at "fix *this* day", and it is
+  `router.replace`d away when the sheet closes so browser Back does not reopen
+  it.
 - A detail route renders the same page component as its list, which reads the
   id from its prop and asks the server for that one record
   (`get_my_leave_detail`, `get_my_request`, `get_approval_detail`,
@@ -216,12 +242,16 @@ them to `/login?redirect-to=<the full portal path>`.
 |---|---|---|---|
 | Dashboard | `get_portal_bootstrap`, `get_dashboard` | none | Timesheet, Leave Application, HR Request, Attendance, Notification Log |
 | Leave | `get_my_leave`, `get_my_leave_detail`, `get_leave_form_context`, `get_leave_day_count` | `apply_for_leave`, `withdraw_my_leave` | Leave Application, Leave Allocation, Leave Ledger Entry |
-| Attendance | `get_my_attendance`, `get_my_checkins` | none (an exception opens a prefilled HR Request) | Attendance, Employee Checkin, Holiday List, Leave Application |
+| Attendance | `get_my_attendance` (now with `checkin`), `get_my_checkins`, `get_my_attendance_requests`, `get_my_attendance_request`, `get_attendance_request_preview` | `punch_my_checkin`, `create_my_attendance_request`, `send_my_attendance_request`, `withdraw_my_attendance_request` (a non-fixable problem still opens a prefilled HR Request) | Attendance, Employee Checkin, Holiday List, Leave Application, Attendance Request, Shift Type + Shift Assignment, Workflow "Attendance Request Approval", DocShare, Notification Log |
+| Payslips | `get_my_payslips`, `get_my_payslip` | none (`download_my_payslip` is a GET that returns a PDF) | Salary Slip + its earnings and deductions rows, Print Format |
+| Holidays | `get_my_holidays` | none | Holiday List, Holiday List Assignment |
+| Team | `get_my_team_week` | none | Employee (`reports_to`), Leave Application, Holiday List |
+| Directory | `get_directory` | none | Employee |
 | Timesheet | `get_my_week`, `get_my_timesheet_history`, `get_timesheet_week_start`, `get_my_projects` | `save_my_week`, `submit_my_week` | Timesheet + Timesheet Detail, Workflow "Timesheet Approval" |
 | Requests | `get_my_requests`, `get_my_request` | `create_my_request`, `attach_to_my_request`, `mark_my_request_read` | HR Request, File, Notification Log |
 | Documents | `get_my_documents` (`frappe.client.get_list` is scoped by the same hooks) | none | HelixHR Document Link |
 | Notifications | `notification_log.get_notification_logs` | `notification_log.mark_all_as_read`, `mark_my_request_read` | Notification Log, fed by the Notification fixtures and `events.hr_request_on_update` |
-| Approvals | `get_my_approvals`, `get_approval_detail` | `act_on_approval` | Leave Application, Timesheet, Workflow actions, DocShare |
+| Approvals | `get_my_approvals`, `get_approval_detail` | `act_on_approval` | Leave Application, Timesheet, Attendance Request, Workflow actions, DocShare |
 | Profile | `get_portal_bootstrap` header, `frappe.client.get` on own Employee | `update_my_profile` | Employee |
 
 Every method in the first two columns without a package prefix is
@@ -294,6 +324,184 @@ reason the `weekStart` route parameter is always normalised through
 `SELECT ... FOR UPDATE` only excludes writers that also take it, and the
 lock used to sit in `submit_my_week` alone.
 
+## Attendance requests: two steps, one share, four guards (P3-U5, P3-U6)
+
+Shipped as the Workflow fixture `Attendance Request Approval` on Attendance
+Request, `workflow_state` as its state field, `send_email_alert` off. It is the
+portal's first **two-step** approval, and the split is the whole design: the
+manager's decision is a plain `save`, and only HR's decision is the `submit`
+that makes HRMS write Attendance rows.
+
+| From | Action | To | Who | Notes |
+|---|---|---|---|---|
+| Draft | Submit | Pending Manager | Employee | self-approval allowed; it is their own request |
+| Pending Manager | Approve | Pending HR | Employee role, conditioned on `reports_to` **and** the manager's Employee being Active | this is a save; no Attendance is written |
+| Pending Manager | Reject | Rejected | same condition | reason is a Comment |
+| Pending Manager / Pending HR | Approve / Reject | Pending HR / Approved / Rejected | HR Manager, conditioned on the request not being the acting user's own | Approved is `doc_status` 1 — the submit that writes Attendance |
+| Draft | Approve | Pending HR | HR Manager | so drafts that predate the fixture are not dead ends (P3-AE14) |
+| Rejected | Edit | Draft | Employee | the employee fixes and resends |
+
+**The state order in the fixture file is load-bearing.** Frappe backfills rows
+that already exist by *state order*, not by name: docstatus 0 rows take the
+first state, docstatus 1 rows the first state with `doc_status` 1, and
+cancelled rows keep a null state. Draft, Pending Manager, Pending HR, Approved,
+Rejected is the order that makes that backfill correct, so it must never be
+reordered in a later edit. Every queue filter tolerates a null state for the
+cancelled rows.
+
+**The DocShare is load-bearing too, and exists in exactly one state.** A
+manager's own User Permission is scoped to their own Employee record and does
+not reach a report's Attendance Request at all — without a share, Frappe's
+`get_transitions` fails on *read* before the transition is even considered. So
+`events.attendance_request_on_update` keeps one share, `write=1` and no
+`submit`, while the state is Pending Manager and `docstatus` 0, and removes it
+in every other state. `events._reconcile_share(doctype, name, employee,
+keep_user, submit=0)` is the Timesheet reconcile generalised by doctype
+(Timesheet passes `submit=1`), and `employee_on_update` runs both doctypes
+through it, so a `reports_to` change or a manager's Employee going inactive
+moves the share and the action rights together (P3-R18).
+
+**Frappe does not enforce a state's `allow_edit` on the server.** It is a Desk
+form hint, and `/api/resource` PUT, `frappe.client.set_value` and
+`apply_workflow` all bypass it. Four doc events carry the rules instead
+(P3-KTD8), and each one is the same rule the portal enforces, restated where
+every route has to pass:
+
+- **`validate`** diffs the doctype's own fields against `get_doc_before_save()`
+  and refuses any change other than `workflow_state` and `shift` (HRMS fills
+  `shift` in its own validate) once the request has left Draft, unless the
+  caller is HR. The same hook refuses Submit when the employee has no active
+  manager, so a raw `apply_workflow` refuses exactly where the portal does.
+- **`on_update`** reconciles the share, then writes one Notification Log row
+  per real state change.
+- **`before_submit`** allows the submit only when the **stored** state is
+  Pending HR — Frappe has already flipped the in-memory field to Approved by
+  then — and only for HR. That is what stops a raw `frappe.client.submit` from
+  jumping Pending Manager straight to Approved.
+- **`on_trash`** allows a delete only for the request's own employee, matched
+  by `Employee.user_id` and never by `owner` (the owner is the HR user when HR
+  raised it), and only in Draft, Pending Manager or Rejected — the same states
+  the portal's withdraw allows.
+
+None of the four commits, so a throw in any of them rolls the transition and
+the share back together.
+
+"HR" here is `events._is_hr`: `Administrator`, or a holder of **HR Manager** or
+**System Manager**. HR User is deliberately outside it.
+
+**The portal acts on the manager step only** (P3-KTD7). `act_on_approval`
+applies the workflow for an Attendance Request only while the state is Pending
+Manager, and `events._approver_user` is the single source for who the manager
+is — it requires the manager's Employee to be Active, which is the same
+assumption the DocShare makes. Pending HR items never enter the portal queue,
+and an HR Manager who is also somebody's line manager is refused when they try
+to act on one from the portal, so the two steps cannot collapse into one. HR's
+confirmation is a Desk action, by design.
+
+**Notifications are code, not a fixture.** `_notify_attendance_request` writes
+one Notification Log row per state change addressed to the *employee's*
+`user_id`, because `owner` is the HR login whenever HR raised the request and
+Attendance Request carries no user field. The four subjects are plain sentences
+("…is with Priya", "…is with HR", "…counts", "…was sent back"); a rejection
+carries the sent-back Comment as its body, or
+`"HR sent this back, ask HR for details"` when a Desk rejection left no
+comment. Nobody is notified about their own action.
+
+## Punch derivation, and why the portal method is the only create route
+
+`punch_my_checkin(latitude, longitude, expected_log_type)` takes **no
+timestamp and no employee**, which is the entire reason it exists rather than
+HRMS's `add_log_based_on_employee_field` (that one trusts a caller-supplied
+employee *and* a caller-supplied time). In order:
+
+1. rate limit, then the employee from the session;
+2. `expected_log_type` must be `IN` or `OUT`;
+3. coordinates cast to float, both finite, latitude within 90, longitude within
+   180, and not both zero;
+4. HR Settings' mobile check-in flag, or the punch is refused as not set up;
+5. `_lock_employee` — the same `SELECT … FOR UPDATE` on the Employee row that
+   `submit_my_week` takes, so two taps that arrive together cannot both read
+   "no punch yet";
+6. server time, and the shift window HRMS resolves for that instant
+   (`get_actual_start_end_datetime_of_shift`, grace periods included, default
+   shift considered). No window, no punch;
+7. the last punch **inside that window** — not inside a calendar day. A night
+   shift spans two dates and a traveller's local day is a third answer again,
+   and whatever HRMS would attach this punch to is what decides which punches
+   are "the shift so far";
+8. under 60 seconds since that punch, the existing row is **returned** rather
+   than refused, which is what makes a retry after a timeout safe;
+9. the type is derived (`IN` after nothing or after an `OUT`, otherwise `OUT`)
+   and compared with `expected_log_type`, which is a staleness token and never
+   an instruction: a strip left open on a phone since this morning is refused
+   with "reload", not obeyed;
+10. insert with server time and `device_id = "HelixHR Portal"`.
+
+That insert passes `ignore_permissions=True`, and it has to: role Employee lost
+`create`, `write` and `delete` on Employee Checkin in
+`patches/v1_0/apply_permission_deltas.py` (P3-KTD13). With its shipped rights
+an employee could insert a backdated punch with any coordinates, and edit or
+delete punches until the nightly job linked them. `read` stays, so the day
+sheet still lists them. **The method is the create rule**, exactly as
+`create_my_request` is for HR Request — and the rule is stricter than a DocPerm
+can express, which is the argument in "Why so many thin methods" applied to a
+punch. HR keeps every Desk and device path.
+
+Coordinates never travel back to a browser: `get_my_checkins` answers with
+`has_location` as a boolean. Erasure is `helixhr/tasks.py` on a daily schedule
+plus an immediate scrub when an Employee's status becomes Left, both including
+the `tabVersion` rows (P3-R28); the period is a site config key, and
+`docs/deployment.md` owns the operator half.
+
+## Payslips answer one uniform not-found
+
+`get_my_payslip` and `download_my_payslip` do **not** follow the leave
+pattern of "not found" for a missing name and "permission denied" for somebody
+else's. A Salary Slip's name embeds the employee id, so the pair of answers
+would be an existence oracle: ask for `Sal Slip/HR-EMP-00042/00003` and the
+difference between the two errors tells you whether employee 42 was paid that
+month. Missing, foreign, draft and cancelled all answer `"That payslip isn't
+here."` as a `DoesNotExistError`. Only after ownership is established does a
+Withheld slip get its own sentence, because by then the caller is provably the
+owner.
+
+`download_my_payslip` is a **GET** so a phone browser saves the file itself
+rather than a fetch buffering it, renders the doctype's own default print
+format, and corrects Frappe's PDF response afterwards through
+`frappe.local.response_headers` (`Content-Disposition: attachment` and
+`Cache-Control: no-store`; Frappe writes `inline` and no cache directive). It
+also sits behind `frappe.concurrent_limit()` on top of the per-user rate
+bound, because PDF rendering spawns wkhtmltopdf and is CPU-bound.
+
+## Projections, not permissions: Team and Directory
+
+Both read Employee-linked data the caller has no Frappe-level right to list,
+and both answer with a **server projection over an explicit field allow-list**
+rather than by loosening a permission:
+
+- `get_directory` reads active Employees in the caller's *own* company with
+  `name, employee_name, designation, department, reports_to, company_email`,
+  resolves manager names in one extra query, and emits `email` only when
+  `company_email` is non-empty. `user_id` is never selected, so a login
+  identifier cannot leave the server through the directory. Search is floored
+  at two characters and capped at 60, and the page is 50.
+- `get_my_team_week` derives the manager's active direct reports server-side
+  and reads their overlapping Leave Applications with `employee, leave_type,
+  from_date, to_date, half_day, half_day_date, status, docstatus`.
+  `description` is never selected — a leave reason is not a manager's to read
+  (P3-R21) — and `status`/`docstatus` are collapsed into one `waiting` flag
+  before they leave the server. A caller with no active reports gets a
+  `PermissionError`, so the page's `has_reports` gate is not the boundary.
+
+Both read with `ignore_permissions=True` and both are safe *because* the scope
+is a server-derived filter rather than a caller-supplied one. The reason it is
+done this way rather than by granting the Employee role `report` on Employee is
+P2-R26: the generic Employee list stays denied to employees (User Permissions
+scope it to themselves), and `test_fixtures.py`'s strict-permission matrix
+asserts that `frappe.client.get_list("Employee")` still returns only the
+caller. Widening the DocPerm would have opened every Employee field to every
+employee to serve six of them.
+
 ## Attendance and the dormant device
 
 No check-in device exists yet. `get_my_attendance` only flags a day as missing
@@ -301,6 +509,18 @@ when it falls on or after the employee's first-ever submitted Attendance record,
 is before today, is a working day on their holiday list, and is not on leave.
 With no records the strip shows a single placeholder line. Nothing changes when
 a device arrives; the first record starts the clock.
+
+Phase 3 gave the portal a punch source of its own, so the strip is no longer
+dormant on a site that configures a shift — but the rule above is unchanged,
+and one exemption was added to it. `get_my_attendance` selects
+`Attendance.attendance_request` and carries it as `by_request` per day, and the
+`absent`, `half_day` and `late` exception counts skip any day that flag is set
+on (P3-R19). A day HR marked by confirming an attendance request has already
+been fixed; counting it as an exception would send the employee back to HR
+about the day they just had corrected. A half-day Work From Home request is the
+case that makes this concrete — HRMS writes a `Half Day` row for it — and a
+`missing` day cannot be affected either way, because a request-marked day has
+an Attendance row by definition.
 
 ## Response headers, uploads and write limits (P2-U9)
 
@@ -342,7 +562,8 @@ an hour is refused, so the bypass is never the thing under test.
 
 ## `helixhr/api.py` is one module on purpose
 
-It is about 2,600 lines. Phase 2's plan carried a 1,500-line review threshold
+It is about 4,600 lines after phase 3 (it was about 2,600 when this section was
+written). Phase 2's plan carried a 1,500-line review threshold
 (KTD4) that would have triggered a split into per-domain modules; that
 threshold was reviewed once the file had actually grown and **dropped**
 (decision taken 2026-09-05, after P2-U9). This is the recorded outcome, not
@@ -367,7 +588,9 @@ The reasoning, so it does not get re-litigated every time the file grows:
   navigability a split would buy is largely there already.
 
 If it is ever split, the seams are the existing domain sections: dashboard,
-leave, attendance, timesheet, approvals, requests, documents, session. Split
+leave, attendance (check-in and attendance requests included), payslips,
+holidays, timesheet, approvals, requests, documents, directory, team, session.
+Split
 it because a concrete test seam cannot stay isolated — the other half of
 KTD4 — not because of a line count.
 
@@ -391,6 +614,17 @@ KTD4 — not because of a line count.
   the tab clears the interval, and the hidden -> visible transition costs
   exactly one catch-up read however many of `visibilitychange` and `focus`
   the platform delivers.
+- Three small pure modules joined the `lib/` layer in phase 3, each with its
+  own vitest file: `lib/statusBadge.js` holds the status word table
+  `StatusBadge.vue` renders (a `<script setup>` component cannot export, so the
+  mapping had to move out to be testable at all); `lib/money.js` formats one
+  amount in one currency and returns an empty string rather than an unlabelled
+  number, because nothing in the portal may sum money across currencies; and
+  `lib/geolocation.js` is the only caller of the Geolocation API — one
+  high-accuracy 10s attempt, one low-accuracy 5s retry, never on page load,
+  with `insecure` and `unsupported` short-circuited before the API is touched
+  so the sheet never gives browser-setting advice for a problem no setting
+  fixes.
 - `lib/dialogA11y.js` names frappe-ui's unlabelled dialog close button, once
   for the whole app, and `lib/featherIcons.js` is the stub the Feather icon
   set is aliased to. Both are there because the alternative was editing
@@ -411,7 +645,8 @@ KTD4 — not because of a line count.
 `bench export-fixtures` never captures another app's rows. Permission rows are
 deliberately **not** among them — see "Permission deltas are a patch, not a
 fixture" above. Fixtures are installed by `bench migrate`;
-`preflight.check_fixtures` confirms the four that the app cannot work without.
+`preflight.check_fixtures` confirms the five that the app cannot work without
+(both Workflows included, since P3-U5).
 
 ## Tests
 

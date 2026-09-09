@@ -10,13 +10,22 @@ import { watchDialogs, unwatchDialogs } from '@/lib/dialogA11y'
 // `primary` items are the four that fit the phone tab bar alongside
 // "More" (design system: max 5 tab items). Everything else lives in the
 // desktop sidebar and, on a phone, behind More.
+//
+// Two gates, kept apart on purpose (P3-KTD11): `managerOnly` reads
+// `canApprove` (there is a decision waiting, or someone reports to you);
+// `reportsOnly` reads `hasReports` (someone reports to you). A leave
+// approver with no reports gets Approvals and not an empty Team page.
 const NAV = [
   { label: 'Home', to: '/', icon: 'home', primary: true },
   { label: 'Leave', to: '/leave', icon: 'leave', primary: true },
   { label: 'Timesheet', to: '/timesheet', icon: 'timesheet', primary: true },
   { label: 'Requests', to: '/requests', icon: 'requests', primary: true },
   { label: 'Attendance', to: '/attendance', icon: 'attendance' },
+  { label: 'Payslips', to: '/payslips', icon: 'wallet' },
+  { label: 'Holidays', to: '/holidays', icon: 'sun' },
   { label: 'Documents', to: '/documents', icon: 'documents' },
+  { label: 'Directory', to: '/directory', icon: 'users' },
+  { label: 'Team', to: '/team', icon: 'users', reportsOnly: true },
   { label: 'Approvals', to: '/approvals', icon: 'approvals', managerOnly: true },
   { label: 'Notifications', to: '/notifications', icon: 'notifications', badge: true },
   { label: 'Profile', to: '/profile', icon: 'profile' },
@@ -34,7 +43,12 @@ const unreadLabel = computed(() => (unread.value > 9 ? '9+' : String(unread.valu
 // no direct-report leave in sight -- both had no Approvals item at all while
 // this read a direct-report count.
 const isManager = computed(() => session.canApprove)
-const navItems = computed(() => NAV.filter((item) => !item.managerOnly || isManager.value))
+const navItems = computed(() =>
+  NAV.filter(
+    (item) =>
+      (!item.managerOnly || isManager.value) && (!item.reportsOnly || session.hasReports),
+  ),
+)
 const primaryItems = computed(() => navItems.value.filter((item) => item.primary))
 const moreItems = computed(() => navItems.value.filter((item) => !item.primary))
 

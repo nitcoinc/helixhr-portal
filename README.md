@@ -1,8 +1,10 @@
 # HelixHR Employee Portal
 
 A Frappe v16 app that gives employees a plain, mobile-first portal for leave,
-attendance, timesheets, HR requests, documents, notifications and profile, plus
-one Approvals page for managers. Frappe HR stays the only source of truth; HR
+attendance (including a located check-in and a "Fix a day" request), payslips,
+holidays, timesheets, HR requests, documents, a colleague directory,
+notifications and profile, plus an Approvals page and a team leave week for
+managers. Frappe HR stays the only source of truth; HR
 keeps working in Frappe Desk. The portal is served at `/helixhr` on the same
 site as ERPNext and HRMS, and an employee signing in lands there rather than
 on Desk -- see [docs/deployment.md](docs/deployment.md) for how that is decided
@@ -13,18 +15,63 @@ and how to keep employees out of Desk entirely.
 - Deploying it: exposure, host names, onboarding an employee: [docs/deployment.md](docs/deployment.md)
 - Operating it, and every hard-won gotcha: [docs/runbook.md](docs/runbook.md)
 - Visual system, copy rules and measured contrast: [docs/design-system.md](docs/design-system.md)
-- The plans the code was built from, phase 1 and phase 2: [docs/plans/](docs/plans/)
+- The plans the code was built from, phases 1 to 3: [docs/plans/](docs/plans/)
+
+## Screens
+
+Captured from a running bench with the test fixtures seeded, so every number
+on them came out of Frappe. Regenerate them with the command under
+[Screenshots](#screenshots).
+
+<p align="center">
+  <img src="docs/images/portal-dashboard.png" alt="Home: this week's spine, what needs the employee, leave left and quick actions" width="880">
+</p>
+
+**Home** answers "what needs me?" before anything else: the week spine with
+hours per day, one card per thing waiting on the employee, one per thing
+waiting on somebody else, and three ways to start.
+
+<p align="center">
+  <img src="docs/images/portal-timesheet.png" alt="Timesheet: a day-first week grid with per-day totals and a sticky Save and Submit bar" width="880">
+</p>
+
+**Timesheet** is a day-first grid -- projects down, days across, hours in the
+cells -- with a running day total, a 40-hour target and one Submit for the
+whole week.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/images/portal-payslips.png" alt="Payslips: the latest net pay with a Download PDF button, and a year-grouped history"></td>
+<td width="50%"><img src="docs/images/portal-approvals.png" alt="Approvals: a manager's queue, oldest first, with what was decided this week"></td>
+</tr>
+<tr>
+<td><b>Payslips</b> put the latest net pay and its PDF one tap away, with
+every earlier month grouped by year.</td>
+<td><b>Approvals</b> is the manager's queue: oldest first, direct reports only,
+and a record of what was already decided.</td>
+</tr>
+</table>
+
+The portal is built mobile-first: the desktop rail becomes a bottom tab bar,
+and every action stays inside a thumb's reach.
+
+<p align="center">
+  <img src="docs/images/portal-attendance-mobile.png" alt="Attendance on a phone: month summary, a Check in button, the located last punch, and the month calendar" width="330">
+  &nbsp;&nbsp;
+  <img src="docs/images/portal-leave-mobile.png" alt="Leave on a phone: balance bars, an upcoming request waiting for the manager with a Withdraw button, and past leave" width="330">
+</p>
 
 ## Repository layout
 
 ```
 helixhr/                 Frappe app (Python)
   api.py                 every whitelisted method the frontend calls
-  events.py              Timesheet and File document-event hooks
+  events.py              Timesheet, Attendance Request, Employee and File document-event hooks
+  tasks.py               scheduled jobs (punch-coordinate retention)
   preflight.py           go-live checks: bench --site <site> execute helixhr.preflight.run
   utils.py               week bounds, manager lookup, per-user rate limit
-  hooks.py               fixtures, doc_events, the /helixhr/* route rule
-  fixtures/              Property Setters, Workflow, Activity Type, Notifications
+  hooks.py               fixtures, doc_events, scheduler_events, the /helixhr/* route rule
+  fixtures/              Property Setters, Workflows, Activity Type, Notifications
   patches/               migrate-time fixes, incl. this app's permission deltas
   helixhr/doctype/       HR Request, HelixHR Document Link
   www/helixhr.py         serves the built SPA, injects CSRF token and site config
@@ -32,9 +79,11 @@ helixhr/                 Frappe app (Python)
 frontend/                Vue 3 + frappe-ui + Tailwind, built by Vite
   src/pages/             one file per screen
   src/components/        AppShell, WeekSpine, NeedsYou, forms
-  src/lib/               api client, session, dates, error mapping
+  src/lib/               api client, session, dates, money, geolocation, status words, error mapping
   tests/e2e/             Playwright specs (real browser, real site)
+  tests/screenshots.mjs  regenerates the README screenshots
 docs/                    deployment, runbook, architecture, design system, plans
+  images/                the README screenshots (generated -- see Verify)
 ```
 
 The frontend build writes into `helixhr/public/helixhr/` and
@@ -85,6 +134,12 @@ All configuration is per-site data, not code. Set it in Desk or with
 | `rate_limit` | `bench --site <site> set-config rate_limit '{"limit": 600, "window": 60}'` | site-wide request limit, in addition to the app's per-user write limits. |
 | `helixhr_rate_limits` | optional, e.g. `'{"create_my_request": [5, 3600]}'` | tightens one per-user write bound. Preflight FAILs on anything looser than policy. |
 | `helixhr_hr_contact` | `bench --site <site> set-config helixhr_hr_contact hr@example.com` | the address shown to a signed-in user with no Employee record. Unset shows "Contact HR" with no link. |
+| `helixhr_checkin_location_retention_days` | `bench --site <site> set-config helixhr_checkin_location_retention_days 90` | how long a punch keeps its coordinates. The daily job does nothing until it is set, and preflight WARNs; the number is HR and legal's decision. See [docs/deployment.md](docs/deployment.md). |
+| Allow Employee Checkin From Mobile App | HR Settings | on, to offer check-in in the portal at all. Off is a preflight WARN, not a FAIL — a site may not want it. |
+| Allow Geolocation Tracking | HR Settings | the portal requires coordinates either way. Turning it **on** also makes HRMS refuse coordinate-less punches from devices and from Desk. |
+| Shift Type + Shift Assignment | Desk: HR | at least one Shift Type with Enable Auto Attendance, `Process Attendance After` set and its sync advancing, plus an assignment per employee. Without them no punch ever becomes Attendance. |
+| Salary Slip default print format | Desk: Salary Slip → Print Settings | decides what the downloaded payslip PDF looks like. Falls back to `Salary Slip Standard`. |
+| `Permissions-Policy` at the proxy | reverse proxy | must not disable geolocation. The app sends `geolocation=(self)` with `setdefault`, so a proxy header wins; preflight FAILs on the effective value. |
 | Role home page | Desk: Role -> Employee | leave **empty**. A Role home page wins over the app's landing rule and sends employees to Desk. Preflight FAILs on it. |
 | Default Portal Home | Desk: Portal Settings | leave **empty**, same reason. |
 | Default Workspace | Desk: User | leave **empty** on portal users; it overrides the resolved landing page. |
@@ -122,6 +177,15 @@ upload policy, every named per-user write bound, test mode, CSRF, and -- when
 headers and the `sid` cookie's `Secure`/`HttpOnly`/`SameSite` flags. Exits
 non-zero on any FAIL, so a deploy script can gate on it. Run it on staging, then
 again on production, after every deploy.
+
+Four lines are about the phase 3 surfaces and are worth reading even though
+three of them can only WARN: `Check-in settings` (the two HR Settings flags),
+`Shift Types` (auto attendance, `Process Attendance After`, and a
+`last_sync_of_checkin` that is actually advancing), `Check-in location
+retention` (the site config key above) and, inside `HTTPS headers and cookies`,
+a **FAIL** when the effective `Permissions-Policy` does not allow
+`geolocation=(self)`. `Fixtures installed` now also covers the
+`Attendance Request Approval` workflow.
 
 On a **test** site one FAIL is expected and correct: `allow_tests` is on.
 
@@ -169,6 +233,17 @@ curl -b cookies.txt -X POST http://localhost:8000/api/method/helixhr.tests.utils
 BASE_URL=http://localhost:8000 SITE_HOST=test_site yarn test:e2e -- --workers=1
 ```
 
+`setup_playwright_fixtures` seeds everything the phase 3 specs need as well as
+the phase 1 and 2 ones: the HR Settings mobile check-in flag, a Shift Type and
+assignment whose window covers the whole site day (so `checkin.spec.ts` runs at
+any hour), one holiday on a date computed from the site's own today, one
+submitted payslip for last month, and colleagues with a published work email.
+
+**`checkin.spec.ts` is Chromium and the `employee` project only, on purpose.**
+`context.grantPermissions` and `setGeolocation` are CDP features, so the mobile
+WebKit project cannot answer a location prompt and would hang in the locating
+state rather than fail usefully.
+
 The e2e run covers desktop Chromium **and** mobile WebKit, which is the only
 engine on iOS. WebKit needs its system libraries (`npx playwright install
 --with-deps webkit`, which needs root); on a host that cannot install them,
@@ -180,6 +255,26 @@ leave-balance test fails if an earlier run left a Leave Allocation behind, and
 `timesheet-approval.spec.ts` is single-run-per-site by design. Recreate the test
 site (or reset the fixture data as the runbook shows) before a final run. CI
 always starts from a fresh site and is the authoritative signal.
+
+### Screenshots
+
+The images in [Screens](#screens) are generated, not hand-cropped, so they
+never drift from the built UI:
+
+```bash
+cd frontend
+BASE_URL=http://localhost:8000 SITE_HOST=test_site node tests/screenshots.mjs
+```
+
+It needs the same running bench and seeded fixtures as the e2e suite, signs in
+as both test identities itself, and writes `docs/images/*.png`. The script
+itself only reads -- it navigates and captures, and asserts nothing.
+
+The shots are only as good as the site's data. A long-lived test site is full
+of `_Test ...` records that do not belong in a README, so the committed images
+were taken on one where a couple of plainly named projects, a booked week and
+two leave requests had been created by hand first. Recreate that shape before
+regenerating them, or the images get worse rather than fresher.
 
 ### Performance
 
@@ -194,18 +289,32 @@ and the one gate that can only be judged on staging: `docs/runbook.md`.
 1. Merge to `main`; CI must be green.
 2. On the server: `bench get-app`/`git pull` in `apps/helixhr`, then
    `cd apps/helixhr/frontend && yarn install --frozen-lockfile && yarn build`.
-3. `bench --site <site> migrate` (installs fixtures) and `bench --site <site> clear-cache`.
-4. First deploy to a site only: set `helixhr_hr_contact` and the other site
-   settings from the Configure table above.
-5. Make sure `allow_tests` is **off**. It exposes the fixture entry points and
+3. **Before the first migrate that ships the attendance workflow**, count the
+   Attendance Request drafts the site already has and decide what happens to
+   them — [docs/deployment.md](docs/deployment.md) has the command and the two
+   options. Frappe backfills the new `workflow_state` by docstatus, so this is
+   a one-time, one-way step.
+4. `bench --site <site> migrate` (installs fixtures **and** re-runs the
+   permission-delta patch under its new dated line) and
+   `bench --site <site> clear-cache`.
+5. First deploy to a site only: set `helixhr_hr_contact` and the other site
+   settings from the Configure table above, and work through
+   [docs/deployment.md](docs/deployment.md) for the HR Settings flags, the
+   Shift Type, the holiday list coverage, the Salary Slip print format and the
+   proxy's `Permissions-Policy`.
+6. Make sure `allow_tests` is **off**. It exposes the fixture entry points and
    disables the per-user write limiter; preflight FAILs on it.
-6. `bench --site <site> execute helixhr.preflight.run` and fix every FAIL.
+7. `bench --site <site> execute helixhr.preflight.run` and fix every FAIL.
    With `helixhr_public_url` set it also probes the real HTTPS endpoint for the
-   security headers and the session cookie's flags.
-7. Work through the host-only sign-offs in `docs/runbook.md` -- the proxy's
+   security headers and the session cookie's flags -- including the
+   `geolocation=(self)` value the check-in button depends on.
+8. Work through the host-only sign-offs in `docs/runbook.md` -- the proxy's
    `X-Forwarded-Proto`, immutable asset caching and compression, the staging
    performance run, and one screen-reader pass.
-8. Restart the web workers if the Python changed (`bench restart`).
+9. Restart the web workers if the Python changed (`bench restart`). The
+   punch-coordinate retention job is a `scheduler_events` entry, so it only
+   ever fires on a site whose scheduler is enabled
+   (`bench --site <site> enable-scheduler`; `bench doctor` reports the state).
 
 ## Sign-in
 

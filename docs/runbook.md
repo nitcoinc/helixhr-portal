@@ -527,6 +527,217 @@ own `late_entry` flag, which only a device (or HR) sets, so it stays at zero unt
 `helixhr/tests/test_api_attendance.py` covers the no-data case first, because that is the one that
 ships today.
 
+## The check-in button is invisible until three things are true (P3-U4)
+
+The Today strip on Attendance offers a punch only when **all** of these hold, and the reason it
+shows names the one that does not:
+
+1. HR Settings → **Allow Employee Checkin From Mobile App** is on. Off, and the strip reads
+   "Check-in isn't set up for you yet" — the same sentence as no shift at all, because from the
+   employee's side they are the same situation.
+2. The employee has a submitted, Active **Shift Assignment** whose Shift Type window (grace
+   periods included) contains *now*. This is HRMS's own rule: `fetch_shift` resolves a punch to a
+   shift by timestamp, and a punch outside the window is stored `offshift`, never becomes
+   Attendance, and later reads as a missing day. Inside an assignment but outside the window, the
+   strip says when check-in opens.
+3. The browser gives a location. There is no coordinate-less punch from the portal, whatever HR
+   Settings' `allow_geolocation_tracking` says — the sheet's fallback is Fix a day.
+
+**A fresh site has no Shift Type at all**, so the button never appears until somebody creates one.
+`preflight.check_shift_types` warns about that, and about a Shift Type whose `last_sync_of_checkin`
+has stalled (punches pile up as bare Employee Checkin rows that never become Attendance).
+
+Debugging "why is the button missing": read `checkin` out of the API rather than the DOM.
+
+```bash
+bench --site <site> console
+# >>> frappe.set_user("someone@example.com")
+# >>> helixhr.api.get_my_attendance("2026-09-01", "2026-09-30")["checkin"]
+```
+
+The seeders `helixhr.tests.utils.ensure_test_shift_type` / `assign_test_shift` create a window that
+covers the whole site day, which is what makes the Python and Playwright check-in suites runnable at
+any hour. HRMS refuses a Shift Type whose window *plus grace* overlaps itself across midnight, so
+that seeded window has zero grace on both sides.
+
+## Punch coordinates are erased on a schedule, and the period is unset by default (P3-R28)
+
+`helixhr.tasks.null_stale_checkin_coordinates` runs daily and does nothing at all until an operator
+sets the period:
+
+```bash
+bench --site <site> set-config helixhr_checkin_location_retention_days 90
+```
+
+It nulls `latitude`, `longitude` and `geolocation` on Employee Checkin rows older than that **and**
+strips the same three fields out of their `tabVersion` rows — Employee Checkin has `track_changes`,
+so erasing the row alone erases nothing. `events.employee_on_update` does the same immediately when
+an Employee's status becomes `Left`. Both paths are idempotent: an erased row no longer matches the
+`is set` filter that selects them.
+
+Two things to know before changing it:
+
+- The job never restores anything. A period set too short is a one-way loss, which is why it is
+  unset until HR and legal choose a number (`preflight.check_checkin_location_retention` warns
+  while it is).
+- It writes with `frappe.db.set_value(..., update_modified=False)` rather than saving the document.
+  A save would rerun HRMS's `validate`, which refuses a coordinate-less punch while geolocation
+  tracking is on — that is, it would refuse to erase anything.
+- "Erased" is `latitude = 0`, `longitude = 0`, `geolocation = ""`. Frappe's Float columns are
+  `NOT NULL`, so zeroed is as empty as the column gets, and the selection filter is
+  `or_filters` on `is set`, which is what makes a second pass over the same rows a no-op.
+
+## "Location denied" and "the site is not allowed location" look identical (P3-KTD12)
+
+The Geolocation API reports a `Permissions-Policy` block and a person tapping **Block** the same
+way: `PERMISSION_DENIED`, code 1, with no prompt. `lib/geolocation.js` classifies that as
+`denied`, and the sheet shows browser-setting advice — which is unfixable advice when the real
+cause is a header. Two things separate them, in this order:
+
+1. **How many people see it.** One employee → their own choice, and the padlock advice in the
+   sheet is right. *Everybody*, including someone who has never used the portal before → it is the
+   origin, not a person.
+2. **Read the effective header, which is the deterministic answer:**
+
+   ```bash
+   curl -sI https://<host>/helixhr | grep -i permissions-policy
+   ```
+
+   It must contain `geolocation=(self)`. The app sends it with `setdefault`, so a reverse proxy
+   that sets its own `Permissions-Policy` wins — `geolocation=()` from nginx disables the API for
+   the whole origin and no browser setting can undo it. `preflight.check_public_endpoint` FAILs on
+   exactly this once `helixhr_public_url` is set, and CI greps for the value on the built shell, so
+   both halves have a standing guard. `docs/deployment.md` carries the nginx rule.
+
+A **third** cause never reaches the `denied` copy at all, and that is deliberate: on a plain-`http`
+origin `window.isSecureContext` is false, `getPosition()` short-circuits to `insecure` before it
+touches the API, and the sheet says "Location needs a secure connection". So a dev bench reached
+over `http://<LAN IP>:8000` always shows *that* sentence, never the padlock one. If somebody
+reports the padlock copy on a plain-HTTP bench, the browser is lying about the secure context (a
+`localhost` alias) and the header is still worth checking.
+
+Chrome's console prints a `Permissions-Policy` violation warning when the header is the cause,
+which is the fastest confirmation with a phone on the desk and DevTools attached.
+
+## Punches that exist but never become Attendance
+
+The punch succeeded, the day sheet lists it, and the calendar still says **No record** a week
+later. This is HRMS's own pipeline, not the portal's, and it has exactly two causes.
+
+**The punch was `offshift`.** `EmployeeCheckin.fetch_shift` resolves a punch to a shift by
+timestamp inside the shift's window *plus grace*; a punch outside every window is stored with
+`offshift = 1` and no `shift`, and HRMS's auto-attendance job only ever marks attendance for
+punches that carry a shift. The portal refuses such a punch up front — `_shift_window` makes the
+same HRMS call and the strip says when check-in opens instead — so an `offshift` row from the
+portal means the assignment or the shift timings changed between the page load and the tap. Check
+one:
+
+```bash
+bench --site <site> execute frappe.client.get_list \
+  --args '["Employee Checkin", {"employee": "<EMP>"}, ["name","time","shift","offshift","log_type"]]'
+```
+
+**The shift's sync never advances.** HRMS marks attendance only for punches *older* than the Shift
+Type's `last_sync_of_checkin`, and it only advances that field by itself when **Auto Update Last
+Sync** is on. A shift with the flag off and a stale (or empty) `last_sync_of_checkin` collects
+punches for ever: every one of them stays a bare Employee Checkin row, and each of those days later
+reads as a missing day in the exceptions strip. `Process Attendance After` being empty has the same
+end effect from the other direction — HRMS has no start point. `preflight.check_shift_types` WARNs
+on all three (empty `process_attendance_after`; and, with auto-update off, an empty
+`last_sync_of_checkin` or one older than two days), which is why the shift lines in a preflight run
+are worth reading even though none of them FAIL.
+
+The day sheet is honest about the intermediate state on purpose: a day with punches and no
+Attendance row reads **"Checked in, attendance not marked yet"**, never "No record". If that
+sentence is still there the next morning, it is one of the two causes above.
+
+## Frappe caches "this doctype has no workflow", and only a save or a cache clear moves it
+
+`frappe.model.workflow.get_workflow_name(doctype)` is cached, **including the negative answer**. A
+site that had no Attendance Request workflow before the fixture landed can therefore go on
+believing it: `get_transitions` returns nothing, the manager's Approve does nothing visible, and
+`act_on_approval` refuses as though the request were already decided.
+
+Nothing special is needed on a normal deploy — `Workflow.on_update` calls
+`frappe.clear_cache(doctype=document_type)` every time the fixture is imported, which is what
+`bench migrate` does, and `install-app` clears the cache anyway. That is exactly why no cache patch
+ships with P3-U5. Two situations still bite:
+
+- A long-running worker on a site where somebody edited the Workflow **row** through SQL rather
+  than a save. Then: `bench --site <site> clear-cache` (and `bench restart` if the worker is old).
+- Somebody deactivating the workflow in Desk to "turn the feature off". The next `bench migrate`
+  re-imports the fixture with `is_active: 1` and turns it back on. Rolling the feature back is a
+  code change — `docs/deployment.md` has the procedure.
+
+`test_attendance_request_workflow.TestAttendanceRequestWorkflow.test_the_workflow_is_installed_and_active`
+asserts through `get_workflow_name` rather than `frappe.db.exists`, so a fresh install that leaves
+the cache wrong fails in CI rather than in production.
+
+## HR's half of the attendance approval happens in Desk
+
+The portal shows the manager's step and nothing else (P3-KTD7), so this is the part of the flow
+nobody can look up in the UI they use every day:
+
+1. The request arrives at **Pending HR** after the manager's Approve. That transition is a plain
+   save: no Attendance row exists yet, and the employee's screen reads "Waiting for HR".
+2. HR opens the Attendance Request in Desk and uses the workflow **Actions** menu. The actor needs
+   **HR Manager** (`events._is_hr` is Administrator, HR Manager or System Manager — HR User is
+   outside it, on purpose). An HR Manager cannot act on their *own* request at either step; the
+   fixture condition refuses it.
+3. **Approve** is the real submit. HRMS's `on_submit` writes the Attendance rows, and the state
+   reads Approved at docstatus 1. The employee's notification says the request "counts".
+4. **Reject** is a save back to Rejected. **Type the reason as a comment** — the employee's
+   notification and the portal both quote the last Comment on the request, and a rejection with no
+   comment renders the fallback "HR sent this back, ask HR for details", which tells them nothing.
+
+Two failure modes to expect at step 3, both of them HRMS's `validate` rerunning on the submit:
+
+- **Approved leave landed after the request was sent.** HRMS refuses the submit. Send it back with
+  a reason; the day is already covered by leave.
+- **Overlap with another Attendance Request**, which arrives as an HTML `msgprint`. The portal
+  flattens those to one sentence (`toPlainMessage` in `frontend/src/lib/errorMap.js`); in Desk you
+  see the table.
+
+And one thing HR must not do: **never cancel an approved request to correct a day.** HRMS cancels
+the Attendance rows the request wrote, including a row it had rewritten in place, so a day that was
+Present ends with no attendance at all. Re-mark the day by hand instead. The portal refuses a
+request over a day that already carries real attendance for this exact reason (P3-KTD14).
+
+## Two test-isolation traps this phase found, and what they look like next time
+
+Both are the same shape — a side effect that escapes the per-test transaction while its restore
+does not — and both cost real time before they were understood. Recognise them rather than
+re-diagnosing them.
+
+**ERPNext disables the linked User when an Employee goes to Left.** `Employee.on_update` does it,
+so `employee.save()` with `status = "Left"` locks that person out of signing in. A test rollback
+does not undo it (the user row was written through a different path than the test's own
+transaction), so a suite that borrowed the shared fixture identity to test the Left-employee path
+left `employee@helixhr.test` disabled for **every later Playwright run in that session** — which
+then failed at the login step with no connection to the test that caused it. Two fixes, both
+shipped:
+
+- the coordinate-scrub test uses a **throwaway employee with no login**
+  (`leaving_employee_fixture()`), so nothing shared needs restoring
+  (`helixhr/tests/test_api_checkin.py`);
+- `test_portal_landing.py` sets the status with `frappe.db.set_value` (which runs no hooks) *and*
+  registers `addCleanup(frappe.db.set_value, "User", EMPLOYEE_USER, "enabled", 1)` anyway, so the
+  order the suites happen to run in stops deciding whether Playwright can sign in.
+
+If Playwright suddenly cannot log in as a fixture user, check `User.enabled` before anything else.
+
+**Committed Employee Checkin rows collide on HRMS's same-timestamp rule.** `validate_duplicate_log`
+refuses a punch that matches an existing one exactly, and the check-in scoping test commits its
+rows on purpose. A run interrupted between the insert and a hand-written cleanup left a punch
+behind, and the *next* run failed on the duplicate rather than on anything real — a failure that
+reads like a product bug and is not one. `test_api_attendance.py::test_checkins_are_scoped_to_the_caller`
+now clears those rows **twice**: once before the first insert and once through `addCleanup`, so
+neither an interrupted run nor a re-run inherits state.
+
+The general rule, already in this runbook for other reasons: a Python test here never assumes an
+empty baseline, and anything it commits it must be able to clear on the way in as well as on the
+way out.
+
 ## Performance baseline (P2-U0)
 
 `frontend/tests/e2e/performance.spec.ts` is the frozen measurement protocol behind P2-R21..P2-R24.
@@ -725,8 +936,22 @@ User Permission on their own Employee, Custom DocPerm coverage, the two HR Setti
 and self-approval, the legacy approved-but-unsubmitted leave backlog, Disable Signup, the
 sign-in phase, password policy, the **exact** upload policy, **every named per-user write
 bound**, site `rate_limit`, **test mode**, **CSRF**, the **HTTPS header and cookie probe**, the
-HR contact address, the four fixtures the app cannot work without, and the frontend being built.
+HR contact address, the five fixtures the app cannot work without, and the frontend being built.
 The checks and their rationale live in `helixhr/preflight.py`.
+
+Four more arrived with phase 3. Three can only **WARN** — each is a setup choice a site is allowed
+to make, and the portal tells the employee the truth either way: `Check-in settings` (the two HR
+Settings flags, with geolocation tracking reported rather than judged), `Shift Types` (auto
+attendance, `Process Attendance After`, and a `last_sync_of_checkin` that is actually advancing)
+and `Check-in location retention` (the site config key).
+
+`Holiday list coverage` **FAILs** and names the people: it walks every active employee and asks
+HRMS which list resolves for them today, through their own Holiday List Assignment or their
+company's. A missing list is the quietest setting in the phase and it reaches furthest — the
+Holidays page can only say it cannot tell, the attendance calendar cannot name working days, and
+the Fix a day preview cannot separate a holiday from a working day, so it refuses to send. The
+other phase 3 FAIL lives inside the HTTPS probe: the effective `Permissions-Policy` must allow
+`geolocation=(self)`, and a proxy that appends a second `geolocation=()` fails it too.
 
 Three of those are new in P2-U9 and judge *values*, not presence:
 

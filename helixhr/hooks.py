@@ -94,16 +94,20 @@ fixtures = [
 	# permission rows into the app. helixhr.patches.v1_0.apply_permission_deltas
 	# snapshots each site's own standard rows and applies only this app's
 	# deltas on top. (P2-U1)
-	{"dt": "Workflow", "filters": [["document_type", "=", "Timesheet"]]},
 	{
 		# "Approved" and "Rejected" already exist as shared Workflow State
 		# records (HRMS's own Leave Application workflow uses them) --
 		# reused by name on the transitions below, not exported here, so
-		# this app never claims ownership of another app's record. Only
-		# "Draft" and "Pending Approval" are new.
+		# this app never claims ownership of another app's record. "Draft"
+		# and "Pending Approval" are the Timesheet workflow's; "Pending
+		# Manager" and "Pending HR" are the attendance request's two
+		# pending steps (P3-KTD6). States before the Workflows that link
+		# to them.
 		"dt": "Workflow State",
-		"filters": [["name", "in", ["Draft", "Pending Approval"]]],
+		"filters": [["name", "in", ["Draft", "Pending Approval", "Pending Manager", "Pending HR"]]],
 	},
+	# Timesheet Approval (KTD7) and Attendance Request Approval (P3-KTD6).
+	{"dt": "Workflow", "filters": [["document_type", "in", ["Timesheet", "Attendance Request"]]]},
 	{
 		# Likewise "Approve" and "Reject" already exist as shared Workflow
 		# Action Master records; only "Submit" and "Edit" are new here.
@@ -147,6 +151,17 @@ doc_events = {
 	# no notification and therefore no obligation the employee could clear.
 	"HR Request": {
 		"on_update": "helixhr.events.hr_request_on_update",
+	},
+	# P3-KTD8. Frappe does not enforce a workflow state's `allow_edit` on
+	# the server, so the two-step attendance approval carries its rules as
+	# doc events: a field freeze outside Draft, the manager's DocShare while
+	# Pending Manager, the final submit only from Pending HR by HR, and a
+	# delete that follows the same states as the portal's withdraw.
+	"Attendance Request": {
+		"validate": "helixhr.events.attendance_request_validate",
+		"on_update": "helixhr.events.attendance_request_on_update",
+		"before_submit": "helixhr.events.attendance_request_before_submit",
+		"on_trash": "helixhr.events.attendance_request_on_trash",
 	},
 }
 
@@ -255,6 +270,17 @@ has_permission = {
 
 # Scheduled Tasks
 # ---------------
+
+# P3-U4 step 2a / P3-KTD15 / P3-R28. Punch coordinates have a retention
+# period, and this is what enforces it. The job is idle until the site config
+# key `helixhr_checkin_location_retention_days` is set; preflight warns while
+# it is unset. Daily rather than hourly: the period is measured in days, so
+# an hourly pass would do the same work 24 times.
+scheduler_events = {
+	"daily": [
+		"helixhr.tasks.null_stale_checkin_coordinates",
+	],
+}
 
 # scheduler_events = {
 # 	"all": [

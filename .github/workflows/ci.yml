@@ -256,6 +256,14 @@ jobs:
             -d "usr=Administrator&pwd=admin"
           curl -sf -b cookies.txt -X POST \
             http://localhost:8000/api/method/helixhr.tests.utils.setup_playwright_fixtures
+      # P3-U2: the payslip PDF is rendered by the host, not by the app, so
+      # without a generator `download_my_payslip` answers 500 and the feature
+      # is untestable here -- which is exactly how it failed on this
+      # workflow's first run with the endpoint. The Frappe production images
+      # ship wkhtmltopdf; a bare runner does not, so install it. `preflight`
+      # reports the same requirement for a real site.
+      - name: PDF generator (payslips)
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends wkhtmltopdf
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
@@ -284,7 +292,9 @@ jobs:
           echo "$shell" | grep -iq "content-security-policy:.*frame-ancestors 'none'" \
             || { echo 'FAIL: no frame-ancestors'; exit 1; }
           echo "$shell" | grep -iq 'referrer-policy:' || { echo 'FAIL: no Referrer-Policy'; exit 1; }
-          echo "$shell" | grep -iq 'permissions-policy:' || { echo 'FAIL: no Permissions-Policy'; exit 1; }
+          # P3-KTD12: the value, not the presence -- geolocation must be allowed for self.
+          echo "$shell" | grep -iq 'permissions-policy:.*geolocation=(self)' \
+            || { echo 'FAIL: Permissions-Policy does not allow geolocation=(self)'; exit 1; }
 
           entry=$(grep -o 'assets/index-[A-Za-z0-9_-]*\.js' \
             frappe-bench/apps/helixhr/helixhr/www/helixhr.html | head -1)

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   addCalendarDays,
   configureCalendar,
+  dateTileParts,
   formatDate,
   formatDateRange,
   formatDateTime,
@@ -88,6 +89,36 @@ describe('date-only values are calendar values (P2-R5)', () => {
     expect(isCalendarDate('2026-09-03 18:47:46.417663')).toBe(false)
     expect(isCalendarDate('')).toBe(false)
     expect(isCalendarDate(null)).toBe(false)
+  })
+
+  // P3-U9: the one date tile, shared by Leave, Payslips, Holidays and Team.
+  it('splits the date tile off the string, never through a Date', () => {
+    for (const hostZone of HOST_ZONES) {
+      withHostZone(hostZone, () => {
+        // The two values that move a day west or east of Greenwich when a
+        // date-only string is parsed as an instant.
+        expect(dateTileParts('2026-01-01'), hostZone).toEqual({
+          year: '2026',
+          month: 'JAN',
+          day: '1',
+        })
+        expect(dateTileParts('2026-12-31'), hostZone).toEqual({
+          year: '2026',
+          month: 'DEC',
+          day: '31',
+        })
+      })
+    }
+    // The day loses its padding (the tile is one big numeral), the month
+    // does not become one.
+    expect(dateTileParts('2026-09-08')).toEqual({ year: '2026', month: 'SEP', day: '8' })
+  })
+
+  it('has no tile for a value that is not a calendar date', () => {
+    expect(dateTileParts('2026-09-03 18:47:46.417663')).toBeNull()
+    expect(dateTileParts('')).toBeNull()
+    expect(dateTileParts(null)).toBeNull()
+    expect(dateTileParts(undefined)).toBeNull()
   })
 })
 
