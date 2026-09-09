@@ -708,12 +708,19 @@ class TestPreflightPdfGenerator(IntegrationTestCase):
 		frappe.set_user("Administrator")
 
 	def test_it_passes_when_the_generator_is_on_the_path(self):
+		"""Mocked, not read off this host: the CI job that runs the Python
+		suite has no PDF generator (only the e2e job installs one), so
+		asserting against the real PATH tests the runner, not the check."""
+		from unittest.mock import patch
+
 		from helixhr.preflight import PASS, check_pdf_generator
 
-		result = check_pdf_generator()
+		with patch("shutil.which", return_value="/usr/local/bin/wkhtmltopdf"):
+			result = check_pdf_generator()
 
 		self.assertEqual(result["status"], PASS)
 		self.assertIn("wkhtmltopdf", result["detail"])
+		self.assertIn("/usr/local/bin/wkhtmltopdf", result["detail"])
 
 	def test_it_fails_and_names_the_missing_binary(self):
 		from unittest.mock import patch
