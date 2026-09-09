@@ -17,6 +17,50 @@ and how to keep employees out of Desk entirely.
 - Visual system, copy rules and measured contrast: [docs/design-system.md](docs/design-system.md)
 - The plans the code was built from, phases 1 to 3: [docs/plans/](docs/plans/)
 
+## Screens
+
+Captured from a running bench with the test fixtures seeded, so every number
+on them came out of Frappe. Regenerate them with the command under
+[Screenshots](#screenshots).
+
+<p align="center">
+  <img src="docs/images/portal-dashboard.png" alt="Home: this week's spine, what needs the employee, leave left and quick actions" width="880">
+</p>
+
+**Home** answers "what needs me?" before anything else: the week spine with
+hours per day, one card per thing waiting on the employee, one per thing
+waiting on somebody else, and three ways to start.
+
+<p align="center">
+  <img src="docs/images/portal-timesheet.png" alt="Timesheet: a day-first week grid with per-day totals and a sticky Save and Submit bar" width="880">
+</p>
+
+**Timesheet** is a day-first grid -- projects down, days across, hours in the
+cells -- with a running day total, a 40-hour target and one Submit for the
+whole week.
+
+<table>
+<tr>
+<td width="50%"><img src="docs/images/portal-payslips.png" alt="Payslips: the latest net pay with a Download PDF button, and a year-grouped history"></td>
+<td width="50%"><img src="docs/images/portal-approvals.png" alt="Approvals: a manager's queue, oldest first, with what was decided this week"></td>
+</tr>
+<tr>
+<td><b>Payslips</b> put the latest net pay and its PDF one tap away, with
+every earlier month grouped by year.</td>
+<td><b>Approvals</b> is the manager's queue: oldest first, direct reports only,
+and a record of what was already decided.</td>
+</tr>
+</table>
+
+The portal is built mobile-first: the desktop rail becomes a bottom tab bar,
+and every action stays inside a thumb's reach.
+
+<p align="center">
+  <img src="docs/images/portal-attendance-mobile.png" alt="Attendance on a phone: month summary, a Check in button, the located last punch, and the month calendar" width="330">
+  &nbsp;&nbsp;
+  <img src="docs/images/portal-leave-mobile.png" alt="Leave on a phone: balance bars, an upcoming request waiting for the manager with a Withdraw button, and past leave" width="330">
+</p>
+
 ## Repository layout
 
 ```
@@ -37,7 +81,9 @@ frontend/                Vue 3 + frappe-ui + Tailwind, built by Vite
   src/components/        AppShell, WeekSpine, NeedsYou, forms
   src/lib/               api client, session, dates, money, geolocation, status words, error mapping
   tests/e2e/             Playwright specs (real browser, real site)
+  tests/screenshots.mjs  regenerates the README screenshots
 docs/                    deployment, runbook, architecture, design system, plans
+  images/                the README screenshots (generated -- see Verify)
 ```
 
 The frontend build writes into `helixhr/public/helixhr/` and
@@ -209,6 +255,26 @@ leave-balance test fails if an earlier run left a Leave Allocation behind, and
 `timesheet-approval.spec.ts` is single-run-per-site by design. Recreate the test
 site (or reset the fixture data as the runbook shows) before a final run. CI
 always starts from a fresh site and is the authoritative signal.
+
+### Screenshots
+
+The images in [Screens](#screens) are generated, not hand-cropped, so they
+never drift from the built UI:
+
+```bash
+cd frontend
+BASE_URL=http://localhost:8000 SITE_HOST=test_site node tests/screenshots.mjs
+```
+
+It needs the same running bench and seeded fixtures as the e2e suite, signs in
+as both test identities itself, and writes `docs/images/*.png`. The script
+itself only reads -- it navigates and captures, and asserts nothing.
+
+The shots are only as good as the site's data. A long-lived test site is full
+of `_Test ...` records that do not belong in a README, so the committed images
+were taken on one where a couple of plainly named projects, a booked week and
+two leave requests had been created by hand first. Recreate that shape before
+regenerating them, or the images get worse rather than fresher.
 
 ### Performance
 
