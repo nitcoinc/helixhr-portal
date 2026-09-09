@@ -315,7 +315,7 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 
 		week = get_my_week()
 
-		self.assertEqual(week["timesheet"]["workflow_state"], "Rejected")
+		self.assertEqual(week["timesheet"]["workflow_state"], "Sent Back")
 		self.assertEqual(week["timesheet"]["rejection_comment"], "Friday hours are missing.")
 
 	def test_queue_never_leaks_another_employees_work(self):
@@ -425,7 +425,7 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 		doc.flags.ignore_validate = True
 		doc.flags.ignore_mandatory = True
 		doc.insert(ignore_permissions=True)
-		frappe.db.set_value("Timesheet", doc.name, "workflow_state", "Rejected")
+		frappe.db.set_value("Timesheet", doc.name, "workflow_state", "Sent Back")
 		# Owned by the *manager*, because that is who sends a week back and
 		# the reason is read as theirs: an employee's own comment on their
 		# sent-back week is not the reason it came back (P3-KTD9).

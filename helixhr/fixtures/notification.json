@@ -65,11 +65,11 @@
   "filters": null,
   "from_attach_field": null,
   "is_standard": 0,
-  "message": "<p>Your timesheet for {{ doc.start_date }} to {{ doc.end_date }} is {{ 'Sent back' if doc.workflow_state == 'Rejected' else doc.workflow_state }}.</p>{% if doc.workflow_state == 'Rejected' and comments %}<p>{{ comments[-1].comment }}</p>{% endif %}",
+  "message": "<p>Your timesheet for {{ doc.start_date }} to {{ doc.end_date }} is {{ doc.workflow_state.replace('Sent Back','Sent back').replace('Pending HR','with HR') }}.</p>{% if doc.workflow_state == 'Sent Back' and doc.helixhr_decision_reason %}<p>{{ doc.helixhr_decision_reason }}</p>{% elif doc.workflow_state == 'Sent Back' and comments %}<p>{{ comments[-1].comment }}</p>{% endif %}",
   "message_type": "Markdown",
   "method": null,
   "minutes_offset": 0,
-  "modified": "2026-09-03 13:49:02.693992",
+  "modified": "2026-09-10 10:00:00.000000",
   "module": "HelixHR",
   "name": "HelixHR Timesheet Status Changed",
   "notification_message": null,
@@ -92,7 +92,7 @@
   "sender_email": null,
   "set_property_after_alert": null,
   "slack_webhook_url": null,
-  "subject": "Your timesheet for {{ doc.start_date }} is {{ 'Sent back' if doc.workflow_state == 'Rejected' else doc.workflow_state }}",
+  "subject": "Your timesheet for {{ doc.start_date }} is {{ doc.workflow_state.replace('Sent Back','Sent back').replace('Pending HR','with HR') }}",
   "value_changed": "workflow_state"
  },
  {

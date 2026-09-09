@@ -199,7 +199,7 @@ class TestApiApprovals(IntegrationTestCase):
 		)
 
 		doc = frappe.get_doc("Timesheet", ts.name)
-		self.assertEqual(doc.workflow_state, "Rejected")
+		self.assertEqual(doc.workflow_state, "Sent Back")
 
 		comments = frappe.get_all(
 			"Comment",
@@ -1078,16 +1078,24 @@ class TestAttendanceRequestApprovals(IntegrationTestCase):
 		self.assertEqual(len(detail["days"]), 2)
 		self.assertEqual(detail["modified"], str(frappe.db.get_value(DOCTYPE, name, "modified")))
 
-	def test_send_to_hr_moves_the_state_and_writes_no_attendance(self):
+	def test_the_managers_approve_is_the_decision_and_writes_the_attendance(self):
+		"""P4-R6: one step. The manager's Approve submits the request, so the
+		Attendance rows exist the moment they decide -- it used to move the
+		request to Pending HR and write nothing."""
 		name = self._pending_manager()
 
 		frappe.set_user(MANAGER_USER)
 		result = act_on_approval(DOCTYPE, name, "Approve", **token(DOCTYPE, name))
-		self.assertEqual(result["state"], "Pending HR")
+		self.assertEqual(result["state"], "Approved")
 
 		frappe.set_user("Administrator")
-		self.assertEqual(self._state(name), "Pending HR")
-		self.assertEqual(frappe.get_all("Attendance", filters={"attendance_request": name}), [])
+		self.assertEqual(self._state(name), "Approved")
+		self.assertEqual(frappe.db.get_value(DOCTYPE, name, "docstatus"), 1)
+		self.assertEqual(
+			len(frappe.get_all("Attendance", filters={"attendance_request": name})),
+			1,
+			"HRMS's cascaded Attendance insert has to succeed under the manager's session",
+		)
 		self.assertEqual(
 			frappe.get_all("DocShare", filters={"share_doctype": DOCTYPE, "share_name": name}),
 			[],
@@ -1121,7 +1129,7 @@ class TestAttendanceRequestApprovals(IntegrationTestCase):
 		act_on_approval(DOCTYPE, name, "Reject", comment="Pick the Tuesday", **token(DOCTYPE, name))
 
 		frappe.set_user("Administrator")
-		self.assertEqual(self._state(name), "Rejected")
+		self.assertEqual(self._state(name), "Sent Back")
 		self.assertEqual(
 			frappe.utils.strip_html(
 				frappe.db.get_value(
@@ -1152,14 +1160,17 @@ class TestAttendanceRequestApprovals(IntegrationTestCase):
 
 	# P3-U6 scenario 6 / P3-KTD7
 
-	def test_a_pending_hr_request_is_in_nobodys_portal_queue_and_cannot_be_acted_on(self):
+	def test_a_decided_request_is_in_nobodys_portal_queue_and_cannot_be_acted_on(self):
+		"""P4-U1: the state the manager's Approve reaches is Approved, not
+		Pending HR. The HR queue itself arrives in P4-U3; until then HR's own
+		portal action on a decided request is refused like anybody's."""
 		name = self._pending_manager()
 		frappe.set_user(MANAGER_USER)
 		act_on_approval(DOCTYPE, name, "Approve", **token(DOCTYPE, name))
 		self.assertNotIn(name, self._queue_names())
 
 		# The manager's own second attempt, and an HR Manager's from the
-		# portal: HR's step is Desk's, so both are refused as already decided.
+		# portal: both are refused as already decided.
 		with self.assertRaises(frappe.ValidationError) as refused:
 			act_on_approval(DOCTYPE, name, "Approve", **token(DOCTYPE, name))
 		self.assertIn("already been decided", str(refused.exception))
@@ -1171,7 +1182,7 @@ class TestAttendanceRequestApprovals(IntegrationTestCase):
 			act_on_approval(DOCTYPE, name, "Approve", **token(DOCTYPE, name))
 
 		frappe.set_user("Administrator")
-		self.assertEqual(self._state(name), "Pending HR")
+		self.assertEqual(self._state(name), "Approved")
 
 	def test_a_stale_token_is_refused(self):
 		name = self._pending_manager()
@@ -1229,4 +1240,4 @@ class TestAttendanceRequestApprovals(IntegrationTestCase):
 		self.assertEqual(len(receipts), 1)
 		self.assertEqual(receipts[0]["kind"], "attendance")
 		self.assertEqual(receipts[0]["label"], "Attendance request")
-		self.assertEqual(receipts[0]["status"], "Pending HR")
+		self.assertEqual(receipts[0]["status"], "Approved")

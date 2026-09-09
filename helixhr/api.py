@@ -39,7 +39,9 @@ from helixhr.events import (
 	REQUEST_PENDING_HR,
 	REQUEST_PENDING_MANAGER,
 	REQUEST_REJECTED,
+	REQUEST_SENT_BACK,
 	REQUEST_WITHDRAWABLE,
+	TIMESHEET_SENT_BACK,
 	_approver_user,
 	_is_hr,
 )
@@ -453,7 +455,7 @@ def _get_needs_you(employee, once):
 
 	rejected = frappe.get_all(
 		"Timesheet",
-		filters={"employee": employee, "workflow_state": "Rejected", "docstatus": ["!=", 2]},
+		filters={"employee": employee, "workflow_state": TIMESHEET_SENT_BACK, "docstatus": ["!=", 2]},
 		fields=["name", "start_date", "end_date"],
 		order_by="start_date asc",
 		limit=_QUEUE_FETCH,
@@ -522,7 +524,7 @@ def _get_needs_you(employee, once):
 	# takes it back to Draft, so this is blocked work the employee can move.
 	rejected_requests = frappe.get_all(
 		"Attendance Request",
-		filters={"employee": employee, "workflow_state": REQUEST_REJECTED, "docstatus": 0},
+		filters={"employee": employee, "workflow_state": REQUEST_SENT_BACK, "docstatus": 0},
 		fields=["name", "from_date", "to_date", "reason"],
 		order_by="from_date asc",
 		limit=_QUEUE_FETCH,
@@ -2049,6 +2051,11 @@ _ATTENDANCE_REQUEST_FIELDS = [
 ]
 
 
+# The two outcomes an approver can reach that leave the employee something to
+# read: one recoverable, one final (P4-KTD1). Both carry a reason.
+_REQUEST_DECIDED_AGAINST = (REQUEST_SENT_BACK, REQUEST_REJECTED)
+
+
 def _request_projection(row, reasons):
 	state = row.get("workflow_state") or REQUEST_DRAFT
 	return {
@@ -2094,7 +2101,7 @@ def get_my_attendance_requests(limit=None, start=0):
 	)
 	reasons = _rejection_comments(
 		"Attendance Request",
-		[row.name for row in rows if row.workflow_state == REQUEST_REJECTED],
+		[row.name for row in rows if row.workflow_state in _REQUEST_DECIDED_AGAINST],
 		employee,
 	)
 
@@ -2126,7 +2133,9 @@ def get_my_attendance_request(name):
 		frappe.throw(_("That attendance request isn't yours."), frappe.PermissionError)
 
 	reasons = _rejection_comments(
-		"Attendance Request", [name] if row.workflow_state == REQUEST_REJECTED else [], employee
+		"Attendance Request",
+		[name] if row.workflow_state in _REQUEST_DECIDED_AGAINST else [],
+		employee,
 	)
 	detail = _request_projection(row, reasons)
 	detail["approver_name"] = _approver_name(employee)
@@ -2460,7 +2469,14 @@ def send_my_attendance_request(name, expected_modified=None):
 @frappe.whitelist(methods=["POST"])
 def withdraw_my_attendance_request(name):
 	"""Remove one of the caller's own requests while it is still theirs to
-	remove -- Draft, with the manager, or sent back (P3-R17).
+	remove -- Draft, with the manager, sent back, or rejected (P3-R17,
+	P4-KTD3).
+
+	Rejected is on that list because a terminal row at docstatus 0 would
+	block the same dates for ever (HRMS refuses an overlap below docstatus
+	2, and a Workflow cannot reach 2 from 0). The portal words it "Remove",
+	not "Withdraw": there is nothing left to withdraw from, and the
+	approver's reason survives on the Deleted Document snapshot.
 
 	Once it has reached HR the honest path is HR, and `events
 	.attendance_request_on_trash` refuses the same states through every
@@ -2753,7 +2769,7 @@ def get_my_week(week_start=None):
 			# told their week was sent back without ever being told why. The
 			# e2e only asserted the "Sent back" label, so it never caught it.
 			"rejection_comment": _last_rejection_comment(doc.name)
-			if doc.workflow_state == "Rejected"
+			if doc.workflow_state == TIMESHEET_SENT_BACK
 			else None,
 			"rows": [
 				{
@@ -2816,7 +2832,9 @@ def get_my_timesheet_history(limit=12, start=0):
 		limit_page_length=limit,
 	)
 	reasons = _rejection_comments(
-		"Timesheet", [row.name for row in rows if row.workflow_state == "Rejected"], employee
+		"Timesheet",
+		[row.name for row in rows if row.workflow_state == TIMESHEET_SENT_BACK],
+		employee,
 	)
 
 	weeks = []
@@ -2981,7 +2999,7 @@ def _assert_week_is_still_sendable(current, expected_modified):
 	"""One send per week, per state. Everything here runs *after* the
 	employee row lock, so the second of two concurrent submits sees the
 	first one's result."""
-	if current and current.workflow_state not in ("Draft", "Rejected", None):
+	if current and current.workflow_state not in ("Draft", TIMESHEET_SENT_BACK, None):
 		frappe.throw(
 			_("This week is {0} and can't be sent again.").format(current.workflow_state)
 		)
@@ -3038,10 +3056,10 @@ def _write_my_week(employee, monday, sunday, rows, existing_name=None):
 
 	if existing_name:
 		doc = frappe.get_doc("Timesheet", existing_name)
-		if doc.workflow_state == "Rejected":
-			# Rejected is not an editable state for an Employee (the
+		if doc.workflow_state == TIMESHEET_SENT_BACK:
+			# Sent Back is not an editable state for an Employee (the
 			# workflow gives `allow_edit` to HR Manager), so a sent-back
-			# week has to travel Rejected -> Draft before it can be
+			# week has to travel Sent Back -> Draft before it can be
 			# written. The portal used to make the employee do that
 			# themselves with a button called "Edit and resubmit" that
 			# only performed the reopen -- it left them on a Draft with
@@ -3238,7 +3256,7 @@ def _decided_timesheets(employee, since):
 			"Timesheet",
 			filters={
 				"employee": ["!=", employee],
-				"workflow_state": ["in", ["Approved", "Rejected"]],
+				"workflow_state": ["in", ["Approved", TIMESHEET_SENT_BACK]],
 				"modified": [">=", str(since)],
 			},
 			fields=["name", "employee_name", "start_date", "end_date", "workflow_state", "modified"],
@@ -3268,7 +3286,10 @@ def _decided_attendance_requests(employee, since):
 			"Attendance Request",
 			filters={
 				"employee": ["!=", employee],
-				"workflow_state": ["in", [REQUEST_PENDING_HR, REQUEST_APPROVED, REQUEST_REJECTED]],
+				"workflow_state": [
+					"in",
+					[REQUEST_PENDING_HR, REQUEST_APPROVED, REQUEST_SENT_BACK, REQUEST_REJECTED],
+				],
 				"modified": [">=", str(since)],
 			},
 			fields=["name", "employee_name", "from_date", "to_date", "workflow_state", "modified"],
@@ -3581,13 +3602,21 @@ def act_on_approval(
 	}
 
 
+# P4-KTD1: the portal's "Reject" has always meant *send back* -- the word
+# "Rejected" was banned from the screen on purpose (P2-R5) -- and the workflow
+# action that carries that meaning is now called Send Back. One map so the
+# portal's word and the fixture's word cannot drift. P4-U3 replaces the action
+# set with the four outcomes and this map goes with it.
+_WORKFLOW_ACTIONS = {"Reject": "Send Back"}
+
+
 def _act_through_workflow(doc, action):
 	"""Timesheet and Attendance Request both move through their own Workflow,
 	whose transition condition and role are the real check; this runs the
 	same transition the Desk actions run."""
 	from frappe.model.workflow import apply_workflow
 
-	apply_workflow(doc, action)
+	apply_workflow(doc, _WORKFLOW_ACTIONS.get(action, action))
 
 
 def _may_act_on_leave(doc, user):

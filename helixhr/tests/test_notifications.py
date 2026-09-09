@@ -120,7 +120,7 @@ class TestNotifications(IntegrationTestCase):
 				"content": "Please add a task",
 			}
 		).insert(ignore_permissions=True)
-		apply_workflow({"doctype": "Timesheet", "name": doc.name}, "Reject")
+		apply_workflow({"doctype": "Timesheet", "name": doc.name}, "Send Back")
 
 		after = self._unread_count(EMPLOYEE_USER)
 		self.assertGreater(after, before)

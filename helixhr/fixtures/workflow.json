@@ -5,7 +5,7 @@
   "document_type": "Timesheet",
   "enable_action_confirmation": 0,
   "is_active": 1,
-  "modified": "2026-09-03 13:16:30.386722",
+  "modified": "2026-09-10 10:00:00.000000",
   "name": "Timesheet Approval",
   "override_status": 0,
   "send_email_alert": 0,
@@ -41,6 +41,20 @@
    {
     "allow_edit": "HR Manager",
     "avoid_status_override": 0,
+    "doc_status": "0",
+    "evaluate_as_expression": 0,
+    "is_optional_state": 0,
+    "message": null,
+    "next_action_email_template": null,
+    "send_email": 1,
+    "state": "Pending HR",
+    "update_field": null,
+    "update_value": null,
+    "workflow_builder_id": null
+   },
+   {
+    "allow_edit": "HR Manager",
+    "avoid_status_override": 0,
     "doc_status": "1",
     "evaluate_as_expression": 0,
     "is_optional_state": 0,
@@ -61,7 +75,7 @@
     "message": null,
     "next_action_email_template": null,
     "send_email": 1,
-    "state": "Rejected",
+    "state": "Sent Back",
     "update_field": null,
     "update_value": null,
     "workflow_builder_id": null
@@ -91,10 +105,32 @@
     "workflow_builder_id": null
    },
    {
+    "action": "Send Back",
+    "allow_self_approval": 0,
+    "allowed": "Employee",
+    "condition": "frappe.db.get_value(\"Employee\", doc.employee, \"reports_to\") == frappe.db.get_value(\"Employee\", {\"user_id\": frappe.session.user}, \"name\")",
+    "next_state": "Sent Back",
+    "send_email_to_creator": 0,
+    "state": "Pending Approval",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Send to HR",
+    "allow_self_approval": 0,
+    "allowed": "Employee",
+    "condition": "frappe.db.get_value(\"Employee\", doc.employee, \"reports_to\") == frappe.db.get_value(\"Employee\", {\"user_id\": frappe.session.user}, \"name\")",
+    "next_state": "Pending HR",
+    "send_email_to_creator": 0,
+    "state": "Pending Approval",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
     "action": "Approve",
     "allow_self_approval": 1,
     "allowed": "HR Manager",
-    "condition": null,
+    "condition": "frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user",
     "next_state": "Approved",
     "send_email_to_creator": 0,
     "state": "Pending Approval",
@@ -102,24 +138,35 @@
     "workflow_builder_id": null
    },
    {
-    "action": "Reject",
-    "allow_self_approval": 0,
-    "allowed": "Employee",
-    "condition": "frappe.db.get_value(\"Employee\", doc.employee, \"reports_to\") == frappe.db.get_value(\"Employee\", {\"user_id\": frappe.session.user}, \"name\")",
-    "next_state": "Rejected",
+    "action": "Send Back",
+    "allow_self_approval": 1,
+    "allowed": "HR Manager",
+    "condition": "frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user",
+    "next_state": "Sent Back",
     "send_email_to_creator": 0,
     "state": "Pending Approval",
     "transition_tasks": null,
     "workflow_builder_id": null
    },
    {
-    "action": "Reject",
+    "action": "Approve",
     "allow_self_approval": 1,
     "allowed": "HR Manager",
-    "condition": null,
-    "next_state": "Rejected",
+    "condition": "frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user",
+    "next_state": "Approved",
     "send_email_to_creator": 0,
-    "state": "Pending Approval",
+    "state": "Pending HR",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Send Back",
+    "allow_self_approval": 1,
+    "allowed": "HR Manager",
+    "condition": "frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user",
+    "next_state": "Sent Back",
+    "send_email_to_creator": 0,
+    "state": "Pending HR",
     "transition_tasks": null,
     "workflow_builder_id": null
    },
@@ -130,7 +177,7 @@
     "condition": null,
     "next_state": "Draft",
     "send_email_to_creator": 0,
-    "state": "Rejected",
+    "state": "Sent Back",
     "transition_tasks": null,
     "workflow_builder_id": null
    }
@@ -145,7 +192,7 @@
   "document_type": "Attendance Request",
   "enable_action_confirmation": 0,
   "is_active": 1,
-  "modified": "2026-09-09 10:00:00.000000",
+  "modified": "2026-09-10 10:00:00.000000",
   "name": "Attendance Request Approval",
   "override_status": 0,
   "send_email_alert": 0,
@@ -215,6 +262,20 @@
     "message": null,
     "next_action_email_template": null,
     "send_email": 1,
+    "state": "Sent Back",
+    "update_field": null,
+    "update_value": null,
+    "workflow_builder_id": null
+   },
+   {
+    "allow_edit": "HR Manager",
+    "avoid_status_override": 0,
+    "doc_status": "0",
+    "evaluate_as_expression": 0,
+    "is_optional_state": 0,
+    "message": null,
+    "next_action_email_template": null,
+    "send_email": 1,
     "state": "Rejected",
     "update_field": null,
     "update_value": null,
@@ -235,10 +296,32 @@
    },
    {
     "action": "Approve",
+    "allow_self_approval": 1,
+    "allowed": "HR Manager",
+    "condition": "frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user",
+    "next_state": "Approved",
+    "send_email_to_creator": 0,
+    "state": "Draft",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Approve",
     "allow_self_approval": 0,
     "allowed": "Employee",
     "condition": "(frappe.db.get_value(\"Employee\", doc.employee, \"reports_to\") or \"\") == frappe.db.get_value(\"Employee\", {\"user_id\": frappe.session.user, \"status\": \"Active\"}, \"name\")",
-    "next_state": "Pending HR",
+    "next_state": "Approved",
+    "send_email_to_creator": 0,
+    "state": "Pending Manager",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Send Back",
+    "allow_self_approval": 0,
+    "allowed": "Employee",
+    "condition": "(frappe.db.get_value(\"Employee\", doc.employee, \"reports_to\") or \"\") == frappe.db.get_value(\"Employee\", {\"user_id\": frappe.session.user, \"status\": \"Active\"}, \"name\")",
+    "next_state": "Sent Back",
     "send_email_to_creator": 0,
     "state": "Pending Manager",
     "transition_tasks": null,
@@ -256,11 +339,33 @@
     "workflow_builder_id": null
    },
    {
+    "action": "Send to HR",
+    "allow_self_approval": 0,
+    "allowed": "Employee",
+    "condition": "(frappe.db.get_value(\"Employee\", doc.employee, \"reports_to\") or \"\") == frappe.db.get_value(\"Employee\", {\"user_id\": frappe.session.user, \"status\": \"Active\"}, \"name\")",
+    "next_state": "Pending HR",
+    "send_email_to_creator": 0,
+    "state": "Pending Manager",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
     "action": "Approve",
     "allow_self_approval": 1,
     "allowed": "HR Manager",
     "condition": "frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user",
-    "next_state": "Pending HR",
+    "next_state": "Approved",
+    "send_email_to_creator": 0,
+    "state": "Pending Manager",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Send Back",
+    "allow_self_approval": 1,
+    "allowed": "HR Manager",
+    "condition": "frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user",
+    "next_state": "Sent Back",
     "send_email_to_creator": 0,
     "state": "Pending Manager",
     "transition_tasks": null,
@@ -289,6 +394,17 @@
     "workflow_builder_id": null
    },
    {
+    "action": "Send Back",
+    "allow_self_approval": 1,
+    "allowed": "HR Manager",
+    "condition": "frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user",
+    "next_state": "Sent Back",
+    "send_email_to_creator": 0,
+    "state": "Pending HR",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
     "action": "Reject",
     "allow_self_approval": 1,
     "allowed": "HR Manager",
@@ -300,24 +416,13 @@
     "workflow_builder_id": null
    },
    {
-    "action": "Approve",
-    "allow_self_approval": 1,
-    "allowed": "HR Manager",
-    "condition": "frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user",
-    "next_state": "Pending HR",
-    "send_email_to_creator": 0,
-    "state": "Draft",
-    "transition_tasks": null,
-    "workflow_builder_id": null
-   },
-   {
     "action": "Edit",
     "allow_self_approval": 1,
     "allowed": "Employee",
     "condition": null,
     "next_state": "Draft",
     "send_email_to_creator": 0,
-    "state": "Rejected",
+    "state": "Sent Back",
     "transition_tasks": null,
     "workflow_builder_id": null
    }

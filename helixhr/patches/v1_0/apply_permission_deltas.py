@@ -101,7 +101,16 @@ DELTAS = {
 	),
 	# R17: the portal sends a week for approval through the Timesheet Approval
 	# workflow, which submits the document as the employee.
-	"Timesheet": ((("Employee", 0, 0), {"submit": 1}),),
+	# P4-KTD7a: `helixhr_decision_reason` sits at permlevel 1 (the same lock
+	# the Employee fields above use), and standard Timesheet DocPerms only
+	# cover permlevel 0 -- so without this row nobody, HR included, can read
+	# or write the approver's reason. Role Employee gets nothing at level 1:
+	# an approver writes the reason through `act_on_approval`, and the
+	# employee only ever reads it through a portal method.
+	"Timesheet": (
+		(("Employee", 0, 0), {"submit": 1}),
+		(("HR Manager", 1, 0), {"read": 1, "write": 1}),
+	),
 	# P3-KTD13 / P3-R7a: HRMS ships role Employee with create, write and
 	# delete on Employee Checkin, so an employee could insert a backdated
 	# punch with any coordinates and edit or delete punches until the nightly
@@ -113,7 +122,11 @@ DELTAS = {
 	# `submit` on their own Attendance Request and skip both approval steps.
 	# The DocShare to the manager is written by `events._reconcile_share`
 	# with `ignore_permissions`, so it does not need this right.
-	"Attendance Request": ((("Employee", 0, 0), {"share": 0}),),
+	# P4-KTD7a: the same permlevel-1 row as Timesheet's, for the same field.
+	"Attendance Request": (
+		(("Employee", 0, 0), {"share": 0}),
+		(("HR Manager", 1, 0), {"read": 1, "write": 1}),
+	),
 }
 
 

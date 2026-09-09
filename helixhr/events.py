@@ -14,9 +14,22 @@ from helixhr.utils import UPLOAD_POLICY, get_manager_user, upload_extension, val
 
 
 # The one workflow state that carries a share. Everything else -- Draft,
-# Approved, Rejected, Cancelled -- has nothing for an approver to do, so the
-# access goes away with the decision (P2-U7 scenario 8).
+# Approved, Sent Back, Pending HR, Cancelled -- has nothing for *this*
+# approver to do, so the access goes away with the decision (P2-U7 scenario
+# 8). Pending HR is deliberately shareless: HR's Approve there rides HR
+# Manager's native submit on Timesheet (P4-U1).
 PENDING_STATE = "Pending Approval"
+
+# P4-KTD1. The recoverable outcome on the Timesheet workflow, renamed from
+# "Rejected" -- a week is never finally rejected (P4-KTD2), so this is the
+# only state the `Edit` transition hangs off.
+TIMESHEET_SENT_BACK = "Sent Back"
+
+# P4-KTD7a. Where an approver's reason lives, on both workflow kinds. A
+# Comment is still added for the timeline, but a Comment dies with the
+# document and a rejected attendance request is removable (P4-KTD3), so the
+# reason the employee reads is a field of the record itself.
+DECISION_REASON_FIELD = "helixhr_decision_reason"
 
 
 def _approver_user(employee):
@@ -125,7 +138,10 @@ def _reconcile_pending_documents(employee):
 		filters={"employee": employee, "workflow_state": REQUEST_PENDING_MANAGER, "docstatus": 0},
 		pluck="name",
 	):
-		_reconcile_share("Attendance Request", name, employee, manager_user)
+		# submit=1 for the same reason as the on_update grant (P4-KTD5): the
+		# new manager's Approve is the submit, so a reassignment that moved a
+		# read/write-only share would hand them a request they cannot decide.
+		_reconcile_share("Attendance Request", name, employee, manager_user, submit=1)
 
 
 def timesheet_before_submit(doc, method=None):
@@ -137,6 +153,18 @@ def timesheet_before_submit(doc, method=None):
 	stops the employee approving their own via the workflow path; this
 	hook is what stops the same self-approval attempt made directly."""
 	user = frappe.session.user
+	# P4-R8: nobody approves their own week, on any route. The workflow's
+	# per-transition `allow_self_approval=0` and `user_id != session.user`
+	# condition cover `apply_workflow`; `frappe.client.submit` consults no
+	# transition at all, and an HR Manager reaches it through their own
+	# native submit on Timesheet -- which is the bug this closes.
+	# Administrator is exempt: it is the migration and backfill account, not
+	# a person with weeks of their own.
+	if user != "Administrator" and frappe.db.get_value("Employee", doc.employee, "user_id") == user:
+		frappe.throw(
+			_("You can't approve your own timesheet. Ask your manager or another HR Manager."),
+			frappe.PermissionError,
+		)
 	if _is_hr(user) or user == get_manager_user(doc.employee):
 		return
 
@@ -175,8 +203,9 @@ def _reconcile_share(doctype, name, employee, keep_user, submit=0):
 	this app granted, it never creates any.
 
 	Generalised from the Timesheet-only version in P3-U5: an Attendance
-	Request needs the same reconcile with `submit=0`, because its manager
-	step is a plain save and the submit belongs to HR alone (P3-KTD8).
+	Request needs the same reconcile, and since P4-KTD5 with the same
+	`submit=1` -- its manager step is the submit now that approval is one
+	step.
 	"""
 	employee_user = frappe.db.get_value("Employee", employee, "user_id")
 	for share in frappe.get_all(
@@ -352,11 +381,27 @@ REQUEST_DRAFT = "Draft"
 REQUEST_PENDING_MANAGER = "Pending Manager"
 REQUEST_PENDING_HR = "Pending HR"
 REQUEST_APPROVED = "Approved"
+# P4-KTD1: two states, two meanings. Sent Back is recoverable (`Edit` returns
+# it to Draft); Rejected is a final no with no transition out of it.
+REQUEST_SENT_BACK = "Sent Back"
 REQUEST_REJECTED = "Rejected"
 
 # The states an employee may still take their own request out of -- the same
 # list the portal's withdraw offers, applied to every route (P3-R17a).
-REQUEST_WITHDRAWABLE = (REQUEST_DRAFT, REQUEST_PENDING_MANAGER, REQUEST_REJECTED)
+#
+# Rejected is on the list for a different reason than the rest (P4-KTD3): a
+# terminal row at docstatus 0 would block the same dates for ever, because
+# HRMS's `validate_request_overlap` refuses a new request over any existing
+# one below docstatus 2 and a Workflow cannot move a document from 0 to 2. So
+# *terminal* means terminal for the row, not for the dates -- the employee
+# removes it, and the approver's reason survives in the Deleted Document
+# snapshot because it is a field of the record (P4-KTD7a).
+REQUEST_WITHDRAWABLE = (
+	REQUEST_DRAFT,
+	REQUEST_PENDING_MANAGER,
+	REQUEST_SENT_BACK,
+	REQUEST_REJECTED,
+)
 
 # Outside Draft the state is the only thing that moves. `shift` is the one
 # exception, and only while it is still empty: HRMS's `validate_shifts` fills
@@ -365,12 +410,19 @@ REQUEST_WITHDRAWABLE = (REQUEST_DRAFT, REQUEST_PENDING_MANAGER, REQUEST_REJECTED
 # (or their manager, through the pending-state DocShare) PUT any Shift Type
 # onto a pending request, and HR's confirmation then wrote Attendance against
 # a shift the person was never assigned -- HRMS checks neither.
-REQUEST_MUTABLE_FIELDS = {"workflow_state"}
+#
+# P4-KTD7a adds `helixhr_decision_reason`: the approver writes their reason on
+# the same request they are about to move, so the freeze has to let it
+# through. It is not a hole -- the field is at permlevel 1, so a save by
+# anyone without HR's level-1 grant leaves it as it was whatever this rule
+# says.
+REQUEST_MUTABLE_FIELDS = {"workflow_state", DECISION_REASON_FIELD}
 
-# A Desk rejection carries no comment of its own, and "sent back" with no
-# reason at all is worse than a sentence naming who to ask (P3-KTD9). State
-# neutral on purpose: either step can send a request back, so naming HR would
-# be wrong for a manager's rejection.
+# A decision taken in Desk carries no reason of its own -- only
+# `act_on_approval` requires one -- and "sent back" with nothing at all is
+# worse than a sentence naming who to ask (P3-KTD9). State neutral on
+# purpose: either step, and either of the two negative outcomes, can arrive
+# without a reason, so naming HR would be wrong for a manager's decision.
 ATTENDANCE_REQUEST_SENT_BACK_FALLBACK = (
 	"No reason was given, ask your manager or HR for details"
 )
@@ -407,8 +459,10 @@ def attendance_request_subject(state, from_date, to_date, manager_name=None):
 		return f"Your attendance request for {dates} is with HR"
 	if state == REQUEST_APPROVED:
 		return f"Your attendance request for {dates} counts"
-	if state == REQUEST_REJECTED:
+	if state == REQUEST_SENT_BACK:
 		return f"Your attendance request for {dates} was sent back"
+	if state == REQUEST_REJECTED:
+		return f"Your attendance request for {dates} was rejected"
 	return f"Your attendance request for {dates} changed"
 
 
@@ -473,9 +527,22 @@ def attendance_request_on_update(doc, method=None):
 	fails on read before the transition is even considered. It exists in
 	Pending Manager and nowhere else -- every other state has nothing for
 	an approver to do (P3-KTD8).
+
+	P4-KTD5: the share now carries `submit=1`. Single-step approval means the
+	manager's Approve *is* the docstatus 0 -> 1 transition, the same shape a
+	timesheet approval has always had, and role Employee has no `submit` on
+	Attendance Request of its own -- the share is the whole grant, and it
+	exists only while the request is Pending Manager and only for the Active
+	reports-to user.
 	"""
 	if doc.workflow_state == REQUEST_PENDING_MANAGER and doc.docstatus == 0:
-		_reconcile_share("Attendance Request", doc.name, doc.employee, _approver_user(doc.employee))
+		_reconcile_share(
+			"Attendance Request",
+			doc.name,
+			doc.employee,
+			_approver_user(doc.employee),
+			submit=1,
+		)
 	else:
 		_reconcile_share("Attendance Request", doc.name, doc.employee, None)
 
@@ -493,6 +560,7 @@ def _notify_attendance_request(doc):
 		REQUEST_PENDING_MANAGER,
 		REQUEST_PENDING_HR,
 		REQUEST_APPROVED,
+		REQUEST_SENT_BACK,
 		REQUEST_REJECTED,
 	):
 		return
@@ -509,8 +577,14 @@ def _notify_attendance_request(doc):
 		manager_name = frappe.db.get_value("Employee", reports_to, "first_name") if reports_to else None
 
 	description = None
-	if doc.workflow_state == REQUEST_REJECTED:
-		description = _last_request_comment(doc.name) or _(ATTENDANCE_REQUEST_SENT_BACK_FALLBACK)
+	if doc.workflow_state in (REQUEST_SENT_BACK, REQUEST_REJECTED):
+		# P4-KTD7a: the field on the record, not the newest comment. The
+		# comment scrape it replaces had to be scoped to the acting user to
+		# avoid quoting the employee's own last remark back at them, and it
+		# died with a removed request (P4-KTD3); a field does neither.
+		description = (doc.get(DECISION_REASON_FIELD) or "").strip() or _(
+			ATTENDANCE_REQUEST_SENT_BACK_FALLBACK
+		)
 
 	frappe.get_doc(
 		{
@@ -528,62 +602,57 @@ def _notify_attendance_request(doc):
 	).insert(ignore_permissions=True)
 
 
-def _last_request_comment(name):
-	"""The reason whoever sent it back typed, as one plain line.
-
-	Scoped to the acting user's own comments: "the newest comment on the
-	document" is whatever the *employee* last typed on their own sent-back
-	request, which is not a reason it came back (P3-KTD9).
-	"""
-	content = frappe.db.get_value(
-		"Comment",
-		{
-			"reference_doctype": "Attendance Request",
-			"reference_name": name,
-			"comment_type": "Comment",
-			"owner": frappe.session.user,
-		},
-		"content",
-		order_by="creation desc",
-	)
-	return frappe.utils.strip_html(content).strip() if content else None
-
-
 def attendance_request_before_submit(doc, method=None):
-	"""The real submit -- the one that writes Attendance -- belongs to HR,
-	from Pending HR, and nowhere else (P3-R15, P3-R17a).
+	"""Who may perform the real submit -- the one HRMS turns into Attendance
+	rows -- and from where (P3-R15, P3-R17a, P4-KTD5, P4-R6, P4-R8).
+
+	Single-step approval (P4-R6) makes the *manager's* Approve this submit,
+	so the table has two rows rather than one:
+
+	  the reports-to approver   from a stored Pending Manager
+	  `_is_hr`                  from Pending Manager, Pending HR or Draft
+
+	Anyone else is refused. HR keeps Pending Manager and Draft because HR can
+	decide anything -- a request handed over, and one HR raised itself for
+	somebody (P4-KTD1's Draft -> Approved edge). HR User is excluded on
+	purpose; deciders need HR Manager.
 
 	`get_doc_before_save()` rather than `doc.workflow_state`: by the time
 	this runs, `apply_workflow` has already set the in-memory field to
 	Approved, so the *stored* state is the only evidence of where the
 	request actually came from. That is what stops a raw
-	`frappe.client.submit` jumping Pending Manager straight to Approved.
-	HR User is excluded on purpose; confirmers need HR Manager.
+	`frappe.client.submit` jumping Sent Back, Rejected or Draft straight to
+	Approved.
 	"""
 	before = doc.get_doc_before_save()
 	stored_state = before.get("workflow_state") if before else None
+	user = frappe.session.user
 
-	if not _is_hr():
+	# P3-KTD6 / P4-R8: nobody decides their own request, on either branch.
+	# It used to sit inside the HR branch alone, which was enough while only
+	# HR could submit; a `reports_to` pointing at oneself now reaches the
+	# manager branch with only the `_approver_user` equality in the way.
+	# Administrator is exempt: it is the migration and backfill account, not
+	# a person with requests of their own.
+	if user != "Administrator" and frappe.db.get_value("Employee", doc.employee, "user_id") == user:
 		frappe.throw(
-			_("Only HR can confirm an attendance request."),
+			_("You can't decide your own attendance request. Ask your manager or HR."),
 			frappe.PermissionError,
 		)
-	# P3-KTD6: an HR Manager never approves their own request at either step.
-	# The workflow fixture's `user_id != session.user` condition covers the
-	# transition route only -- `frappe.client.submit` never consults a
-	# transition at all, and it is the route HR's legitimate final step uses,
-	# so the rule has to be here too. Administrator is exempt: it is the
-	# migration and backfill account, not a person with requests of their own.
-	if frappe.session.user != "Administrator" and frappe.db.get_value(
-		"Employee", doc.employee, "user_id"
-	) == frappe.session.user:
+
+	if _is_hr():
+		allowed_from = (REQUEST_DRAFT, REQUEST_PENDING_MANAGER, REQUEST_PENDING_HR)
+	elif user == _approver_user(doc.employee):
+		allowed_from = (REQUEST_PENDING_MANAGER,)
+	else:
 		frappe.throw(
-			_("You can't confirm your own attendance request. Ask another HR Manager."),
+			_("Only {0}'s manager or HR can approve this attendance request.").format(doc.employee),
 			frappe.PermissionError,
 		)
-	if stored_state != REQUEST_PENDING_HR:
+
+	if (stored_state or REQUEST_DRAFT) not in allowed_from:
 		frappe.throw(
-			_("This request has to reach HR before it can be confirmed."),
+			_("This request isn't waiting for a decision, so it can't be approved."),
 			frappe.PermissionError,
 		)
 

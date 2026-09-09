@@ -1,6 +1,12 @@
-"""P3-U5: the two-step attendance-request approval -- fixture, guards,
-shares, notifications and the employee-facing API (P3-R12 to P3-R19,
-P3-AE7 to P3-AE10, P3-AE8a, P3-AE8b, P3-AE14).
+"""The attendance-request approval -- fixture, guards, shares, notifications
+and the employee-facing API (P3-R12 to P3-R19, P3-AE7 to P3-AE10, P3-AE8a,
+P3-AE8b, P3-AE14; P4-R2 to R6, R8).
+
+P4-U1 collapsed the two-step approval to one: the manager's Approve is now the
+submit that writes Attendance, and HR decides only what a manager handed over
+(Send to HR) or what HR raised itself. The state that used to be called
+Rejected and *meant* sent back is now Sent Back; Rejected is a final no the
+employee may only remove (P4-KTD1, P4-KTD3).
 
 Every test picks its own past-year date window (hashed from the test id, and
 never nearer than 450 days back, which keeps clear of test_fixtures' own
@@ -29,6 +35,7 @@ from helixhr.api import (
 )
 from helixhr.events import (
 	ATTENDANCE_REQUEST_SENT_BACK_FALLBACK,
+	DECISION_REASON_FIELD,
 	attendance_request_subject,
 )
 from helixhr.tests.utils import (
@@ -133,10 +140,22 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 		return created["name"]
 
 	def _pending_hr(self, **kwargs):
+		"""P4-R5: the only way a request reaches HR is a manager handing it
+		over. The manager's Approve is the final decision now."""
 		name = self._pending_manager(**kwargs)
 		frappe.set_user(MANAGER_USER)
-		apply_workflow(_ref(name), "Approve")
+		apply_workflow(_ref(name), "Send to HR")
 		return name
+
+	def _reason(self, name, text):
+		"""What `act_on_approval` writes before it moves the record (P4-R9):
+		the approver's reason on the record itself, not a comment (P4-KTD7a).
+		Set as Administrator because the field sits at permlevel 1.
+		"""
+		previous = frappe.session.user
+		frappe.set_user("Administrator")
+		frappe.db.set_value(DOCTYPE, name, DECISION_REASON_FIELD, text, update_modified=False)
+		frappe.set_user(previous)
 
 	def _hr_request(self, offset=0):
 		"""A request HR raised for the employee in Desk: `owner` is the HR
@@ -206,9 +225,11 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 		# P3-KTD6: the state order is the backfill order and must never move.
 		self.assertEqual(
 			[row.state for row in workflow.states],
-			["Draft", "Pending Manager", "Pending HR", "Approved", "Rejected"],
+			["Draft", "Pending Manager", "Pending HR", "Approved", "Sent Back", "Rejected"],
 		)
-		self.assertEqual([row.doc_status for row in workflow.states], ["0", "0", "0", "1", "0"])
+		self.assertEqual(
+			[row.doc_status for row in workflow.states], ["0", "0", "0", "1", "0", "0"]
+		)
 
 	# --- scenario 1 / AE7: the lifecycle ------------------------------------
 
@@ -223,21 +244,20 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 		self.assertEqual(sent["workflow_state"], "Pending Manager")
 		shares = self._shares(name)
 		self.assertEqual([share.user for share in shares], [MANAGER_USER])
-		self.assertEqual((shares[0].write, shares[0].submit), (1, 0), "the manager step is a save")
+		self.assertEqual(
+			(shares[0].write, shares[0].submit),
+			(1, 1),
+			"P4-KTD5: the manager's Approve is the submit, so the share carries it",
+		)
 		self.assertEqual(len(self._logs(name)), logs_before, "nobody tells you what you just sent")
 
+		# One step: the manager's Approve submits the request and writes the
+		# Attendance rows, under a role-Employee session (P4-R6, P4-KTD5).
 		frappe.set_user(MANAGER_USER)
 		apply_workflow(_ref(name), "Approve")
-		self.assertEqual(self._state(name).workflow_state, "Pending HR")
 		self.assertEqual(self._shares(name), [], "the share ends with the manager's decision")
-		self.assertEqual(self._attendance_rows(name), [], "no Attendance before HR confirms")
 		logs = self._logs(name)
 		self.assertEqual(len(logs), logs_before + 1)
-		self.assertEqual(logs[-1].subject, attendance_request_subject("Pending HR", self._day(), self._day(1)))
-		self.assertIn("is with HR", logs[-1].subject)
-
-		frappe.set_user(self.hr_user)
-		apply_workflow(_ref(name), "Approve")
 		state = self._state(name)
 		self.assertEqual((state.workflow_state, state.docstatus), ("Approved", 1))
 		rows = self._attendance_rows(name)
@@ -245,6 +265,10 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 		self.assertEqual({row.status for row in rows}, {"Work From Home"})
 		self.assertEqual({row.docstatus for row in rows}, {1})
 		self.assertIn("counts", self._logs(name)[-1].subject)
+		self.assertEqual(
+			self._logs(name)[-1].subject,
+			attendance_request_subject("Approved", self._day(), self._day(1)),
+		)
 
 		frappe.set_user(EMPLOYEE_USER)
 		listed = get_my_attendance_requests()
@@ -420,15 +444,19 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			frappe.share.add(DOCTYPE, name, OTHER_MANAGER_USER, write=1)
 
-		# A raw submit from Pending Manager is refused even for HR.
-		frappe.set_user(self.hr_user)
+		# P4-U1: HR *may* now submit from Pending Manager (HR can decide
+		# anything), but a colleague who is neither the approver nor HR
+		# cannot -- the branch `attendance_request_before_submit` refuses.
+		frappe.set_user("Administrator")
+		make_test_user(OTHER_MANAGER_USER, self.company)
+		frappe.set_user(OTHER_MANAGER_USER)
 		with self.assertRaises(frappe.PermissionError):
 			client_submit(frappe.get_doc(DOCTYPE, name).as_dict())
 		self.assertEqual(self._state(name).docstatus, 0)
 		self.assertEqual(self._state(name).workflow_state, "Pending Manager")
 
 		frappe.set_user(MANAGER_USER)
-		apply_workflow(_ref(name), "Approve")
+		apply_workflow(_ref(name), "Send to HR")
 
 		frappe.set_user(EMPLOYEE_USER)
 		with self.assertRaises((frappe.ValidationError, frappe.PermissionError)):
@@ -437,7 +465,8 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 			client_delete(DOCTYPE, name)
 		self.assertTrue(frappe.db.exists(DOCTYPE, name))
 
-		# HR's own raw submit from Pending HR is the legitimate final step.
+		# HR's own raw submit from Pending HR is the legitimate step for a
+		# request a manager handed over.
 		frappe.set_user(self.hr_user)
 		client_submit(frappe.get_doc(DOCTYPE, name).as_dict())
 		state = self._state(name)
@@ -553,15 +582,16 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 
 	def test_sent_back_with_a_reason(self):
 		name = self._pending_manager()
+		self._reason(name, "Log the hours in the timesheet instead")
 		frappe.set_user(MANAGER_USER)
 		doc = frappe.get_doc(DOCTYPE, name)
 		doc.add_comment("Comment", "Log the hours in the timesheet instead")
-		apply_workflow(_ref(name), "Reject")
+		apply_workflow(_ref(name), "Send Back")
 
-		self.assertEqual(self._state(name).workflow_state, "Rejected")
+		self.assertEqual(self._state(name).workflow_state, "Sent Back")
 		self.assertEqual(self._shares(name), [])
 		log = self._logs(name)[-1]
-		self.assertEqual(log.subject, attendance_request_subject("Rejected", self._day(), self._day()))
+		self.assertEqual(log.subject, attendance_request_subject("Sent Back", self._day(), self._day()))
 		self.assertIn("was sent back", log.subject)
 		self.assertIn("Log the hours in the timesheet instead", log.description)
 
@@ -589,7 +619,7 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 		frappe.set_user(MANAGER_USER)
 		doc = frappe.get_doc(DOCTYPE, name)
 		doc.add_comment("Comment", "Log the hours in the timesheet instead")
-		apply_workflow(_ref(name), "Reject")
+		apply_workflow(_ref(name), "Send Back")
 
 		frappe.set_user(EMPLOYEE_USER)
 		frappe.get_doc(DOCTYPE, name).add_comment("Comment", "Will do, sorry")
@@ -614,7 +644,7 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 		frappe.get_doc(DOCTYPE, name).add_comment("Comment", "Any news?")
 
 		frappe.set_user(MANAGER_USER)
-		apply_workflow(_ref(name), "Reject")
+		apply_workflow(_ref(name), "Send Back")
 
 		log = self._logs(name)[-1]
 		self.assertIn("was sent back", log.subject)
@@ -627,15 +657,11 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 		self.assertEqual(frappe.db.get_value(DOCTYPE, name, "owner"), self.hr_user)
 
 		frappe.set_user(self.hr_user)
-		apply_workflow(_ref(name), "Approve")  # Draft -> Pending HR (P3-KTD6)
-		self.assertEqual(self._state(name).workflow_state, "Pending HR")
-		self.assertIn("is with HR", self._logs(name)[-1].subject)
+		apply_workflow(_ref(name), "Approve")  # Draft -> Approved (P4-KTD1)
+		state = self._state(name)
+		self.assertEqual((state.workflow_state, state.docstatus), ("Approved", 1))
+		self.assertIn("counts", self._logs(name)[-1].subject)
 		self.assertEqual(self._logs(name, for_user=self.hr_user), [])
-
-		apply_workflow(_ref(name), "Reject")  # Desk rejection without a comment
-		log = self._logs(name)[-1]
-		self.assertIn("was sent back", log.subject)
-		self.assertIn(ATTENDANCE_REQUEST_SENT_BACK_FALLBACK, log.description)
 
 	def test_waiting_list_names_the_owner_of_the_step(self):
 		name = self._pending_manager()
@@ -649,7 +675,7 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 		self.assertEqual(item["owner"], "manager")
 
 		frappe.set_user(MANAGER_USER)
-		apply_workflow(_ref(name), "Approve")
+		apply_workflow(_ref(name), "Send to HR")
 		frappe.set_user(EMPLOYEE_USER)
 		waiting = get_dashboard()["needs_you"]["waiting"]
 		item = next(
@@ -658,6 +684,164 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 			if i["kind"] == "attendance_request_waiting" and i["to"]["params"]["name"] == name
 		)
 		self.assertEqual(item["owner"], "hr")
+
+	# --- P4-U1: the four outcomes, single step -------------------------------
+
+	def test_send_to_hr_hands_the_request_over(self):
+		"""P4-R5. Send to HR is a routing act, not a decision: the request
+		leaves the manager's hands (and their share goes with it) and only HR
+		can move it afterwards."""
+		name = self._pending_manager()
+		frappe.set_user(MANAGER_USER)
+		apply_workflow(_ref(name), "Send to HR")
+
+		self.assertEqual(self._state(name).workflow_state, "Pending HR")
+		self.assertEqual(self._shares(name), [], "the manager's share ends with the hand-over")
+		self.assertIn("is with HR", self._logs(name)[-1].subject)
+
+		frappe.set_user(MANAGER_USER)
+		with self.assertRaises((frappe.PermissionError, WorkflowTransitionError)):
+			apply_workflow(_ref(name), "Approve")
+
+		frappe.set_user(self.hr_user)
+		apply_workflow(_ref(name), "Approve")
+		state = self._state(name)
+		self.assertEqual((state.workflow_state, state.docstatus), ("Approved", 1))
+		self.assertEqual(len(self._attendance_rows(name)), 1)
+
+	def test_reject_is_final_and_its_reason_outlives_the_row(self):
+		"""P4-R4, P4-KTD3. Rejected has no way back to Draft, but the row is
+		removable so the dates are not blocked for ever -- and the reason
+		travels into the Deleted Document snapshot because it is a field of
+		the record, not a comment."""
+		name = self._pending_manager()
+		self._reason(name, "Not on the WFH roster that week")
+		frappe.set_user(MANAGER_USER)
+		apply_workflow(_ref(name), "Reject")
+
+		self.assertEqual(self._state(name).workflow_state, "Rejected")
+		self.assertEqual(self._shares(name), [])
+		log = self._logs(name)[-1]
+		self.assertEqual(log.subject, attendance_request_subject("Rejected", self._day(), self._day()))
+		self.assertIn("was rejected", log.subject)
+		self.assertIn("Not on the WFH roster that week", log.description)
+
+		# No Edit transition out of Rejected, for anybody.
+		for user in (EMPLOYEE_USER, MANAGER_USER, self.hr_user):
+			frappe.set_user(user)
+			with self.assertRaises((frappe.PermissionError, WorkflowTransitionError), msg=user):
+				apply_workflow(_ref(name), "Edit")
+		self.assertEqual(self._state(name).workflow_state, "Rejected")
+
+		frappe.set_user(EMPLOYEE_USER)
+		self.assertEqual(withdraw_my_attendance_request(name)["withdrawn"], True)
+		self.assertFalse(frappe.db.exists(DOCTYPE, name))
+
+		frappe.set_user("Administrator")
+		snapshot = frappe.db.get_value(
+			"Deleted Document", {"deleted_doctype": DOCTYPE, "deleted_name": name}, "data"
+		)
+		self.assertIn("Not on the WFH roster that week", snapshot or "")
+
+		# ...and HRMS accepts a new request over the same dates.
+		replacement = self._create()
+		self.assertEqual(replacement["workflow_state"], "Draft")
+
+	def test_nobody_decides_their_own_request_on_any_route(self):
+		"""P4-R8. A `reports_to` pointing at oneself reaches the manager
+		branch of `attendance_request_before_submit`, which is why the
+		self-request refusal runs before the branch table -- and why the
+		transitions carry `allow_self_approval=0`."""
+		from frappe.client import submit as client_submit
+
+		name = self._pending_manager()
+		frappe.set_user("Administrator")
+		frappe.db.set_value("Employee", self.employee_name, "reports_to", self.employee_name)
+		try:
+			frappe.set_user(EMPLOYEE_USER)
+			# Frappe's own `allow_self_approval=0` check throws a plain
+			# ValidationError ("Self approval is not allowed") before the
+			# condition is even evaluated.
+			with self.assertRaises(
+				(frappe.ValidationError, frappe.PermissionError, WorkflowTransitionError)
+			):
+				apply_workflow(_ref(name), "Approve")
+			with self.assertRaises(frappe.PermissionError):
+				client_submit(frappe.get_doc(DOCTYPE, name).as_dict())
+			self.assertEqual(self._state(name).docstatus, 0)
+		finally:
+			frappe.set_user("Administrator")
+			frappe.db.set_value("Employee", self.employee_name, "reports_to", self.manager_name)
+
+	def test_an_hr_manager_cannot_approve_their_own_request_through_the_workflow(self):
+		"""The transition route, beside the raw-submit route the older test
+		covers. Both matter: HR reaches Approve from Pending Manager now."""
+		name = self._pending_manager()
+
+		frappe.set_user("Administrator")
+		employee_login = frappe.get_doc("User", EMPLOYEE_USER)
+		employee_login.add_roles("HR Manager")
+		frappe.clear_cache(user=EMPLOYEE_USER)
+		try:
+			frappe.set_user(EMPLOYEE_USER)
+			with self.assertRaises(
+				(frappe.ValidationError, frappe.PermissionError, WorkflowTransitionError)
+			):
+				apply_workflow(_ref(name), "Approve")
+			self.assertEqual(self._state(name).docstatus, 0)
+		finally:
+			frappe.set_user("Administrator")
+			employee_login.reload()
+			employee_login.remove_roles("HR Manager")
+			frappe.clear_cache(user=EMPLOYEE_USER)
+
+	def test_the_decision_reason_is_not_the_employees_to_write(self):
+		"""P4-KTD7a. The field is at permlevel 1, so a generic save by the
+		employee (or their manager) leaves whatever the approver wrote."""
+		from frappe.client import set_value as client_set_value
+
+		name = self._pending_manager()
+		self._reason(name, "Ask your manager")
+
+		for user in (EMPLOYEE_USER, MANAGER_USER):
+			frappe.set_user(user)
+			try:
+				client_set_value(DOCTYPE, name, DECISION_REASON_FIELD, "actually it is fine")
+			except (frappe.ValidationError, frappe.PermissionError):
+				pass
+			self.assertEqual(
+				frappe.db.get_value(DOCTYPE, name, DECISION_REASON_FIELD),
+				"Ask your manager",
+				msg=user,
+			)
+
+	def test_a_raw_submit_is_refused_from_every_state_but_a_pending_one(self):
+		"""P4-R8 / P3-R17a. `frappe.client.submit` consults no transition, so
+		the stored state is the only evidence of where a request came from."""
+		from frappe.client import submit as client_submit
+
+		draft = self._create()["name"]
+		frappe.set_user(self.hr_user)
+		# Draft is HR's own edge (HR raised it for somebody), so this one is
+		# allowed -- and is the boundary the other two sit outside.
+		client_submit(frappe.get_doc(DOCTYPE, draft).as_dict())
+		self.assertEqual(self._state(draft).docstatus, 1)
+
+		sent_back = self._pending_manager(offset=1)
+		frappe.set_user(MANAGER_USER)
+		apply_workflow(_ref(sent_back), "Send Back")
+		frappe.set_user(self.hr_user)
+		with self.assertRaises(frappe.PermissionError):
+			client_submit(frappe.get_doc(DOCTYPE, sent_back).as_dict())
+		self.assertEqual(self._state(sent_back).docstatus, 0)
+
+		rejected = self._pending_manager(offset=2)
+		frappe.set_user(MANAGER_USER)
+		apply_workflow(_ref(rejected), "Reject")
+		frappe.set_user(self.hr_user)
+		with self.assertRaises(frappe.PermissionError):
+			client_submit(frappe.get_doc(DOCTYPE, rejected).as_dict())
+		self.assertEqual(self._state(rejected).docstatus, 0)
 
 	# --- scenario 5: no manager ----------------------------------------------------
 
@@ -712,7 +896,8 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 			apply_workflow(_ref(names[0]), "Approve")
 		frappe.set_user(self.hr_user)
 		apply_workflow(_ref(names[0]), "Approve")
-		self.assertEqual(self._state(names[0]).workflow_state, "Pending HR")
+		state = self._state(names[0])
+		self.assertEqual((state.workflow_state, state.docstatus), ("Approved", 1))
 
 	# --- scenario 6: half day --------------------------------------------------------------
 
@@ -750,9 +935,18 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 		self.assertFalse(frappe.db.exists(DOCTYPE, pending))
 		self.assertEqual(self._shares(pending), [])
 
-		rejected = self._pending_manager(offset=2)
+		sent_back = self._pending_manager(offset=2)
 		frappe.set_user(MANAGER_USER)
-		frappe.get_doc(DOCTYPE, rejected).add_comment("Comment", "no")
+		frappe.get_doc(DOCTYPE, sent_back).add_comment("Comment", "no")
+		apply_workflow(_ref(sent_back), "Send Back")
+		frappe.set_user(EMPLOYEE_USER)
+		withdraw_my_attendance_request(sent_back)
+		self.assertFalse(frappe.db.exists(DOCTYPE, sent_back))
+
+		# P4-KTD3: a final Reject is terminal for the *row*, not for the
+		# dates -- so the employee may still remove it.
+		rejected = self._pending_manager(offset=3)
+		frappe.set_user(MANAGER_USER)
 		apply_workflow(_ref(rejected), "Reject")
 		frappe.set_user(EMPLOYEE_USER)
 		withdraw_my_attendance_request(rejected)

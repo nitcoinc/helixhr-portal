@@ -605,6 +605,13 @@ def check_fixtures():
 		# row that never installed leaves the workflow itself looking fine.
 		("Workflow State", "Pending Manager"),
 		("Workflow State", "Pending HR"),
+		# P4-KTD1: the state that carries the recoverable "sent back"
+		# meaning on both workflows, and the two actions that reach the new
+		# outcomes. Same reason as above -- a Workflow's action and state
+		# names are Links, and the import runs with `ignore_links`.
+		("Workflow State", "Sent Back"),
+		("Workflow Action Master", "Send Back"),
+		("Workflow Action Master", "Send to HR"),
 		("Activity Type", "General"),
 		("Notification", "HelixHR Timesheet Status Changed"),
 		("Notification", "HelixHR Leave Status Changed"),

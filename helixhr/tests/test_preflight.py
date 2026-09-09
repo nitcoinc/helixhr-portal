@@ -84,20 +84,29 @@ class TestPreflight(IntegrationTestCase):
 		"""
 		from unittest.mock import patch
 
-		absent = ("Workflow State", "Pending HR")
 		real_exists = frappe.db.exists
+		# One per fixture the import can silently skip: the Workflow's state
+		# and action names are Links and `sync_fixtures` runs with
+		# `ignore_links`, so an absent row leaves the Workflow itself looking
+		# fine (P4-U1 added "Sent Back" and the two new actions).
+		for absent in (
+			("Workflow State", "Pending HR"),
+			("Workflow State", "Sent Back"),
+			("Workflow Action Master", "Send Back"),
+			("Workflow Action Master", "Send to HR"),
+		):
 
-		def _exists(doctype, name=None, *args, **kwargs):
-			if (doctype, name) == absent:
-				return None
-			return real_exists(doctype, name, *args, **kwargs)
+			def _exists(doctype, name=None, *args, _absent=absent, **kwargs):
+				if (doctype, name) == _absent:
+					return None
+				return real_exists(doctype, name, *args, **kwargs)
 
-		with patch.object(frappe.db, "exists", side_effect=_exists):
-			result = preflight.check_fixtures()
+			with patch.object(frappe.db, "exists", side_effect=_exists):
+				result = preflight.check_fixtures()
 
-		self.assertEqual(result["status"], preflight.FAIL)
-		self.assertIn("Pending HR", result["detail"])
-		self.assertIn("bench migrate", result["detail"])
+			self.assertEqual(result["status"], preflight.FAIL, msg=absent)
+			self.assertIn(absent[1], result["detail"])
+			self.assertIn("bench migrate", result["detail"])
 
 	def test_run_exits_non_zero_when_something_fails(self):
 		def _run():

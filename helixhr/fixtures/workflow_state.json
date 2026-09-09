@@ -34,5 +34,14 @@
   "name": "Pending HR",
   "style": "",
   "workflow_state_name": "Pending HR"
+ },
+ {
+  "docstatus": 0,
+  "doctype": "Workflow State",
+  "icon": "",
+  "modified": "2026-09-10 10:00:00.000000",
+  "name": "Sent Back",
+  "style": "",
+  "workflow_state_name": "Sent Back"
  }
 ]

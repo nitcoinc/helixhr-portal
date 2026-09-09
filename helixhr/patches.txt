@@ -16,3 +16,10 @@ helixhr.patches.v1_0.apply_permission_deltas
 # Frappe skips a patch whose exact line is already in the Patch Log, so a
 # migrated site needs a fresh line to re-run it; the module is idempotent.
 helixhr.patches.v1_0.apply_permission_deltas #2026-09-09 P3-KTD13 Employee Checkin and Attendance Request
+# P4-KTD1: the two workflows' "Rejected" state now means a final no, and the
+# recoverable meaning moves to a new "Sent Back". Renames existing docstatus-0
+# rows before `sync_fixtures` installs the new transitions.
+helixhr.patches.v1_0.rename_sent_back_state
+# P4-KTD7a: same module, new deltas (HR Manager at permlevel 1 on Timesheet and
+# Attendance Request, for `helixhr_decision_reason`).
+helixhr.patches.v1_0.apply_permission_deltas #2026-09-10 P4-KTD7a decision reason permlevel
