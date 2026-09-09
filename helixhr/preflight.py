@@ -615,6 +615,15 @@ def check_fixtures():
 		("Activity Type", "General"),
 		("Notification", "HelixHR Timesheet Status Changed"),
 		("Notification", "HelixHR Leave Status Changed"),
+		# P4-KTD9 / P4-R12: HR is told a request reached its queue by these
+		# four fixture Notifications and by nothing in code, so a missing one
+		# is a queue nobody is watching. Leave needs two -- Frappe skips
+		# Value Change while `flags.in_insert`, and an HR-approves leave is
+		# *inserted* in the HR stage.
+		("Notification", "HelixHR Leave Sent To HR"),
+		("Notification", "HelixHR New Leave For HR"),
+		("Notification", "HelixHR Timesheet Sent To HR"),
+		("Notification", "HelixHR Attendance Request Sent To HR"),
 	]
 	missing = [f"{dt} '{name}'" for dt, name in expected if not frappe.db.exists(dt, name)]
 	if missing:

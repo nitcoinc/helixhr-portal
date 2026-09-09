@@ -25,6 +25,12 @@ PENDING_STATE = "Pending Approval"
 # only state the `Edit` transition hangs off.
 TIMESHEET_SENT_BACK = "Sent Back"
 
+# P4-KTD7. Where a week waits after a manager hands it over. Named here
+# rather than repeated in `api` because the HR queue collector, the
+# already-decided gate and the notification fixture all have to agree on the
+# same string.
+TIMESHEET_PENDING_HR = "Pending HR"
+
 # P4-KTD7a. Where an approver's reason lives, on both workflow kinds. A
 # Comment is still added for the timeline, but a Comment dies with the
 # document and a rejected attendance request is removable (P4-KTD3), so the

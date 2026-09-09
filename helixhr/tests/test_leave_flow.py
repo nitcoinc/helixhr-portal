@@ -488,13 +488,14 @@ class TestLeaveStageAndOutcomes(IntegrationTestCase):
 	"""P4-U2. Leave carries the same four outcomes as the workflow kinds
 	through HRMS's own lifecycle plus one stage field (P4-KTD4).
 
-	Two of the four are new here and neither is reachable through
-	`act_on_approval` yet -- that method still speaks the two-word vocabulary
-	P4-U3 replaces, in which "Reject" means *send back*. So the final reject
-	and the escalation are driven through the per-kind `act` the dispatcher
-	calls, after the same authorization the dispatcher performs; the refusals
-	are asserted on the public surfaces (`get_approval_detail`, a raw
-	`submit`, a generic `set_value`), which is where they actually matter.
+	Two of the four were not reachable through `act_on_approval` when this
+	class was written -- P4-U3 replaced its two-word vocabulary with the four
+	canonical names -- so the final reject and the escalation are driven here
+	through the per-kind `act` the dispatcher calls, after the same
+	authorization the dispatcher performs. The dispatcher's own vocabulary is
+	covered in `test_api_approvals.py`; the refusals are asserted here on the
+	public surfaces (`get_approval_detail`, a raw `submit`, a generic
+	`set_value`), which is where they actually matter.
 
 	Dates: offsets 78-92, clear of every other leave suite in this repo
 	(60-75, 96+, and 102-114) and inside the allocation year.
@@ -750,7 +751,7 @@ class TestLeaveStageAndOutcomes(IntegrationTestCase):
 		act_on_approval(
 			"Leave Application",
 			mine["name"],
-			"Reject",
+			"Send Back",
 			comment="Cover the Friday first",
 			**_token(mine["name"]),
 		)

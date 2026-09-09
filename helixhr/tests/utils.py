@@ -7,6 +7,11 @@ ORPHAN_USER = "no-employee@helixhr.test"
 # P3-U5: the HR step of the attendance-request workflow (P3-KTD6) and a
 # second manager the fixture employee does not report to (P3-AE8).
 HR_MANAGER_USER = "hr-manager@helixhr.test"
+# P4-KTD8/P4-R10: an HR Manager who is *also* an active employee, which is
+# what the portal landing rule and every portal read require. Deliberately a
+# second identity: HR_MANAGER_USER has no Employee record on purpose and must
+# keep not having one.
+HR_MANAGER_EMPLOYEE_USER = "hr-manager-employee@helixhr.test"
 OTHER_MANAGER_USER = "other-manager@helixhr.test"
 # Not "password" -- some sites (any with System Settings' password policy
 # enabled, unlike a barebones fresh test site) reject it as a top-10
@@ -199,6 +204,87 @@ def ensure_hr_manager_user():
 			}
 		).insert(ignore_permissions=True)
 	return HR_MANAGER_USER
+
+
+def make_test_hr_manager_employee():
+	"""An HR Manager with an Active Employee record, so they can open the
+	portal and work the HR queue (P4-R10, P4-R11, P4-KTD8).
+
+	Separate from `ensure_hr_manager_user`, which holds the role and *no*
+	Employee on purpose -- `portal_home_page` refuses it and every portal
+	method that starts from `get_current_employee` throws for it, so it can
+	prove the role alone reaches a record in Desk and nothing else.
+
+	Returns (employee_name, user).
+	"""
+	company = ensure_test_company()
+	# `create_user_permission=0`, unlike every other fixture identity here,
+	# and it is a precondition of the HR queue rather than a convenience: a
+	# self-scoping User Permission on Employee beats HR Manager's own read
+	# permission on Leave Application, Timesheet and Attendance Request, so
+	# an HR Manager who has one can see nothing but their own records and has
+	# no queue at all. HR staff are not scoped to themselves on a real site
+	# for the same reason. See docs/deployment.md.
+	employee_name = make_test_user(
+		HR_MANAGER_EMPLOYEE_USER, company, create_user_permission=0
+	)
+
+	user = frappe.get_doc("User", HR_MANAGER_EMPLOYEE_USER)
+	if "HR Manager" not in [row.role for row in user.roles]:
+		user.append_roles("HR Manager")
+		user.save(ignore_permissions=True)
+		frappe.clear_cache(user=HR_MANAGER_EMPLOYEE_USER)
+
+	return employee_name, HR_MANAGER_EMPLOYEE_USER
+
+
+TEST_EMAIL_ACCOUNT = "_Test HelixHR Outgoing"
+
+
+def ensure_test_email_account():
+	"""A default outgoing Email Account, because several writes now send mail
+	*inside the save* (P4-R12, P4-KTD9).
+
+	An Email-channel Notification calls `frappe.sendmail` and
+	`Communication.get_outgoing_email_account` from `on_change`, and both
+	throw with no default outgoing account -- so on a site without one every
+	Send to HR would fail, and the failure would look like the escalation
+	being refused. The queue rows are what tests assert on; nothing is ever
+	delivered, because the SMTP host below does not exist and
+	`frappe.sendmail` only enqueues.
+
+	`frappe.flags.in_patch` is Frappe's own escape hatch from the SMTP
+	connection check in `email_account.validate` (which also exempts
+	`frappe.in_test`, so this only matters on the Playwright route, where
+	the fixtures are created over HTTP). Idempotent.
+	"""
+	existing = frappe.db.get_value(
+		"Email Account", {"enable_outgoing": 1, "default_outgoing": 1}, "name"
+	)
+	if existing:
+		return existing
+
+	was_in_patch = frappe.flags.in_patch
+	frappe.flags.in_patch = True
+	try:
+		account = frappe.get_doc(
+			{
+				"doctype": "Email Account",
+				"email_account_name": TEST_EMAIL_ACCOUNT,
+				"email_id": "portal-tests@helixhr.test",
+				"enable_incoming": 0,
+				"enable_outgoing": 1,
+				"default_outgoing": 1,
+				"smtp_server": "localhost",
+				"smtp_port": 1025,
+				"awaiting_password": 0,
+				"password": TEST_PASSWORD,
+			}
+		)
+		account.insert(ignore_permissions=True)
+	finally:
+		frappe.flags.in_patch = was_in_patch
+	return account.name
 
 
 def ensure_holiday_list_assignment_from(company, from_date):
@@ -419,6 +505,13 @@ def setup_playwright_fixtures():
 	# published work email on the manager fixture, so the person sheet has a
 	# real mailto: action (`ensure_directory_fixtures`).
 	ensure_directory_fixtures()
+
+	# P4-U3: a default outgoing Email Account, because the HR-queue
+	# Notifications are Email-channel and throw inside the save without one
+	# (P4-KTD9), and an HR Manager who is also an employee, which is the
+	# third identity the approvals specs sign in as (P4-KTD8).
+	ensure_test_email_account()
+	make_test_hr_manager_employee()
 
 	frappe.db.commit()  # nosemgrep
 
