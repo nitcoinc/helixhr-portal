@@ -190,6 +190,13 @@ doc_events = {
 	# DocShare (with `submit`, since P4 made their Approve the submit) while
 	# Pending Manager, who may submit and from which stored state, and a
 	# delete that follows the same states as the portal's withdraw.
+	# P4-U6 / P4-R18 / P4-KTD10. Frappe cannot unregister HRMS's daily
+	# reminder job, so a HelixHR template picked while the matching HRMS
+	# checkbox is still ticked means two emails for the same event, every
+	# morning. Refused here, where HR creates it; preflight is the backstop.
+	"HR Settings": {
+		"validate": "helixhr.events.hr_settings_validate",
+	},
 	"Attendance Request": {
 		"validate": "helixhr.events.attendance_request_validate",
 		"on_update": "helixhr.events.attendance_request_on_update",
@@ -309,9 +316,16 @@ has_permission = {
 # key `helixhr_checkin_location_retention_days` is set; preflight warns while
 # it is unset. Daily rather than hourly: the period is measured in days, so
 # an hourly pass would do the same work 24 times.
+# P4-U6 / P4-KTD10 / P4-R15. The birthday and work-anniversary emails HR
+# words themselves, from an Email Template. Idle until HR picks a template on
+# HR Settings, and it runs *beside* HRMS's own daily reminder job rather than
+# replacing it -- Frappe merges scheduler hooks across apps and offers no
+# removal, so having both senders on for one event is the thing
+# `events.hr_settings_validate` and preflight guard against.
 scheduler_events = {
 	"daily": [
 		"helixhr.tasks.null_stale_checkin_coordinates",
+		"helixhr.reminders.send_celebration_reminders",
 	],
 }
 

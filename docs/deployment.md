@@ -354,6 +354,107 @@ Changing that sentence is a compliance change, not a copy tweak. A California
 risk assessment and notice-at-collection text for US employees is HR work that
 this phase deliberately did not attempt.
 
+## The birthday and work-anniversary emails HR words (P4-U6)
+
+HRMS sends both of these already, from a subject, header and Jinja file that
+are hardcoded in HRMS Python. There is no record to edit, so changing the copy
+means editing HRMS -- which the next `bench update` overwrites. HelixHR adds a
+second sender that reads an **Email Template** instead, so HR owns the words.
+
+### The switch: two pickers on HR Settings
+
+**HR Settings -> Reminders** now carries two extra fields:
+
+| Field | What it does |
+|---|---|
+| HelixHR Birthday Template | Empty: HelixHR sends no birthday email. Set: it sends that template, every morning, to everyone in the celebrating person's company. |
+| HelixHR Work Anniversary Template | The same, for work anniversaries. |
+
+Two templates ship as starting points -- **HelixHR Birthday Reminder** and
+**HelixHR Work Anniversary Reminder** -- created once, on install or on the
+first `bench migrate`, and never overwritten afterwards. Edit them in Desk
+(**Email Template**); the edit survives every later deploy. Neither is picked
+for you: switching the emails on is HR's decision, so a site that upgrades
+does not start emailing anybody.
+
+**Only one sender per event.** Frappe merges scheduler jobs across apps and
+offers no way to remove HRMS's, so HRMS's own reminder keeps going out for as
+long as its checkbox is ticked. Picking a HelixHR template while the matching
+HRMS checkbox is still on is therefore refused on save:
+
+> HRMS and HelixHR would both send the birthday email: untick 'Birthdays' in
+> HR Settings > Reminders, or clear 'HelixHR Birthday Template'.
+
+`helixhr.preflight.run` FAILs on the same contradiction, for the routes that
+never reach a save (a fixture import, a raw write), and FAILs when a picked
+template has since been deleted -- the job logs that and sends nothing, so the
+event would otherwise go quiet with no other sign. Neither sender on for an
+event is a WARN, not a FAIL: a site may not want the email at all.
+
+Both senders need a **default outgoing Email Account** (preflight WARNs
+without one), the same one the HR-queue notifications use.
+
+### What the template can read
+
+This is the whole contract. A template that reads anything else is reading
+something the app does not promise to keep:
+
+| Variable | What it is |
+|---|---|
+| `persons` | The people celebrating. Each has `name`, `first_name`, `image_url` (absolute, may be empty), and on an anniversary `years` -- the number completed. |
+| `names` | Their names as one string: `Ada, Grace & Jim`. |
+| `count` | How many of them there are. |
+| `company` | The celebrating people's company. |
+| `logo_url` | That company's logo, absolute. Empty when the Company has none, so guard on it: `{% if logo_url %}`. |
+| `date` | Today, formatted for the site. |
+| `portal_url` | Absolute link to the portal. |
+
+Both the subject and the body are Jinja, and Email Template caps the subject
+at 140 characters -- template markup included.
+
+### Preview one before you switch it on
+
+From `bench --site <site> console`, with a real Employee name:
+
+```python
+# A console session has no language set, and Frappe's own email footer
+# rendering raises UnboundLocalError without one. Harmless, and only here.
+frappe.local.lang = "en"
+
+from helixhr.reminders import _context
+
+name = "<EMPLOYEE>"           # an Employee record's name, e.g. HR-EMP-00002
+company = frappe.db.get_value("Employee", name, "company")
+person = frappe.get_all(
+    "Employee",
+    filters={"name": name},
+    fields=["employee_name as name", "image", "date_of_joining"],
+)[0]
+mail = frappe.get_doc("Email Template", "HelixHR Birthday Reminder").get_formatted_email(
+    _context([person], company, "birthday")
+)
+frappe.sendmail(recipients=["you@example.com"], subject=mail["subject"], message=mail["message"], now=True)
+```
+
+`now=True` sends it instead of queueing it, so a mistake in the markup shows
+up in your own inbox rather than in everybody's tomorrow morning.
+
+### Two things about the recipients
+
+Who is celebrating, and who hears about it, is HRMS's own answer -- HelixHR
+imports those helpers rather than re-implementing them, so the email and
+Home's "this month" card can never disagree about who is eligible. Two
+consequences follow, and both are HRMS's behaviour rather than a choice made
+here:
+
+- **A personal address can receive it.** For an employee with no linked User
+  and no company email, HRMS falls back to `personal_email`. So a branded
+  company email can arrive in a personal inbox. Clear `personal_email`, or
+  fill in `company_email`, for anyone that is not wanted for.
+- **Everyone active in the company is a recipient**, minus the people
+  celebrating. When two or more share a day, each of them also gets one email
+  about the others.
+
 ## Before the migrate that ships the attendance workflow (P3-U5)
 
 `Attendance Request Approval` (P3-KTD6) gives Attendance Request a

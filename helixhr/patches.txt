@@ -26,3 +26,9 @@ helixhr.patches.v1_0.apply_permission_deltas #2026-09-10 P4-KTD7a decision reaso
 # P4-KTD4: same module, new deltas (HR Manager at permlevel 1 on Leave
 # Application, for `helixhr_stage`).
 helixhr.patches.v1_0.apply_permission_deltas #2026-09-10 P4-KTD4 leave stage permlevel
+# P4-KTD11: the two default Email Templates the celebration reminders send
+# from, inserted only if absent and never overwritten -- fixtures re-import
+# on every migrate and would replace HR's edited copy. Also called from
+# `install.py`, because `--install-app` marks patches complete without
+# running them.
+helixhr.patches.v1_0.seed_celebration_templates

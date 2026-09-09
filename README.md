@@ -144,6 +144,8 @@ All configuration is per-site data, not code. Set it in Desk or with
 | Default Portal Home | Desk: Portal Settings | leave **empty**, same reason. |
 | Default Workspace | Desk: User | leave **empty** on portal users; it overrides the resolved landing page. |
 | Documents page content | Desk: HelixHR Document Link | one record per link; no code change to add one. |
+| HelixHR Birthday Template | HR Settings → Reminders | pick an Email Template and HelixHR sends the birthday email from it. Empty sends nothing. Untick HRMS's own **Birthdays** first — both senders on for one event is refused on save and FAILs preflight. |
+| HelixHR Work Anniversary Template | HR Settings → Reminders | the same, for work anniversaries, against HRMS's **Work Anniversaries** checkbox. |
 
 Site config is cached for 60 seconds per web process, so a `set-config` change
 reaches the page within a minute with no restart.

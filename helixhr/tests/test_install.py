@@ -42,3 +42,13 @@ class TestHelixHRInstall(IntegrationTestCase):
 
 		self.assertEqual(response.status_code, 200)
 		self.assertIn('id="app"', response.get_data(as_text=True))
+
+	def test_the_celebration_templates_are_seeded(self):
+		"""P4-KTD11 / P4-R19: `--install-app` marks every patch complete
+		without running it, so `install.after_install` calls the seed patch
+		as well -- a freshly installed site has both templates, not just a
+		migrated one."""
+		from helixhr.patches.v1_0.seed_celebration_templates import TEMPLATES
+
+		for spec in TEMPLATES:
+			self.assertTrue(frappe.db.exists("Email Template", spec["name"]), spec["name"])

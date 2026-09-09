@@ -727,3 +727,40 @@ def attendance_request_on_trash(doc, method=None):
 	# for the reason _reconcile_share gives: a permission-checked delete of
 	# DocShare would fail for the very employee whose request this is.
 	frappe.db.delete("DocShare", {"share_doctype": "Attendance Request", "share_name": doc.name})
+
+
+# HR Settings (P4-U6 / P4-R18 / P4-KTD10) ------------------------------------
+
+
+def hr_settings_validate(doc, method=None):
+	"""Refuse the save that would leave a site sending two emails for the
+	same event.
+
+	Frappe merges `scheduler_events` across apps and offers no way to remove
+	HRMS's daily reminder job, so HRMS keeps sending its stock birthday and
+	anniversary emails for as long as its own checkbox is ticked -- and
+	`helixhr.reminders` sends the branded one for as long as HR has picked a
+	template. Both at once is two emails to everybody, every morning.
+
+	`preflight.check_celebration_reminders` FAILs on the same contradiction,
+	but preflight is an operator command: between HR's save and the next run
+	of it there is a morning's worth of duplicate mail. So the refusal lives
+	where HR creates the state, and preflight is the backstop for the routes
+	that never reach `validate` -- a fixture import, a raw `db_set`.
+
+	One sentence, naming both fields as HR sees them on the form, because the
+	fix is to clear one of the two and nothing else.
+	"""
+	# Local import on purpose: `helixhr.reminders` imports HRMS's own
+	# recipient helpers at module level (P4-KTD12), and every doc event in
+	# this file would otherwise carry that import.
+	from helixhr.reminders import EVENTS
+
+	for spec in EVENTS.values():
+		if doc.get(spec["template_field"]) and cint(doc.get(spec["hrms_field"])):
+			frappe.throw(
+				_(
+					"HRMS and HelixHR would both send the {0} email: untick '{1}' in "
+					"HR Settings > Reminders, or clear '{2}'."
+				).format(spec["label"].lower(), spec["hrms_label"], spec["template_label"])
+			)
