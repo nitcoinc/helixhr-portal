@@ -749,7 +749,13 @@ class TestLeaveApprovalIsNative(IntegrationTestCase):
 			"the HelixHR Leave Status Changed notification should carry the new status",
 		)
 
-	def test_rejection_keeps_the_reason_stays_unsubmitted_and_consumes_nothing(self):
+	def test_send_back_keeps_the_reason_stays_unsubmitted_and_consumes_nothing(self):
+		"""P4-R3: this is the *send back*, which is what the portal's one
+		button used to mean when it was labelled Reject. It still leaves the
+		application at docstatus 0 with HRMS status Rejected, so the employee
+		can edit and resend it. The terminal Reject is a different action and
+		submits -- `test_leave_flow.test_a_final_reject_submits_consumes_nothing_and_frees_the_dates`
+		covers that."""
 		leave = self._pending_leave()
 		before = self._balance()
 
@@ -757,7 +763,7 @@ class TestLeaveApprovalIsNative(IntegrationTestCase):
 		act_on_approval(
 			"Leave Application",
 			leave.name,
-			"Reject",
+			"Send Back",
 			comment="Two people are already out",
 			**token("Leave Application", leave.name),
 		)
@@ -990,7 +996,11 @@ class TestLeaveApprovalIsNative(IntegrationTestCase):
 				}
 			)
 			leave.insert()
-			with self.assertRaises(frappe.ValidationError):
+			# A PermissionError, not HRMS's ValidationError: R8's refusal runs
+			# first and Frappe's PermissionError is not a ValidationError
+			# subclass, so asserting the old class here would only prove that
+			# the portal never reached HR Settings.
+			with self.assertRaises(frappe.PermissionError):
 				act_on_approval(
 					"Leave Application", leave.name, "Approve", **token("Leave Application", leave.name)
 				)
