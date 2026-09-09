@@ -46,6 +46,28 @@ test.describe('employee', () => {
     await expect(leaveCard).toBeVisible()
     await expect(leaveCard.getByText(/^[0-9](\.5)?$/)).toBeVisible()
   })
+
+  // P4-U5 scenario 6 / P4-R14. `ensure_celebration_fixtures` seeds one
+  // colleague in the same company whose birthday is the 15th of whatever
+  // month the run happens in, so this reads a name and a day off Home.
+  test("shows this month's celebrations by day, with no year (R14)", async ({
+    page,
+  }, testInfo) => {
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
+    await page.goto('/helixhr')
+
+    const card = page.locator('[data-async-state^="celebrations:"]')
+    await expect(card).toHaveAttribute('data-async-state', 'celebrations:ready')
+    await expect(card.getByRole('heading', { name: 'Celebrating this month' })).toBeVisible()
+    await expect(card.getByText('Celebration Birthday')).toBeVisible()
+    // Day and month in the reader's own locale order ("15 Sep" in the India
+    // office, "Sep 15" in the US one -- lib/dates.js pins no locale in
+    // production on purpose), so the assertion accepts either.
+    await expect(card.getByText(/^(15 [A-Za-z]+|[A-Za-z]+ 15)$/)).toBeVisible()
+    // P4-KTD14: a birth year never reaches the client, so none can reach the
+    // screen. Any four-digit run in this card would be one.
+    expect(await card.innerText()).not.toMatch(/\d{4}/)
+  })
 })
 
 test.describe('manager', () => {

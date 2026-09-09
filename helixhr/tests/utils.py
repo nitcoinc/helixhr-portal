@@ -1,3 +1,5 @@
+from datetime import date
+
 import frappe
 
 TEST_COMPANY = "_Test Company"
@@ -512,6 +514,11 @@ def setup_playwright_fixtures():
 	# third identity the approvals specs sign in as (P4-KTD8).
 	ensure_test_email_account()
 	make_test_hr_manager_employee()
+
+	# P4-U5 scenario 6: `login-dashboard.spec.ts` needs one colleague with a
+	# birthday in the month the run happens in, so Home's celebrations card
+	# has a name and a day on it.
+	ensure_celebration_fixtures()
 
 	frappe.db.commit()  # nosemgrep
 
@@ -1379,6 +1386,77 @@ def ensure_directory_fixtures():
 		"inactive": _ensure_directory_employee("INACTIVE", company, status="Inactive"),
 		"other": _ensure_directory_employee("OTHERCO", other_company),
 	}
+
+
+# P4-U5: celebrations. Home's card reads a *projection* of `date_of_birth`
+# and `date_of_joining` (P4-KTD14), so both the Python suite and
+# `login-dashboard.spec.ts` need people whose dates fall in whatever month
+# the run happens on. The dates are therefore recomputed on every call --
+# a fixture with a fixed birthday drops out of the card the moment the month
+# turns.
+CELEBRATION_TAG = "P4U5-CELEBRATION"
+
+
+def make_celebration_employee(suffix, company, date_of_birth, date_of_joining, **fields):
+	"""One Employee with no `user_id` -- no login, no User Permission. These
+	rows exist to be *named* on Home's celebrations card, never signed in as.
+	Idempotent on `employee_number`, and re-dated on every call."""
+	number = f"{CELEBRATION_TAG}-{suffix}"
+	name = frappe.db.get_value("Employee", {"employee_number": number}, "name")
+	desired = {
+		"company": company,
+		"date_of_birth": str(date_of_birth),
+		"date_of_joining": str(date_of_joining),
+		"status": "Active",
+		**fields,
+	}
+	if desired["status"] == "Left":
+		desired.setdefault("relieving_date", str(date_of_joining))
+
+	if name:
+		employee = frappe.get_doc("Employee", name)
+		changed = False
+		for field, value in desired.items():
+			if str(employee.get(field) or "") != str(value or ""):
+				employee.set(field, value)
+				changed = True
+		if changed:
+			employee.save(ignore_permissions=True)
+		return employee.name
+
+	employee = frappe.get_doc(
+		{
+			"doctype": "Employee",
+			"employee_number": number,
+			"first_name": f"Celebration {suffix.title()}",
+			"gender": ensure_test_gender(),
+			**desired,
+		}
+	)
+	employee.insert(ignore_permissions=True)
+	return employee.name
+
+
+def ensure_celebration_fixtures():
+	"""One colleague of the fixture employee whose birthday falls in the
+	current month, so `login-dashboard.spec.ts` can read a name and a day on
+	Home's celebrations card (P4-U5 scenario 6).
+
+	The 15th, not today: a day-and-month row is what the card is for, and a
+	fixture pinned to today would only ever exercise the "Today" chip.
+	Born in 1990 and joined in a past January, so the person is a birthday
+	and (outside January) not also an anniversary.
+	"""
+	from frappe.utils import getdate
+
+	company = ensure_test_company()
+	today = getdate()
+	return make_celebration_employee(
+		"BIRTHDAY",
+		company,
+		date_of_birth=date(1990, today.month, 15),
+		date_of_joining=date(today.year - 4, 1, 6),
+	)
 
 
 # P3-U7: the team week. `team.spec.ts` needs one *report* of the manager

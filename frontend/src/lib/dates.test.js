@@ -6,6 +6,7 @@ import {
   formatDate,
   formatDateRange,
   formatDateTime,
+  formatDayMonth,
   formatTime,
   isCalendarDate,
   mondayOf,
@@ -320,6 +321,37 @@ describe('timestamps are instants, rendered in the user timezone (P2-R5)', () =>
     configureCalendar({ timeZone: 'UTC', systemTimeZone: 'America/New_York', locale: LOCALE })
     expect(formatTime('2026-03-08 01:59:00')).toBe('6:59')
     expect(formatTime('2026-03-08 03:00:00')).toBe('7:00')
+  })
+})
+
+describe('a day and a month, with no year to render (P4-R14)', () => {
+  it('renders the day and the month and nothing else', () => {
+    configureCalendar({ timeZone: 'UTC', systemTimeZone: 'UTC', locale: LOCALE })
+    expect(formatDayMonth(9, 9)).toBe('9 Sept')
+    expect(formatDayMonth(1, 1)).toBe('1 Jan')
+    // The celebrations projection carries no birth year (P4-KTD14), so no
+    // year may appear on screen either -- including the one this function
+    // uses internally to make a valid instant.
+    expect(formatDayMonth(9, 9)).not.toMatch(/\d{4}/)
+  })
+
+  it('does not shift a day west of Greenwich', () => {
+    for (const hostZone of HOST_ZONES) {
+      withHostZone(hostZone, () => {
+        configureCalendar({ timeZone: 'America/Los_Angeles', systemTimeZone: 'UTC', locale: LOCALE })
+        expect(formatDayMonth(1, 1), hostZone).toBe('1 Jan')
+      })
+    }
+  })
+
+  it('renders nothing for a day or month that is not one', () => {
+    configureCalendar({ timeZone: 'UTC', systemTimeZone: 'UTC', locale: LOCALE })
+    expect(formatDayMonth(13, 1)).toBe('')
+    expect(formatDayMonth(0, 1)).toBe('')
+    expect(formatDayMonth(1, 0)).toBe('')
+    expect(formatDayMonth(1, 32)).toBe('')
+    expect(formatDayMonth(undefined, undefined)).toBe('')
+    expect(formatDayMonth('9', '9')).toBe('9 Sept')
   })
 })
 

@@ -109,6 +109,10 @@ def get_dashboard(**kwargs):
 		# screen stays one request.
 		"week": section("week", lambda: _get_week_spine(employee, once)),
 		"needs_you": section("needs_you", lambda: _get_needs_you(employee, once)),
+		# P4-R14: a projection, never the underlying dates (P4-KTD14).
+		"celebrations": section(
+			"celebrations", lambda: _get_celebrations(employee, getdate(user_today()))
+		),
 		"failed_sections": failed,
 	}
 
@@ -294,6 +298,94 @@ def _attendance_events():
 	start = min(get_first_day(user_today()), monday)
 	end = max(get_last_day(user_today()), sunday)
 	return get_attendance_calendar_events(str(start), str(end)) or {}
+
+
+# Celebrations (P4-U5 / P4-R14, P4-KTD14)
+#
+# `Employee.date_of_birth` and `date_of_joining` sit at permlevel 1 by
+# property setter -- role Employee cannot read either one, on purpose. So
+# this is a *projection*, the same posture `get_directory` takes: the read
+# runs server-side, scoped to the caller's own company, bounded by that
+# company's active headcount, and what comes back is only what the card
+# prints. The year of birth never leaves the server, and neither does an
+# age: a day and a month are what a colleague needs to say happy birthday,
+# and the rest is nobody's business (P4-R14).
+#
+# Eligibility is HRMS's own rule, so Home and the reminder email can never
+# disagree about who is celebrating: Active, the day and month match, and
+# the *year* is strictly before this year (`get_employees_having_an_event_today`
+# filters `Extract(year, ...) < today.year`). That one condition covers both
+# "no year recorded" (a null date is skipped outright) and "joined or was
+# born this year" -- a person's first year is not an anniversary, and a
+# newborn is not a colleague.
+_CELEBRATION_FIELDS = ("name", "employee_name", "date_of_birth", "date_of_joining")
+
+
+def _celebration_projection(row, event_date, today):
+	"""One card row: who, which day, and whether that day is today.
+
+	Deliberately no `date`, no `year`, no `age`. `day` and `month` are
+	integers the client formats in the reader's own locale (`formatDayMonth`
+	in lib/dates.js), which also means there is no full date on the wire for
+	a caller to reconstruct a birth year from.
+	"""
+	return {
+		"employee": row.name,
+		"employee_name": row.employee_name,
+		# The monogram the directory and the Approvals queue already draw,
+		# from the server so all three agree (P3-U9).
+		"initials": _initials(row.employee_name),
+		"day": event_date.day,
+		"month": event_date.month,
+		"is_today": event_date.day == today.day,
+	}
+
+
+def _get_celebrations(employee, today):
+	"""This month's birthdays and work anniversaries in the caller's own
+	company, today's first and then by day.
+
+	An employee whose record carries no company gets empty lists rather
+	than an error, exactly as `get_directory` does -- "we cannot tell which
+	company you are in" is a thing for HR to fix, and the card simply does
+	not appear.
+	"""
+	company = frappe.db.get_value("Employee", employee, "company")
+	if not company:
+		return {"birthdays": [], "anniversaries": []}
+
+	rows = frappe.get_all(
+		"Employee",
+		filters={"status": "Active", "company": company},
+		fields=list(_CELEBRATION_FIELDS),
+		order_by="employee_name asc",
+		ignore_permissions=True,
+	)
+
+	birthdays, anniversaries = [], []
+	for row in rows:
+		born = getdate(row.date_of_birth) if row.date_of_birth else None
+		if born and born.month == today.month and born.year < today.year:
+			birthdays.append(_celebration_projection(row, born, today))
+
+		joined = getdate(row.date_of_joining) if row.date_of_joining else None
+		if joined and joined.month == today.month and joined.year < today.year:
+			anniversary = _celebration_projection(row, joined, today)
+			# The one number the card does print: years completed, which is
+			# a fact about the job and not about the person.
+			anniversary["years"] = today.year - joined.year
+			anniversaries.append(anniversary)
+
+	return {
+		"birthdays": _ordered_celebrations(birthdays),
+		"anniversaries": _ordered_celebrations(anniversaries),
+	}
+
+
+def _ordered_celebrations(entries):
+	"""Today first, then up the month. Someone reading the card today wants
+	today's names at the top; the rest of the month is a reminder."""
+	return sorted(entries, key=lambda entry: (not entry["is_today"], entry["day"]))
 
 
 def _open_leave(employee):

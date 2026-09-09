@@ -6,6 +6,7 @@ import Icon from '@/components/Icon.vue'
 import WeekSpine from '@/components/WeekSpine.vue'
 import NeedsYou from '@/components/NeedsYou.vue'
 import QuickActions from '@/components/QuickActions.vue'
+import Celebrations from '@/components/Celebrations.vue'
 
 const dashboard = createResource({
   url: 'helixhr.api.get_dashboard',
@@ -39,6 +40,17 @@ const needsYouWaiting = computed(() => dashboard.data?.needs_you?.waiting || [])
 const attendanceFailed = computed(() =>
   (dashboard.data?.failed_sections || []).includes('attendance_this_month'),
 )
+const celebrationsFailed = computed(() =>
+  (dashboard.data?.failed_sections || []).includes('celebrations'),
+)
+// P4-R14. Hidden on a genuinely quiet month -- a rail slot saying "nobody has
+// a birthday" is noise. A *failed* read is not a quiet month, which is why the
+// visibility test asks about `celebrationsFailed` too: `AsyncState`'s own
+// header names "a failed request rendered as its empty state" as the bug it
+// exists to prevent (P2-AE8).
+const birthdays = computed(() => dashboard.data?.celebrations?.birthdays || [])
+const anniversaries = computed(() => dashboard.data?.celebrations?.anniversaries || [])
+const hasCelebrations = computed(() => birthdays.value.length + anniversaries.value.length > 0)
 const leaveTypeEntries = computed(() => Object.entries(dashboard.data?.leave_balances || {}))
 const attendanceEntries = computed(() => Object.entries(dashboard.data?.attendance_this_month || {}))
 // Both rails used to render entry[0] as though it were the whole story: the
@@ -195,6 +207,23 @@ const today = new Intl.DateTimeFormat(undefined, {
                 {{ leadAttendance[1] }}
               </span>
             </router-link>
+          </AsyncState>
+
+          <AsyncState
+            v-if="hasCelebrations || celebrationsFailed"
+            section="celebrations"
+            :resource="dashboard"
+            :loading="false"
+            :error="celebrationsFailed ? { section: 'celebrations' } : null"
+            :empty="false"
+          >
+            <template #error-title>
+              We couldn't load this month's celebrations
+            </template>
+            <Celebrations
+              :birthdays="birthdays"
+              :anniversaries="anniversaries"
+            />
           </AsyncState>
 
           <router-link
