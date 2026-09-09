@@ -405,6 +405,61 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 		self.assertEqual(self._state(created["name"]).workflow_state, "Draft")
 		self.assertEqual(self._shares(created["name"]), [])
 
+	def test_the_overwrite_gate_holds_on_the_raw_submit_routes(self):
+		"""P4-KTD5 on every route, not only the portal's.
+
+		The manager's DocShare carries `submit=1`, so `apply_workflow` and
+		`frappe.client.submit` both reach the submit HRMS turns into
+		Attendance -- and HRMS rewrites an existing row in place. The refusal
+		therefore lives in `attendance_request_before_submit`, which is the
+		one choke point all three routes share.
+		"""
+		from frappe.client import submit as client_submit
+
+		name = self._pending_manager(days=2)
+		# Auto-attendance marking a day Present *after* the send: the case the
+		# send-time preview cannot have seen.
+		self._seed_attendance(1, "Present")
+
+		frappe.set_user(MANAGER_USER)
+		with self.assertRaises(frappe.ValidationError) as refused:
+			apply_workflow(_ref(name), "Approve")
+		self.assertIn("send this to HR instead", str(refused.exception))
+
+		frappe.set_user(MANAGER_USER)
+		with self.assertRaises(frappe.ValidationError) as refused:
+			client_submit(frappe.get_doc(DOCTYPE, name).as_dict())
+		self.assertIn("send this to HR instead", str(refused.exception))
+
+		frappe.set_user("Administrator")
+		self.assertEqual(self._state(name).docstatus, 0)
+		self.assertEqual(self._state(name).workflow_state, "Pending Manager")
+		self.assertEqual(self._attendance_rows(name), [])
+
+		# HR is not gated: they can read the calendar and weigh the rewrite.
+		frappe.set_user(self.hr_user)
+		apply_workflow(_ref(name), "Approve")
+		frappe.set_user("Administrator")
+		self.assertEqual(self._state(name).docstatus, 1)
+
+	def test_an_unanswerable_preview_is_treated_as_an_overwrite(self):
+		"""A preview that cannot answer (`known` false -- no holiday list
+		resolves) used to report `overwrite: 0` and let the Approve through,
+		leaving HRMS's own `is_holiday(raise_exception=True)` to throw a raw
+		Frappe error a few lines later. Same answer as `can_send` gives at
+		send time: this one is HR's call."""
+		name = self._pending_manager()
+
+		frappe.set_user(MANAGER_USER)
+		with patch("helixhr.api.get_holiday_list_for_employee", return_value=None):
+			with self.assertRaises(frappe.ValidationError) as refused:
+				apply_workflow(_ref(name), "Approve")
+		self.assertIn("Send it to HR instead", str(refused.exception))
+
+		frappe.set_user("Administrator")
+		self.assertEqual(self._state(name).docstatus, 0)
+		self.assertEqual(self._attendance_rows(name), [])
+
 	def test_no_holiday_list_means_cannot_tell(self):
 		frappe.set_user(EMPLOYEE_USER)
 		with patch("helixhr.api.get_holiday_list_for_employee", return_value=None):

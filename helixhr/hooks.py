@@ -181,7 +181,10 @@ doc_events = {
 	# raw submit route -- Desk, `frappe.client.submit`, the `submit=1`
 	# DocShare HRMS grants the approver -- is this hook: nobody approves their
 	# own leave, and nobody but HR approves one that is in the HR stage.
+	# `validate` is the same rule on the route that never submits: a send back
+	# is `status = "Rejected"` at docstatus 0, which is a save.
 	"Leave Application": {
+		"validate": "helixhr.events.leave_application_validate",
 		"before_submit": "helixhr.events.leave_application_before_submit",
 	},
 	# P3-KTD8 / P4-KTD5. Frappe does not enforce a workflow state's

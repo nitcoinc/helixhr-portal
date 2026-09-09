@@ -547,12 +547,18 @@ HR is told that a request reached their queue by four fixture Notifications on
 **channel Email** (`HelixHR Leave Sent To HR`, `HelixHR New Leave For HR`,
 `HelixHR Timesheet Sent To HR`, `HelixHR Attendance Request Sent To HR`), and
 they send from inside the save that escalates the request. `frappe.sendmail`
-throws without a **default outgoing Email Account**, so on a site with no mail
-configured a Send to HR fails at the moment the manager presses it.
-`preflight.check_outgoing_email` WARNs rather than FAILs — a site can run the
-portal with no mail at all — but that is the one thing it cannot then do.
-Configure the account in Desk → Email Account before anyone escalates anything.
-The celebration reminders need the same account.
+throws without a **default outgoing Email Account**, and because it throws
+*inside* that save, the throw is the save's: on a site with no mail configured
+a Send to HR does not merely go unannounced, it is refused at the moment the
+manager presses it. Applying for an HR-approves leave type is refused the same
+way, since the stage write raises the same notification.
+
+`preflight.check_outgoing_email` therefore **FAILs**, not WARNs. Send to HR is
+a new action that simply does not work without the account, which is different
+from existing behaviour degrading — and swallowing the error instead would be
+worse, because HR would never be told the request arrived. Configure the
+account in Desk → Email Account before anyone escalates anything. The
+celebration reminders need the same account.
 
 ### HR staff are the deliberate exception to self-scoping
 
@@ -587,6 +593,92 @@ at by accident: an Employee record created with HR Settings' "Create User
 Permission" ticked — the default — is exactly where the unwanted permission
 comes from. If HR reports an empty Approvals page, this is the first thing to
 check.
+
+
+### The P4 migrate, as commands
+
+The reasoning is above; this is the sequence. Run it on staging against a
+restored production dump first — the rename is one-way, so a rehearsal is the
+only cheap way to find out what it does to your data.
+
+**Before.** Record the numbers; step 2 reconciles against them.
+
+```bash
+# rows the rename will move (docstatus 0 only -- see above)
+bench --site <site> mariadb -e "SELECT workflow_state, docstatus, count(*) \
+  FROM \`tabTimesheet\` WHERE workflow_state='Rejected' GROUP BY 1,2;"
+bench --site <site> mariadb -e "SELECT workflow_state, docstatus, count(*) \
+  FROM \`tabAttendance Request\` WHERE workflow_state='Rejected' GROUP BY 1,2;"
+
+# the guard the patch relies on: both workflows exist and are active
+bench --site <site> mariadb -e "SELECT name, is_active FROM \`tabWorkflow\` \
+  WHERE name IN ('Timesheet Approval','Attendance Request Approval');"
+
+# a default outgoing Email Account, without which Send to HR is refused
+bench --site <site> mariadb -e "SELECT name FROM \`tabEmail Account\` \
+  WHERE enable_outgoing=1 AND default_outgoing=1;"
+
+# HR Managers who will keep landing in Desk, or who have no queue at all
+bench --site <site> execute helixhr.preflight.check_portal_landing
+bench --site <site> execute helixhr.preflight.check_hr_manager_self_scope
+
+bench --site <site> backup --with-files   # the only recovery path
+```
+
+Do **not** hand-write an `UPDATE` on `workflow_state` beforehand. The patch is
+the only sanctioned writer, and a hand-edit desyncs the counts above.
+
+**After.** `bench migrate`, then:
+
+```bash
+# 1. nothing left in the legacy meaning
+bench --site <site> mariadb -e "SELECT count(*) FROM \`tabTimesheet\` \
+  WHERE workflow_state='Rejected' AND docstatus=0;"        # expect 0
+bench --site <site> mariadb -e "SELECT count(*) FROM \`tabAttendance Request\` \
+  WHERE workflow_state='Rejected' AND docstatus=0;"        # expect 0 at this moment;
+# a later non-zero count is legitimate NEW terminal rejections -- check `modified`
+
+# 2. reconciles with the before-counts
+bench --site <site> mariadb -e "SELECT count(*) FROM \`tabTimesheet\` \
+  WHERE workflow_state='Sent Back' AND docstatus=0;"
+bench --site <site> mariadb -e "SELECT count(*) FROM \`tabAttendance Request\` \
+  WHERE workflow_state='Sent Back' AND docstatus=0;"
+
+# 3. no row in a state its workflow no longer defines
+bench --site <site> mariadb -e "SELECT workflow_state, count(*) \
+  FROM \`tabAttendance Request\` WHERE docstatus IN (0,1) GROUP BY 1 HAVING \
+  workflow_state NOT IN ('Draft','Pending Manager','Pending HR','Approved','Sent Back','Rejected');"
+
+# 4. the whole gate
+bench --site <site> execute helixhr.preflight.run
+```
+
+A `Fixtures installed` FAIL with steps 1 and 2 clean is the interrupted-migrate
+window described above: run `bench migrate` again, never edit rows.
+
+**Watch for 48 hours.** Email Queue errors (`SELECT status, count(*) FROM
+\`tabEmail Queue\` WHERE creation > DATE_SUB(NOW(), INTERVAL 1 HOUR) GROUP BY
+1;` — steady state is `Sent` only), the celebration job in `tabScheduled Job
+Log` (a failed import of an HRMS helper surfaces here, by design), and any
+Pending Manager attendance request older than 48 hours with no manager action.
+
+### "Rolling back" this release means rolling forward
+
+There is no reverse patch, and a `git revert` plus `bench migrate` is **not** a
+rollback:
+
+- Rows already in `Sent Back` stay there. The old fixture has no such state, so
+  the old `Edit` transition — which hangs off `Rejected` — no longer matches,
+  and the employee is offered **nothing at all** on those rows.
+- Rows that are genuinely, terminally `Rejected` under P4 would be turned back
+  into send-backs by a naive reverse `UPDATE`, resurrecting decisions HR made.
+  Any reverse has to be scoped to a cutoff and leave real rejections alone.
+- The Custom DocPerm rows and the seeded Email Templates are not removed by
+  running old code. Deltas are corrective, not reversible.
+
+So: restore the pre-migrate backup to a **separate** site to inspect rows, and
+reconcile the live site forward. Tell whoever approves the deploy this before
+it goes out, not after.
 
 
 ## Before the migrate that ships the attendance workflow (P3-U5)

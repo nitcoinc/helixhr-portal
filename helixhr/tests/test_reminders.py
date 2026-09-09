@@ -23,6 +23,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import getdate
 
+from helixhr import reminders
 from helixhr.reminders import EVENTS, send_celebration_reminders
 from helixhr.tests.utils import ensure_test_email_account, make_celebration_employee
 
@@ -40,6 +41,12 @@ POOL = {"A1": COMPANY_A, "A2": COMPANY_A, "A3": COMPANY_A, "B1": COMPANY_B, "B2"
 
 BIRTHDAY_TEMPLATE = "_Test HelixHR Birthday"
 ANNIVERSARY_TEMPLATE = "_Test HelixHR Anniversary"
+# One template that raises while rendering, for one company only -- the
+# failure-isolation tests below.
+BOOM_TEMPLATE = "_Test HelixHR Boom"
+# The title `reminders` logs every swallowed failure under. Error Log keeps
+# the title in `method`.
+ERROR_LOG_TITLE = "HelixHR celebration reminders"
 
 # Deliberately not the shipped default's markup: these assert the *context*
 # contract of P4-KTD13, which is what the app promises, one marker per key.
@@ -77,6 +84,30 @@ def _template(name, subject):
 		}
 	).insert(ignore_permissions=True)
 	return name
+
+
+def _boom_template(company):
+	"""A template that raises for one company and renders for every other.
+
+	Division by zero rather than a missing variable: Jinja's default
+	Undefined is happy to be printed, so an undefined name would render an
+	empty string instead of failing.
+	"""
+	html = "OK {%% if company == %r %%}{{ 1 / 0 }}{%% endif %%}" % company
+	if frappe.db.exists("Email Template", BOOM_TEMPLATE):
+		frappe.db.set_value("Email Template", BOOM_TEMPLATE, "response_html", html)
+		frappe.clear_document_cache("Email Template", BOOM_TEMPLATE)
+		return BOOM_TEMPLATE
+	frappe.get_doc(
+		{
+			"doctype": "Email Template",
+			"name": BOOM_TEMPLATE,
+			"use_html": 1,
+			"subject": "BOOMMARK {{ names }}",
+			"response_html": html,
+		}
+	).insert(ignore_permissions=True)
+	return BOOM_TEMPLATE
 
 
 class TestCelebrationReminders(IntegrationTestCase):
@@ -270,6 +301,86 @@ class TestCelebrationReminders(IntegrationTestCase):
 
 		self.assertEqual(send_celebration_reminders()["birthday"]["emails"], 0)
 		self.assertEqual(added(), [])
+
+	# --- failure isolation and the once-a-day assumption -------------------
+
+	def _errors(self):
+		"""A delta of the job's own Error Log rows. `frappe.log_error` writes
+		one per swallowed failure, which is the whole point -- a failure has
+		to surface in the scheduler log rather than vanish."""
+		before = set(
+			frappe.get_all("Error Log", filters={"method": ERROR_LOG_TITLE}, pluck="name")
+		)
+
+		def added():
+			return sorted(
+				set(frappe.get_all("Error Log", filters={"method": ERROR_LOG_TITLE}, pluck="name"))
+				- before
+			)
+
+		return added
+
+	def test_one_companys_render_failure_leaves_the_other_company_its_mail(self):
+		"""HR writes this template (P4-KTD13), so a template that raises is
+		one HR edit away. It must cost that company its mail and nothing
+		else."""
+		_boom_template(COMPANY_A)
+		self._stage(birthdays=("A1", "B1"))
+		self._pick("helixhr_birthday_template", BOOM_TEMPLATE)
+		added = self._watch_mail()
+		errors = self._errors()
+
+		result = send_celebration_reminders()
+		mails = added()
+
+		self.assertEqual(result["birthday"]["companies"], 2)
+		self.assertEqual(result["birthday"]["failed"], 1)
+		self.assertEqual(result["birthday"]["emails"], 1)
+		self.assertEqual([mail["recipients"] for mail in mails], [[self._address("B2")]])
+		self.assertEqual(len(errors()), 1, "the failure is in the scheduler log, not swallowed")
+
+	def test_an_event_that_fails_outright_still_leaves_the_other_event_its_mail(self):
+		"""The per-company guard cannot cover a failure before any company is
+		reached -- resolving the template, the sender or HRMS's grouping -- and
+		that failure used to take the day's second event with it."""
+		from unittest.mock import patch
+
+		self._stage(birthdays=("A1",), anniversaries=("B1",))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		self._pick("helixhr_anniversary_template", ANNIVERSARY_TEMPLATE)
+		added = self._watch_mail()
+		errors = self._errors()
+
+		real = reminders._send_event
+
+		def boom(event, template_name):
+			if event == "birthday":
+				raise RuntimeError("HRMS grouping blew up")
+			return real(event, template_name)
+
+		with patch("helixhr.reminders._send_event", side_effect=boom):
+			result = send_celebration_reminders()
+
+		mails = added()
+		self.assertEqual(result["birthday"], {"companies": 0, "emails": 0, "failed": 1})
+		self.assertEqual(result["work_anniversary"]["emails"], 1)
+		self.assertEqual([mail["recipients"] for mail in mails], [[self._address("B2")]])
+		self.assertEqual(len(errors()), 1)
+
+	def test_a_second_run_on_the_same_day_sends_the_mail_again(self):
+		"""Not a wish -- the documented assumption (`send_celebration_reminders`
+		says so in its docstring). There is no per-(event, company, date)
+		marker, so an operator running the job by hand with `bench execute`
+		after the scheduler has already been round mails the company twice.
+		The test is here so the assumption cannot change silently."""
+		self._stage(birthdays=("A1",))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		added = self._watch_mail()
+
+		send_celebration_reminders()
+		send_celebration_reminders()
+
+		self.assertEqual(len(added()), 2)
 
 	def test_the_job_is_registered_as_a_daily_scheduler_event(self):
 		self.assertIn(

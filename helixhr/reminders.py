@@ -76,13 +76,39 @@ def send_celebration_reminders():
 
 	No commit of its own: `frappe.sendmail` commits the Email Queue row it
 	writes, and nothing else here writes anything.
+
+	NOT idempotent, unlike `tasks.null_stale_checkin_coordinates`, and once a
+	day is the assumption: there is no per-(event, company, date) marker, so
+	a second run on the same day sends every celebration email a second time.
+	The scheduler runs it once, and `docs/deployment.md`'s U6 steps have an
+	operator run it by hand with `bench execute` -- doing that on a live site
+	after the scheduler has already been round mails the whole company twice.
+	A marker would need either a new DocType or a Custom Field written from a
+	job, which is more machinery than a once-a-day sender is worth; the
+	pruning of Email Queue rules out reading the queue back as one. HRMS's own
+	celebration job makes exactly the same assumption.
+
+	Failure is isolated per event and, inside `_send_event`, per company: one
+	template that raises while rendering must not cost the other event its
+	mail (P4-KTD13 hands HR the template, so a template that raises is HR's
+	edit away). Every swallowed error goes to the scheduler log via
+	`frappe.log_error` -- it must surface somewhere, not vanish.
 	"""
 	sent = {}
 	for event, spec in EVENTS.items():
 		template = frappe.db.get_single_value("HR Settings", spec["template_field"])
 		if not template:
 			continue
-		sent[event] = _send_event(event, template)
+		try:
+			sent[event] = _send_event(event, template)
+		except Exception:
+			frappe.log_error(
+				f"The {event} celebration reminder failed before it reached any company "
+				f"(Email Template '{template}') -- nothing was sent for this event.\n\n"
+				f"{frappe.get_traceback()}",
+				"HelixHR celebration reminders",
+			)
+			sent[event] = {"companies": 0, "emails": 0, "failed": 1}
 	return sent
 
 
@@ -93,6 +119,12 @@ def _send_event(event, template_name):
 	in that company, minus the people celebrating. When two or more share the
 	day, each of them also gets one email about the others -- from the same
 	template, so HR words that mail once too.
+
+	One company at a time, each inside its own try/except: HR edits this
+	template (P4-KTD13), so a render that raises -- an undefined filter, an
+	attribute the context does not carry -- is a realistic morning, and it
+	must cost that company its mail and nothing else. The error goes to the
+	scheduler log, the same way the missing-template case above does.
 	"""
 	if not frappe.db.exists("Email Template", template_name):
 		# `preflight.check_celebration_reminders` FAILs on this. The job says
@@ -103,27 +135,43 @@ def _send_event(event, template_name):
 			"but no such template exists -- nothing was sent for this event.",
 			"HelixHR celebration reminders",
 		)
-		return {"companies": 0, "emails": 0}
+		return {"companies": 0, "emails": 0, "failed": 1}
 
 	template = frappe.get_doc("Email Template", template_name)
 	sender = get_sender_email()
 	grouped = get_employees_having_an_event_today(event) or {}
 
 	emails = 0
+	failed = 0
 	for company, persons in grouped.items():
-		celebrating = {get_employee_email(person) for person in persons}
-		recipients = sorted(set(get_all_employee_emails(company)) - celebrating)
-		if recipients:
-			emails += _send(template, sender, recipients, persons, company, event)
+		try:
+			emails += _send_company(template, sender, persons, company, event)
+		except Exception:
+			failed += 1
+			frappe.log_error(
+				f"The {event} celebration reminder for '{company}' failed -- Email Template "
+				f"'{template.name}' was not sent to that company. The other companies and the "
+				f"other event are unaffected.\n\n{frappe.get_traceback()}",
+				"HelixHR celebration reminders",
+			)
 
-		if len(persons) > 1:
-			for person in persons:
-				own = get_employee_email(person)
-				others = [other for other in persons if other is not person]
-				if own:
-					emails += _send(template, sender, [own], others, company, event)
+	return {"companies": len(grouped), "emails": emails, "failed": failed}
 
-	return {"companies": len(grouped), "emails": emails}
+
+def _send_company(template, sender, persons, company, event):
+	emails = 0
+	celebrating = {get_employee_email(person) for person in persons}
+	recipients = sorted(set(get_all_employee_emails(company)) - celebrating)
+	if recipients:
+		emails += _send(template, sender, recipients, persons, company, event)
+
+	if len(persons) > 1:
+		for person in persons:
+			own = get_employee_email(person)
+			others = [other for other in persons if other is not person]
+			if own:
+				emails += _send(template, sender, [own], others, company, event)
+	return emails
 
 
 def _send(template, sender, recipients, persons, company, event):

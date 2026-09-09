@@ -223,6 +223,44 @@ def leave_application_before_submit(doc, method=None):
 		)
 
 
+def leave_application_validate(doc, method=None):
+	"""The *save* half of P4-R8a, which `before_submit` cannot reach.
+
+	Send back is `status = "Rejected"` at docstatus 0 -- a save, not a submit
+	-- and HRMS shares every application with its `leave_approver` at
+	`submit=1` on every save (`hrms.hr.utils.share_doc_with_approver`), so
+	the manager of an application that was escalated to HR keeps write on it
+	and could send it back (or otherwise decide it) from Desk. That is the
+	same hole `before_submit` closes for Approve and Reject, on the one route
+	that never submits.
+
+	Frozen field: `status` only. The stage is what moved the decision, not the
+	rest of the record, and HRMS itself writes other fields on an application
+	in flight.
+
+	The *stored* stage and status are what count. By `validate` Frappe has
+	already applied the incoming change to the in-memory document, so the row
+	is the only evidence of where this application actually is -- and reading
+	it is also what makes a raw `frappe.client.set_value` answerable.
+	"""
+	if doc.is_new():
+		return
+	user = frappe.session.user
+	if _is_hr(user):
+		return
+
+	stored = frappe.db.get_value(
+		"Leave Application", doc.name, ["helixhr_stage", "status"], as_dict=True
+	)
+	if not stored or stored.helixhr_stage != LEAVE_STAGE_HR:
+		return
+	if (doc.status or None) != (stored.status or None):
+		frappe.throw(
+			_("This leave request is with HR now, so only HR can decide it."),
+			frappe.PermissionError,
+		)
+
+
 def _reconcile_timesheet_share(name, employee, keep_user):
 	"""The Timesheet call of `_reconcile_share`: an approver's share on a
 	pending week carries `submit=1`, because the Approve transition on that
@@ -703,6 +741,29 @@ def attendance_request_before_submit(doc, method=None):
 		frappe.throw(
 			_("This request isn't waiting for a decision, so it can't be approved."),
 			frappe.PermissionError,
+		)
+
+	if not _is_hr():
+		# P4-KTD5, and the reason the gate lives here rather than only in the
+		# portal: HRMS's `on_submit` writes and *overwrites* Attendance in
+		# place, and the `submit=1` DocShare above means a line manager can
+		# reach this submit from Desk through `apply_workflow` or
+		# `frappe.client.submit` -- neither of which passes through
+		# `api._act_on_attendance_request`. This is the one choke point every
+		# route shares, so the refusal is asserted against the *stored* dates.
+		#
+		# Local import: `helixhr.api` imports this module at load time, so the
+		# dependency can only run in this direction from inside the call.
+		from helixhr.api import assert_no_attendance_overwrite
+
+		stored = before or doc
+		assert_no_attendance_overwrite(
+			doc.employee,
+			stored.get("from_date"),
+			stored.get("to_date"),
+			half_day=stored.get("half_day"),
+			half_day_date=stored.get("half_day_date"),
+			reason=stored.get("reason"),
 		)
 
 

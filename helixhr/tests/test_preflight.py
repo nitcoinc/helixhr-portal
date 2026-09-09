@@ -843,18 +843,23 @@ class TestPreflightMailAndHRQueue(IntegrationTestCase):
 		self.assertEqual(result["status"], PASS)
 		self.assertIn(account, result["detail"])
 
-	def test_a_site_with_no_default_outgoing_account_warns(self):
-		"""WARN, not FAIL: a site can run the portal with no mail at all.
-		What it cannot do is escalate to HR and have the email arrive."""
+	def test_a_site_with_no_default_outgoing_account_fails(self):
+		"""FAIL, not WARN: the HR-queue notifications send from inside the
+		save that escalates a request, so with no account Send to HR is
+		refused outright, and so is applying for an HR-approves leave type.
+		The detail has to name both refusals, not just the missing account.
+		"""
 		from unittest.mock import patch
 
-		from helixhr.preflight import WARN, check_outgoing_email
+		from helixhr.preflight import FAIL, check_outgoing_email
 
 		with patch("frappe.db.get_value", return_value=None):
 			result = check_outgoing_email()
 
-		self.assertEqual(result["status"], WARN)
+		self.assertEqual(result["status"], FAIL)
 		self.assertIn("Email Account", result["detail"])
+		self.assertIn("Send to HR", result["detail"])
+		self.assertIn("HR-approves leave type", result["detail"])
 
 	def test_an_hr_manager_scoped_to_their_own_employee_is_named(self):
 		"""P4-R11 carry-forward: a User Permission on Employee beats HR

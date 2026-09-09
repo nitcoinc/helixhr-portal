@@ -669,6 +669,46 @@ class TestLeaveStageAndOutcomes(IntegrationTestCase):
 		frappe.set_user("Administrator")
 		self.assertEqual(frappe.db.get_value("Leave Application", mine["name"], "docstatus"), 1)
 
+	def test_the_approvers_share_cannot_send_back_a_request_that_is_with_hr(self):
+		"""P4-R8a on the route that never submits.
+
+		Send back is `status = "Rejected"` at docstatus 0 -- a save -- so
+		`before_submit` never sees it, and HRMS's `submit=1` DocShare leaves
+		the manager write on an application that was escalated. `validate`
+		is what closes it, on both the generic `set_value` and a plain save.
+		"""
+		mine = self._open_leave(90)
+		self._act(mine["name"], "Send to HR", MANAGER_USER)
+
+		frappe.set_user(MANAGER_USER)
+		with self.assertRaises(frappe.PermissionError):
+			frappe.client.set_value("Leave Application", mine["name"], "status", "Rejected")
+
+		frappe.set_user(MANAGER_USER)
+		doc = frappe.get_doc("Leave Application", mine["name"])
+		doc.status = "Rejected"
+		with self.assertRaises(frappe.PermissionError):
+			doc.save()
+
+		frappe.set_user("Administrator")
+		stored = frappe.db.get_value(
+			"Leave Application", mine["name"], ["status", "docstatus", "helixhr_stage"], as_dict=True
+		)
+		self.assertEqual(stored.status, "Open")
+		self.assertEqual(stored.docstatus, 0)
+		self.assertEqual(stored.helixhr_stage, "HR")
+
+		# HR still decides it, on the same route.
+		frappe.set_user(self.hr_user)
+		hr_doc = frappe.get_doc("Leave Application", mine["name"])
+		hr_doc.status = "Rejected"
+		hr_doc.save()
+
+		frappe.set_user("Administrator")
+		self.assertEqual(
+			frappe.db.get_value("Leave Application", mine["name"], "status"), "Rejected"
+		)
+
 	def test_nobody_submits_their_own_leave_even_holding_hr_manager(self):
 		"""P4-R8's leave half. The HR-Manager role carries submit on Leave
 		Application, so without this hook an HR Manager could approve their

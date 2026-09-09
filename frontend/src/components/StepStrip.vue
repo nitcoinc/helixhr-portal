@@ -80,7 +80,11 @@ const steps = computed(() => {
   // the reason shown beside this strip.
   const stopWord = STOPS_AT[props.state]
   const stoppedAt = stopWord ? 1 : -1
-  const progress = cancelled ? -1 : (reached[props.state] ?? 0)
+  // A stopped journey still *got* to the step that stopped it, so progress is
+  // that step -- not 0. `reached` has no entry for the two stop states (they
+  // are outcomes, not positions), and falling back to 0 drew "Sent" as still
+  // in progress on a request the employee had plainly already sent (P4-U4).
+  const progress = cancelled ? -1 : stopWord ? stoppedAt : (reached[props.state] ?? 0)
 
   return labels.map((label, index) => {
     if (index === stoppedAt) {

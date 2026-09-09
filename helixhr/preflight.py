@@ -30,8 +30,10 @@ a doctype in the permission-delta table carries no Custom DocPerm row at all.
 
 P4-U6 added the mail checks: the two celebration-reminder senders must not
 both be on for the same event (P4-R18), a default outgoing Email Account is
-what the HR-queue notifications and the reminders both need, and an HR
-Manager scoped to their own Employee record has no HR queue (P4-R11).
+what the HR-queue notifications and the reminders both need -- and a FAIL
+without it, because the notifications send inside the escalating save, so
+Send to HR is refused rather than merely unannounced -- and an HR Manager
+scoped to their own Employee record has no HR queue (P4-R11).
 """
 
 import os
@@ -847,11 +849,18 @@ def check_celebration_reminders():
 
 def check_outgoing_email():
 	"""P4-R18: `frappe.sendmail` throws without a default outgoing Email
-	Account, and two things now depend on it -- the HR-queue Notifications,
-	which send from inside the save that escalates a request (P4-R12), and
-	the celebration reminders. A WARN rather than a FAIL because a site can
-	run the portal with no mail at all; what it cannot do is escalate to HR
-	and have the email arrive."""
+	Account, and the HR-queue Notifications send from *inside* the save that
+	escalates a request (P4-R12) -- so the throw is the save's throw.
+
+	A FAIL, not a WARN. Without the account two actions do not merely go
+	unannounced, they are refused outright: Send to HR on a leave, timesheet
+	or attendance request, and an employee applying for a leave type HR
+	approves (that insert starts in the HR queue and fires the same
+	notification). Both are new user-facing actions rather than existing
+	behaviour degrading, and swallowing the notification error instead would
+	be worse -- HR would silently never be told. The celebration reminders
+	need the same account, and fail quietly in the scheduler log.
+	"""
 	account = frappe.db.get_value(
 		"Email Account", {"enable_outgoing": 1, "default_outgoing": 1}, "name"
 	)
@@ -859,9 +868,10 @@ def check_outgoing_email():
 		return _result("Outgoing email", PASS, f"default outgoing account '{account}'")
 	return _result(
 		"Outgoing email",
-		WARN,
-		"no default outgoing Email Account -- the HR-queue notifications and the celebration "
-		"reminders both fail to send (Desk: Email Account)",
+		FAIL,
+		"no default outgoing Email Account -- Send to HR is refused on every leave, timesheet "
+		"and attendance request, applying for an HR-approves leave type is refused too, and the "
+		"celebration reminders send nothing (Desk: Email Account)",
 	)
 
 

@@ -392,9 +392,16 @@ class TestHrQueueEmails(IntegrationTestCase):
 	fixture Notifications and by nothing in code.
 
 	Channel Email, recipients by role HR Manager, one mail per escalation.
-	Leave needs two of them: Frappe skips Value Change while
-	`flags.in_insert`, and a request for an HR-approves Leave Type is
-	*inserted* in the HR stage.
+	Leave needs two of them, and the split is not the one KTD9 describes:
+	`api.apply_for_leave` cannot insert in stage HR at all (the field is
+	permlevel 1, so `reset_values_if_no_permlevel_access` puts it back before
+	the insert), and writes it with `db_set` immediately after -- so on the
+	*portal* path the Value Change fixture is what fires and the New fixture's
+	condition is False. The New fixture covers the Desk path instead: a Leave
+	Application filed by HR or a System Manager with `helixhr_stage` already
+	"HR", where Value Change never runs because Frappe skips it while
+	`flags.in_insert`. Both paths are covered below, and each sends exactly
+	one mail.
 
 	These are the tests that need `ensure_test_email_account` -- without a
 	default outgoing account `frappe.sendmail` throws from inside the save,
@@ -507,26 +514,66 @@ class TestHrQueueEmails(IntegrationTestCase):
 			frappe.db.get_value("Email Queue", mails[0][0], "reference_name"), leave.name
 		)
 
-	def test_an_hr_approves_leave_type_mails_on_the_insert(self):
-		"""Frappe does not evaluate Value Change while `flags.in_insert`, so
-		the New-event fixture is the only thing that covers a request that
-		starts in the HR queue (P4-R7, P4-KTD9)."""
+	def _hr_approves_leave_type(self):
 		leave_type = "_Test HR Approved Leave"
 		if not frappe.db.exists("Leave Type", leave_type):
 			frappe.get_doc(
 				{"doctype": "Leave Type", "leave_type_name": leave_type, "helixhr_hr_approves": 1}
 			).insert(ignore_permissions=True)
 		frappe.db.set_value("Leave Type", leave_type, "helixhr_hr_approves", 1)
+		return leave_type
+
+	def test_the_portal_path_mails_hr_exactly_once_through_the_value_change_fixture(self):
+		"""P4-R7 / P4-KTD9, with KTD9's stated mechanism corrected.
+
+		`apply_for_leave` cannot insert in stage HR -- `helixhr_stage` is
+		permlevel 1, so `reset_values_if_no_permlevel_access` puts it back to
+		its default for the employee's own session -- and writes it with
+		`db_set` straight after (P4-KTD4). So the New fixture's condition is
+		False at insert time on this path, the Value Change fixture on the
+		`db_set` is what mails HR, and the total is one mail, not two.
+		"""
+		from helixhr.api import apply_for_leave
+
+		leave_type = self._hr_approves_leave_type()
+		ensure_leave_allocation(self.employee_name, leave_type, 30)
+		date = str(add_days(self.leave_date, 4))
+		frappe.set_user("Administrator")
+		for existing in frappe.get_all(
+			"Leave Application",
+			filters={"employee": self.employee_name, "from_date": date},
+			pluck="name",
+		):
+			frappe.delete_doc("Leave Application", existing, force=True, ignore_permissions=True)
+
+		added = self._watch_mail()
+		frappe.set_user(self.EMAIL_EMPLOYEE_USER)
+		result = apply_for_leave(leave_type=leave_type, from_date=date, to_date=date)
+		frappe.set_user("Administrator")
+		self.addCleanup(self._remove, result["name"])
+
+		self.assertEqual(result["stage"], "HR")
+		mails = added()
+		self.assertEqual(len(mails), 1, "one mail on the portal path, not one per fixture")
+		self.assertIn(self.hr_user, mails[0][1])
+		self.assertEqual(
+			frappe.db.get_value("Email Queue", mails[0][0], "reference_name"), result["name"]
+		)
+
+	def test_a_leave_filed_in_desk_already_in_the_hr_stage_mails_on_the_insert(self):
+		"""Frappe does not evaluate Value Change while `flags.in_insert`, so
+		the New-event fixture is the only thing that covers a request that
+		*starts* in the HR queue -- which is the Desk path, not the portal one
+		(P4-R7, P4-KTD9)."""
+		leave_type = self._hr_approves_leave_type()
 
 		leave = self._leave(leave_type=leave_type)
 		frappe.set_user("Administrator")
 		leave.reload()
-		self.assertEqual(leave.helixhr_stage, "Manager", "the insert itself never sets the stage")
+		self.assertEqual(
+			leave.helixhr_stage, "Manager", "an employee's own insert never sets the stage"
+		)
 
-		# `apply_for_leave` is what sets it, with `db_set` after the insert
-		# (P4-KTD4) -- so on this route the Value Change fixture is what
-		# fires. The New fixture covers a request HR files in Desk with the
-		# stage already set.
 		frappe.set_user("Administrator")
 		hr_filed = frappe.get_doc(
 			{
@@ -576,3 +623,45 @@ class TestHrQueueEmails(IntegrationTestCase):
 			self.assertTrue(alert.enabled, msg=name)
 			self.assertEqual([row.receiver_by_role for row in alert.recipients], ["HR Manager"], msg=name)
 			self.assertIn("/helixhr/approvals/", alert.message, msg=name)
+
+
+class TestNotificationTemplateEscaping(IntegrationTestCase):
+	"""P4 security follow-up. Frappe's Jinja environment has no autoescape,
+	so a fixture that interpolates approver-authored free text into an HTML
+	message has to escape it itself.
+
+	`events._notify_attendance_request` already runs the same value through
+	`frappe.utils.escape_html`; the fixture path was the inconsistent one.
+	Rendered here rather than through a real send: the fixture's template
+	text is the thing under test, and `Notification.get_context` supplies
+	exactly `doc` and `comments`.
+	"""
+
+	PAYLOAD = "<script>alert(1)</script>"
+
+	def _render(self, comments=None, **fields):
+		message = frappe.db.get_value("Notification", "HelixHR Timesheet Status Changed", "message")
+		return frappe.render_template(message, {"doc": frappe._dict(fields), "comments": comments})
+
+	def test_a_decision_reason_carrying_markup_is_escaped(self):
+		rendered = self._render(
+			start_date="2026-09-07",
+			end_date="2026-09-13",
+			workflow_state="Sent Back",
+			helixhr_decision_reason=self.PAYLOAD,
+		)
+
+		self.assertIn("&lt;script&gt;", rendered)
+		self.assertNotIn("<script>", rendered)
+
+	def test_the_comment_fallback_is_escaped_too(self):
+		rendered = self._render(
+			comments=[{"by": "hr@helixhr.test", "comment": self.PAYLOAD}],
+			start_date="2026-09-07",
+			end_date="2026-09-13",
+			workflow_state="Sent Back",
+			helixhr_decision_reason=None,
+		)
+
+		self.assertIn("&lt;script&gt;", rendered)
+		self.assertNotIn("<script>", rendered)
