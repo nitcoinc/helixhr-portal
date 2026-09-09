@@ -47,8 +47,9 @@ whole week.
 <tr>
 <td><b>Payslips</b> put the latest net pay and its PDF one tap away, with
 every earlier month grouped by year.</td>
-<td><b>Approvals</b> is the manager's queue: oldest first, direct reports only,
-and a record of what was already decided.</td>
+<td><b>Approvals</b> is the decider's queue: oldest first, four outcomes per
+request, HR's escalations tagged in the same list, and a record of what was
+already decided.</td>
 </tr>
 </table>
 
@@ -146,6 +147,9 @@ All configuration is per-site data, not code. Set it in Desk or with
 | Documents page content | Desk: HelixHR Document Link | one record per link; no code change to add one. |
 | HelixHR Birthday Template | HR Settings → Reminders | pick an Email Template and HelixHR sends the birthday email from it. Empty sends nothing. Untick HRMS's own **Birthdays** first — both senders on for one event is refused on save and FAILs preflight. |
 | HelixHR Work Anniversary Template | HR Settings → Reminders | the same, for work anniversaries, against HRMS's **Work Anniversaries** checkbox. |
+| HR Approves | Desk: Leave Type | tick it and requests for that type skip the manager and go straight to the HR queue; the employee reads "Waiting for HR" from the moment they send it. Off by default on every type. |
+| Default Workspace on HR Managers | Desk: User | leave **empty**. HR Managers land in the portal as of P4, and a pinned workspace overrides that — preflight FAILs and names them, and they keep landing in Desk. |
+| Default outgoing Email Account | Desk: Email Account | needed for the four HR-queue notifications, which send from inside the save that escalates a request, and for the celebration emails. Preflight WARNs without one; a Send to HR fails at the moment a manager presses it. |
 
 Site config is cached for 60 seconds per web process, so a `set-config` change
 reaches the page within a minute with no restart.
@@ -187,7 +191,17 @@ three of them can only WARN: `Check-in settings` (the two HR Settings flags),
 retention` (the site config key above) and, inside `HTTPS headers and cookies`,
 a **FAIL** when the effective `Permissions-Policy` does not allow
 `geolocation=(self)`. `Fixtures installed` now also covers the
-`Attendance Request Approval` workflow.
+`Attendance Request Approval` workflow, the `Sent Back` workflow state, the two
+new workflow actions and the four HR-queue notifications.
+
+Phase 4 adds three more. `Celebration reminders` **FAILs** when HRMS and
+HelixHR would both send for one event, and when a picked Email Template has
+been deleted. `Outgoing email` **WARNs** without a default outgoing Email
+Account. `HR queue scoping` **WARNs** when an HR Manager has a User Permission
+on their own Employee record -- the one case where the self-scoping every other
+linked employee must have silently breaks something, so
+`Employee User Permissions` exempts HR Manager logins and this check owns them
+instead.
 
 On a **test** site one FAIL is expected and correct: `allow_tests` is on.
 
@@ -296,24 +310,37 @@ and the one gate that can only be judged on staging: `docs/runbook.md`.
    them — [docs/deployment.md](docs/deployment.md) has the command and the two
    options. Frappe backfills the new `workflow_state` by docstatus, so this is
    a one-time, one-way step.
-4. `bench --site <site> migrate` (installs fixtures **and** re-runs the
-   permission-delta patch under its new dated line) and
+4. **Before the first migrate that ships the four approval outcomes**, know
+   that it renames a workflow state in place: every docstatus-0 `Rejected`
+   timesheet and attendance request becomes `Sent Back`, because *Rejected* now
+   means a final no. Nothing to prepare, and nothing to do by hand — the patch
+   is idempotent, and a migrate that dies part-way is fixed by **running
+   migrate again**, never by editing rows. It is one-way: rolling the app back
+   means reversing the rename deliberately. [docs/deployment.md](docs/deployment.md)
+   has the detail and what happens to requests already in flight.
+5. **Clear `Default Workspace` on every HR Manager** (Desk → User). HR Managers
+   land in the portal as of P4, but a pinned workspace overrides the landing
+   rule by Frappe's own precedence, so they keep arriving in Desk and read it as
+   the feature not working. `preflight`'s `Portal landing` check FAILs and names
+   them.
+6. `bench --site <site> migrate` (installs fixtures **and** re-runs the
+   permission-delta patch under its new dated lines) and
    `bench --site <site> clear-cache`.
-5. First deploy to a site only: set `helixhr_hr_contact` and the other site
+7. First deploy to a site only: set `helixhr_hr_contact` and the other site
    settings from the Configure table above, and work through
    [docs/deployment.md](docs/deployment.md) for the HR Settings flags, the
    Shift Type, the holiday list coverage, the Salary Slip print format and the
    proxy's `Permissions-Policy`.
-6. Make sure `allow_tests` is **off**. It exposes the fixture entry points and
+8. Make sure `allow_tests` is **off**. It exposes the fixture entry points and
    disables the per-user write limiter; preflight FAILs on it.
-7. `bench --site <site> execute helixhr.preflight.run` and fix every FAIL.
+9. `bench --site <site> execute helixhr.preflight.run` and fix every FAIL.
    With `helixhr_public_url` set it also probes the real HTTPS endpoint for the
    security headers and the session cookie's flags -- including the
    `geolocation=(self)` value the check-in button depends on.
-8. Work through the host-only sign-offs in `docs/runbook.md` -- the proxy's
+10. Work through the host-only sign-offs in `docs/runbook.md` -- the proxy's
    `X-Forwarded-Proto`, immutable asset caching and compression, the staging
    performance run, and one screen-reader pass.
-9. Restart the web workers if the Python changed (`bench restart`). The
+11. Restart the web workers if the Python changed (`bench restart`). The
    punch-coordinate retention job is a `scheduler_events` entry, so it only
    ever fires on a site whose scheduler is enabled
    (`bench --site <site> enable-scheduler`; `bench doctor` reports the state).

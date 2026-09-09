@@ -69,6 +69,22 @@ no figure does not render. Quick actions last, as one divided row. Empty queue s
 you." and names the outstanding weekly obligation. Unread count lives on the shell's Notifications
 nav item rather than on the page.
 
+**"Celebrating this month" joins the right rail (P4-U5).** One card between the attendance figure
+and Documents: up to two labelled groups, `Birthdays` and `Work anniversaries`, each row the
+directory's own initials monogram, the person's name, and `9 Sep` — with `· 3 years` on an
+anniversary, the one number the card prints, because that is a fact about the job and not about the
+person. Today's rows sort first and carry a small `Today` chip. **No photos and no birth year**: the
+server projects `day`, `month`, `is_today` and `years` and nothing else, so there is no date string
+on the wire to reconstruct an age from, and `formatDayMonth` exists for exactly that reason.
+
+Nothing in the card is clickable. A birthday is something to read on the way past; there is no
+detail view behind a name, and a rail of rows that look like controls and do nothing is a rail of
+dead tab stops. A group with no people is not rendered, and the whole card is hidden in a month
+where nobody is celebrating — but **only when the read genuinely returned nothing**. A failed
+celebrations read shows the `AsyncState` retry panel instead, because a failed request rendered as
+its empty state is the bug that component exists to prevent (P2-AE8), and "nobody has a birthday"
+and "we could not tell" are not the same sentence.
+
 The whole body is **one** async region (P2-U3). Every element on it reads from the same
 `get_dashboard` response, so painting them before it arrives is what produced the U0 baseline's
 0.8431 CLS; the skeleton and the page are alternative subtrees of one region, and nothing that has
@@ -374,6 +390,28 @@ has loaded — the decision is unavailable until the thing being decided is on s
 employee reads that sentence, so it is written next to what it is about. Below the queue, **Decided
 this week** lists the last few outcomes with a `StatusBadge`.
 
+**The button row is four wide now, and it is the server's list, not the screen's (P4-U4).** The
+screen renders exactly `detail.actions` from `get_approval_detail`, in one fixed order — primary
+**Approve**, secondary **Send back**, tertiary **Reject** in the destructive tone, and **Send to
+HR** as a quiet link-style button, because handing a request over is a routing act and not a
+decision. An outcome the server would refuse is **not rendered**, never rendered-and-disabled: a
+greyed-out Reject invites the question "why not?" on a screen that has no room to answer it, and it
+is also how a button row and a server drift apart. So a timesheet shows three buttons and an
+attendance request four, and neither the screen nor a reviewer has to know why (P4-KTD6, P4-KTD2).
+
+**One reason surface, two outcomes.** Send back and Reject share the field, and opening it from
+either arms that action and names it in the heading ("Send back with a reason" / "Reject with a
+reason"). Switching from one to the other while the sheet is open **clears the typed reason and its
+error and relabels the field**, so a sentence written to send something back can never be submitted
+as a terminal rejection. Send to HR opens a smaller, plainly optional note field inline instead —
+it is not a reason, and a required-looking field would say otherwise.
+
+**HR work is tagged, not separated.** An HR Manager gets one oldest-first queue mixing their own
+reports' work with everything handed to HR; the HR rows carry an "HR" chip beside the name and a
+second line, "Sent by Priya · 'needs policy check'", and the detail head repeats both. Two backlogs
+to poll would be the alternative, and an HR Manager who is also a line manager would have to poll
+both. HR has no Send to HR button anywhere — there is nowhere further to send.
+
 *Deviations from the artboard, recorded:*
 
 - The primary button carries the quantity at **both** widths ("Approve 38.5 h", "Approve 3 days"),
@@ -524,17 +562,27 @@ record".
 
 One `Dialog`, two modes on one surface: the **ask** (no `name`) and **one request** (`name` set).
 The ask is `WHAT HAPPENED` reason pills, `From` / `To` dates, a `Half day` checkbox, a
-server-derived preview block, the approver line `Goes to {manager} first, then HR.`, an optional
+server-derived preview block, the approver line `Goes to {manager} for approval.`, an optional
 explanation, and a sticky `Send to {first name}`. The preview block is the whole point of the sheet
 being server-backed: it names how many days would be marked, how many are skipped as a holiday, a
 weekly off or approved leave, and — when any day already carries real attendance — says so and
 disables Send with a pointer to HR (P3-KTD14). Send is two calls on purpose, create then send, so a
 failed send leaves a draft the employee can retry rather than losing what they typed.
 
-**`StepStrip`** is the request's own progress: four pills, `Sent · {manager} · HR · Counted`, with
-done in green, the current step in amber, and a sent-back request tinted red at the step that sent
-it back. It appears on the request view and on each row of the Attendance page's `Your requests`
-column.
+**`StepStrip`** is the request's own progress: three pills, `Sent · {manager} · Counted`, with
+done in green, the current step in amber, and a decided-against request tinted red at the step that
+decided it, carrying the word — `Sent back` or `Rejected` — in place of the step's own label. It
+appears on the request view and on each row of the Attendance page's `Your requests` column.
+
+**A fourth `HR` pill appears only when the request is or was with HR (P4-KTD15).** An attendance
+request is approved in one step by the reports-to manager (P4-R6), so HR is not a stage every
+request walks through and a permanent HR pill would draw a step most requests never reach. The
+strip stays because it is how an employee reads *where* a request is; the single-step change makes
+it shorter, not less useful. A plain status line was considered and declined for that reason.
+
+A rejected request is the one place the sheet offers **Remove** rather than `Withdraw`, under the
+sentence `This one is final. Remove it to ask for the same days again.` — there is nothing left to
+withdraw from, and removing the row is only what frees the dates (P4-KTD3).
 
 *Deviations from the artboard, recorded:*
 
@@ -555,11 +603,15 @@ column.
 - The explanation label reads `Anything your manager should know (optional)`, not "TELL YOUR
   MANAGER". It is genuinely optional, and a label that does not say so reads as a required field.
 - The primary button is `Send to {first name}`, not "Send request". The name is the useful half.
-- **`StepStrip` cannot show an HR send-back at the HR step.** A rejected request always rests at
-  step 2 (the manager's), because `workflow_state` stores `Rejected` from either pending state and
-  does not record which one it left. HR's send-back is still identifiable from the reason quoted
+- **`StepStrip` cannot show an HR send-back at the HR step.** A decided-against request always
+  rests at step 2 (the manager's), because `workflow_state` records which state a request is *in*
+  and not which one it left. HR's send-back or reject is still identifiable from the reason quoted
   beside the strip. The upgrade path is one more field on the request projection, and it is noted
   in the component.
+- **The retrospective HR pill is not wired up.** `StepStrip` takes a `viaHr` prop and nothing hands
+  it in, so a request that went to HR and came back shows no HR pill: `Pending HR` is gone the
+  moment HR decides, and the live state is all the component has. Same upgrade path as above — one
+  boolean on the request projection, from the `Version` rows.
 
 ## Approvals · the attendance kind (P3-U6 — **built**)
 
@@ -567,24 +619,34 @@ A third kind in the same mixed queue, oldest first, with the same row shape: ini
 employee's name, `{reason} · {dates}` as the summary line, `N days` as the amount. The evidence is
 the explanation quoted, then one line per requested day saying **what the calendar already shows**
 for it (`nothing recorded`, `holiday`, `weekly off`, or the status word), and a warning where the
-employee has no holiday list so working days cannot be told. The primary button reads **Send to
-HR**; `Send back` still requires its reason on the same surface as the evidence.
+employee has no holiday list so working days cannot be told. The primary button reads **Approve N
+days** again (P4-U4) — the manager's Approve is the submit that writes the Attendance now, so the
+label may claim the decision and carry the quantity; `Send back` and `Reject` still require their
+reason on the same surface as the evidence.
 
 The `if timesheet else leave` branches that used to run this page and its server helpers were
 replaced by an explicit per-kind map first, with a named fallback, so an unknown kind renders as
-itself instead of silently inheriting timesheet copy. Pending HR requests are **not** in the queue
-at all, and an HR Manager who is also a line manager is refused when they try to act on one from
-the portal — the two steps must not collapse (P3-KTD7).
+itself instead of silently inheriting timesheet copy. Pending HR requests **are** in the queue as
+of P4 — in the HR half of it, tagged, where P3 kept them out of the portal entirely and left HR's
+decision to Desk. The rule that replaced the one they were keeping out for is narrower and applies
+to everybody: nobody decides their own request, at any step, on any route (P4-R8).
 
 *Deviations from the artboard, recorded:*
 
-- **The primary button says `Send to HR`, where the artboard says `Approve`.** The manager's
-  decision is not final and the label must not claim it is. This is the one deliberate override of
-  the comp on this screen, and it is the plan's (P3-KTD7).
-- **The artboard's explanatory sentence — "After you approve, HR confirms before it counts as a
-  working day." — is not on the page.** The button label carries that meaning now, and a sentence
-  restating a button immediately above it is the kind of line people stop reading. Worth revisiting
-  if managers ask what happens next.
+- **The primary button says `Approve N days`, as the artboard does.** P3 overrode the comp with
+  `Send to HR`, because the manager's decision was not final and the label must not claim it is.
+  P4-R6 made it final, so the override is retired and the comp is right again. The artboard's
+  explanatory sentence underneath it — the one promising a further HR check before the day counted
+  — is no longer true of any request, and nothing replaced it: what the button does is what it
+  says.
+- **`Send to HR` survives as a fourth, quiet button rather than as the primary one.** It is the
+  hand-over a manager reaches for when a request needs a policy call, and it is the one control on
+  this screen the artboard has no equivalent for.
+- **The overwrite refusal is a sentence, not a disabled button.** A day inside the range that has
+  picked up real attendance since the employee sent the request makes Approve fail with "Some of
+  those days now have attendance; send this to HR instead" — the manager cannot read Attendance and
+  cannot judge an overwrite, and HR can (P4-KTD5). The refusal names the button that *is* available,
+  which is why it arrives as an error rather than as a pre-emptive greyed-out control.
 - The day evidence is a `<dl>` of one line per day, not the artboard's single
   `That day today · No record · not on leave` chip. A request can span up to a month, and the days
   are not all alike — one holiday inside a range is the thing a manager needs to see.

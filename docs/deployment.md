@@ -32,15 +32,30 @@ Both audiences use the same `/login`. What happens next is decided by
 `helixhr.utils.portal_home_page`, registered as Frappe's
 `get_website_user_home_page` hook:
 
-- A user with an **active Employee record** who does **not** hold `HR Manager`,
-  `HR User`, `System Manager` or `Administrator` → `/helixhr`.
+- A user with an **active Employee record** who does **not** hold `HR User`,
+  `System Manager` or `Administrator` → `/helixhr`.
 - Everybody else → whatever Frappe would have done anyway, which for a System
   User is Desk.
 
 Managers are employees too, so they also land on the portal; their extra
-Approvals page appears inside it. An HR person who is *also* an employee keeps
-Desk — the rule is deliberately "does not work in Desk" rather than "holds the
-Employee role", because HR staff hold that role as well.
+Approvals page appears inside it.
+
+**`HR Manager` left that list in P4 (P4-KTD8).** HR now works a queue *inside*
+the portal — everything managers have handed over, across leave, timesheets and
+attendance requests — so an HR Manager with an active Employee record lands on
+`/helixhr` like anybody else, with Desk one click away in the shell. Their
+bookmarks still work. `HR User` and `System Manager` are unchanged and still
+land in Desk, and an HR Manager with **no** Employee record has no portal
+identity, so the rule does not move them either.
+
+One consequence to handle **before** the deploy, not after: a
+`default_workspace` pinned on a User overrides the resolved landing page, by
+Frappe's own precedence, so an HR Manager who had pinned a workspace keeps
+landing in Desk and reads it as the feature not working.
+`preflight.check_portal_landing` already FAILs and names every portal user with
+a pin — the set it reports simply grows to include HR Managers. Clear the pin
+(Desk → User → Default Workspace) and `bench --site <site> clear-cache`. It is
+a release step, not code.
 
 **Three things silently override this**, in Frappe's own precedence order.
 `preflight`'s `Portal landing` check FAILs on all three, because the symptom —
@@ -158,6 +173,12 @@ for 60 seconds; Desk records are not cached at all):
   company. URLs must be `http(s)`; anything else is refused on save.
 - **Leave types, holiday lists, allocations, approvers** — stock HRMS. The
   portal reads whatever HRMS says.
+- **Which leave types HR decides** — tick **HR Approves** on a Leave Type
+  (Desk → Leave Type). A request for that type is filed straight into the HR
+  queue: the manager never sees it, and the employee reads "Waiting for HR"
+  from the moment they send it (P4-R7). Untick it and the next request goes to
+  the manager again; requests already in flight keep the stage they were filed
+  with.
 - **Request categories** — the `category` field's options on `HR Request`.
 - **HR reply text** — the `hr_note` field on a request. Changing it notifies
   the employee and puts the request back in their queue.
@@ -165,7 +186,10 @@ for 60 seconds; Desk records are not cached at all):
   — `bench --site <site> set-config helixhr_hr_contact hr@example.com`.
 
 Approving leave or a timesheet in Desk works too, and the portal reflects it —
-the portal's approval path exists for convenience, not as the only route.
+the portal's approval path exists for convenience, not as the only route. What
+Desk *cannot* do is bypass the rules: three `before_submit` hooks refuse a
+submit by the requester themselves, and refuse a manager submitting a leave
+request that is already with HR, whichever route the submit arrives on.
 
 ## What HR sets up before the self-service surfaces work (P3-U9)
 
@@ -455,6 +479,116 @@ here:
   celebrating. When two or more share a day, each of them also gets one email
   about the others.
 
+## Before the migrate that ships the four approval outcomes (P4-U1)
+
+Three things change at this migrate that an operator has to know about: a state
+gets renamed in the database, attendance requests stop needing HR, and HR
+Managers start landing in the portal. None of them needs a hand-written SQL
+statement, and one of them must never get one.
+
+### The `Sent Back` rename is automatic, and one-way
+
+*Rejected* used to mean "the approver sent this back, edit it and send it
+again" on both the Timesheet and the Attendance Request workflows. P4 gives
+*Rejected* its literal meaning — a final no — and moves the recoverable one to
+a new state, **Sent Back**. Every row a site already holds in the old state has
+the old meaning, so `patches/v1_0/rename_sent_back_state.py` moves it:
+
+```
+UPDATE  ... SET workflow_state = 'Sent Back'
+WHERE   workflow_state = 'Rejected' AND docstatus = 0
+```
+
+per doctype, guarded on this app's Workflow existing on the site, and
+idempotent — a second run matches nothing. Only docstatus-0 rows are touched;
+`Approved` is the only submitted state on either workflow, so a docstatus-1 row
+was never a send-back, and a docstatus-2 row is cancelled history.
+
+Nothing to do beforehand. Two things to know:
+
+- **It is one-way.** Rolling the *app* back would leave rows in a state the old
+  fixture does not know about, where the employee is offered nothing at all,
+  because the `Edit` transition now hangs off `Sent Back`. Rolling back means
+  reversing the rename too, by hand and deliberately.
+- **A migrate that dies part-way is fixed by running migrate again — never by
+  editing rows.** Frappe's order is patches, then `sync_fixtures`
+  (`frappe/migrate.py`), so the patch runs *before* the `Sent Back` Workflow
+  State record exists. That is by design and is fine: it is a column update on
+  the document table, not a Link validation, and the fixture creates the state
+  moments later. But it means there is a window in which the site has rows in
+  `Sent Back` and a Workflow that has never heard of it — which is what a
+  migrate interrupted between the two looks like. `bench --site <site> migrate`
+  again finishes the job (the patch is idempotent, the fixture import is not
+  destructive). `helixhr.preflight.run`'s `Fixtures installed` line is the
+  check: it FAILs on a missing `Sent Back` Workflow State or a missing
+  `Send Back` / `Send to HR` Workflow Action Master, because a Workflow's state
+  and action names are Links and fixture import runs with `ignore_links`, so a
+  half-installed set leaves the Workflow itself looking fine.
+
+### Requests already in flight
+
+Both existing pending states survive the migrate, so nothing is stranded:
+
+- One already in **Pending HR** completes under HR exactly as before — the
+  state and HR's transitions off it still exist.
+- One already in **Pending Manager** becomes single-step. The manager's next
+  `Approve` submits it and writes the Attendance, where before it moved the
+  request to Pending HR. Managers who worked the old flow will notice; nothing
+  needs migrating.
+
+Approving is now the manager's submit, so their DocShare on a Pending Manager
+request carries `submit=1` where it used to carry only `write`. It is granted
+only while the request is Pending Manager and only to the Active reports-to
+user, which is the scope Timesheet has had since phase 2.
+
+### The new Notification fixtures need an outgoing Email Account
+
+HR is told that a request reached their queue by four fixture Notifications on
+**channel Email** (`HelixHR Leave Sent To HR`, `HelixHR New Leave For HR`,
+`HelixHR Timesheet Sent To HR`, `HelixHR Attendance Request Sent To HR`), and
+they send from inside the save that escalates the request. `frappe.sendmail`
+throws without a **default outgoing Email Account**, so on a site with no mail
+configured a Send to HR fails at the moment the manager presses it.
+`preflight.check_outgoing_email` WARNs rather than FAILs — a site can run the
+portal with no mail at all — but that is the one thing it cannot then do.
+Configure the account in Desk → Email Account before anyone escalates anything.
+The celebration reminders need the same account.
+
+### HR staff are the deliberate exception to self-scoping
+
+Preflight carries a real tension here, and it is written down so nobody
+"fixes" it later by making the two checks agree the other way.
+
+`check_employee_user_permissions` FAILs when a linked employee has no User
+Permission on their own Employee record: without one, that person can read
+every employee on the site. It is the app's whole authorization boundary.
+
+An **HR Manager must not have one.** A User Permission on Employee beats HR
+Manager's own read permission on Leave Application, Timesheet and Attendance
+Request, and it does so silently: `check_permission("read")` inside
+`frappe.model.workflow.get_transitions` throws for every row that is not
+theirs, so the Approvals page shows HR nothing but their own records. That reads
+as an empty queue, not as a permission problem — which is the worst possible
+failure shape for the person whose job is the queue.
+
+So as of P4 the first check **exempts HR Manager logins**, through the shared
+`preflight._hr_manager_users()` helper that `check_hr_manager_self_scope` uses
+to find them. The two checks read the same list and want opposite answers about
+it, on purpose:
+
+| Check | About | Wants |
+|---|---|---|
+| `Employee User Permissions` | every linked employee **except** HR Manager logins | a self-scoping User Permission on each — FAIL without |
+| `HR queue scoping` | HR Manager logins only | **no** User Permission on Employee — WARN with |
+
+It is a WARN and not a FAIL on the second, because whether a particular HR
+Manager login is meant to work the queue is HR's call. And it is easy to arrive
+at by accident: an Employee record created with HR Settings' "Create User
+Permission" ticked — the default — is exactly where the unwanted permission
+comes from. If HR reports an empty Approvals page, this is the first thing to
+check.
+
+
 ## Before the migrate that ships the attendance workflow (P3-U5)
 
 `Attendance Request Approval` (P3-KTD6) gives Attendance Request a
@@ -467,19 +601,18 @@ bench --site <site> execute frappe.db.count   --args '["Attendance Request", {"d
 ```
 
 Either have HR submit those in Desk before the migrate, or afterwards move
-each of them along with the workflow's HR-only `Approve` action, which takes an
-old draft straight to `Pending HR`. Confirmers need the **HR Manager** role —
-HR User is refused at the final step on purpose. Employees never submit an
-attendance request themselves; the manager's approve is a save and HR's is the
-submit that writes Attendance.
+each of them along with the workflow's HR-only `Approve` action, which since
+P4-U1 takes an old draft straight to `Approved`. Deciders need the **HR
+Manager** role — HR User is refused on purpose. Employees never submit an
+attendance request themselves.
 
 `events._is_hr` is the exact rule behind "HR": `Administrator`, or a user
 holding **HR Manager** or **System Manager**. HR User is not in that set, so an
-HR User can open a request in Desk and cannot confirm it, edit it out of a
-pending state or delete it. Grant HR Manager to whoever is meant to confirm.
+HR User can open a request in Desk and cannot decide it, edit it out of a
+pending state or delete it. Grant HR Manager to whoever is meant to decide.
 
 **Never cancel an approved request to correct a day.** HRMS writes the
-Attendance rows at HR's submit and cancels them outright on cancel — including
+Attendance rows at the approver's submit and cancels them outright on cancel — including
 a row it rewrote in place that was Present before the request. Cancelling
 therefore leaves a day with no attendance rather than the day it used to have.
 The portal refuses a request over a day that already carries real attendance

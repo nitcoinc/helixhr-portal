@@ -673,24 +673,40 @@ ships with P3-U5. Two situations still bite:
 asserts through `get_workflow_name` rather than `frappe.db.exists`, so a fresh install that leaves
 the cache wrong fails in CI rather than in production.
 
-## HR's half of the attendance approval happens in Desk
+## HR's half of the attendance approval is in the portal now (P4-U1)
 
-The portal shows the manager's step and nothing else (P3-KTD7), so this is the part of the flow
-nobody can look up in the UI they use every day:
+This section used to say the opposite, and the change is the thing to remember: in phase 3 an
+attendance request needed **two** approvals, the manager's save and then HR's submit in Desk, and
+the portal deliberately showed only the first. P4-R6 collapsed that. **The reports-to manager's
+`Approve` is now the submit** — it writes the Attendance rows — and HR is involved only where a
+manager handed a request over with `Send to HR`, or where HR raised one itself.
 
-1. The request arrives at **Pending HR** after the manager's Approve. That transition is a plain
-   save: no Attendance row exists yet, and the employee's screen reads "Waiting for HR".
-2. HR opens the Attendance Request in Desk and uses the workflow **Actions** menu. The actor needs
-   **HR Manager** (`events._is_hr` is Administrator, HR Manager or System Manager — HR User is
-   outside it, on purpose). An HR Manager cannot act on their *own* request at either step; the
-   fixture condition refuses it.
-3. **Approve** is the real submit. HRMS's `on_submit` writes the Attendance rows, and the state
-   reads Approved at docstatus 1. The employee's notification says the request "counts".
-4. **Reject** is a save back to Rejected. **Type the reason as a comment** — the employee's
-   notification and the portal both quote the last Comment on the request, and a rejection with no
-   comment renders the fallback "HR sent this back, ask HR for details", which tells them nothing.
+So there is no longer an HR step to look up. What is worth knowing:
 
-Two failure modes to expect at step 3, both of them HRMS's `validate` rerunning on the submit:
+1. A request handed over sits at **Pending HR**, the employee's screen reads "Waiting for HR", and
+   it appears in the **HR queue on the portal's Approvals page** for every HR Manager, tagged with
+   an "HR" chip and the sender's note. HR Managers are also emailed, by the fixture Notification
+   `HelixHR Attendance Request Sent To HR`. Desk still works, but nobody has to go there.
+2. Deciding needs the **HR Manager** role. `events._is_hr` is `Administrator`, HR Manager or System
+   Manager — HR User is outside it, on purpose. An HR Manager cannot decide their *own* request at
+   any step: the fixture condition refuses it and `attendance_request_before_submit` refuses the raw
+   route.
+3. **Approve** is the submit that writes the Attendance, whoever presses it. A *manager's* Approve
+   is refused when any day in the range has picked up real attendance since the request was sent —
+   "Some of those days now have attendance; send this to HR instead" — because a line manager cannot
+   read Attendance and cannot weigh an overwrite. HR is not gated for that reason.
+4. **Send back** and **Reject** both require a reason, and the reason goes on the record
+   (`helixhr_decision_reason`), not into a Comment. A decision taken in Desk through the Actions
+   menu carries none, and the employee then reads the fallback "No reason was given, ask your
+   manager or HR for details" — which tells them nothing. **If you decide one in Desk, fill in
+   Decision Reason.**
+5. **Rejected is terminal and the employee removes the row.** There is no `Edit` transition off it.
+   That is deliberate: a Workflow cannot move a document from docstatus 0 to 2, and HRMS's
+   `validate_request_overlap` refuses a new request over any existing one below docstatus 2, so a
+   terminal row left in place would block those dates for ever. The employee's action is worded
+   **Remove**, the reason survives into the Deleted Document snapshot, and the dates are then free.
+
+Two failure modes to expect at the submit, both of them HRMS's `validate` rerunning:
 
 - **Approved leave landed after the request was sent.** HRMS refuses the submit. Send it back with
   a reason; the day is already covered by leave.
@@ -698,10 +714,51 @@ Two failure modes to expect at step 3, both of them HRMS's `validate` rerunning 
   flattens those to one sentence (`toPlainMessage` in `frontend/src/lib/errorMap.js`); in Desk you
   see the table.
 
-And one thing HR must not do: **never cancel an approved request to correct a day.** HRMS cancels
+And one thing nobody must do: **never cancel an approved request to correct a day.** HRMS cancels
 the Attendance rows the request wrote, including a row it had rewritten in place, so a day that was
 Present ends with no attendance at all. Re-mark the day by hand instead. The portal refuses a
-request over a day that already carries real attendance for this exact reason (P3-KTD14).
+request over a day that already carries real attendance for this exact reason (P3-KTD14), and the
+manager's Approve re-checks it at decision time (P4-KTD5).
+
+## Two reminder emails for one birthday: what the refusal and the FAIL say
+
+Frappe merges `scheduler_events` across installed apps and offers no way to remove another app's
+job, so HRMS's stock birthday and anniversary emails keep going out for as long as HRMS's own
+checkboxes are ticked, and HelixHR's branded one goes out for as long as HR has picked a template
+(P4-KTD10). Both at once is two emails to everybody, every morning — and the first sign of it is
+usually somebody forwarding you both.
+
+There are two guards, and the words are worth recognising because they name the same two fields
+each time.
+
+**At the point HR creates it.** `events.hr_settings_validate` refuses the HR Settings save:
+
+```
+HRMS and HelixHR would both send the birthday email: untick 'Birthdays' in
+HR Settings > Reminders, or clear 'HelixHR Birthday Template'.
+```
+
+The anniversary wording is the same shape — "the work anniversary email", `'Work Anniversaries'`,
+`'HelixHR Work Anniversary Template'`. Both strings come from `reminders.EVENTS`, which is also
+where the preflight line reads them, so a form label and a message can never drift apart.
+
+**After the fact.** `helixhr.preflight.run`'s `Celebration reminders` line, for the routes that
+never reach a `validate` — a fixture import, a raw `db_set`, a restored site:
+
+```
+FAIL  Celebration reminders  Birthday: both HRMS and HelixHR would send -- untick
+      'Birthdays' in HR Settings or clear 'HelixHR Birthday Template'
+```
+
+The same check FAILs for a different reason worth telling apart: a picked template that has since
+been **deleted** ("… names Email Template 'X', which does not exist -- nothing is sent"). That one
+is quiet in production — the job logs it and sends nothing, so the event simply goes silent — which
+is why it is a FAIL and not a WARN. Neither sender on for an event is a WARN, not a FAIL: a site
+may not want the email at all.
+
+Save-time refusal *and* preflight, rather than one of them, because preflight is an operator
+command: between HR's save and the next run of it there is a morning's worth of duplicate mail.
+
 
 ## Two test-isolation traps this phase found, and what they look like next time
 
@@ -952,6 +1009,19 @@ Holidays page can only say it cannot tell, the attendance calendar cannot name w
 the Fix a day preview cannot separate a holiday from a working day, so it refuses to send. The
 other phase 3 FAIL lives inside the HTTPS probe: the effective `Permissions-Policy` must allow
 `geolocation=(self)`, and a proxy that appends a second `geolocation=()` fails it too.
+
+Three more arrived with phase 4. `Celebration reminders` **FAILs** when HRMS and HelixHR would
+both send for one event, or when a picked Email Template has been deleted, and WARNs when nobody
+sends — see "Two reminder emails for one birthday" above for the exact words. `Outgoing email`
+**WARNs** when the site has no default outgoing Email Account: the HR-queue notifications send from
+inside the save that escalates a request, so without one a Send to HR fails at the moment a manager
+presses it. `HR queue scoping` **WARNs** when an HR Manager has a User Permission on their own
+Employee record, which silently empties their HR queue — the one case where the self-scoping that
+`Employee User Permissions` demands of everybody else is wrong, and the reason that check now
+exempts HR Manager logins. `Fixtures installed` and `Portal landing` both grew: the first covers
+the `Sent Back` Workflow State, the two new Workflow Action Masters and the four HR-queue
+Notifications; the second now names HR Managers among the users whose pinned `default_workspace`
+would keep them out of the portal.
 
 Three of those are new in P2-U9 and judge *values*, not presence:
 

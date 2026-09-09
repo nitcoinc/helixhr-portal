@@ -637,7 +637,8 @@ def check_hr_contact():
 def check_fixtures():
 	expected = [
 		("Workflow", "Timesheet Approval"),
-		# P3-KTD6 / P3-R26: the two-step attendance approval (P3-U5).
+		# P4-U1: the single-step attendance approval, with Pending HR reached
+		# only by Send to HR (was two mandatory steps in P3).
 		("Workflow", "Attendance Request Approval"),
 		# Its two new states. A Workflow's `workflow_state` values are Links
 		# and fixture import runs with `ignore_links`, so a Workflow State
