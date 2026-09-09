@@ -71,6 +71,26 @@ describe('toPlainLeaveError', () => {
       'Some other Frappe error',
     )
   })
+
+  // P4-U4. The three refusals `act_on_approval` added. A throw raised inside
+  // `apply_workflow` reaches the browser wrapped in HRMS's own markup, so
+  // matching on the sentence is what gets the plain line back to the manager
+  // rather than a paragraph of it.
+  it('maps the four-outcome refusals back to their plain sentences', () => {
+    expect(
+      toPlainLeaveError(
+        err("<div>Error: That isn't something you can do to this request.</div>"),
+      ),
+    ).toBe("That isn't something you can do to this request.")
+    expect(toPlainLeaveError(err('<b>Say why before rejecting this.</b>'))).toBe(
+      'Say why before rejecting this.',
+    )
+    expect(
+      toPlainLeaveError(
+        err('Some of those days now have attendance; send this to HR instead.'),
+      ),
+    ).toBe('Some of those days now have attendance; send this to HR instead.')
+  })
 })
 
 // P2-U5. The two messages the leave lifecycle added, plus the promise that

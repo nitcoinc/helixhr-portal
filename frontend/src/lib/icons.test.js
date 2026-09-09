@@ -19,6 +19,9 @@ describe('NEEDS_YOU_ICON', () => {
     'approval_attendance',
     'attendance_request_rejected',
     'attendance_request_waiting',
+    // P4-R4: the two terminal rejections, which reach "Waiting on others".
+    'leave_final_rejected',
+    'attendance_request_final_rejected',
   ]
 
   it('covers every kind the server emits, and nothing else', () => {

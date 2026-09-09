@@ -64,6 +64,24 @@ const PATTERNS = [
     test: /leave type is mandatory|please select a leave type/i,
     message: () => 'Pick a leave type first.',
   },
+  // P4-U4 / P4-R1, P4-R4, P4-KTD5. The three refusals `act_on_approval`
+  // added are already plain sentences, so they are mapped to *themselves*
+  // rather than reworded. They earn a pattern anyway, unlike the P2-U5
+  // refusals above: HRMS wraps a throw raised inside `apply_workflow` in
+  // its own markup and prefixes it, so the sentence can arrive glued to
+  // something else, and matching on it is what gets the plain line back.
+  {
+    test: /isn't something you can do to this request/i,
+    message: () => "That isn't something you can do to this request.",
+  },
+  {
+    test: /say why before rejecting this/i,
+    message: () => 'Say why before rejecting this.',
+  },
+  {
+    test: /some of those days now have attendance/i,
+    message: () => 'Some of those days now have attendance; send this to HR instead.',
+  },
 ]
 
 /**

@@ -142,7 +142,9 @@ test.describe('employee', () => {
     await expect(preview).toContainText('1 day would be marked as Work From Home', {
       timeout: 10000,
     })
-    await expect(preview).toContainText('Goes to Manager first, then HR')
+    // P4-R6: one step. The manager's Approve submits the request and writes
+    // the Attendance; HR is involved only if the manager hands it over.
+    await expect(preview).toContainText('Goes to Manager for approval.')
 
     // A range that reaches into the future adds days nothing can say about
     // yet; extending it over the whole week is enough to move the number.
@@ -255,6 +257,10 @@ test.describe('manager', () => {
     await expect(panel).toContainText('Client site all day', { timeout: 10000 })
     await expect(panel).toContainText('the calendar shows nothing recorded')
 
+    // P4-U4: Send to HR opens its optional note first, then fires. Every
+    // outcome that carries words to another person is confirmed once.
+    await panel.getByRole('button', { name: 'Send to HR' }).click()
+    await expect(panel.getByTestId('hr-note')).toBeVisible()
     await panel.getByRole('button', { name: 'Send to HR' }).click()
 
     const admin = await adminContext(baseURL!)
@@ -289,9 +295,32 @@ test.describe('manager', () => {
     const panel = page.getByTestId('approval-detail')
     await expect(panel.getByRole('button', { name: 'Send to HR' })).toBeVisible({ timeout: 10000 })
 
-    // Client-side: no reason, no send back.
-    await panel.getByRole('button', { name: 'Send back' }).click()
+    // P4-U4. All four outcomes are on screen, because the server said all
+    // four are legal on a Pending Manager attendance request for its own
+    // manager (P4-R1) -- and Approve is the decision again, not a hand-over.
+    await expect(panel.getByRole('button', { name: /^Approve 1 day$/ })).toBeVisible()
+    await expect(panel.getByTestId('send-back')).toBeVisible()
+    await expect(panel.getByTestId('reject')).toBeVisible()
+    await expect(panel.getByTestId('send-to-hr')).toBeVisible()
+
+    // Client-side: no reason, no send back. The first tap opens the surface,
+    // the second is the one that would fire.
+    await panel.getByTestId('send-back').click()
+    await expect(panel.getByTestId('decision-reason')).toContainText('Send back with a reason')
+    await panel.getByTestId('send-back').click()
     await expect(page.getByText('Say what should change before sending it back.')).toBeVisible()
+
+    // P4-U4. Switching outcomes empties and relabels the field: a sentence
+    // written to ask for a change must never be submittable as the
+    // justification for a terminal no.
+    const reasonBox = panel.getByTestId('decision-reason')
+    await reasonBox.getByRole('textbox').fill('add the Friday hours')
+    await panel.getByTestId('reject').click()
+    await expect(reasonBox).toContainText('Reject with a reason')
+    await expect(reasonBox.getByRole('textbox')).toHaveValue('')
+    await expect(page.getByText('Say what should change before sending it back.')).toHaveCount(0)
+    await panel.getByTestId('reject').click()
+    await expect(page.getByText('Say why before rejecting this.')).toBeVisible()
 
     // Server-side: the same refusal, with the browser out of the way. Its own
     // logged-in API context rather than `page.request`, which carries the
@@ -308,7 +337,7 @@ test.describe('manager', () => {
       },
     })
     expect(refused.ok()).toBeFalsy()
-    expect(await refused.text()).toContain('comment is required')
+    expect(await refused.text()).toContain('Say why before rejecting this.')
     await managerApi.dispose()
 
     // Now move the record under the manager, exactly as an HR edit would, and
@@ -324,7 +353,8 @@ test.describe('manager', () => {
     })
     expect(changed.ok(), await changed.text()).toBeTruthy()
 
-    await panel.getByRole('button', { name: 'Send to HR' }).click()
+    await panel.getByTestId('send-to-hr').click()
+    await panel.getByTestId('send-to-hr').click()
     await expect(page.getByRole('alert').filter({ hasText: /Reload/ })).toBeVisible({
       timeout: 10000,
     })

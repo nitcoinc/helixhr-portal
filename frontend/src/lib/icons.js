@@ -81,4 +81,8 @@ export const NEEDS_YOU_ICON = {
   approval_attendance: 'approvals',
   attendance_request_rejected: 'attendance',
   attendance_request_waiting: 'attendance',
+  // P4-R4: the two terminal rejections. They sit in "Waiting on others" with
+  // the reason and no verb, because the decision is already made.
+  leave_final_rejected: 'leave',
+  attendance_request_final_rejected: 'attendance',
 }

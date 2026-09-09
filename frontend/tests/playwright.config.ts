@@ -42,6 +42,18 @@ export default defineConfig({
       dependencies: ['setup'],
       testIgnore: /performance\.spec\.ts/,
     },
+    // P4-U4. The HR queue's identity (P4-KTD8): an HR Manager with an Active
+    // Employee record, who lands in the portal and works the HR half of the
+    // Approvals queue. Scoped to `approvals.spec.ts` on purpose -- this
+    // project exists for the HR capability shape, and every other spec is
+    // written for the employee or manager one, so a wider `testMatch` would
+    // run somebody else's flow under the wrong hat and fight it for fixtures.
+    {
+      name: 'hr',
+      use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/hr.json' },
+      dependencies: ['setup'],
+      testMatch: /approvals\.spec\.ts/,
+    },
     // P2-U9 step 9. Mobile WebKit is the second mandatory browser: it is the
     // only engine on iOS, it is where a coarse pointer, a real safe-area
     // inset and Safari's own overlay behaviour actually live, and every

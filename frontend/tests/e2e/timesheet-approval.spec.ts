@@ -217,14 +217,18 @@ test('employee submits a week, manager rejects with a comment, employee edits an
 
   // P2-U3 renamed the manager's action to the word the employee already
   // sees on the row ("Sent back"); "Reject" was the Frappe verb.
-  await panel
-    .getByLabel('Send back with a reason (required to send back)')
-    .fill('Please double check your hours')
-  await panel.getByRole('button', { name: 'Send back' }).click()
+  // P4-U4: the reason surface is opened by the button it belongs to rather
+  // than standing permanently open, so Send back is two taps -- arm, then
+  // fire -- and the field says which outcome it is feeding.
+  await panel.getByTestId('send-back').click()
+  await panel.getByTestId('decision-reason').getByRole('textbox').fill('Please double check your hours')
+  await panel.getByTestId('send-back').click()
   await expect(weekRow).toHaveCount(0, { timeout: 10000 })
 
   await empPage.reload()
-  await expect(empPage.locator('[data-status="Rejected"]:visible')).toBeVisible({ timeout: 10000 })
+  // P4-KTD1: the state is named honestly now. "Rejected" meant "sent back"
+  // on a Timesheet, and after the rename it means nothing at all there.
+  await expect(empPage.locator('[data-status="Sent Back"]:visible')).toBeVisible({ timeout: 10000 })
 
   // The reason, not just the label. Asserting only "Sent back" is what let a
   // 403 on the comment lookup live in this flow undetected: the employee saw

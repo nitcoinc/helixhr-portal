@@ -559,6 +559,67 @@ def _get_needs_you(employee, once):
 			)
 		)
 
+	# P4-R4. A terminal rejection is nobody's move. The employee has to *read*
+	# it -- the reason is the whole content of the row -- but there is nothing
+	# to edit, resend or chase, so it goes to the quieter "Waiting on others"
+	# list rather than into a queue of work. Once each: the two collectors
+	# above are scoped to the send-back states, so a rejected record reaches
+	# exactly one of these lists and never both.
+	final_leave = frappe.get_all(
+		"Leave Application",
+		filters={"employee": employee, "status": "Rejected", "docstatus": 1},
+		fields=["name", "leave_type", "from_date", "owner"],
+		order_by="from_date desc",
+		limit=_QUEUE_FETCH,
+	)
+	final_leave_reasons = _leave_reason(
+		[row.name for row in final_leave],
+		{row.name: row.owner for row in final_leave},
+	)
+	for row in final_leave:
+		waiting.append(
+			_queue_item(
+				kind="leave_final_rejected",
+				name=row.name,
+				title=f"Your {row.leave_type} was rejected",
+				detail=final_leave_reasons.get(row.name),
+				date=str(row.from_date),
+				day=day_for(row.from_date),
+				age_days=age_days(row.from_date),
+				action="View",
+				owner="nobody",
+				urgency="waiting",
+				to={"name": "LeaveDetail", "params": {"name": row.name}},
+			)
+		)
+
+	final_requests = frappe.get_all(
+		"Attendance Request",
+		filters={"employee": employee, "workflow_state": REQUEST_REJECTED, "docstatus": 0},
+		fields=["name", "from_date", "reason"],
+		order_by="from_date desc",
+		limit=_QUEUE_FETCH,
+	)
+	final_request_reasons = _rejection_comments(
+		"Attendance Request", [row.name for row in final_requests], employee
+	)
+	for row in final_requests:
+		waiting.append(
+			_queue_item(
+				kind="attendance_request_final_rejected",
+				name=row.name,
+				title=f"Your {row.reason} request was rejected",
+				detail=final_request_reasons.get(row.name),
+				date=str(row.from_date),
+				day=day_for(row.from_date),
+				age_days=age_days(row.from_date),
+				action="View",
+				owner="nobody",
+				urgency="waiting",
+				to={"name": "AttendanceRequestDetail", "params": {"name": row.name}},
+			)
+		)
+
 	# An HR reply is an obligation for exactly as long as its notification is
 	# unread (KTD6). Deriving it from Notification Log rather than from the
 	# request's own status is what lets reading it clear the queue without a
@@ -687,8 +748,9 @@ def _queue_item(
 		"day": day,
 		"age_days": age_days,
 		"action": action,
-		# Whose move it is. "you" rows are the queue; "manager" rows are the
-		# waiting list.
+		# Whose move it is. "you" rows are the queue; "manager", "hr" and
+		# "nobody" rows are the waiting list -- "nobody" is a decision that
+		# has already been made and only needs reading (P4-R4).
 		"owner": owner,
 		"urgency": urgency,
 		"tone": _URGENCY_TONE[urgency],
@@ -3597,7 +3659,9 @@ def get_my_approvals():
 	}
 
 
-def _decided_row(kind, name, employee_name, label, from_date, to_date, status, decided_on):
+def _decided_row(
+	kind, name, employee_name, label, from_date, to_date, status, decided_on, docstatus=0
+):
 	return {
 		"id": f"{kind}:{name}",
 		"kind": kind,
@@ -3608,6 +3672,10 @@ def _decided_row(kind, name, employee_name, label, from_date, to_date, status, d
 		"from_date": str(from_date) if from_date else None,
 		"to_date": str(to_date) if to_date else None,
 		"status": status,
+		# P4-U4: the receipt's badge needs it. Leave's Rejected is a send-back
+		# at docstatus 0 and a terminal rejection at 1 (P4-KTD4), so a receipt
+		# without the docstatus would word a manager's final no as "Sent back".
+		"docstatus": cint(docstatus),
 		"decided_on": str(decided_on) if decided_on else None,
 	}
 
@@ -3623,6 +3691,7 @@ def _decided_leave(employee, since):
 			row.to_date,
 			row.status,
 			row.modified,
+			row.docstatus,
 		)
 		for row in frappe.get_list(
 			"Leave Application",
@@ -3632,11 +3701,39 @@ def _decided_leave(employee, since):
 				"status": ["in", ["Approved", "Rejected"]],
 				"modified": [">=", str(since)],
 			},
-			fields=["name", "employee_name", "leave_type", "from_date", "to_date", "status", "modified"],
+			fields=[
+				"name",
+				"employee_name",
+				"leave_type",
+				"from_date",
+				"to_date",
+				"status",
+				"docstatus",
+				"modified",
+			],
 			order_by="modified desc",
 			limit=_DECIDED_LIMIT,
 		)
 	]
+
+
+def _decided_hr_handover_states(*states):
+	"""The Pending-HR states a "Decided this week" receipt should include, for
+	*this* caller (P4-U4).
+
+	A manager who hands a week or a request to HR has finished with it, and
+	the receipt is how they see that their step happened -- attendance
+	requests have said "Waiting for HR" here since P3-KTD7, and after P4-R5 a
+	timesheet can be handed over too, so it says the same thing.
+
+	For an HR Manager the same row is not a receipt at all: it is the top of
+	their own pending queue (P4-R11), and listing it under "Decided this
+	week" would tell them they had already dealt with the thing they are
+	being asked to deal with. So the Pending-HR states drop out for an HR
+	caller, and the receipt they keep is what they themselves approved, sent
+	back or rejected.
+	"""
+	return [] if _is_hr() else list(states)
 
 
 def _decided_timesheets(employee, since):
@@ -3650,15 +3747,31 @@ def _decided_timesheets(employee, since):
 			row.end_date,
 			row.workflow_state,
 			row.modified,
+			row.docstatus,
 		)
 		for row in frappe.get_list(
 			"Timesheet",
 			filters={
 				"employee": ["!=", employee],
-				"workflow_state": ["in", ["Approved", TIMESHEET_SENT_BACK]],
+				"workflow_state": [
+					"in",
+					[
+						"Approved",
+						TIMESHEET_SENT_BACK,
+						*_decided_hr_handover_states(TIMESHEET_PENDING_HR),
+					],
+				],
 				"modified": [">=", str(since)],
 			},
-			fields=["name", "employee_name", "start_date", "end_date", "workflow_state", "modified"],
+			fields=[
+				"name",
+				"employee_name",
+				"start_date",
+				"end_date",
+				"workflow_state",
+				"docstatus",
+				"modified",
+			],
 			order_by="modified desc",
 			limit=_DECIDED_LIMIT,
 		)
@@ -3668,7 +3781,9 @@ def _decided_timesheets(employee, since):
 def _decided_attendance_requests(employee, since):
 	"""A request the manager sent on reads "Waiting for HR" here, which is
 	the honest receipt: their step is done and HR's has not happened yet
-	(P3-KTD7). Approved and Rejected are the later outcomes of the same row.
+	(P3-KTD7). Approved, Sent Back and Rejected are the later outcomes of the
+	same row. See `_decided_hr_handover_states` for why HR's own queue does
+	not appear in HR's receipt.
 	"""
 	return [
 		_decided_row(
@@ -3680,6 +3795,7 @@ def _decided_attendance_requests(employee, since):
 			row.to_date,
 			row.workflow_state,
 			row.modified,
+			row.docstatus,
 		)
 		for row in frappe.get_list(
 			"Attendance Request",
@@ -3687,11 +3803,24 @@ def _decided_attendance_requests(employee, since):
 				"employee": ["!=", employee],
 				"workflow_state": [
 					"in",
-					[REQUEST_PENDING_HR, REQUEST_APPROVED, REQUEST_SENT_BACK, REQUEST_REJECTED],
+					[
+						REQUEST_APPROVED,
+						REQUEST_SENT_BACK,
+						REQUEST_REJECTED,
+						*_decided_hr_handover_states(REQUEST_PENDING_HR),
+					],
 				],
 				"modified": [">=", str(since)],
 			},
-			fields=["name", "employee_name", "from_date", "to_date", "workflow_state", "modified"],
+			fields=[
+				"name",
+				"employee_name",
+				"from_date",
+				"to_date",
+				"workflow_state",
+				"docstatus",
+				"modified",
+			],
 			order_by="modified desc",
 			limit=_DECIDED_LIMIT,
 		)

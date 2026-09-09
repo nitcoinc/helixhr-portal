@@ -229,7 +229,7 @@ const isReadOnly = computed(
   () =>
     !!workflowState.value &&
     workflowState.value !== 'Draft' &&
-    workflowState.value !== 'Rejected',
+    workflowState.value !== 'Sent Back',
 )
 const approverName = computed(() => week.data?.approver_name || '')
 
@@ -500,13 +500,24 @@ const savedLabel = computed(() => {
       </div>
 
       <div
-        v-if="workflowState === 'Rejected'"
+        v-if="workflowState === 'Sent Back'"
         class="surface-alert mt-4 p-3 text-sm"
         role="alert"
       >
         This week was sent back<span v-if="rejectionComment">: &ldquo;{{ rejectionComment }}&rdquo;</span>.
         Fix it up and send it again.
       </div>
+
+      <!-- P4-R5. The manager handed this week to HR, so it is nobody's to
+           edit until HR decides. The grid below is already read-only; saying
+           so is what stops the employee looking for the reason it will not
+           take their hours. -->
+      <p
+        v-else-if="workflowState === 'Pending HR'"
+        class="surface-inset mt-4 p-3 text-sm text-ink-gray-7"
+      >
+        This week is with HR now. You can't change it until they decide.
+      </p>
 
       <div class="mt-4">
         <WeekGrid
@@ -594,7 +605,7 @@ const savedLabel = computed(() => {
         :disabled="!canWrite"
         @click="submitWeek"
       >
-        {{ workflowState === 'Rejected' ? 'Send again' : 'Submit week' }}
+        {{ workflowState === 'Sent Back' ? 'Send again' : 'Submit week' }}
       </Button>
     </div>
 
