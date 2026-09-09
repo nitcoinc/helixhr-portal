@@ -61,6 +61,79 @@ class TestNotifications(IntegrationTestCase):
 		)
 		self.assertIn("Approved", log.subject)
 
+	def _leave_subjects(self, name):
+		return frappe.get_all(
+			"Notification Log",
+			filters={"document_type": "Leave Application", "document_name": name},
+			pluck="subject",
+		)
+
+	def _open_leave(self, offset):
+		"""One unsubmitted leave of the employee's own, filed by them."""
+		ensure_leave_allocation(self.employee_name, "Casual Leave", 5)
+		date = add_days(today(), offset)
+		frappe.set_user("Administrator")
+		for existing in frappe.get_all(
+			"Leave Application",
+			filters={"employee": self.employee_name, "from_date": str(date)},
+			pluck="name",
+		):
+			frappe.delete_doc("Leave Application", existing, force=True, ignore_permissions=True)
+
+		frappe.set_user(EMPLOYEE_USER)
+		doc = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": self.employee_name,
+				"leave_type": "Casual Leave",
+				"from_date": str(date),
+				"to_date": str(date),
+				"description": "test",
+				"leave_approver": MANAGER_USER,
+			}
+		)
+		doc.insert()
+		frappe.set_user("Administrator")
+		return doc
+
+	def test_a_send_back_and_a_final_reject_are_told_apart_by_docstatus(self):
+		"""P4-U2 / P4-KTD9. Both outcomes write `status = "Rejected"` -- one
+		unsubmitted, one submitted -- and a Notification watches one field,
+		so `docstatus` is what the wording keys on. A submit does raise Value
+		Change (`run_post_save_methods` runs `on_change` after it), which is
+		why one fixture covers both.
+		"""
+		sent_back = self._open_leave(3)
+		sent_back.reload()
+		sent_back.status = "Rejected"
+		sent_back.save(ignore_permissions=True)
+
+		subjects = self._leave_subjects(sent_back.name)
+		self.assertEqual(len(subjects), 1)
+		self.assertIn("Sent back", subjects[0])
+
+		rejected = self._open_leave(5)
+		rejected.reload()
+		rejected.status = "Rejected"
+		rejected.submit()
+
+		subjects = self._leave_subjects(rejected.name)
+		self.assertEqual(len(subjects), 1)
+		self.assertIn("Rejected", subjects[0])
+		self.assertNotIn("Sent back", subjects[0])
+
+	def test_a_leave_sent_to_hr_tells_the_employee_it_is_waiting_for_hr(self):
+		"""The stage is a second field, so it needs its own fixture -- and
+		`db_set`, which is how a permlevel-1 field is written, still runs
+		`on_change`, so Value Change fires on it."""
+		leave = self._open_leave(7)
+
+		leave.db_set("helixhr_stage", "HR")
+
+		subjects = self._leave_subjects(leave.name)
+		self.assertEqual(len(subjects), 1)
+		self.assertIn("waiting for HR", subjects[0])
+
 	def test_timesheet_rejection_notifies_the_users_field_with_the_comment_available(self):
 		company = frappe.db.get_value("Employee", self.employee_name, "company")
 		ensure_holiday_list_assignment(company)

@@ -3,7 +3,11 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, getdate, today
 
 from helixhr.api import (
+	_act_on_leave_application,
+	_assert_may_act_on,
+	act_on_approval,
 	apply_for_leave,
+	get_approval_detail,
 	get_leave_day_count,
 	get_leave_form_context,
 	get_my_leave,
@@ -14,9 +18,18 @@ from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	MANAGER_USER,
 	ensure_holiday_list_assignment,
+	ensure_hr_manager_user,
 	ensure_leave_allocation,
+	ensure_leave_approver_role,
 	make_test_employee_and_manager,
 )
+
+
+def _token(name):
+	"""The concurrency token `act_on_approval` requires: the `modified` and
+	status the approver was shown (P2-U7 step 3)."""
+	row = frappe.db.get_value("Leave Application", name, ["modified", "status"], as_dict=True)
+	return {"expected_modified": str(row.modified), "expected_state": row.status}
 
 
 class TestLeaveFlow(IntegrationTestCase):
@@ -469,3 +482,290 @@ class TestPortalLeaveApi(IntegrationTestCase):
 		self.assertTrue(context["approver_name"])
 		casual = next(t for t in context["types"] if t["leave_type"] == "Casual Leave")
 		self.assertIsNotNone(casual["left"])
+
+
+class TestLeaveStageAndOutcomes(IntegrationTestCase):
+	"""P4-U2. Leave carries the same four outcomes as the workflow kinds
+	through HRMS's own lifecycle plus one stage field (P4-KTD4).
+
+	Two of the four are new here and neither is reachable through
+	`act_on_approval` yet -- that method still speaks the two-word vocabulary
+	P4-U3 replaces, in which "Reject" means *send back*. So the final reject
+	and the escalation are driven through the per-kind `act` the dispatcher
+	calls, after the same authorization the dispatcher performs; the refusals
+	are asserted on the public surfaces (`get_approval_detail`, a raw
+	`submit`, a generic `set_value`), which is where they actually matter.
+
+	Dates: offsets 78-92, clear of every other leave suite in this repo
+	(60-75, 96+, and 102-114) and inside the allocation year.
+	"""
+
+	def setUp(self):
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		frappe.db.set_value("Employee", self.employee_name, "reports_to", self.manager_name)
+		frappe.db.set_value("Employee", self.employee_name, "leave_approver", MANAGER_USER)
+		ensure_leave_approver_role(MANAGER_USER)
+		self.company = frappe.db.get_value("Employee", self.employee_name, "company")
+		ensure_holiday_list_assignment(self.company)
+		ensure_leave_allocation(self.employee_name, "Casual Leave", 30)
+		self.hr_user = ensure_hr_manager_user()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	# helpers
+
+	def _clear(self, offset):
+		frappe.set_user("Administrator")
+		date = add_days(today(), offset)
+		for name in frappe.get_all(
+			"Leave Application",
+			filters={"employee": self.employee_name, "from_date": ["<=", str(date)], "to_date": [">=", str(date)]},
+			pluck="name",
+		):
+			doc = frappe.get_doc("Leave Application", name)
+			if doc.docstatus == 1:
+				doc.cancel()
+			frappe.delete_doc("Leave Application", name, force=True, ignore_permissions=True)
+		return date
+
+	def _open_leave(self, offset, leave_type="Casual Leave"):
+		date = self._clear(offset)
+		frappe.set_user(EMPLOYEE_USER)
+		result = apply_for_leave(leave_type=leave_type, from_date=date, to_date=date)
+		frappe.set_user("Administrator")
+		return result
+
+	def _hr_approved_type(self):
+		"""A Leave Type HR decides for itself (P4-R7)."""
+		name = "_Test HR Approved Leave"
+		frappe.set_user("Administrator")
+		if not frappe.db.exists("Leave Type", name):
+			frappe.get_doc(
+				{"doctype": "Leave Type", "leave_type_name": name, "helixhr_hr_approves": 1}
+			).insert(ignore_permissions=True)
+		frappe.db.set_value("Leave Type", name, "helixhr_hr_approves", 1)
+		ensure_leave_allocation(self.employee_name, name, 10)
+		return name
+
+	def _stage(self, name):
+		return frappe.db.get_value("Leave Application", name, "helixhr_stage")
+
+	def _balance(self, date, leave_type="Casual Leave"):
+		from hrms.hr.doctype.leave_application.leave_application import get_leave_balance_on
+
+		return get_leave_balance_on(self.employee_name, leave_type, str(date))
+
+	def _act(self, name, action, user):
+		"""What `act_on_approval` does, minus the vocabulary P4-U3 owns:
+		authorize the session against the stored record, then run the
+		lifecycle."""
+		frappe.set_user(user)
+		doc = frappe.get_doc("Leave Application", name)
+		_assert_may_act_on(doc)
+		_act_on_leave_application(doc, action)
+		return doc
+
+	# --- the stage, and who it hands the request to -----------------------
+
+	def test_a_normal_type_waits_for_the_manager_and_an_hr_type_starts_with_hr(self):
+		mine = self._open_leave(78)
+		self.assertEqual(self._stage(mine["name"]), "Manager")
+		self.assertEqual(mine["stage"], "Manager")
+
+		frappe.set_user(EMPLOYEE_USER)
+		self.assertEqual(get_my_leave_detail(mine["name"])["stage"], "Manager")
+
+		# The manager may open it, which is the same check that lets them
+		# decide it (`_assert_may_act_on`).
+		frappe.set_user(MANAGER_USER)
+		self.assertTrue(get_approval_detail("leave", mine["name"]))
+
+		hr_type = self._hr_approved_type()
+		theirs = self._open_leave(80, leave_type=hr_type)
+		# Written by the employee's own session, through `db_set`, because
+		# the field is permlevel 1 and `insert()` would have reset it.
+		self.assertEqual(self._stage(theirs["name"]), "HR")
+		self.assertEqual(theirs["stage"], "HR")
+
+		frappe.set_user(MANAGER_USER)
+		with self.assertRaises(frappe.PermissionError):
+			get_approval_detail("leave", theirs["name"])
+
+		frappe.set_user(self.hr_user)
+		self.assertTrue(get_approval_detail("leave", theirs["name"]))
+
+	def test_the_form_context_marks_the_types_that_go_straight_to_hr(self):
+		hr_type = self._hr_approved_type()
+
+		frappe.set_user(EMPLOYEE_USER)
+		types = {row["leave_type"]: row for row in get_leave_form_context()["types"]}
+
+		self.assertTrue(types[hr_type]["hr_approves"])
+		self.assertFalse(types["Casual Leave"]["hr_approves"])
+
+	def test_send_to_hr_moves_the_queue_and_nothing_else(self):
+		mine = self._open_leave(82)
+
+		self._act(mine["name"], "Send to HR", MANAGER_USER)
+
+		frappe.set_user("Administrator")
+		doc = frappe.get_doc("Leave Application", mine["name"])
+		self.assertEqual(doc.helixhr_stage, "HR")
+		# HRMS's own lifecycle is untouched: still Open, still unsubmitted,
+		# and still the manager on `leave_approver` -- HRMS requires one and
+		# shares the document with them (P4-KTD4).
+		self.assertEqual(doc.status, "Open")
+		self.assertEqual(doc.docstatus, 0)
+		self.assertEqual(doc.leave_approver, MANAGER_USER)
+
+		frappe.set_user(MANAGER_USER)
+		with self.assertRaises(frappe.PermissionError):
+			get_approval_detail("leave", mine["name"])
+
+		frappe.set_user(self.hr_user)
+		self.assertTrue(get_approval_detail("leave", mine["name"]))
+
+	# --- the raw routes (P4-R8, P4-R8a) -----------------------------------
+
+	def test_the_employee_cannot_move_their_own_request_into_the_hr_queue(self):
+		mine = self._open_leave(84)
+
+		frappe.set_user(EMPLOYEE_USER)
+		try:
+			frappe.client.set_value("Leave Application", mine["name"], "helixhr_stage", "HR")
+		except frappe.PermissionError:
+			pass
+
+		frappe.set_user("Administrator")
+		# Refused outright, or silently reset by
+		# `reset_values_if_no_permlevel_access` -- either way the queue did
+		# not move.
+		self.assertEqual(self._stage(mine["name"]), "Manager")
+
+	def test_the_approvers_share_cannot_submit_a_request_that_is_with_hr(self):
+		"""HRMS shares every application with its `leave_approver` at
+		`submit=1`, so the manager of an escalated request keeps a Desk route
+		to Approve that never consults the portal. `before_submit` is what
+		closes it."""
+		mine = self._open_leave(86)
+		self._act(mine["name"], "Send to HR", MANAGER_USER)
+
+		frappe.set_user(MANAGER_USER)
+		doc = frappe.get_doc("Leave Application", mine["name"])
+		doc.status = "Approved"
+		with self.assertRaises(frappe.PermissionError):
+			doc.submit()
+
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("Leave Application", mine["name"], "docstatus"), 0)
+
+		frappe.set_user(self.hr_user)
+		hr_doc = frappe.get_doc("Leave Application", mine["name"])
+		hr_doc.status = "Approved"
+		hr_doc.submit()
+
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("Leave Application", mine["name"], "docstatus"), 1)
+
+	def test_nobody_submits_their_own_leave_even_holding_hr_manager(self):
+		"""P4-R8's leave half. The HR-Manager role carries submit on Leave
+		Application, so without this hook an HR Manager could approve their
+		own days from Desk."""
+		mine = self._open_leave(88)
+		self._grant_hr_manager(EMPLOYEE_USER)
+		# HRMS has its own self-approval refusal, but it is a *setting*
+		# (`HR Settings.prevent_self_leave_approval`), it only looks at
+		# status Approved, and it stands down entirely if a Workflow is ever
+		# added to Leave Application. Turned off here so what the assertion
+		# proves is this app's hook and not HRMS's.
+		self._allow_self_approval()
+
+		frappe.set_user(EMPLOYEE_USER)
+		doc = frappe.get_doc("Leave Application", mine["name"])
+		doc.status = "Approved"
+		with self.assertRaises(frappe.PermissionError):
+			doc.submit()
+
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("Leave Application", mine["name"], "docstatus"), 0)
+
+	def _allow_self_approval(self):
+		frappe.set_user("Administrator")
+		before = frappe.db.get_single_value("HR Settings", "prevent_self_leave_approval")
+		frappe.db.set_single_value("HR Settings", "prevent_self_leave_approval", 0)
+		self.addCleanup(
+			frappe.db.set_single_value, "HR Settings", "prevent_self_leave_approval", before
+		)
+
+	def _grant_hr_manager(self, user):
+		frappe.set_user("Administrator")
+		doc = frappe.get_doc("User", user)
+		if "HR Manager" not in {row.role for row in doc.roles}:
+			doc.append("roles", {"role": "HR Manager"})
+			doc.save(ignore_permissions=True)
+			self.addCleanup(self._revoke_hr_manager, user)
+
+	def _revoke_hr_manager(self, user):
+		frappe.set_user("Administrator")
+		doc = frappe.get_doc("User", user)
+		doc.roles = [row for row in doc.roles if row.role != "HR Manager"]
+		doc.save(ignore_permissions=True)
+
+	# --- the two rejections, which are not the same thing -----------------
+
+	def test_a_final_reject_submits_consumes_nothing_and_frees_the_dates(self):
+		date = self._clear(90)
+		mine = self._open_leave(90)
+		before = self._balance(date)
+
+		self._act(mine["name"], "Reject", MANAGER_USER)
+
+		frappe.set_user("Administrator")
+		doc = frappe.get_doc("Leave Application", mine["name"])
+		self.assertEqual(doc.status, "Rejected")
+		self.assertEqual(doc.docstatus, 1)
+		self.assertEqual(
+			frappe.get_all(
+				"Leave Ledger Entry", filters={"transaction_name": mine["name"], "docstatus": 1}
+			),
+			[],
+		)
+		self.assertEqual(self._balance(date), before)
+
+		frappe.set_user(EMPLOYEE_USER)
+		row = get_my_leave_detail(mine["name"])
+		self.assertEqual(row["state"], "rejected")
+		self.assertFalse(row["can_withdraw"])
+
+		# Terminal for the row, not for the dates: HRMS's overlap rule
+		# ignores a Rejected application, so the employee can ask again.
+		again = apply_for_leave(leave_type="Casual Leave", from_date=date, to_date=date)
+		self.assertTrue(again["name"])
+
+	def test_a_send_back_still_stays_unsubmitted_and_withdrawable(self):
+		mine = self._open_leave(92)
+
+		frappe.set_user(MANAGER_USER)
+		act_on_approval(
+			"Leave Application",
+			mine["name"],
+			"Reject",
+			comment="Cover the Friday first",
+			**_token(mine["name"]),
+		)
+
+		frappe.set_user("Administrator")
+		doc = frappe.get_doc("Leave Application", mine["name"])
+		self.assertEqual(doc.status, "Rejected")
+		self.assertEqual(doc.docstatus, 0)
+		self.assertEqual(doc.helixhr_stage, "Manager")
+
+		frappe.set_user(EMPLOYEE_USER)
+		row = get_my_leave_detail(mine["name"])
+		self.assertEqual(row["state"], "sent_back")
+		self.assertTrue(row["can_withdraw"])
+		self.assertEqual(row["reason"], "Cover the Friday first")
+
+		withdraw_my_leave(mine["name"])
+		self.assertFalse(frappe.db.exists("Leave Application", mine["name"]))

@@ -177,6 +177,13 @@ doc_events = {
 	"HR Request": {
 		"on_update": "helixhr.events.hr_request_on_update",
 	},
+	# P4-U2 / P4-R8, P4-R8a. Leave has no Workflow, so the only guard on the
+	# raw submit route -- Desk, `frappe.client.submit`, the `submit=1`
+	# DocShare HRMS grants the approver -- is this hook: nobody approves their
+	# own leave, and nobody but HR approves one that is in the HR stage.
+	"Leave Application": {
+		"before_submit": "helixhr.events.leave_application_before_submit",
+	},
 	# P3-KTD8 / P4-KTD5. Frappe does not enforce a workflow state's
 	# `allow_edit` on the server, so the attendance approval carries its
 	# rules as doc events: a field freeze outside Draft, the manager's

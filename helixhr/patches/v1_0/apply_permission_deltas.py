@@ -95,9 +95,18 @@ DELTAS = {
 	# sharing UI. HRMS's own Employee Self Service rule still grants it to
 	# users who hold that role; removing sharing site-wide is System Settings'
 	# "Disable Document Sharing", not a permission rule.
+	# P4-KTD4: `helixhr_stage` sits at permlevel 1, so the HR queue survives
+	# a generic write. Role Employee has write on its own open Leave
+	# Application and HRMS shares every application with its approver at
+	# `submit=1`, so at permlevel 0 either of them could move a request into
+	# or out of the HR queue with one `frappe.client.set_value`. HR Manager is
+	# the only role given the level, and the portal writes the field with
+	# `db_set` after its own authorization -- a permlevel-1 field set through
+	# `save()` by anybody else is reset to the stored value (P4-R8a).
 	"Leave Application": (
 		(("Employee", 0, 0), {"share": 0}),
 		(("Employee", 0, 1), {"read": 1, "delete": 1}),
+		(("HR Manager", 1, 0), {"read": 1, "write": 1}),
 	),
 	# R17: the portal sends a week for approval through the Timesheet Approval
 	# workflow, which submits the document as the employee.

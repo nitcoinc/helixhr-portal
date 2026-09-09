@@ -34,6 +34,7 @@ from hrms.utils.holiday_list import get_holiday_list_for_employee
 
 from helixhr.events import (
 	HR_REPLY_SUBJECT_PREFIX,
+	LEAVE_STAGE_HR,
 	REQUEST_APPROVED,
 	REQUEST_DRAFT,
 	REQUEST_PENDING_HR,
@@ -1125,6 +1126,14 @@ _LEAVE_MAX_PAGE = 200
 # asking the holiday resolver for a decade of dates (P2-R22).
 _LEAVE_MAX_SPAN_DAYS = 366
 
+# P4-KTD4. Leave has no Workflow (P2-KTD17) -- HRMS's own lifecycle is the
+# right one -- so the queue a request is waiting in is one Custom Field beside
+# it, at permlevel 1 so only HR can move it through a generic write. These are
+# its two options; nothing else is ever written to the field. "HR" is
+# `events.LEAVE_STAGE_HR`, imported above, because the submit hook enforces
+# the same value on the raw route.
+_LEAVE_STAGE_MANAGER = "Manager"
+
 
 def _leave_state(status, docstatus):
 	"""The lifecycle state the *portal* reasons about, which is not the same
@@ -1138,6 +1147,12 @@ def _leave_state(status, docstatus):
 	                                             never read as "Approved", and
 	                                             the employee has no action.
 	  approved        docstatus 1, Approved   -- submitted; balance consumed
+	  rejected        docstatus 1, Rejected   -- the final no of P4-R4. HRMS's
+	                                             own on_submit accepts this
+	                                             status, and a submitted
+	                                             application consumes no
+	                                             balance and cannot be edited
+	                                             or resent.
 	  decided         docstatus 1, anything else
 	  cancelled       docstatus 2, or status Cancelled
 	"""
@@ -1145,7 +1160,12 @@ def _leave_state(status, docstatus):
 	if docstatus == 2 or status == "Cancelled":
 		return "cancelled"
 	if docstatus == 1:
-		return "approved" if status == "Approved" else "decided"
+		if status == "Approved":
+			return "approved"
+		# P4-KTD4: docstatus 0 + Rejected is the send-back; docstatus 1 +
+		# Rejected is terminal. Same status, two different answers, which is
+		# exactly why the portal reasons about a state and not a status.
+		return "rejected" if status == "Rejected" else "decided"
 	if status == "Rejected":
 		return "sent_back"
 	if status == "Approved":
@@ -1216,6 +1236,9 @@ def _leave_projection(row, approver_names, reasons):
 		"status": row.get("status"),
 		"docstatus": cint(row.get("docstatus")),
 		"state": state,
+		# P4-R5/R7: which queue this request is waiting in. "HR" means the
+		# employee is told "Waiting for HR" and the manager has no action.
+		"stage": row.get("helixhr_stage") or _LEAVE_STAGE_MANAGER,
 		"can_withdraw": _may_withdraw(state) and row.get("owner") == frappe.session.user,
 		"approver": approver,
 		# `get_leave_applications` hands back a user id; the row needs the
@@ -1243,6 +1266,7 @@ _LEAVE_FIELDS = [
 	"status",
 	"docstatus",
 	"leave_approver",
+	"helixhr_stage",
 	"posting_date",
 	"owner",
 	"creation",
@@ -1355,12 +1379,26 @@ def get_leave_form_context():
 	details = get_leave_approval_details(employee) or {}
 	balances = {entry["leave_type"]: entry for entry in _leave_balances(employee)}
 
+	names = get_leave_types(employee, today) or []
+	# P4-R7: a type HR approves never reaches the manager, so the sheet says
+	# so before the employee sends it. One read for the whole list.
+	hr_approved = set(
+		frappe.get_all(
+			"Leave Type",
+			filters={"name": ["in", names], "helixhr_hr_approves": 1},
+			pluck="name",
+		)
+		if names
+		else []
+	)
+
 	types = []
-	for leave_type in get_leave_types(employee, today) or []:
+	for leave_type in names:
 		entry = balances.get(leave_type)
 		types.append(
 			{
 				"leave_type": leave_type,
+				"hr_approves": leave_type in hr_approved,
 				# None, not 0, for a type with no allocation (leave without
 				# pay): "0 left" and "no balance to show" are different
 				# sentences and the chip prints them differently.
@@ -1486,7 +1524,24 @@ def apply_for_leave(leave_type, from_date, to_date, half_day=0, description=None
 		}
 	)
 	doc.insert()
-	return {"name": doc.name, "status": doc.status, "total_leave_days": flt(doc.total_leave_days)}
+
+	# P4-R7 / P4-KTD4. `helixhr_stage` is permlevel 1, so setting it on the
+	# document above would be silently reset -- `reset_values_if_no_permlevel
+	# _access` puts a new document's high-permlevel fields back to their
+	# default for any session without the level, which every employee is. The
+	# stage is written straight to the row instead, *after* the insert has
+	# authorized and validated the application, and `db_set` still runs
+	# `on_change`, so the "Waiting for HR" Notification fires (P4-KTD9).
+	stage = _LEAVE_STAGE_MANAGER
+	if frappe.db.get_value("Leave Type", leave_type, "helixhr_hr_approves"):
+		stage = LEAVE_STAGE_HR
+		doc.db_set("helixhr_stage", stage)
+	return {
+		"name": doc.name,
+		"status": doc.status,
+		"stage": stage,
+		"total_leave_days": flt(doc.total_leave_days),
+	}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -3594,7 +3649,11 @@ def act_on_approval(
 	if comment:
 		doc.add_comment("Comment", comment)
 
-	_APPROVAL_KINDS[doctype]["act"](doc, action)
+	# P4-KTD1: the portal still says "Reject" where it means *send back*, and
+	# every lifecycle now names that outcome Send Back. Translated once, here,
+	# so both `act` implementations speak the canonical vocabulary and P4-U3
+	# has one line to delete when the screen sends the four names itself.
+	_APPROVAL_KINDS[doctype]["act"](doc, _WORKFLOW_ACTIONS.get(action, action))
 	return {
 		"name": doc.name,
 		"action": action,
@@ -3603,10 +3662,11 @@ def act_on_approval(
 
 
 # P4-KTD1: the portal's "Reject" has always meant *send back* -- the word
-# "Rejected" was banned from the screen on purpose (P2-R5) -- and the workflow
-# action that carries that meaning is now called Send Back. One map so the
-# portal's word and the fixture's word cannot drift. P4-U3 replaces the action
-# set with the four outcomes and this map goes with it.
+# "Rejected" was banned from the screen on purpose (P2-R5) -- and every
+# lifecycle now names that outcome Send Back. One map, applied once in
+# `act_on_approval`, so the portal's word and the lifecycle's word cannot
+# drift. P4-U3 replaces the action set with the four outcomes and this map
+# goes with it.
 _WORKFLOW_ACTIONS = {"Reject": "Send Back"}
 
 
@@ -3616,10 +3676,23 @@ def _act_through_workflow(doc, action):
 	same transition the Desk actions run."""
 	from frappe.model.workflow import apply_workflow
 
-	apply_workflow(doc, _WORKFLOW_ACTIONS.get(action, action))
+	apply_workflow(doc, action)
 
 
 def _may_act_on_leave(doc, user):
+	"""Who may decide one leave request (P4-R5, P4-R7).
+
+	Only reached for a non-HR session -- `_assert_may_act_on` returns early
+	for `_is_hr` -- so the stage check is the whole of "the manager loses the
+	request once it is with HR". The raw route (the `submit=1` DocShare HRMS
+	grants the approver on every save) is closed by
+	`events.leave_application_before_submit`, not here.
+	"""
+	if doc.get("helixhr_stage") == LEAVE_STAGE_HR:
+		frappe.throw(
+			_("This leave request is with HR now, so only HR can decide it."),
+			frappe.PermissionError,
+		)
 	if user != doc.leave_approver:
 		frappe.throw(
 			_("Only {0}'s approver or HR can act on this leave request.").format(doc.employee),
@@ -3715,13 +3788,28 @@ def _act_on_leave_application(doc, action):
 	`submit=1` DocShare hrms.hr.utils.share_doc_with_approver creates on
 	every save. See docs/architecture.md and
 	test_the_approvers_submit_grant_is_native.
+
+	P4-U2 gives the same function the other three outcomes. Send back is
+	unchanged; Reject is the *submitted* twin of it -- HRMS's own on_submit
+	accepts Approved and Rejected, a submitted application writes no Leave
+	Ledger Entry unless it is Approved, and docstatus 1 is what makes the row
+	unresendable (P4-R4). Send to HR touches no HRMS field at all: it moves
+	`helixhr_stage`, which is permlevel 1, so it goes through `db_set` after
+	the authorization `act_on_approval` has already done (P4-KTD4).
 	"""
 	if action == "Approve":
 		doc.status = "Approved"
 		doc.submit()
-	else:
+	elif action == "Reject":
+		doc.status = "Rejected"
+		doc.submit()
+	elif action == "Send to HR":
+		doc.db_set("helixhr_stage", LEAVE_STAGE_HR)
+	elif action == "Send Back":
 		doc.status = "Rejected"
 		doc.save()
+	else:
+		frappe.throw(_("Not a valid action."))
 
 
 # Everything that is per-kind about a decision, in one doctype-keyed table

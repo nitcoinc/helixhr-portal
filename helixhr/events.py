@@ -31,6 +31,11 @@ TIMESHEET_SENT_BACK = "Sent Back"
 # reason the employee reads is a field of the record itself.
 DECISION_REASON_FIELD = "helixhr_decision_reason"
 
+# P4-KTD4. The one stage value that changes who may act on a leave request.
+# `api` imports this name rather than repeating the string, so the portal's
+# check and this hook's cannot drift.
+LEAVE_STAGE_HR = "HR"
+
 
 def _approver_user(employee):
 	"""The User that may hold `employee`'s pending-week share: their
@@ -172,6 +177,44 @@ def timesheet_before_submit(doc, method=None):
 		_("Only {0}'s manager or HR can approve this timesheet.").format(doc.employee),
 		frappe.PermissionError,
 	)
+
+
+def leave_application_before_submit(doc, method=None):
+	"""The raw-route half of P4-R8 and P4-R8a for leave.
+
+	Leave has no Workflow (P2-KTD17) -- HRMS's own lifecycle is the correct
+	one -- so `api._may_act_on_leave` is the portal's check and this hook is
+	the only thing standing on every other route. Two refusals:
+
+	  * Nobody submits their own application. HRMS's
+	    `validate_for_self_approval` refuses one too, but only while HR
+	    Settings' `prevent_self_leave_approval` is on, only for status
+	    Approved, and not at all if a Workflow is ever added to Leave
+	    Application -- so the rule R8 actually states is asserted here
+	    unconditionally. Administrator is exempt: it is the migration and
+	    backfill account, not a person with leave of their own.
+	  * While the *stored* stage is HR, only `_is_hr` may submit. HRMS shares
+	    every application with its `leave_approver` at `submit=1`
+	    (`hrms.hr.utils.share_doc_with_approver`), so the manager of an
+	    escalated request keeps a Desk route to Approve that never consults
+	    the portal. The stored value is what counts -- `helixhr_stage` is
+	    permlevel 1, so an in-memory value from a non-HR session was reset on
+	    the way in, and reading the row is also what makes a raw
+	    `frappe.client.submit` answerable.
+	"""
+	user = frappe.session.user
+	if user != "Administrator" and frappe.db.get_value("Employee", doc.employee, "user_id") == user:
+		frappe.throw(
+			_("You can't approve your own leave request. Ask your manager or HR."),
+			frappe.PermissionError,
+		)
+
+	stored_stage = frappe.db.get_value("Leave Application", doc.name, "helixhr_stage")
+	if stored_stage == LEAVE_STAGE_HR and not _is_hr(user):
+		frappe.throw(
+			_("This leave request is with HR now, so only HR can decide it."),
+			frappe.PermissionError,
+		)
 
 
 def _reconcile_timesheet_share(name, employee, keep_user):

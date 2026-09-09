@@ -760,6 +760,49 @@ class TestApprovalWorkflowFixtures(IntegrationTestCase):
 			self.assertTrue(hr.read and hr.write, msg=doctype)
 			self.assertIsNone(_rule(doctype, "Employee", permlevel=1), msg=doctype)
 
+	def test_the_leave_stage_and_hr_approves_fields_are_installed(self):
+		"""P4-KTD4 / P4-R7. Leave has no Workflow, so these two fields *are*
+		the routing: the stage says which queue a request waits in and the
+		Leave Type flag says which queue it starts in. Permlevel 1 on the
+		stage is what stops the employee or their approver moving it with a
+		generic write -- role Employee has write on its own open Leave
+		Application and HRMS shares every application with its approver at
+		`submit=1` (P4-R8a).
+		"""
+		stage = frappe.db.get_value(
+			"Custom Field",
+			{"dt": "Leave Application", "fieldname": "helixhr_stage"},
+			["fieldtype", "permlevel", "module", "options", "default", "allow_on_submit"],
+			as_dict=True,
+		)
+		self.assertIsNotNone(stage)
+		self.assertEqual(stage.fieldtype, "Select")
+		self.assertEqual(frappe.utils.cint(stage.permlevel), 1)
+		self.assertEqual(stage.module, "HelixHR")
+		self.assertEqual(stage.options.split("\n"), ["Manager", "HR"])
+		self.assertEqual(stage.default, "Manager")
+		self.assertEqual(frappe.utils.cint(stage.allow_on_submit), 0)
+
+		hr = _rule("Leave Application", "HR Manager", permlevel=1)
+		self.assertIsNotNone(hr)
+		self.assertTrue(hr.read and hr.write)
+		self.assertIsNone(_rule("Leave Application", "Employee", permlevel=1))
+
+		flag = frappe.db.get_value(
+			"Custom Field",
+			{"dt": "Leave Type", "fieldname": "helixhr_hr_approves"},
+			["fieldtype", "permlevel", "module"],
+			as_dict=True,
+		)
+		self.assertIsNotNone(flag)
+		self.assertEqual(flag.fieldtype, "Check")
+		self.assertEqual(frappe.utils.cint(flag.permlevel), 0)
+		self.assertEqual(flag.module, "HelixHR")
+
+		# A leave HR files in Desk starts with the manager, like any other:
+		# the default is on the field, not in the portal method.
+		self.assertEqual(frappe.new_doc("Leave Application").helixhr_stage, "Manager")
+
 	def test_the_rename_patch_is_idempotent_and_leaves_submitted_rows_alone(self):
 		"""P4-KTD1. A site with legacy docstatus-0 Rejected rows ends with
 		them in Sent Back; a submitted row is untouched; a second run changes

@@ -23,3 +23,6 @@ helixhr.patches.v1_0.rename_sent_back_state
 # P4-KTD7a: same module, new deltas (HR Manager at permlevel 1 on Timesheet and
 # Attendance Request, for `helixhr_decision_reason`).
 helixhr.patches.v1_0.apply_permission_deltas #2026-09-10 P4-KTD7a decision reason permlevel
+# P4-KTD4: same module, new deltas (HR Manager at permlevel 1 on Leave
+# Application, for `helixhr_stage`).
+helixhr.patches.v1_0.apply_permission_deltas #2026-09-10 P4-KTD4 leave stage permlevel
