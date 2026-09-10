@@ -68,6 +68,62 @@ test.describe('employee', () => {
     // screen. Any four-digit run in this card would be one.
     expect(await card.innerText()).not.toMatch(/\d{4}/)
   })
+
+  // P4-U9. HR manages the policy-link catalogue in Desk (`HelixHR Document
+  // Link`), so the rail is a way into it, not a copy of /documents.
+  test('the rail shows a few documents and the page holds the rest (P4-U9)', async ({
+    page,
+  }, testInfo) => {
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
+    await page.goto('/helixhr')
+
+    const card = page.locator('section[aria-labelledby="dashboard-documents-heading"]')
+    await expect(card).toBeVisible()
+
+    const links = card.locator('ul li a')
+    const shown = await links.count()
+    expect(shown).toBeGreaterThan(0)
+    expect(shown, 'the rail card is bounded at five').toBeLessThanOrEqual(5)
+
+    // Every row is an external destination that opens in its own tab, and it
+    // says so: without `noopener` the opened page can reach back through
+    // `window.opener`. The scheme is guaranteed server-side (a
+    // `javascript:` link is refused at save), so this asserts the client
+    // kept that guarantee rather than re-testing the server.
+    for (const link of await links.all()) {
+      await expect(link).toHaveAttribute('href', /^https?:\/\//)
+      await expect(link).toHaveAttribute('target', '_blank')
+      await expect(link).toHaveAttribute('rel', /noopener/)
+    }
+
+    // The page that holds the rest and the search is one click away.
+    await expect(card.getByRole('link', { name: /^All/ })).toHaveAttribute(
+      'href',
+      '/helixhr/documents',
+    )
+  })
+
+  // The rule this card follows is the rail's own: a slot with nothing in it
+  // does not render. Stubbed rather than seeded, because a site where HR has
+  // added nothing yet is exactly the case that must not show an empty card.
+  test('the documents card is absent when HR has added none (P4-U9)', async ({
+    page,
+  }, testInfo) => {
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
+    await page.route('**/api/method/helixhr.api.get_dashboard*', async (route) => {
+      const response = await route.fetch()
+      const body = await response.json()
+      body.message.documents = { items: [], more: 0 }
+      await route.fulfill({ response, json: body })
+    })
+    await page.goto('/helixhr')
+
+    // The page still rendered, so the absence below is not a blank page.
+    await expect(page.getByRole('heading', { name: 'Needs you' })).toBeVisible()
+    await expect(
+      page.locator('section[aria-labelledby="dashboard-documents-heading"]'),
+    ).toHaveCount(0)
+  })
 })
 
 test.describe('manager', () => {

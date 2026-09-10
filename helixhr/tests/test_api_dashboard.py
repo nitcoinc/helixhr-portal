@@ -5,7 +5,7 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_to_date, get_first_day, getdate
 from hrms.api import get_leave_balance_map
 
-from helixhr.api import _get_celebrations, get_dashboard
+from helixhr.api import _LINKS_LIMIT, _get_celebrations, get_dashboard, get_my_documents
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	ensure_test_company,
@@ -77,6 +77,56 @@ class TestHelixHRDashboard(IntegrationTestCase):
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
+
+	def _document_link(self, title, company=None):
+		"""One catalogue row, as HR would add it in Desk."""
+		frappe.get_doc(
+			{
+				"doctype": "HelixHR Document Link",
+				"title": title,
+				"url": "https://example.com/p4-u9",
+				**({"company": company} if company else {}),
+			}
+		).insert(ignore_permissions=True)
+
+	def test_documents_card_is_the_first_five_of_what_the_page_shows(self):
+		"""P4-U9. The rail card is bounded at `_LINKS_LIMIT` and discloses the
+		remainder, and it shows exactly the head of the list /documents shows.
+
+		Asserted against that list rather than against fixed counts: this site
+		carries document links planted outside the test transaction, so an
+		absolute number would be asserting the state of the bench, not the
+		contract.
+		"""
+		company = frappe.db.get_value("Employee", self.employee_name, "company")
+		for index in range(_LINKS_LIMIT + 2):
+			self._document_link(f"P4-U9 link {index}")
+		self._document_link("P4-U9 own company link", company)
+
+		frappe.set_user(EMPLOYEE_USER)
+		page = get_my_documents()
+		card = get_dashboard()["documents"]
+
+		self.assertEqual(card["items"], page[:_LINKS_LIMIT])
+		self.assertEqual(card["more"], len(page) - _LINKS_LIMIT)
+		self.assertGreater(card["more"], 0, "the card must say how many it did not show")
+		self.assertEqual(len(card["items"]), _LINKS_LIMIT)
+
+	def test_documents_card_failure_is_named_and_isolated(self):
+		"""A broken read names itself in `failed_sections` and leaves the rest
+		of the page standing -- the same contract the other sections hold."""
+		from unittest.mock import patch
+
+		frappe.set_user(EMPLOYEE_USER)
+		self.assertNotIn("documents", get_dashboard()["failed_sections"])
+
+		with patch("helixhr.api._visible_document_links", side_effect=Exception("boom")):
+			broken = get_dashboard()
+
+		self.assertEqual(broken["failed_sections"], ["documents"])
+		self.assertIsNone(broken["documents"])
+		self.assertIsNotNone(broken["week"])
+		self.assertIsNotNone(broken["needs_you"])
 
 
 # P4-U5 / P4-R14. Its own Company, and that is the point rather than tidiness:

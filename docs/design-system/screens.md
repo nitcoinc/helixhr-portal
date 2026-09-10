@@ -70,6 +70,16 @@ no figure does not render. Empty queue says "Nothing needs
 you." and names the outstanding weekly obligation. Unread count lives on the shell's Notifications
 nav item rather than on the page.
 
+**The rail's documents entry is a card of links, not a row (P4-U9).** It lists the first five entries
+of the policy-link catalogue by title, then `All N documents` into the searchable page. HR Manager and
+System Manager manage that catalogue in Desk — `HelixHR Document Link`, with title, url, description
+and company, where a blank company means everyone — and the doctype's own hooks enforce the scope on
+every route, not only on the query the portal sends. Titles only in the rail: it is narrow, and the
+description, destination host and PDF flag are what `/documents` is for. Bounded for the same reason
+the celebrations band is — HR decides how many entries exist, and this column shares its height with
+the one beside it. On a site where HR has added nothing the card does not render, which is the rail's
+rule for a slot with nothing in it.
+
 **The quick actions sit in the left column, not at the page foot (P4-U8).** They used to come after
 both columns. A grid row is as tall as its tallest cell, so a busy rail pushed them hundreds of
 pixels down the page and left that height as empty paper beside the queue — measured at 292px of

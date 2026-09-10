@@ -109,6 +109,11 @@ def get_dashboard(**kwargs):
 		# screen stays one request.
 		"week": section("week", lambda: _get_week_spine(employee, once)),
 		"needs_you": section("needs_you", lambda: _get_needs_you(employee, once)),
+		# P4-U9. The first few policy links, so the rail reaches them without a
+		# trip to /documents. Bounded and disclosing the remainder the same way
+		# the queue is: HR manages this catalogue in Desk, so it has no ceiling,
+		# and the rail sits in a grid row whose height the other column shares.
+		"documents": section("documents", lambda: _get_documents_card(employee)),
 		# P4-R14: a projection, never the underlying dates (P4-KTD14).
 		"celebrations": section(
 			"celebrations", lambda: _get_celebrations(employee, getdate(user_today()))
@@ -860,6 +865,11 @@ def _queue_item(
 # "and N more" count exact without a second COUNT query per source, and these
 # tables hold a handful of rows per employee.
 _QUEUE_LIMIT = 8
+
+# The rail card's ceiling (P4-U9). Five rows is what fits the rail beside the
+# queue without becoming the taller column; the page behind it is the full
+# searchable catalogue.
+_LINKS_LIMIT = 5
 _QUEUE_FETCH = 50
 # The bound on the one comment read that spans many records: a handful of
 # comments per sent-back record, over a page of records (P3-R25).
@@ -4827,6 +4837,32 @@ _APPROVAL_KINDS = {
 # Documents (R19, P2-R19)
 
 
+def _visible_document_links(employee):
+	"""The policy links one employee may see: global ones plus their own
+	company's (P2-R19).
+
+	One query, two callers -- `get_my_documents` for the full searchable page
+	and the dashboard's bounded card -- so the scope has one definition.
+	"""
+	company = frappe.db.get_value("Employee", employee, "company")
+	return frappe.get_all(
+		"HelixHR Document Link",
+		or_filters=[["company", "is", "not set"], ["company", "=", company]],
+		fields=["name", "title", "url", "company", "description"],
+		order_by="title asc",
+	)
+
+
+def _get_documents_card(employee):
+	"""The rail card: the first `_LINKS_LIMIT` links and how many were not
+	shown. Ordered by title, the only stable order this catalogue has -- there
+	is no priority field, and adding one would give HR a column to maintain for
+	no gain at five rows."""
+	links = _visible_document_links(employee)
+	shown = links[:_LINKS_LIMIT]
+	return {"items": shown, "more": max(0, len(links) - len(shown))}
+
+
 @frappe.whitelist()
 def get_my_documents():
 	"""The policy links this employee may see: global ones plus their own
@@ -4839,14 +4875,7 @@ def get_my_documents():
 	method exists so the portal asks a session-scoped question instead of
 	sending the filter itself (KTD5, R27).
 	"""
-	employee = get_current_employee()
-	company = frappe.db.get_value("Employee", employee, "company")
-	return frappe.get_all(
-		"HelixHR Document Link",
-		or_filters=[["company", "is", "not set"], ["company", "=", company]],
-		fields=["name", "title", "url", "company", "description"],
-		order_by="title asc",
-	)
+	return _visible_document_links(get_current_employee())
 
 
 # ---------------------------------------------------------------------------

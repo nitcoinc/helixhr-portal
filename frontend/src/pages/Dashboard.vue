@@ -40,6 +40,14 @@ const needsYouWaiting = computed(() => dashboard.data?.needs_you?.waiting || [])
 const attendanceFailed = computed(() =>
   (dashboard.data?.failed_sections || []).includes('attendance_this_month'),
 )
+// P4-U9. HR manages the policy-link catalogue in Desk (`HelixHR Document
+// Link`), so the rail shows the first few and /documents holds the rest and
+// the search. Title only: the rail is narrow, and the full record --
+// description, destination host, PDF flag -- is what the page is for.
+const links = computed(() => dashboard.data?.documents?.items || [])
+const linksMore = computed(() => dashboard.data?.documents?.more || 0)
+const linksTotal = computed(() => links.value.length + linksMore.value)
+const linksFailed = computed(() => (dashboard.data?.failed_sections || []).includes('documents'))
 const celebrationsFailed = computed(() =>
   (dashboard.data?.failed_sections || []).includes('celebrations'),
 )
@@ -217,17 +225,66 @@ const today = new Intl.DateTimeFormat(undefined, {
             </router-link>
           </AsyncState>
 
-          <router-link
-            to="/documents"
-            class="surface-card elev-1 group flex min-h-11 cursor-pointer items-center justify-between gap-3 p-3 transition-colors duration-200 hover:border-blue-600"
+          <AsyncState
+            v-if="links.length || linksFailed"
+            section="documents"
+            :resource="dashboard"
+            :loading="false"
+            :error="linksFailed ? { section: 'documents' } : null"
+            :empty="false"
           >
-            <span class="text-sm text-ink-gray-6">Documents</span>
-            <Icon
-              name="chevronRight"
-              size="h-4 w-4"
-              class="text-ink-gray-4 group-hover:text-blue-700"
-            />
-          </router-link>
+            <template #error-title>
+              We couldn't load your documents
+            </template>
+            <!-- The rail is a way in, not a copy of /documents: five titles,
+                 then the page. Bounded for the same reason the celebrations
+                 band is -- HR adds this catalogue in Desk and it has no
+                 ceiling, while this column's height is shared with the
+                 column beside it. Hidden when there is nothing to show,
+                 which is the rule the rest of the rail follows. -->
+            <section
+              class="surface-card elev-1 p-3"
+              aria-labelledby="dashboard-documents-heading"
+            >
+              <h2
+                id="dashboard-documents-heading"
+                class="font-heading text-base font-semibold text-ink-gray-9"
+              >
+                Documents
+              </h2>
+
+              <ul class="mt-1">
+                <li
+                  v-for="link in links"
+                  :key="link.name"
+                >
+                  <!-- The design system's compact-row idiom: `min-h-11` gives
+                       the target its real 44px box and `-my-2` takes exactly
+                       that back, so the row keeps its density. -->
+                  <a
+                    :href="link.url"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="-my-2 flex min-h-11 items-center justify-between gap-2 py-2"
+                  >
+                    <span class="min-w-0 truncate text-sm text-ink-gray-7">{{ link.title }}</span>
+                    <Icon
+                      name="chevronRight"
+                      size="h-4 w-4"
+                      class="shrink-0 text-ink-gray-4"
+                    />
+                  </a>
+                </li>
+              </ul>
+
+              <router-link
+                to="/documents"
+                class="mt-1 inline-flex min-h-11 items-center text-sm font-medium text-blue-700 hover:underline"
+              >
+                {{ linksMore ? `All ${linksTotal} documents` : 'All documents' }}
+              </router-link>
+            </section>
+          </AsyncState>
         </aside>
       </div>
 
