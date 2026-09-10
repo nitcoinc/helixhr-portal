@@ -21,13 +21,13 @@ const ACTIONS = [
       Start something
     </h2>
     <div
-      class="elev-1 flex flex-col divide-y divide-outline-gray-2 overflow-hidden rounded-xl border border-outline-gray-1 bg-surface-white sm:flex-row sm:divide-x sm:divide-y-0"
+      class="surface-card elev-1 flex flex-col divide-y divide-outline-gray-2 overflow-hidden sm:flex-row sm:divide-x sm:divide-y-0"
     >
       <router-link
         v-for="action in ACTIONS"
         :key="action.to"
         :to="action.to"
-        class="flex min-h-11 flex-1 cursor-pointer items-center gap-2 px-4 py-3 text-sm font-medium text-ink-gray-8 transition-colors duration-200 hover:bg-blue-50 hover:text-blue-700"
+        class="flex min-h-11 flex-1 cursor-pointer items-center gap-2 p-3 text-sm font-medium text-ink-gray-8 transition-colors duration-200 hover:bg-blue-50 hover:text-blue-700"
       >
         <Icon
           :name="action.icon"

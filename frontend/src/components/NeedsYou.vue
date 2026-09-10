@@ -56,7 +56,7 @@ function ageLabel(item) {
       <div
         v-for="n in 2"
         :key="n"
-        class="h-16 animate-pulse rounded-xl bg-surface-gray-2"
+        class="h-16 animate-pulse rounded bg-surface-gray-2"
       />
     </div>
 
@@ -64,7 +64,7 @@ function ageLabel(item) {
          one thing still outstanding rather than reading as a broken page. -->
     <div
       v-else-if="items.length === 0"
-      class="elev-1 rounded-xl border border-outline-gray-1 bg-surface-white p-5"
+      class="surface-card elev-1 p-4"
     >
       <p class="font-heading text-base font-medium text-ink-gray-9">
         Nothing needs you.
@@ -100,7 +100,7 @@ function ageLabel(item) {
       <li
         v-for="item in items"
         :key="item.id"
-        class="elev-1 flex flex-wrap items-start gap-x-3 gap-y-2 rounded-xl border border-outline-gray-1 bg-surface-white p-3 sm:flex-nowrap"
+        class="surface-card elev-1 flex flex-wrap items-start gap-x-3 gap-y-2 p-3 sm:flex-nowrap"
         :data-kind="item.kind"
       >
         <span
@@ -178,7 +178,7 @@ function ageLabel(item) {
         >
           <router-link
             :to="item.to"
-            class="surface-card elev-1 flex min-h-11 cursor-pointer items-center gap-3 px-3 py-2.5 transition-colors duration-200 hover:border-blue-600"
+            class="surface-card elev-1 flex min-h-11 cursor-pointer items-center gap-3 p-3 transition-colors duration-200 hover:border-blue-600"
           >
             <Icon
               :name="NEEDS_YOU_ICON[item.kind] || 'leave'"

@@ -94,6 +94,103 @@ async function horizontalOverflow(page: Page) {
   )
 }
 
+/** The home page's card surface, read off the rendered page (R1, R2, R6).
+ *
+ * Two properties and no screenshot, because a screenshot comparison cannot
+ * say what a card's corner *is* -- only that it moved. Every card the page
+ * draws carries the one corner the design system declares, and every card's
+ * inset is one of the two the app uses (a content card at 16px, a record row
+ * at 12px).
+ *
+ * A divided card owns no inset itself -- its segments do -- so a
+ * zero-padding card is legal only inside the quick-actions section, whose
+ * segments are checked in its place.
+ *
+ * The last loop is the anti-regression teeth: a card redrawn by hand with
+ * `rounded-xl` is caught by its computed corner, not by its class list, so
+ * the check survives the next rewrite of the markup.
+ */
+async function cardSurfaceFindings(page: Page) {
+  return page.evaluate(() => {
+    const findings: string[] = []
+    const main = document.querySelector('main')
+    if (!main) return ['no <main> on the home page']
+
+    const label = (el: Element) =>
+      `${el.tagName.toLowerCase()}.${(el.className || '').toString().split(/\s+/).slice(0, 2).join('.')}`
+
+    /** The four inset sides, so "is this one of the two card insets" and "is
+     * this inset even" read the same way wherever an inset is measured. */
+    const insets = (style: CSSStyleDeclaration) => [
+      style.paddingTop,
+      style.paddingRight,
+      style.paddingBottom,
+      style.paddingLeft,
+    ]
+
+    const cards = Array.from(main.querySelectorAll('.surface-card'))
+    if (cards.length === 0) findings.push('the home page draws no .surface-card at all')
+
+    for (const card of cards) {
+      const style = getComputedStyle(card)
+      if (style.borderRadius !== '8px') {
+        findings.push(`${label(card)} corner is ${style.borderRadius}, not the shared 8px`)
+      }
+      const sides = insets(style)
+      if (new Set(sides).size !== 1) {
+        findings.push(`${label(card)} inset is uneven: ${sides.join('/')}`)
+        continue
+      }
+      const inset = sides[0]
+      if (inset === '0px') {
+        if (!card.closest('[aria-labelledby="quick-actions-heading"]')) {
+          findings.push(`${label(card)} carries no inset and is not the divided quick-actions card`)
+        }
+        continue
+      }
+      if (inset !== '12px' && inset !== '16px') {
+        findings.push(`${label(card)} inset is ${inset}, not one of the two card insets`)
+      }
+    }
+
+    // The divided card's segments own the inset it does not carry. Both the
+    // card and its segments are required: an optional lookup here would let
+    // the check pass over a quick-actions bar that rendered nothing.
+    const bar = main.querySelector('[aria-labelledby="quick-actions-heading"] .surface-card')
+    if (!bar) {
+      findings.push('the quick-actions divided card is not on the page to check its inset')
+    } else {
+      const segments = Array.from(bar.querySelectorAll('a'))
+      if (segments.length === 0) {
+        findings.push('the quick-actions card rendered no segments to check the inset on')
+      }
+      for (const segment of segments) {
+        const sides = insets(getComputedStyle(segment))
+        if (new Set(sides).size !== 1 || sides[0] !== '12px') {
+          findings.push(`${label(segment)} segment inset is ${sides.join('/')}, not 12px`)
+        }
+      }
+    }
+
+    // Every corner bar the on-surface one, so a card redrawn by hand at any
+    // of them is caught. The preset's non-card radii are the drift the design
+    // system itself records (`rounded-md` 10px, `rounded-lg` 12px,
+    // `rounded-xl` 16px); `rounded-full` is 9999px and stays out of this, so
+    // a pill or an avatar is not mistaken for a card.
+    const OFF_SURFACE_CORNERS = ['10px', '12px', '16px']
+    for (const el of Array.from(main.querySelectorAll('*'))) {
+      const style = getComputedStyle(el)
+      if (OFF_SURFACE_CORNERS.includes(style.borderRadius) && parseFloat(style.borderTopWidth) > 0) {
+        findings.push(
+          `${label(el)} is a card drawn by hand: a ${style.borderRadius} corner behind a ${style.borderTopWidth} border`,
+        )
+      }
+    }
+
+    return findings
+  })
+}
+
 test.describe('employee', () => {
   test.beforeEach(async ({}, testInfo) => {
     test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenarios')
@@ -434,6 +531,76 @@ test.describe('employee', () => {
     expect(family).toContain('Archivo')
     await context.close()
   })
+
+  // P2-U3 / P2-R1, P2-R2. The home page was the last screen still drawing its
+  // own cards: its rail and its Celebrating card were `.surface-card` while
+  // the queue rows, the empty state and the quick-actions bar restated the
+  // same surface by hand at 16px. This is the check that keeps them one
+  // surface, at the desktop width and at the phone stack.
+  test('every home-page card is drawn by the shared surface (R1, R2, R6)', async ({ page }) => {
+    for (const width of [1280, 360]) {
+      await page.setViewportSize({ width, height: 900 })
+      await page.goto('/helixhr/')
+      await page.waitForLoadState('networkidle')
+      const findings = await cardSurfaceFindings(page)
+      expect(findings, `at ${width}px:\n${findings.join('\n')}`).toEqual([])
+    }
+  })
+
+  // The queue row is its own card shape, and the seeded home page renders an
+  // empty queue -- so the check above passes over that shape without ever
+  // seeing it. This is the same guard against a dashboard this test controls,
+  // which is the only way the queue row is guaranteed to be on the page.
+  test('a rendered queue row is drawn by the shared surface (R1, R2)', async ({ page }) => {
+    await page.route('**/api/method/helixhr.api.get_dashboard*', async (route) => {
+      const response = await route.fetch()
+      const body = await response.json()
+      body.message.needs_you = {
+        items: [
+          {
+            id: 'surface-check:queue-row',
+            kind: 'leave',
+            tone: 'action',
+            title: 'A row the surface check needs on the page',
+            detail: 'Quoted inline, the way a real row carries its reason',
+            date: body.message.needs_you?.items?.[0]?.date || null,
+            day: null,
+            age_days: null,
+            action: 'Review',
+            to: '/leave',
+          },
+        ],
+        more: 0,
+        waiting: [
+          {
+            id: 'surface-check:waiting-row',
+            kind: 'leave',
+            tone: 'muted',
+            title: 'The quieter row the surface check also needs',
+            detail: null,
+            date: body.message.needs_you?.items?.[0]?.date || null,
+            day: null,
+            age_days: null,
+            to: '/leave',
+          },
+        ],
+      }
+      await route.fulfill({ response, json: body })
+    })
+
+    await page.goto('/helixhr/')
+    await page.waitForLoadState('networkidle')
+
+    // Without these the guard could pass on a page where the rows never
+    // rendered -- which is exactly what it did before this test existed.
+    await expect(page.locator('li[data-kind="leave"]').first()).toBeVisible()
+    await expect(
+      page.getByRole('link', { name: /quieter row the surface check also needs/ }),
+    ).toBeVisible()
+
+    const findings = await cardSurfaceFindings(page)
+    expect(findings, findings.join('\n')).toEqual([])
+  })
 })
 
 // P3-U9. The manager half of the same foundation. `/team` is a manager
@@ -470,6 +637,16 @@ test.describe('manager', () => {
         expect(await horizontalOverflow(page), `${route} at ${width}px`).toBe(0)
       }
     }
+  })
+
+  // The rail changes shape per user -- a manager with no leave allocated sees
+  // a rail row with no figure at all -- so the surface rule is checked under
+  // the manager identity too, not only the employee one.
+  test('a manager home page draws its cards on the same surface (R1, R2)', async ({ page }) => {
+    await page.goto('/helixhr/')
+    await page.waitForLoadState('networkidle')
+    const findings = await cardSurfaceFindings(page)
+    expect(findings, findings.join('\n')).toEqual([])
   })
 
   test('200% text zoom does not create horizontal scroll on a manager route', async ({ page }) => {

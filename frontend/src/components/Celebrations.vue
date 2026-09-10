@@ -35,7 +35,7 @@ function when(person) {
 
 <template>
   <section
-    class="surface-card elev-1 px-4 py-3"
+    class="surface-card elev-1 p-4"
     aria-labelledby="celebrations-heading"
   >
     <h2

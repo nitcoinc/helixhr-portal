@@ -107,7 +107,7 @@ const today = new Intl.DateTimeFormat(undefined, {
           <div
             v-for="n in 3"
             :key="n"
-            class="h-20 animate-pulse rounded-xl bg-surface-gray-2"
+            class="h-20 animate-pulse rounded bg-surface-gray-2"
           />
         </div>
       </div>
@@ -157,7 +157,7 @@ const today = new Intl.DateTimeFormat(undefined, {
         >
           <router-link
             to="/leave"
-            class="surface-card elev-1 group flex cursor-pointer items-center justify-between gap-3 px-4 py-3 transition-colors duration-200 hover:border-blue-600"
+            class="surface-card elev-1 group flex min-h-11 cursor-pointer items-center justify-between gap-3 p-3 transition-colors duration-200 hover:border-blue-600"
           >
             <span class="min-w-0">
               <span class="block text-sm text-ink-gray-6">Leave left</span>
@@ -195,7 +195,7 @@ const today = new Intl.DateTimeFormat(undefined, {
             </template>
             <router-link
               to="/attendance"
-              class="surface-card elev-1 group flex cursor-pointer items-center justify-between gap-3 px-4 py-3 transition-colors duration-200 hover:border-blue-600"
+              class="surface-card elev-1 group flex min-h-11 cursor-pointer items-center justify-between gap-3 p-3 transition-colors duration-200 hover:border-blue-600"
             >
               <span class="min-w-0">
                 <span class="block text-sm text-ink-gray-6">Attendance</span>
@@ -228,7 +228,7 @@ const today = new Intl.DateTimeFormat(undefined, {
 
           <router-link
             to="/documents"
-            class="surface-card elev-1 group flex min-h-11 cursor-pointer items-center justify-between gap-3 px-4 py-3 transition-colors duration-200 hover:border-blue-600"
+            class="surface-card elev-1 group flex min-h-11 cursor-pointer items-center justify-between gap-3 p-3 transition-colors duration-200 hover:border-blue-600"
           >
             <span class="text-sm text-ink-gray-6">Documents</span>
             <Icon
