@@ -124,9 +124,15 @@ test.describe('employee on a phone', () => {
     await page.waitForLoadState('networkidle')
 
     await page.getByLabel('Search').fill(MANAGER_NAME)
+    // Exact, on the name itself. `hasText` is a case-insensitive *substring*
+    // match over the whole row, and the fixture site has other people whose
+    // names contain "manager" (the HR-queue identity is
+    // `hr-manager-employee`, which also sorts first) -- so a loose filter
+    // plus `.first()` opened somebody else's sheet and then failed on the
+    // work email they do not publish.
     await page
       .getByRole('listitem')
-      .filter({ hasText: MANAGER_NAME })
+      .filter({ has: page.getByText(MANAGER_NAME, { exact: true }) })
       .getByRole('button')
       .first()
       .click()
