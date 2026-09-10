@@ -345,12 +345,19 @@ test.describe('employee', () => {
     const badges = page.locator('[data-status]')
     const count = await badges.count()
     test.skip(count === 0, 'no leave on this site to read a status from')
+    // Frappe vocabulary the portal never says out loud (P2-R5). "Rejected"
+    // was on this list until P4-R21, which admits it deliberately: leave now
+    // has a *terminal* rejection distinct from a send-back, and the copy
+    // table gains the word rather than the screen paraphrasing a final no
+    // into something recoverable-sounding. "Open" and "Cancelled" are still
+    // Frappe's words -- the portal says "Waiting" and "Withdrawn".
+    const FRAPPE_ONLY = ['Open', 'Cancelled']
     for (let index = 0; index < Math.min(count, 10); index += 1) {
-      // The plain sentence, never the Frappe value, and never an empty pill
-      // whose only content is a hue.
+      // The plain sentence, never the raw Frappe value, and never an empty
+      // pill whose only content is a hue.
       const text = (await badges.nth(index).innerText()).trim()
       expect(text.length).toBeGreaterThan(0)
-      expect(text).not.toBe('Rejected')
+      expect(FRAPPE_ONLY, `badge read "${text}"`).not.toContain(text)
     }
   })
 

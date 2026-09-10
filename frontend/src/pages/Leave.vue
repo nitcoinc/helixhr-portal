@@ -95,12 +95,29 @@ function approverFirstName(app) {
 const BADGE_STATUS = {
   open: 'Open',
   sent_back: 'Rejected',
+  // P4-R4. The terminal no. It is the same HRMS status as a send-back and
+  // the badge tells the two apart by `docstatus`, which is why `badgeStatus`
+  // is never read without it.
+  rejected: 'Rejected',
   approved: 'Approved',
   waiting_for_hr: 'Waiting for HR',
   cancelled: 'Cancelled',
 }
 function badgeStatus(app) {
+  // P4-R5/R7. A request in the HR stage is waiting for HR whatever HRMS's
+  // own status says, and the employee is told so from the moment they send
+  // it. The synthetic key matches the other two kinds' `Pending HR`, and is
+  // deliberately not the legacy "Waiting for HR" string above -- that one is
+  // the P2-U1 defect state and must keep reading as unfamiliar grey.
+  if (app.state === 'open' && app.stage === 'HR') return 'Pending HR'
   return BADGE_STATUS[app.state] || app.status
+}
+
+/** Sent back or rejected: either way the manager or HR wrote a sentence the
+ * employee needs to read. What differs is what happens next, which is the
+ * button row below, not this block (P4-R3, P4-R4). */
+function decidedAgainst(app) {
+  return app.state === 'sent_back' || app.state === 'rejected'
 }
 
 function durationLabel(app) {
@@ -350,6 +367,7 @@ async function doWithdraw() {
                     <StatusBadge
                       kind="leave"
                       :status="badgeStatus(app)"
+                      :docstatus="app.docstatus"
                       :approver="approverFirstName(app)"
                     />
                   </div>
@@ -365,12 +383,15 @@ async function doWithdraw() {
                        rather than a status word that sends the employee
                        looking for it (P2-R14). -->
                   <div
-                    v-if="app.state === 'sent_back' && app.reason"
+                    v-if="decidedAgainst(app) && app.reason"
                     class="surface-alert mt-2 p-3 text-sm"
                   >
                     <span v-if="app.approver_name">{{ app.approver_name }}: </span>“{{ app.reason }}”
                   </div>
 
+                  <!-- Only a send-back can be edited and resent. A rejected
+                       application is submitted and final (P4-R4), so it gets
+                       the reason above and no affordance at all. -->
                   <div
                     v-if="app.state === 'sent_back'"
                     class="relative z-10 mt-2 flex flex-wrap items-center gap-2"
@@ -475,6 +496,7 @@ async function doWithdraw() {
               <StatusBadge
                 kind="leave"
                 :status="badgeStatus(selected)"
+                :docstatus="selected.docstatus"
                 :approver="approverFirstName(selected)"
               />
             </div>
@@ -531,13 +553,26 @@ async function doWithdraw() {
                  employee lands on from Home and from the notification
                  (P2-U5 scenario 1). -->
             <div
-              v-if="selected.state === 'sent_back' && selected.reason"
+              v-if="decidedAgainst(selected) && selected.reason"
               class="surface-alert mt-4 p-3 text-sm"
             >
               <span v-if="selected.approver_name">{{ selected.approver_name }}: </span>“{{
                 selected.reason
               }}”
             </div>
+
+            <!-- P4-R5/R7. In the HR stage the manager has no action, so
+                 naming them here would send the employee to the wrong
+                 person. -->
+            <p
+              v-else-if="selected.state === 'open' && selected.stage === 'HR'"
+              class="surface-inset mt-4 p-3 text-sm text-ink-gray-7"
+            >
+              Waiting on <span class="font-medium">HR</span>
+              <template v-if="selected.creation">
+                since {{ formatDate(selected.creation) }}
+              </template>.
+            </p>
 
             <p
               v-else-if="selected.state === 'open' && selected.approver_name"
@@ -580,7 +615,13 @@ async function doWithdraw() {
                   Withdraw
                 </Button>
                 <p
-                  v-if="selected.approver_name"
+                  v-if="selected.stage === 'HR'"
+                  class="text-sm text-ink-gray-5"
+                >
+                  You can withdraw until HR decides.
+                </p>
+                <p
+                  v-else-if="selected.approver_name"
                   class="text-sm text-ink-gray-5"
                 >
                   You can withdraw until {{ approverFirstName(selected) }} decides.

@@ -27,6 +27,13 @@ fixture, the HR Settings check-in flags, at least one Shift Type with auto
 attendance that can still mark attendance, the effective `Permissions-Policy`
 allowing geolocation for self, the coordinate retention key, and a FAIL when
 a doctype in the permission-delta table carries no Custom DocPerm row at all.
+
+P4-U6 added the mail checks: the two celebration-reminder senders must not
+both be on for the same event (P4-R18), a default outgoing Email Account is
+what the HR-queue notifications and the reminders both need -- and a FAIL
+without it, because the notifications send inside the escalating save, so
+Send to HR is refused rather than merely unannounced -- and an HR Manager
+scoped to their own Employee record has no HR queue (P4-R11).
 """
 
 import os
@@ -84,9 +91,35 @@ def check_strict_user_permissions():
 	)
 
 
+def _hr_manager_users():
+	"""The enabled logins holding HR Manager, which two checks need to agree
+	about: this role must *not* be self-scoped (P4-R11)."""
+	holders = set(
+		frappe.get_all(
+			"Has Role",
+			filters={"role": "HR Manager", "parenttype": "User"},
+			pluck="parent",
+		)
+	) - {"Administrator", "Guest"}
+	if not holders:
+		return set()
+	return set(
+		frappe.get_all("User", filters={"enabled": 1, "name": ["in", list(holders)]}, pluck="name")
+	)
+
+
 def check_employee_user_permissions():
 	"""Every Employee with a portal login must be scoped to their own record.
-	Without the User Permission, that user can read every employee."""
+	Without the User Permission, that user can read every employee.
+
+	HR Managers are the deliberate exception (P4-R11): a User Permission on
+	their own Employee record silently empties their HR queue, because it
+	beats HR Manager's own read permission inside
+	`frappe.model.workflow.get_transitions`. `check_hr_manager_self_scope`
+	owns that case and wants the opposite answer, so counting them as
+	missing here would leave every real site with an HR Manager employee
+	holding a FAIL that must not be fixed.
+	"""
 	employees = frappe.get_all(
 		"Employee",
 		filters={"status": "Active", "user_id": ["is", "set"]},
@@ -98,7 +131,12 @@ def check_employee_user_permissions():
 			"User Permission", filters={"allow": "Employee"}, fields=["user", "for_value"]
 		)
 	}
-	missing = sorted(e.user_id for e in employees if (e.user_id, e.name) not in scoped)
+	exempt = _hr_manager_users()
+	missing = sorted(
+		e.user_id
+		for e in employees
+		if e.user_id not in exempt and (e.user_id, e.name) not in scoped
+	)
 	if not employees:
 		return _result("Employee User Permissions", WARN, "no active Employee has a user_id yet")
 	if missing:
@@ -108,7 +146,10 @@ def check_employee_user_permissions():
 			FAIL,
 			f"{len(missing)} of {len(employees)} linked employees have no User Permission: {shown}",
 		)
-	return _result("Employee User Permissions", PASS, f"all {len(employees)} linked employees scoped")
+	detail = f"all {len(employees)} linked employees scoped"
+	if exempt:
+		detail += f" ({len(exempt)} HR Manager login(s) exempt -- see HR queue scoping)"
+	return _result("Employee User Permissions", PASS, detail)
 
 
 def check_custom_docperm_coverage():
@@ -598,16 +639,33 @@ def check_hr_contact():
 def check_fixtures():
 	expected = [
 		("Workflow", "Timesheet Approval"),
-		# P3-KTD6 / P3-R26: the two-step attendance approval (P3-U5).
+		# P4-U1: the single-step attendance approval, with Pending HR reached
+		# only by Send to HR (was two mandatory steps in P3).
 		("Workflow", "Attendance Request Approval"),
 		# Its two new states. A Workflow's `workflow_state` values are Links
 		# and fixture import runs with `ignore_links`, so a Workflow State
 		# row that never installed leaves the workflow itself looking fine.
 		("Workflow State", "Pending Manager"),
 		("Workflow State", "Pending HR"),
+		# P4-KTD1: the state that carries the recoverable "sent back"
+		# meaning on both workflows, and the two actions that reach the new
+		# outcomes. Same reason as above -- a Workflow's action and state
+		# names are Links, and the import runs with `ignore_links`.
+		("Workflow State", "Sent Back"),
+		("Workflow Action Master", "Send Back"),
+		("Workflow Action Master", "Send to HR"),
 		("Activity Type", "General"),
 		("Notification", "HelixHR Timesheet Status Changed"),
 		("Notification", "HelixHR Leave Status Changed"),
+		# P4-KTD9 / P4-R12: HR is told a request reached its queue by these
+		# four fixture Notifications and by nothing in code, so a missing one
+		# is a queue nobody is watching. Leave needs two -- Frappe skips
+		# Value Change while `flags.in_insert`, and an HR-approves leave is
+		# *inserted* in the HR stage.
+		("Notification", "HelixHR Leave Sent To HR"),
+		("Notification", "HelixHR New Leave For HR"),
+		("Notification", "HelixHR Timesheet Sent To HR"),
+		("Notification", "HelixHR Attendance Request Sent To HR"),
 	]
 	missing = [f"{dt} '{name}'" for dt, name in expected if not frappe.db.exists(dt, name)]
 	if missing:
@@ -739,6 +797,130 @@ def check_holiday_list_coverage():
 	)
 
 
+# --- celebration reminders and mail (P4-U6, P4-R18) ------------------------
+
+
+def check_celebration_reminders():
+	"""P4-R18 / P4-KTD10: a site must not be left sending two emails for the
+	same event.
+
+	Frappe merges `scheduler_events` across apps and offers no way to remove
+	HRMS's daily reminder job, so HRMS's stock email keeps going out while
+	its own checkbox is ticked and HelixHR's branded one goes out while HR
+	has picked a template. `events.hr_settings_validate` refuses the save
+	that creates the contradiction; this is the backstop for the routes that
+	never reach `validate` -- a fixture import, a raw `db_set`, a restored
+	site.
+
+	A picked template that does not exist is the other FAIL: the job logs it
+	and sends nothing, so the event goes quiet with no other sign. Neither
+	sender on for an event is a WARN and not a FAIL -- a site may not want
+	the email at all -- and either one on is a PASS naming which one sends.
+	"""
+	from helixhr.reminders import EVENTS
+
+	problems, notes, quiet = [], [], []
+	for spec in EVENTS.values():
+		template = _hr_setting(spec["template_field"])
+		hrms_on = cint(_hr_setting(spec["hrms_field"]))
+		if template and hrms_on:
+			problems.append(
+				f"{spec['label']}: both HRMS and HelixHR would send -- untick "
+				f"'{spec['hrms_label']}' in HR Settings or clear '{spec['template_label']}'"
+			)
+		elif template and not frappe.db.exists("Email Template", template):
+			problems.append(
+				f"{spec['label']}: '{spec['template_label']}' names Email Template "
+				f"'{template}', which does not exist -- nothing is sent"
+			)
+		elif template:
+			notes.append(f"{spec['label']}: HelixHR sends '{template}'")
+		elif hrms_on:
+			notes.append(f"{spec['label']}: HRMS sends its own")
+		else:
+			quiet.append(f"{spec['label']}: nobody sends")
+
+	if problems:
+		return _result("Celebration reminders", FAIL, "; ".join(problems))
+	if quiet:
+		return _result("Celebration reminders", WARN, "; ".join(quiet + notes))
+	return _result("Celebration reminders", PASS, "; ".join(notes))
+
+
+def check_outgoing_email():
+	"""P4-R18: `frappe.sendmail` throws without a default outgoing Email
+	Account, and the HR-queue Notifications send from *inside* the save that
+	escalates a request (P4-R12) -- so the throw is the save's throw.
+
+	A FAIL, not a WARN. Without the account two actions do not merely go
+	unannounced, they are refused outright: Send to HR on a leave, timesheet
+	or attendance request, and an employee applying for a leave type HR
+	approves (that insert starts in the HR queue and fires the same
+	notification). Both are new user-facing actions rather than existing
+	behaviour degrading, and swallowing the notification error instead would
+	be worse -- HR would silently never be told. The celebration reminders
+	need the same account, and fail quietly in the scheduler log.
+	"""
+	account = frappe.db.get_value(
+		"Email Account", {"enable_outgoing": 1, "default_outgoing": 1}, "name"
+	)
+	if account:
+		return _result("Outgoing email", PASS, f"default outgoing account '{account}'")
+	return _result(
+		"Outgoing email",
+		FAIL,
+		"no default outgoing Email Account -- Send to HR is refused on every leave, timesheet "
+		"and attendance request, applying for an HR-approves leave type is refused too, and the "
+		"celebration reminders send nothing (Desk: Email Account)",
+	)
+
+
+def check_hr_manager_self_scope():
+	"""P4-R11: an HR Manager with a User Permission on their own Employee
+	record has no HR queue at all.
+
+	A User Permission on Employee beats HR Manager's own read permission on
+	Leave Application, Timesheet and Attendance Request, and it does so
+	silently: `check_permission("read")` inside `frappe.model.workflow
+	.get_transitions` throws for every row that is not theirs, so the
+	Approvals page shows HR nothing but their own records and reads as an
+	empty queue rather than as a permission problem. HR staff are therefore
+	not scoped to themselves -- an Employee record created with HR Settings'
+	"Create User Permission" ticked (the default) is where this comes from,
+	so it is easy to arrive at by accident.
+
+	Reported, not judged, and a WARN: whether a particular login is meant to
+	work the HR queue is HR's call, and `check_employee_user_permissions`
+	deliberately wants the scoping on everybody else.
+	"""
+	# The same helper `check_employee_user_permissions` exempts by, so the two
+	# checks can never disagree about who holds the role.
+	enabled = sorted(_hr_manager_users())
+	if not enabled:
+		return _result(
+			"HR queue scoping", WARN, "no enabled user holds HR Manager -- nobody works the HR queue"
+		)
+
+	scoped = sorted(
+		set(
+			frappe.get_all(
+				"User Permission",
+				filters={"allow": "Employee", "user": ["in", enabled]},
+				pluck="user",
+			)
+		)
+	)
+	if scoped:
+		shown = ", ".join(scoped[:5]) + (f" and {len(scoped) - 5} more" if len(scoped) > 5 else "")
+		return _result(
+			"HR queue scoping",
+			WARN,
+			f"{len(scoped)} HR Manager(s) have a User Permission on Employee, which empties their "
+			f"HR queue: {shown} -- remove it for the people who work the queue",
+		)
+	return _result("HR queue scoping", PASS, f"{len(enabled)} HR Manager(s), none scoped to one Employee")
+
+
 def check_pdf_generator():
 	"""P3-R2: the payslip PDF is rendered by a binary on the host, not by this
 	app, so a site without one answers 500 on a download that looks fine in
@@ -794,6 +976,9 @@ CHECKS = [
 	check_shift_types,
 	check_checkin_location_retention,
 	check_holiday_list_coverage,
+	check_celebration_reminders,
+	check_outgoing_email,
+	check_hr_manager_self_scope,
 	check_pdf_generator,
 	check_frontend_built,
 ]

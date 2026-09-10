@@ -187,6 +187,14 @@ function ageLabel(item) {
             />
             <span class="min-w-0 flex-1">
               <span class="block truncate text-sm text-ink-gray-7">{{ item.title }}</span>
+              <!-- P4-R4. A terminal rejection reaches this list, and its
+                   reason is the whole reason the row exists: without it the
+                   employee reads "was rejected" and has to open the record to
+                   find out why. -->
+              <span
+                v-if="item.detail"
+                class="block truncate text-xs text-ink-gray-6"
+              >“{{ item.detail }}”</span>
               <span class="tabular block text-xs text-ink-gray-5">
                 {{ formatDate(item.date) }}
               </span>

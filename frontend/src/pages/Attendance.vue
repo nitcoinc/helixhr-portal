@@ -622,10 +622,14 @@ const LEGEND = [
                   :docstatus="row.docstatus"
                   :approver="approverName"
                 />
+                <!-- P4-R4: which of the two nos this was, then the reason
+                     for it. The badge above says the same word; this line is
+                     where the sentence lives. -->
                 <span
                   v-if="row.reason_sent_back"
                   class="mt-2 block text-sm text-ink-red-4"
-                >“{{ row.reason_sent_back }}”</span>
+                >{{ row.workflow_state === 'Rejected' ? 'Rejected' : 'Sent back' }}:
+                  “{{ row.reason_sent_back }}”</span>
               </button>
             </li>
           </ul>
@@ -705,7 +709,7 @@ const LEGEND = [
               Fix a day
             </button>
             <p class="mt-1 text-xs text-ink-gray-5">
-              You worked from home or were on duty. Your manager and then HR agree, and the day counts.
+              You worked from home or were on duty. Your manager agrees, and the day counts.
             </p>
           </div>
           <div>

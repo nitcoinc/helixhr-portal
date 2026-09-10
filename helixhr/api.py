@@ -33,13 +33,19 @@ from hrms.api import (
 from hrms.utils.holiday_list import get_holiday_list_for_employee
 
 from helixhr.events import (
+	DECISION_REASON_FIELD,
 	HR_REPLY_SUBJECT_PREFIX,
+	LEAVE_STAGE_HR,
+	PENDING_STATE,
 	REQUEST_APPROVED,
 	REQUEST_DRAFT,
 	REQUEST_PENDING_HR,
 	REQUEST_PENDING_MANAGER,
 	REQUEST_REJECTED,
+	REQUEST_SENT_BACK,
 	REQUEST_WITHDRAWABLE,
+	TIMESHEET_PENDING_HR,
+	TIMESHEET_SENT_BACK,
 	_approver_user,
 	_is_hr,
 )
@@ -103,6 +109,10 @@ def get_dashboard(**kwargs):
 		# screen stays one request.
 		"week": section("week", lambda: _get_week_spine(employee, once)),
 		"needs_you": section("needs_you", lambda: _get_needs_you(employee, once)),
+		# P4-R14: a projection, never the underlying dates (P4-KTD14).
+		"celebrations": section(
+			"celebrations", lambda: _get_celebrations(employee, getdate(user_today()))
+		),
 		"failed_sections": failed,
 	}
 
@@ -212,8 +222,14 @@ def get_portal_bootstrap():
 	title = "HelixHR portal bootstrap failed"
 	report_count = _safe(lambda: _count_direct_reports(employee["name"]), title=title) or 0
 	boot["has_reports"] = report_count > 0
-	boot["can_approve"] = report_count > 0 or bool(
-		_safe(lambda: _pending_approvals(employee["name"]), title=title)
+	# P4-R13: the Approvals nav item is present for every HR Manager, empty
+	# queue or not -- HR's work arrives without warning and a rail item that
+	# comes and goes is a rail item nobody trusts. Still a nav decision, not
+	# a grant: `_assert_may_act_on` re-checks every read and every action.
+	boot["can_approve"] = (
+		report_count > 0
+		or _is_hr(frappe.session.user)
+		or bool(_safe(lambda: _pending_approvals(employee["name"]), title=title))
 	)
 	boot["unread_notifications"] = _safe(_get_unread_notification_count, title=title) or 0
 	return boot
@@ -282,6 +298,94 @@ def _attendance_events():
 	start = min(get_first_day(user_today()), monday)
 	end = max(get_last_day(user_today()), sunday)
 	return get_attendance_calendar_events(str(start), str(end)) or {}
+
+
+# Celebrations (P4-U5 / P4-R14, P4-KTD14)
+#
+# `Employee.date_of_birth` and `date_of_joining` sit at permlevel 1 by
+# property setter -- role Employee cannot read either one, on purpose. So
+# this is a *projection*, the same posture `get_directory` takes: the read
+# runs server-side, scoped to the caller's own company, bounded by that
+# company's active headcount, and what comes back is only what the card
+# prints. The year of birth never leaves the server, and neither does an
+# age: a day and a month are what a colleague needs to say happy birthday,
+# and the rest is nobody's business (P4-R14).
+#
+# Eligibility is HRMS's own rule, so Home and the reminder email can never
+# disagree about who is celebrating: Active, the day and month match, and
+# the *year* is strictly before this year (`get_employees_having_an_event_today`
+# filters `Extract(year, ...) < today.year`). That one condition covers both
+# "no year recorded" (a null date is skipped outright) and "joined or was
+# born this year" -- a person's first year is not an anniversary, and a
+# newborn is not a colleague.
+_CELEBRATION_FIELDS = ("name", "employee_name", "date_of_birth", "date_of_joining")
+
+
+def _celebration_projection(row, event_date, today):
+	"""One card row: who, which day, and whether that day is today.
+
+	Deliberately no `date`, no `year`, no `age`. `day` and `month` are
+	integers the client formats in the reader's own locale (`formatDayMonth`
+	in lib/dates.js), which also means there is no full date on the wire for
+	a caller to reconstruct a birth year from.
+	"""
+	return {
+		"employee": row.name,
+		"employee_name": row.employee_name,
+		# The monogram the directory and the Approvals queue already draw,
+		# from the server so all three agree (P3-U9).
+		"initials": _initials(row.employee_name),
+		"day": event_date.day,
+		"month": event_date.month,
+		"is_today": event_date.day == today.day,
+	}
+
+
+def _get_celebrations(employee, today):
+	"""This month's birthdays and work anniversaries in the caller's own
+	company, today's first and then by day.
+
+	An employee whose record carries no company gets empty lists rather
+	than an error, exactly as `get_directory` does -- "we cannot tell which
+	company you are in" is a thing for HR to fix, and the card simply does
+	not appear.
+	"""
+	company = frappe.db.get_value("Employee", employee, "company")
+	if not company:
+		return {"birthdays": [], "anniversaries": []}
+
+	rows = frappe.get_all(
+		"Employee",
+		filters={"status": "Active", "company": company},
+		fields=list(_CELEBRATION_FIELDS),
+		order_by="employee_name asc",
+		ignore_permissions=True,
+	)
+
+	birthdays, anniversaries = [], []
+	for row in rows:
+		born = getdate(row.date_of_birth) if row.date_of_birth else None
+		if born and born.month == today.month and born.year < today.year:
+			birthdays.append(_celebration_projection(row, born, today))
+
+		joined = getdate(row.date_of_joining) if row.date_of_joining else None
+		if joined and joined.month == today.month and joined.year < today.year:
+			anniversary = _celebration_projection(row, joined, today)
+			# The one number the card does print: years completed, which is
+			# a fact about the job and not about the person.
+			anniversary["years"] = today.year - joined.year
+			anniversaries.append(anniversary)
+
+	return {
+		"birthdays": _ordered_celebrations(birthdays),
+		"anniversaries": _ordered_celebrations(anniversaries),
+	}
+
+
+def _ordered_celebrations(entries):
+	"""Today first, then up the month. Someone reading the card today wants
+	today's names at the top; the rest of the month is a reminder."""
+	return sorted(entries, key=lambda entry: (not entry["is_today"], entry["day"]))
 
 
 def _open_leave(employee):
@@ -453,7 +557,7 @@ def _get_needs_you(employee, once):
 
 	rejected = frappe.get_all(
 		"Timesheet",
-		filters={"employee": employee, "workflow_state": "Rejected", "docstatus": ["!=", 2]},
+		filters={"employee": employee, "workflow_state": TIMESHEET_SENT_BACK, "docstatus": ["!=", 2]},
 		fields=["name", "start_date", "end_date"],
 		order_by="start_date asc",
 		limit=_QUEUE_FETCH,
@@ -522,7 +626,7 @@ def _get_needs_you(employee, once):
 	# takes it back to Draft, so this is blocked work the employee can move.
 	rejected_requests = frappe.get_all(
 		"Attendance Request",
-		filters={"employee": employee, "workflow_state": REQUEST_REJECTED, "docstatus": 0},
+		filters={"employee": employee, "workflow_state": REQUEST_SENT_BACK, "docstatus": 0},
 		fields=["name", "from_date", "to_date", "reason"],
 		order_by="from_date asc",
 		limit=_QUEUE_FETCH,
@@ -543,6 +647,67 @@ def _get_needs_you(employee, once):
 				action="Edit and resend",
 				owner="you",
 				urgency="blocked",
+				to={"name": "AttendanceRequestDetail", "params": {"name": row.name}},
+			)
+		)
+
+	# P4-R4. A terminal rejection is nobody's move. The employee has to *read*
+	# it -- the reason is the whole content of the row -- but there is nothing
+	# to edit, resend or chase, so it goes to the quieter "Waiting on others"
+	# list rather than into a queue of work. Once each: the two collectors
+	# above are scoped to the send-back states, so a rejected record reaches
+	# exactly one of these lists and never both.
+	final_leave = frappe.get_all(
+		"Leave Application",
+		filters={"employee": employee, "status": "Rejected", "docstatus": 1},
+		fields=["name", "leave_type", "from_date", "owner"],
+		order_by="from_date desc",
+		limit=_QUEUE_FETCH,
+	)
+	final_leave_reasons = _leave_reason(
+		[row.name for row in final_leave],
+		{row.name: row.owner for row in final_leave},
+	)
+	for row in final_leave:
+		waiting.append(
+			_queue_item(
+				kind="leave_final_rejected",
+				name=row.name,
+				title=f"Your {row.leave_type} was rejected",
+				detail=final_leave_reasons.get(row.name),
+				date=str(row.from_date),
+				day=day_for(row.from_date),
+				age_days=age_days(row.from_date),
+				action="View",
+				owner="nobody",
+				urgency="waiting",
+				to={"name": "LeaveDetail", "params": {"name": row.name}},
+			)
+		)
+
+	final_requests = frappe.get_all(
+		"Attendance Request",
+		filters={"employee": employee, "workflow_state": REQUEST_REJECTED, "docstatus": 0},
+		fields=["name", "from_date", "reason"],
+		order_by="from_date desc",
+		limit=_QUEUE_FETCH,
+	)
+	final_request_reasons = _rejection_comments(
+		"Attendance Request", [row.name for row in final_requests], employee
+	)
+	for row in final_requests:
+		waiting.append(
+			_queue_item(
+				kind="attendance_request_final_rejected",
+				name=row.name,
+				title=f"Your {row.reason} request was rejected",
+				detail=final_request_reasons.get(row.name),
+				date=str(row.from_date),
+				day=day_for(row.from_date),
+				age_days=age_days(row.from_date),
+				action="View",
+				owner="nobody",
+				urgency="waiting",
 				to={"name": "AttendanceRequestDetail", "params": {"name": row.name}},
 			)
 		)
@@ -651,7 +816,12 @@ def _get_needs_you(employee, once):
 		)
 
 	items.sort(key=lambda item: (_URGENCY_RANK[item["urgency"]], -(item["age_days"] or 0)))
-	waiting.sort(key=lambda item: -(item["age_days"] or 0))
+	# P4-R4, second order key: "nobody" rows are terminal receipts -- there is
+	# nothing to chase -- so they sort *below* everything still live, and only
+	# then by age. A recency window was the alternative and is worse: it would
+	# drop a rejection the employee never read, and the reason is the whole
+	# content of the row.
+	waiting.sort(key=lambda item: (item["owner"] == "nobody", -(item["age_days"] or 0)))
 	shown = items[:_QUEUE_LIMIT]
 	return {
 		"items": shown,
@@ -675,8 +845,9 @@ def _queue_item(
 		"day": day,
 		"age_days": age_days,
 		"action": action,
-		# Whose move it is. "you" rows are the queue; "manager" rows are the
-		# waiting list.
+		# Whose move it is. "you" rows are the queue; "manager", "hr" and
+		# "nobody" rows are the waiting list -- "nobody" is a decision that
+		# has already been made and only needs reading (P4-R4).
 		"owner": owner,
 		"urgency": urgency,
 		"tone": _URGENCY_TONE[urgency],
@@ -693,6 +864,14 @@ _QUEUE_FETCH = 50
 # The bound on the one comment read that spans many records: a handful of
 # comments per sent-back record, over a page of records (P3-R25).
 _COMMENT_FETCH = 200
+# P4-R5's hand-over note, marked. It is written for HR ("check this against the
+# policy") and lives in the same Comment stream as the reason the *employee*
+# reads, so an unmarked note was surfaced as the send-back reason by any later
+# reason-less decision. Written in one place (`act_on_approval`) and matched in
+# one place (`_hr_handover_note` / `_decision_reason_text`), like
+# HR_REPLY_SUBJECT_PREFIX. Visible in the Desk timeline on purpose -- it says
+# what the note was for.
+HR_HANDOVER_NOTE_PREFIX = "Sent to HR:"
 # blocked work, then an answer waiting to be read, then a decision this
 # person owes somebody else. "waiting" never enters the queue; it is the
 # urgency of the separate Waiting-on-others list.
@@ -717,6 +896,26 @@ def _notification_text(description):
 	from html import unescape
 
 	return unescape(frappe.utils.strip_html(description)).strip() or None
+
+
+def _decision_reason_text(content):
+	"""One comment as a reason the employee may be shown, or None.
+
+	None for a hand-over note: it was written about routing, not about a
+	decision taken against them (P4-R5, P4-KTD7a)."""
+	text = frappe.utils.strip_html(content).strip() if content else None
+	if not text or text.startswith(HR_HANDOVER_NOTE_PREFIX):
+		return None
+	return text
+
+
+def _hr_handover_note(content):
+	"""The other half of the same marker: the note itself, without its
+	prefix, or None when this comment is not a hand-over note."""
+	text = frappe.utils.strip_html(content).strip() if content else None
+	if not text or not text.startswith(HR_HANDOVER_NOTE_PREFIX):
+		return None
+	return text[len(HR_HANDOVER_NOTE_PREFIX) :].strip() or None
 
 
 def _rejection_comments(doctype, names, employee=None):
@@ -755,7 +954,7 @@ def _rejection_comments(doctype, names, employee=None):
 	):
 		if row.reference_name in latest or (employee_user and row.owner == employee_user):
 			continue
-		text = frappe.utils.strip_html(row.content).strip() if row.content else None
+		text = _decision_reason_text(row.content)
 		if text:
 			latest[row.reference_name] = text
 	return latest
@@ -764,13 +963,24 @@ def _rejection_comments(doctype, names, employee=None):
 def _last_rejection_comment(timesheet):
 	"""The manager's reason, shown inline so the employee doesn't have to
 	open the timesheet to find out what to change."""
-	comment = frappe.db.get_value(
+	for row in frappe.get_all(
 		"Comment",
-		{"reference_doctype": "Timesheet", "reference_name": timesheet, "comment_type": "Comment"},
-		"content",
+		filters={
+			"reference_doctype": "Timesheet",
+			"reference_name": timesheet,
+			"comment_type": "Comment",
+		},
+		fields=["content"],
 		order_by="creation desc",
-	)
-	return frappe.utils.strip_html(comment).strip() if comment else None
+		limit=_COMMENT_FETCH,
+	):
+		# Newest first, skipping the hand-over notes: the newest comment on a
+		# sent-back week can be a note written for HR, which is not a reason
+		# this employee was sent back (P4-R5).
+		text = _decision_reason_text(row.content)
+		if text:
+			return text
+	return None
 
 
 def _summary_row(
@@ -799,18 +1009,84 @@ def _summary_row(
 		"status": status,
 		"sent_on": str(sent_on) if sent_on else None,
 		"age_days": _age_in_days(sent_on, today),
+		# P4-R11. One queue, tagged: an HR Manager's list mixes their own
+		# reports' work with everything a manager handed to HR, and only the
+		# tag tells the two apart. Every row answers all three keys, so the
+		# screen never has to ask whether a kind knows about them (P4-KTD7).
+		"for_hr": False,
+		"sent_to_hr_by": None,
+		"hr_note": None,
 	}
 	row.update(extra)
 	return row
 
 
+def _leave_names_in_hr_stage(names):
+	"""Which of these applications are waiting for HR (P4-R5, P4-R7). One
+	bounded read, because the caller already holds the names."""
+	if not names:
+		return set()
+	return set(
+		frappe.get_all(
+			"Leave Application",
+			filters={"name": ["in", names], "helixhr_stage": LEAVE_STAGE_HR},
+			pluck="name",
+			limit=len(names),
+		)
+	)
+
+
+def _line_manager_filter(employee):
+	"""The `employee` filter for the two workflow collectors, and None when
+	this caller has no line-manager queue at all.
+
+	For an ordinary manager it is "anybody but me": the DocShare
+	`events.timesheet_on_update` / `attendance_request_on_update` grants,
+	plus the nested-set User Permission a manager holds over their reports,
+	are what narrow the answer to their own people.
+
+	An HR Manager has native read on every Timesheet and Attendance Request
+	in the company, so the same filter would answer with the whole company's
+	backlog rather than with their own reports (P4-KTD7, P4-R11). Their
+	line-manager half is therefore narrowed by `reports_to` explicitly; the
+	HR half of their queue is a separate collector.
+	"""
+	if not _is_hr():
+		return ["!=", employee]
+	# No limit, deliberately: this is a *filter*, not a page of rows. The
+	# per-collector `limit=_QUEUE_FETCH` on the reads below is the real bound,
+	# and capping the reports list here instead made the requests of anybody
+	# past the 50th report disappear from the queue altogether.
+	reports = frappe.get_all(
+		"Employee",
+		filters={"reports_to": employee, "status": "Active"},
+		pluck="name",
+	)
+	return ["in", reports] if reports else None
+
+
 def _leave_summaries(employee, today):
 	"""HRMS filters leave by `leave_approver`, so this read is already
-	scoped to decisions this session may make."""
+	scoped to decisions this session may make.
+
+	P4-R7 subtracts one thing from it: a request in the HR stage is nobody's
+	line-manager work any more, and `leave_approver` deliberately stays the
+	manager so HRMS's own validation and DocShare keep working (P4-KTD4).
+	HRMS returns its own field list and does not know about the stage, so the
+	stage is asked for once, on the names it answered with, rather than by
+	re-reading the applications.
+	"""
 	from hrms.api import get_leave_applications
 
+	applications = get_leave_applications(
+		employee, approver_id=frappe.session.user, for_approval=True
+	)
+	with_hr = _leave_names_in_hr_stage([row["name"] for row in applications])
+
 	rows = []
-	for row in get_leave_applications(employee, approver_id=frappe.session.user, for_approval=True):
+	for row in applications:
+		if row["name"] in with_hr:
+			continue
 		sent_on = row.get("creation") or row.get("posting_date")
 		rows.append(
 			_summary_row(
@@ -840,7 +1116,14 @@ def _timesheet_summaries(employee, today):
 	`ignore_permissions=True`, so it answered with *every* pending timesheet
 	on the site regardless of who was asking -- the employee name and week of
 	every person in the company, to anyone with a session.
+
+	P4-KTD7: for an HR Manager, whose native read on Timesheet is that wide
+	answer all over again, `_line_manager_filter` narrows this half of the
+	queue to their own direct reports.
 	"""
+	scope = _line_manager_filter(employee)
+	if scope is None:
+		return []
 	return [
 		# `modified` is when the week last moved, which for a Pending
 		# Approval timesheet is when it was sent. Timesheet has no
@@ -862,9 +1145,9 @@ def _timesheet_summaries(employee, today):
 		for row in frappe.get_list(
 			"Timesheet",
 			filters={
-				"workflow_state": "Pending Approval",
+				"workflow_state": PENDING_STATE,
 				"docstatus": 0,
-				"employee": ["!=", employee],
+				"employee": scope,
 			},
 			fields=[
 				"name",
@@ -884,21 +1167,29 @@ def _timesheet_summaries(employee, today):
 def _attendance_request_summaries(employee, today):
 	"""Pending Manager rows only (P3-KTD7, P3-R16).
 
-	HR's confirmation happens in Desk, so a request that has already reached
-	Pending HR is not a decision this queue owns -- listing it would offer a
-	manager (or an HR Manager who is also a line manager) a second, portal
-	version of a step that has been taken.
+	A request that has reached Pending HR is not this half of the queue's
+	work: the manager's step is done. It reaches an HR Manager through
+	`_hr_attendance_request_summaries` instead, tagged, so a manager who is
+	also HR is never offered two versions of the same row (P4-KTD7).
 
 	`frappe.get_list` as the session user: the manager reaches a report's
 	request through the `write` DocShare `events.attendance_request_on_update`
 	grants for exactly this state, and through nothing else.
+
+	P4-KTD7: an HR Manager reaches every one of them through the role
+	instead, so `_line_manager_filter` narrows this half of their queue to
+	their own direct reports; what a manager handed to HR arrives through the
+	HR collector, tagged.
 	"""
+	scope = _line_manager_filter(employee)
+	if scope is None:
+		return []
 	rows = frappe.get_list(
 		"Attendance Request",
 		filters={
 			"workflow_state": REQUEST_PENDING_MANAGER,
 			"docstatus": 0,
-			"employee": ["!=", employee],
+			"employee": scope,
 		},
 		fields=[
 			"name",
@@ -1006,6 +1297,251 @@ def _requested_day_status(rows):
 	}
 
 
+# ---------------------------------------------------------------------------
+# The HR queue (P4-R11, P4-KTD7)
+#
+# One list, not a second page: an HR Manager who is also a line manager would
+# otherwise have two backlogs to poll. The three collectors below answer with
+# everything waiting for HR across the three kinds; the line-manager
+# collectors above answer with their own reports' work, narrowed by
+# `_line_manager_filter`. The two halves cannot overlap, because the states
+# they filter on are disjoint.
+#
+# Each of them runs as the session user. HR Manager holds native read on all
+# three doctypes, which is exactly why the *other* half needed narrowing --
+# here the wide read is the point.
+# ---------------------------------------------------------------------------
+
+
+def _hr_senders(doctype, rows):
+	"""Who put each of these records in the HR queue, and the note they left,
+	as `{name: {"by": full name or None, "note": text or None}}`.
+
+	This answers the question P4 left to implementation. The sender is the
+	record's own `modified_by`; the note is the newest Comment that user left
+	on it.
+
+	`Version` was the alternative and cannot answer for leave at all: the
+	stage is permlevel 1 and is therefore written with `db_set` (P4-KTD4),
+	which runs no `save` and so writes no Version row -- for the one kind
+	whose escalation is not a workflow transition, the table would be empty.
+	Version is also gated on `track_changes`, a Desk-editable flag, and would
+	need its JSON diff parsed per row. `modified_by` is already a column of
+	the collector's own read, and the note is the same bounded, newest-first
+	Comment query `_rejection_comments` already is.
+
+	A record whose last writer is the employee themselves has no sender: that
+	is a leave of an HR-approves type, which nobody handed over -- it started
+	in the HR queue (P4-R7).
+	"""
+	if not rows:
+		return {}
+
+	writers = {row["name"]: row.get("modified_by") for row in rows}
+	employee_users = {
+		row.name: row.user_id
+		for row in frappe.get_all(
+			"Employee",
+			filters={"name": ["in", list({row["employee"] for row in rows if row.get("employee")})]},
+			fields=["name", "user_id"],
+		)
+	}
+
+	notes = {}
+	for comment in frappe.get_all(
+		"Comment",
+		filters={
+			"reference_doctype": doctype,
+			"reference_name": ["in", list(writers)],
+			"comment_type": "Comment",
+		},
+		fields=["reference_name", "content", "owner"],
+		# Newest first with "first one seen wins", so a truncated page can
+		# only cost an older record its note, never show a staler one.
+		order_by="creation desc",
+		limit=_COMMENT_FETCH,
+	):
+		if comment.owner != writers.get(comment.reference_name) or comment.reference_name in notes:
+			continue
+		# Only a marked hand-over note. The newest comment by the same writer
+		# was the old answer and could be the reason they sent the record
+		# *back* on an earlier round, which is not what HR was told (P4-R5).
+		text = _hr_handover_note(comment.content)
+		if text:
+			notes[comment.reference_name] = text
+
+	full_names = {
+		row.name: row.full_name
+		for row in frappe.get_all(
+			"User",
+			filters={"name": ["in", list({writer for writer in writers.values() if writer})]},
+			fields=["name", "full_name"],
+		)
+	}
+
+	senders = {}
+	for row in rows:
+		writer = writers.get(row["name"])
+		if not writer or writer == employee_users.get(row.get("employee")):
+			senders[row["name"]] = {"by": None, "note": None}
+		else:
+			senders[row["name"]] = {
+				"by": full_names.get(writer) or writer,
+				"note": notes.get(row["name"]),
+			}
+	return senders
+
+
+def _hr_leave_summaries(employee, today):
+	"""Leave waiting for HR: status Open at docstatus 0 in stage HR, whether a
+	manager sent it over or the Leave Type routed it there (P4-R5, P4-R7)."""
+	rows = frappe.get_list(
+		"Leave Application",
+		filters={
+			"status": "Open",
+			"docstatus": 0,
+			"helixhr_stage": LEAVE_STAGE_HR,
+			"employee": ["!=", employee],
+		},
+		fields=[
+			"name",
+			"employee",
+			"employee_name",
+			"leave_type",
+			"from_date",
+			"to_date",
+			"total_leave_days",
+			"status",
+			"creation",
+			"modified_by",
+		],
+		order_by="creation asc",
+		limit=_QUEUE_FETCH,
+	)
+	senders = _hr_senders("Leave Application", rows)
+	return [
+		_summary_row(
+			"leave",
+			"Leave Application",
+			row.name,
+			row.employee,
+			row.employee_name,
+			row.from_date,
+			row.to_date,
+			row.creation,
+			row.status,
+			today,
+			leave_type=row.leave_type,
+			total_days=flt(row.total_leave_days),
+			for_hr=True,
+			sent_to_hr_by=senders[row.name]["by"],
+			hr_note=senders[row.name]["note"],
+		)
+		for row in rows
+	]
+
+
+def _hr_timesheet_summaries(employee, today):
+	"""Weeks a manager handed over. Pending HR carries no DocShare on
+	purpose (P4-U1) -- HR reaches these through the role."""
+	rows = frappe.get_list(
+		"Timesheet",
+		filters={
+			"workflow_state": TIMESHEET_PENDING_HR,
+			"docstatus": 0,
+			"employee": ["!=", employee],
+		},
+		fields=[
+			"name",
+			"employee",
+			"employee_name",
+			"start_date",
+			"end_date",
+			"total_hours",
+			"modified",
+			"modified_by",
+		],
+		order_by="start_date asc",
+		limit=_QUEUE_FETCH,
+	)
+	senders = _hr_senders("Timesheet", rows)
+	return [
+		_summary_row(
+			"timesheet",
+			"Timesheet",
+			row.name,
+			row.employee,
+			row.employee_name,
+			row.start_date,
+			row.end_date,
+			row.modified,
+			TIMESHEET_PENDING_HR,
+			today,
+			total_hours=flt(row.total_hours),
+			for_hr=True,
+			sent_to_hr_by=senders[row.name]["by"],
+			hr_note=senders[row.name]["note"],
+		)
+		for row in rows
+	]
+
+
+def _hr_attendance_request_summaries(employee, today):
+	"""Attendance requests a manager handed over, with the same evidence the
+	manager read before doing so -- including what the calendar shows for
+	each day, which is the whole reason an overwrite is HR's decision and not
+	theirs (P4-KTD5)."""
+	rows = frappe.get_list(
+		"Attendance Request",
+		filters={
+			"workflow_state": REQUEST_PENDING_HR,
+			"docstatus": 0,
+			"employee": ["!=", employee],
+		},
+		fields=[
+			"name",
+			"employee",
+			"employee_name",
+			"from_date",
+			"to_date",
+			"half_day",
+			"half_day_date",
+			"reason",
+			"explanation",
+			"modified",
+			"modified_by",
+		],
+		order_by="modified asc",
+		limit=_QUEUE_FETCH,
+	)
+	senders = _hr_senders("Attendance Request", rows)
+	shown = _requested_day_status(rows)
+	return [
+		_summary_row(
+			"attendance",
+			"Attendance Request",
+			row.name,
+			row.employee,
+			row.employee_name,
+			row.from_date,
+			row.to_date,
+			row.modified,
+			REQUEST_PENDING_HR,
+			today,
+			total_days=date_diff(row.to_date, row.from_date) + 1,
+			reason=row.reason,
+			explanation=(row.explanation or "").strip() or None,
+			half_day=bool(cint(row.half_day)),
+			half_day_date=str(row.half_day_date) if row.half_day_date else None,
+			calendar=shown.get(row.name, []),
+			for_hr=True,
+			sent_to_hr_by=senders[row.name]["by"],
+			hr_note=senders[row.name]["note"],
+		)
+		for row in rows
+	]
+
+
 # Per-kind, never "not leave means timesheet" (P3-U6 step 0). A third kind
 # landed in P3-U5, and every one of these helpers used to branch on one
 # doctype and treat everything else as the other.
@@ -1033,13 +1569,30 @@ def _approval_summaries(employee):
 	"""
 	today = _as_date(user_today())
 	rows = []
+	# Whether any collector came back full, and the total is therefore a floor
+	# rather than a count. Each read is bounded at `_QUEUE_FETCH` per kind
+	# (P3-R25), so a backlog of 200 used to be reported as 50 with nothing
+	# saying so.
+	capped = False
 	for collect in _APPROVAL_SUMMARY_COLLECTORS:
-		rows.extend(collect(employee, today))
+		collected = collect(employee, today)
+		capped = capped or len(collected) >= _QUEUE_FETCH
+		rows.extend(collected)
+
+	# P4-R11: one queue. An HR Manager's own reports' work arrived above,
+	# narrowed by `_line_manager_filter`; everything waiting for HR is added
+	# here and tagged, so the two halves are one oldest-first backlog rather
+	# than two lists to poll.
+	if _is_hr():
+		for kind in _APPROVAL_KINDS.values():
+			collected = kind["hr_queue"](employee, today)
+			capped = capped or len(collected) >= _QUEUE_FETCH
+			rows.extend(collected)
 
 	# Oldest first: the queue is a backlog, and the person who has waited
 	# longest is the one the manager is holding up (P2-U7 step 7).
 	rows.sort(key=lambda entry: (entry["sent_on"] or "", entry["name"]))
-	return rows
+	return rows, capped
 
 
 def _initials(full_name):
@@ -1065,14 +1618,22 @@ def _pending_approvals(employee):
 	the other.
 	"""
 	decisions = []
-	for row in _approval_summaries(employee):
+	rows, _capped = _approval_summaries(employee)
+	for row in rows:
+		title = _QUEUE_TITLE[row["kind"]](row)
+		if row["for_hr"]:
+			# P4-R11: Home's queue says which hat this decision is under.
+			# Without it an HR Manager who is also a line manager reads five
+			# identical lines and cannot tell which are theirs as a manager.
+			title = f"{title} · waiting for HR"
 		decisions.append(
 			{
 				"kind": f"approval_{row['kind']}",
 				"reference_doctype": row["doctype"],
 				"reference_name": row["name"],
 				"route_kind": row["kind"],
-				"title": _QUEUE_TITLE[row["kind"]](row),
+				"title": title,
+				"for_hr": row["for_hr"],
 				"date": row["from_date"],
 			}
 		)
@@ -1123,6 +1684,14 @@ _LEAVE_MAX_PAGE = 200
 # asking the holiday resolver for a decade of dates (P2-R22).
 _LEAVE_MAX_SPAN_DAYS = 366
 
+# P4-KTD4. Leave has no Workflow (P2-KTD17) -- HRMS's own lifecycle is the
+# right one -- so the queue a request is waiting in is one Custom Field beside
+# it, at permlevel 1 so only HR can move it through a generic write. These are
+# its two options; nothing else is ever written to the field. "HR" is
+# `events.LEAVE_STAGE_HR`, imported above, because the submit hook enforces
+# the same value on the raw route.
+_LEAVE_STAGE_MANAGER = "Manager"
+
 
 def _leave_state(status, docstatus):
 	"""The lifecycle state the *portal* reasons about, which is not the same
@@ -1136,6 +1705,12 @@ def _leave_state(status, docstatus):
 	                                             never read as "Approved", and
 	                                             the employee has no action.
 	  approved        docstatus 1, Approved   -- submitted; balance consumed
+	  rejected        docstatus 1, Rejected   -- the final no of P4-R4. HRMS's
+	                                             own on_submit accepts this
+	                                             status, and a submitted
+	                                             application consumes no
+	                                             balance and cannot be edited
+	                                             or resent.
 	  decided         docstatus 1, anything else
 	  cancelled       docstatus 2, or status Cancelled
 	"""
@@ -1143,7 +1718,12 @@ def _leave_state(status, docstatus):
 	if docstatus == 2 or status == "Cancelled":
 		return "cancelled"
 	if docstatus == 1:
-		return "approved" if status == "Approved" else "decided"
+		if status == "Approved":
+			return "approved"
+		# P4-KTD4: docstatus 0 + Rejected is the send-back; docstatus 1 +
+		# Rejected is terminal. Same status, two different answers, which is
+		# exactly why the portal reasons about a state and not a status.
+		return "rejected" if status == "Rejected" else "decided"
 	if status == "Rejected":
 		return "sent_back"
 	if status == "Approved":
@@ -1193,7 +1773,7 @@ def _leave_reason(names, owners):
 	):
 		if row.owner == owners.get(row.reference_name):
 			continue
-		text = frappe.utils.strip_html(row.content).strip() if row.content else None
+		text = _decision_reason_text(row.content)
 		if text:
 			latest[row.reference_name] = text
 	return latest
@@ -1214,6 +1794,9 @@ def _leave_projection(row, approver_names, reasons):
 		"status": row.get("status"),
 		"docstatus": cint(row.get("docstatus")),
 		"state": state,
+		# P4-R5/R7: which queue this request is waiting in. "HR" means the
+		# employee is told "Waiting for HR" and the manager has no action.
+		"stage": row.get("helixhr_stage") or _LEAVE_STAGE_MANAGER,
 		"can_withdraw": _may_withdraw(state) and row.get("owner") == frappe.session.user,
 		"approver": approver,
 		# `get_leave_applications` hands back a user id; the row needs the
@@ -1241,6 +1824,7 @@ _LEAVE_FIELDS = [
 	"status",
 	"docstatus",
 	"leave_approver",
+	"helixhr_stage",
 	"posting_date",
 	"owner",
 	"creation",
@@ -1353,12 +1937,26 @@ def get_leave_form_context():
 	details = get_leave_approval_details(employee) or {}
 	balances = {entry["leave_type"]: entry for entry in _leave_balances(employee)}
 
+	names = get_leave_types(employee, today) or []
+	# P4-R7: a type HR approves never reaches the manager, so the sheet says
+	# so before the employee sends it. One read for the whole list.
+	hr_approved = set(
+		frappe.get_all(
+			"Leave Type",
+			filters={"name": ["in", names], "helixhr_hr_approves": 1},
+			pluck="name",
+		)
+		if names
+		else []
+	)
+
 	types = []
-	for leave_type in get_leave_types(employee, today) or []:
+	for leave_type in names:
 		entry = balances.get(leave_type)
 		types.append(
 			{
 				"leave_type": leave_type,
+				"hr_approves": leave_type in hr_approved,
 				# None, not 0, for a type with no allocation (leave without
 				# pay): "0 left" and "no balance to show" are different
 				# sentences and the chip prints them differently.
@@ -1484,7 +2082,24 @@ def apply_for_leave(leave_type, from_date, to_date, half_day=0, description=None
 		}
 	)
 	doc.insert()
-	return {"name": doc.name, "status": doc.status, "total_leave_days": flt(doc.total_leave_days)}
+
+	# P4-R7 / P4-KTD4. `helixhr_stage` is permlevel 1, so setting it on the
+	# document above would be silently reset -- `reset_values_if_no_permlevel
+	# _access` puts a new document's high-permlevel fields back to their
+	# default for any session without the level, which every employee is. The
+	# stage is written straight to the row instead, *after* the insert has
+	# authorized and validated the application, and `db_set` still runs
+	# `on_change`, so the "Waiting for HR" Notification fires (P4-KTD9).
+	stage = _LEAVE_STAGE_MANAGER
+	if frappe.db.get_value("Leave Type", leave_type, "helixhr_hr_approves"):
+		stage = LEAVE_STAGE_HR
+		doc.db_set("helixhr_stage", stage)
+	return {
+		"name": doc.name,
+		"status": doc.status,
+		"stage": stage,
+		"total_leave_days": flt(doc.total_leave_days),
+	}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -2049,6 +2664,11 @@ _ATTENDANCE_REQUEST_FIELDS = [
 ]
 
 
+# The two outcomes an approver can reach that leave the employee something to
+# read: one recoverable, one final (P4-KTD1). Both carry a reason.
+_REQUEST_DECIDED_AGAINST = (REQUEST_SENT_BACK, REQUEST_REJECTED)
+
+
 def _request_projection(row, reasons):
 	state = row.get("workflow_state") or REQUEST_DRAFT
 	return {
@@ -2094,7 +2714,7 @@ def get_my_attendance_requests(limit=None, start=0):
 	)
 	reasons = _rejection_comments(
 		"Attendance Request",
-		[row.name for row in rows if row.workflow_state == REQUEST_REJECTED],
+		[row.name for row in rows if row.workflow_state in _REQUEST_DECIDED_AGAINST],
 		employee,
 	)
 
@@ -2126,7 +2746,9 @@ def get_my_attendance_request(name):
 		frappe.throw(_("That attendance request isn't yours."), frappe.PermissionError)
 
 	reasons = _rejection_comments(
-		"Attendance Request", [name] if row.workflow_state == REQUEST_REJECTED else [], employee
+		"Attendance Request",
+		[name] if row.workflow_state in _REQUEST_DECIDED_AGAINST else [],
+		employee,
 	)
 	detail = _request_projection(row, reasons)
 	detail["approver_name"] = _approver_name(employee)
@@ -2460,7 +3082,14 @@ def send_my_attendance_request(name, expected_modified=None):
 @frappe.whitelist(methods=["POST"])
 def withdraw_my_attendance_request(name):
 	"""Remove one of the caller's own requests while it is still theirs to
-	remove -- Draft, with the manager, or sent back (P3-R17).
+	remove -- Draft, with the manager, sent back, or rejected (P3-R17,
+	P4-KTD3).
+
+	Rejected is on that list because a terminal row at docstatus 0 would
+	block the same dates for ever (HRMS refuses an overlap below docstatus
+	2, and a Workflow cannot reach 2 from 0). The portal words it "Remove",
+	not "Withdraw": there is nothing left to withdraw from, and the
+	approver's reason survives on the Deleted Document snapshot.
 
 	Once it has reached HR the honest path is HR, and `events
 	.attendance_request_on_trash` refuses the same states through every
@@ -2753,7 +3382,7 @@ def get_my_week(week_start=None):
 			# told their week was sent back without ever being told why. The
 			# e2e only asserted the "Sent back" label, so it never caught it.
 			"rejection_comment": _last_rejection_comment(doc.name)
-			if doc.workflow_state == "Rejected"
+			if doc.workflow_state == TIMESHEET_SENT_BACK
 			else None,
 			"rows": [
 				{
@@ -2816,7 +3445,9 @@ def get_my_timesheet_history(limit=12, start=0):
 		limit_page_length=limit,
 	)
 	reasons = _rejection_comments(
-		"Timesheet", [row.name for row in rows if row.workflow_state == "Rejected"], employee
+		"Timesheet",
+		[row.name for row in rows if row.workflow_state == TIMESHEET_SENT_BACK],
+		employee,
 	)
 
 	weeks = []
@@ -2981,7 +3612,7 @@ def _assert_week_is_still_sendable(current, expected_modified):
 	"""One send per week, per state. Everything here runs *after* the
 	employee row lock, so the second of two concurrent submits sees the
 	first one's result."""
-	if current and current.workflow_state not in ("Draft", "Rejected", None):
+	if current and current.workflow_state not in ("Draft", TIMESHEET_SENT_BACK, None):
 		frappe.throw(
 			_("This week is {0} and can't be sent again.").format(current.workflow_state)
 		)
@@ -3038,10 +3669,10 @@ def _write_my_week(employee, monday, sunday, rows, existing_name=None):
 
 	if existing_name:
 		doc = frappe.get_doc("Timesheet", existing_name)
-		if doc.workflow_state == "Rejected":
-			# Rejected is not an editable state for an Employee (the
+		if doc.workflow_state == TIMESHEET_SENT_BACK:
+			# Sent Back is not an editable state for an Employee (the
 			# workflow gives `allow_edit` to HR Manager), so a sent-back
-			# week has to travel Rejected -> Draft before it can be
+			# week has to travel Sent Back -> Draft before it can be
 			# written. The portal used to make the employee do that
 			# themselves with a button called "Edit and resubmit" that
 			# only performed the reopen -- it left them on a Draft with
@@ -3159,6 +3790,11 @@ _APPROVAL_PAGE = 25
 # a manager can see that the thing they just did actually happened.
 _DECIDED_DAYS = 7
 _DECIDED_LIMIT = 5
+# What a handed-over leave reads as in the receipt list. Leave has no workflow
+# state of its own (P2-KTD17), so this is the one place the word lives -- the
+# same word `TIMESHEET_PENDING_HR` and `REQUEST_PENDING_HR` already carry, so
+# the three kinds report one state under one name.
+_LEAVE_PENDING_HR = "Pending HR"
 
 
 @frappe.whitelist()
@@ -3171,16 +3807,23 @@ def get_my_approvals():
 	`get_approval_detail` for the one item actually selected (P2-R22).
 	"""
 	employee = get_current_employee()
-	pending = _approval_summaries(employee)
+	pending, capped = _approval_summaries(employee)
 	return {
 		"today": user_today(),
 		"pending": pending[:_APPROVAL_PAGE],
 		"total": len(pending),
+		# `total` is what came back, and every kind's read is bounded, so on a
+		# very large backlog it is a floor and not a count. The flag is what
+		# lets the screen say "50+" rather than lie about 50; a real COUNT per
+		# kind on every poll is the thing being avoided (P2-R22, P3-R25).
+		"total_is_capped": capped,
 		"decided": _recently_decided(employee),
 	}
 
 
-def _decided_row(kind, name, employee_name, label, from_date, to_date, status, decided_on):
+def _decided_row(
+	kind, name, employee_name, label, from_date, to_date, status, decided_on, docstatus=0
+):
 	return {
 		"id": f"{kind}:{name}",
 		"kind": kind,
@@ -3191,12 +3834,64 @@ def _decided_row(kind, name, employee_name, label, from_date, to_date, status, d
 		"from_date": str(from_date) if from_date else None,
 		"to_date": str(to_date) if to_date else None,
 		"status": status,
+		# P4-U4: the receipt's badge needs it. Leave's Rejected is a send-back
+		# at docstatus 0 and a terminal rejection at 1 (P4-KTD4), so a receipt
+		# without the docstatus would word a manager's final no as "Sent back".
+		"docstatus": cint(docstatus),
 		"decided_on": str(decided_on) if decided_on else None,
 	}
 
 
 def _decided_leave(employee, since):
-	return [
+	"""What this approver decided, plus what they handed to HR.
+
+	The handover row is the same receipt a timesheet and an attendance
+	request have had since P3-KTD7: a manager who escalates has finished
+	with the record and needs to see that their step happened. It was the one
+	kind of the three that reported nothing at all.
+	"""
+	handed_over = []
+	# Empty for an HR caller: for them this row is the top of their own
+	# pending queue, not a receipt (see `_decided_hr_handover_states`).
+	if _decided_hr_handover_states(LEAVE_STAGE_HR):
+		handed_over = [
+			_decided_row(
+				"leave",
+				row.name,
+				row.employee_name,
+				row.leave_type,
+				row.from_date,
+				row.to_date,
+				# The same word the other two kinds use for the same state.
+				_LEAVE_PENDING_HR,
+				row.modified,
+				row.docstatus,
+			)
+			for row in frappe.get_list(
+				"Leave Application",
+				filters={
+					"leave_approver": frappe.session.user,
+					"employee": ["!=", employee],
+					"status": "Open",
+					"docstatus": 0,
+					"helixhr_stage": LEAVE_STAGE_HR,
+					"modified": [">=", str(since)],
+				},
+				fields=[
+					"name",
+					"employee_name",
+					"leave_type",
+					"from_date",
+					"to_date",
+					"docstatus",
+					"modified",
+				],
+				order_by="modified desc",
+				limit=_DECIDED_LIMIT,
+			)
+		]
+
+	return handed_over + [
 		_decided_row(
 			"leave",
 			row.name,
@@ -3206,6 +3901,7 @@ def _decided_leave(employee, since):
 			row.to_date,
 			row.status,
 			row.modified,
+			row.docstatus,
 		)
 		for row in frappe.get_list(
 			"Leave Application",
@@ -3215,11 +3911,57 @@ def _decided_leave(employee, since):
 				"status": ["in", ["Approved", "Rejected"]],
 				"modified": [">=", str(since)],
 			},
-			fields=["name", "employee_name", "leave_type", "from_date", "to_date", "status", "modified"],
+			fields=[
+				"name",
+				"employee_name",
+				"leave_type",
+				"from_date",
+				"to_date",
+				"status",
+				"docstatus",
+				"modified",
+			],
 			order_by="modified desc",
 			limit=_DECIDED_LIMIT,
 		)
 	]
+
+
+def _decided_hr_handover_states(*states):
+	"""The Pending-HR states a "Decided this week" receipt should include, for
+	*this* caller (P4-U4).
+
+	A manager who hands a week or a request to HR has finished with it, and
+	the receipt is how they see that their step happened -- attendance
+	requests have said "Waiting for HR" here since P3-KTD7, and after P4-R5 a
+	timesheet can be handed over too, so it says the same thing.
+
+	For an HR Manager the same row is not a receipt at all: it is the top of
+	their own pending queue (P4-R11), and listing it under "Decided this
+	week" would tell them they had already dealt with the thing they are
+	being asked to deal with. So the Pending-HR states drop out for an HR
+	caller, and the receipt they keep is what they themselves approved, sent
+	back or rejected.
+	"""
+	return [] if _is_hr() else list(states)
+
+
+def _decided_by_me():
+	"""The extra filter that keeps an HR caller's receipt list their own.
+
+	"Decided this week" is a receipt for work *this user* did, and the two
+	workflow collectors narrow it with `employee != caller` alone -- which is
+	enough for a line manager (their reads are bounded by the DocShare and by
+	their own nested-set User Permission) and not remotely enough for an HR
+	Manager, whose native read spans the company: HR's receipt list was every
+	manager's decisions. The same permission-scoping trap `_line_manager_filter`
+	closes for the *pending* queue (P4-KTD7, P4-R11).
+
+	`modified_by` rather than `_line_manager_filter`: HR decides records that
+	are nobody's reports, and those are exactly the decisions their receipt
+	has to show. A decided record's last writer is the decider.
+	"""
+	return {"modified_by": frappe.session.user} if _is_hr() else {}
 
 
 def _decided_timesheets(employee, since):
@@ -3233,15 +3975,32 @@ def _decided_timesheets(employee, since):
 			row.end_date,
 			row.workflow_state,
 			row.modified,
+			row.docstatus,
 		)
 		for row in frappe.get_list(
 			"Timesheet",
 			filters={
 				"employee": ["!=", employee],
-				"workflow_state": ["in", ["Approved", "Rejected"]],
+				"workflow_state": [
+					"in",
+					[
+						"Approved",
+						TIMESHEET_SENT_BACK,
+						*_decided_hr_handover_states(TIMESHEET_PENDING_HR),
+					],
+				],
 				"modified": [">=", str(since)],
+				**_decided_by_me(),
 			},
-			fields=["name", "employee_name", "start_date", "end_date", "workflow_state", "modified"],
+			fields=[
+				"name",
+				"employee_name",
+				"start_date",
+				"end_date",
+				"workflow_state",
+				"docstatus",
+				"modified",
+			],
 			order_by="modified desc",
 			limit=_DECIDED_LIMIT,
 		)
@@ -3251,7 +4010,9 @@ def _decided_timesheets(employee, since):
 def _decided_attendance_requests(employee, since):
 	"""A request the manager sent on reads "Waiting for HR" here, which is
 	the honest receipt: their step is done and HR's has not happened yet
-	(P3-KTD7). Approved and Rejected are the later outcomes of the same row.
+	(P3-KTD7). Approved, Sent Back and Rejected are the later outcomes of the
+	same row. See `_decided_hr_handover_states` for why HR's own queue does
+	not appear in HR's receipt.
 	"""
 	return [
 		_decided_row(
@@ -3263,15 +4024,33 @@ def _decided_attendance_requests(employee, since):
 			row.to_date,
 			row.workflow_state,
 			row.modified,
+			row.docstatus,
 		)
 		for row in frappe.get_list(
 			"Attendance Request",
 			filters={
 				"employee": ["!=", employee],
-				"workflow_state": ["in", [REQUEST_PENDING_HR, REQUEST_APPROVED, REQUEST_REJECTED]],
+				"workflow_state": [
+					"in",
+					[
+						REQUEST_APPROVED,
+						REQUEST_SENT_BACK,
+						REQUEST_REJECTED,
+						*_decided_hr_handover_states(REQUEST_PENDING_HR),
+					],
+				],
 				"modified": [">=", str(since)],
+				**_decided_by_me(),
 			},
-			fields=["name", "employee_name", "from_date", "to_date", "workflow_state", "modified"],
+			fields=[
+				"name",
+				"employee_name",
+				"from_date",
+				"to_date",
+				"workflow_state",
+				"docstatus",
+				"modified",
+			],
 			order_by="modified desc",
 			limit=_DECIDED_LIMIT,
 		)
@@ -3328,7 +4107,13 @@ def get_approval_detail(kind, name):
 
 	doc = frappe.get_doc(doctype, name)
 	_assert_may_act_on(doc)
-	return _APPROVAL_KINDS[doctype]["detail"](doc)
+	detail = _APPROVAL_KINDS[doctype]["detail"](doc)
+	# P4-R1 / P4-KTD6: the outcomes that are legal for *this* record and
+	# *this* approver, from the one rule table `act_on_approval` validates
+	# against. The screen draws exactly this list, so it can never offer a
+	# button the server would refuse.
+	detail["actions"] = _allowed_actions(doc, frappe.session.user)
+	return detail
 
 
 # The three kinds, and the doctype each one names -- the alias the whitelisted
@@ -3342,7 +4127,153 @@ _APPROVAL_DOCTYPES = {
 }
 
 
+# The four outcomes, in the order the screen draws them: the decision, the
+# recoverable no, the final no, the hand-over (P4-R1..R5). Timesheets reach
+# three of them and never Reject (P4-KTD2), which is a fact of that
+# workflow's transitions rather than a rule written here.
+_APPROVAL_ACTIONS = ("Approve", "Send Back", "Reject", "Send to HR")
+
+# The two that are meaningless without one: the employee is told what to
+# change, or why the answer is final (P4-R3, P4-R4).
+_REASON_REQUIRED = ("Send Back", "Reject")
+
+# Where an approver's reason is stored, per kind. Leave keeps its Comment --
+# its rows are never deleted -- while a rejected Attendance Request is
+# removable by its employee and a Comment dies with the document, so those
+# two carry the reason as a field of the record (P4-KTD7a, P4-KTD3).
+_DECISION_REASON_KINDS = ("Timesheet", "Attendance Request")
+
+# Leave has no Workflow (P2-KTD17), so its half of the rule table is written
+# here. HR decides, sends back or rejects in either stage; only a line
+# manager hands over, and only from their own stage (P4-R5).
+_LEAVE_DECISIONS = ("Approve", "Send Back", "Reject")
+
+
+def _requester_user(doc):
+	return frappe.db.get_value("Employee", doc.employee, "user_id")
+
+
+def _allowed_actions(doc, user):
+	"""The outcomes this user may take on this record, right now (P4-KTD6).
+
+	One function, two entry points: `get_approval_detail` returns it as
+	`actions` and `act_on_approval` refuses anything absent from it. There is
+	no second copy of the rules on the screen or in the act.
+
+	For Timesheet and Attendance Request the list is *derived* from the
+	Workflow -- `frappe.model.workflow.get_transitions` applies the same
+	roles and the same conditions `apply_workflow` will apply, filtered to
+	the four outcome names. Editing a transition in Desk therefore changes
+	the button row and the server's answer together, which is the whole point
+	of deriving it. Only Leave uses the explicit table above.
+
+	Nobody decides their own request, on any kind, in any state (P4-R8): the
+	list is empty for the requester, and `_assert_may_act_on` refuses them
+	before this is ever reached from `act_on_approval`. Administrator is
+	exempt, as it is in the submit hooks -- it is the migration and backfill
+	account, not a person with requests of their own.
+	"""
+	if not _APPROVAL_KINDS[doc.doctype]["is_open"](doc):
+		return []
+	if user != "Administrator" and _requester_user(doc) == user:
+		return []
+	if doc.doctype == "Leave Application":
+		actions = _leave_allowed_actions(doc, user)
+	else:
+		actions = _workflow_allowed_actions(doc, user)
+
+	# P4-R5, and the dead end it would otherwise create: the only route out of
+	# Pending HR is an HR Manager who is not the requester, so on a site with
+	# no enabled HR Manager -- or where the only one is the person who raised
+	# this record -- a hand-over leaves it with no legal move for anybody.
+	# Withheld rather than offered.
+	if "Send to HR" in actions and not _an_hr_manager_can_take_this(doc):
+		actions = [action for action in actions if action != "Send to HR"]
+	return actions
+
+
+def _an_hr_manager_can_take_this(doc):
+	"""Is there anybody who could actually decide this record once it is with
+	HR: an enabled login holding HR Manager who is not this record's
+	requester.
+
+	The same notion of "enabled holder of HR Manager" `preflight._hr_manager_users`
+	checks (P4-R11). The two-query shape is repeated here rather than imported
+	because preflight is an operator command and this is a request path; both
+	exclude Administrator and Guest -- Administrator is the migration and
+	backfill account, not a person HR work can be handed to.
+
+	`ignore_permissions` for the reason the holiday and directory reads give:
+	an ordinary employee has no read on Has Role, this method owns the whole
+	scope, and what leaves the function is a boolean.
+	"""
+	holders = set(
+		frappe.get_all(
+			"Has Role",
+			filters={"role": "HR Manager", "parenttype": "User"},
+			pluck="parent",
+			ignore_permissions=True,
+		)
+	) - {"Administrator", "Guest", _requester_user(doc)}
+	if not holders:
+		return False
+	return bool(
+		frappe.get_all(
+			"User",
+			filters={"enabled": 1, "name": ["in", list(holders)]},
+			pluck="name",
+			limit=1,
+			ignore_permissions=True,
+		)
+	)
+
+
+def _workflow_allowed_actions(doc, user):
+	"""The two workflow kinds' list, derived from the fixture's own
+	transitions.
+
+	Filtered through `has_approval_access` as well as by action name, because
+	`apply_workflow` applies it too and it keys on `doc.owner`: a manager who
+	*filed* a request for one of their reports would otherwise be offered the
+	Employee-role outcomes (`allow_self_approval = 0`) and then refused with
+	"Self approval is not allowed" on the click. P4-KTD6's promise is that the
+	offered list and the enforced list cannot disagree.
+	"""
+	from frappe.model.workflow import get_transitions, has_approval_access
+
+	reachable = {
+		transition.get("action")
+		for transition in get_transitions(doc)
+		if transition.get("action") in _APPROVAL_ACTIONS
+		and has_approval_access(user, doc, transition)
+	}
+	return [action for action in _APPROVAL_ACTIONS if action in reachable]
+
+
+def _leave_allowed_actions(doc, user):
+	"""The HTD table, as code. A user who is both HR and this employee's
+	line manager gets the union -- minus Send to HR once the request is
+	already with HR, because there is nowhere left to send it."""
+	is_hr = _is_hr(user)
+	is_manager = user == doc.leave_approver
+
+	if (doc.get("helixhr_stage") or _LEAVE_STAGE_MANAGER) == LEAVE_STAGE_HR:
+		return list(_LEAVE_DECISIONS) if is_hr else []
+	if not (is_hr or is_manager):
+		return []
+	return [*_LEAVE_DECISIONS, "Send to HR"] if is_manager else list(_LEAVE_DECISIONS)
+
+
 def _decision_head(doc, employee_name):
+	for_hr = _APPROVAL_KINDS[doc.doctype]["hr_state"](doc)
+	sender = (
+		_hr_senders(
+			doc.doctype,
+			[{"name": doc.name, "employee": doc.employee, "modified_by": doc.modified_by}],
+		)[doc.name]
+		if for_hr
+		else {"by": None, "note": None}
+	)
 	return {
 		"name": doc.name,
 		"doctype": doc.doctype,
@@ -3353,6 +4284,12 @@ def _decision_head(doc, employee_name):
 		# rendered from, and `act_on_approval` refuses anything else
 		# (P2-R25, P2-U7 step 3).
 		"modified": str(doc.modified),
+		# The same three keys the queue row carries (P4-R11), so the detail
+		# head can say "HR · sent by Priya · 'needs a policy check'" without
+		# a second request.
+		"for_hr": for_hr,
+		"sent_to_hr_by": sender["by"],
+		"hr_note": sender["note"],
 	}
 
 
@@ -3519,9 +4456,13 @@ def _project_and_task_names(lines):
 def act_on_approval(
 	doctype, name, action, comment=None, expected_modified=None, expected_state=None
 ):
-	"""Approve or send back a report's pending Leave Application or
-	Timesheet. `comment` is required for a Reject (R25) -- the employee is
-	told what to change, not just that it came back.
+	"""Take one of the four outcomes on a report's pending request: Approve,
+	Send Back, Reject or Send to HR (P4-R1..R5).
+
+	`comment` is the approver's reason. It is **required** for Send Back and
+	for Reject -- the employee is told what to change, or why the answer is
+	final, not merely that it happened -- and optional for Send to HR, where
+	it is the note HR reads. Approve takes none.
 
 	Who may actually act is checked here on the server, not assumed from
 	what the portal chose to show (R26). Timesheet goes through the same
@@ -3548,10 +4489,13 @@ def act_on_approval(
 	rate_limit_per_user("act_on_approval")
 	if doctype not in _APPROVAL_DOCTYPES.values():
 		frappe.throw(_("Not a valid request."))
-	if action not in ("Approve", "Reject"):
+	if action not in _APPROVAL_ACTIONS:
 		frappe.throw(_("Not a valid action."))
-	if action == "Reject" and not comment:
-		frappe.throw(_("A comment is required to reject."))
+	reason = (comment or "").strip() or None
+	if action == "Send Back" and not reason:
+		frappe.throw(_("Say what should change before sending it back."))
+	if action == "Reject" and not reason:
+		frappe.throw(_("Say why before rejecting this."))
 	if not expected_modified:
 		frappe.throw(_("Open this request before deciding it, then try again."))
 
@@ -3565,13 +4509,30 @@ def act_on_approval(
 	doc = frappe.get_doc(doctype, name)
 	_assert_may_act_on(doc)
 	_assert_still_open(doc)
+	# P4-R1 / P4-KTD6: the same list the screen was drawn from. For the two
+	# workflow kinds this is the fixture's own roles and conditions, so an
+	# action the workflow would technically allow from some other role is
+	# still refused here, and vice versa.
+	if action not in _allowed_actions(doc, frappe.session.user):
+		frappe.throw(_("That isn't something you can do to this request."))
 	_assert_expected_state(expected_modified, current_modified)
 	_assert_expected_workflow_state(doc, expected_state)
 
-	# Before the transition, so a Send back carries its reason into the
-	# notification the transition writes (P3-KTD9).
-	if comment:
-		doc.add_comment("Comment", comment)
+	# Before the transition, so the employee's notification carries the
+	# reason the transition writes (P4-R9, P3-KTD9).
+	if reason:
+		if action in _REASON_REQUIRED and doctype in _DECISION_REASON_KINDS:
+			# `db_set` because the field is permlevel 1 (P4-KTD7a): a save by
+			# this approver, who is an ordinary employee with a DocShare,
+			# would have the value silently reset on the way in. The
+			# authorization above is what makes this safe.
+			doc.db_set(DECISION_REASON_FIELD, reason)
+		# P4-R5: a hand-over note is marked, so no employee-facing reason
+		# reader can ever return it (see HR_HANDOVER_NOTE_PREFIX).
+		doc.add_comment(
+			"Comment",
+			f"{HR_HANDOVER_NOTE_PREFIX} {reason}" if action == "Send to HR" else reason,
+		)
 
 	_APPROVAL_KINDS[doctype]["act"](doc, action)
 	return {
@@ -3591,6 +4552,19 @@ def _act_through_workflow(doc, action):
 
 
 def _may_act_on_leave(doc, user):
+	"""Who may decide one leave request (P4-R5, P4-R7).
+
+	Only reached for a non-HR session -- `_assert_may_act_on` returns early
+	for `_is_hr` -- so the stage check is the whole of "the manager loses the
+	request once it is with HR". The raw route (the `submit=1` DocShare HRMS
+	grants the approver on every save) is closed by
+	`events.leave_application_before_submit`, not here.
+	"""
+	if doc.get("helixhr_stage") == LEAVE_STAGE_HR:
+		frappe.throw(
+			_("This leave request is with HR now, so only HR can decide it."),
+			frappe.PermissionError,
+		)
 	if user != doc.leave_approver:
 		frappe.throw(
 			_("Only {0}'s approver or HR can act on this leave request.").format(doc.employee),
@@ -3630,8 +4604,19 @@ def _assert_may_act_on(doc):
 	directly: both entry points -- `get_approval_detail` and `act_on_approval` --
 	have already refused anything that is not one of `_APPROVAL_DOCTYPES`, so a
 	missing key here would be a programming error, not a caller's input.
+
+	P4-R8: the "not your own request" refusal runs *before* the HR
+	short-circuit. It used to sit inside the per-kind checks, which HR never
+	reaches, so an HR Manager could send back, reject or escalate their own
+	leave through the portal. Administrator is exempt, as it is in the three
+	`before_submit` hooks that cover the raw routes.
 	"""
 	user = frappe.session.user
+	if user != "Administrator" and _requester_user(doc) == user:
+		frappe.throw(
+			_("You can't decide your own request. Ask your manager or HR."),
+			frappe.PermissionError,
+		)
 	if _is_hr(user):
 		return
 
@@ -3686,13 +4671,100 @@ def _act_on_leave_application(doc, action):
 	`submit=1` DocShare hrms.hr.utils.share_doc_with_approver creates on
 	every save. See docs/architecture.md and
 	test_the_approvers_submit_grant_is_native.
+
+	P4-U2 gives the same function the other three outcomes. Send back is
+	unchanged; Reject is the *submitted* twin of it -- HRMS's own on_submit
+	accepts Approved and Rejected, a submitted application writes no Leave
+	Ledger Entry unless it is Approved, and docstatus 1 is what makes the row
+	unresendable (P4-R4). Send to HR touches no HRMS field at all: it moves
+	`helixhr_stage`, which is permlevel 1, so it goes through `db_set` after
+	the authorization `act_on_approval` has already done (P4-KTD4).
 	"""
 	if action == "Approve":
 		doc.status = "Approved"
 		doc.submit()
-	else:
+	elif action == "Reject":
+		doc.status = "Rejected"
+		doc.submit()
+	elif action == "Send to HR":
+		doc.db_set("helixhr_stage", LEAVE_STAGE_HR)
+	elif action == "Send Back":
 		doc.status = "Rejected"
 		doc.save()
+	else:
+		frappe.throw(_("Not a valid action."))
+
+
+def _act_on_attendance_request(doc, action):
+	"""The workflow transition, with the overwrite gate in front of Approve
+	(P4-KTD5).
+
+	Single-step approval makes the manager's Approve a real docstatus 0 -> 1
+	submit, and HRMS's `on_submit` rewrites existing Attendance rows in
+	place. P3-U6's preview refuses an overwrite at *send* time, but
+	auto-attendance can mark a day Present between the send and the
+	decision, and the person now submitting is a line manager who cannot see
+	Attendance at all. So the preview is re-run against the stored range and
+	the manager is pointed at the one person who can weigh an overwrite.
+
+	HR is deliberately not gated: HR can read Attendance, and leaving the
+	overwrite decision with them is what the sentence below asks for.
+
+	This is the portal's copy of the refusal, kept for its sentence alone.
+	The *enforcement* is `events.attendance_request_before_submit`, which
+	every submit route passes through -- P4-KTD5's `submit=1` DocShare means
+	a line manager can reach `apply_workflow` and `frappe.client.submit` from
+	Desk, neither of which comes through here.
+	"""
+	if action == "Approve" and not _is_hr():
+		assert_no_attendance_overwrite(
+			doc.employee,
+			doc.from_date,
+			doc.to_date,
+			half_day=doc.half_day,
+			half_day_date=doc.half_day_date,
+			reason=doc.reason,
+		)
+
+	_act_through_workflow(doc, action)
+
+
+def assert_no_attendance_overwrite(
+	employee, from_date, to_date, half_day=0, half_day_date=None, reason="Work From Home"
+):
+	"""Refuse a non-HR approval of days that already carry attendance, or
+	that cannot be judged at all (P4-KTD5).
+
+	Called from two places on purpose: the portal's `_act_on_attendance_request`
+	(for the message a manager reads) and `events.attendance_request_before_submit`
+	(the choke point every submit route -- portal, `apply_workflow`,
+	`frappe.client.submit` -- actually passes through). One function so the two
+	cannot drift.
+
+	An unanswerable preview (`known` false: no holiday list resolves) is
+	treated as an overwrite rather than as "no overwrite". HRMS's own
+	`is_holiday(..., raise_exception=True)` throws a few lines later anyway,
+	so the choice is between our sentence and a raw Frappe error -- and the
+	honest answer is the same one `can_send` gives at send time: this needs
+	HR.
+	"""
+	preview = _attendance_request_preview(
+		employee,
+		_as_date(from_date),
+		_as_date(to_date),
+		half_day=half_day,
+		half_day_date=half_day_date,
+		reason=reason,
+	)
+	if not preview["known"]:
+		frappe.throw(
+			_(
+				"We can't tell which of those days are working days, so this one is HR's "
+				"call. Send it to HR instead."
+			)
+		)
+	if preview["overwrite"]:
+		frappe.throw(_("Some of those days now have attendance; send this to HR instead."))
 
 
 # Everything that is per-kind about a decision, in one doctype-keyed table
@@ -3706,12 +4778,15 @@ def _act_on_leave_application(doc, action):
 #   detail         the evidence `get_approval_detail` returns
 #   may_act        who may open or decide this record, checked on the server
 #                  on every read of a detail and every action (P2-R10, R26)
-#   is_open        the one state in which the portal has a decision to offer,
-#                  and `open_message` the sentence for a caller who arrives
-#                  after it has moved. Attendance Request is Pending Manager
-#                  only: HR's second step is Desk's, so an HR Manager acting
-#                  on a Pending HR item *from the portal* is refused as
-#                  already decided (P3-KTD7).
+#   is_open        the states in which the portal still has a decision to
+#                  offer -- the manager's *and* HR's, since P4-U3 gives HR a
+#                  queue inside the portal -- and `open_message` the sentence
+#                  for a caller who arrives after both have moved. Which of
+#                  the two an individual caller may act in is
+#                  `_allowed_actions`'s answer, not this one (P4-KTD6).
+#   hr_state       whether this record is waiting for HR right now, which is
+#                  what tags a queue row and a detail head (P4-R11)
+#   hr_queue       the HR half of the queue for this kind, oldest first
 #   act            the lifecycle a decision actually runs
 _APPROVAL_KINDS = {
 	"Leave Application": {
@@ -3720,14 +4795,19 @@ _APPROVAL_KINDS = {
 		"may_act": _may_act_on_leave,
 		"is_open": lambda doc: cint(doc.docstatus) == 0 and doc.status == "Open",
 		"open_message": "This leave request has already been decided. Reload to see the result.",
+		"hr_state": lambda doc: (doc.get("helixhr_stage") or _LEAVE_STAGE_MANAGER)
+		== LEAVE_STAGE_HR,
+		"hr_queue": _hr_leave_summaries,
 		"act": _act_on_leave_application,
 	},
 	"Timesheet": {
 		"state_field": "workflow_state",
 		"detail": _timesheet_decision_detail,
 		"may_act": _may_act_on_timesheet,
-		"is_open": lambda doc: doc.workflow_state == "Pending Approval",
+		"is_open": lambda doc: doc.workflow_state in (PENDING_STATE, TIMESHEET_PENDING_HR),
 		"open_message": "This timesheet has already been decided. Reload to see the result.",
+		"hr_state": lambda doc: doc.workflow_state == TIMESHEET_PENDING_HR,
+		"hr_queue": _hr_timesheet_summaries,
 		"act": _act_through_workflow,
 	},
 	"Attendance Request": {
@@ -3735,9 +4815,11 @@ _APPROVAL_KINDS = {
 		"detail": _attendance_decision_detail,
 		"may_act": _may_act_on_attendance_request,
 		"is_open": lambda doc: cint(doc.docstatus) == 0
-		and doc.workflow_state == REQUEST_PENDING_MANAGER,
+		and doc.workflow_state in (REQUEST_PENDING_MANAGER, REQUEST_PENDING_HR),
 		"open_message": "This attendance request has already been decided. Reload to see the result.",
-		"act": _act_through_workflow,
+		"hr_state": lambda doc: doc.workflow_state == REQUEST_PENDING_HR,
+		"hr_queue": _hr_attendance_request_summaries,
+		"act": _act_on_attendance_request,
 	},
 }
 

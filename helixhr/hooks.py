@@ -101,19 +101,44 @@ fixtures = [
 		# this app never claims ownership of another app's record. "Draft"
 		# and "Pending Approval" are the Timesheet workflow's; "Pending
 		# Manager" and "Pending HR" are the attendance request's two
-		# pending steps (P3-KTD6). States before the Workflows that link
-		# to them.
+		# pending steps (P3-KTD6). "Sent Back" is P4-KTD1: it carries the
+		# recoverable meaning "Rejected" used to carry on both workflows,
+		# which frees "Rejected" to mean a final no. States before the
+		# Workflows that link to them.
 		"dt": "Workflow State",
-		"filters": [["name", "in", ["Draft", "Pending Approval", "Pending Manager", "Pending HR"]]],
+		"filters": [
+			["name", "in", ["Draft", "Pending Approval", "Pending Manager", "Pending HR", "Sent Back"]]
+		],
 	},
-	# Timesheet Approval (KTD7) and Attendance Request Approval (P3-KTD6).
+	# Timesheet Approval (KTD7) and Attendance Request Approval (P3-KTD6),
+	# each carrying the four outcomes of P4-KTD1 (Timesheet has three --
+	# P4-KTD2).
+	#
+	# Why every HR Manager transition keeps `allow_self_approval: 1` and a
+	# `user_id != frappe.session.user` condition instead (P4-R8): Frappe's
+	# own self-approval check is `user != doc.owner`
+	# (`frappe.model.workflow.has_approval_access`), and `owner` is the login
+	# that *created* the record -- which for a request or a week HR raised on
+	# somebody's behalf is HR itself. With `allow_self_approval: 0` an HR
+	# Manager could not decide any record they had filed for someone else.
+	# The condition asks the question the rule actually means -- is this the
+	# requester's own record -- and `events.timesheet_before_submit` and
+	# `events.attendance_request_before_submit` ask it again on the raw
+	# `frappe.client.submit` route the fixture never sees. The Employee-role
+	# (line manager) transitions keep `allow_self_approval: 0`, where `owner`
+	# genuinely is the employee.
 	{"dt": "Workflow", "filters": [["document_type", "in", ["Timesheet", "Attendance Request"]]]},
 	{
 		# Likewise "Approve" and "Reject" already exist as shared Workflow
-		# Action Master records; only "Submit" and "Edit" are new here.
+		# Action Master records; "Submit", "Edit", "Send Back" and
+		# "Send to HR" are this app's own.
 		"dt": "Workflow Action Master",
-		"filters": [["name", "in", ["Submit", "Edit"]]],
+		"filters": [["name", "in", ["Submit", "Edit", "Send Back", "Send to HR"]]],
 	},
+	# P4-KTD7a: `helixhr_decision_reason` on the two workflow kinds, at
+	# permlevel 1 so only the roles `apply_permission_deltas` names can read
+	# or write it. Module-scoped like every other fixture here.
+	{"dt": "Custom Field", "filters": [["module", "=", "HelixHR"]]},
 	{
 		# ERPNext's Timesheet requires Activity Type on every row at
 		# submit time (erpnext/projects/doctype/timesheet/timesheet.py),
@@ -152,11 +177,29 @@ doc_events = {
 	"HR Request": {
 		"on_update": "helixhr.events.hr_request_on_update",
 	},
-	# P3-KTD8. Frappe does not enforce a workflow state's `allow_edit` on
-	# the server, so the two-step attendance approval carries its rules as
-	# doc events: a field freeze outside Draft, the manager's DocShare while
-	# Pending Manager, the final submit only from Pending HR by HR, and a
+	# P4-U2 / P4-R8, P4-R8a. Leave has no Workflow, so the only guard on the
+	# raw submit route -- Desk, `frappe.client.submit`, the `submit=1`
+	# DocShare HRMS grants the approver -- is this hook: nobody approves their
+	# own leave, and nobody but HR approves one that is in the HR stage.
+	# `validate` is the same rule on the route that never submits: a send back
+	# is `status = "Rejected"` at docstatus 0, which is a save.
+	"Leave Application": {
+		"validate": "helixhr.events.leave_application_validate",
+		"before_submit": "helixhr.events.leave_application_before_submit",
+	},
+	# P3-KTD8 / P4-KTD5. Frappe does not enforce a workflow state's
+	# `allow_edit` on the server, so the attendance approval carries its
+	# rules as doc events: a field freeze outside Draft, the manager's
+	# DocShare (with `submit`, since P4 made their Approve the submit) while
+	# Pending Manager, who may submit and from which stored state, and a
 	# delete that follows the same states as the portal's withdraw.
+	# P4-U6 / P4-R18 / P4-KTD10. Frappe cannot unregister HRMS's daily
+	# reminder job, so a HelixHR template picked while the matching HRMS
+	# checkbox is still ticked means two emails for the same event, every
+	# morning. Refused here, where HR creates it; preflight is the backstop.
+	"HR Settings": {
+		"validate": "helixhr.events.hr_settings_validate",
+	},
 	"Attendance Request": {
 		"validate": "helixhr.events.attendance_request_validate",
 		"on_update": "helixhr.events.attendance_request_on_update",
@@ -276,9 +319,16 @@ has_permission = {
 # key `helixhr_checkin_location_retention_days` is set; preflight warns while
 # it is unset. Daily rather than hourly: the period is measured in days, so
 # an hourly pass would do the same work 24 times.
+# P4-U6 / P4-KTD10 / P4-R15. The birthday and work-anniversary emails HR
+# words themselves, from an Email Template. Idle until HR picks a template on
+# HR Settings, and it runs *beside* HRMS's own daily reminder job rather than
+# replacing it -- Frappe merges scheduler hooks across apps and offers no
+# removal, so having both senders on for one event is the thing
+# `events.hr_settings_validate` and preflight guard against.
 scheduler_events = {
 	"daily": [
 		"helixhr.tasks.null_stale_checkin_coordinates",
+		"helixhr.reminders.send_celebration_reminders",
 	],
 }
 

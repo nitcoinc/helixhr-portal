@@ -12,10 +12,10 @@ const PROJECT_NAME = 'Approvals Spec Project'
 /** A week well clear of the current one, which timesheet-entry.spec.ts and
  * timesheet-approval.spec.ts both work in. One Timesheet per Monday-Sunday
  * week (KTD10), so two specs sharing a week would fight over one record. */
-function seedMonday(): string {
+function seedMonday(weeksBack = 5): string {
   const now = new Date()
   const monday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
-  monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7) - 35)
+  monday.setUTCDate(monday.getUTCDate() - ((monday.getUTCDay() + 6) % 7) - weeksBack * 7)
   return monday.toISOString().slice(0, 10)
 }
 
@@ -46,7 +46,7 @@ async function getValue(api: APIRequestContext, doctype: string, filters: object
  * Pending-Approval DocShare are the real ones rather than a fixture's
  * imitation of them.
  */
-async function seedPendingWeek(baseURL: string) {
+async function seedPendingWeek(baseURL: string, weeksBack = 5) {
   const admin = await adminContext(baseURL)
   const employee = await getValue(admin, 'Employee', { user_id: EMPLOYEE }, 'name')
   const company = await getValue(admin, 'Employee', { user_id: EMPLOYEE }, 'company')
@@ -84,7 +84,7 @@ async function seedPendingWeek(baseURL: string) {
     })
   }
 
-  const monday = seedMonday()
+  const monday = seedMonday(weeksBack)
   // Start from nothing: a previous run left this week Approved, and an
   // approved week has no decision left in it.
   const existing = await admin.get(
@@ -156,6 +156,14 @@ test('a manager reads the whole week before Approve exists, and a stale decision
   await expect(panel.getByText(/Long Monday, doctor on Friday/)).toBeVisible()
   await expect(panel.getByRole('button', { name: /^Approve/ })).toBeVisible()
 
+  // P4-R1 / P4-KTD2. Three outcomes on a week, and Reject is not one of them:
+  // a terminal state would lock a week whose hours still have to be recorded.
+  // The button is absent rather than disabled, so nobody learns that a week
+  // can be rejected (P4-U4).
+  await expect(panel.getByTestId('send-back')).toBeVisible()
+  await expect(panel.getByTestId('send-to-hr')).toBeVisible()
+  await expect(panel.getByTestId('reject')).toHaveCount(0)
+
   // Refresh lands on the same decision (KTD5).
   await page.reload()
   await expect(page.getByTestId('approval-detail').getByText('Day total')).toBeVisible({
@@ -203,4 +211,77 @@ test('an employee with nobody reporting to them has no approvals at all', async 
     timeout: 10000,
   })
   await expect(page.getByRole('link', { name: 'Approvals' })).toHaveCount(0)
+})
+
+/**
+ * P4-U4 / P4-R11, P4-AE2. The HR half of the queue, under the third identity
+ * (`make_test_hr_manager_employee` -- an HR Manager who *has* an Employee
+ * record, so `portal_home_page` lets them into the portal at all).
+ *
+ * Its own week, five weeks further back than the manager test's: both run in
+ * this one file and one Timesheet per Monday-Sunday week (KTD10) means a
+ * shared week would be two tests fighting over one record even at
+ * `--workers=1`.
+ */
+test('HR works what a manager handed over, tagged and with the note, and has no Send to HR', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'this is the HR capability shape')
+  test.setTimeout(90000)
+
+  const baseURL = process.env.BASE_URL || 'http://localhost:8080'
+  const { name } = await seedPendingWeek(baseURL, 10)
+
+  // The manager hands it over, with a note, through the same method the
+  // screen calls -- so the stage change, the DocShare removal and the
+  // HR-queue Notification are the real ones.
+  const managerApi = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+  await managerApi.post('/api/method/login', {
+    form: { usr: 'manager@helixhr.test', pwd: PASSWORD },
+  })
+  const modified = await getValue(managerApi, 'Timesheet', { name }, 'modified')
+  const escalated = await managerApi.post('/api/method/helixhr.api.act_on_approval', {
+    form: {
+      doctype: 'Timesheet',
+      name,
+      action: 'Send to HR',
+      comment: 'hours on Sunday',
+      expected_modified: modified,
+      expected_state: 'Pending Approval',
+    },
+  })
+  expect(escalated.ok(), await escalated.text()).toBeTruthy()
+  await managerApi.dispose()
+
+  await page.goto('/helixhr/approvals')
+  const row = page.getByTestId('approvals-queue').locator(`[data-approval-name="${name}"]`)
+  await expect(row).toBeVisible({ timeout: 15000 })
+  // The chip is a word, not a tint: it is the only thing that says whether a
+  // row is HR's work or this person's own as a line manager (P4-R11).
+  await expect(row.getByTestId('hr-chip')).toBeVisible()
+  await expect(row).toContainText('hours on Sunday')
+
+  await row.click()
+  const panel = page.getByTestId('approval-detail')
+  await expect(panel.getByTestId('hr-chip')).toBeVisible({ timeout: 10000 })
+  await expect(panel).toContainText('hours on Sunday')
+
+  // R5: only a manager hands a request over. There is nowhere left to send
+  // this, so HR never sees the button.
+  await expect(panel.getByTestId('send-to-hr')).toHaveCount(0)
+  await expect(panel.getByTestId('send-back')).toBeVisible()
+
+  await panel.getByRole('button', { name: /^Approve/ }).click()
+
+  const admin = await adminContext(baseURL)
+  await expect
+    .poll(async () => getValue(admin, 'Timesheet', { name }, 'workflow_state'), { timeout: 15000 })
+    .toBe('Approved')
+  await admin.post('/api/method/frappe.client.cancel', {
+    form: { doctype: 'Timesheet', name },
+  })
+  await admin.post('/api/method/frappe.client.delete', {
+    form: { doctype: 'Timesheet', name },
+  })
+  await admin.dispose()
 })

@@ -9,9 +9,16 @@ const PASSWORD = process.env.TEST_USER_PASSWORD || 'Helixhr-Test-Fixture-2026!'
 const IDENTITIES = [
   { user: 'employee@helixhr.test', storageState: 'tests/.auth/employee.json' },
   { user: 'manager@helixhr.test', storageState: 'tests/.auth/manager.json' },
+  // P4-KTD8 / P4-R10. The HR queue's own identity: an HR Manager who *has* an
+  // Active Employee record, seeded by `make_test_hr_manager_employee`. Its
+  // sibling `ensure_hr_manager_user` deliberately has no Employee, so
+  // `portal_home_page` refuses it and every portal read throws for it -- it
+  // proves the role alone reaches Desk and nothing else, and cannot sign in
+  // here.
+  { user: 'hr-manager-employee@helixhr.test', storageState: 'tests/.auth/hr.json' },
 ]
 
-setup('authenticate as employee and manager', async ({ baseURL }) => {
+setup('authenticate as employee, manager and HR', async ({ baseURL }) => {
   const context = await request.newContext({
     baseURL,
     extraHTTPHeaders: { Host: SITE_HOST },

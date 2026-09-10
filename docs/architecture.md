@@ -79,7 +79,7 @@ There is no app-level auth code. Three Frappe mechanisms carry it:
 
 Writes the employee should not be able to make are refused server-side:
 
-- `save_my_week` refuses a week that is not Draft or Rejected, refuses projects
+- `save_my_week` refuses a week that is not Draft or Sent Back, refuses projects
   the user is not assigned to, and is rate-limited per user.
 - `act_on_approval` locks the native row (`SELECT ... FOR UPDATE` on
   `modified`), then re-checks that the caller is the approver (`reports_to`
@@ -89,7 +89,12 @@ Writes the employee should not be able to make are refused server-side:
   it used to comment first, so an unauthorized caller left a comment on
   somebody else's record.
 - `events.timesheet_before_submit` refuses a submit by anyone but the approver
-  even if a Desk user finds another route to it.
+  or HR even if a Desk user finds another route to it, and refuses anybody
+  submitting their own week (P4-R8).
+- `events.leave_application_before_submit` and
+  `events.attendance_request_before_submit` carry the same rule for the other
+  two kinds, and the leave one also refuses a non-HR submitter on a request
+  that is already with HR.
 - `events.file_before_insert` refuses a public file attached to an HR Request.
 
 ## Leave approval runs the native lifecycle
@@ -100,7 +105,48 @@ attendance; setting `status = "Approved"` alone does none of it, and the row it
 leaves behind (`docstatus` 0, status Approved) is a defect state that
 `preflight.check_unsubmitted_approved_leave` counts and
 `patches/v1_0/report_unsubmitted_approved_leave` lists for HR to resolve in
-Desk. A rejection stays unsubmitted, so it consumes nothing.
+Desk. A send-back stays unsubmitted, so it consumes nothing.
+
+**One HRMS status, two meanings, told apart by `docstatus` (P4-KTD4).** HRMS
+has one word for both kinds of no, so the portal reads the pair:
+`status = "Rejected"` **saved** is the recoverable send-back the employee edits
+and resends, and `status = "Rejected"` **submitted** is the final no. A
+submitted Rejected application writes no Leave Ledger Entry — HRMS's `on_submit`
+accepts Approved and Rejected and only Approved touches the ledger — and
+`docstatus` 1 is what makes the row unresendable. `api._leave_state` reports
+`sent_back` for the first and `rejected` for the second; `statusBadge.js` keys
+the badge on the same pair.
+
+### Leave has a stage, not a Workflow (P4-KTD4)
+
+P2-KTD17 still stands: Leave Application gets no Workflow, because HRMS's own
+lifecycle is the correct one. "Send to HR" and "HR approves" are therefore one
+Custom Field, `helixhr_stage` (Select `Manager` / `HR`, default `Manager`), read
+by the queue collectors and by `_may_act_on_leave`. `leave_approver` stays the
+manager throughout, so HRMS's own validation and its `submit=1` DocShare keep
+working; the stage is what takes the request out of the manager's hands.
+
+Three things make that true outside the portal too, because role Employee has
+write on its own open application and HRMS shares every one of them with its
+approver at `submit=1`:
+
+- The field sits at **permlevel 1**, with `apply_permission_deltas` giving HR
+  Manager read/write there and nobody else. A generic save by the employee or
+  the manager silently resets it — the same lock the Employee permlevel rows
+  already use.
+- The portal therefore writes it with **`db_set` after its own authorization**.
+  A permlevel-1 field set through `doc.save()` by a permlevel-0 session is
+  reverted on the way in, so `apply_for_leave` inserts and then sets the stage,
+  and `Send to HR` authorizes and then sets it.
+- `events.leave_application_before_submit` refuses a non-HR submitter while the
+  **stored** stage is HR, and refuses anybody submitting their own application
+  (Administrator exempt, as in the other two submit hooks). The stored value is
+  what counts: an in-memory one from a non-HR session was already reset, and
+  reading the row is also what makes a raw `frappe.client.submit` answerable.
+
+`Leave Type.helixhr_hr_approves` is the other half: `apply_for_leave` reads it
+and inserts the application straight into stage HR, so the manager never sees
+it and the employee reads "Waiting for HR" from the moment they send it.
 
 **Submit permission path (decided, and tested):** the portal calls `doc.submit()`
 with **no `ignore_permissions`**, after its own approver/HR check. The grant is
@@ -287,8 +333,9 @@ DocPerm on HR Request and no delete on Leave Application: the method is the
 create rule, and it is stricter than a DocPerm can be.
 
 `get_dashboard` is one round trip that assembles the header, the leave
-balances, this month's attendance, the week spine (`_get_week_spine`) and the
-action queue (`_get_needs_you`) -- and nothing else: the counts it used to
+balances, this month's attendance, the week spine (`_get_week_spine`), the
+action queue (`_get_needs_you`) and this month's celebrations
+(`_get_celebrations`) -- and nothing else: the counts it used to
 carry alongside them (`pending`, `unread_notifications`) cost a query each
 and no screen read them, the badge being fed by the bootstrap and the poller.
 Each sub-part runs through `_safe`, which turns an exception into `null` for
@@ -302,13 +349,39 @@ test that asserts real data comes back, not just that the key exists.
 ## Timesheet approval workflow
 
 Shipped as a Workflow fixture on Timesheet with states Draft, Pending Approval,
-Approved, Rejected and actions Submit, Approve, Reject, Edit. The portal never
-shows those words; `docs/design-system.md` maps them ("Waiting for Priya",
-"Sent back"). `events.timesheet_on_update` shares a Pending Approval timesheet
-with the approver's User via DocShare so they can read it, and removes the
-share when it leaves that state. The manager's rejection reason is a Comment on
-the Timesheet, resolved server-side in `get_my_week` because the Employee role
+Pending HR, Approved, Sent Back and actions Submit, Approve, Send Back, Send to
+HR, Edit. The portal never shows those words; `docs/design-system.md` maps them
+("Waiting for Priya", "Sent back", "Waiting for HR").
+`events.timesheet_on_update` shares a Pending Approval timesheet with the
+approver's User via DocShare (`submit=1` — the Approve transition on this
+workflow *is* the submit) so they can read and decide it, and removes the share
+when it leaves that state. The manager's reason is written to
+`helixhr_decision_reason` on the Timesheet itself and also added as a Comment
+for the timeline; `get_my_week` reads the field, because the Employee role
 cannot read Comment directly.
+
+**There is no Reject on a timesheet (P4-KTD2).** A week is one Timesheet row
+(`api._week_timesheet`), so a terminal state would lock that week while the
+hours still have to be recorded. The workflow carries three outcomes —
+Approve, Send Back, Send to HR — and no `Reject` transition on either pending
+state, which is why `_allowed_actions` never offers the button: the list is
+derived from the transitions, not written beside them.
+
+**Sent Back is the state that used to be called Rejected.** P4-KTD1 gave
+*Rejected* its literal meaning and moved the recoverable one to a new state,
+**Sent Back** (docstatus 0, `Edit` → Draft).
+`patches/v1_0/rename_sent_back_state.py` moves every docstatus-0 row on both
+workflows across before `sync_fixtures` installs the new transitions, and every
+server read of the literal `"Rejected"` on a workflow kind now reads `Sent
+Back` — `_assert_week_is_still_sendable`, `_write_my_week`, `get_my_week`,
+`get_my_timesheet_history`, `_decided_*` and `_request_projection.can_withdraw`.
+Without that an employee could not resend a sent-back week at all.
+
+**Pending HR is where a manager hands a week over, and it has no DocShare.**
+`timesheet_on_update` removes approver shares outside Pending Approval, so HR's
+Approve there relies on HR Manager's native `submit` on Timesheet — which
+`events.timesheet_before_submit` has always assumed, and which now also refuses
+an HR Manager submitting their *own* week.
 
 **One week is one Timesheet, and the week is a range.** Every query for "this
 employee's week" goes through `api._week_timesheet`, which matches
@@ -324,42 +397,80 @@ reason the `weekStart` route parameter is always normalised through
 `SELECT ... FOR UPDATE` only excludes writers that also take it, and the
 lock used to sit in `submit_my_week` alone.
 
-## Attendance requests: two steps, one share, four guards (P3-U5, P3-U6)
+## Attendance requests: one step, one share, four guards (P3-U5, P3-U6, P4-U1)
 
 Shipped as the Workflow fixture `Attendance Request Approval` on Attendance
-Request, `workflow_state` as its state field, `send_email_alert` off. It is the
-portal's first **two-step** approval, and the split is the whole design: the
-manager's decision is a plain `save`, and only HR's decision is the `submit`
-that makes HRMS write Attendance rows.
+Request, `workflow_state` as its state field, `send_email_alert` off. It was
+the portal's first two-stage approval and P4-R6 collapsed it: **the reports-to
+manager's Approve is the submit**, the one HRMS turns into Attendance rows.
+Work From Home and On Duty need one decision, not two. HR is involved only
+where a manager hands a request over, or where HR raised one itself.
 
 | From | Action | To | Who | Notes |
 |---|---|---|---|---|
 | Draft | Submit | Pending Manager | Employee | self-approval allowed; it is their own request |
-| Pending Manager | Approve | Pending HR | Employee role, conditioned on `reports_to` **and** the manager's Employee being Active | this is a save; no Attendance is written |
-| Pending Manager | Reject | Rejected | same condition | reason is a Comment |
-| Pending Manager / Pending HR | Approve / Reject | Pending HR / Approved / Rejected | HR Manager, conditioned on the request not being the acting user's own | Approved is `doc_status` 1 — the submit that writes Attendance |
-| Draft | Approve | Pending HR | HR Manager | so drafts that predate the fixture are not dead ends (P3-AE14) |
-| Rejected | Edit | Draft | Employee | the employee fixes and resends |
+| Pending Manager | Approve | Approved | Employee role, conditioned on `reports_to` **and** the manager's Employee being Active | `doc_status` 1 — the submit that writes Attendance |
+| Pending Manager | Send Back | Sent Back | same condition | reason on the record |
+| Pending Manager | Reject | Rejected | same condition | terminal; reason on the record |
+| Pending Manager | Send to HR | Pending HR | same condition | the hand-over; the manager's note is a Comment |
+| Pending Manager / Pending HR | Approve / Send Back / Reject | Approved / Sent Back / Rejected | HR Manager, conditioned on the request not being the acting user's own | HR decides a hand-over, and anything still with a manager |
+| Draft | Approve | Approved | HR Manager | so drafts that predate the fixture are not dead ends, and HR can raise-and-approve for somebody (P3-AE14) |
+| Sent Back | Edit | Draft | Employee | the employee fixes and resends |
+
+**Rejected is terminal, and the row is removable by its employee (P4-KTD3).**
+There is deliberately **no** `Edit` transition off Rejected. But a Workflow
+cannot move a document from docstatus 0 to 2, and HRMS's
+`validate_request_overlap` refuses a new request over any existing one below
+docstatus 2, so a terminal row left in place would block those dates for ever.
+Rejected therefore joins `events.REQUEST_WITHDRAWABLE` and the portal words the
+action **Remove**, not "Withdraw" — there is nothing left to withdraw from.
+*Terminal* means terminal for the row, not for the dates.
+
+**The approver's reason lives on the record, not in a Comment (P4-KTD7a).**
+`helixhr_decision_reason` is a Custom Field at permlevel 1 on both Attendance
+Request and Timesheet, written by `act_on_approval` at Send Back and Reject.
+Deleting a document deletes its Comments, so a Comment could not survive the
+removal above; a field travels into the Deleted Document snapshot Frappe keeps.
+It also replaced the author-scoped comment scrape `_last_request_comment` as the
+source of every employee-facing reason. A decision taken in Desk carries no
+reason at all — only `act_on_approval` requires one — so
+`_notify_attendance_request` falls back to "No reason was given, ask your
+manager or HR for details", which is state-neutral because either outcome can
+arrive from either decider.
 
 **The state order in the fixture file is load-bearing.** Frappe backfills rows
 that already exist by *state order*, not by name: docstatus 0 rows take the
 first state, docstatus 1 rows the first state with `doc_status` 1, and
 cancelled rows keep a null state. Draft, Pending Manager, Pending HR, Approved,
-Rejected is the order that makes that backfill correct, so it must never be
-reordered in a later edit. Every queue filter tolerates a null state for the
-cancelled rows.
+Sent Back, Rejected is the order that makes that backfill correct, so it must
+never be reordered in a later edit. Every queue filter tolerates a null state
+for the cancelled rows.
 
-**The DocShare is load-bearing too, and exists in exactly one state.** A
-manager's own User Permission is scoped to their own Employee record and does
-not reach a report's Attendance Request at all — without a share, Frappe's
-`get_transitions` fails on *read* before the transition is even considered. So
-`events.attendance_request_on_update` keeps one share, `write=1` and no
-`submit`, while the state is Pending Manager and `docstatus` 0, and removes it
-in every other state. `events._reconcile_share(doctype, name, employee,
-keep_user, submit=0)` is the Timesheet reconcile generalised by doctype
-(Timesheet passes `submit=1`), and `employee_on_update` runs both doctypes
-through it, so a `reports_to` change or a manager's Employee going inactive
-moves the share and the action rights together (P3-R18).
+**The DocShare is load-bearing too, it exists in exactly one state, and it now
+carries `submit` (P4-KTD5).** A manager's own User Permission is scoped to
+their own Employee record and does not reach a report's Attendance Request at
+all — without a share, Frappe's `get_transitions` fails on *read* before the
+transition is even considered. Role Employee has no `submit` on Attendance
+Request either, so once the manager's Approve became the submit the share is
+the whole grant. `events.attendance_request_on_update` keeps one share,
+`write=1` **and** `submit=1`, while the state is Pending Manager and `docstatus`
+0, and removes it in every other state — including Pending HR, so a manager who
+hands a request over cannot act on it afterwards.
+`events._reconcile_share(doctype, name, employee, keep_user, submit=0)` is the
+Timesheet reconcile generalised by doctype (both callers now pass `submit=1`),
+and `employee_on_update` runs both doctypes through it, so a `reports_to` change
+or a manager's Employee going inactive moves the share and the action rights
+together (P3-R18).
+
+**The overwrite gate moved to the moment of the submit.** HRMS's `on_submit`
+rewrites existing Attendance in place, and the P3-U6 preview refuses an
+overwrite at *send* time — but auto-attendance can mark a day Present between
+the send and the decision, and the person now pressing submit is a line manager
+who cannot read Attendance at all. So `_act_on_attendance_request` re-runs
+`_attendance_request_preview` against the stored range for a non-HR Approve and
+refuses when any day would be overwritten, pointing the manager at Send to HR.
+HR is not gated: HR can read Attendance, and leaving the overwrite decision
+with them is exactly what that sentence asks for.
 
 **Frappe does not enforce a state's `allow_edit` on the server.** It is a Desk
 form hint, and `/api/resource` PUT, `frappe.client.set_value` and
@@ -368,20 +479,30 @@ form hint, and `/api/resource` PUT, `frappe.client.set_value` and
 every route has to pass:
 
 - **`validate`** diffs the doctype's own fields against `get_doc_before_save()`
-  and refuses any change other than `workflow_state` and `shift` (HRMS fills
-  `shift` in its own validate) once the request has left Draft, unless the
-  caller is HR. The same hook refuses Submit when the employee has no active
-  manager, so a raw `apply_workflow` refuses exactly where the portal does.
+  and refuses any change other than `workflow_state`, `helixhr_decision_reason`
+  and `shift` (HRMS fills `shift` in its own validate) once the request has left
+  Draft, unless the caller is HR. The same hook refuses Submit when the employee
+  has no active manager, so a raw `apply_workflow` refuses exactly where the
+  portal does.
 - **`on_update`** reconciles the share, then writes one Notification Log row
   per real state change.
-- **`before_submit`** allows the submit only when the **stored** state is
-  Pending HR — Frappe has already flipped the in-memory field to Approved by
-  then — and only for HR. That is what stops a raw `frappe.client.submit` from
-  jumping Pending Manager straight to Approved.
+- **`before_submit`** is a two-row table now that the manager's Approve is the
+  submit: the reports-to approver from a **stored** Pending Manager, and
+  `_is_hr` from Pending Manager, Pending HR or Draft. Anyone else is refused.
+  Frappe has already flipped the in-memory field to Approved by then, so the
+  stored state is the only evidence of where the request came from — which is
+  what stops a raw `frappe.client.submit` jumping Sent Back, Rejected or Draft
+  straight to Approved. The "nobody decides their own request" throw runs
+  **before** the table, on both branches: it used to sit inside the HR branch
+  alone, and a `reports_to` pointing at oneself now reaches the manager branch
+  with only the `_approver_user` equality in the way. Administrator is exempt
+  here and in the other two submit hooks — it is the migration and backfill
+  account, not a person with requests of their own.
 - **`on_trash`** allows a delete only for the request's own employee, matched
   by `Employee.user_id` and never by `owner` (the owner is the HR user when HR
-  raised it), and only in Draft, Pending Manager or Rejected — the same states
-  the portal's withdraw allows.
+  raised it), and only in Draft, Pending Manager, Sent Back or Rejected — the
+  same states the portal's withdraw allows. Approved and Pending HR still
+  refuse.
 
 None of the four commits, so a throw in any of them rolls the transition and
 the share back together.
@@ -389,23 +510,97 @@ the share back together.
 "HR" here is `events._is_hr`: `Administrator`, or a holder of **HR Manager** or
 **System Manager**. HR User is deliberately outside it.
 
-**The portal acts on the manager step only** (P3-KTD7). `act_on_approval`
-applies the workflow for an Attendance Request only while the state is Pending
-Manager, and `events._approver_user` is the single source for who the manager
-is — it requires the manager's Employee to be Active, which is the same
-assumption the DocShare makes. Pending HR items never enter the portal queue,
-and an HR Manager who is also somebody's line manager is refused when they try
-to act on one from the portal, so the two steps cannot collapse into one. HR's
-confirmation is a Desk action, by design.
+**The portal acts on both steps now, and the queue tells them apart.** A
+Pending HR request is in the portal — in the HR queue, tagged, with the sender
+and their note (see *Who may act*, below) — rather than being a Desk-only
+action as it was in P3. `events._approver_user` is still the single source for
+who the manager is; it requires the manager's Employee to be Active, which is
+the same assumption the DocShare makes.
 
-**Notifications are code, not a fixture.** `_notify_attendance_request` writes
-one Notification Log row per state change addressed to the *employee's*
-`user_id`, because `owner` is the HR login whenever HR raised the request and
-Attendance Request carries no user field. The four subjects are plain sentences
-("…is with Priya", "…is with HR", "…counts", "…was sent back"); a rejection
-carries the sent-back Comment as its body, or
-`"HR sent this back, ask HR for details"` when a Desk rejection left no
-comment. Nobody is notified about their own action.
+**Notifications to the employee are code, not a fixture.**
+`_notify_attendance_request` writes one Notification Log row per state change
+addressed to the *employee's* `user_id`, because `owner` is the HR login
+whenever HR raised the request and Attendance Request carries no user field.
+`attendance_request_subject` has one plain sentence per state — "…is with
+Priya", "…is with HR", "…counts", "…was sent back", "…was rejected" — and the
+two negative ones carry `helixhr_decision_reason` as the body. Nobody is
+notified about their own action. The *HR-facing* email is the opposite choice:
+it is a fixture Notification on channel Email, recipients by role (P4-KTD9),
+because Frappe's Notification DocType already sends to a role and there was
+nothing to write.
+
+
+## Who may act: one table
+
+Four outcomes, three kinds, two roles, and one place that decides which of them
+are legal right now. `api._allowed_actions(doc, user)` is that place:
+`get_approval_detail` returns its answer as `actions` and `act_on_approval`
+refuses anything absent from it, so there is no second copy of the rules on the
+screen or in the act. `Approvals.vue` renders exactly `detail.actions` — a
+button the server would refuse is not drawn, rather than drawn and disabled.
+
+| Kind | State | Line manager | HR Manager |
+|---|---|---|---|
+| Leave | Open, stage Manager | Approve · Send back · Reject · Send to HR | Approve · Send back · Reject |
+| Leave | Open, stage HR | — | Approve · Send back · Reject |
+| Timesheet | Pending Approval | Approve · Send back · Send to HR | Approve · Send back |
+| Timesheet | Pending HR | — | Approve · Send back |
+| Attendance | Pending Manager | Approve · Send back · Reject · Send to HR | Approve · Send back · Reject |
+| Attendance | Pending HR | — | Approve · Send back · Reject |
+
+"Line manager" is the reports-to user with an **Active** Employee record
+(`events._approver_user`). A manager who is also HR gets the union, minus Send
+to HR once a request is already with HR — there is nowhere left to send it.
+Own requests: nothing, at any step, on any route (P4-R8); the list is empty for
+the requester and the three `before_submit` hooks refuse the raw routes.
+Administrator is exempt everywhere, being the migration account.
+
+**For the two workflow kinds this table is a description, not the
+implementation (P4-KTD6).** `_workflow_allowed_actions` calls
+`frappe.model.workflow.get_transitions(doc)` and filters it to the four action
+names, so the roles and conditions `apply_workflow` will enforce are the only
+rule there is: editing a transition in Desk moves the button row and the
+server's answer together. Timesheets reach three outcomes and never Reject
+because that workflow has no Reject transition (P4-KTD2), not because a rule
+here says so. Only Leave, which has no Workflow, uses the explicit table —
+`_leave_allowed_actions` is the table above, as code.
+
+Reason and note follow the outcome: Send back and Reject require a reason
+(`_REASON_REQUIRED`), written to `helixhr_decision_reason` on the two workflow
+kinds and to a Comment on leave, *before* the transition so the employee's
+notification carries it. Send to HR takes an optional note. Every outcome is
+still refused if the record moved since the approver read it (the
+`expected_modified` / `expected_state` contract).
+
+### One queue, tagged
+
+An HR Manager gets **one** oldest-first list, not a second backlog:
+everything in the HR stage across the three kinds, plus anything waiting for
+them as a line manager of their own reports. HR rows carry `for_hr`, the sender
+and their note; the screen draws an "HR" chip and "Sent by … · '…'".
+
+That scoping is deliberate and it is the non-obvious half. HR Manager has
+native read on every Timesheet and Attendance Request in the company, so the
+permission-scoped collectors would answer with the whole company's backlog;
+`_line_manager_filter` narrows an HR caller's line-manager half by `reports_to`
+explicitly. Leave needs no equivalent — HRMS already scopes it by
+`leave_approver` — and `_leave_names_in_hr_stage` is what drops stage-HR rows
+out of the manager's half.
+
+The mirror image of that is a trap worth knowing: **an HR Manager must not have
+a User Permission on their own Employee record.** It beats HR Manager's own read
+inside `get_transitions`, which throws per row, and the Approvals page then
+shows HR nothing but their own records — an empty queue rather than a permission
+error. `preflight.check_hr_manager_self_scope` WARNs about exactly that, and
+`check_employee_user_permissions` exempts HR Manager logins through the shared
+`_hr_manager_users()` helper so the two checks can never disagree.
+
+HR Managers with an Active Employee record also **land in the portal** now:
+`utils.DESK_ROLES` is `HR User`, `System Manager`, `Administrator` and no longer
+HR Manager (P4-KTD8). A `default_workspace` pinned on the User still wins over
+the hook, by Frappe's own precedence — `preflight.check_portal_landing` FAILs
+and names those users.
+
 
 ## Punch derivation, and why the portal method is the only create route
 
@@ -501,6 +696,65 @@ scope it to themselves), and `test_fixtures.py`'s strict-permission matrix
 asserts that `frappe.client.get_list("Employee")` still returns only the
 caller. Widening the DocPerm would have opened every Employee field to every
 employee to serve six of them.
+
+## Reminders: beside HRMS, not instead of it
+
+HRMS already emails birthdays and work anniversaries, from a subject, header and
+Jinja file hardcoded in `hrms/controllers/employee_reminders.py`, gated only by
+two HR Settings checkboxes. There is no Email Template record behind it, so the
+copy cannot be changed without editing HRMS — which the next `bench update`
+overwrites, and which P4-R20 forbids outright.
+
+So `helixhr/reminders.py` registers its **own** daily job in
+`scheduler_events.daily` and runs beside HRMS's. Frappe merges scheduler hooks
+across installed apps and offers no way to remove another app's job, which is
+the whole shape of this design: HelixHR cannot switch HRMS off, so it has to be
+switchable itself and the contradiction has to be refused somewhere.
+
+- **The switch is two Custom Fields on HR Settings**,
+  `helixhr_birthday_template` and `helixhr_anniversary_template`, each a Link to
+  Email Template, sitting in HRMS's own *Reminders* section. Empty means HelixHR
+  sends nothing for that event. `reminders.EVENTS` is the one table pairing each
+  picker with the HRMS checkbox that would send the stock email for the same
+  event, and both the save-time refusal and the preflight line quote from it, so
+  they name the same two fields the form does.
+- **Two senders for one event is refused where HR creates it.**
+  `events.hr_settings_validate` throws on a save that picks a template while the
+  matching HRMS checkbox is still ticked. `preflight.check_celebration_reminders`
+  FAILs on the same contradiction as the backstop for routes that never reach
+  `validate` — a fixture import, a raw `db_set`, a restored site — because
+  preflight alone would leave a morning of duplicate mail between HR's save and
+  the next operator run.
+- **Who is celebrating, and who hears about it, is HRMS's answer** (P4-KTD12).
+  `get_employees_having_an_event_today`, `get_all_employee_emails`,
+  `get_employee_email` and `get_sender_email` are imported, never
+  re-implemented, so eligibility cannot drift from HRMS's. If HRMS renames one
+  the module fails to import — loudly, in the scheduler log and in
+  `tests/test_reminders.py` — which is the trade that was made on purpose
+  against a quiet second implementation.
+- **The Jinja context is a small documented contract** (P4-KTD13): `persons`,
+  `names`, `count`, `company`, `logo_url`, `date`, `portal_url`, and nothing
+  else. It is what HR writes templates against, so it lives in
+  `docs/deployment.md` rather than only in the code.
+- **The two default templates are seeded by a patch, not shipped as fixtures**
+  (P4-KTD11). Fixtures re-import on every migrate and would overwrite HR's
+  edits; `patches/v1_0/seed_celebration_templates.py` inserts them only if
+  absent and never sets them on HR Settings — switching on is HR's act. It is
+  also called from `after_install`, because `bench new-site --install-app` marks
+  every patch complete without running it, exactly as `apply_permission_deltas`
+  is.
+
+Home's "Celebrating this month" card is the cheap half of the same feature and
+shares none of the machinery: `api._get_celebrations` is a projection in the
+same posture as `get_directory` (P4-KTD14). `Employee.date_of_birth` and
+`date_of_joining` are at permlevel 1 by property setter and unreadable to the
+Employee role by design, so the read runs server-side, company-scoped, and
+projects only `day`, `month`, `is_today` and — for an anniversary — `years`.
+No year of birth and no age is ever on the wire, which is why `lib/dates.js`
+grew `formatDayMonth`: there is no date string to format. It is a section of
+`get_dashboard`, so it rides Home's one request and its per-section failure
+isolation.
+
 
 ## Attendance and the dormant device
 

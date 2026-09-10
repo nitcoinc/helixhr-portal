@@ -290,6 +290,23 @@ export function formatDate(value) {
   return p ? renderCalendarDate(p, DATE_OPTS) : (value ?? '')
 }
 
+/** "9 Sep" from a day and a month integer, with no year involved at all.
+ *
+ * The celebrations card is given `day` and `month` and nothing else, because
+ * a birth year never leaves the server (P4-KTD14) -- so there is no calendar
+ * string to hand `formatDate`. The y/m/d is rebuilt as a UTC instant and
+ * formatted in UTC, the same way `renderCalendarDate` does, so no offset can
+ * move the day; the year stands in only to make a valid instant and is never
+ * rendered. */
+export function formatDayMonth(month, day) {
+  const m = Number(month)
+  const d = Number(day)
+  if (!Number.isInteger(m) || !Number.isInteger(d) || m < 1 || m > 12 || d < 1 || d > 31) {
+    return ''
+  }
+  return renderCalendarDate({ y: 2000, m, d }, DATE_NO_YEAR_OPTS)
+}
+
 /** "18:47" in the user's timezone — for a list of check-ins that already
  * sits under a date heading. */
 export function formatTime(value) {

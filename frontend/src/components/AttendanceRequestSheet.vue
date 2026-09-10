@@ -250,6 +250,16 @@ const title = computed(() => {
   if (!props.name) return props.date ? `Fix ${formatDate(props.date)}` : 'Fix a day'
   return 'Your attendance request'
 })
+
+// P4-R4 / P4-KTD3. A rejected request is terminal *for the row*, not for the
+// dates: HRMS refuses a second request over any existing one below docstatus
+// 2, so the way to ask for the same days again is to take the rejected row
+// away. The verb is "Remove" rather than "Withdraw" because there is nothing
+// left to withdraw from -- the decision has already been made, and it
+// survives the deletion on the record itself.
+const isRejected = computed(() => shown.value?.workflow_state === 'Rejected')
+const withdrawLabel = computed(() => (isRejected.value ? 'Remove' : 'Withdraw'))
+const decisionLabel = computed(() => (isRejected.value ? 'Rejected' : 'Sent back'))
 </script>
 
 <template>
@@ -334,7 +344,7 @@ const title = computed(() => {
             class="surface-alert p-3 text-sm"
             data-testid="attendance-request-sent-back"
           >
-            Sent back: {{ shown.reason_sent_back }}
+            {{ decisionLabel }}: {{ shown.reason_sent_back }}
           </p>
 
           <p
@@ -365,7 +375,7 @@ const title = computed(() => {
               :disabled="sending"
               @click="act(withdraw, { name: shown.name })"
             >
-              Withdraw
+              {{ withdrawLabel }}
             </Button>
             <Button
               variant="subtle"
@@ -380,7 +390,13 @@ const title = computed(() => {
                that changes them, so "change it" means withdraw this one and
                ask again with the reason above still on screen (P3-R17a). -->
           <p
-            v-if="shown.can_withdraw && shown.reason_sent_back"
+            v-if="isRejected && shown.can_withdraw"
+            class="text-xs text-ink-gray-5"
+          >
+            This one is final. Remove it to ask for the same days again.
+          </p>
+          <p
+            v-else-if="shown.can_withdraw && shown.reason_sent_back"
             class="text-xs text-ink-gray-5"
           >
             To change the days, withdraw this one and ask again.
@@ -509,7 +525,7 @@ const title = computed(() => {
             v-if="approverName"
             class="mt-2 text-sm text-ink-gray-7"
           >
-            Goes to {{ approverName }} first, then HR.
+            Goes to {{ approverName }} for approval.
           </p>
         </div>
 

@@ -84,20 +84,36 @@ class TestPreflight(IntegrationTestCase):
 		"""
 		from unittest.mock import patch
 
-		absent = ("Workflow State", "Pending HR")
 		real_exists = frappe.db.exists
+		# One per fixture the import can silently skip: the Workflow's state
+		# and action names are Links and `sync_fixtures` runs with
+		# `ignore_links`, so an absent row leaves the Workflow itself looking
+		# fine (P4-U1 added "Sent Back" and the two new actions).
+		for absent in (
+			("Workflow State", "Pending HR"),
+			("Workflow State", "Sent Back"),
+			("Workflow Action Master", "Send Back"),
+			("Workflow Action Master", "Send to HR"),
+			# P4-U3 / P4-KTD9: HR is told a request reached its queue by
+			# these four and by nothing in code, so a missing one is a queue
+			# nobody is watching.
+			("Notification", "HelixHR Leave Sent To HR"),
+			("Notification", "HelixHR New Leave For HR"),
+			("Notification", "HelixHR Timesheet Sent To HR"),
+			("Notification", "HelixHR Attendance Request Sent To HR"),
+		):
 
-		def _exists(doctype, name=None, *args, **kwargs):
-			if (doctype, name) == absent:
-				return None
-			return real_exists(doctype, name, *args, **kwargs)
+			def _exists(doctype, name=None, *args, _absent=absent, **kwargs):
+				if (doctype, name) == _absent:
+					return None
+				return real_exists(doctype, name, *args, **kwargs)
 
-		with patch.object(frappe.db, "exists", side_effect=_exists):
-			result = preflight.check_fixtures()
+			with patch.object(frappe.db, "exists", side_effect=_exists):
+				result = preflight.check_fixtures()
 
-		self.assertEqual(result["status"], preflight.FAIL)
-		self.assertIn("Pending HR", result["detail"])
-		self.assertIn("bench migrate", result["detail"])
+			self.assertEqual(result["status"], preflight.FAIL, msg=absent)
+			self.assertIn(absent[1], result["detail"])
+			self.assertIn("bench migrate", result["detail"])
 
 	def test_run_exits_non_zero_when_something_fails(self):
 		def _run():
@@ -733,3 +749,135 @@ class TestPreflightPdfGenerator(IntegrationTestCase):
 		self.assertEqual(result["status"], FAIL)
 		self.assertIn("wkhtmltopdf", result["detail"])
 		self.assertIn("500", result["detail"])
+
+
+class TestPreflightCelebrationReminders(IntegrationTestCase):
+	"""P4-R18 / P4-KTD10: the double-send guard, after the fact.
+
+	`events.hr_settings_validate` refuses the contradiction at the moment HR
+	creates it; these are the routes that never reach `validate` -- a fixture
+	import, a raw `db_set`, a restored site.
+	"""
+
+	FIELDS = (
+		"helixhr_birthday_template",
+		"helixhr_anniversary_template",
+		"send_birthday_reminders",
+		"send_work_anniversary_reminders",
+	)
+	TEMPLATE = "_Test HelixHR Birthday"
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		from helixhr.tests.test_reminders import _template
+
+		_template(self.TEMPLATE, "BDAYMARK {{ names }}")
+		self.original = {
+			field: frappe.db.get_single_value("HR Settings", field) for field in self.FIELDS
+		}
+		self._set(dict.fromkeys(self.FIELDS, None))
+
+	def tearDown(self):
+		self._set(self.original)
+
+	def _set(self, values):
+		for field, value in values.items():
+			frappe.db.set_single_value("HR Settings", field, value)
+		frappe.clear_document_cache("HR Settings", "HR Settings")
+
+	def _check(self):
+		from helixhr.preflight import check_celebration_reminders
+
+		return check_celebration_reminders()
+
+	def test_both_senders_on_for_one_event_fails_and_names_both_fields(self):
+		from helixhr.preflight import FAIL
+
+		self._set({"send_birthday_reminders": 1, "helixhr_birthday_template": self.TEMPLATE})
+		result = self._check()
+
+		self.assertEqual(result["status"], FAIL)
+		self.assertIn("Birthday", result["detail"])
+		self.assertIn("Birthdays", result["detail"])
+		self.assertIn("HelixHR Birthday Template", result["detail"])
+
+	def test_a_picked_template_that_does_not_exist_fails(self):
+		from helixhr.preflight import FAIL
+
+		self._set({"helixhr_anniversary_template": "_Test Template That Went Away"})
+		result = self._check()
+
+		self.assertEqual(result["status"], FAIL)
+		self.assertIn("_Test Template That Went Away", result["detail"])
+
+	def test_neither_sender_on_warns_rather_than_failing(self):
+		from helixhr.preflight import WARN
+
+		result = self._check()
+
+		self.assertEqual(result["status"], WARN)
+		self.assertIn("nobody sends", result["detail"])
+
+	def test_helixhr_only_and_hrms_only_both_pass_and_name_the_sender(self):
+		from helixhr.preflight import PASS
+
+		self._set({"helixhr_birthday_template": self.TEMPLATE, "send_work_anniversary_reminders": 1})
+		result = self._check()
+
+		self.assertEqual(result["status"], PASS)
+		self.assertIn(f"HelixHR sends '{self.TEMPLATE}'", result["detail"])
+		self.assertIn("HRMS sends its own", result["detail"])
+
+
+class TestPreflightMailAndHRQueue(IntegrationTestCase):
+	def setUp(self):
+		frappe.set_user("Administrator")
+
+	def test_a_site_with_a_default_outgoing_account_passes(self):
+		from helixhr.preflight import PASS, check_outgoing_email
+		from helixhr.tests.utils import ensure_test_email_account
+
+		account = ensure_test_email_account()
+		result = check_outgoing_email()
+
+		self.assertEqual(result["status"], PASS)
+		self.assertIn(account, result["detail"])
+
+	def test_a_site_with_no_default_outgoing_account_fails(self):
+		"""FAIL, not WARN: the HR-queue notifications send from inside the
+		save that escalates a request, so with no account Send to HR is
+		refused outright, and so is applying for an HR-approves leave type.
+		The detail has to name both refusals, not just the missing account.
+		"""
+		from unittest.mock import patch
+
+		from helixhr.preflight import FAIL, check_outgoing_email
+
+		with patch("frappe.db.get_value", return_value=None):
+			result = check_outgoing_email()
+
+		self.assertEqual(result["status"], FAIL)
+		self.assertIn("Email Account", result["detail"])
+		self.assertIn("Send to HR", result["detail"])
+		self.assertIn("HR-approves leave type", result["detail"])
+
+	def test_an_hr_manager_scoped_to_their_own_employee_is_named(self):
+		"""P4-R11 carry-forward: a User Permission on Employee beats HR
+		Manager's own read permission on the three approval doctypes, so the
+		HR queue is silently empty -- `get_transitions` throws on every row
+		that is not theirs. Reported, not judged."""
+		from helixhr.preflight import PASS, WARN, check_hr_manager_self_scope
+		from helixhr.tests.utils import make_test_hr_manager_employee
+
+		employee, user = make_test_hr_manager_employee()
+		self.assertEqual(check_hr_manager_self_scope()["status"], PASS)
+
+		permission = frappe.get_doc(
+			{"doctype": "User Permission", "user": user, "allow": "Employee", "for_value": employee}
+		).insert(ignore_permissions=True)
+		self.addCleanup(frappe.delete_doc, "User Permission", permission.name, force=True)
+
+		result = check_hr_manager_self_scope()
+
+		self.assertEqual(result["status"], WARN)
+		self.assertIn(user, result["detail"])

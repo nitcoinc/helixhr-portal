@@ -59,7 +59,15 @@ def get_manager_user(employee):
 # sent to the portal. HR staff are employees too and hold the Employee role,
 # so the rule cannot be "has the Employee role" -- it has to be "does not work
 # in Desk".
-DESK_ROLES = frozenset({"HR Manager", "HR User", "System Manager", "Administrator"})
+#
+# P4-KTD8 removed HR Manager from this set. An HR Manager now works a queue
+# *inside* the portal (P4-R10, P4-R11), so the portal is where they should
+# land; Desk is one click away in the shell. HR User keeps Desk -- the role
+# has no portal queue of its own -- and so do System Manager and
+# Administrator. The Active-Employee requirement below is what keeps an HR
+# Manager who is not an employee out of a portal that would refuse every
+# read of theirs.
+DESK_ROLES = frozenset({"HR User", "System Manager", "Administrator"})
 
 PORTAL_HOME_PAGE = "helixhr"
 

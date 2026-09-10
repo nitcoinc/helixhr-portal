@@ -2,7 +2,7 @@ import hashlib
 import json
 
 import frappe
-from frappe.model.workflow import apply_workflow
+from frappe.model.workflow import apply_workflow, get_transitions
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, get_datetime
 
@@ -279,7 +279,7 @@ class TestApiTimesheet(IntegrationTestCase):
 		name = self._save_and_submit()
 
 		frappe.set_user(MANAGER_USER)
-		apply_workflow({"doctype": "Timesheet", "name": name}, "Reject")
+		apply_workflow({"doctype": "Timesheet", "name": name}, "Send Back")
 
 		frappe.set_user("Administrator")
 		shared_users = [row.user for row in frappe.share.get_users("Timesheet", name)]
@@ -299,10 +299,10 @@ class TestApiTimesheet(IntegrationTestCase):
 				"content": "Please add task details",
 			}
 		).insert(ignore_permissions=True)
-		apply_workflow({"doctype": "Timesheet", "name": name}, "Reject")
+		apply_workflow({"doctype": "Timesheet", "name": name}, "Send Back")
 
 		doc = frappe.get_doc("Timesheet", name)
-		self.assertEqual(doc.workflow_state, "Rejected")
+		self.assertEqual(doc.workflow_state, "Sent Back")
 		self.assertEqual(doc.docstatus, 0)
 
 		frappe.set_user("Administrator")
@@ -340,6 +340,89 @@ class TestApiTimesheet(IntegrationTestCase):
 
 		doc = frappe.get_doc("Timesheet", name)
 		self.assertEqual(doc.workflow_state, "Approved")
+
+	# --- P4-U1: Send to HR, no Reject, and R8 on the HR route ---------------
+
+	def test_send_to_hr_then_hr_approves_with_no_docshare(self):
+		"""P4-R5, P4-KTD2. Pending HR carries no share -- `timesheet_on_update`
+		removes the approver's share outside Pending Approval -- so HR's
+		Approve there rides HR Manager's own native submit on Timesheet."""
+		name = self._save_and_submit()
+
+		frappe.set_user(MANAGER_USER)
+		apply_workflow({"doctype": "Timesheet", "name": name}, "Send to HR")
+
+		doc = frappe.get_doc("Timesheet", name)
+		self.assertEqual(doc.workflow_state, "Pending HR")
+		self.assertEqual(doc.docstatus, 0)
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.share.get_users("Timesheet", name), [])
+
+		hr_user = self._hr_manager_user("hr-manager-p4@helixhr.test")
+		frappe.set_user(hr_user)
+		apply_workflow({"doctype": "Timesheet", "name": name}, "Approve")
+		doc = frappe.get_doc("Timesheet", name)
+		self.assertEqual((doc.workflow_state, doc.docstatus), ("Approved", 1))
+
+	def test_a_week_is_never_rejected_outright(self):
+		"""P4-KTD2: a week is one row and the hours still have to be
+		recorded, so there is no Reject transition on either pending state
+		for anybody."""
+		name = self._save_and_submit()
+		hr_user = self._hr_manager_user("hr-manager-p4b@helixhr.test")
+
+		for state, mover in (("Pending Approval", MANAGER_USER), ("Pending HR", hr_user)):
+			if state == "Pending HR":
+				frappe.set_user(MANAGER_USER)
+				apply_workflow({"doctype": "Timesheet", "name": name}, "Send to HR")
+			frappe.set_user(mover)
+			actions = {t.action for t in get_transitions(frappe.get_doc("Timesheet", name))}
+			self.assertNotIn("Reject", actions, msg=state)
+			self.assertIn("Send Back", actions, msg=state)
+
+	def test_an_hr_manager_cannot_approve_their_own_week(self):
+		"""P4-R8. The HR Manager transitions used to carry
+		`allow_self_approval: 1` with no condition at all, so an HR Manager
+		who is also an employee could approve their own week -- through the
+		workflow and through a raw submit."""
+		from frappe.client import submit as client_submit
+
+		name = self._save_and_submit()
+
+		frappe.set_user("Administrator")
+		employee_login = frappe.get_doc("User", EMPLOYEE_USER)
+		employee_login.add_roles("HR Manager")
+		frappe.clear_cache(user=EMPLOYEE_USER)
+		try:
+			frappe.set_user(EMPLOYEE_USER)
+			with self.assertRaises(Exception):
+				apply_workflow({"doctype": "Timesheet", "name": name}, "Approve")
+			with self.assertRaises(frappe.PermissionError):
+				client_submit(frappe.get_doc("Timesheet", name).as_dict())
+			with self.assertRaises(Exception):
+				apply_workflow({"doctype": "Timesheet", "name": name}, "Send Back")
+			doc = frappe.get_doc("Timesheet", name)
+			self.assertEqual((doc.workflow_state, doc.docstatus), ("Pending Approval", 0))
+		finally:
+			frappe.set_user("Administrator")
+			employee_login.reload()
+			employee_login.remove_roles("HR Manager")
+			frappe.clear_cache(user=EMPLOYEE_USER)
+
+	def _hr_manager_user(self, email):
+		frappe.set_user("Administrator")
+		if not frappe.db.exists("User", email):
+			frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": email,
+					"first_name": "HR",
+					"last_name": "Manager",
+					"send_welcome_email": 0,
+					"roles": [{"doctype": "Has Role", "role": "HR Manager"}],
+				}
+			).insert(ignore_permissions=True)
+		return email
 
 	def test_hr_cancel_then_get_my_week_offers_a_fresh_week(self):
 		name = self._save_and_submit()
@@ -502,7 +585,7 @@ class TestApiTimesheet(IntegrationTestCase):
 		name = self._save_and_submit()
 
 		frappe.set_user(MANAGER_USER)
-		apply_workflow({"doctype": "Timesheet", "name": name}, "Reject")
+		apply_workflow({"doctype": "Timesheet", "name": name}, "Send Back")
 
 		frappe.set_user(EMPLOYEE_USER)
 		result = submit_my_week(str(self.monday), json.dumps([self._week_row(hours=7)]), self._token())
@@ -585,13 +668,13 @@ class TestApiTimesheet(IntegrationTestCase):
 				"content": "Friday hours are missing",
 			}
 		).insert(ignore_permissions=True)
-		apply_workflow({"doctype": "Timesheet", "name": name}, "Reject")
+		apply_workflow({"doctype": "Timesheet", "name": name}, "Send Back")
 
 		frappe.set_user(EMPLOYEE_USER)
 		week = next(
 			w for w in get_my_timesheet_history(limit=10)["weeks"] if w["name"] == name
 		)
-		self.assertEqual(week["workflow_state"], "Rejected")
+		self.assertEqual(week["workflow_state"], "Sent Back")
 		self.assertEqual(week["rejection_comment"], "Friday hours are missing")
 
 	def test_a_timesheet_id_resolves_to_its_monday_only_for_its_owner(self):

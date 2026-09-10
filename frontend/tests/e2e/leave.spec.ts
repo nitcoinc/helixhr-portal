@@ -63,7 +63,7 @@ async function seedLeave(
   employeeApi: APIRequestContext,
   employee: string,
   date: string,
-  options: { reject?: string } = {},
+  options: { sendBack?: string } = {},
 ) {
   const existing = await api.get(
     '/api/method/frappe.client.get_list?doctype=Leave%20Application&filters=' +
@@ -89,26 +89,31 @@ async function seedLeave(
   const name = (await created.json())?.message?.name
   expect(name, 'seeding a Leave Application should succeed').toBeTruthy()
 
-  if (options.reject) {
+  if (options.sendBack) {
     // Administrator is an authorized actor in act_on_approval, so this is the
-    // real portal path a rejection takes -- not a raw status write. P2-U7
+    // real portal path a send-back takes -- not a raw status write. P2-U7
     // made the concurrency token mandatory, so the seed reads the record
     // first exactly as the Approvals screen does.
+    //
+    // P4-KTD1/P4-R3: the action is `Send Back`. It used to be `Reject`,
+    // which *meant* send back and now means the opposite -- a terminal no
+    // that submits the application (P4-R4). Seeding with the old name left a
+    // Rejected leave here and asked why it had no "Edit and resend".
     const detail = await api.get(
       '/api/method/helixhr.api.get_approval_detail?kind=leave&name=' + encodeURIComponent(name),
     )
     const evidence = (await detail.json())?.message
-    const rejected = await api.post('/api/method/helixhr.api.act_on_approval', {
+    const sentBack = await api.post('/api/method/helixhr.api.act_on_approval', {
       data: {
         doctype: 'Leave Application',
         name,
-        action: 'Reject',
-        comment: options.reject,
+        action: 'Send Back',
+        comment: options.sendBack,
         expected_modified: evidence?.modified,
         expected_state: evidence?.state,
       },
     })
-    expect(rejected.ok(), await rejected.text()).toBeTruthy()
+    expect(sentBack.ok(), await sentBack.text()).toBeTruthy()
   }
   return name
 }
@@ -169,7 +174,7 @@ test.describe('employee', () => {
     const employeeApi = await asEmployee(baseURL!)
     const employee = await getValue(api, 'Employee', { user_id: EMPLOYEE }, 'name')
     const reason = 'Team offsite that day, can you shift it?'
-    const name = await seedLeave(api, employeeApi, employee, seedDate(31), { reject: reason })
+    const name = await seedLeave(api, employeeApi, employee, seedDate(31), { sendBack: reason })
 
     try {
       await page.goto('/helixhr/leave')

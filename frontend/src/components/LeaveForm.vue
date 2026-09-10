@@ -49,6 +49,14 @@ const approver = computed(() => context.data?.approver || '')
 const approverName = computed(() => context.data?.approver_name || '')
 const approverFirstName = computed(() => (approverName.value || '').split(/\s+/)[0] || '')
 
+// P4-R7. A Leave Type HR marked "HR approves" never reaches the manager, so
+// the sheet must not promise it will. `leave_approver` stays set underneath
+// -- HRMS requires one and shares the record with them -- which is exactly
+// why the chip above it would otherwise be wrong.
+const goesToHr = computed(
+  () => !!types.value.find((type) => type.leave_type === leaveType.value)?.hr_approves,
+)
+
 /** Initials for the approver chip, the same device the canvas uses on the
  * Approvals queue. Two letters at most; one is fine for a single-word name. */
 const approverInitials = computed(() =>
@@ -259,7 +267,13 @@ async function submit() {
         </p>
       </template>
       <p
-        v-if="approverName"
+        v-if="goesToHr"
+        class="mt-2 text-sm text-ink-gray-7"
+      >
+        Goes to HR, not your manager.
+      </p>
+      <p
+        v-else-if="approverName"
         class="mt-2 flex items-center gap-2 text-sm text-ink-gray-7"
       >
         <span

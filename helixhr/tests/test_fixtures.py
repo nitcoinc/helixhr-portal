@@ -632,3 +632,250 @@ class TestPermissionDeltas(IntegrationTestCase):
 				"submit", "cancel", "amend", "report", "export", "print", "email", "share"],
 			order_by="parent, role, permlevel, if_owner",
 		)
+
+
+_MANAGER = "Employee"
+_HR = "HR Manager"
+
+_MANAGER = "Employee"
+_HR = "HR Manager"
+
+# The plan's "who may do what, per state" table, as (state, action,
+# next_state, allowed role) edges.
+_TIMESHEET_EDGES = frozenset(
+	{
+		("Draft", "Submit", "Pending Approval", _MANAGER),
+		("Pending Approval", "Approve", "Approved", _MANAGER),
+		("Pending Approval", "Send Back", "Sent Back", _MANAGER),
+		("Pending Approval", "Send to HR", "Pending HR", _MANAGER),
+		("Pending Approval", "Approve", "Approved", _HR),
+		("Pending Approval", "Send Back", "Sent Back", _HR),
+		("Pending HR", "Approve", "Approved", _HR),
+		("Pending HR", "Send Back", "Sent Back", _HR),
+		("Sent Back", "Edit", "Draft", _MANAGER),
+	}
+)
+_ATTENDANCE_EDGES = frozenset(
+	{
+		("Draft", "Submit", "Pending Manager", _MANAGER),
+		("Draft", "Approve", "Approved", _HR),
+		("Pending Manager", "Approve", "Approved", _MANAGER),
+		("Pending Manager", "Send Back", "Sent Back", _MANAGER),
+		("Pending Manager", "Reject", "Rejected", _MANAGER),
+		("Pending Manager", "Send to HR", "Pending HR", _MANAGER),
+		("Pending Manager", "Approve", "Approved", _HR),
+		("Pending Manager", "Send Back", "Sent Back", _HR),
+		("Pending Manager", "Reject", "Rejected", _HR),
+		("Pending HR", "Approve", "Approved", _HR),
+		("Pending HR", "Send Back", "Sent Back", _HR),
+		("Pending HR", "Reject", "Rejected", _HR),
+		("Sent Back", "Edit", "Draft", _MANAGER),
+	}
+)
+
+
+class TestApprovalWorkflowFixtures(IntegrationTestCase):
+	"""P4-U1. Both workflows, transition by transition, against the plan's
+	"who may do what, per state" table.
+
+	The fixture is imported on every migrate and a typo in a condition string
+	breaks approvals site-wide, so the shape is asserted rather than assumed
+	-- and the *order* of the states matters on its own:
+	`Workflow.on_update` backfills a null `workflow_state` from the first
+	state of each docstatus, so Draft has to stay first at docstatus 0 or
+	every legacy row would be backfilled into a pending state.
+	"""
+
+	def _workflow(self, name):
+		self.assertTrue(frappe.db.exists("Workflow", name), f"{name} did not import")
+		return frappe.get_doc("Workflow", name)
+
+	def _edges(self, workflow):
+		return {(t.state, t.action, t.next_state, t.allowed) for t in workflow.transitions}
+
+	def test_the_timesheet_workflow_matches_the_table(self):
+		workflow = self._workflow("Timesheet Approval")
+		self.assertEqual(self._edges(workflow), _TIMESHEET_EDGES)
+		self.assertEqual(
+			[row.state for row in workflow.states],
+			["Draft", "Pending Approval", "Pending HR", "Approved", "Sent Back"],
+		)
+		# P4-KTD2: no terminal reject on a week, in either pending state.
+		self.assertNotIn("Reject", {t.action for t in workflow.transitions})
+
+	def test_the_attendance_request_workflow_matches_the_table(self):
+		workflow = self._workflow("Attendance Request Approval")
+		self.assertEqual(self._edges(workflow), _ATTENDANCE_EDGES)
+		self.assertEqual(
+			[row.state for row in workflow.states],
+			["Draft", "Pending Manager", "Pending HR", "Approved", "Sent Back", "Rejected"],
+		)
+		# P4-KTD3: Rejected is terminal -- nothing leads out of it.
+		self.assertEqual([t for t in workflow.transitions if t.state == "Rejected"], [])
+
+	def test_draft_is_the_first_state_per_docstatus_in_both(self):
+		for name in ("Timesheet Approval", "Attendance Request Approval"):
+			workflow = self._workflow(name)
+			first_per_docstatus = {}
+			for row in workflow.states:
+				first_per_docstatus.setdefault(str(row.doc_status), row.state)
+			self.assertEqual(first_per_docstatus["0"], "Draft", msg=name)
+			self.assertEqual(first_per_docstatus["1"], "Approved", msg=name)
+
+	def test_every_hr_transition_refuses_the_requesters_own_record(self):
+		"""P4-R8. Frappe's own `allow_self_approval` guard is owner-based, and
+		HR is the owner of anything HR filed for somebody else, so the rule
+		lives in the condition instead -- on every HR transition, both
+		workflows. `events.timesheet_before_submit` and
+		`events.attendance_request_before_submit` are the raw-route halves.
+		"""
+		for name in ("Timesheet Approval", "Attendance Request Approval"):
+			for transition in self._workflow(name).transitions:
+				if transition.allowed != _HR:
+					continue
+				self.assertIn(
+					"user_id",
+					transition.condition or "",
+					msg=f"{name}: {transition.state} -> {transition.action}",
+				)
+				self.assertIn("frappe.session.user", transition.condition or "")
+
+	def test_the_decision_reason_field_installed_on_both_kinds_at_permlevel_one(self):
+		"""P4-KTD7a. The reason has to survive the removal of a rejected
+		request (P4-KTD3), so it is a field of the record; permlevel 1 is
+		what stops the employee or their manager writing it."""
+		for doctype in ("Timesheet", "Attendance Request"):
+			field = frappe.db.get_value(
+				"Custom Field",
+				{"dt": doctype, "fieldname": "helixhr_decision_reason"},
+				["fieldtype", "permlevel", "module"],
+				as_dict=True,
+			)
+			self.assertIsNotNone(field, msg=doctype)
+			self.assertEqual(field.fieldtype, "Small Text", msg=doctype)
+			self.assertEqual(frappe.utils.cint(field.permlevel), 1, msg=doctype)
+			self.assertEqual(field.module, "HelixHR", msg=doctype)
+			hr = _rule(doctype, "HR Manager", permlevel=1)
+			self.assertIsNotNone(hr, msg=doctype)
+			self.assertTrue(hr.read and hr.write, msg=doctype)
+			self.assertIsNone(_rule(doctype, "Employee", permlevel=1), msg=doctype)
+
+	def test_the_leave_stage_and_hr_approves_fields_are_installed(self):
+		"""P4-KTD4 / P4-R7. Leave has no Workflow, so these two fields *are*
+		the routing: the stage says which queue a request waits in and the
+		Leave Type flag says which queue it starts in. Permlevel 1 on the
+		stage is what stops the employee or their approver moving it with a
+		generic write -- role Employee has write on its own open Leave
+		Application and HRMS shares every application with its approver at
+		`submit=1` (P4-R8a).
+		"""
+		stage = frappe.db.get_value(
+			"Custom Field",
+			{"dt": "Leave Application", "fieldname": "helixhr_stage"},
+			["fieldtype", "permlevel", "module", "options", "default", "allow_on_submit"],
+			as_dict=True,
+		)
+		self.assertIsNotNone(stage)
+		self.assertEqual(stage.fieldtype, "Select")
+		self.assertEqual(frappe.utils.cint(stage.permlevel), 1)
+		self.assertEqual(stage.module, "HelixHR")
+		self.assertEqual(stage.options.split("\n"), ["Manager", "HR"])
+		self.assertEqual(stage.default, "Manager")
+		self.assertEqual(frappe.utils.cint(stage.allow_on_submit), 0)
+
+		hr = _rule("Leave Application", "HR Manager", permlevel=1)
+		self.assertIsNotNone(hr)
+		self.assertTrue(hr.read and hr.write)
+		self.assertIsNone(_rule("Leave Application", "Employee", permlevel=1))
+
+		flag = frappe.db.get_value(
+			"Custom Field",
+			{"dt": "Leave Type", "fieldname": "helixhr_hr_approves"},
+			["fieldtype", "permlevel", "module"],
+			as_dict=True,
+		)
+		self.assertIsNotNone(flag)
+		self.assertEqual(flag.fieldtype, "Check")
+		self.assertEqual(frappe.utils.cint(flag.permlevel), 0)
+		self.assertEqual(flag.module, "HelixHR")
+
+		# A leave HR files in Desk starts with the manager, like any other:
+		# the default is on the field, not in the portal method.
+		self.assertEqual(frappe.new_doc("Leave Application").helixhr_stage, "Manager")
+
+	def test_the_reminder_template_pickers_are_installed_on_hr_settings(self):
+		"""P4-R17 / P4-KTD10. Picking a template is how HR switches the
+		branded email on, so the two fields are the switch itself -- and they
+		sit in HRMS's own Reminders section, next to the checkboxes they
+		replace."""
+		from helixhr.reminders import EVENTS
+
+		for spec in EVENTS.values():
+			field = frappe.db.get_value(
+				"Custom Field",
+				{"dt": "HR Settings", "fieldname": spec["template_field"]},
+				["fieldtype", "options", "module", "insert_after", "label"],
+				as_dict=True,
+			)
+			self.assertIsNotNone(field, msg=spec["template_field"])
+			self.assertEqual(field.fieldtype, "Link", msg=spec["template_field"])
+			self.assertEqual(field.options, "Email Template", msg=spec["template_field"])
+			self.assertEqual(field.module, "HelixHR", msg=spec["template_field"])
+			# The refusal and the preflight line quote these back to HR, so
+			# the label on the form has to be the label they name.
+			self.assertEqual(field.label, spec["template_label"], msg=spec["template_field"])
+			self.assertEqual(field.insert_after, spec["hrms_field"], msg=spec["template_field"])
+
+	def test_the_rename_patch_is_idempotent_and_leaves_submitted_rows_alone(self):
+		"""P4-KTD1. A site with legacy docstatus-0 Rejected rows ends with
+		them in Sent Back; a submitted row is untouched; a second run changes
+		nothing."""
+		from helixhr.patches.v1_0 import rename_sent_back_state
+
+		employee_name, _, _, _ = make_test_employee_and_manager()
+		frappe.set_user("Administrator")
+		monday, _ = get_week_bounds(add_days(today(), -3500))
+		rows = {}
+		for offset, (docstatus, state) in enumerate(((0, "Rejected"), (1, "Approved"))):
+			doc = frappe.get_doc(
+				{
+					"doctype": "Timesheet",
+					"employee": employee_name,
+					"company": frappe.db.get_value("Employee", employee_name, "company"),
+					"time_logs": [
+						{
+							"activity_type": "General",
+							"from_time": f"{add_days(monday, offset)} 09:00:00",
+							"hours": 1,
+							"description": "legacy",
+						}
+					],
+				}
+			)
+			doc.insert(ignore_permissions=True)
+			# Raw writes on purpose: a real submit would run the workflow this
+			# test is pretending predates the rename.
+			frappe.db.set_value(
+				"Timesheet", doc.name, {"docstatus": docstatus, "workflow_state": state}
+			)
+			rows[docstatus] = doc.name
+			self.addCleanup(self._remove_timesheet, doc.name)
+
+		rename_sent_back_state.execute()
+		self.assertEqual(
+			frappe.db.get_value("Timesheet", rows[0], "workflow_state"), "Sent Back"
+		)
+		self.assertEqual(frappe.db.get_value("Timesheet", rows[1], "workflow_state"), "Approved")
+
+		rename_sent_back_state.execute()
+		self.assertEqual(
+			frappe.db.get_value("Timesheet", rows[0], "workflow_state"), "Sent Back"
+		)
+
+	def _remove_timesheet(self, name):
+		"""The row was pushed to its docstatus with a raw write, so it has to
+		come back to Draft the same way before Frappe will delete it."""
+		frappe.set_user("Administrator")
+		frappe.db.set_value("Timesheet", name, "docstatus", 0)
+		frappe.delete_doc("Timesheet", name, force=True, ignore_permissions=True)
+

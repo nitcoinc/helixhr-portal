@@ -11,8 +11,11 @@ from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	MANAGER_USER,
 	ensure_holiday_list_assignment,
+	ensure_hr_manager_user,
 	ensure_leave_allocation,
+	ensure_test_email_account,
 	make_test_employee_and_manager,
+	make_test_user,
 )
 from helixhr.utils import get_week_bounds
 
@@ -60,6 +63,79 @@ class TestNotifications(IntegrationTestCase):
 			"Notification Log", filters={"for_user": EMPLOYEE_USER, "document_type": "Leave Application"}
 		)
 		self.assertIn("Approved", log.subject)
+
+	def _leave_subjects(self, name):
+		return frappe.get_all(
+			"Notification Log",
+			filters={"document_type": "Leave Application", "document_name": name},
+			pluck="subject",
+		)
+
+	def _open_leave(self, offset):
+		"""One unsubmitted leave of the employee's own, filed by them."""
+		ensure_leave_allocation(self.employee_name, "Casual Leave", 5)
+		date = add_days(today(), offset)
+		frappe.set_user("Administrator")
+		for existing in frappe.get_all(
+			"Leave Application",
+			filters={"employee": self.employee_name, "from_date": str(date)},
+			pluck="name",
+		):
+			frappe.delete_doc("Leave Application", existing, force=True, ignore_permissions=True)
+
+		frappe.set_user(EMPLOYEE_USER)
+		doc = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": self.employee_name,
+				"leave_type": "Casual Leave",
+				"from_date": str(date),
+				"to_date": str(date),
+				"description": "test",
+				"leave_approver": MANAGER_USER,
+			}
+		)
+		doc.insert()
+		frappe.set_user("Administrator")
+		return doc
+
+	def test_a_send_back_and_a_final_reject_are_told_apart_by_docstatus(self):
+		"""P4-U2 / P4-KTD9. Both outcomes write `status = "Rejected"` -- one
+		unsubmitted, one submitted -- and a Notification watches one field,
+		so `docstatus` is what the wording keys on. A submit does raise Value
+		Change (`run_post_save_methods` runs `on_change` after it), which is
+		why one fixture covers both.
+		"""
+		sent_back = self._open_leave(3)
+		sent_back.reload()
+		sent_back.status = "Rejected"
+		sent_back.save(ignore_permissions=True)
+
+		subjects = self._leave_subjects(sent_back.name)
+		self.assertEqual(len(subjects), 1)
+		self.assertIn("Sent back", subjects[0])
+
+		rejected = self._open_leave(5)
+		rejected.reload()
+		rejected.status = "Rejected"
+		rejected.submit()
+
+		subjects = self._leave_subjects(rejected.name)
+		self.assertEqual(len(subjects), 1)
+		self.assertIn("Rejected", subjects[0])
+		self.assertNotIn("Sent back", subjects[0])
+
+	def test_a_leave_sent_to_hr_tells_the_employee_it_is_waiting_for_hr(self):
+		"""The stage is a second field, so it needs its own fixture -- and
+		`db_set`, which is how a permlevel-1 field is written, still runs
+		`on_change`, so Value Change fires on it."""
+		leave = self._open_leave(7)
+
+		leave.db_set("helixhr_stage", "HR")
+
+		subjects = self._leave_subjects(leave.name)
+		self.assertEqual(len(subjects), 1)
+		self.assertIn("waiting for HR", subjects[0])
 
 	def test_timesheet_rejection_notifies_the_users_field_with_the_comment_available(self):
 		company = frappe.db.get_value("Employee", self.employee_name, "company")
@@ -120,7 +196,7 @@ class TestNotifications(IntegrationTestCase):
 				"content": "Please add a task",
 			}
 		).insert(ignore_permissions=True)
-		apply_workflow({"doctype": "Timesheet", "name": doc.name}, "Reject")
+		apply_workflow({"doctype": "Timesheet", "name": doc.name}, "Send Back")
 
 		after = self._unread_count(EMPLOYEE_USER)
 		self.assertGreater(after, before)
@@ -309,3 +385,283 @@ class TestNotifications(IntegrationTestCase):
 		mark_all_as_read()
 
 		self.assertEqual(self._unread_count(EMPLOYEE_USER), 0)
+
+
+class TestHrQueueEmails(IntegrationTestCase):
+	"""P4-R12 / P4-KTD9. HR is told a request reached its queue by four
+	fixture Notifications and by nothing in code.
+
+	Channel Email, recipients by role HR Manager, one mail per escalation.
+	Leave needs two of them, and the split is not the one KTD9 describes:
+	`api.apply_for_leave` cannot insert in stage HR at all (the field is
+	permlevel 1, so `reset_values_if_no_permlevel_access` puts it back before
+	the insert), and writes it with `db_set` immediately after -- so on the
+	*portal* path the Value Change fixture is what fires and the New fixture's
+	condition is False. The New fixture covers the Desk path instead: a Leave
+	Application filed by HR or a System Manager with `helixhr_stage` already
+	"HR", where Value Change never runs because Frappe skips it while
+	`flags.in_insert`. Both paths are covered below, and each sends exactly
+	one mail.
+
+	These are the tests that need `ensure_test_email_account` -- without a
+	default outgoing account `frappe.sendmail` throws from inside the save,
+	so every Send to HR would fail rather than merely fail to notify.
+	"""
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		ensure_test_email_account()
+
+	EMAIL_EMPLOYEE_USER = "hr-email-employee@helixhr.test"
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_, _, self.manager_name, _ = make_test_employee_and_manager()
+		self.company = frappe.db.get_value("Employee", self.manager_name, "company")
+		# Its own employee, and therefore its own Leave Allocation with the
+		# range `ensure_leave_allocation` writes today: `EMPLOYEE_USER`'s
+		# allocation on a long-lived bench predates these suites and drifts
+		# (docs/runbook.md).
+		self.employee_name = make_test_user(
+			self.EMAIL_EMPLOYEE_USER, self.company, reports_to=self.manager_name
+		)
+		frappe.db.set_value("Employee", self.employee_name, "leave_approver", MANAGER_USER)
+		ensure_holiday_list_assignment(self.company)
+		self.hr_user = ensure_hr_manager_user()
+		digest = int(hashlib.md5(self.id().encode()).hexdigest(), 16)
+		self.leave_date = add_days(today(), 200 + (digest % 60))
+		self.queued = set()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		# The rows are committed (see `_watch_mail`), so they have to be
+		# removed on purpose or every run leaves a handful behind.
+		for row in self.queued:
+			frappe.db.delete("Email Queue Recipient", {"parent": row})
+			frappe.db.delete("Email Queue", {"name": row})
+
+	def _watch_mail(self):
+		"""Snapshot the queue, and answer with what the next act added.
+
+		A delta, not a `reference_name` filter, and that is the P4 question
+		about `mute_emails` answered: `frappe.sendmail` *commits* the Email
+		Queue row, so a row outlives the rollback of the very document it
+		points at -- and Leave Application's naming series is rolled back
+		with that document, so the next test method's application is handed
+		the same name and would match the previous one's mail.
+		"""
+		before = set(frappe.get_all("Email Queue", pluck="name"))
+
+		def added():
+			rows = set(frappe.get_all("Email Queue", pluck="name")) - before
+			self.queued.update(rows)
+			return sorted(
+				(
+					row,
+					sorted(
+						frappe.get_all(
+							"Email Queue Recipient", filters={"parent": row}, pluck="recipient"
+						)
+					),
+				)
+				for row in rows
+			)
+
+		return added
+
+	def _leave(self, leave_type="Casual Leave"):
+		ensure_leave_allocation(self.employee_name, leave_type, 30)
+		frappe.set_user("Administrator")
+		for existing in frappe.get_all(
+			"Leave Application",
+			filters={"employee": self.employee_name, "from_date": str(self.leave_date)},
+			pluck="name",
+		):
+			frappe.delete_doc("Leave Application", existing, force=True, ignore_permissions=True)
+		frappe.set_user(self.EMAIL_EMPLOYEE_USER)
+		doc = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": self.employee_name,
+				"leave_type": leave_type,
+				"from_date": str(self.leave_date),
+				"to_date": str(self.leave_date),
+				"description": "hr email",
+				"leave_approver": MANAGER_USER,
+			}
+		)
+		doc.insert()
+		frappe.set_user("Administrator")
+		self.addCleanup(self._remove, doc.name)
+		return doc
+
+	def _remove(self, name):
+		frappe.set_user("Administrator")
+		if frappe.db.exists("Leave Application", name):
+			frappe.delete_doc("Leave Application", name, force=True, ignore_permissions=True)
+
+	def test_a_leave_moving_to_the_hr_stage_mails_every_hr_manager_once(self):
+		leave = self._leave()
+		added = self._watch_mail()
+
+		leave.db_set("helixhr_stage", "HR")
+
+		mails = added()
+		self.assertEqual(len(mails), 1, "one mail, however many HR Managers hold the role")
+		self.assertIn(self.hr_user, mails[0][1])
+		self.assertEqual(
+			frappe.db.get_value("Email Queue", mails[0][0], "reference_name"), leave.name
+		)
+
+	def _hr_approves_leave_type(self):
+		leave_type = "_Test HR Approved Leave"
+		if not frappe.db.exists("Leave Type", leave_type):
+			frappe.get_doc(
+				{"doctype": "Leave Type", "leave_type_name": leave_type, "helixhr_hr_approves": 1}
+			).insert(ignore_permissions=True)
+		frappe.db.set_value("Leave Type", leave_type, "helixhr_hr_approves", 1)
+		return leave_type
+
+	def test_the_portal_path_mails_hr_exactly_once_through_the_value_change_fixture(self):
+		"""P4-R7 / P4-KTD9, with KTD9's stated mechanism corrected.
+
+		`apply_for_leave` cannot insert in stage HR -- `helixhr_stage` is
+		permlevel 1, so `reset_values_if_no_permlevel_access` puts it back to
+		its default for the employee's own session -- and writes it with
+		`db_set` straight after (P4-KTD4). So the New fixture's condition is
+		False at insert time on this path, the Value Change fixture on the
+		`db_set` is what mails HR, and the total is one mail, not two.
+		"""
+		from helixhr.api import apply_for_leave
+
+		leave_type = self._hr_approves_leave_type()
+		ensure_leave_allocation(self.employee_name, leave_type, 30)
+		date = str(add_days(self.leave_date, 4))
+		frappe.set_user("Administrator")
+		for existing in frappe.get_all(
+			"Leave Application",
+			filters={"employee": self.employee_name, "from_date": date},
+			pluck="name",
+		):
+			frappe.delete_doc("Leave Application", existing, force=True, ignore_permissions=True)
+
+		added = self._watch_mail()
+		frappe.set_user(self.EMAIL_EMPLOYEE_USER)
+		result = apply_for_leave(leave_type=leave_type, from_date=date, to_date=date)
+		frappe.set_user("Administrator")
+		self.addCleanup(self._remove, result["name"])
+
+		self.assertEqual(result["stage"], "HR")
+		mails = added()
+		self.assertEqual(len(mails), 1, "one mail on the portal path, not one per fixture")
+		self.assertIn(self.hr_user, mails[0][1])
+		self.assertEqual(
+			frappe.db.get_value("Email Queue", mails[0][0], "reference_name"), result["name"]
+		)
+
+	def test_a_leave_filed_in_desk_already_in_the_hr_stage_mails_on_the_insert(self):
+		"""Frappe does not evaluate Value Change while `flags.in_insert`, so
+		the New-event fixture is the only thing that covers a request that
+		*starts* in the HR queue -- which is the Desk path, not the portal one
+		(P4-R7, P4-KTD9)."""
+		leave_type = self._hr_approves_leave_type()
+
+		leave = self._leave(leave_type=leave_type)
+		frappe.set_user("Administrator")
+		leave.reload()
+		self.assertEqual(
+			leave.helixhr_stage, "Manager", "an employee's own insert never sets the stage"
+		)
+
+		frappe.set_user("Administrator")
+		hr_filed = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": self.employee_name,
+				"leave_type": leave_type,
+				"from_date": str(add_days(self.leave_date, 2)),
+				"to_date": str(add_days(self.leave_date, 2)),
+				"description": "filed by HR",
+				"leave_approver": MANAGER_USER,
+				"helixhr_stage": "HR",
+			}
+		)
+		added = self._watch_mail()
+		hr_filed.insert(ignore_permissions=True)
+		self.addCleanup(self._remove, hr_filed.name)
+
+		mails = added()
+		self.assertEqual(len(mails), 1)
+		self.assertIn(self.hr_user, mails[0][1])
+		self.assertEqual(
+			frappe.db.get_value("Email Queue", mails[0][0], "reference_name"), hr_filed.name
+		)
+
+	def test_a_state_that_is_not_the_hr_queue_mails_nobody(self):
+		leave = self._leave()
+		added = self._watch_mail()
+
+		leave.reload()
+		leave.status = "Rejected"
+		leave.save(ignore_permissions=True)
+
+		self.assertEqual(added(), [], "a send-back is the employee's news, not HR's")
+
+	def test_the_four_fixtures_are_email_channel_and_addressed_by_role(self):
+		"""The mechanism is the fixture, so the fixture's shape is the
+		requirement. A System Notification here would leave HR with no mail
+		and only a bell they may never look at (P4 deferred work)."""
+		for name in (
+			"HelixHR Leave Sent To HR",
+			"HelixHR New Leave For HR",
+			"HelixHR Timesheet Sent To HR",
+			"HelixHR Attendance Request Sent To HR",
+		):
+			alert = frappe.get_doc("Notification", name)
+			self.assertEqual(alert.channel, "Email", msg=name)
+			self.assertTrue(alert.enabled, msg=name)
+			self.assertEqual([row.receiver_by_role for row in alert.recipients], ["HR Manager"], msg=name)
+			self.assertIn("/helixhr/approvals/", alert.message, msg=name)
+
+
+class TestNotificationTemplateEscaping(IntegrationTestCase):
+	"""P4 security follow-up. Frappe's Jinja environment has no autoescape,
+	so a fixture that interpolates approver-authored free text into an HTML
+	message has to escape it itself.
+
+	`events._notify_attendance_request` already runs the same value through
+	`frappe.utils.escape_html`; the fixture path was the inconsistent one.
+	Rendered here rather than through a real send: the fixture's template
+	text is the thing under test, and `Notification.get_context` supplies
+	exactly `doc` and `comments`.
+	"""
+
+	PAYLOAD = "<script>alert(1)</script>"
+
+	def _render(self, comments=None, **fields):
+		message = frappe.db.get_value("Notification", "HelixHR Timesheet Status Changed", "message")
+		return frappe.render_template(message, {"doc": frappe._dict(fields), "comments": comments})
+
+	def test_a_decision_reason_carrying_markup_is_escaped(self):
+		rendered = self._render(
+			start_date="2026-09-07",
+			end_date="2026-09-13",
+			workflow_state="Sent Back",
+			helixhr_decision_reason=self.PAYLOAD,
+		)
+
+		self.assertIn("&lt;script&gt;", rendered)
+		self.assertNotIn("<script>", rendered)
+
+	def test_the_comment_fallback_is_escaped_too(self):
+		rendered = self._render(
+			comments=[{"by": "hr@helixhr.test", "comment": self.PAYLOAD}],
+			start_date="2026-09-07",
+			end_date="2026-09-13",
+			workflow_state="Sent Back",
+			helixhr_decision_reason=None,
+		)
+
+		self.assertIn("&lt;script&gt;", rendered)
+		self.assertNotIn("<script>", rendered)

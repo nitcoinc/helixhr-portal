@@ -12,5 +12,19 @@
   "modified": "2026-09-03 13:16:30.311706",
   "name": "Edit",
   "workflow_action_name": "Edit"
+ },
+ {
+  "docstatus": 0,
+  "doctype": "Workflow Action Master",
+  "modified": "2026-09-10 10:00:00.000000",
+  "name": "Send Back",
+  "workflow_action_name": "Send Back"
+ },
+ {
+  "docstatus": 0,
+  "doctype": "Workflow Action Master",
+  "modified": "2026-09-10 10:00:00.000000",
+  "name": "Send to HR",
+  "workflow_action_name": "Send to HR"
  }
 ]

@@ -7,7 +7,7 @@ import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
 import { formatDate, formatDateRange } from '@/lib/dates'
-import { toPlainMessage } from '@/lib/errorMap'
+import { toPlainLeaveError } from '@/lib/errorMap'
 import { useIsDesktop } from '@/lib/useIsDesktop'
 import { ATTENDANCE_LABEL } from '@/lib/week'
 
@@ -38,6 +38,13 @@ const pending = computed(() => queue.data?.pending || [])
 const decided = computed(() => queue.data?.decided || [])
 const overflow = computed(() => Math.max(0, (queue.data?.total || 0) - pending.value.length))
 
+// P4-R11. The queue's own sentence used to promise "you only see people who
+// report to you", which is still true for a line manager and false for an HR
+// Manager, whose queue is their reports *plus* everything handed to HR. The
+// rows themselves are the honest signal, so the sentence follows them rather
+// than asking the server a second question about roles.
+const hasHrWork = computed(() => pending.value.some((row) => row.for_hr))
+
 // --- the selected decision ----------------------------------------------
 
 // P2-U7 step 2 / P2-R22. Evidence costs a document read plus its child rows,
@@ -67,7 +74,33 @@ const acting = ref('') // the one item in flight, by record name
 const actionError = ref('')
 const reason = ref('')
 const reasonError = ref('')
-const showReason = ref(false)
+
+// P4-U4. Which of the two reason-bearing outcomes the one reason surface is
+// currently armed for: '' (closed), 'Send Back' or 'Reject'. One surface, not
+// two, and it knows which button will fire it -- see `openReason`.
+const reasonFor = ref('')
+// Send to HR's note is optional and is not a reason, so it gets its own
+// smaller field rather than borrowing the required one above.
+const noteOpen = ref(false)
+const note = ref('')
+
+// P4-R1 / P4-KTD6. The outcomes the *server* says are legal for this record
+// and this approver. The screen renders exactly this list: a button that is
+// absent is not drawn, not drawn-and-disabled, because a disabled Reject on
+// a timesheet would still teach a manager that timesheets can be rejected.
+const actions = computed(() => selected.value?.actions || [])
+
+function may(action) {
+  return actions.value.includes(action)
+}
+
+function clearDecisionSurfaces() {
+  reason.value = ''
+  reasonError.value = ''
+  reasonFor.value = ''
+  note.value = ''
+  noteOpen.value = false
+}
 
 // The selected record drives the fetch, and clears whatever the last
 // decision left behind -- a half-typed reason must never follow the manager
@@ -78,23 +111,75 @@ watch(
   () => [props.kind, props.name].join('/'),
   () => {
     actionError.value = ''
-    reason.value = ''
-    showReason.value = false
+    clearDecisionSurfaces()
     if (props.name) detail.fetch()
   },
   { immediate: true },
 )
 
-function askForReason() {
+/**
+ * Arm the one reason surface for one outcome (P4-U4).
+ *
+ * Switching from Send back to Reject -- or back -- **clears the typed reason
+ * and its error and relabels the field**. That is the point of the reset, not
+ * tidiness: a sentence written to tell somebody what to change ("add the
+ * Friday hours") must never be submittable as the justification for a
+ * terminal no. The two outcomes are different messages to a person, so they
+ * never share a draft.
+ */
+function openReason(action) {
   actionError.value = ''
-  showReason.value = true
+  noteOpen.value = false
+  if (reasonFor.value !== action) {
+    reason.value = ''
+    reasonError.value = ''
+    reasonFor.value = action
+  }
 }
+
+function openNote() {
+  actionError.value = ''
+  reason.value = ''
+  reasonError.value = ''
+  reasonFor.value = ''
+  noteOpen.value = true
+}
+
+// What the reason field is called, per outcome. The label says which button
+// the sentence is going to, so the field can never be read as the other one.
+const REASON_COPY = {
+  'Send Back': {
+    heading: 'Send back with a reason',
+    placeholder: 'What should they change?',
+    // The server's own sentence, so the screen and the refusal agree.
+    missing: 'Say what should change before sending it back.',
+  },
+  Reject: {
+    heading: 'Reject with a reason',
+    placeholder: 'Why is the answer final?',
+    missing: 'Say why before rejecting this.',
+  },
+}
+
+const reasonCopy = computed(() => REASON_COPY[reasonFor.value] || REASON_COPY['Send Back'])
+
+/** The field's own label, naming the person the sentence is written to. */
+const reasonPlaceholder = computed(() =>
+  reasonFor.value === 'Reject'
+    ? reasonCopy.value.placeholder
+    : `What should ${firstName.value || 'they'} change?`,
+)
 
 /**
  * P2-U7 steps 3 and 4. One decision at a time, always carrying the `modified`
  * and the state the evidence on screen was rendered from, so a decision made
  * against a record that has since moved is refused by the server instead of
  * overwriting somebody else's.
+ *
+ * P4-U4 gives the same function four outcomes. Send back and Reject open the
+ * shared reason surface on the first tap and fire on the second; Send to HR
+ * opens its optional note the same way, so every outcome that carries words
+ * is confirmed once. Approve carries none and goes straight through.
  */
 async function decide(action) {
   const item = selected.value
@@ -102,11 +187,28 @@ async function decide(action) {
   // pointerdown can land before Vue has flushed the disabled attribute
   // (P2-U7 scenario 3).
   if (!item || acting.value) return
+  // Belt and braces over the render: `actions` is what draws the row, but a
+  // stale detail behind a slow reload must not be able to fire an outcome the
+  // server would refuse anyway.
+  if (!may(action)) return
 
-  if (action === 'Reject' && !reason.value.trim()) {
-    showReason.value = true
-    reasonError.value = 'Say what should change before sending it back.'
-    return
+  let comment
+  if (action === 'Send Back' || action === 'Reject') {
+    if (reasonFor.value !== action) {
+      openReason(action)
+      return
+    }
+    comment = reason.value.trim()
+    if (!comment) {
+      reasonError.value = reasonCopy.value.missing
+      return
+    }
+  } else if (action === 'Send to HR') {
+    if (!noteOpen.value) {
+      openNote()
+      return
+    }
+    comment = note.value.trim() || undefined
   }
 
   actionError.value = ''
@@ -117,12 +219,11 @@ async function decide(action) {
       doctype: item.doctype,
       name: item.name,
       action,
-      comment: action === 'Reject' ? reason.value.trim() : undefined,
+      comment,
       expected_modified: item.modified,
       expected_state: item.state,
     })
-    reason.value = ''
-    showReason.value = false
+    clearDecisionSurfaces()
     closeDetail()
     queue.reload()
   } catch (error) {
@@ -133,11 +234,12 @@ async function decide(action) {
     // P3-U6 scenario 7. HRMS reports two of its Attendance Request
     // refusals as an HTML table or a list of lists, not as a sentence, and
     // both can arrive mid-decision -- an overlapping request, or a range
-    // that would mark nothing. `toPlainMessage` flattens either into one
-    // readable line; anything already plain passes through untouched.
+    // that would mark nothing. `toPlainLeaveError` flattens either into one
+    // readable line and maps the sentences this app has plain words for --
+    // including "send this to HR instead", which is how a manager's Approve
+    // is refused once a day in the range already has attendance (P4-KTD5).
     actionError.value =
-      toPlainMessage(error?.messages?.[0]) ||
-      "We couldn't record that decision. Reload and try again."
+      toPlainLeaveError(error) || "We couldn't record that decision. Reload and try again."
     queue.reload()
     if (props.name) detail.fetch()
   } finally {
@@ -181,9 +283,12 @@ const KIND = {
   attendance: {
     summary: (row) => `${row.reason} · ${formatDateRange(row.from_date, row.to_date)}`,
     amount: (row) => `${row.total_days} day${row.total_days === 1 ? '' : 's'}`,
-    // P3-KTD7. Approving is not the end of this one: the manager agrees and
-    // HR confirms, and the button says which of the two this is.
-    approve: () => 'Send to HR',
+    // P4-R6. Attendance requests are approved in one step now, so this
+    // button is the decision again rather than a hand-over: the manager's
+    // Approve submits the request and writes the Attendance, and the
+    // quantity it commits belongs on the control that commits it. Handing
+    // one to HR is its own button (P4-R5), not this one wearing HR's name.
+    approve: (item) => `Approve ${item.total_days} day${item.total_days === 1 ? '' : 's'}`,
     quote: (item) => item.explanation,
   },
 }
@@ -236,6 +341,19 @@ function requestedDayLabel(day) {
   if (day.status) return ATTENDANCE_LABEL[day.status] || day.status
   return 'nothing recorded'
 }
+
+/** P4-R11. Who handed this to HR, and what they said -- one line, on the
+ * queue row and again on the detail head, so the HR chip is never the only
+ * thing distinguishing HR's work from a manager's own. Both halves are
+ * optional: a request of an HR-approves leave type reached HR with nobody
+ * sending it (P4-R7). */
+function hrLine(row) {
+  if (!row?.for_hr) return ''
+  const parts = []
+  if (row.sent_to_hr_by) parts.push(`Sent by ${row.sent_to_hr_by}`)
+  if (row.hr_note) parts.push(`“${row.hr_note}”`)
+  return parts.join(' · ')
+}
 </script>
 
 <template>
@@ -252,7 +370,12 @@ function requestedDayLabel(day) {
     </PageHeader>
 
     <p class="mb-4 text-sm text-ink-gray-5">
-      Oldest first. You only see people who report to you.
+      <template v-if="hasHrWork">
+        Oldest first. Your own team, plus anything marked HR.
+      </template>
+      <template v-else>
+        Oldest first. You only see people who report to you.
+      </template>
     </p>
 
     <div class="lg:flex lg:items-start lg:gap-6">
@@ -295,11 +418,27 @@ function requestedDayLabel(day) {
                 >{{ row.initials }}</span>
 
                 <span class="min-w-0 flex-1">
-                  <span class="block truncate font-medium text-ink-gray-9">
-                    {{ row.employee_name }}
+                  <span class="flex min-w-0 items-center gap-2">
+                    <span class="min-w-0 truncate font-medium text-ink-gray-9">
+                      {{ row.employee_name }}
+                    </span>
+                    <!-- P4-R11. One queue, two hats. The chip is a word, not
+                         a tint, because it is the only thing that says whether
+                         this row is HR's work or this manager's own. -->
+                    <span
+                      v-if="row.for_hr"
+                      class="shrink-0 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-bold text-ink-gray-7"
+                      data-testid="hr-chip"
+                    >HR</span>
                   </span>
                   <span class="block truncate text-sm text-ink-gray-6">
                     {{ rowSummary(row) }}
+                  </span>
+                  <span
+                    v-if="hrLine(row)"
+                    class="block truncate text-xs text-ink-gray-5"
+                  >
+                    {{ hrLine(row) }}
                   </span>
                 </span>
 
@@ -436,6 +575,7 @@ function requestedDayLabel(day) {
                           <StatusBadge
                             kind="leave"
                             :status="selected.status"
+                            :docstatus="selected.docstatus"
                           />
                         </dd>
                       </div>
@@ -496,27 +636,55 @@ function requestedDayLabel(day) {
                       {{ actionError }}
                     </p>
 
+                    <!-- P4-U4. One reason surface, armed for one outcome at a
+                         time, on the deep field where the portal's other
+                         anchored write regions live. -->
                     <div
-                      v-if="showReason"
-                      class="mt-3"
+                      v-if="reasonFor"
+                      class="surface-field elev-2 mt-3 p-3"
+                      data-testid="decision-reason"
                     >
+                      <p class="text-sm font-medium text-white">
+                        {{ reasonCopy.heading }}
+                      </p>
                       <FormControl
                         v-model="reason"
+                        class="mt-2"
                         type="textarea"
-                        :label="`What should ${firstName} change?`"
+                        :placeholder="reasonPlaceholder"
+                        :aria-label="reasonCopy.heading"
                         required
                       />
                       <p
                         v-if="reasonError"
-                        class="mt-1 text-sm text-ink-red-4"
+                        class="mt-1 text-sm font-medium text-signal"
                         role="alert"
                       >
                         {{ reasonError }}
                       </p>
                     </div>
 
-                    <div class="mt-3 flex flex-wrap gap-2">
+                    <!-- Send to HR is a routing act, so its words are a note
+                         to a colleague and optional (P4-R5). -->
+                    <div
+                      v-if="noteOpen"
+                      class="mt-3"
+                      data-testid="hr-note"
+                    >
+                      <FormControl
+                        v-model="note"
+                        type="textarea"
+                        label="Anything HR should know? (optional)"
+                        placeholder="Why this needs HR"
+                      />
+                    </div>
+
+                    <div
+                      class="mt-3 flex flex-wrap items-center gap-2"
+                      data-testid="decision-actions"
+                    >
                       <Button
+                        v-if="may('Approve')"
                         variant="solid"
                         theme="green"
                         :loading="acting === selected.name"
@@ -526,12 +694,32 @@ function requestedDayLabel(day) {
                         {{ approveLabel }}
                       </Button>
                       <Button
+                        v-if="may('Send Back')"
+                        variant="outline"
+                        :disabled="acting === selected.name"
+                        data-testid="send-back"
+                        @click="decide('Send Back')"
+                      >
+                        Send back
+                      </Button>
+                      <Button
+                        v-if="may('Reject')"
                         variant="outline"
                         theme="red"
                         :disabled="acting === selected.name"
-                        @click="showReason ? decide('Reject') : askForReason()"
+                        data-testid="reject"
+                        @click="decide('Reject')"
                       >
-                        Send back
+                        Reject
+                      </Button>
+                      <Button
+                        v-if="may('Send to HR')"
+                        variant="ghost"
+                        :disabled="acting === selected.name"
+                        data-testid="send-to-hr"
+                        @click="decide('Send to HR')"
+                      >
+                        Send to HR
                       </Button>
                     </div>
                   </div>
@@ -579,6 +767,7 @@ function requestedDayLabel(day) {
               <StatusBadge
                 :kind="row.kind"
                 :status="row.status"
+                :docstatus="row.docstatus"
               />
             </li>
           </ul>
@@ -618,9 +807,22 @@ function requestedDayLabel(day) {
                 aria-hidden="true"
               >{{ selected.initials }}</span>
               <div class="min-w-0 flex-1">
-                <h2 class="font-heading text-lg font-bold text-ink-gray-9">
-                  {{ selected.employee_name }}
+                <h2 class="flex min-w-0 items-center gap-2 font-heading text-lg font-bold text-ink-gray-9">
+                  <span class="min-w-0 truncate">{{ selected.employee_name }}</span>
+                  <span
+                    v-if="selected.for_hr"
+                    class="shrink-0 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-bold text-ink-gray-7"
+                    data-testid="hr-chip"
+                  >HR</span>
                 </h2>
+                <!-- P4-R11: the same line the queue row carries, so opening
+                     an HR row does not lose who handed it over or why. -->
+                <p
+                  v-if="hrLine(selected)"
+                  class="text-sm text-ink-gray-5"
+                >
+                  {{ hrLine(selected) }}
+                </p>
                 <p class="text-sm text-ink-gray-6">
                   <template v-if="selected.kind === 'timesheet'">
                     Timesheet · {{ formatDateRange(selected.week_start, selected.week_end) }}
@@ -830,35 +1032,90 @@ function requestedDayLabel(day) {
               {{ actionError }}
             </p>
 
-            <!-- Send back needs its reason on the same surface as the button,
-                 not behind a dialog: the employee reads this sentence, so it
-                 is written next to the evidence it is about (P2-U7 step 4). -->
-            <div class="mt-4 border-t border-outline-gray-2 pt-4">
+            <!-- Send back and Reject need their reason on the same surface as
+                 the button, not behind a dialog: the employee reads this
+                 sentence, so it is written next to the evidence it is about
+                 (P2-U7 step 4).
+                 P4-U4: one surface for both, armed by whichever button opened
+                 it and relabelled -- and emptied -- if the other one does. -->
+            <div
+              v-if="reasonFor"
+              class="surface-field elev-2 mt-4 p-4"
+              data-testid="decision-reason"
+            >
+              <p class="text-sm font-medium text-white">
+                {{ reasonCopy.heading }}
+              </p>
               <FormControl
                 v-model="reason"
+                class="mt-2"
                 type="textarea"
-                label="Send back with a reason (required to send back)"
-                :placeholder="`What should ${firstName} change?`"
+                :placeholder="reasonPlaceholder"
+                :aria-label="reasonCopy.heading"
+                required
               />
               <p
                 v-if="reasonError"
-                class="mt-1 text-sm text-ink-red-4"
+                class="mt-1 text-sm font-medium text-signal"
                 role="alert"
               >
                 {{ reasonError }}
               </p>
             </div>
 
-            <div class="mt-4 flex flex-wrap justify-end gap-2">
+            <div
+              v-if="noteOpen"
+              class="mt-4"
+              data-testid="hr-note"
+            >
+              <FormControl
+                v-model="note"
+                type="textarea"
+                label="Anything HR should know? (optional)"
+                placeholder="Why this needs HR"
+              />
+            </div>
+
+            <!-- P4-R1. Exactly the outcomes the server allows, in one order
+                 on every kind: the decision, the recoverable no, the final no,
+                 the hand-over. An outcome missing from `actions` is not
+                 rendered rather than rendered disabled -- a greyed-out Reject
+                 on a timesheet would still teach a manager that a week can be
+                 rejected, which it cannot (P4-KTD2). -->
+            <div
+              class="mt-4 flex flex-wrap items-center justify-end gap-2"
+              data-testid="decision-actions"
+            >
               <Button
+                v-if="may('Send to HR')"
+                variant="ghost"
+                :disabled="acting === selected.name"
+                data-testid="send-to-hr"
+                @click="decide('Send to HR')"
+              >
+                Send to HR
+              </Button>
+              <Button
+                v-if="may('Reject')"
                 variant="outline"
                 theme="red"
                 :disabled="acting === selected.name"
+                data-testid="reject"
                 @click="decide('Reject')"
+              >
+                Reject
+              </Button>
+              <Button
+                v-if="may('Send Back')"
+                variant="outline"
+                :disabled="acting === selected.name"
+                data-testid="send-back"
+                @click="decide('Send Back')"
               >
                 Send back
               </Button>
               <Button
+                v-if="may('Approve')"
                 variant="solid"
                 theme="green"
                 :loading="acting === selected.name"

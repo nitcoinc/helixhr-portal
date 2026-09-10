@@ -176,7 +176,8 @@ identity block linking to Profile, nav list with the unread count on Notificatio
 a slim brand+bell app bar below `lg:`, and a five-slot bottom tab bar (Home, Leave, Timesheet,
 Requests, More) where More opens a sheet with the rest. Page content is capped at `max-w-5xl`;
 before the shell, pages ran the full window width. Approvals appears only for a user with at
-least one direct report. `NotLinked` is the one route rendered without the shell
+least one direct report, or an HR Manager working the HR queue (P4-R13).
+`NotLinked` is the one route rendered without the shell
 (`meta.shell === false`).
 
 Revised in P2-U3: the tab bar stays at five destinations, but **More** now lights up when the route
@@ -193,17 +194,21 @@ right on the first painted frame rather than a round trip later.
 | Docstatus / Submitted | Waiting for [manager] |
 | Workflow state: Pending Approval | Waiting for [manager] |
 | Workflow state: Approved | Approved |
-| Workflow state: Rejected | Sent back |
+| Workflow state: Sent Back | Sent back |
 | Cancel / Amend | Edit and resubmit |
-| Reject (the manager's button) | Send back |
+| Reject (the workflow action that means "sent back") | Send back |
 | DocType | (never shown) |
 | Employee Self Service role | (never shown) |
 | No data | Nothing here yet — [action hint] |
 | Workflow state: Pending Manager (Attendance Request) | Waiting for [manager] |
 | Workflow state: Pending HR | Waiting for HR |
-| Approve (the manager's button on an attendance request) | Send to HR |
+| Leave Application `helixhr_stage` = HR | Waiting for HR |
 | Workflow state: Approved (Attendance Request) | Counted |
-| Workflow state: Rejected (Attendance Request) | Sent back |
+| Workflow state: Sent Back (Attendance Request, Timesheet) | Sent back |
+| Workflow state: Rejected (Attendance Request) | Rejected |
+| Leave status Rejected at docstatus 0 | Sent back |
+| Leave status Rejected at docstatus 1 | Rejected |
+| Withdraw (a rejected attendance request) | Remove |
 | Attendance status: Work From Home | Work from home (calendar legend, day sheet, Approvals) |
 | Attendance Request reason | shown as HRMS spells it — `Work From Home`, `On Duty` — see below |
 | Create Attendance Request | Fix a day |
@@ -216,22 +221,60 @@ right on the first painted frame rather than a round trip later.
 
 The phase 3 words, and why each one is the word (P3-U9):
 
-- **Waiting for HR** already existed for the one legacy leave defect row, and it
-  now means what it says on an attendance request: the manager has agreed and HR
-  has not confirmed yet. Only `Pending Manager` ever substitutes a person's
-  name; `Pending HR` never names an individual, because HR is a queue, not a
-  person the employee can chase.
-- **Send to HR** is the manager's primary button, not "Approve". Approve would
-  claim the decision is final, and it is not — the day does not count until HR
-  confirms. The label says where the request goes next, which is also what the
-  sentence under the buttons says.
+- **Waiting for HR** means a manager handed the request over: it is with the HR
+  queue and not with a person. Only `Pending Manager` ever substitutes a
+  person's name; `Pending HR` never names an individual, because HR is a queue,
+  not somebody the employee can chase. Leave says the same words from
+  `helixhr_stage`, so all three kinds read alike (P4-R5, P4-R7).
 - **Counted** is the end state, not "Approved". What an employee wants to know
   is whether the day counts as a working day; "Approved" is a status about a
-  document. It is also the fourth step on `StepStrip`, so the word appears
+  document. It is also the last step on `StepStrip`, so the word appears
   before it is true, as the name of the thing being waited for.
 - **Sent back** is the same word leave and timesheets already use, extended to
-  requests, with the reason quoted next to it. There is no "Rejected" anywhere
-  in the portal.
+  requests, with the reason quoted next to it.
+
+The phase 4 words, and the one ban that was lifted (P4-R21):
+
+- **Reject** and **Rejected** are now in the portal, and that is a change of
+  policy, not a slip. Until P4 every no was recoverable — "Send back" was the
+  `Reject` action of each lifecycle and the employee could always edit and
+  resend — so a word that sounds final would have been a lie, and this table
+  banned it outright. P4 gives approvers a genuinely final outcome (P4-R4): a
+  rejected leave request is submitted at status Rejected and cannot be resent,
+  and a rejected attendance request has no `Edit` transition at all. The
+  employee is owed the true word for that, and *Sent back* is no longer it. So
+  the ban is now narrower and sharper: **never say "Rejected" for something the
+  employee can still fix.** The two are told apart by `docstatus` on leave and
+  by two separate workflow states on an attendance request, and
+  `statusBadge.js` is the only place that mapping lives. No new colour was
+  added for it — Rejected shares the measured sent-back (ink, surface) pair,
+  and the word carries the difference.
+- **Send back** is the button, and the word, for the recoverable no. It was
+  already the portal's word for the `Reject` action; now that a button labelled
+  **Reject** exists and means Reject, the two are distinct controls sharing one
+  reason sheet, and the sheet relabels itself and clears the typed text when an
+  approver switches from one to the other — a sentence written to send
+  something back must never be submitted as a terminal rejection.
+- **Approve** is the manager's primary button on an attendance request, where
+  P3 said "Send to HR". The manager's decision *is* final now: their Approve is
+  the submit that writes the Attendance (P4-R6), so the label carries the
+  quantity again — "Approve 3 days".
+- **Send to HR** is still a label, but for a different control: a quiet
+  tertiary button that hands a request over, with an optional note. It is a
+  routing act, not a decision, and it is worded and weighted as one. HR never
+  sees it — there is nowhere further to send.
+- **Remove**, not "Withdraw", on a rejected attendance request. Withdrawing
+  implies taking back something still in flight; this row has been decided, and
+  deleting it is only what frees the dates to be requested again (P4-KTD3).
+- **The HR chip** plus "Sent by Priya · 'needs policy check'" is what marks HR
+  work in the queue: a word and a sentence, not a colour.
+
+Under Approvals, one rule that is a product decision rather than a copy one:
+**there is no Reject on a timesheet** (P4-KTD2). A week is one Timesheet row, so
+a terminal state would lock a week whose hours still have to be recorded.
+Timesheets get Approve, Send back and Send to HR, and the button row is drawn
+from the server's `actions` list, so nobody can add the fourth by editing the
+screen.
 - **Work from home** is the sentence-case word everywhere the portal *describes*
   a day: the calendar legend, the day sheet and the manager's Approvals row.
   `Work From Home` in title case is a data value — an HRMS field option, an
