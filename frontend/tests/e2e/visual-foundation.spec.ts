@@ -601,6 +601,79 @@ test.describe('employee', () => {
     const findings = await cardSurfaceFindings(page)
     expect(findings, findings.join('\n')).toEqual([])
   })
+
+  // P4-U8. A month with a dozen people in it is the case that broke the old
+  // layout: one unbounded card put several hundred pixels of height into a
+  // grid row, and that height became dead paper beside the queue because
+  // "Start something" was measured from the bottom of the row. The band now
+  // lives outside the grid and holds five rows per card, so headcount can no
+  // longer move anything else on the page.
+  test('a dozen celebrations do not grow the page (P4-U8)', async ({ page }) => {
+    const person = (name, initials, day, years) => ({
+      employee: `surface-check:${name}`,
+      employee_name: name,
+      initials,
+      day,
+      month: 9,
+      is_today: false,
+      ...(years ? { years } : {}),
+    })
+    const birthdays = ['Ana One', 'Bo Two', 'Cy Three', 'Di Four', 'Eve Five', 'Fay Six'].map(
+      (name, i) => person(name, name.slice(0, 2).toUpperCase(), i + 1),
+    )
+    const anniversaries = ['Gil Seven', 'Hal Eight', 'Ivy Nine', 'Jo Ten', 'Kim Eleven', 'Lou Twelve'].map(
+      (name, i) => person(name, name.slice(0, 2).toUpperCase(), i + 1, i + 1),
+    )
+
+    await page.route('**/api/method/helixhr.api.get_dashboard*', async (route) => {
+      const response = await route.fetch()
+      const body = await response.json()
+      body.message.celebrations = { birthdays, anniversaries }
+      await route.fulfill({ response, json: body })
+    })
+
+    await page.goto('/helixhr/')
+    await page.waitForLoadState('networkidle')
+
+    const band = page.locator('[aria-labelledby="celebrations-heading"]')
+    await expect(band).toBeVisible()
+    expect(await band.locator('li').count(), 'twelve people, no cap applied').toBe(10)
+
+    // The cap is the geometry guarantee, so it is asserted, not assumed.
+    const cards = band.locator('section.surface-card')
+    expect(await cards.count(), 'one card per group').toBe(2)
+    for (const card of await cards.all()) {
+      expect(await card.locator('li').count(), 'five rows before disclosure').toBe(5)
+    }
+
+    // The band is not inside the grid that holds the queue and the rail: that
+    // is what stops a busy month from pushing anything down the page.
+    expect(
+      await page.locator('div.lg\\:grid-cols-3 [aria-labelledby="celebrations-heading"]').count(),
+      'the band is outside the two-column grid',
+    ).toBe(0)
+
+    // And the one control works, in place, with no round trip. Each card is
+    // addressed by its own label: both buttons share the accessible name
+    // "Show all 6", so an unscoped locator is ambiguous.
+    const birthdayCard = band.locator('section[aria-labelledby="celebrations-birthdays"]')
+    const anniversaryCard = band.locator('section[aria-labelledby="celebrations-anniversaries"]')
+
+    const disclosure = birthdayCard.getByRole('button')
+    await expect(disclosure).toHaveAttribute('aria-expanded', 'false')
+    await expect(disclosure).toHaveText('Show all 6')
+    await disclosure.click()
+    await expect(disclosure).toHaveAttribute('aria-expanded', 'true')
+    await expect(disclosure).toHaveText('Show fewer')
+    expect(await birthdayCard.locator('li').count(), 'the disclosure revealed the rest').toBe(6)
+    expect(await band.locator('li').count(), 'only the expanded card grew').toBe(11)
+
+    await anniversaryCard.getByRole('button').click()
+    expect(
+      await band.locator('li').count(),
+      'the two cards disclose independently',
+    ).toBe(12)
+  })
 })
 
 // P3-U9. The manager half of the same foundation. `/team` is a manager

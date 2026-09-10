@@ -147,6 +147,14 @@ const today = new Intl.DateTimeFormat(undefined, {
             :week-hours="week?.total_hours || 0"
             :timesheet-state="week?.timesheet_state"
           />
+
+          <!-- P2-U4 / P4-U8. The quick actions belong to the column that
+               holds the work, not to the page foot. Below both columns they
+               sat under the tallest one -- and because a grid row is as tall
+               as its tallest cell, a busy rail pushed them several hundred
+               pixels down the page and left that height as empty paper
+               beside the queue. -->
+          <QuickActions class="mt-6" />
         </div>
 
         <!-- Reference numbers, deliberately demoted to a rail: they are what
@@ -209,23 +217,6 @@ const today = new Intl.DateTimeFormat(undefined, {
             </router-link>
           </AsyncState>
 
-          <AsyncState
-            v-if="hasCelebrations || celebrationsFailed"
-            section="celebrations"
-            :resource="dashboard"
-            :loading="false"
-            :error="celebrationsFailed ? { section: 'celebrations' } : null"
-            :empty="false"
-          >
-            <template #error-title>
-              We couldn't load this month's celebrations
-            </template>
-            <Celebrations
-              :birthdays="birthdays"
-              :anniversaries="anniversaries"
-            />
-          </AsyncState>
-
           <router-link
             to="/documents"
             class="surface-card elev-1 group flex min-h-11 cursor-pointer items-center justify-between gap-3 p-3 transition-colors duration-200 hover:border-blue-600"
@@ -240,7 +231,32 @@ const today = new Intl.DateTimeFormat(undefined, {
         </aside>
       </div>
 
-      <QuickActions class="mt-6" />
+      <!-- Celebrations sit below the columns, at full width, for two reasons
+           that are both geometry. One card holding both groups grew without
+           limit with the size of the company -- a month with six birthdays
+           and six anniversaries made this region several hundred pixels
+           taller than the column beside it, and a grid row is as tall as its
+           tallest cell. And two cards side by side need the page's width:
+           inside the rail they would be about 150px each, too narrow for a
+           name and a date. Five rows per card plus an in-place disclosure
+           keeps the height independent of headcount (P4-R14). -->
+      <AsyncState
+        v-if="hasCelebrations || celebrationsFailed"
+        class="mt-6"
+        section="celebrations"
+        :resource="dashboard"
+        :loading="false"
+        :error="celebrationsFailed ? { section: 'celebrations' } : null"
+        :empty="false"
+      >
+        <template #error-title>
+          We couldn't load this month's celebrations
+        </template>
+        <Celebrations
+          :birthdays="birthdays"
+          :anniversaries="anniversaries"
+        />
+      </AsyncState>
     </div>
   </AsyncState>
 </template>

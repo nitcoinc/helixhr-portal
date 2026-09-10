@@ -63,23 +63,45 @@ sentence quoted inline; out-of-week rows carry an age tag, and the list disclose
 Every row carries a stable record identity (its list key) and opens **that** record — the sent-back
 week by its Monday, the answered request, the exact decision a manager owes. Under it, a quieter
 **"Waiting on others"** run of rows under a `.label`: leave sitting with a manager is still visible
-but is not work, so it does not pad a queue called "Needs you" (P2-U4). Right rail:
+but is not work, so it does not pad a queue called "Needs you" (P2-U4). Left column, under the
+queue: **quick actions**, as one divided row. Right rail:
 leave balance, attendance, documents — reference figures, deliberately demoted, and a rail row with
-no figure does not render. Quick actions last, as one divided row. Empty queue says "Nothing needs
+no figure does not render. Empty queue says "Nothing needs
 you." and names the outstanding weekly obligation. Unread count lives on the shell's Notifications
 nav item rather than on the page.
 
-**"Celebrating this month" joins the right rail (P4-U5).** One card between the attendance figure
-and Documents: up to two labelled groups, `Birthdays` and `Work anniversaries`, each row the
+**The quick actions sit in the left column, not at the page foot (P4-U8).** They used to come after
+both columns. A grid row is as tall as its tallest cell, so a busy rail pushed them hundreds of
+pixels down the page and left that height as empty paper beside the queue — measured at 292px of
+dead space with one celebration row, and far more with a busy month. In the column that holds the
+work, the queue and its next actions stay together and the leftover height is small.
+
+**"Celebrating this month" is a full-width band below the columns (P4-U8; it was a rail card under
+P4-U5).** Two cards side by side, one per group — `Birthdays` and `Work anniversaries` — each row the
 directory's own initials monogram, the person's name, and `9 Sep` — with `· 3 years` on an
 anniversary, the one number the card prints, because that is a fact about the job and not about the
 person. Today's rows sort first and carry a small `Today` chip. **No photos and no birth year**: the
 server projects `day`, `month`, `is_today` and `years` and nothing else, so there is no date string
 on the wire to reconstruct an age from, and `formatDayMonth` exists for exactly that reason.
 
-Nothing in the card is clickable. A birthday is something to read on the way past; there is no
-detail view behind a name, and a rail of rows that look like controls and do nothing is a rail of
-dead tab stops. A group with no people is not rendered, and the whole card is hidden in a month
+Two geometry reasons moved it out of the rail. One card holding both groups grew without limit with
+the size of the company: a month with six birthdays and six anniversaries made the region several
+hundred pixels taller than the column beside it, and in a grid row that height becomes dead space
+next to the queue. And two cards side by side need the page's width — inside the rail they would be
+about 150px each, too narrow for a name and a date.
+
+Each card shows **five rows** and then a `Show all N` button that reveals the rest in place, which
+keeps the page height independent of headcount. Five rather than a fixed minimum height: a common
+card height would put dead space inside the quieter card, which is the same defect one level down.
+Expand rather than an internal scroll region — a scroll inside a card is a nested-scroll trap on a
+phone, needs its own focus and label to be reachable by keyboard, and hides people with no signal
+that they exist. The `Show all` control is a real `<button>` carrying `aria-expanded` and
+`aria-controls`, and it is the **only** interactive element in the band.
+
+No row is clickable. A birthday is something to read on the way past; there is no
+detail view behind a name, and a run of rows that look like controls and do nothing is a run of
+dead tab stops. A group with no people is not rendered — no empty slot, no "nobody has a birthday"
+line — and a lone group's card spans the band. The whole band is hidden in a month
 where nobody is celebrating — but **only when the read genuinely returned nothing**. A failed
 celebrations read shows the `AsyncState` retry panel instead, because a failed request rendered as
 its empty state is the bug that component exists to prevent (P2-AE8), and "nobody has a birthday"
