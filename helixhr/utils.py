@@ -112,6 +112,10 @@ RATE_LIMIT_POLICY = {
 	"withdraw_my_leave": (20, 3600),
 	"create_my_request": (10, 3600),
 	"attach_to_my_request": (20, 3600),
+	# Both trigger mail to the routed role, so an unbounded reply or
+	# attachment is mail amplification, not just a write to police (P5-U6).
+	"reply_to_my_request": (20, 3600),
+	"attach_to_request_reply": (20, 3600),
 	"mark_notifications_read": (60, 60),
 	# P3-U1 step 5 / P3-R25. Writes first; the two reads are bounded too
 	# because each one fans out to a per-employee lookup.

@@ -35,6 +35,9 @@ from hrms.utils.holiday_list import get_holiday_list_for_employee
 from helixhr.events import (
 	DECISION_REASON_FIELD,
 	HR_REPLY_SUBJECT_PREFIX,
+	HR_REQUEST_IN_PROGRESS,
+	HR_REQUEST_OPEN,
+	HR_REQUEST_WAITING_ON_EMPLOYEE,
 	LEAVE_STAGE_HR,
 	PENDING_STATE,
 	REQUEST_APPROVED,
@@ -47,8 +50,14 @@ from helixhr.events import (
 	TIMESHEET_PENDING_HR,
 	TIMESHEET_SENT_BACK,
 	_approver_user,
+	_enabled_users_with_role,
 	_is_hr,
 )
+
+# The routed roles that are *not* already unscoped HR access (P5-U5's own
+# permission scope), reused here rather than re-listed so this gate and
+# `hr_request.get_permission_query_conditions` cannot drift apart.
+from helixhr.helixhr.doctype.hr_request.hr_request import _WORKER_ROLES as _ROUTED_WORKER_ROLES
 from helixhr.utils import (
 	PROFILE_EDITABLE_FIELDS,
 	UPLOAD_MAX_BYTES,
@@ -1552,6 +1561,82 @@ def _hr_attendance_request_summaries(employee, today):
 	]
 
 
+def _hr_request_summaries(employee, today):
+	"""Every routed request the session user may work right now (P5-R11,
+	P5-R12).
+
+	There is no line-manager half for this kind -- a routed role's whole
+	queue arrives through this collector, reached from `_approval_summaries`'s
+	`hr_queue` loop rather than from `_APPROVAL_SUMMARY_COLLECTORS`. Scope is
+	not repeated here: `frappe.get_list` runs as the session user, and
+	`hr_request.get_permission_query_conditions` (P5-U5) already narrows the
+	rows to an HR Manager's company or a routed-role holder's own route
+	before this function ever sees them.
+
+	`Waiting on Employee` is excluded on purpose -- it is the employee's
+	backlog while they hold the ball, not the worker's (P5-R6), and counting
+	it here would show a manager or IT holder a request there is currently
+	nothing for them to do about.
+
+	`for_hr` is true only when the **stored** route is HR Manager: an IT
+	Team holder's rows must never carry Home's "waiting for HR" caption
+	(P4-KTD7's tag, applied to a fourth kind for the first time).
+	"""
+	rows = frappe.get_list(
+		"HR Request",
+		filters={
+			"status": ["in", (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS)],
+			"employee": ["!=", employee],
+		},
+		fields=[
+			"name",
+			"employee",
+			"category",
+			"subject",
+			"status",
+			"routed_to_role",
+			"picked_up_by",
+			"creation",
+			"modified",
+			"hr_note",
+		],
+		order_by="creation asc",
+		limit=_QUEUE_FETCH,
+	)
+	if not rows:
+		return []
+
+	employee_names = {
+		row.name: row.employee_name
+		for row in frappe.get_all(
+			"Employee",
+			filters={"name": ["in", list({row.employee for row in rows})]},
+			fields=["name", "employee_name"],
+		)
+	}
+	return [
+		_summary_row(
+			"request",
+			"HR Request",
+			row.name,
+			row.employee,
+			employee_names.get(row.employee) or row.employee,
+			None,
+			None,
+			row.creation,
+			row.status,
+			today,
+			category=row.category,
+			subject=row.subject,
+			routed_to_role=row.routed_to_role,
+			picked_up_by=row.picked_up_by,
+			for_hr=(row.routed_to_role == "HR Manager"),
+			hr_note=row.hr_note,
+		)
+		for row in rows
+	]
+
+
 # Per-kind, never "not leave means timesheet" (P3-U6 step 0). A third kind
 # landed in P3-U5, and every one of these helpers used to branch on one
 # doctype and treat everything else as the other.
@@ -1584,25 +1669,54 @@ def _approval_summaries(employee):
 	# (P3-R25), so a backlog of 200 used to be reported as 50 with nothing
 	# saying so.
 	capped = False
-	for collect in _APPROVAL_SUMMARY_COLLECTORS:
-		collected = collect(employee, today)
-		capped = capped or len(collected) >= _QUEUE_FETCH
-		rows.extend(collected)
+	# A routed-role holder who is not also an Employee (P5-U2 ships IT Team
+	# without that role, deliberately -- P5-KTD10) has no possible
+	# line-manager backlog at all. Leave Application, Timesheet and
+	# Attendance Request each grant their baseline read to role Employee; a
+	# caller holding neither that role nor an HR one has no DocPerm row on
+	# any of the three at all, which `frappe.get_list` answers with a hard
+	# PermissionError, not an empty list -- discovered by this gate's own
+	# widening in P5-U6, since nothing reached this function as that kind of
+	# caller before.
+	if "Employee" in frappe.get_roles():
+		for collect in _APPROVAL_SUMMARY_COLLECTORS:
+			collected = collect(employee, today)
+			capped = capped or len(collected) >= _QUEUE_FETCH
+			rows.extend(collected)
 
 	# P4-R11: one queue. An HR Manager's own reports' work arrived above,
 	# narrowed by `_line_manager_filter`; everything waiting for HR is added
 	# here and tagged, so the two halves are one oldest-first backlog rather
 	# than two lists to poll.
+	#
 	if _is_hr():
 		for kind in _APPROVAL_KINDS.values():
 			collected = kind["hr_queue"](employee, today)
 			capped = capped or len(collected) >= _QUEUE_FETCH
 			rows.extend(collected)
+	elif _holds_routed_role():
+		# P5-R11: a routed-role holder (IT Team today) has no line-manager
+		# half and no standing on Leave Application, Timesheet or Attendance
+		# Request at all -- calling their `hr_queue` collectors the way the
+		# `_is_hr()` branch above does would be the same hard PermissionError
+		# the line-manager loop hit above, not an empty answer. Their whole
+		# queue is `_hr_request_summaries`, and only that one is reached.
+		collected = _hr_request_summaries(employee, today)
+		capped = capped or len(collected) >= _QUEUE_FETCH
+		rows.extend(collected)
 
 	# Oldest first: the queue is a backlog, and the person who has waited
 	# longest is the one the manager is holding up (P2-U7 step 7).
 	rows.sort(key=lambda entry: (entry["sent_on"] or "", entry["name"]))
 	return rows, capped
+
+
+def _holds_routed_role(user=None):
+	"""Whether the caller holds a role a category may route work to, other
+	than HR Manager -- `_is_hr` already covers HR Manager, and this is the
+	other half of P5-R11's "is HR or holds a routed role" gate."""
+	user = user or frappe.session.user
+	return bool(set(frappe.get_roles(user)) & _ROUTED_WORKER_ROLES)
 
 
 def _initials(full_name):
@@ -1656,6 +1770,7 @@ _QUEUE_TITLE = {
 	"leave": lambda row: f"{row['employee_name']} asked for {row['leave_type']}",
 	"timesheet": lambda row: f"{row['employee_name']} sent a week for your approval",
 	"attendance": lambda row: f"{row['employee_name']} asked for {row['reason']}",
+	"request": lambda row: f"{row['employee_name']} filed a {row['category']} request",
 }
 
 
@@ -4134,24 +4249,32 @@ _APPROVAL_DOCTYPES = {
 	"leave": "Leave Application",
 	"timesheet": "Timesheet",
 	"attendance": "Attendance Request",
+	"request": "HR Request",
 }
 
 
-# The four outcomes, in the order the screen draws them: the decision, the
-# recoverable no, the final no, the hand-over (P4-R1..R5). Timesheets reach
-# three of them and never Reject (P4-KTD2), which is a fact of that
-# workflow's transitions rather than a rule written here.
-_APPROVAL_ACTIONS = ("Approve", "Send Back", "Reject", "Send to HR")
+# The seven outcomes, in the order the screen draws them: the decision, the
+# recoverable no, the final no, the hand-over (P4-R1..R5), and the routed
+# request's own three (Pick up, Need info, Done -- P5-U6). Timesheets reach
+# three of the first four and never Reject (P4-KTD2); HR Request never
+# reaches Approve or Send to HR at all -- both are facts of each workflow's
+# own transitions rather than a rule written here.
+_APPROVAL_ACTIONS = ("Approve", "Send Back", "Reject", "Send to HR", "Pick up", "Need info", "Done")
 
-# The two that are meaningless without one: the employee is told what to
-# change, or why the answer is final (P4-R3, P4-R4).
-_REASON_REQUIRED = ("Send Back", "Reject")
+# The three that are meaningless without one: the employee is told what to
+# change, why the answer is final, or what is missing before it can be
+# finished (P4-R3, P4-R4, P5-U6).
+_REASON_REQUIRED = ("Send Back", "Reject", "Need info")
 
 # Where an approver's reason is stored, per kind. Leave keeps its Comment --
 # its rows are never deleted -- while a rejected Attendance Request is
 # removable by its employee and a Comment dies with the document, so those
-# two carry the reason as a field of the record (P4-KTD7a, P4-KTD3).
-_DECISION_REASON_KINDS = ("Timesheet", "Attendance Request")
+# two carry the reason as a field of the record (P4-KTD7a, P4-KTD3). HR
+# Request joins them for the same reason as Attendance Request: its own
+# employee can read its Comments (P5-R10's conversation), so a decision
+# reason has to live somewhere a rejection-comment reader would not
+# mistake it for part of that conversation (P5-KTD14).
+_DECISION_REASON_KINDS = ("Timesheet", "Attendance Request", "HR Request")
 
 # Leave has no Workflow (P2-KTD17), so its half of the rule table is written
 # here. HR decides, sends back or rejects in either stage; only a line
@@ -4506,6 +4629,8 @@ def act_on_approval(
 		frappe.throw(_("Say what should change before sending it back."))
 	if action == "Reject" and not reason:
 		frappe.throw(_("Say why before rejecting this."))
+	if action == "Need info" and not reason:
+		frappe.throw(_("Say what you need from them before asking."))
 	if not expected_modified:
 		frappe.throw(_("Open this request before deciding it, then try again."))
 
@@ -4777,6 +4902,100 @@ def assert_no_attendance_overwrite(
 		frappe.throw(_("Some of those days now have attendance; send this to HR instead."))
 
 
+def _may_act_on_hr_request(doc, user):
+	"""Only a holder of this request's **stored** `routed_to_role` may act on
+	it (P5-R5, P5-R9). Reached only for a non-HR session -- `_assert_may_act_on`
+	returns early for `_is_hr()` -- so a request stamped to HR Manager is only
+	ever decided by HR here, never by an IT Team holder, whatever roles they
+	both happen to hold."""
+	if doc.routed_to_role not in frappe.get_roles(user):
+		frappe.throw(
+			_("Only {0} can act on this request.").format(doc.routed_to_role),
+			frappe.PermissionError,
+		)
+
+
+def _act_on_hr_request(doc, action):
+	"""The fixture's own transitions are the rule (P5-KTD4); this only runs
+	the one the caller was already authorised and validated for."""
+	_act_through_workflow(doc, action)
+
+
+def _request_thread(doc):
+	"""The request and every reply after it, oldest first, as one
+	conversation (P5-R10).
+
+	The employee's opening message is a field of the record; everything
+	after it is a Comment -- the routed role's `Need info`/`Reject` reasons
+	(written by `act_on_approval`'s existing, doctype-generic reason code)
+	and the employee's own replies (`reply_to_my_request`) land there the
+	same way, told apart only by who wrote them. Filtered the way
+	`_rejection_comments` filters a hand-over note: a `Send to HR` prefix can
+	never appear on this doctype's own transitions, but the guard costs
+	nothing and keeps the rule in one place rather than assuming it.
+	"""
+	employee_user = frappe.db.get_value("Employee", doc.employee, "user_id")
+	entries = []
+	opening = frappe.utils.strip_html(doc.details or "").strip()
+	if opening:
+		entries.append({"by": "employee", "message": opening, "on": str(doc.creation)})
+
+	for row in frappe.get_all(
+		"Comment",
+		filters={
+			"reference_doctype": "HR Request",
+			"reference_name": doc.name,
+			"comment_type": "Comment",
+		},
+		fields=["content", "owner", "creation"],
+		order_by="creation asc",
+		limit=_COMMENT_FETCH,
+	):
+		text = frappe.utils.strip_html(row.content or "").strip()
+		if not text or text.startswith(HR_HANDOVER_NOTE_PREFIX):
+			continue
+		entries.append(
+			{
+				"by": "employee" if employee_user and row.owner == employee_user else "worker",
+				"message": text,
+				"on": str(row.creation),
+			}
+		)
+	return entries
+
+
+def _request_decision_detail(doc):
+	"""The evidence a worker needs to decide a routed request: what the
+	employee wrote, the category it came in under, and the conversation so
+	far (P5-R10, P5-R11)."""
+	employee_name = frappe.db.get_value("Employee", doc.employee, "employee_name") or doc.employee
+	return {
+		"name": doc.name,
+		"doctype": doc.doctype,
+		"employee": doc.employee,
+		"employee_name": employee_name,
+		"initials": _initials(employee_name),
+		"modified": str(doc.modified),
+		# P4-KTD7's tag, carried by a fourth kind for the first time: true
+		# only when the stored route is HR Manager, never for IT Team.
+		"for_hr": doc.routed_to_role == "HR Manager",
+		"sent_to_hr_by": None,
+		"hr_note": doc.hr_note,
+		"kind": "request",
+		"state": doc.status,
+		"status": doc.status,
+		"docstatus": cint(doc.docstatus),
+		"category": doc.category,
+		"subject": doc.subject,
+		"routed_to_role": doc.routed_to_role,
+		"picked_up_by": doc.picked_up_by,
+		"decision_reason": doc.get(DECISION_REASON_FIELD),
+		"sent_on": str(doc.creation) if doc.creation else None,
+		"age_days": _age_in_days(doc.creation, _as_date(user_today())),
+		"thread": _request_thread(doc),
+	}
+
+
 # Everything that is per-kind about a decision, in one doctype-keyed table
 # (P3-U6 step 0, P3-U9). It replaced five parallel maps over the same three
 # doctypes -- five places a fourth kind could be half-registered, which is the
@@ -4830,6 +5049,20 @@ _APPROVAL_KINDS = {
 		"hr_state": lambda doc: doc.workflow_state == REQUEST_PENDING_HR,
 		"hr_queue": _hr_attendance_request_summaries,
 		"act": _act_on_attendance_request,
+	},
+	"HR Request": {
+		"state_field": "status",
+		"detail": _request_decision_detail,
+		"may_act": _may_act_on_hr_request,
+		"is_open": lambda doc: doc.status in (
+			HR_REQUEST_OPEN,
+			HR_REQUEST_IN_PROGRESS,
+			HR_REQUEST_WAITING_ON_EMPLOYEE,
+		),
+		"open_message": "This request has already been finished. Reload to see the result.",
+		"hr_state": lambda doc: doc.routed_to_role == "HR Manager",
+		"hr_queue": _hr_request_summaries,
+		"act": _act_on_hr_request,
 	},
 }
 
@@ -5272,6 +5505,138 @@ def attach_to_my_request(name):
 	)
 	doc.insert(ignore_permissions=True)
 	return {**_attachment(doc), "created": True}
+
+
+@frappe.whitelist(methods=["POST"])
+def reply_to_my_request(name, message, expected_modified=None):
+	"""The employee's half of a routed conversation (P5-R10, P5-U6).
+
+	This is deliberately **not** `act_on_approval` (P5-KTD5): role Employee
+	has no write on HR Request at all, so there is no workflow transition for
+	this caller to apply. The state check is against the **stored** status --
+	a reply against anything but `Waiting on Employee` is refused, the same
+	staleness contract `act_on_approval` gives the worker (P5-R8) -- and the
+	move back to the routed role's queue is `db_set`, after this function's
+	own ownership and state checks have authorised it, exactly the way
+	`act_on_approval` already writes `helixhr_decision_reason` on a
+	permlevel-1 field it does not otherwise have write on.
+
+	The reply is recorded as a Comment through `add_comment`, which always
+	inserts with `ignore_permissions=True` itself -- the fourth documented
+	exception the P2-U8 allow-list comment above promises: role Employee can
+	read nothing on this doctype directly, including its own Comments, so
+	this is the only route by which the employee's own words join the
+	thread `_request_thread` projects back to them and to the routed role.
+	"""
+	rate_limit_per_user("reply_to_my_request")
+	employee = get_current_employee()
+	row = frappe.db.get_value(
+		"HR Request",
+		name,
+		["employee", "status", "modified", "routed_to_role", "category", "subject"],
+		as_dict=True,
+	)
+	if not row or row.employee != employee:
+		frappe.throw(_("That request isn't yours."), frappe.PermissionError)
+	if not expected_modified:
+		frappe.throw(_("Open this request before replying, then try again."))
+	if get_datetime(expected_modified) != get_datetime(row.modified):
+		frappe.throw(_("Somebody changed this while you were looking at it. Reload and try again."))
+	if row.status != HR_REQUEST_WAITING_ON_EMPLOYEE:
+		frappe.throw(
+			_("This request isn't waiting on you right now ({0}). Reload to see its status.").format(
+				row.status
+			)
+		)
+
+	message = (message or "").strip()
+	if not message:
+		frappe.throw(_("Say something before sending your reply."))
+	if len(message) > _DETAILS_MAX:
+		frappe.throw(_("That reply is too long. Keep it under {0} characters.").format(_DETAILS_MAX))
+
+	doc = frappe.get_doc("HR Request", name)
+	doc.add_comment("Comment", message)
+	doc.db_set("status", HR_REQUEST_IN_PROGRESS)
+
+	role = row.routed_to_role
+	recipients = _enabled_users_with_role(role)
+	if recipients:
+		try:
+			frappe.sendmail(
+				recipients=recipients,
+				subject=f"New reply on a {row.category} request: {row.subject}",
+				message=(
+					f"{frappe.utils.escape_html(row.category)} request "
+					f"“{frappe.utils.escape_html(row.subject)}” has a new reply. "
+					f"<a href=\"{frappe.utils.get_url('/helixhr/requests')}\">Open requests</a>."
+				),
+				reference_doctype="HR Request",
+				reference_name=name,
+			)
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), "HelixHR request reply mail failed")
+
+	return {"name": name, "status": doc.status}
+
+
+@frappe.whitelist(methods=["POST"])
+def attach_to_request_reply(name):
+	"""The routed role's side of the conversation's attachments (P5-R10a) --
+	what makes an `HR Letter` request completable without opening Desk.
+
+	`attach_to_my_request`'s ownership check ("is this the caller's own
+	request") is inverted here: a worker must **not** be the request's own
+	employee, and must otherwise be authorised to act on it right now, which
+	is exactly what `_assert_may_act_on` already checks for a decision on
+	the same record (P5-R9). Reusing it means a caller this method refuses
+	and a caller `act_on_approval` would refuse can never disagree.
+	"""
+	rate_limit_per_user("attach_to_request_reply")
+	if not frappe.db.exists("HR Request", name):
+		frappe.throw(_("That request no longer exists."), frappe.DoesNotExistError)
+	doc = frappe.get_doc("HR Request", name)
+	_assert_may_act_on(doc)
+
+	upload = (getattr(frappe.request, "files", None) or {}).get("file")
+	if upload is None:
+		frappe.throw(_("No file came through. Pick the file again."))
+
+	file_name = os.path.basename(upload.filename or "").strip()
+	if not file_name:
+		frappe.throw(_("That file has no name. Pick another one."))
+
+	content = upload.stream.read()
+	# The same policy `attach_to_my_request` applies, so the type and size
+	# rule is one rule for both sides of the conversation.
+	validate_portal_upload(file_name, content)
+
+	existing = frappe.db.get_value(
+		"File",
+		{
+			"attached_to_doctype": "HR Request",
+			"attached_to_name": name,
+			"file_name": file_name,
+			"owner": frappe.session.user,
+		},
+		["name", "file_name", "file_url", "file_size", "is_private"],
+		as_dict=True,
+	)
+	if existing:
+		return {**_attachment(existing), "created": False}
+
+	file_doc = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": file_name,
+			"content": content,
+			"attached_to_doctype": "HR Request",
+			"attached_to_name": name,
+			"is_private": 1,
+		}
+	)
+	file_doc.insert(ignore_permissions=True)
+	return {**_attachment(file_doc), "created": True}
 
 
 # ---------------------------------------------------------------------------

@@ -11,8 +11,10 @@ from helixhr.tests.utils import (
 	IT_TEAM_USER,
 	MANAGER_USER,
 	ensure_hr_manager_user,
+	ensure_test_company,
 	make_test_employee_and_manager,
 	make_test_it_user,
+	make_test_user,
 )
 
 
@@ -544,6 +546,247 @@ class TestDocumentLinkUrlSafety(IntegrationTestCase):
 		doc = self._insert("https://example.com/policies/leave.pdf", title="P2-U1 valid url")
 		self.assertEqual(doc.url, "https://example.com/policies/leave.pdf")
 		frappe.delete_doc("HelixHR Document Link", doc.name, force=True, ignore_permissions=True)
+
+
+class TestRequestApprovalQueue(IntegrationTestCase):
+	"""P5-U6: a routed request is a fourth kind in the existing approval
+	queue, workable end to end, with a conversation the employee can
+	answer."""
+
+	def setUp(self):
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		self.it_employee, self.it_user = make_test_it_user()
+		self.addCleanup(setattr, frappe.local, "request", None)
+		self._mailed = []
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		for row in self._mailed:
+			frappe.db.delete("Email Queue Recipient", {"parent": row})
+			frappe.db.delete("Email Queue", {"name": row})
+
+	def _file(self, category="IT / Asset", **extra):
+		from helixhr.api import create_my_request
+
+		frappe.set_user(EMPLOYEE_USER)
+		fields = {"category": category, "subject": "Need a new laptop", "details": "Mine died", **extra}
+		created = create_my_request(operation_key=str(uuid.uuid4()), **fields)
+		frappe.set_user("Administrator")
+		return created["name"]
+
+	def _token(self, name):
+		row = frappe.db.get_value("HR Request", name, ["modified", "status"], as_dict=True)
+		return {"expected_modified": str(row.modified), "expected_state": row.status}
+
+	def _second_it_worker(self):
+		company = ensure_test_company()
+		user = "second-it-team@helixhr.test"
+		employee = make_test_user(user, company)
+		user_doc = frappe.get_doc("User", user)
+		roles = [row.role for row in user_doc.roles if row.role != "Employee"]
+		if "IT Team" not in roles:
+			roles.append("IT Team")
+			user_doc.set("roles", [{"role": role} for role in roles])
+			user_doc.save(ignore_permissions=True)
+			frappe.clear_cache(user=user)
+		return employee, user
+
+	def _watch_mail(self):
+		before = set(frappe.get_all("Email Queue", pluck="name"))
+
+		def added():
+			rows = set(frappe.get_all("Email Queue", pluck="name")) - before
+			self._mailed.extend(rows)
+			return rows
+
+		return added
+
+	def test_get_approval_detail_actions_match_get_transitions_and_others_are_refused(self):
+		from helixhr.api import act_on_approval, get_approval_detail
+
+		name = self._file()
+		frappe.set_user(self.it_user)
+		detail = get_approval_detail("request", name)
+		self.assertEqual(set(detail["actions"]), {"Pick up", "Reject"})
+
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval("HR Request", name, "Done", **self._token(name))
+
+	def test_a_stale_token_is_refused_and_current_state_then_works(self):
+		from helixhr.api import act_on_approval
+
+		name = self._file()
+		stale = self._token(name)
+
+		frappe.set_user(self.it_user)
+		act_on_approval("HR Request", name, "Pick up", **stale)
+
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval("HR Request", name, "Done", **stale)
+
+		act_on_approval("HR Request", name, "Done", **self._token(name))
+		self.assertEqual(frappe.db.get_value("HR Request", name, "status"), "Done")
+
+	def test_two_workers_picking_up_the_same_request_the_second_is_refused_and_named(self):
+		from helixhr.api import act_on_approval
+
+		name = self._file()
+		_, second_user = self._second_it_worker()
+		token = self._token(name)
+
+		frappe.set_user(self.it_user)
+		act_on_approval("HR Request", name, "Pick up", **token)
+
+		frappe.set_user(second_user)
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval("HR Request", name, "Pick up", **token)
+		self.assertEqual(frappe.db.get_value("HR Request", name, "picked_up_by"), self.it_user)
+
+	def test_need_info_and_reject_require_a_reason_written_before_the_transition(self):
+		from helixhr.api import act_on_approval
+		from helixhr.events import DECISION_REASON_FIELD
+
+		name = self._file()
+		frappe.set_user(self.it_user)
+		act_on_approval("HR Request", name, "Pick up", **self._token(name))
+
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval("HR Request", name, "Need info", **self._token(name))
+
+		act_on_approval(
+			"HR Request", name, "Need info", comment="Which laptop model?", **self._token(name)
+		)
+		doc = frappe.get_doc("HR Request", name)
+		self.assertEqual(doc.status, "Waiting on Employee")
+		self.assertEqual(doc.get(DECISION_REASON_FIELD), "Which laptop model?")
+
+	def test_employee_reply_moves_the_request_back_and_emails_the_routed_role(self):
+		from helixhr.api import act_on_approval, reply_to_my_request
+
+		name = self._file()
+		frappe.set_user(self.it_user)
+		act_on_approval("HR Request", name, "Pick up", **self._token(name))
+		act_on_approval("HR Request", name, "Need info", comment="Which model?", **self._token(name))
+
+		added = self._watch_mail()
+		frappe.set_user(EMPLOYEE_USER)
+		result = reply_to_my_request(
+			name, "A Dell Latitude, please.", expected_modified=self._token(name)["expected_modified"]
+		)
+
+		self.assertEqual(result["status"], "In Progress")
+		mails = added()
+		self.assertEqual(len(mails), 1)
+		recipients = frappe.get_all(
+			"Email Queue Recipient", filters={"parent": next(iter(mails))}, pluck="recipient"
+		)
+		self.assertIn(self.it_user, recipients)
+
+	def test_reply_against_a_status_that_isnt_waiting_on_employee_is_refused(self):
+		from helixhr.api import reply_to_my_request
+
+		name = self._file()
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.ValidationError):
+			reply_to_my_request(name, "hello", expected_modified=self._token(name)["expected_modified"])
+
+	def test_an_over_long_reply_is_refused(self):
+		from helixhr.api import _DETAILS_MAX, act_on_approval, reply_to_my_request
+
+		name = self._file()
+		frappe.set_user(self.it_user)
+		act_on_approval("HR Request", name, "Pick up", **self._token(name))
+		act_on_approval("HR Request", name, "Need info", comment="model?", **self._token(name))
+
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.ValidationError):
+			reply_to_my_request(
+				name, "x" * (_DETAILS_MAX + 1), expected_modified=self._token(name)["expected_modified"]
+			)
+
+	def test_reply_and_attach_rate_limits_are_enforced(self):
+		from helixhr.utils import rate_limit_bounds, rate_limit_per_user, reset_rate_limit
+
+		frappe.set_user(EMPLOYEE_USER)
+		for action in ("reply_to_my_request", "attach_to_request_reply"):
+			limit, _seconds = rate_limit_bounds(action)
+			frappe.flags.helixhr_enforce_rate_limits = True
+			try:
+				reset_rate_limit(action)
+				with self.assertRaises(frappe.RateLimitExceededError, msg=action):
+					for _ in range(limit + 5):
+						rate_limit_per_user(action)
+			finally:
+				frappe.flags.helixhr_enforce_rate_limits = False
+				reset_rate_limit(action)
+
+	def test_an_employee_cannot_reply_to_somebody_elses_request(self):
+		from helixhr.api import reply_to_my_request
+
+		name = self._file()
+		frappe.set_user(MANAGER_USER)
+		with self.assertRaises(frappe.PermissionError):
+			reply_to_my_request(name, "not mine", expected_modified=self._token(name)["expected_modified"])
+
+	def test_hr_attaches_a_file_to_a_reply_employee_can_see_it_a_non_worker_cannot_attach(self):
+		from helixhr.api import act_on_approval, attach_to_request_reply, get_my_request
+
+		name = self._file()
+		frappe.set_user(self.it_user)
+		act_on_approval("HR Request", name, "Pick up", **self._token(name))
+
+		frappe.local.request = with_uploaded_file("replacement-quote.pdf")
+		attach_to_request_reply(name)
+		frappe.local.request = None
+
+		frappe.set_user(EMPLOYEE_USER)
+		detail = get_my_request(name)
+		self.assertEqual([row["file_name"] for row in detail["hr_attachments"]], ["replacement-quote.pdf"])
+
+		# The request's own employee is refused: they may not act on their
+		# own request (P5-R9), which is what this method reuses to authorise.
+		frappe.local.request = with_uploaded_file("sneaky.pdf")
+		with self.assertRaises(frappe.PermissionError):
+			attach_to_request_reply(name)
+
+	def test_the_thread_excludes_the_handover_prefix_and_reads_as_plain_conversation(self):
+		from helixhr.api import act_on_approval, get_approval_detail
+
+		name = self._file(details="My laptop died over the weekend.")
+		frappe.set_user(self.it_user)
+		act_on_approval("HR Request", name, "Pick up", **self._token(name))
+		act_on_approval("HR Request", name, "Need info", comment="Which model?", **self._token(name))
+		# Simulate a hand-over note landing on this record's Comments some
+		# other way -- never reachable through this doctype's own actions,
+		# but the filter should hold regardless of how one got there.
+		frappe.get_doc("HR Request", name).add_comment("Comment", "Sent to HR: escalate this please")
+
+		frappe.set_user(self.it_user)
+		thread = get_approval_detail("request", name)["thread"]
+		messages = [entry["message"] for entry in thread]
+		self.assertIn("My laptop died over the weekend.", messages)
+		self.assertIn("Which model?", messages)
+		self.assertFalse(any(message.startswith("Sent to HR:") for message in messages))
+		self.assertTrue(all("workflow" not in message.lower() for message in messages))
+
+	def test_homes_action_queue_renders_with_a_request_pending(self):
+		from helixhr.api import _pending_approvals
+
+		self._file()
+		frappe.set_user(self.it_user)
+		decisions = _pending_approvals(self.it_employee)
+		self.assertTrue(any(row["reference_doctype"] == "HR Request" for row in decisions))
+
+	def test_an_it_team_holders_queue_is_populated(self):
+		from helixhr.api import _approval_summaries
+
+		name = self._file()
+		frappe.set_user(self.it_user)
+		rows, _capped = _approval_summaries(self.it_employee)
+		matching = [row for row in rows if row["name"] == name]
+		self.assertEqual(len(matching), 1)
+		self.assertEqual(matching[0]["kind"], "request")
+		self.assertFalse(matching[0]["for_hr"], "IT-routed rows must never carry HR's caption")
 
 
 class TestRequestIdempotency(IntegrationTestCase):
