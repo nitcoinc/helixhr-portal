@@ -66,9 +66,12 @@ class TestNotifications(IntegrationTestCase):
 		self.assertIn("Approved", log.subject)
 
 	def _leave_subjects(self, name):
+		"""The employee's own notifications on this application -- not P5-U10's
+		manager arrival notice, which lands in the same document_type/
+		document_name bucket and would otherwise double-count here."""
 		return frappe.get_all(
 			"Notification Log",
-			filters={"document_type": "Leave Application", "document_name": name},
+			filters={"for_user": EMPLOYEE_USER, "document_type": "Leave Application", "document_name": name},
 			pluck="subject",
 		)
 
@@ -483,6 +486,79 @@ class TestHrQueueEmails(IntegrationTestCase):
 		frappe.set_user("Administrator")
 		if frappe.db.exists("Leave Application", name):
 			frappe.delete_doc("Leave Application", name, force=True, ignore_permissions=True)
+
+	def _manager_logs(self, name):
+		return frappe.get_all(
+			"Notification Log",
+			filters={"for_user": MANAGER_USER, "document_type": "Leave Application", "document_name": name},
+			pluck="subject",
+		)
+
+	def test_filing_a_leave_application_notifies_the_manager_once(self):
+		"""P5-U10: the manager's arrival notice, a Notification Log (the
+		portal bell) rather than mail -- unlike everything else in this
+		class, which is HR's separate Email-channel fixture path."""
+		leave = self._leave()
+
+		subjects = self._manager_logs(leave.name)
+		self.assertEqual(len(subjects), 1)
+		self.assertIn("Casual Leave", subjects[0])
+
+	def test_a_resave_does_not_notify_the_manager_again(self):
+		leave = self._leave()
+		self.assertEqual(len(self._manager_logs(leave.name)), 1)
+
+		frappe.set_user("Administrator")
+		leave.reload()
+		leave.description = "edited"
+		leave.save(ignore_permissions=True)
+
+		self.assertEqual(len(self._manager_logs(leave.name)), 1)
+
+	def test_an_hr_approves_leave_type_notifies_hr_not_the_manager(self):
+		"""The fixture-mailed HR path (tested elsewhere in this class) must
+		not *also* ring the manager's portal bell for a request that was
+		never theirs to act on (P4-R7)."""
+		from helixhr.api import apply_for_leave
+
+		leave_type = self._hr_approves_leave_type()
+		ensure_leave_allocation(self.employee_name, leave_type, 30)
+		date = str(add_days(self.leave_date, 8))
+		frappe.set_user("Administrator")
+		for existing in frappe.get_all(
+			"Leave Application", filters={"employee": self.employee_name, "from_date": date}, pluck="name"
+		):
+			frappe.delete_doc("Leave Application", existing, force=True, ignore_permissions=True)
+
+		frappe.set_user(self.EMAIL_EMPLOYEE_USER)
+		result = apply_for_leave(leave_type=leave_type, from_date=date, to_date=date)
+		frappe.set_user("Administrator")
+		self.addCleanup(self._remove, result["name"])
+
+		self.assertEqual(result["stage"], "HR")
+		self.assertEqual(self._manager_logs(result["name"]), [])
+
+	def test_a_manager_whose_employee_is_inactive_is_not_notified_and_filing_still_succeeds(self):
+		frappe.db.set_value("Employee", self.manager_name, "status", "Left")
+		self.addCleanup(frappe.db.set_value, "Employee", self.manager_name, "status", "Active")
+
+		leave = self._leave()
+		self.assertTrue(frappe.db.exists("Leave Application", leave.name))
+		self.assertEqual(self._manager_logs(leave.name), [])
+
+	def test_the_notifier_never_addresses_the_acting_session_user(self):
+		"""Direct unit coverage of the shared guard -- constructing a real
+		document whose manager and submitter are the same login is not a
+		reachable state through any portal path, so this calls the helper
+		the way `leave_application_after_insert` does."""
+		from helixhr.events import _notify_manager_of_arrival
+
+		leave = self._leave()
+		before = frappe.db.count("Notification Log")
+		frappe.set_user(MANAGER_USER)
+		_notify_manager_of_arrival("Leave Application", leave, MANAGER_USER, "should never be written")
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.count("Notification Log"), before)
 
 	def test_a_leave_moving_to_the_hr_stage_mails_every_hr_manager_once(self):
 		leave = self._leave()

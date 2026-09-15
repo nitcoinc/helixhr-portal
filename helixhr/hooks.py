@@ -200,6 +200,10 @@ doc_events = {
 	"Leave Application": {
 		"validate": "helixhr.events.leave_application_validate",
 		"before_submit": "helixhr.events.leave_application_before_submit",
+		# P5-U10. The manager's arrival notice -- unlike Timesheet and
+		# Attendance Request, filing a leave application is the insert
+		# itself, not a later workflow-state move.
+		"after_insert": "helixhr.events.leave_application_after_insert",
 	},
 	# P3-KTD8 / P4-KTD5. Frappe does not enforce a workflow state's
 	# `allow_edit` on the server, so the attendance approval carries its

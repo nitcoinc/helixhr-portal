@@ -71,8 +71,59 @@ def _approver_user(employee):
 	return manager.user_id
 
 
+def _notify_manager_of_arrival(doctype, doc, manager_user, subject):
+	"""P5-U10: a Notification Log, not mail -- managers are in the portal
+	daily, and one more email per submission is how a channel gets ignored.
+
+	`manager_user` is always `_approver_user`'s answer: the Active-checked
+	reports-to manager every share and workflow path here already uses, so
+	"who gets told" and "who may act" can never name two different people.
+	Guarded twice: no manager (none set, or not Active) means nobody to
+	tell, and a manager who is also the acting session user (submitting
+	their own record on somebody's behalf, or a data anomaly where someone
+	reports to themselves) is never their own recipient.
+	"""
+	if not manager_user or manager_user == frappe.session.user:
+		return
+	frappe.get_doc(
+		{
+			"doctype": "Notification Log",
+			"for_user": manager_user,
+			"from_user": frappe.session.user,
+			"type": "Alert",
+			"document_type": doctype,
+			"document_name": doc.name,
+			"subject": subject,
+		}
+	).insert(ignore_permissions=True)
+
+
+def leave_application_after_insert(doc, method=None):
+	"""P5-U10: the manager learns a leave request landed, without opening
+	the portal -- the pre-existing gap the routing inventory surfaced.
+
+	An HR-approves leave type skips the manager entirely (P4-R7): the
+	fixture `HelixHR New Leave For HR` already emails HR the moment
+	`apply_for_leave` writes `helixhr_stage = "HR"`, moments after this
+	hook runs, so notifying the manager here too would be a second,
+	wrong recipient for a request that was never theirs to act on. That
+	check reads `Leave Type` directly rather than `doc.helixhr_stage`,
+	because permlevel 1 means the field is not written on `doc` until
+	after this insert returns (KTD4).
+	"""
+	if frappe.db.get_value("Leave Type", doc.leave_type, "helixhr_hr_approves"):
+		return
+	_notify_manager_of_arrival(
+		"Leave Application",
+		doc,
+		_approver_user(doc.employee),
+		_("{0} applied for {1}").format(doc.employee_name or doc.employee, doc.leave_type),
+	)
+
+
 def timesheet_on_update(doc, method=None):
 	manager_user = _approver_user(doc.employee)
+	before = doc.get_doc_before_save()
 
 	if doc.workflow_state == PENDING_STATE and doc.docstatus == 0:
 		if not manager_user:
@@ -89,6 +140,20 @@ def timesheet_on_update(doc, method=None):
 				)
 			)
 		_reconcile_timesheet_share(doc.name, doc.employee, manager_user)
+		# P5-U10: only on the transition into Pending Approval, not on every
+		# later save while it sits there (an HR reason-writing save, a
+		# reassignment reconcile) -- `before.workflow_state` is the row's
+		# stored value before this save, so a re-save that was already
+		# Pending never fires a second notification for the same arrival.
+		if not before or before.workflow_state != PENDING_STATE:
+			_notify_manager_of_arrival(
+				"Timesheet",
+				doc,
+				manager_user,
+				_("{0} submitted a timesheet for {1} to {2}").format(
+					doc.employee_name or doc.employee, doc.start_date, doc.end_date
+				),
+			)
 	else:
 		# Approved, Rejected, Cancelled, or back to Draft. "Cancelled" and
 		# the docstatus-2 case were missing until P2-U7: a cancelled week
@@ -797,18 +862,32 @@ def attendance_request_on_update(doc, method=None):
 	exists only while the request is Pending Manager and only for the Active
 	reports-to user.
 	"""
+	before = doc.get_doc_before_save()
+
 	if doc.workflow_state == REQUEST_PENDING_MANAGER and doc.docstatus == 0:
+		manager_user = _approver_user(doc.employee)
 		_reconcile_share(
 			"Attendance Request",
 			doc.name,
 			doc.employee,
-			_approver_user(doc.employee),
+			manager_user,
 			submit=1,
 		)
+		# P5-U10, same transition guard as the Timesheet arrival notice: only
+		# the move into Pending Manager, not a later save that happens to
+		# still be there.
+		if not before or before.get("workflow_state") != REQUEST_PENDING_MANAGER:
+			_notify_manager_of_arrival(
+				"Attendance Request",
+				doc,
+				manager_user,
+				_("{0} sent an attendance request for {1}").format(
+					doc.employee_name or doc.employee, doc.from_date
+				),
+			)
 	else:
 		_reconcile_share("Attendance Request", doc.name, doc.employee, None)
 
-	before = doc.get_doc_before_save()
 	if not before or before.get("workflow_state") == doc.workflow_state:
 		return
 	_notify_attendance_request(doc)

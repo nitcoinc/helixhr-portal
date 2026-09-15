@@ -172,6 +172,25 @@ class TestApiTimesheet(IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			apply_workflow({"doctype": "Timesheet", "name": name}, "Submit")
 
+	def test_submitting_notifies_the_manager_once_and_a_resave_does_not_repeat_it(self):
+		"""P5-U10: the manager's arrival notice."""
+		name = self._save_and_submit()
+
+		logs = frappe.get_all(
+			"Notification Log",
+			filters={"for_user": MANAGER_USER, "document_type": "Timesheet", "document_name": name},
+		)
+		self.assertEqual(len(logs), 1)
+
+		frappe.set_user("Administrator")
+		frappe.get_doc("Timesheet", name).save(ignore_permissions=True)
+
+		logs = frappe.get_all(
+			"Notification Log",
+			filters={"for_user": MANAGER_USER, "document_type": "Timesheet", "document_name": name},
+		)
+		self.assertEqual(len(logs), 1, "a re-save while still Pending Approval must not notify again")
+
 	def test_manager_can_read_pending_timesheet_a_different_manager_cannot(self):
 		name = self._save_and_submit()
 
