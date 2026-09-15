@@ -217,6 +217,12 @@ def get_portal_bootstrap():
 		# a leave approver with no reports would otherwise open an empty
 		# Team page. Same rule as `can_approve`: a nav decision, not a grant.
 		"has_reports": False,
+		# P5-U11: a routed-role holder (IT Team today) has no reports and is
+		# never `_is_hr()`, so `can_approve` alone would hide the Approvals nav
+		# item until their queue happened to have something in it -- the same
+		# gap P4-R13 already closed for HR Manager. Read unconditionally on
+		# role, the same way HR's `can_approve` does not wait for a pending row.
+		"can_work_requests": _holds_routed_role(),
 		"unread_notifications": 0,
 	}
 
@@ -4199,8 +4205,18 @@ def _recently_decided(employee):
 	since = add_days(user_today(), -_DECIDED_DAYS)
 	today = _as_date(user_today())
 	decided = []
-	for collect in _DECIDED_COLLECTORS:
-		decided.extend(collect(employee, since))
+	# P5-U11: the same gate `_approval_summaries` needed for its line-manager
+	# loop. A routed-role holder with no `Employee` role (IT Team, P5-KTD10)
+	# has no DocPerm row on Leave Application, Timesheet or Attendance
+	# Request at all, so `frappe.get_list` inside these collectors answers a
+	# hard PermissionError rather than an empty list -- first reachable here
+	# once `get_my_approvals` served a caller of that shape (P5-U11 is that
+	# caller; HR Request has no decided-receipts collector of its own, see
+	# `_DECIDED_COLLECTORS`, so a routed-role holder's receipt list is empty
+	# rather than missing a kind).
+	if "Employee" in frappe.get_roles():
+		for collect in _DECIDED_COLLECTORS:
+			decided.extend(collect(employee, since))
 
 	decided.sort(key=lambda entry: entry["decided_on"] or "", reverse=True)
 	for entry in decided:
@@ -5144,6 +5160,7 @@ _REQUEST_FIELDS = (
 	"status",
 	"hr_note",
 	"creation",
+	"modified",
 	"picked_up_on",
 	"replied_on",
 	"closed_on",
@@ -5245,6 +5262,12 @@ def _request_detail(name, employee):
 		# File's own download check against this request (P2-U8 scenario 4).
 		"attachments": [_attachment(row) for row in files if row.owner == mine],
 		"hr_attachments": [_attachment(row) for row in files if row.owner != mine],
+		# P5-R10: the same conversation `get_approval_detail` projects to the
+		# worker, so a reply the employee sends and a reason the worker writes
+		# read as one thread on both sides rather than two different views of
+		# the same record.
+		"thread": _request_thread(frappe.get_doc("HR Request", name)),
+		"can_reply": row.status == HR_REQUEST_WAITING_ON_EMPLOYEE,
 	}
 
 

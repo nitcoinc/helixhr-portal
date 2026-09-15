@@ -536,7 +536,42 @@ def setup_playwright_fixtures():
 	# has a name and a day on it.
 	ensure_celebration_fixtures()
 
+	# P5-U11: a fourth Playwright identity, `it`, plus one `IT / Asset`
+	# request already routed to it -- `route_it_asset_requests` (U2) points
+	# the seeded category at `IT Team` by default, so filing it as the
+	# employee is enough to give the IT identity a real, workable row rather
+	# than an empty queue on every run.
+	make_test_it_user()
+	ensure_test_it_request(employee_name)
+
 	frappe.db.commit()  # nosemgrep
+
+
+def ensure_test_it_request(employee_name):
+	"""One `IT / Asset` request, filed once, for `approvals.spec.ts`'s `it`
+	project to pick up, question and finish. Idempotent like the rest of this
+	module's `ensure_*` fixtures -- re-running setup must not pile up a fresh
+	request (and a fresh arrival email) on every CI run."""
+	from helixhr.api import create_my_request
+
+	existing = frappe.db.exists(
+		"HR Request", {"employee": employee_name, "category": "IT / Asset"}
+	)
+	if existing:
+		return existing
+
+	user = frappe.session.user
+	try:
+		frappe.set_user(frappe.db.get_value("Employee", employee_name, "user_id"))
+		created = create_my_request(
+			category="IT / Asset",
+			subject="New laptop request",
+			details="My laptop won't turn on any more.",
+			operation_key=frappe.generate_hash(length=32),
+		)
+	finally:
+		frappe.set_user(user)
+	return created["name"]
 
 
 def ensure_leave_approver_role(user):

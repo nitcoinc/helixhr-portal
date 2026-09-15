@@ -16,9 +16,14 @@ const IDENTITIES = [
   // proves the role alone reaches Desk and nothing else, and cannot sign in
   // here.
   { user: 'hr-manager-employee@helixhr.test', storageState: 'tests/.auth/hr.json' },
+  // P5-U11. The fourth identity: `IT Team`, portal-only (desk_access: 0,
+  // P5-KTD10), seeded by `make_test_it_user` with an Active Employee record
+  // of its own -- routed-request scoping (P5-U5) needs a real employee to
+  // resolve a company from, the same as every other identity here.
+  { user: 'it-team@helixhr.test', storageState: 'tests/.auth/it.json' },
 ]
 
-setup('authenticate as employee, manager and HR', async ({ baseURL }) => {
+setup('authenticate as employee, manager, HR and IT', async ({ baseURL }) => {
   const context = await request.newContext({
     baseURL,
     extraHTTPHeaders: { Host: SITE_HOST },

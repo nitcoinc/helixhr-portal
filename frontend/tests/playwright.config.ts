@@ -54,6 +54,17 @@ export default defineConfig({
       dependencies: ['setup'],
       testMatch: /approvals\.spec\.ts/,
     },
+    // P5-U11. The routed-worker identity: `IT Team`, portal-only
+    // (desk_access: 0), which never reaches Desk and works only the requests
+    // stamped to its role (P5-U5). Scoped to `approvals.spec.ts` for the same
+    // reason `hr` is -- this project exists for the IT capability shape, and
+    // every other spec is written for a different hat.
+    {
+      name: 'it',
+      use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/it.json' },
+      dependencies: ['setup'],
+      testMatch: /approvals\.spec\.ts/,
+    },
     // P2-U9 step 9. Mobile WebKit is the second mandatory browser: it is the
     // only engine on iOS, it is where a coarse pointer, a real safe-area
     // inset and Safari's own overlay behaviour actually live, and every

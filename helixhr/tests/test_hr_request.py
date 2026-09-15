@@ -12,6 +12,7 @@ from helixhr.tests.utils import (
 	MANAGER_USER,
 	ensure_hr_manager_user,
 	ensure_test_company,
+	ensure_test_email_account,
 	make_test_employee_and_manager,
 	make_test_it_user,
 	make_test_user,
@@ -556,6 +557,10 @@ class TestRequestApprovalQueue(IntegrationTestCase):
 	def setUp(self):
 		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
 		self.it_employee, self.it_user = make_test_it_user()
+		# Arrival mail (P5-U4) and the reply mail this class exercises both call
+		# `frappe.sendmail` inside the write; a site with no default outgoing
+		# Email Account throws there (P4-KTD9's failure mode, reused by P5-U6).
+		ensure_test_email_account()
 		self.addCleanup(setattr, frappe.local, "request", None)
 		self._mailed = []
 
