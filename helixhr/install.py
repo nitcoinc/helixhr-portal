@@ -31,6 +31,7 @@ def after_install():
 	from helixhr.patches.v1_0 import (
 		apply_permission_deltas,
 		report_unsubmitted_approved_leave,
+		retire_request_notifications,
 		route_it_asset_requests,
 		seed_celebration_templates,
 		seed_request_categories,
@@ -40,5 +41,6 @@ def after_install():
 	seed_celebration_templates.execute()
 	seed_request_categories.execute()
 	route_it_asset_requests.execute()
+	retire_request_notifications.execute()
 	apply_permission_deltas.execute()
 	frappe.db.commit()  # nosemgrep

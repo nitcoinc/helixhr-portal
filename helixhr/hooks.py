@@ -187,6 +187,7 @@ doc_events = {
 	# watches `status`, so a reply written without a status change produced
 	# no notification and therefore no obligation the employee could clear.
 	"HR Request": {
+		"after_insert": "helixhr.events.hr_request_after_insert",
 		"validate": "helixhr.events.hr_request_validate",
 		"on_update": "helixhr.events.hr_request_on_update",
 	},

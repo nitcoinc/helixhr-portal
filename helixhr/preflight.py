@@ -677,6 +677,7 @@ def check_fixtures():
 		# P4-U1: the single-step attendance approval, with Pending HR reached
 		# only by Send to HR (was two mandatory steps in P3).
 		("Workflow", "Attendance Request Approval"),
+		("Workflow", "HR Request Handling"),
 		# Its two new states. A Workflow's `workflow_state` values are Links
 		# and fixture import runs with `ignore_links`, so a Workflow State
 		# row that never installed leaves the workflow itself looking fine.
@@ -687,8 +688,12 @@ def check_fixtures():
 		# outcomes. Same reason as above -- a Workflow's action and state
 		# names are Links, and the import runs with `ignore_links`.
 		("Workflow State", "Sent Back"),
+		("Workflow State", "Waiting on Employee"),
 		("Workflow Action Master", "Send Back"),
 		("Workflow Action Master", "Send to HR"),
+		("Workflow Action Master", "Pick up"),
+		("Workflow Action Master", "Need info"),
+		("Workflow Action Master", "Done"),
 		("Activity Type", "General"),
 		("Notification", "HelixHR Timesheet Status Changed"),
 		("Notification", "HelixHR Leave Status Changed"),

@@ -34,6 +34,8 @@ helixhr.patches.v1_0.apply_permission_deltas #2026-09-10 P4-KTD7a decision reaso
 helixhr.patches.v1_0.apply_permission_deltas #2026-09-10 P4-KTD4 leave stage permlevel
 # P5-U2: IT Team access to routed HR Requests and category records.
 helixhr.patches.v1_0.apply_permission_deltas #2026-09-15 P5-U2 IT Team permissions
+# P5-U4: fixture removal does not delete existing Notification records.
+helixhr.patches.v1_0.retire_request_notifications
 # P4-KTD11: the two default Email Templates the celebration reminders send
 # from, inserted only if absent and never overwritten -- fixtures re-import
 # on every migrate and would replace HR's edited copy. Also called from

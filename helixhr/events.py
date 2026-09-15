@@ -400,6 +400,51 @@ def hr_request_validate(doc, method=None):
 		)
 
 
+def hr_request_after_insert(doc, method=None):
+	"""Queue arrival mail for enabled holders of the request's stored route.
+
+	The request is already durable before this hook runs. Email Queue failures
+	therefore cannot roll back a portal filing; they are logged for the operator
+	to retry while the request remains visible to its requester.
+	"""
+	role = doc.routed_to_role
+	users = _enabled_users_with_role(role)
+	if not users and role != "HR Manager":
+		frappe.log_error(
+			f"HR Request {doc.name} is routed to {role}, which has no enabled holders; falling back to HR Manager.",
+		"HelixHR request routing",
+		)
+		users = _enabled_users_with_role("HR Manager")
+	if not users:
+		frappe.log_error(
+			f"HR Request {doc.name} has no enabled recipient for route {role}.",
+			"HelixHR request routing",
+		)
+		return
+	try:
+		frappe.sendmail(
+			recipients=users,
+			subject=f"New {doc.category} request: {doc.subject}",
+			message=(
+				f"A new {frappe.utils.escape_html(doc.category)} request, “{frappe.utils.escape_html(doc.subject)}”, "
+				f"is waiting for you. <a href=\"{frappe.utils.get_url('/helixhr/requests')}\">Open requests</a>."
+			),
+			reference_doctype="HR Request",
+			reference_name=doc.name,
+		)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "HelixHR request arrival mail failed")
+
+
+def _enabled_users_with_role(role):
+	if not role:
+		return []
+	holders = frappe.get_all("Has Role", filters={"role": role, "parenttype": "User"}, pluck="parent")
+	if not holders:
+		return []
+	return frappe.get_all("User", filters={"name": ["in", holders], "enabled": 1}, pluck="name")
+
+
 def hr_request_on_update(doc, method=None):
 	"""One notification per new employee-visible reply, and none for
 	anything else.
@@ -415,6 +460,9 @@ def hr_request_on_update(doc, method=None):
 		# An insert. HR cannot write hr_note at creation (permlevel 1), and
 		# an employee's own new request has nothing to reply to yet.
 		return
+
+	if before.status != doc.status:
+		_notify_hr_request_status(doc)
 
 	note = (doc.hr_note or "").strip()
 	if not note or note == (before.hr_note or "").strip():
@@ -437,6 +485,38 @@ def hr_request_on_update(doc, method=None):
 			# Notification Log mirrors description <-> email_content in its
 			# own before_insert, so one of the pair is enough.
 			"description": frappe.utils.escape_html(note),
+		}
+	).insert(ignore_permissions=True)
+
+
+def _notify_hr_request_status(doc):
+	if doc.status not in {
+		HR_REQUEST_IN_PROGRESS,
+		HR_REQUEST_WAITING_ON_EMPLOYEE,
+		HR_REQUEST_DONE,
+		HR_REQUEST_REJECTED,
+	}:
+		return
+	for_user = frappe.db.get_value("Employee", doc.employee, "user_id") or doc.owner
+	if not for_user or for_user == frappe.session.user:
+		return
+	reason = (doc.get(DECISION_REASON_FIELD) or "").strip()
+	state = {
+		HR_REQUEST_IN_PROGRESS: "is being worked on",
+		HR_REQUEST_WAITING_ON_EMPLOYEE: "needs more information from you",
+		HR_REQUEST_DONE: "is done",
+		HR_REQUEST_REJECTED: "was declined",
+	}[doc.status]
+	frappe.get_doc(
+		{
+			"doctype": "Notification Log",
+			"for_user": for_user,
+			"from_user": frappe.session.user,
+			"type": "Alert",
+			"document_type": "HR Request",
+			"document_name": doc.name,
+			"subject": f"Your request {state}: {doc.subject}",
+			"description": frappe.utils.escape_html(reason) if reason else None,
 		}
 	).insert(ignore_permissions=True)
 
