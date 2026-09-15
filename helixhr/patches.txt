@@ -42,3 +42,7 @@ helixhr.patches.v1_0.retire_request_notifications
 # `install.py`, because `--install-app` marks patches complete without
 # running them.
 helixhr.patches.v1_0.seed_celebration_templates
+# P5-U13: the default request-notification wording, as editable
+# HelixHR Message Template rows -- inserted only if absent, never
+# overwriting an HR edit, same shape as seed_celebration_templates above.
+helixhr.patches.v1_0.seed_message_templates

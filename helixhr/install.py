@@ -34,11 +34,13 @@ def after_install():
 		retire_request_notifications,
 		route_it_asset_requests,
 		seed_celebration_templates,
+		seed_message_templates,
 		seed_request_categories,
 	)
 
 	report_unsubmitted_approved_leave.execute()
 	seed_celebration_templates.execute()
+	seed_message_templates.execute()
 	seed_request_categories.execute()
 	route_it_asset_requests.execute()
 	retire_request_notifications.execute()
