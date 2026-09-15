@@ -232,6 +232,10 @@ def get_portal_bootstrap():
 		# unconditionally on role, like `can_work_requests` above -- HR
 		# Manager need not be anybody's employee for Settings to make sense.
 		"can_configure": _is_hr(frappe.session.user),
+		# P5-U15: the same predicate `get_organisation_view` itself enforces,
+		# so the nav item and the server's own gate can never disagree --
+		# same shape as `can_configure` just above.
+		"can_see_organisation": _is_hr(frappe.session.user),
 		"unread_notifications": 0,
 	}
 
@@ -6423,3 +6427,149 @@ def _team_holiday_dates(employee, start, end, cache):
 	"""
 	_, kinds = _holiday_kinds(employee, start, end, cache)
 	return {date for date, kind in (kinds or {}).items() if kind != "weekly_off"}
+
+
+# Organisation view (P5-U15 / P5-R20, P5-R23)
+#
+# Management -- HR Manager and System Manager, the roles that already have
+# company-wide read -- sees the state of their own company here and can act
+# on nothing: this method has no write counterpart at all, not a smaller
+# permission on a shared one.
+#
+# "Absence is aggregate, never per person" (P5-U15's own words). Every other
+# screen that shows who is out (`get_my_team_week`) is scoped to a manager's
+# direct reports and withholds the leave reason; an org-wide read of *names*
+# would be a wider disclosure than any screen in the app makes today, so this
+# one goes one step further and withholds the person too. What comes back is
+# a count, and each queue's backlog age in days -- a fact about the queue,
+# never about whoever is at the front of it -- plus the same celebrations
+# projection the home page already makes public (`_get_celebrations`).
+_ORGANISATION_QUEUES = (
+	{
+		"key": "leave",
+		"doctype": "Leave Application",
+		"state_field": "status",
+		"open_states": ("Open",),
+		"docstatus_zero": True,
+	},
+	{
+		"key": "timesheet",
+		"doctype": "Timesheet",
+		"state_field": "workflow_state",
+		"open_states": (PENDING_STATE, TIMESHEET_PENDING_HR),
+		"docstatus_zero": False,
+	},
+	{
+		"key": "attendance",
+		"doctype": "Attendance Request",
+		"state_field": "workflow_state",
+		"open_states": (REQUEST_PENDING_MANAGER, REQUEST_PENDING_HR),
+		"docstatus_zero": True,
+	},
+	{
+		"key": "request",
+		"doctype": "HR Request",
+		"state_field": "status",
+		"open_states": (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS, HR_REQUEST_WAITING_ON_EMPLOYEE),
+		"docstatus_zero": False,
+	},
+)
+
+
+def _queue_aggregate(doctype, state_field, open_states, docstatus_zero, company, today):
+	"""One kind's backlog, as two numbers: how many rows are open in this
+	company, and how many days old the oldest one is.
+
+	One aggregate query -- `count(*)` and `min(creation)` together -- rather
+	than a fetch-then-measure, so this stays flat as the organisation grows
+	instead of costing one round trip per pending row (P5-R23). `state_field`
+	and `doctype` are drawn only from `_ORGANISATION_QUEUES` above, never from
+	a caller, so building the query with an f-string carries no injection
+	surface; every value that *is* a caller-adjacent input (`company`,
+	`open_states`) is bound as a SQL parameter.
+	"""
+	if not company:
+		return {"pending": 0, "oldest_pending_days": None}
+	table = f"`tab{doctype}`"
+	state_placeholders = ", ".join(["%s"] * len(open_states))
+	docstatus_clause = "and t.docstatus = 0" if docstatus_zero else ""
+	row = frappe.db.sql(
+		f"""
+		select count(*) as pending, min(t.creation) as oldest
+		from {table} t
+		inner join `tabEmployee` e on e.name = t.employee
+		where e.company = %s
+		and t.{state_field} in ({state_placeholders})
+		{docstatus_clause}
+		""",
+		(company, *open_states),
+		as_dict=True,
+	)[0]
+	oldest_days = date_diff(today, getdate(row.oldest)) if row.oldest else None
+	return {"pending": cint(row.pending), "oldest_pending_days": oldest_days}
+
+
+def _on_leave_today(company, today):
+	"""How many people in `company` are on approved leave today -- a count,
+	never a name (see the module note above)."""
+	if not company:
+		return 0
+	return cint(
+		frappe.db.sql(
+			"""
+			select count(*)
+			from `tabLeave Application` t
+			inner join `tabEmployee` e on e.name = t.employee
+			where e.company = %s and t.docstatus = 1 and t.status = 'Approved'
+			and t.from_date <= %s and t.to_date >= %s
+			""",
+			(company, today, today),
+		)[0][0]
+	)
+
+
+@frappe.whitelist()
+def get_organisation_view():
+	"""A read-only snapshot of the caller's own company (P5-R20): headcount,
+	how many people are out today, each queue's backlog and its age, and
+	this month's celebrations.
+
+	Gated on `_is_hr()` -- the same predicate `can_configure` and
+	`get_portal_config` already use (P5-U14) -- because this is company-wide
+	read, not a manager's own team. No new role and no new permission delta:
+	P5-U15's whole point is that HR Manager and System Manager already have
+	the read this method projects.
+	"""
+	rate_limit_per_user("get_organisation_view")
+	if not _is_hr():
+		frappe.throw(_("Only HR may see the organisation view."), frappe.PermissionError)
+
+	employee = get_current_employee()
+	company = frappe.db.get_value("Employee", employee, "company") if employee else None
+	today = user_today()
+
+	return {
+		"company": company,
+		"headcount": _headcount(company),
+		"on_leave_today": _on_leave_today(company, today),
+		"queues": {
+			queue["key"]: _queue_aggregate(
+				queue["doctype"],
+				queue["state_field"],
+				queue["open_states"],
+				queue["docstatus_zero"],
+				company,
+				today,
+			)
+			for queue in _ORGANISATION_QUEUES
+		},
+		"celebrations": (
+			_get_celebrations(employee, getdate(today)) if employee else {"birthdays": [], "anniversaries": []}
+		),
+	}
+
+
+def _headcount(company):
+	if not company:
+		return 0
+	return frappe.db.count("Employee", {"status": "Active", "company": company})

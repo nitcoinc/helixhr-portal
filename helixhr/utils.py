@@ -199,6 +199,7 @@ RATE_LIMIT_POLICY = {
 	"download_my_payslip": (10, 60),
 	"get_directory": (60, 60),
 	"get_my_team_week": (60, 60),
+	"get_organisation_view": (60, 60),
 	"get_request_categories": (60, 60),
 	# P5-U13 configuration writes. Reads (`get_portal_config`) are cheap and
 	# server-scoped like `get_directory`; every write checks permission itself
