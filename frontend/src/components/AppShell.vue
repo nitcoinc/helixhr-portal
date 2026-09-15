@@ -27,6 +27,7 @@ const NAV = [
   { label: 'Directory', to: '/directory', icon: 'users' },
   { label: 'Team', to: '/team', icon: 'users', reportsOnly: true },
   { label: 'Approvals', to: '/approvals', icon: 'approvals', managerOnly: true },
+  { label: 'Settings', to: '/settings', icon: 'settings', configureOnly: true },
   { label: 'Notifications', to: '/notifications', icon: 'notifications', badge: true },
   { label: 'Profile', to: '/profile', icon: 'profile' },
 ]
@@ -52,7 +53,9 @@ const isManager = computed(() => session.canApprove || session.canWorkRequests)
 const navItems = computed(() =>
   NAV.filter(
     (item) =>
-      (!item.managerOnly || isManager.value) && (!item.reportsOnly || session.hasReports),
+      (!item.managerOnly || isManager.value) &&
+      (!item.reportsOnly || session.hasReports) &&
+      (!item.configureOnly || session.canConfigure),
   ),
 )
 const primaryItems = computed(() => navItems.value.filter((item) => item.primary))

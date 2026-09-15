@@ -227,6 +227,11 @@ def get_portal_bootstrap():
 		# gap P4-R13 already closed for HR Manager. Read unconditionally on
 		# role, the same way HR's `can_approve` does not wait for a pending row.
 		"can_work_requests": _holds_routed_role(),
+		# P5-U14: the same predicate `get_portal_config` itself enforces, so
+		# the nav item and the server's own gate can never disagree. Read
+		# unconditionally on role, like `can_work_requests` above -- HR
+		# Manager need not be anybody's employee for Settings to make sense.
+		"can_configure": _is_hr(frappe.session.user),
 		"unread_notifications": 0,
 	}
 

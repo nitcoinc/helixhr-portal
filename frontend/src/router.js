@@ -145,6 +145,21 @@ const routes = [
     name: 'Profile',
     component: () => import('@/pages/Profile.vue'),
   },
+  {
+    path: '/settings',
+    name: 'Settings',
+    component: () => import('@/pages/Settings.vue'),
+  },
+  {
+    // P5-U14: a section is opened directly (e.g. from a link elsewhere in
+    // the portal) rather than only via in-page tabs. `get_portal_config` is
+    // the server's own gate -- an employee hitting this route directly gets
+    // AsyncState's 'forbidden' region, not a client-side redirect.
+    path: '/settings/:section(categories|templates|leave-types|holiday-lists|shift-types)',
+    name: 'SettingsSection',
+    component: () => import('@/pages/Settings.vue'),
+    props: true,
+  },
   // The three states that are not a page of the portal. All of them render
   // NotLinked.vue, which reads the session status; none of them get the nav
   // shell (there is nothing to navigate with, and for a Guest there is
