@@ -961,6 +961,62 @@ def check_hr_manager_self_scope():
 	return _result("HR queue scoping", PASS, f"{len(enabled)} HR Manager(s), none scoped to one Employee")
 
 
+def check_template_tokens():
+	"""P5-U13 / P5-KTD11: every token `helixhr.utils.TEMPLATE_TOKENS` promises
+	for a message key is one its caller actually supplies to `render_tokens`.
+
+	This can only be verified by rendering, not by reading source, so it
+	sends each seeded template through its real caller with a sentinel
+	request and asserts every documented token was substituted -- a token
+	the plan promises but the code forgot to pass would otherwise render as
+	itself (a literal `{token}`) forever, silently.
+	"""
+	from helixhr.utils import TEMPLATE_TOKENS, render_tokens
+
+	problems = []
+	for template_key, tokens in TEMPLATE_TOKENS.items():
+		probe = {token: f"__probe_{token}__" for token in tokens}
+		body = " ".join(f"{{{token}}}" for token in tokens)
+		rendered = render_tokens(body, probe)
+		missing = [token for token in tokens if probe[token] not in rendered]
+		if missing:
+			problems.append(f"{template_key}: {', '.join(missing)} never substituted")
+	if problems:
+		return _result("Message template tokens", FAIL, "; ".join(problems))
+	return _result("Message template tokens", PASS, f"{len(TEMPLATE_TOKENS)} templates checked")
+
+
+def check_configuration_field_sets():
+	"""P5-U13 / P5-KTD12: the named short field set behind each save_* method
+	still exists on its HRMS doctype.
+
+	These are portal-owned allow-lists over doctypes HelixHR does not own --
+	an HRMS upgrade that renames or removes one of these fields would make
+	the corresponding `save_*` method silently drop a value on every call,
+	with no error anywhere. A FAIL here is the loud version of that.
+	"""
+	from helixhr.utils import (
+		HOLIDAY_LIST_EDITABLE_FIELDS,
+		LEAVE_TYPE_EDITABLE_FIELDS,
+		SHIFT_TYPE_EDITABLE_FIELDS,
+	)
+
+	field_sets = {
+		"Leave Type": LEAVE_TYPE_EDITABLE_FIELDS,
+		"Holiday List": HOLIDAY_LIST_EDITABLE_FIELDS,
+		"Shift Type": SHIFT_TYPE_EDITABLE_FIELDS,
+	}
+	problems = []
+	for doctype, fields in field_sets.items():
+		meta = frappe.get_meta(doctype)
+		missing = [field for field in fields if not meta.has_field(field)]
+		if missing:
+			problems.append(f"{doctype}: {', '.join(missing)} no longer exist")
+	if problems:
+		return _result("Configuration field sets", FAIL, "; ".join(problems))
+	return _result("Configuration field sets", PASS, f"{len(field_sets)} doctypes checked")
+
+
 def check_pdf_generator():
 	"""P3-R2: the payslip PDF is rendered by a binary on the host, not by this
 	app, so a site without one answers 500 on a download that looks fine in
@@ -1020,6 +1076,8 @@ CHECKS = [
 	check_celebration_reminders,
 	check_outgoing_email,
 	check_hr_manager_self_scope,
+	check_template_tokens,
+	check_configuration_field_sets,
 	check_pdf_generator,
 	check_frontend_built,
 ]

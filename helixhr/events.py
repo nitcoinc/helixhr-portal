@@ -4,7 +4,14 @@ from frappe.model import no_value_fields
 from frappe.utils import cint
 
 from helixhr.helixhr.doctype.hr_request.hr_request import request_belongs_to_session
-from helixhr.utils import UPLOAD_POLICY, get_manager_user, upload_extension, validate_portal_upload
+from helixhr.utils import (
+	UPLOAD_POLICY,
+	get_manager_user,
+	get_message_template,
+	render_tokens,
+	upload_extension,
+	validate_portal_upload,
+)
 
 # Timesheet workflow document event hooks (KTD7, KTD18). Two guards, both
 # needed because Frappe's workflow engine only enforces "does the acting
@@ -421,14 +428,26 @@ def hr_request_after_insert(doc, method=None):
 			"HelixHR request routing",
 		)
 		return
+	tokens = {
+		"category": frappe.utils.escape_html(doc.category),
+		"subject": frappe.utils.escape_html(doc.subject),
+		"portal_url": frappe.utils.get_url("/helixhr/requests"),
+	}
+	template = get_message_template("request_arrival")
+	if template:
+		subject = render_tokens(template.subject, tokens)
+		message = render_tokens(template.body, tokens)
+	else:
+		subject = f"New {doc.category} request: {doc.subject}"
+		message = (
+			f"A new {tokens['category']} request, “{tokens['subject']}”, "
+			f"is waiting for you. <a href=\"{tokens['portal_url']}\">Open requests</a>."
+		)
 	try:
 		frappe.sendmail(
 			recipients=users,
-			subject=f"New {doc.category} request: {doc.subject}",
-			message=(
-				f"A new {frappe.utils.escape_html(doc.category)} request, “{frappe.utils.escape_html(doc.subject)}”, "
-				f"is waiting for you. <a href=\"{frappe.utils.get_url('/helixhr/requests')}\">Open requests</a>."
-			),
+			subject=subject,
+			message=message,
 			reference_doctype="HR Request",
 			reference_name=doc.name,
 		)
@@ -507,6 +526,15 @@ def _notify_hr_request_status(doc):
 		HR_REQUEST_DONE: "is done",
 		HR_REQUEST_REJECTED: "was declined",
 	}[doc.status]
+	tokens = {
+		"category": frappe.utils.escape_html(doc.category),
+		"subject": frappe.utils.escape_html(doc.subject),
+		"state": state,
+		"reason": frappe.utils.escape_html(reason) if reason else "",
+	}
+	template = get_message_template("request_status_changed")
+	subject = render_tokens(template.subject, tokens) if template else f"Your request {state}: {doc.subject}"
+	description = render_tokens(template.body, tokens) if template else (tokens["reason"] or None)
 	frappe.get_doc(
 		{
 			"doctype": "Notification Log",
@@ -515,8 +543,8 @@ def _notify_hr_request_status(doc):
 			"type": "Alert",
 			"document_type": "HR Request",
 			"document_name": doc.name,
-			"subject": f"Your request {state}: {doc.subject}",
-			"description": frappe.utils.escape_html(reason) if reason else None,
+			"subject": subject,
+			"description": description or None,
 		}
 	).insert(ignore_permissions=True)
 
