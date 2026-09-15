@@ -14,6 +14,7 @@ HR_MANAGER_USER = "hr-manager@helixhr.test"
 # second identity: HR_MANAGER_USER has no Employee record on purpose and must
 # keep not having one.
 HR_MANAGER_EMPLOYEE_USER = "hr-manager-employee@helixhr.test"
+IT_TEAM_USER = "it-team@helixhr.test"
 OTHER_MANAGER_USER = "other-manager@helixhr.test"
 # Not "password" -- some sites (any with System Settings' password policy
 # enabled, unlike a barebones fresh test site) reject it as a top-10
@@ -238,6 +239,21 @@ def make_test_hr_manager_employee():
 		frappe.clear_cache(user=HR_MANAGER_EMPLOYEE_USER)
 
 	return employee_name, HR_MANAGER_EMPLOYEE_USER
+
+
+def make_test_it_user():
+	"""An IT Team portal user with an Employee record but no Desk role (P5-U2)."""
+	company = ensure_test_company()
+	employee_name = make_test_user(IT_TEAM_USER, company)
+	user = frappe.get_doc("User", IT_TEAM_USER)
+	roles = [row.role for row in user.roles if row.role != "Employee"]
+	if "IT Team" not in roles:
+		roles.append("IT Team")
+	if roles != [row.role for row in user.roles]:
+		user.set("roles", [{"role": role} for role in roles])
+		user.save(ignore_permissions=True)
+		frappe.clear_cache(user=IT_TEAM_USER)
+	return employee_name, IT_TEAM_USER
 
 
 TEST_EMAIL_ACCOUNT = "_Test HelixHR Outgoing"

@@ -44,6 +44,7 @@ from frappe.utils import cint
 from helixhr.patches.v1_0.apply_permission_deltas import DELTAS
 from helixhr.utils import (
 	ALLOWED_UPLOAD_EXTENSIONS,
+	DESK_ROLES,
 	RATE_LIMIT_POLICY,
 	UPLOAD_MAX_BYTES,
 	portal_home_page,
@@ -51,6 +52,8 @@ from helixhr.utils import (
 )
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
+IT_TEAM = "IT Team"
+IT_TEAM_HR_REQUEST_PERMLEVEL_ONE_FIELDS = frozenset({"status", "hr_note"})
 
 
 def run():
@@ -347,6 +350,36 @@ def check_portal_landing():
 	if problems:
 		return _result("Portal landing", FAIL, "; ".join(problems))
 	return _result("Portal landing", PASS, "employees land on /helixhr; Desk users are untouched")
+
+
+def check_it_team_role():
+	"""P5-U2: IT Team stays portal-only and its writable request fields are reviewed."""
+	problems = []
+	role = frappe.db.get_value("Role", IT_TEAM, ["desk_access", "is_custom"], as_dict=True)
+	if not role:
+		problems.append("Role fixture is missing")
+	else:
+		if cint(role.desk_access):
+			problems.append("desk_access must be 0")
+		if cint(role.is_custom):
+			problems.append("is_custom must be 0")
+	if IT_TEAM in DESK_ROLES:
+		problems.append("IT Team is in DESK_ROLES")
+
+	actual = {
+		field.fieldname
+		for field in frappe.get_meta("HR Request").fields
+		if cint(field.permlevel) == 1
+	}
+	if actual != IT_TEAM_HR_REQUEST_PERMLEVEL_ONE_FIELDS:
+		problems.append(
+			"HR Request permlevel-1 fields are not reviewed: "
+			f"expected {sorted(IT_TEAM_HR_REQUEST_PERMLEVEL_ONE_FIELDS)}, got {sorted(actual)}"
+		)
+
+	if problems:
+		return _result("IT Team role", FAIL, "; ".join(problems) + " -- run bench migrate")
+	return _result("IT Team role", PASS, "portal-only role and HR Request field inventory reviewed")
 
 
 def check_signup_disabled():
@@ -960,6 +993,7 @@ CHECKS = [
 	check_unsubmitted_approved_leave,
 	check_document_link_urls,
 	check_portal_landing,
+	check_it_team_role,
 	check_signup_disabled,
 	check_password_login,
 	check_entra,

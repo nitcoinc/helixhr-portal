@@ -478,6 +478,8 @@ class TestPermissionDeltas(IntegrationTestCase):
 		"Employee Checkin",
 		"Attendance Request",
 		"Salary Slip",
+		"HR Request",
+		"HelixHR Request Category",
 	)
 
 	def test_no_standard_role_lost_access_to_a_customised_doctype(self):
@@ -547,6 +549,18 @@ class TestPermissionDeltas(IntegrationTestCase):
 		self.assertFalse(not_owner["if_owner"].get("delete"), "and only their own")
 		self.assertFalse(not_owner.get("delete"), "an employee must not delete another employee's leave")
 		self.assertTrue(not_owner.get("read"), "reading a request HR filed for them must still work")
+
+	def test_it_team_permissions_keep_existing_hr_request_roles_and_limit_category_access(self):
+		for permlevel in (0, 1):
+			rule = _rule("HR Request", "IT Team", permlevel=permlevel)
+			self.assertIsNotNone(rule, f"IT Team is missing HR Request level {permlevel}")
+			self.assertTrue(rule.read and rule.write)
+
+		category = _rule("HelixHR Request Category", "IT Team")
+		self.assertIsNotNone(category)
+		self.assertTrue(category.read)
+		for ptype in ("create", "write", "delete", "share"):
+			self.assertEqual(category.get(ptype), 0, ptype)
 
 	def test_the_employee_role_can_submit_a_timesheet(self):
 		"""R17: the portal's send-for-approval transition submits the week as

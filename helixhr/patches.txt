@@ -6,6 +6,9 @@
 # P5-U1: replaces the HR Request category Select options with records named
 # exactly as the stored legacy values, so Link validation does not orphan rows.
 helixhr.patches.v1_0.seed_request_categories
+# P5-U2: Role fixtures sync before post-model patches, so the seeded IT / Asset
+# route can now point to the portal-only IT Team role without rewriting history.
+helixhr.patches.v1_0.route_it_asset_requests
 # Patches added in this section will be executed after doctypes are migrated
 # P2-U1 step 4: lists the legacy docstatus 0 / status Approved rows the
 # pre-P2-U1 approval path left behind. Reports only -- it never submits.
@@ -29,6 +32,8 @@ helixhr.patches.v1_0.apply_permission_deltas #2026-09-10 P4-KTD7a decision reaso
 # P4-KTD4: same module, new deltas (HR Manager at permlevel 1 on Leave
 # Application, for `helixhr_stage`).
 helixhr.patches.v1_0.apply_permission_deltas #2026-09-10 P4-KTD4 leave stage permlevel
+# P5-U2: IT Team access to routed HR Requests and category records.
+helixhr.patches.v1_0.apply_permission_deltas #2026-09-15 P5-U2 IT Team permissions
 # P4-KTD11: the two default Email Templates the celebration reminders send
 # from, inserted only if absent and never overwritten -- fixtures re-import
 # on every migrate and would replace HR's edited copy. Also called from

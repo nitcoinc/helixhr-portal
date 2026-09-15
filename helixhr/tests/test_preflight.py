@@ -1,4 +1,4 @@
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 
 import frappe
 from frappe.tests import IntegrationTestCase
@@ -48,6 +48,27 @@ class TestPreflight(IntegrationTestCase):
 			"apply_strict_user_permissions", 0, preflight.check_strict_user_permissions
 		)
 		self.assertEqual(result["status"], preflight.FAIL)
+
+	def test_it_team_role_is_portal_only_and_its_hr_request_lock_is_reviewed(self):
+		self.assertEqual(preflight.check_it_team_role()["status"], preflight.PASS)
+
+		from unittest.mock import patch
+
+		with patch.object(preflight, "DESK_ROLES", frozenset({"IT Team"})):
+			result = preflight.check_it_team_role()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("DESK_ROLES", result["detail"])
+
+		with patch.object(
+			preflight.frappe,
+			"get_meta",
+			return_value=SimpleNamespace(
+				fields=[SimpleNamespace(fieldname="unreviewed_field", permlevel=1)]
+			),
+		):
+			result = preflight.check_it_team_role()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("unreviewed_field", result["detail"])
 
 	def test_a_linked_employee_without_a_user_permission_fails(self):
 		perms = frappe.get_all(

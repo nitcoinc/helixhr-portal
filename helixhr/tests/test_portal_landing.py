@@ -50,6 +50,14 @@ class TestPortalLanding(IntegrationTestCase):
 
 		self.assertEqual(portal_home_page(user), PORTAL_HOME_PAGE)
 
+	def test_an_it_team_member_is_a_website_user_and_lands_on_the_portal(self):
+		from helixhr.tests.utils import make_test_it_user
+
+		employee, user = make_test_it_user()
+		self.assertTrue(employee)
+		self.assertEqual(frappe.db.get_value("User", user, "user_type"), "Website User")
+		self.assertEqual(portal_home_page(user), PORTAL_HOME_PAGE)
+
 	def test_an_hr_manager_with_no_employee_record_keeps_desk(self):
 		"""The other half of KTD8. An HR Manager who is not an employee has
 		no portal identity at all: every portal read starts from
