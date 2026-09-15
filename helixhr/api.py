@@ -59,7 +59,11 @@ from helixhr.events import (
 # `hr_request.get_permission_query_conditions` cannot drift apart.
 from helixhr.helixhr.doctype.hr_request.hr_request import _WORKER_ROLES as _ROUTED_WORKER_ROLES
 from helixhr.utils import (
+	HOLIDAY_LIST_EDITABLE_FIELDS,
+	LEAVE_TYPE_EDITABLE_FIELDS,
 	PROFILE_EDITABLE_FIELDS,
+	SHIFT_TYPE_EDITABLE_FIELDS,
+	TEMPLATE_TOKENS,
 	UPLOAD_MAX_BYTES,
 	get_manager_user,
 	get_week_bounds,
@@ -5462,6 +5466,224 @@ def get_request_categories():
 		limit=_REQUEST_CATEGORY_LIMIT,
 		order_by="category_name asc",
 	)
+
+
+# --- Configuration (P5-U13, P5-KTD3, P5-KTD11, P5-KTD12, P5-KTD15) ---------
+
+# Data fieldtype's storage limit, restated here so a caller gets a plain
+# refusal instead of a DB truncation or a `CharacterLengthExceededError` with
+# no context (P5-R19). `HelixHR Message Template.subject` carries the same
+# limit in its own JSON; this is the number the API enforces before it ever
+# reaches the document.
+_TEMPLATE_SUBJECT_MAX = 140
+
+# The category's own fields (not one of P5-KTD12's borrowed-doctype sets --
+# `HelixHR Request Category` is app-owned, so its whole shape beyond the
+# autoname key is already short).
+_CATEGORY_EDITABLE_FIELDS = ("hint", "route_to_role", "sla_days", "is_active")
+
+
+def _assert_config_write(doc):
+	"""Explicit permission check before a configuration write (P5-R18,
+	P5-KTD15): `doc.save()` on a new or existing document still runs the
+	doctype's own `has_permission`, so this is not the only gate, but the
+	plan asks for a `PermissionError` a caller can act on before anything
+	else about the write is attempted."""
+	ptype = "create" if doc.is_new() else "write"
+	if not doc.has_permission(ptype):
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+
+
+def _apply_allowed_fields(doc, fields, allowed, skip_on_update=()):
+	"""Update only the named, allow-listed fields (P5-KTD12) -- anything
+	else in `fields` is silently ignored, never reaches `doc.set`, and can
+	never widen what a caller can change just by adding another keyword.
+	`skip_on_update` names an identifying field (`leave_type_name`,
+	`holiday_list_name`) that only applies at creation: these doctypes'
+	`field:` autoname does not re-rename an existing document when the
+	field changes later, so accepting it on an update would silently
+	desynchronise `doc.name` from the field HR just edited."""
+	for field in allowed:
+		if field in skip_on_update and not doc.is_new():
+			continue
+		if field in fields:
+			doc.set(field, fields[field])
+
+
+@frappe.whitelist()
+def get_portal_config():
+	"""Everything the Settings screen needs, in one call (P5-R13, P5-R14,
+	P5-R16). HR only: an IT Team holder works requests but does not
+	configure the site."""
+	rate_limit_per_user("get_portal_config")
+	if not _is_hr():
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+
+	return {
+		"categories": frappe.get_all(
+			"HelixHR Request Category",
+			fields=["name", "category_name", "hint", "route_to_role", "sla_days", "is_active"],
+			order_by="category_name asc",
+		),
+		"templates": frappe.get_all(
+			"HelixHR Message Template",
+			fields=["name", "template_key", "subject", "body", "is_enabled"],
+			order_by="template_key asc",
+		),
+		"template_tokens": TEMPLATE_TOKENS,
+		"leave_types": frappe.get_all(
+			"Leave Type", fields=["name", *LEAVE_TYPE_EDITABLE_FIELDS], order_by="leave_type_name asc"
+		),
+		# `holidays` is a child table -- not a plain column `frappe.get_all`
+		# can select for a list summary. The scalar fields are enough for
+		# the settings list; a specific list's rows are read when editing
+		# it, via `frappe.get_doc`.
+		"holiday_lists": frappe.get_all(
+			"Holiday List",
+			fields=["name", *(field for field in HOLIDAY_LIST_EDITABLE_FIELDS if field != "holidays")],
+			order_by="holiday_list_name asc",
+		),
+		"shift_types": frappe.get_all(
+			"Shift Type", fields=["name", *SHIFT_TYPE_EDITABLE_FIELDS], order_by="name asc"
+		),
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+def save_request_category(name, **fields):
+	"""Create or update one request category (P5-R13). `route_to_role` is
+	validated against the reviewed set of workable roles by the doctype's
+	own `validate()` -- not repeated here, so the rule cannot drift between
+	the portal and Desk."""
+	rate_limit_per_user("save_request_category")
+	name = (name or "").strip()
+	if not name:
+		frappe.throw(_("Give the category a name."))
+
+	if frappe.db.exists("HelixHR Request Category", name):
+		doc = frappe.get_doc("HelixHR Request Category", name)
+	else:
+		doc = frappe.new_doc("HelixHR Request Category")
+		doc.category_name = name
+
+	_assert_config_write(doc)
+	_apply_allowed_fields(doc, fields, _CATEGORY_EDITABLE_FIELDS)
+	doc.save()
+	return {field: doc.get(field) for field in ("name", "category_name", *_CATEGORY_EDITABLE_FIELDS)}
+
+
+@frappe.whitelist(methods=["POST"])
+def save_message_template(template_key, subject=None, body=None, is_enabled=None):
+	"""Edit the wording of one message the portal sends (P5-R14). The body
+	is stored as-is and rendered later by `helixhr.utils.render_tokens` --
+	plain substitution, never Jinja (P5-R15, P5-KTD11) -- so nothing here
+	ever executes what HR types."""
+	rate_limit_per_user("save_message_template")
+	if template_key not in TEMPLATE_TOKENS:
+		frappe.throw(_("Not a valid message."))
+
+	if frappe.db.exists("HelixHR Message Template", template_key):
+		doc = frappe.get_doc("HelixHR Message Template", template_key)
+	else:
+		doc = frappe.new_doc("HelixHR Message Template")
+		doc.template_key = template_key
+
+	_assert_config_write(doc)
+	if subject is not None:
+		subject = subject.strip()
+		if len(subject) > _TEMPLATE_SUBJECT_MAX:
+			frappe.throw(
+				_("That subject is too long. Keep it under {0} characters.").format(_TEMPLATE_SUBJECT_MAX)
+			)
+		doc.subject = subject
+	if body is not None:
+		doc.body = body
+	if is_enabled is not None:
+		doc.is_enabled = cint(is_enabled)
+	doc.save()
+	return {
+		"template_key": doc.template_key,
+		"subject": doc.subject,
+		"body": doc.body,
+		"is_enabled": cint(doc.is_enabled),
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+def save_leave_type(name, **fields):
+	"""Create or update a leave type through the five-field set P5-KTD12
+	names -- HRMS's own `validate()` still runs on `doc.save()` (P5-KTD15),
+	so a value HRMS itself would reject is rejected here too."""
+	rate_limit_per_user("save_leave_type")
+	name = (name or "").strip()
+	if not name:
+		frappe.throw(_("Give the leave type a name."))
+
+	if frappe.db.exists("Leave Type", name):
+		doc = frappe.get_doc("Leave Type", name)
+	else:
+		doc = frappe.new_doc("Leave Type")
+		doc.leave_type_name = fields.get("leave_type_name") or name
+
+	_assert_config_write(doc)
+	_apply_allowed_fields(doc, fields, LEAVE_TYPE_EDITABLE_FIELDS, skip_on_update=("leave_type_name",))
+	doc.save()
+	return {"name": doc.name, **{field: doc.get(field) for field in LEAVE_TYPE_EDITABLE_FIELDS}}
+
+
+@frappe.whitelist(methods=["POST"])
+def save_holiday_list(name, holidays=None, **fields):
+	"""Create or update a holiday list through the named field set
+	(P5-KTD12). `holidays` is the child table, posted as a list of
+	`{"holiday_date": ..., "description": ...}` rows -- `doc.set` replaces
+	the table wholesale, matching how the Desk form itself saves it."""
+	rate_limit_per_user("save_holiday_list")
+	name = (name or "").strip()
+	if not name:
+		frappe.throw(_("Give the holiday list a name."))
+
+	if frappe.db.exists("Holiday List", name):
+		doc = frappe.get_doc("Holiday List", name)
+	else:
+		doc = frappe.new_doc("Holiday List")
+		doc.holiday_list_name = fields.get("holiday_list_name") or name
+
+	_assert_config_write(doc)
+	_apply_allowed_fields(doc, fields, HOLIDAY_LIST_EDITABLE_FIELDS, skip_on_update=("holiday_list_name",))
+	if holidays is not None:
+		doc.set("holidays", holidays)
+	doc.save()
+	return {
+		"name": doc.name,
+		"from_date": str(doc.from_date) if doc.from_date else None,
+		"to_date": str(doc.to_date) if doc.to_date else None,
+		"weekly_off": doc.weekly_off,
+		"holidays": [
+			{"holiday_date": str(row.holiday_date), "description": row.description} for row in doc.holidays
+		],
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+def save_shift_type(name, **fields):
+	"""Create or update a shift type through the named field set
+	(P5-KTD12). Shift Type is prompt-autonamed: `name` is the identifier a
+	create call supplies and is never itself rewritten on an update."""
+	rate_limit_per_user("save_shift_type")
+	name = (name or "").strip()
+	if not name:
+		frappe.throw(_("Give the shift a name."))
+
+	if frappe.db.exists("Shift Type", name):
+		doc = frappe.get_doc("Shift Type", name)
+	else:
+		doc = frappe.new_doc("Shift Type")
+		doc.name = name
+
+	_assert_config_write(doc)
+	_apply_allowed_fields(doc, fields, SHIFT_TYPE_EDITABLE_FIELDS)
+	doc.save()
+	return {"name": doc.name, **{field: doc.get(field) for field in SHIFT_TYPE_EDITABLE_FIELDS}}
 
 
 @frappe.whitelist(methods=["POST"])
