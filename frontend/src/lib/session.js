@@ -28,10 +28,15 @@ const state = reactive({
    */
   status: 'idle',
   employee: null,
+  user: null,
   canApprove: false,
   /** P3-KTD11: gates the Team nav item. Direct reports, not approval
    * capability -- a leave approver with no reports has no team to show. */
   hasReports: false,
+  /** P5-U11: a routed-role holder (IT Team today) has requests to work even
+   * when `canApprove`'s queue-derived half is momentarily empty -- the same
+   * "present regardless of a pending row" rule P4-R13 already gives HR. */
+  canWorkRequests: false,
   unread: 0,
   /** The authoritative calendar (P2-R5). Mirrored into lib/dates.js. */
   timeZone: null,
@@ -84,8 +89,10 @@ async function load() {
 function apply(boot) {
   const employee = boot?.employee || null
   state.employee = employee
+  state.user = boot?.user || null
   state.canApprove = !!boot?.can_approve
   state.hasReports = !!boot?.has_reports
+  state.canWorkRequests = !!boot?.can_work_requests
   state.unread = boot?.unread_notifications ?? 0
   state.timeZone = boot?.time_zone || null
   state.systemTimeZone = boot?.system_time_zone || null

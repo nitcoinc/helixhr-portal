@@ -6,7 +6,9 @@ import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
-import { formatDate, formatDateRange } from '@/lib/dates'
+import { attachToRequestReply } from '@/lib/api'
+import { session } from '@/lib/session'
+import { formatDate, formatDateRange, formatDateTime } from '@/lib/dates'
 import { toPlainLeaveError } from '@/lib/errorMap'
 import { useIsDesktop } from '@/lib/useIsDesktop'
 import { ATTENDANCE_LABEL } from '@/lib/week'
@@ -45,6 +47,25 @@ const overflow = computed(() => Math.max(0, (queue.data?.total || 0) - pending.v
 // than asking the server a second question about roles.
 const hasHrWork = computed(() => pending.value.some((row) => row.for_hr))
 
+// P5-R12: a routed request has a claim state the other three kinds do not --
+// nobody "picks up" a leave application. The counts are read off the one flat
+// queue rather than a second request, so they can never disagree with what is
+// actually in `pending`.
+const requestRows = computed(() => pending.value.filter((row) => row.kind === 'request'))
+const unclaimedRequestCount = computed(
+  () => requestRows.value.filter((row) => !row.picked_up_by).length,
+)
+const myRequestCount = computed(
+  () => requestRows.value.filter((row) => row.picked_up_by === session.user).length,
+)
+
+/** The claim chip on a request row: who has it, or that nobody does yet. */
+function requestClaimLabel(row) {
+  if (row.kind !== 'request') return ''
+  if (!row.picked_up_by) return 'Unclaimed'
+  return row.picked_up_by === session.user ? 'You have this' : 'Picked up'
+}
+
 // --- the selected decision ----------------------------------------------
 
 // P2-U7 step 2 / P2-R22. Evidence costs a document read plus its child rows,
@@ -75,9 +96,10 @@ const actionError = ref('')
 const reason = ref('')
 const reasonError = ref('')
 
-// P4-U4. Which of the two reason-bearing outcomes the one reason surface is
-// currently armed for: '' (closed), 'Send Back' or 'Reject'. One surface, not
-// two, and it knows which button will fire it -- see `openReason`.
+// P4-U4 / P5-U11. Which of the three reason-bearing outcomes the one reason
+// surface is currently armed for: '' (closed), 'Send Back', 'Reject' or
+// 'Need info'. One surface, not three, and it knows which button will fire
+// it -- see `openReason`.
 const reasonFor = ref('')
 // Send to HR's note is optional and is not a reason, so it gets its own
 // smaller field rather than borrowing the required one above.
@@ -159,15 +181,20 @@ const REASON_COPY = {
     placeholder: 'Why is the answer final?',
     missing: 'Say why before rejecting this.',
   },
+  'Need info': {
+    heading: 'Ask a question',
+    placeholder: 'What do you need from them?',
+    missing: 'Say what you need before sending this.',
+  },
 }
 
 const reasonCopy = computed(() => REASON_COPY[reasonFor.value] || REASON_COPY['Send Back'])
 
 /** The field's own label, naming the person the sentence is written to. */
 const reasonPlaceholder = computed(() =>
-  reasonFor.value === 'Reject'
-    ? reasonCopy.value.placeholder
-    : `What should ${firstName.value || 'they'} change?`,
+  reasonFor.value === 'Send Back'
+    ? `What should ${firstName.value || 'they'} change?`
+    : reasonCopy.value.placeholder,
 )
 
 /**
@@ -193,7 +220,7 @@ async function decide(action) {
   if (!may(action)) return
 
   let comment
-  if (action === 'Send Back' || action === 'Reject') {
+  if (action === 'Send Back' || action === 'Reject' || action === 'Need info') {
     if (reasonFor.value !== action) {
       openReason(action)
       return
@@ -247,6 +274,34 @@ async function decide(action) {
   }
 }
 
+// --- request attachments (P5-R10a) ---------------------------------------
+//
+// The worker's side of the conversation's attachments -- what makes an HR
+// Letter completable without opening Desk. A plain file input rather than a
+// resource: `attachToRequestReply` is a multipart POST, the same shape
+// `RequestForm.vue` already uses for the employee's own upload.
+
+const attachingReply = ref(false)
+const attachReplyError = ref('')
+const requestFileInputMobile = ref(null)
+const requestFileInputDesktop = ref(null)
+
+async function attachReplyFile(event) {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (!file || !selected.value) return
+  attachingReply.value = true
+  attachReplyError.value = ''
+  try {
+    await attachToRequestReply(file, { name: selected.value.name })
+    detail.fetch()
+  } catch (error) {
+    attachReplyError.value = error?.messages?.[0] || 'That file did not upload.'
+  } finally {
+    attachingReply.value = false
+  }
+}
+
 // --- presentation --------------------------------------------------------
 
 const DAY_LETTERS = ['M', 'T', 'W', 'T', 'F', 'S', 'S']
@@ -290,6 +345,19 @@ const KIND = {
     // one to HR is its own button (P4-R5), not this one wearing HR's name.
     approve: (item) => `Approve ${item.total_days} day${item.total_days === 1 ? '' : 's'}`,
     quote: (item) => item.explanation,
+  },
+  // P5-U11: a request has no single "amount" (a leave's days, a timesheet's
+  // hours) and no `Approve` action at all -- `may('Pick up')`/`may('Done')`
+  // draw its buttons instead of `approve`, so that entry is never called.
+  // `quote` is the request's own opening line; the full back-and-forth is the
+  // conversation block below, not this one-line surface.
+  request: {
+    summary: (row) => `${row.category} · ${row.subject}`,
+    amount: (row) => requestClaimLabel(row),
+    approve: () => '',
+    // The full back-and-forth renders as its own conversation block, not the
+    // shared one-line quote surface every other kind uses.
+    quote: () => null,
   },
 }
 
@@ -378,6 +446,23 @@ function hrLine(row) {
       </template>
     </p>
 
+    <!-- P5-R12: requests split into what nobody has claimed and what the
+         viewer already has, counted separately from the rest of the queue. -->
+    <p
+      v-if="requestRows.length"
+      class="mb-4 flex flex-wrap gap-x-4 gap-y-1 text-sm text-ink-gray-5"
+      data-testid="request-claim-counts"
+    >
+      <span data-testid="unclaimed-count">
+        <span class="tabular font-medium text-ink-gray-9">{{ unclaimedRequestCount }}</span>
+        unclaimed
+      </span>
+      <span data-testid="my-request-count">
+        <span class="tabular font-medium text-ink-gray-9">{{ myRequestCount }}</span>
+        picked up by you
+      </span>
+    </p>
+
     <div class="lg:flex lg:items-start lg:gap-6">
       <!-- The queue. One list, leave and timesheets together: they are the
            same job -- somebody is waiting on a decision -- and splitting them
@@ -443,7 +528,10 @@ function hrLine(row) {
                 </span>
 
                 <span class="shrink-0 text-right">
-                  <span class="tabular block font-medium text-ink-gray-9">{{ rowAmount(row) }}</span>
+                  <span
+                    class="tabular block font-medium text-ink-gray-9"
+                    :data-testid="row.kind === 'request' ? 'request-claim' : null"
+                  >{{ rowAmount(row) }}</span>
                   <span class="tabular block text-xs text-ink-gray-5">{{ ageLabel(row) }}</span>
                 </span>
 
@@ -621,6 +709,72 @@ function hrLine(row) {
                       </div>
                     </dl>
 
+                    <!-- P5-R10: the request and every reply after it, one
+                         conversation, oldest first. -->
+                    <div
+                      v-else-if="selected.kind === 'request'"
+                      class="border-t border-outline-gray-2 pt-3"
+                      data-testid="request-thread"
+                    >
+                      <p class="text-sm text-ink-gray-6">
+                        {{ selected.category }}
+                      </p>
+                      <ul
+                        v-if="selected.thread?.length"
+                        class="mt-2 space-y-2"
+                      >
+                        <li
+                          v-for="(entry, index) in selected.thread"
+                          :key="index"
+                          class="surface-inset p-2 text-sm"
+                        >
+                          <p class="text-xs font-medium text-ink-gray-5">
+                            {{ entry.by === 'employee' ? firstName || 'Employee' : 'Worker' }}
+                            · {{ formatDateTime(entry.on) }}
+                          </p>
+                          <p class="mt-0.5 whitespace-pre-line text-ink-gray-8">
+                            {{ entry.message }}
+                          </p>
+                        </li>
+                      </ul>
+                      <p
+                        v-else
+                        class="mt-2 text-sm text-ink-gray-5"
+                      >
+                        No details were written with this request.
+                      </p>
+
+                      <!-- P5-R10a: what makes an HR Letter completable
+                           without opening Desk. -->
+                      <div
+                        v-if="actions.length"
+                        class="mt-3"
+                      >
+                        <Button
+                          variant="outline"
+                          :loading="attachingReply"
+                          :disabled="attachingReply"
+                          @click="requestFileInputMobile?.click()"
+                        >
+                          Attach a file
+                        </Button>
+                        <input
+                          ref="requestFileInputMobile"
+                          type="file"
+                          class="sr-only"
+                          data-testid="attach-reply-input"
+                          @change="attachReplyFile"
+                        >
+                        <p
+                          v-if="attachReplyError"
+                          class="mt-1 text-sm text-signal"
+                          role="alert"
+                        >
+                          {{ attachReplyError }}
+                        </p>
+                      </div>
+                    </div>
+
                     <p
                       v-if="quote"
                       class="surface-inset mt-3 p-3 text-sm text-ink-gray-7"
@@ -692,6 +846,37 @@ function hrLine(row) {
                         @click="decide('Approve')"
                       >
                         {{ approveLabel }}
+                      </Button>
+                      <Button
+                        v-if="may('Pick up')"
+                        variant="solid"
+                        theme="green"
+                        :loading="acting === selected.name"
+                        :disabled="acting === selected.name"
+                        data-testid="pick-up"
+                        @click="decide('Pick up')"
+                      >
+                        Pick up
+                      </Button>
+                      <Button
+                        v-if="may('Done')"
+                        variant="solid"
+                        theme="green"
+                        :loading="acting === selected.name"
+                        :disabled="acting === selected.name"
+                        data-testid="done"
+                        @click="decide('Done')"
+                      >
+                        Done
+                      </Button>
+                      <Button
+                        v-if="may('Need info')"
+                        variant="outline"
+                        :disabled="acting === selected.name"
+                        data-testid="need-info"
+                        @click="decide('Need info')"
+                      >
+                        Need info
                       </Button>
                       <Button
                         v-if="may('Send Back')"
@@ -830,6 +1015,9 @@ function hrLine(row) {
                   <template v-else-if="selected.kind === 'attendance'">
                     {{ selected.reason }} ·
                     {{ formatDateRange(selected.from_date, selected.to_date) }}
+                  </template>
+                  <template v-else-if="selected.kind === 'request'">
+                    {{ selected.category }} · {{ selected.subject }}
                   </template>
                   <template v-else>
                     {{ selected.leave_type }} ·
@@ -979,7 +1167,7 @@ function hrLine(row) {
             </div>
 
             <dl
-              v-else
+              v-else-if="selected.kind === 'leave'"
               class="mt-4 grid grid-cols-2 gap-4"
             >
               <div>
@@ -1016,6 +1204,71 @@ function hrLine(row) {
                 </dd>
               </div>
             </dl>
+
+            <!-- P5-R10 / P5-R10a: the request and every reply after it, plus
+                 the routed worker's own attach affordance -- the desktop twin
+                 of the phone conversation block above. -->
+            <div
+              v-else-if="selected.kind === 'request'"
+              class="mt-4"
+              data-testid="request-thread"
+            >
+              <p class="text-sm text-ink-gray-6">
+                {{ selected.category }}
+              </p>
+              <ul
+                v-if="selected.thread?.length"
+                class="mt-2 space-y-2"
+              >
+                <li
+                  v-for="(entry, index) in selected.thread"
+                  :key="index"
+                  class="surface-inset p-3 text-sm"
+                >
+                  <p class="text-xs font-medium text-ink-gray-5">
+                    {{ entry.by === 'employee' ? firstName || 'Employee' : 'Worker' }}
+                    · {{ formatDateTime(entry.on) }}
+                  </p>
+                  <p class="mt-0.5 whitespace-pre-line text-ink-gray-8">
+                    {{ entry.message }}
+                  </p>
+                </li>
+              </ul>
+              <p
+                v-else
+                class="mt-2 text-sm text-ink-gray-5"
+              >
+                No details were written with this request.
+              </p>
+
+              <div
+                v-if="actions.length"
+                class="mt-3"
+              >
+                <Button
+                  variant="outline"
+                  :loading="attachingReply"
+                  :disabled="attachingReply"
+                  @click="requestFileInputDesktop?.click()"
+                >
+                  Attach a file
+                </Button>
+                <input
+                  ref="requestFileInputDesktop"
+                  type="file"
+                  class="sr-only"
+                  data-testid="attach-reply-input"
+                  @change="attachReplyFile"
+                >
+                <p
+                  v-if="attachReplyError"
+                  class="mt-1 text-sm text-signal"
+                  role="alert"
+                >
+                  {{ attachReplyError }}
+                </p>
+              </div>
+            </div>
 
             <p
               v-if="quote"
@@ -1106,6 +1359,15 @@ function hrLine(row) {
                 Reject
               </Button>
               <Button
+                v-if="may('Need info')"
+                variant="outline"
+                :disabled="acting === selected.name"
+                data-testid="need-info"
+                @click="decide('Need info')"
+              >
+                Need info
+              </Button>
+              <Button
                 v-if="may('Send Back')"
                 variant="outline"
                 :disabled="acting === selected.name"
@@ -1113,6 +1375,28 @@ function hrLine(row) {
                 @click="decide('Send Back')"
               >
                 Send back
+              </Button>
+              <Button
+                v-if="may('Pick up')"
+                variant="solid"
+                theme="green"
+                :loading="acting === selected.name"
+                :disabled="acting === selected.name"
+                data-testid="pick-up"
+                @click="decide('Pick up')"
+              >
+                Pick up
+              </Button>
+              <Button
+                v-if="may('Done')"
+                variant="solid"
+                theme="green"
+                :loading="acting === selected.name"
+                :disabled="acting === selected.name"
+                data-testid="done"
+                @click="decide('Done')"
+              >
+                Done
               </Button>
               <Button
                 v-if="may('Approve')"

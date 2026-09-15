@@ -53,6 +53,9 @@ const MAP = {
   request: {
     Open: { label: 'Open', tone: 'resting' },
     'In Progress': { label: 'In progress', tone: 'waiting' },
+    // P5-R6: a request blocked on the employee is their backlog, not the
+    // worker's -- worded so neither side reads it as still open on HR/IT.
+    'Waiting on Employee': { label: 'Waiting on employee', tone: 'waiting' },
     Done: { label: 'Done', tone: 'done' },
     Rejected: { label: 'Sent back', tone: 'sentBack' },
   },
