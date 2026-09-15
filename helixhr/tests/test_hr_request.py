@@ -8,12 +8,15 @@ from frappe.tests import IntegrationTestCase
 
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
+	HR_MANAGER_EMPLOYEE_USER,
 	IT_TEAM_USER,
 	MANAGER_USER,
+	ensure_baseline_company,
 	ensure_hr_manager_user,
 	ensure_test_company,
 	ensure_test_email_account,
 	make_test_employee_and_manager,
+	make_test_hr_manager_employee,
 	make_test_it_user,
 	make_test_user,
 )
@@ -300,6 +303,45 @@ class TestHRRequest(IntegrationTestCase):
 
 		doc.reload()
 		self.assertEqual(doc.routed_to_role, "IT Team")
+
+	def test_a_company_anchored_hr_manager_sees_only_their_own_company(self):
+		"""P5-R5: 'HR Manager and System Manager see their whole company' --
+		not every company. `make_test_hr_manager_employee` is the portal
+		persona this scopes; `ensure_hr_manager_user` (no Employee, Desk
+		only) is deliberately left wide-open below, matching the existing
+		P3-KTD7/P4-KTD7 precedent for that persona."""
+		own_request = self._make_request(category="HR Letter")
+
+		other_company = ensure_baseline_company()
+		other_user = "hr-scope-other-company@helixhr.test"
+		make_test_user(other_user, other_company)
+		other_request = self._make_request(as_user=other_user, category="HR Letter")
+
+		make_test_hr_manager_employee()
+		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+
+		names = frappe.get_list("HR Request", pluck="name")
+		self.assertIn(own_request.name, names)
+		self.assertNotIn(other_request.name, names)
+		self.assertTrue(frappe.has_permission("HR Request", "read", own_request.name))
+		self.assertFalse(frappe.has_permission("HR Request", "read", other_request.name))
+
+	def test_a_desk_only_hr_manager_with_no_employee_still_reaches_every_company(self):
+		"""The existing, deliberate exception: `ensure_hr_manager_user` holds
+		no Employee record at all, the same Desk-only persona P3-KTD7 and
+		P4-KTD7 already grant an unscoped read to for the other three kinds.
+		"""
+		own_company_request = self._make_request(category="HR Letter")
+
+		other_company = ensure_baseline_company()
+		other_user = "hr-scope-desk-other-company@helixhr.test"
+		make_test_user(other_user, other_company)
+		other_company_request = self._make_request(as_user=other_user, category="HR Letter")
+
+		frappe.set_user(ensure_hr_manager_user())
+		names = frappe.get_list("HR Request", pluck="name")
+		self.assertIn(own_company_request.name, names)
+		self.assertIn(other_company_request.name, names)
 
 
 class TestRequestCategories(IntegrationTestCase):

@@ -88,11 +88,34 @@ _WORKER_ROLES = frozenset({"IT Team"})
 _UNSCOPED_ROLES = frozenset({"HR Manager", "System Manager"})
 
 
-def get_permission_query_conditions(user=None, doctype=None, **kwargs):
-	"""Limit lists to a requester's records or their routed work."""
-	user = user or frappe.session.user
-	if user == "Administrator" or set(frappe.get_roles(user)) & _UNSCOPED_ROLES:
+def _company_scope_condition(company):
+	"""The list-route half of an HR Manager / System Manager's company scope
+	(P5-R5): every request whose employee is in that company.
+
+	`ensure_hr_manager_user()` deliberately holds no Employee record -- the
+	same Desk-only, no-company HR Manager P3-KTD7/P4-KTD7 already reach every
+	Attendance Request and Timesheet through the role alone. `company` is
+	`None` for that holder, and the wide-open behaviour for *that* persona is
+	preserved on purpose. A portal HR Manager who does have an active
+	Employee (`make_test_hr_manager_employee`) is the one this scope narrows,
+	since they are the multi-company risk P5-R5 exists to close.
+	"""
+	if not company:
 		return ""
+	company_employees = frappe.get_all("Employee", filters={"company": company}, pluck="name")
+	if not company_employees:
+		return "1=0"
+	return f"employee in ({', '.join(frappe.db.escape(name, percent=False) for name in company_employees)})"
+
+
+def get_permission_query_conditions(user=None, doctype=None, **kwargs):
+	"""Limit lists to a requester's records, their routed work, or (for a
+	company-anchored HR Manager / System Manager) their own company."""
+	user = user or frappe.session.user
+	if user == "Administrator":
+		return ""
+	if set(frappe.get_roles(user)) & _UNSCOPED_ROLES:
+		return _company_scope_condition(_session_company(user))
 	employee = frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "name")
 	if not employee:
 		return "1=0"
@@ -110,13 +133,17 @@ def get_permission_query_conditions(user=None, doctype=None, **kwargs):
 
 
 def has_permission(doc, ptype=None, user=None, **kwargs):
-	"""The single-document half of routed request visibility."""
+	"""The single-document half of routed request visibility (P5-KTD13:
+	every branch returns an explicit boolean)."""
 	user = user or frappe.session.user
-	roles = set(frappe.get_roles(user))
-	if user == "Administrator" or roles & _UNSCOPED_ROLES:
+	if user == "Administrator":
 		return True
+	roles = set(frappe.get_roles(user))
 	if doc.employee == frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "name"):
 		return True
+	if roles & _UNSCOPED_ROLES:
+		company = _session_company(user)
+		return not company or frappe.db.get_value("Employee", doc.employee, "company") == company
 	return (
 		doc.routed_to_role in roles
 		and frappe.db.get_value("Employee", doc.employee, "company") == _session_company(user)
