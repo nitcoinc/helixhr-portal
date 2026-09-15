@@ -28,6 +28,7 @@ const NAV = [
   { label: 'Team', to: '/team', icon: 'users', reportsOnly: true },
   { label: 'Approvals', to: '/approvals', icon: 'approvals', managerOnly: true },
   { label: 'Settings', to: '/settings', icon: 'settings', configureOnly: true },
+  { label: 'Organisation', to: '/organisation', icon: 'organisation', organisationOnly: true },
   { label: 'Notifications', to: '/notifications', icon: 'notifications', badge: true },
   { label: 'Profile', to: '/profile', icon: 'profile' },
 ]
@@ -55,7 +56,8 @@ const navItems = computed(() =>
     (item) =>
       (!item.managerOnly || isManager.value) &&
       (!item.reportsOnly || session.hasReports) &&
-      (!item.configureOnly || session.canConfigure),
+      (!item.configureOnly || session.canConfigure) &&
+      (!item.organisationOnly || session.canSeeOrganisation),
   ),
 )
 const primaryItems = computed(() => navItems.value.filter((item) => item.primary))

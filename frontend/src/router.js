@@ -160,6 +160,15 @@ const routes = [
     component: () => import('@/pages/Settings.vue'),
     props: true,
   },
+  {
+    // P5-U15. `get_organisation_view` is the server's own gate -- a caller
+    // hitting this route directly with no capability gets AsyncState's
+    // 'forbidden' region, not a client-side redirect (same posture as
+    // /settings above).
+    path: '/organisation',
+    name: 'Organisation',
+    component: () => import('@/pages/Organisation.vue'),
+  },
   // The three states that are not a page of the portal. All of them render
   // NotLinked.vue, which reads the session status; none of them get the nav
   // shell (there is nothing to navigate with, and for a Guest there is

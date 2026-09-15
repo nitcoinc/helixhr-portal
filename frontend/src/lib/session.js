@@ -41,6 +41,10 @@ const state = reactive({
    * `helixhr.api.get_portal_config` itself enforces server-side, so the nav
    * item and the server's own gate can never disagree. */
   canConfigure: false,
+  /** P5-U15: gates the Organisation nav item. Mirrors the exact predicate
+   * `helixhr.api.get_organisation_view` itself enforces server-side, so the
+   * nav item and the server's own gate can never disagree. */
+  canSeeOrganisation: false,
   unread: 0,
   /** The authoritative calendar (P2-R5). Mirrored into lib/dates.js. */
   timeZone: null,
@@ -98,6 +102,7 @@ function apply(boot) {
   state.hasReports = !!boot?.has_reports
   state.canWorkRequests = !!boot?.can_work_requests
   state.canConfigure = !!boot?.can_configure
+  state.canSeeOrganisation = !!boot?.can_see_organisation
   state.unread = boot?.unread_notifications ?? 0
   state.timeZone = boot?.time_zone || null
   state.systemTimeZone = boot?.system_time_zone || null
