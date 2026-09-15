@@ -4902,6 +4902,7 @@ def get_my_documents():
 # One bounded first page, and the ceiling Load More may climb to (P2-R22).
 _REQUEST_PAGE = 20
 _REQUEST_MAX_PAGE = 100
+_REQUEST_CATEGORY_LIMIT = 100
 
 _REQUEST_FIELDS = (
 	"name",
@@ -5185,8 +5186,26 @@ def _request_for_key(key, employee):
 
 
 def _request_categories():
-	options = frappe.get_meta("HR Request").get_field("category").options or ""
-	return [line.strip() for line in options.split("\n") if line.strip()]
+	return frappe.get_all(
+		"HelixHR Request Category",
+		filters={"is_active": 1},
+		pluck="name",
+		limit=_REQUEST_CATEGORY_LIMIT,
+		order_by="category_name asc",
+	)
+
+
+@frappe.whitelist()
+def get_request_categories():
+	"""The active request categories the employee may file (P5-R1)."""
+	rate_limit_per_user("get_request_categories")
+	return frappe.get_all(
+		"HelixHR Request Category",
+		filters={"is_active": 1},
+		fields=["name", "category_name", "hint"],
+		limit=_REQUEST_CATEGORY_LIMIT,
+		order_by="category_name asc",
+	)
 
 
 @frappe.whitelist(methods=["POST"])

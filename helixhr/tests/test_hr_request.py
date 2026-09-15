@@ -239,6 +239,73 @@ class TestHRRequest(IntegrationTestCase):
 		self.assertEqual(employee_view.hr_note, "Sent to your personal email")
 
 
+class TestRequestCategories(IntegrationTestCase):
+	"""P5-U1: categories are routable records, not a static Select list."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		from helixhr.patches.v1_0.seed_request_categories import execute
+		from helixhr.tests.utils import make_test_employee_and_manager
+
+		make_test_employee_and_manager()
+		execute()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def test_seeded_categories_keep_the_legacy_values_as_their_names(self):
+		from helixhr.patches.v1_0.seed_request_categories import CATEGORIES, execute
+
+		execute()
+		self.assertEqual(
+			set(frappe.get_all("HelixHR Request Category", pluck="name")),
+			{spec["category_name"] for spec in CATEGORIES},
+		)
+
+	def test_picker_returns_new_active_categories_and_create_refuses_inactive_ones(self):
+		from helixhr.api import create_my_request, get_request_categories
+		from helixhr.tests.utils import EMPLOYEE_USER
+
+		category = frappe.get_doc(
+			{
+				"doctype": "HelixHR Request Category",
+				"category_name": "Facilities",
+				"hint": "Workspace and building help",
+				"route_to_role": "HR Manager",
+			}
+		).insert()
+		self.addCleanup(
+			frappe.delete_doc,
+			"HelixHR Request Category",
+			category.name,
+			force=True,
+			ignore_permissions=True,
+		)
+		frappe.db.set_value("HelixHR Request Category", "Other", "is_active", 0)
+		self.addCleanup(frappe.db.set_value, "HelixHR Request Category", "Other", "is_active", 1)
+
+		names = [row["name"] for row in get_request_categories()]
+		self.assertIn("Facilities", names)
+		self.assertNotIn("Other", names)
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.ValidationError):
+			create_my_request(
+				category="Other", subject="Inactive category", operation_key=str(uuid.uuid4())
+			)
+
+	def test_a_category_cannot_route_requests_to_a_broad_role(self):
+		category = frappe.get_doc(
+			{
+				"doctype": "HelixHR Request Category",
+				"category_name": "P5-U1 broad role test",
+				"hint": "Must not be saved",
+				"route_to_role": "Employee",
+			}
+		)
+		with self.assertRaises(frappe.ValidationError):
+			category.insert()
+
+
 class TestHelixHRDocumentLink(IntegrationTestCase):
 	def setUp(self):
 		self.employee_name, _, _, _ = make_test_employee_and_manager()

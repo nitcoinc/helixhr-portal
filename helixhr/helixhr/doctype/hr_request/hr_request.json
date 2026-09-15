@@ -43,10 +43,10 @@
   },
   {
    "fieldname": "category",
-   "fieldtype": "Select",
+   "fieldtype": "Link",
    "in_list_view": 1,
    "label": "Category",
-   "options": "HR Letter\nIT / Asset\nPayroll Question\nOther",
+   "options": "HelixHR Request Category",
    "reqd": 1
   },
   {

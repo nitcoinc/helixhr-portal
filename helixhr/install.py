@@ -11,7 +11,8 @@ assumption that a fresh install's doctype JSON already reflects the schema a
 patch would have produced. That assumption holds for a schema-migration
 patch; it does not hold for `patches/v1_0/apply_permission_deltas`,
 `patches/v1_0/report_unsubmitted_approved_leave` and
-`patches/v1_0/seed_celebration_templates`, which insert or mutate data rather
+`patches/v1_0/seed_celebration_templates` and
+`patches/v1_0/seed_request_categories`, which insert or mutate data rather
 than schema. A site created with `--install-app` therefore silently skips
 both and ships with unpatched permissions -- this is what broke CI's first
 real run, and it would equally break every fresh production install: nothing
@@ -30,9 +31,11 @@ def after_install():
 		apply_permission_deltas,
 		report_unsubmitted_approved_leave,
 		seed_celebration_templates,
+		seed_request_categories,
 	)
 
 	apply_permission_deltas.execute()
 	report_unsubmitted_approved_leave.execute()
 	seed_celebration_templates.execute()
+	seed_request_categories.execute()
 	frappe.db.commit()  # nosemgrep

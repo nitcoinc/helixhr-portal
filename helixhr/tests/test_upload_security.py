@@ -229,6 +229,7 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"download_my_payslip": (10, 60),
 			"get_directory": (60, 60),
 			"get_my_team_week": (60, 60),
+			"get_request_categories": (60, 60),
 		}
 		self.assertEqual(utils.RATE_LIMIT_POLICY, expected)
 		self.assertEqual(preflight.check_rate_limits()["status"], preflight.PASS)
