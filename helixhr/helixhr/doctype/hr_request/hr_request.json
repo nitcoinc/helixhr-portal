@@ -14,6 +14,9 @@
   "subject",
   "column_break_1",
   "status",
+  "routed_to_role",
+  "picked_up_by",
+  "helixhr_decision_reason",
   "section_break_1",
   "details",
   "hr_note",
@@ -67,7 +70,35 @@
    "in_list_view": 1,
    "in_standard_filter": 1,
    "label": "Status",
-   "options": "Open\nIn Progress\nDone\nRejected",
+   "options": "Open\nIn Progress\nWaiting on Employee\nDone\nRejected",
+   "permlevel": 1
+  },
+  {
+   "fieldname": "routed_to_role",
+   "fieldtype": "Link",
+   "hidden": 1,
+   "label": "Routed to role",
+   "no_copy": 1,
+   "options": "Role",
+   "permlevel": 1,
+   "read_only": 1,
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "picked_up_by",
+   "fieldtype": "Link",
+   "hidden": 1,
+   "label": "Picked up by",
+   "no_copy": 1,
+   "options": "User",
+   "permlevel": 1,
+   "read_only": 1
+  },
+  {
+   "fieldname": "helixhr_decision_reason",
+   "fieldtype": "Small Text",
+   "hidden": 1,
+   "label": "Decision reason",
    "permlevel": 1
   },
   {

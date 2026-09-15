@@ -110,7 +110,11 @@ fixtures = [
 		# Workflows that link to them.
 		"dt": "Workflow State",
 		"filters": [
-			["name", "in", ["Draft", "Pending Approval", "Pending Manager", "Pending HR", "Sent Back"]]
+			[
+				"name",
+				"in",
+				["Draft", "Pending Approval", "Pending Manager", "Pending HR", "Sent Back", "Waiting on Employee"],
+			]
 		],
 	},
 	# Timesheet Approval (KTD7) and Attendance Request Approval (P3-KTD6),
@@ -130,13 +134,18 @@ fixtures = [
 	# `frappe.client.submit` route the fixture never sees. The Employee-role
 	# (line manager) transitions keep `allow_self_approval: 0`, where `owner`
 	# genuinely is the employee.
-	{"dt": "Workflow", "filters": [["document_type", "in", ["Timesheet", "Attendance Request"]]]},
+	{
+		"dt": "Workflow",
+		"filters": [["document_type", "in", ["Timesheet", "Attendance Request", "HR Request"]]],
+	},
 	{
 		# Likewise "Approve" and "Reject" already exist as shared Workflow
 		# Action Master records; "Submit", "Edit", "Send Back" and
 		# "Send to HR" are this app's own.
 		"dt": "Workflow Action Master",
-		"filters": [["name", "in", ["Submit", "Edit", "Send Back", "Send to HR"]]],
+		"filters": [
+			["name", "in", ["Submit", "Edit", "Send Back", "Send to HR", "Pick up", "Need info", "Done"]]
+		],
 	},
 	# P4-KTD7a: `helixhr_decision_reason` on the two workflow kinds, at
 	# permlevel 1 so only the roles `apply_permission_deltas` names can read
@@ -178,6 +187,7 @@ doc_events = {
 	# watches `status`, so a reply written without a status change produced
 	# no notification and therefore no obligation the employee could clear.
 	"HR Request": {
+		"validate": "helixhr.events.hr_request_validate",
 		"on_update": "helixhr.events.hr_request_on_update",
 	},
 	# P4-U2 / P4-R8, P4-R8a. Leave has no Workflow, so the only guard on the

@@ -430,5 +430,203 @@
   "workflow_data": null,
   "workflow_name": "Attendance Request Approval",
   "workflow_state_field": "workflow_state"
+ },
+ {
+  "docstatus": 0,
+  "doctype": "Workflow",
+  "document_type": "HR Request",
+  "enable_action_confirmation": 0,
+  "is_active": 1,
+  "modified": "2026-09-15 12:00:00.000000",
+  "name": "HR Request Handling",
+  "override_status": 0,
+  "send_email_alert": 0,
+  "states": [
+   {
+    "allow_edit": "Employee",
+    "avoid_status_override": 0,
+    "doc_status": "0",
+    "evaluate_as_expression": 0,
+    "is_optional_state": 0,
+    "message": null,
+    "next_action_email_template": null,
+    "send_email": 0,
+    "state": "Open",
+    "update_field": null,
+    "update_value": null,
+    "workflow_builder_id": null
+   },
+   {
+    "allow_edit": "HR Manager",
+    "avoid_status_override": 0,
+    "doc_status": "0",
+    "evaluate_as_expression": 0,
+    "is_optional_state": 0,
+    "message": null,
+    "next_action_email_template": null,
+    "send_email": 0,
+    "state": "In Progress",
+    "update_field": null,
+    "update_value": null,
+    "workflow_builder_id": null
+   },
+   {
+    "allow_edit": "Employee",
+    "avoid_status_override": 0,
+    "doc_status": "0",
+    "evaluate_as_expression": 0,
+    "is_optional_state": 0,
+    "message": null,
+    "next_action_email_template": null,
+    "send_email": 0,
+    "state": "Waiting on Employee",
+    "update_field": null,
+    "update_value": null,
+    "workflow_builder_id": null
+   },
+   {
+    "allow_edit": "HR Manager",
+    "avoid_status_override": 0,
+    "doc_status": "0",
+    "evaluate_as_expression": 0,
+    "is_optional_state": 0,
+    "message": null,
+    "next_action_email_template": null,
+    "send_email": 0,
+    "state": "Done",
+    "update_field": null,
+    "update_value": null,
+    "workflow_builder_id": null
+   },
+   {
+    "allow_edit": "HR Manager",
+    "avoid_status_override": 0,
+    "doc_status": "0",
+    "evaluate_as_expression": 0,
+    "is_optional_state": 0,
+    "message": null,
+    "next_action_email_template": null,
+    "send_email": 0,
+    "state": "Rejected",
+    "update_field": null,
+    "update_value": null,
+    "workflow_builder_id": null
+   }
+  ],
+  "transitions": [
+   {
+    "action": "Pick up",
+    "allow_self_approval": 1,
+    "allowed": "HR Manager",
+    "condition": "doc.routed_to_role == 'HR Manager' and (frappe.session.user == \"Administrator\" or frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user)",
+    "next_state": "In Progress",
+    "send_email_to_creator": 0,
+    "state": "Open",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Reject",
+    "allow_self_approval": 1,
+    "allowed": "HR Manager",
+    "condition": "doc.routed_to_role == 'HR Manager' and (frappe.session.user == \"Administrator\" or frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user)",
+    "next_state": "Rejected",
+    "send_email_to_creator": 0,
+    "state": "Open",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Need info",
+    "allow_self_approval": 1,
+    "allowed": "HR Manager",
+    "condition": "doc.routed_to_role == 'HR Manager' and (frappe.session.user == \"Administrator\" or frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user)",
+    "next_state": "Waiting on Employee",
+    "send_email_to_creator": 0,
+    "state": "In Progress",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Done",
+    "allow_self_approval": 1,
+    "allowed": "HR Manager",
+    "condition": "doc.routed_to_role == 'HR Manager' and (frappe.session.user == \"Administrator\" or frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user)",
+    "next_state": "Done",
+    "send_email_to_creator": 0,
+    "state": "In Progress",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Reject",
+    "allow_self_approval": 1,
+    "allowed": "HR Manager",
+    "condition": "doc.routed_to_role == 'HR Manager' and (frappe.session.user == \"Administrator\" or frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user)",
+    "next_state": "Rejected",
+    "send_email_to_creator": 0,
+    "state": "In Progress",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Pick up",
+    "allow_self_approval": 1,
+    "allowed": "IT Team",
+    "condition": "doc.routed_to_role == 'IT Team' and (frappe.session.user == \"Administrator\" or frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user)",
+    "next_state": "In Progress",
+    "send_email_to_creator": 0,
+    "state": "Open",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Reject",
+    "allow_self_approval": 1,
+    "allowed": "IT Team",
+    "condition": "doc.routed_to_role == 'IT Team' and (frappe.session.user == \"Administrator\" or frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user)",
+    "next_state": "Rejected",
+    "send_email_to_creator": 0,
+    "state": "Open",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Need info",
+    "allow_self_approval": 1,
+    "allowed": "IT Team",
+    "condition": "doc.routed_to_role == 'IT Team' and (frappe.session.user == \"Administrator\" or frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user)",
+    "next_state": "Waiting on Employee",
+    "send_email_to_creator": 0,
+    "state": "In Progress",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Done",
+    "allow_self_approval": 1,
+    "allowed": "IT Team",
+    "condition": "doc.routed_to_role == 'IT Team' and (frappe.session.user == \"Administrator\" or frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user)",
+    "next_state": "Done",
+    "send_email_to_creator": 0,
+    "state": "In Progress",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   },
+   {
+    "action": "Reject",
+    "allow_self_approval": 1,
+    "allowed": "IT Team",
+    "condition": "doc.routed_to_role == 'IT Team' and (frappe.session.user == \"Administrator\" or frappe.db.get_value(\"Employee\", doc.employee, \"user_id\") != frappe.session.user)",
+    "next_state": "Rejected",
+    "send_email_to_creator": 0,
+    "state": "In Progress",
+    "transition_tasks": null,
+    "workflow_builder_id": null
+   }
+  ],
+  "workflow_data": null,
+  "workflow_name": "HR Request Handling",
+  "workflow_state_field": "status"
  }
 ]

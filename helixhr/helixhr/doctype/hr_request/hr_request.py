@@ -8,11 +8,10 @@ from frappe.model.document import Document
 from frappe.utils import now_datetime
 from hrms.api import get_current_employee
 
-# The statuses that mean HR has taken the request off the pile, and the ones
-# that mean it is finished. Both are read off the DocType's own Select
-# options; a status added in Desk that is in neither set simply stamps
-# nothing rather than guessing (P2-U8).
-PICKED_UP_STATUSES = ("In Progress", "Done", "Rejected")
+# The first worker claim and terminal outcomes. Both are read off the
+# DocType's own Select options; a status added in Desk that is in neither set
+# simply stamps nothing rather than guessing (P2-U8, P5-R6).
+PICKED_UP_STATUSES = ("In Progress",)
 CLOSED_STATUSES = ("Done", "Rejected")
 
 
@@ -23,6 +22,11 @@ class HRRequest(Document):
 		# different employee on the very first insert -- resolve it from
 		# the session instead of trusting whatever was posted (KTD5).
 		self.employee = get_current_employee()
+		self.routed_to_role = frappe.db.get_value(
+			"HelixHR Request Category", self.category, "route_to_role"
+		)
+		if not self.routed_to_role:
+			frappe.throw("This request category has no worker role configured.")
 
 		# P2-U8 step 2. The idempotency key is a *unique* column, and a
 		# unique column with several empty strings in it is not unique in
@@ -53,6 +57,7 @@ class HRRequest(Document):
 
 		if not self.picked_up_on and self.status in PICKED_UP_STATUSES:
 			self.picked_up_on = now_datetime()
+			self.picked_up_by = frappe.session.user
 		if not self.closed_on and self.status in CLOSED_STATUSES:
 			self.closed_on = now_datetime()
 
@@ -63,7 +68,7 @@ class HRRequest(Document):
 			# stamp and the notification can never disagree.
 			self.replied_on = now_datetime()
 
-	# status and hr_note are permlevel 1 with only HR Manager/HR User/
+	# status and hr_note are permlevel 1 with only HR Manager and
 	# System Manager granted write there (see this doctype's own
 	# permissions, not a fixture) -- Frappe resets an ESS write to either
 	# field the same way it does for Employee's locked fields (KTD6), so

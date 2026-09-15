@@ -3,9 +3,17 @@ import io
 import uuid
 
 import frappe
+from frappe.model.workflow import apply_workflow
 from frappe.tests import IntegrationTestCase
 
-from helixhr.tests.utils import EMPLOYEE_USER, MANAGER_USER, make_test_employee_and_manager
+from helixhr.tests.utils import (
+	EMPLOYEE_USER,
+	IT_TEAM_USER,
+	MANAGER_USER,
+	ensure_hr_manager_user,
+	make_test_employee_and_manager,
+	make_test_it_user,
+)
 
 
 class _UploadedFile:
@@ -52,6 +60,7 @@ def with_uploaded_file(filename, content=SAFE_PDF):
 class TestHRRequest(IntegrationTestCase):
 	def setUp(self):
 		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		make_test_it_user()
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
@@ -227,16 +236,56 @@ class TestHRRequest(IntegrationTestCase):
 		frappe.set_user(EMPLOYEE_USER)
 		doc = self._make_request()
 
-		frappe.set_user("Administrator")
+		frappe.set_user(ensure_hr_manager_user())
+		apply_workflow({"doctype": "HR Request", "name": doc.name}, "Pick up")
 		desk_doc = frappe.get_doc("HR Request", doc.name)
-		desk_doc.status = "Done"
 		desk_doc.hr_note = "Sent to your personal email"
 		desk_doc.save()
+		apply_workflow({"doctype": "HR Request", "name": doc.name}, "Done")
 
 		frappe.set_user(EMPLOYEE_USER)
 		employee_view = frappe.get_doc("HR Request", doc.name)
 		self.assertEqual(employee_view.status, "Done")
 		self.assertEqual(employee_view.hr_note, "Sent to your personal email")
+
+	def test_route_is_stamped_and_the_it_worker_can_pick_up_its_request(self):
+		doc = self._make_request(category="IT / Asset")
+		self.assertEqual(doc.routed_to_role, "IT Team")
+
+		frappe.set_user(IT_TEAM_USER)
+		apply_workflow({"doctype": "HR Request", "name": doc.name}, "Pick up")
+		doc.reload()
+		self.assertEqual(doc.status, "In Progress")
+		self.assertEqual(doc.picked_up_by, IT_TEAM_USER)
+		self.assertIsNotNone(doc.picked_up_on)
+
+	def test_a_worker_cannot_decide_their_own_request_on_a_raw_save(self):
+		doc = self._make_request(as_user=IT_TEAM_USER, category="IT / Asset")
+		frappe.set_user(IT_TEAM_USER)
+		doc.status = "In Progress"
+		with self.assertRaises(frappe.PermissionError):
+			doc.save()
+
+	def test_request_filing_details_are_frozen_after_pickup(self):
+		doc = self._make_request(category="IT / Asset")
+		frappe.set_user(IT_TEAM_USER)
+		apply_workflow({"doctype": "HR Request", "name": doc.name}, "Pick up")
+		doc.reload()
+		doc.subject = "A changed request"
+		with self.assertRaises(frappe.PermissionError):
+			doc.save()
+
+	def test_repointing_a_category_does_not_retroactively_change_a_request_route(self):
+		doc = self._make_request(category="IT / Asset")
+		frappe.set_user("Administrator")
+		category = frappe.get_doc("HelixHR Request Category", "IT / Asset")
+		original_route = category.route_to_role
+		self.addCleanup(frappe.db.set_value, category.doctype, category.name, "route_to_role", original_route)
+		category.route_to_role = "HR Manager"
+		category.save(ignore_permissions=True)
+
+		doc.reload()
+		self.assertEqual(doc.routed_to_role, "IT Team")
 
 
 class TestRequestCategories(IntegrationTestCase):
@@ -615,11 +664,12 @@ class TestRequestDetailAndScope(IntegrationTestCase):
 		frappe.local.request = with_uploaded_file("id-scan.pdf")
 		attach_to_my_request(created["name"])
 
-		frappe.set_user("Administrator")
+		frappe.set_user(ensure_hr_manager_user())
+		apply_workflow({"doctype": "HR Request", "name": created["name"]}, "Pick up")
 		desk = frappe.get_doc("HR Request", created["name"])
-		desk.status = "Done"
 		desk.hr_note = "Attached the signed letter."
 		desk.save()
+		apply_workflow({"doctype": "HR Request", "name": created["name"]}, "Done")
 
 		frappe.set_user(EMPLOYEE_USER)
 		detail = get_my_request(created["name"])

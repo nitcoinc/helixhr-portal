@@ -26,5 +26,26 @@
   "modified": "2026-09-10 10:00:00.000000",
   "name": "Send to HR",
   "workflow_action_name": "Send to HR"
+ },
+ {
+  "docstatus": 0,
+  "doctype": "Workflow Action Master",
+  "modified": "2026-09-15 12:00:00.000000",
+  "name": "Pick up",
+  "workflow_action_name": "Pick up"
+ },
+ {
+  "docstatus": 0,
+  "doctype": "Workflow Action Master",
+  "modified": "2026-09-15 12:00:00.000000",
+  "name": "Need info",
+  "workflow_action_name": "Need info"
+ },
+ {
+  "docstatus": 0,
+  "doctype": "Workflow Action Master",
+  "modified": "2026-09-15 12:00:00.000000",
+  "name": "Done",
+  "workflow_action_name": "Done"
  }
 ]

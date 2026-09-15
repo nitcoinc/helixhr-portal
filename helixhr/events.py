@@ -332,6 +332,73 @@ def _reconcile_share(doctype, name, employee, keep_user, submit=0):
 # both written and matched in one place. helixhr.api._get_needs_you imports it.
 HR_REPLY_SUBJECT_PREFIX = "HR replied about"
 
+HR_REQUEST_OPEN = "Open"
+HR_REQUEST_IN_PROGRESS = "In Progress"
+HR_REQUEST_WAITING_ON_EMPLOYEE = "Waiting on Employee"
+HR_REQUEST_DONE = "Done"
+HR_REQUEST_REJECTED = "Rejected"
+HR_REQUEST_STATE_EDGES = frozenset(
+	{
+		(HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS),
+		(HR_REQUEST_OPEN, HR_REQUEST_REJECTED),
+		(HR_REQUEST_IN_PROGRESS, HR_REQUEST_WAITING_ON_EMPLOYEE),
+		(HR_REQUEST_IN_PROGRESS, HR_REQUEST_DONE),
+		(HR_REQUEST_IN_PROGRESS, HR_REQUEST_REJECTED),
+	}
+)
+HR_REQUEST_MUTABLE_FIELDS = {
+	"status",
+	DECISION_REASON_FIELD,
+	"hr_note",
+	"picked_up_by",
+	"picked_up_on",
+	"replied_on",
+	"closed_on",
+}
+
+
+def hr_request_validate(doc, method=None):
+	"""Keep the routed-request lifecycle on its workflow edges.
+
+	Workflow conditions are not evaluated by raw Desk saves or
+	``frappe.client.set_value``. This event is the server-side half: once a
+	request has left Open, its filing fields are immutable, a worker cannot
+	decide their own request, and only a documented lifecycle edge may change
+	its status. The employee reply path intentionally uses ``db_set`` after
+	its own ownership check in ``reply_to_my_request``.
+	"""
+	before = doc.get_doc_before_save()
+	if not before:
+		return
+
+	stored_status = before.status or HR_REQUEST_OPEN
+	status_changed = doc.status != stored_status
+	if status_changed and (stored_status, doc.status) not in HR_REQUEST_STATE_EDGES:
+		frappe.throw(_("This request can't move from {0} to {1}.").format(stored_status, doc.status))
+
+	requester = frappe.db.get_value("Employee", doc.employee, "user_id")
+	if status_changed and frappe.session.user != "Administrator" and requester == frappe.session.user:
+		frappe.throw(
+			_("You can't decide your own request. Ask another worker."), frappe.PermissionError
+		)
+
+	if stored_status == HR_REQUEST_OPEN or _is_hr():
+		return
+
+	changed = [
+		field.fieldname
+		for field in doc.meta.fields
+		if field.fieldname not in HR_REQUEST_MUTABLE_FIELDS
+		and not field.is_virtual
+		and field.fieldtype not in no_value_fields
+		and (doc.get(field.fieldname) or None) != (before.get(field.fieldname) or None)
+	]
+	if changed:
+		frappe.throw(
+			_("This request is already being handled, so its filing details can't be changed."),
+			frappe.PermissionError,
+		)
+
 
 def hr_request_on_update(doc, method=None):
 	"""One notification per new employee-visible reply, and none for

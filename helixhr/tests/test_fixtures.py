@@ -669,6 +669,20 @@ _TIMESHEET_EDGES = frozenset(
 		("Sent Back", "Edit", "Draft", _MANAGER),
 	}
 )
+_HR_REQUEST_EDGES = frozenset(
+	{
+		(state, action, next_state, role)
+		for role in ("HR Manager", "IT Team")
+		for state, action, next_state in (
+			("Open", "Pick up", "In Progress"),
+			("Open", "Reject", "Rejected"),
+			("In Progress", "Need info", "Waiting on Employee"),
+			("In Progress", "Done", "Done"),
+			("In Progress", "Reject", "Rejected"),
+		)
+	}
+)
+
 _ATTENDANCE_EDGES = frozenset(
 	{
 		("Draft", "Submit", "Pending Manager", _MANAGER),
@@ -716,6 +730,16 @@ class TestApprovalWorkflowFixtures(IntegrationTestCase):
 		)
 		# P4-KTD2: no terminal reject on a week, in either pending state.
 		self.assertNotIn("Reject", {t.action for t in workflow.transitions})
+
+	def test_the_hr_request_workflow_matches_the_table(self):
+		workflow = self._workflow("HR Request Handling")
+		self.assertEqual(self._edges(workflow), _HR_REQUEST_EDGES)
+		self.assertEqual(workflow.workflow_state_field, "status")
+		self.assertEqual(workflow.states[0].state, "Open")
+		self.assertEqual(
+			[row.state for row in workflow.states],
+			["Open", "In Progress", "Waiting on Employee", "Done", "Rejected"],
+		)
 
 	def test_the_attendance_request_workflow_matches_the_table(self):
 		workflow = self._workflow("Attendance Request Approval")

@@ -53,7 +53,9 @@ from helixhr.utils import (
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
 IT_TEAM = "IT Team"
-IT_TEAM_HR_REQUEST_PERMLEVEL_ONE_FIELDS = frozenset({"status", "hr_note"})
+IT_TEAM_HR_REQUEST_PERMLEVEL_ONE_FIELDS = frozenset(
+	{"status", "hr_note", "helixhr_decision_reason", "picked_up_by", "routed_to_role"}
+)
 
 
 def run():
