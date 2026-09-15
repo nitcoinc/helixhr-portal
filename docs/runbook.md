@@ -1023,6 +1023,48 @@ the `Sent Back` Workflow State, the two new Workflow Action Masters and the four
 Notifications; the second now names HR Managers among the users whose pinned `default_workspace`
 would keep them out of the portal.
 
+Six more arrived with phase 5 (routed requests, the `IT Team` role, and the
+portal's own configuration surface). `IT Team role` **FAILs** if the role
+ever gains `desk_access`, if it ever lands in `DESK_ROLES`, or if a new field
+lands at permlevel 1 on `HR Request` without being added to the reviewed
+inventory it checks against -- each of those would hand `IT Team` more than
+the routed categories it is meant to see. `Message template tokens` and
+`Configuration field sets` FAIL if `helixhr/utils.py`'s `TEMPLATE_TOKENS` or
+`*_EDITABLE_FIELDS` promise something the code no longer supplies or an HRMS
+upgrade no longer has -- both are drift guards, not deploy blockers on a
+healthy site. The three genuinely new failure modes this release found:
+
+- **A category whose routed role has no enabled holder.** `Request category
+  routes` WARNs and names it. The runtime fallback (route to HR Manager and
+  log it) means no request is ever lost, but a category nobody is actually
+  working is exactly the "I file one and cannot find it" complaint this
+  plan exists to close, and it is silent until someone happens to notice a
+  stuck queue. **Fix**: assign the category's role to at least one enabled
+  User, or re-route it to a role that already has one, from Settings.
+- **The `HR Request Handling` workflow's first state is not `Open`.**
+  `HR Request workflow state order` FAILs. `HR Request.status` defaults to
+  `Open`, and `validate_workflow` has no prior version to compare against on
+  insert, so it takes `states[0]` as ground truth -- if a Desk edit or a
+  later fixture patch reorders the states, **every new request throws** at
+  the moment of filing, not at the moment of the edit. **Fix**: reorder the
+  Workflow's states in Desk so `Open` is first, or re-run
+  `bench migrate` to restore the shipped fixture.
+- **A queue emptied by the `_is_hr` gate.** Not a preflight check --there is
+  no site-config value to inspect for it -- but a code-shape trap worth
+  knowing if `_approval_summaries` is ever touched again: it used to gate
+  the whole HR half of the queue on `_is_hr()`, which an `IT Team` holder is
+  never true for. The fix (`_holds_routed_role`, alongside `_is_hr`) is
+  regression-tested directly (`test_an_it_team_holders_queue_is_populated`),
+  because this class of bug looks like "the queue is just empty today," not
+  like an error.
+
+`Retired request notifications` **FAILs** if either of the two Notification
+fixtures phase 5 retired (`HelixHR New Request For HR`,
+`HelixHR Request Status Changed`) comes back enabled -- on a site that had
+already installed one before the routing release, a Desk re-enable or a
+fixture-sync regression would otherwise double an employee's notification
+on every status change, silently.
+
 Three of those are new in P2-U9 and judge *values*, not presence:
 
 - **Upload policy** FAILs unless System Settings lists only PDF/PNG/JPG/JPEG/DOCX/XLSX, Max File

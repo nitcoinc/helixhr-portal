@@ -175,8 +175,12 @@ shell never existed until after U11". As shipped: a 256px left side nav at `lg:`
 identity block linking to Profile, nav list with the unread count on Notifications, sign out),
 a slim brand+bell app bar below `lg:`, and a five-slot bottom tab bar (Home, Leave, Timesheet,
 Requests, More) where More opens a sheet with the rest. Page content is capped at `max-w-5xl`;
-before the shell, pages ran the full window width. Approvals appears only for a user with at
-least one direct report, or an HR Manager working the HR queue (P4-R13).
+before the shell, pages ran the full window width. Approvals appears for a user with at least
+one direct report, an HR Manager working the HR queue (P4-R13), or -- since phase 5 -- any
+holder of a role a request category routes to (`can_work_requests`; `IT Team` is the first).
+Settings (`can_configure`) and Organisation (`can_see_organisation`) are phase-5 additions,
+both HR-only and both surfaced from the More sheet rather than a bottom-tab slot, since neither
+is a destination most sessions visit.
 `NotLinked` is the one route rendered without the shell
 (`meta.shell === false`).
 
