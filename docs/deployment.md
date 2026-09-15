@@ -171,15 +171,23 @@ for 60 seconds; Desk records are not cached at all):
 - **Documents page contents** — one `HelixHR Document Link` record per link.
   Leave `company` empty for "everyone", or set it to scope the link to one
   company. URLs must be `http(s)`; anything else is refused on save.
+- **Request categories and their routing, message text, leave types, holiday
+  lists, and shift types — from the portal itself**, at `/settings` (HR
+  Manager and System Manager only; nothing here is reachable from Desk-only
+  roles, and nothing here is reachable from Desk at all any more for
+  categories or message text — see the two subsections below). Everything
+  else in this list is still a Desk record.
 - **Leave types, holiday lists, allocations, approvers** — stock HRMS. The
-  portal reads whatever HRMS says.
-- **Which leave types HR decides** — tick **HR Approves** on a Leave Type
-  (Desk → Leave Type). A request for that type is filed straight into the HR
-  queue: the manager never sees it, and the employee reads "Waiting for HR"
-  from the moment they send it (P4-R7). Untick it and the next request goes to
-  the manager again; requests already in flight keep the stage they were filed
-  with.
-- **Request categories** — the `category` field's options on `HR Request`.
+  portal reads whatever HRMS says. `/settings` edits leave types, holiday
+  lists and shift types through the same three named field sets below, on
+  top of the real doctype — a Desk edit and a portal edit are the same record,
+  never two stores to keep in sync.
+- **Which leave types HR decides** — tick **HR Approves** on a Leave Type,
+  either in Desk or from `/settings → Leave types`. A request for that type is
+  filed straight into the HR queue: the manager never sees it, and the
+  employee reads "Waiting for HR" from the moment they send it (P4-R7). Untick
+  it and the next request goes to the manager again; requests already in
+  flight keep the stage they were filed with.
 - **HR reply text** — the `hr_note` field on a request. Changing it notifies
   the employee and puts the request back in their queue.
 - **The HR contact address** shown to a signed-in user with no Employee record
@@ -190,6 +198,64 @@ the portal's approval path exists for convenience, not as the only route. What
 Desk *cannot* do is bypass the rules: three `before_submit` hooks refuse a
 submit by the requester themselves, and refuse a manager submitting a leave
 request that is already with HR, whichever route the submit arrives on.
+
+### Request categories moved off `HR Request.category`'s Select options (P5-U1, P5-U13)
+
+A request category is now its own record, `HelixHR Request Category`, edited
+at `/settings → Categories` — not a Select option on `HR Request` any more.
+Each category names the role its requests route to (`HR Manager` or
+`IT Team` today — nothing else is accepted, on save or on the portal's own
+picker), an SLA in days (carried on the record; no scheduler acts on it yet),
+and whether it is offered to employees at all. Deactivating a category hides
+it from the picker without touching any request already filed under it.
+
+Re-routing a category only changes where the **next** request goes.
+`HR Request.routed_to_role` is stamped once, at insert, from the category's
+route at that moment — re-pointing `Payroll Question` from `HR Manager` to
+`IT Team` does not hand IT a single request filed before the change.
+
+### HR-editable message text is a fixed token contract, never Jinja (P5-U13, P5-KTD11)
+
+Two messages the portal sends are editable at `/settings → Message text`:
+who is emailed when a request arrives, and what the employee is told when its
+status changes. Each is stored in `HelixHR Message Template` as plain text —
+rendered by simple `{token}` substitution (`helixhr.utils.render_tokens`),
+**never** by `frappe.render_template`. A body containing `{{ frappe.get_doc(...) }}`
+comes back as that literal string; nothing HR types is ever executed. An
+unrecognized `{token}` is left as-is rather than rendered empty, so a typo
+never blanks the sentence around it.
+
+The token contract, one row per message (`helixhr.utils.TEMPLATE_TOKENS` is
+the source of truth — this table is a copy of it, kept in sync by hand):
+
+| `template_key`             | Tokens                                       | Sent when |
+|-----------------------------|-----------------------------------------------|-----------|
+| `request_arrival`           | `{category}`, `{subject}`, `{portal_url}`     | A request is filed, to the routed role. |
+| `request_status_changed`    | `{category}`, `{subject}`, `{state}`, `{reason}` | The status changes, to the employee. |
+
+`Notification` and `Email Template` — the two doctypes Frappe itself renders
+through unrestricted Jinja — are deliberately untouched by this feature and
+stay System-Manager-only. The birthday and work-anniversary reminders
+described below still go through that older `Email Template` path; they were
+not moved onto this token system (it would be a real behavior change, since
+that template uses loops and conditionals over a variable number of people,
+which flat substitution cannot express).
+
+### Leave type, holiday list and shift type: a named field set, not a Desk reskin (P5-U13, P5-KTD12)
+
+`/settings` deliberately shows only these fields per area — not every field
+the underlying HRMS doctype has:
+
+- **Leave type** — name, maximum days allowed, is carry-forward, is leave
+  without pay, whether HR approves it.
+- **Holiday list** — name, from date, to date, weekly off day, and the
+  holiday rows.
+- **Shift type** — name, start time, end time, and the check-in/check-out
+  window (minutes before/after the shift).
+
+Every save still runs through `doc.save()`, so HRMS's own `validate()` always
+runs — a value HRMS itself would reject is rejected here too. A field outside
+the named set posted to the save method is silently ignored, never written.
 
 ## What HR sets up before the self-service surfaces work (P3-U9)
 
