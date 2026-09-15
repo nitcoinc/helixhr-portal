@@ -53,18 +53,24 @@ export default defineConfig({
       name: 'hr',
       use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/hr.json' },
       dependencies: ['setup'],
-      testMatch: /(approvals|settings)\.spec\.ts/,
+      // P5-U15: organisation.spec.ts joins this list -- HR is the actor
+      // `get_organisation_view` is written for.
+      testMatch: /(approvals|settings|organisation)\.spec\.ts/,
     },
     // P5-U11. The routed-worker identity: `IT Team`, portal-only
     // (desk_access: 0), which never reaches Desk and works only the requests
     // stamped to its role (P5-U5). Scoped to `approvals.spec.ts` for the same
     // reason `hr` is -- this project exists for the IT capability shape, and
     // every other spec is written for a different hat.
+    //
+    // P5-U15: also `organisation.spec.ts`, for one negative assertion --
+    // IT Team works requests but is not HR, so the organisation view must
+    // refuse it exactly as it refuses a plain employee.
     {
       name: 'it',
       use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/it.json' },
       dependencies: ['setup'],
-      testMatch: /approvals\.spec\.ts/,
+      testMatch: /(approvals|organisation)\.spec\.ts/,
     },
     // P2-U9 step 9. Mobile WebKit is the second mandatory browser: it is the
     // only engine on iOS, it is where a coarse pointer, a real safe-area
