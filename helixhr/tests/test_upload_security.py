@@ -232,6 +232,13 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"get_request_categories": (60, 60),
 			"reply_to_my_request": (20, 3600),
 			"attach_to_request_reply": (20, 3600),
+			"get_organisation_view": (60, 60),
+			"get_portal_config": (60, 60),
+			"save_request_category": (30, 3600),
+			"save_message_template": (30, 3600),
+			"save_leave_type": (30, 3600),
+			"save_holiday_list": (30, 3600),
+			"save_shift_type": (30, 3600),
 		}
 		self.assertEqual(utils.RATE_LIMIT_POLICY, expected)
 		self.assertEqual(preflight.check_rate_limits()["status"], preflight.PASS)
