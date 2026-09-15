@@ -44,15 +44,16 @@ export default defineConfig({
     },
     // P4-U4. The HR queue's identity (P4-KTD8): an HR Manager with an Active
     // Employee record, who lands in the portal and works the HR half of the
-    // Approvals queue. Scoped to `approvals.spec.ts` on purpose -- this
-    // project exists for the HR capability shape, and every other spec is
-    // written for the employee or manager one, so a wider `testMatch` would
-    // run somebody else's flow under the wrong hat and fight it for fixtures.
+    // Approvals queue. Scoped to `approvals.spec.ts` and (P5-U14)
+    // `settings.spec.ts` on purpose -- this project exists for the HR
+    // capability shape, and every other spec is written for the employee or
+    // manager one, so a wider `testMatch` would run somebody else's flow
+    // under the wrong hat and fight it for fixtures.
     {
       name: 'hr',
       use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/hr.json' },
       dependencies: ['setup'],
-      testMatch: /approvals\.spec\.ts/,
+      testMatch: /(approvals|settings)\.spec\.ts/,
     },
     // P5-U11. The routed-worker identity: `IT Team`, portal-only
     // (desk_access: 0), which never reaches Desk and works only the requests
