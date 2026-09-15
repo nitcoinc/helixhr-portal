@@ -136,6 +136,78 @@ class TestPreflight(IntegrationTestCase):
 			self.assertIn(absent[1], result["detail"])
 			self.assertIn("bench migrate", result["detail"])
 
+	def test_retired_request_notifications_fails_when_re_enabled(self):
+		"""P5-U16: neither retired Notification -- the un-routable bell-only
+		arrival one, nor the hardcoded status ladder -- may come back
+		enabled, whether it exists on this site at all or not."""
+		self.assertEqual(preflight.check_retired_request_notifications()["status"], preflight.PASS)
+
+		for name in ("HelixHR New Request For HR", "HelixHR Request Status Changed"):
+			if not frappe.db.exists("Notification", name):
+				continue
+			original = frappe.db.get_value("Notification", name, "enabled")
+			frappe.db.set_value("Notification", name, "enabled", 1)
+			try:
+				result = preflight.check_retired_request_notifications()
+				self.assertEqual(result["status"], preflight.FAIL, msg=name)
+				self.assertIn(name, result["detail"])
+			finally:
+				frappe.db.set_value("Notification", name, "enabled", original)
+
+	def test_hr_request_workflow_state_order_fails_when_open_is_not_first(self):
+		"""P5-KTD4: `Open` not being `states[0]` throws on every insert, not
+		just on read -- this is the standing guard for a regression a
+		Desk edit or a later fixture patch could otherwise reintroduce
+		silently."""
+		self.assertEqual(preflight.check_hr_request_workflow_state_order()["status"], preflight.PASS)
+
+		from types import SimpleNamespace
+		from unittest.mock import patch
+
+		with patch.object(
+			preflight.frappe,
+			"get_doc",
+			return_value=SimpleNamespace(states=[SimpleNamespace(state="In Progress")]),
+		):
+			result = preflight.check_hr_request_workflow_state_order()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("In Progress", result["detail"])
+
+	def test_request_category_routes_warns_when_nobody_holds_the_role(self):
+		"""P5-KTD8's fallback exists so this never blocks the employee, but a
+		category nobody currently works should not go unnoticed at deploy
+		time. `Has Role` is stubbed to answer "nobody" for `IT Team` rather
+		than disabling the real fixture identity every other suite in this
+		run depends on; every other lookup passes through untouched."""
+		self.assertEqual(preflight.check_request_category_routes()["status"], preflight.PASS)
+
+		category = frappe.get_doc(
+			{
+				"doctype": "HelixHR Request Category",
+				"category_name": "_Test Unrouted Category",
+				"hint": "test fixture",
+				"route_to_role": "IT Team",
+				"is_active": 1,
+			}
+		)
+		category.insert(ignore_permissions=True)
+		try:
+			from unittest.mock import patch
+
+			real_get_all = frappe.get_all
+
+			def _stub(doctype, filters=None, **kwargs):
+				if doctype == "Has Role" and (filters or {}).get("role") == "IT Team":
+					return []
+				return real_get_all(doctype, filters=filters, **kwargs)
+
+			with patch.object(preflight.frappe, "get_all", side_effect=_stub):
+				result = preflight.check_request_category_routes()
+			self.assertEqual(result["status"], preflight.WARN)
+			self.assertIn(category.name, result["detail"])
+		finally:
+			frappe.delete_doc("HelixHR Request Category", category.name, force=True, ignore_permissions=True)
+
 	def test_run_exits_non_zero_when_something_fails(self):
 		def _run():
 			with self.assertRaises(SystemExit):

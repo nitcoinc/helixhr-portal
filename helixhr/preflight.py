@@ -713,6 +713,90 @@ def check_fixtures():
 	return _result("Fixtures installed", PASS, f"{len(expected)} checked")
 
 
+def check_retired_request_notifications():
+	"""P5-U4 / P5-KTD8: the two Notification fixtures the routed-request
+	release retired -- the bell-only arrival one (it cannot route to a
+	category's role) and the hardcoded status ladder (it would call a
+	`Waiting on Employee` request "open", and double every employee-facing
+	notification the new code path sends) -- must never come back enabled.
+
+	Neither is in `helixhr/fixtures/notification.json` any more, so a fresh
+	site never creates them and this passes trivially. An existing site
+	that had already installed them before this plan gets them disabled by
+	`helixhr.patches.v1_0.retire_request_notifications`; this is the standing
+	guard that a later `bench migrate` regression, or a Desk re-enable,
+	cannot bring either one back silently.
+	"""
+	retired = ("HelixHR New Request For HR", "HelixHR Request Status Changed")
+	enabled = [
+		name for name in retired if frappe.db.get_value("Notification", name, "enabled")
+	]
+	if enabled:
+		return _result(
+			"Retired request notifications",
+			FAIL,
+			f"{', '.join(enabled)} still enabled -- run helixhr.patches.v1_0.retire_request_notifications",
+		)
+	return _result("Retired request notifications", PASS, f"{len(retired)} confirmed absent or disabled")
+
+
+def check_hr_request_workflow_state_order():
+	"""P5-KTD4: `Open` must be `states[0]` on the `HR Request Handling`
+	workflow, or every `create_my_request` throws -- `HR Request.status`
+	defaults to `Open`, and `validate_workflow` has no `_doc_before_save` on
+	insert, so it takes the *first* state row as ground truth and refuses a
+	document that disagrees with it. A future edit to the fixture (in Desk,
+	or a later patch) that reorders the states breaks every request filed
+	after it, silently, until someone happens to try.
+	"""
+	if not frappe.db.exists("Workflow", "HR Request Handling"):
+		return _result("HR Request workflow state order", WARN, "HR Request Handling workflow not installed")
+	states = frappe.get_doc("Workflow", "HR Request Handling").states
+	if not states or states[0].state != "Open":
+		return _result(
+			"HR Request workflow state order",
+			FAIL,
+			f"states[0] is {states[0].state if states else 'missing'}, not Open -- every new request will throw",
+		)
+	return _result("HR Request workflow state order", PASS, "Open is states[0]")
+
+
+def check_request_category_routes():
+	"""P5-KTD8's fallback ('a category whose role has no enabled holder
+	falls back to HR Manager and logs it') is a runtime safety net, not a
+	reason to leave the misconfiguration unnoticed at deploy time. An active
+	category routed to a role nobody currently holds -- or holds but has
+	disabled -- silently sends every new request in that category through
+	the HR Manager fallback rather than the queue HR configured, which is
+	exactly the "I file one and cannot find it" complaint this plan closes.
+	"""
+	if not frappe.db.exists("DocType", "HelixHR Request Category"):
+		return _result("Request category routes", WARN, "HelixHR Request Category not installed")
+	categories = frappe.get_all(
+		"HelixHR Request Category", filters={"is_active": 1}, fields=["name", "route_to_role"]
+	)
+	unrouted = []
+	for category in categories:
+		holders = frappe.get_all(
+			"Has Role", filters={"role": category.route_to_role, "parenttype": "User"}, pluck="parent"
+		)
+		enabled = frappe.get_all(
+			"User",
+			filters={"name": ["in", holders or [""]], "enabled": 1},
+			pluck="name",
+			limit=1,
+		)
+		if not enabled:
+			unrouted.append(f"{category.name} -> {category.route_to_role}")
+	if unrouted:
+		return _result(
+			"Request category routes",
+			WARN,
+			"no enabled holder, falls back to HR Manager: " + ", ".join(unrouted),
+		)
+	return _result("Request category routes", PASS, f"{len(categories)} active categor{'y' if len(categories) == 1 else 'ies'} routable")
+
+
 # --- check-in (P3-U1 step 6, P3-R26) ---------------------------------------
 
 
@@ -1069,6 +1153,9 @@ CHECKS = [
 	check_public_endpoint,
 	check_hr_contact,
 	check_fixtures,
+	check_retired_request_notifications,
+	check_hr_request_workflow_state_order,
+	check_request_category_routes,
 	check_checkin_settings,
 	check_shift_types,
 	check_checkin_location_retention,
