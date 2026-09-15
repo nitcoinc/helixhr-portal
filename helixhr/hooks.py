@@ -301,6 +301,7 @@ after_install = "helixhr.install.after_install"
 # browser-side filter is not a boundary; these are.
 
 permission_query_conditions = {
+	"HR Request": "helixhr.helixhr.doctype.hr_request.hr_request.get_permission_query_conditions",
 	"HelixHR Document Link": (
 		"helixhr.helixhr.doctype.helixhr_document_link.helixhr_document_link"
 		".get_permission_query_conditions"
@@ -308,6 +309,7 @@ permission_query_conditions = {
 }
 
 has_permission = {
+	"HR Request": "helixhr.helixhr.doctype.hr_request.hr_request.has_permission",
 	"HelixHR Document Link": (
 		"helixhr.helixhr.doctype.helixhr_document_link.helixhr_document_link.has_permission"
 	),

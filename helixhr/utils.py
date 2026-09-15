@@ -72,6 +72,11 @@ DESK_ROLES = frozenset({"HR User", "System Manager", "Administrator"})
 PORTAL_HOME_PAGE = "helixhr"
 
 
+def _session_company(user):
+	"""Return the active Employee's company for ``user``, if any."""
+	return frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "company")
+
+
 def portal_home_page(user=None):
 	"""Where this user lands after signing in.
 

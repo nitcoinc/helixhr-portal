@@ -8,6 +8,8 @@ from frappe.model.document import Document
 from frappe.utils import now_datetime
 from hrms.api import get_current_employee
 
+from helixhr.utils import _session_company
+
 # The first worker claim and terminal outcomes. Both are read off the
 # DocType's own Select options; a status added in Desk that is in neither set
 # simply stamps nothing rather than guessing (P2-U8, P5-R6).
@@ -80,6 +82,45 @@ class HRRequest(Document):
 	# `helixhr.api.attach_to_my_request`, both field-allow-listed and
 	# session-scoped (P2-R27), so there is no generic Frappe route left that
 	# writes an HR Request as an employee.
+
+
+_WORKER_ROLES = frozenset({"IT Team"})
+_UNSCOPED_ROLES = frozenset({"HR Manager", "System Manager"})
+
+
+def get_permission_query_conditions(user=None, doctype=None, **kwargs):
+	"""Limit lists to a requester's records or their routed work."""
+	user = user or frappe.session.user
+	if user == "Administrator" or set(frappe.get_roles(user)) & _UNSCOPED_ROLES:
+		return ""
+	employee = frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "name")
+	if not employee:
+		return "1=0"
+	roles = set(frappe.get_roles(user)) & _WORKER_ROLES
+	if not roles:
+		return f"employee = {frappe.db.escape(employee, percent=False)}"
+	company_employees = frappe.get_all(
+		"Employee", filters={"company": _session_company(user)}, pluck="name"
+	)
+	return (
+		f"(employee = {frappe.db.escape(employee, percent=False)} or "
+		f"(employee in ({', '.join(frappe.db.escape(name, percent=False) for name in company_employees)}) "
+		f"and routed_to_role in ({', '.join(frappe.db.escape(role, percent=False) for role in roles)})))"
+	)
+
+
+def has_permission(doc, ptype=None, user=None, **kwargs):
+	"""The single-document half of routed request visibility."""
+	user = user or frappe.session.user
+	roles = set(frappe.get_roles(user))
+	if user == "Administrator" or roles & _UNSCOPED_ROLES:
+		return True
+	if doc.employee == frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "name"):
+		return True
+	return (
+		doc.routed_to_role in roles
+		and frappe.db.get_value("Employee", doc.employee, "company") == _session_company(user)
+	)
 
 
 def request_belongs_to_session(name):

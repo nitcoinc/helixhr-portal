@@ -275,6 +275,17 @@ class TestHRRequest(IntegrationTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			doc.save()
 
+	def test_it_worker_lists_only_stored_it_routes_and_can_read_them(self):
+		it_request = self._make_request(category="IT / Asset")
+		hr_request = self._make_request(category="HR Letter")
+		frappe.set_user(IT_TEAM_USER)
+
+		names = frappe.get_list("HR Request", pluck="name")
+		self.assertIn(it_request.name, names)
+		self.assertNotIn(hr_request.name, names)
+		self.assertTrue(frappe.has_permission("HR Request", "read", it_request.name))
+		self.assertFalse(frappe.has_permission("HR Request", "read", hr_request.name))
+
 	def test_repointing_a_category_does_not_retroactively_change_a_request_route(self):
 		doc = self._make_request(category="IT / Asset")
 		frappe.set_user("Administrator")
