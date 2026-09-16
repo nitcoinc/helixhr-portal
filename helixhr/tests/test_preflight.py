@@ -178,7 +178,19 @@ class TestPreflight(IntegrationTestCase):
 		category nobody currently works should not go unnoticed at deploy
 		time. `Has Role` is stubbed to answer "nobody" for `IT Team` rather
 		than disabling the real fixture identity every other suite in this
-		run depends on; every other lookup passes through untouched."""
+		run depends on; every other lookup passes through untouched.
+
+		The seeded categories route to `HR Manager` and `IT Team` (P5-U1,
+		P5-U2's `route_it_asset_requests` patch) -- on a genuinely fresh
+		site nobody holds either role yet, so the baseline assertion below
+		would see WARN before this test ever touches anything, on run order
+		alone. This test asserts its own precondition instead of borrowing
+		enabled holders another test happened to leave behind."""
+		from helixhr.tests.utils import make_test_hr_manager_employee, make_test_it_user
+
+		make_test_hr_manager_employee()
+		make_test_it_user()
+
 		self.assertEqual(preflight.check_request_category_routes()["status"], preflight.PASS)
 
 		category = frappe.get_doc(

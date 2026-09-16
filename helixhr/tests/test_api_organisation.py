@@ -21,6 +21,16 @@ LEAVE_TYPE = "Casual Leave"
 
 
 def _ensure_org_company():
+	# Company.create_default_warehouses() unconditionally creates a "Goods In
+	# Transit" warehouse tagged warehouse_type="Transit" -- normally seeded by
+	# the setup wizard, absent on a headless install. `ensure_test_company()`
+	# guards this the same way; this suite creates its own company (see the
+	# module docstring) rather than sharing that fixture, so it needs the same
+	# guard rather than depending on some other test having run first.
+	if not frappe.db.exists("Warehouse Type", "Transit"):
+		frappe.get_doc({"doctype": "Warehouse Type", "name": "Transit"}).insert(
+			ignore_permissions=True
+		)
 	if not frappe.db.exists("Company", ORG_COMPANY):
 		frappe.get_doc(
 			{
