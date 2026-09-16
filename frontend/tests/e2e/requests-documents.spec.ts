@@ -124,18 +124,18 @@ test.describe('employee', () => {
     await expect(sheet).toBeVisible()
 
     for (const [title, hint] of [
-      ['HR letter', 'Address, employment, visa'],
+      ['HR Letter', 'Address, employment, visa'],
       ['Payroll', 'Payslip, tax, overtime'],
-      ['IT / asset', 'Laptop, access, badge'],
-      ['Something else', 'Anything HR can help with'],
+      ['IT / Asset', 'Laptop, access, badge'],
+      ['Other', 'Anything HR can help with'],
     ]) {
       const tile = sheet.getByRole('button', { name: new RegExp(`^${title}`) })
       await expect(tile).toBeVisible()
       await expect(tile).toContainText(hint)
     }
 
-    // HR letter is the resting choice, and it says so rather than looking so.
-    await expect(sheet.getByRole('button', { name: /^HR letter/ })).toHaveAttribute(
+    // HR Letter is the resting choice, and it says so rather than looking so.
+    await expect(sheet.getByRole('button', { name: /^HR Letter/ })).toHaveAttribute(
       'aria-pressed',
       'true',
     )
