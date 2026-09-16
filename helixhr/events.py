@@ -4,7 +4,14 @@ from frappe.model import no_value_fields
 from frappe.utils import cint
 
 from helixhr.helixhr.doctype.hr_request.hr_request import request_belongs_to_session
-from helixhr.utils import UPLOAD_POLICY, get_manager_user, upload_extension, validate_portal_upload
+from helixhr.utils import (
+	UPLOAD_POLICY,
+	get_manager_user,
+	get_message_template,
+	render_tokens,
+	upload_extension,
+	validate_portal_upload,
+)
 
 # Timesheet workflow document event hooks (KTD7, KTD18). Two guards, both
 # needed because Frappe's workflow engine only enforces "does the acting
@@ -64,8 +71,59 @@ def _approver_user(employee):
 	return manager.user_id
 
 
+def _notify_manager_of_arrival(doctype, doc, manager_user, subject):
+	"""P5-U10: a Notification Log, not mail -- managers are in the portal
+	daily, and one more email per submission is how a channel gets ignored.
+
+	`manager_user` is always `_approver_user`'s answer: the Active-checked
+	reports-to manager every share and workflow path here already uses, so
+	"who gets told" and "who may act" can never name two different people.
+	Guarded twice: no manager (none set, or not Active) means nobody to
+	tell, and a manager who is also the acting session user (submitting
+	their own record on somebody's behalf, or a data anomaly where someone
+	reports to themselves) is never their own recipient.
+	"""
+	if not manager_user or manager_user == frappe.session.user:
+		return
+	frappe.get_doc(
+		{
+			"doctype": "Notification Log",
+			"for_user": manager_user,
+			"from_user": frappe.session.user,
+			"type": "Alert",
+			"document_type": doctype,
+			"document_name": doc.name,
+			"subject": subject,
+		}
+	).insert(ignore_permissions=True)
+
+
+def leave_application_after_insert(doc, method=None):
+	"""P5-U10: the manager learns a leave request landed, without opening
+	the portal -- the pre-existing gap the routing inventory surfaced.
+
+	An HR-approves leave type skips the manager entirely (P4-R7): the
+	fixture `HelixHR New Leave For HR` already emails HR the moment
+	`apply_for_leave` writes `helixhr_stage = "HR"`, moments after this
+	hook runs, so notifying the manager here too would be a second,
+	wrong recipient for a request that was never theirs to act on. That
+	check reads `Leave Type` directly rather than `doc.helixhr_stage`,
+	because permlevel 1 means the field is not written on `doc` until
+	after this insert returns (KTD4).
+	"""
+	if frappe.db.get_value("Leave Type", doc.leave_type, "helixhr_hr_approves"):
+		return
+	_notify_manager_of_arrival(
+		"Leave Application",
+		doc,
+		_approver_user(doc.employee),
+		_("{0} applied for {1}").format(doc.employee_name or doc.employee, doc.leave_type),
+	)
+
+
 def timesheet_on_update(doc, method=None):
 	manager_user = _approver_user(doc.employee)
+	before = doc.get_doc_before_save()
 
 	if doc.workflow_state == PENDING_STATE and doc.docstatus == 0:
 		if not manager_user:
@@ -82,6 +140,20 @@ def timesheet_on_update(doc, method=None):
 				)
 			)
 		_reconcile_timesheet_share(doc.name, doc.employee, manager_user)
+		# P5-U10: only on the transition into Pending Approval, not on every
+		# later save while it sits there (an HR reason-writing save, a
+		# reassignment reconcile) -- `before.workflow_state` is the row's
+		# stored value before this save, so a re-save that was already
+		# Pending never fires a second notification for the same arrival.
+		if not before or before.workflow_state != PENDING_STATE:
+			_notify_manager_of_arrival(
+				"Timesheet",
+				doc,
+				manager_user,
+				_("{0} submitted a timesheet for {1} to {2}").format(
+					doc.employee_name or doc.employee, doc.start_date, doc.end_date
+				),
+			)
 	else:
 		# Approved, Rejected, Cancelled, or back to Draft. "Cancelled" and
 		# the docstatus-2 case were missing until P2-U7: a cancelled week
@@ -332,6 +404,130 @@ def _reconcile_share(doctype, name, employee, keep_user, submit=0):
 # both written and matched in one place. helixhr.api._get_needs_you imports it.
 HR_REPLY_SUBJECT_PREFIX = "HR replied about"
 
+HR_REQUEST_OPEN = "Open"
+HR_REQUEST_IN_PROGRESS = "In Progress"
+HR_REQUEST_WAITING_ON_EMPLOYEE = "Waiting on Employee"
+HR_REQUEST_DONE = "Done"
+HR_REQUEST_REJECTED = "Rejected"
+HR_REQUEST_STATE_EDGES = frozenset(
+	{
+		(HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS),
+		(HR_REQUEST_OPEN, HR_REQUEST_REJECTED),
+		(HR_REQUEST_IN_PROGRESS, HR_REQUEST_WAITING_ON_EMPLOYEE),
+		(HR_REQUEST_IN_PROGRESS, HR_REQUEST_DONE),
+		(HR_REQUEST_IN_PROGRESS, HR_REQUEST_REJECTED),
+	}
+)
+HR_REQUEST_MUTABLE_FIELDS = {
+	"status",
+	DECISION_REASON_FIELD,
+	"hr_note",
+	"picked_up_by",
+	"picked_up_on",
+	"replied_on",
+	"closed_on",
+}
+
+
+def hr_request_validate(doc, method=None):
+	"""Keep the routed-request lifecycle on its workflow edges.
+
+	Workflow conditions are not evaluated by raw Desk saves or
+	``frappe.client.set_value``. This event is the server-side half: once a
+	request has left Open, its filing fields are immutable, a worker cannot
+	decide their own request, and only a documented lifecycle edge may change
+	its status. The employee reply path intentionally uses ``db_set`` after
+	its own ownership check in ``reply_to_my_request``.
+	"""
+	before = doc.get_doc_before_save()
+	if not before:
+		return
+
+	stored_status = before.status or HR_REQUEST_OPEN
+	status_changed = doc.status != stored_status
+	if status_changed and (stored_status, doc.status) not in HR_REQUEST_STATE_EDGES:
+		frappe.throw(_("This request can't move from {0} to {1}.").format(stored_status, doc.status))
+
+	requester = frappe.db.get_value("Employee", doc.employee, "user_id")
+	if status_changed and frappe.session.user != "Administrator" and requester == frappe.session.user:
+		frappe.throw(
+			_("You can't decide your own request. Ask another worker."), frappe.PermissionError
+		)
+
+	if stored_status == HR_REQUEST_OPEN or _is_hr():
+		return
+
+	changed = [
+		field.fieldname
+		for field in doc.meta.fields
+		if field.fieldname not in HR_REQUEST_MUTABLE_FIELDS
+		and not field.is_virtual
+		and field.fieldtype not in no_value_fields
+		and (doc.get(field.fieldname) or None) != (before.get(field.fieldname) or None)
+	]
+	if changed:
+		frappe.throw(
+			_("This request is already being handled, so its filing details can't be changed."),
+			frappe.PermissionError,
+		)
+
+
+def hr_request_after_insert(doc, method=None):
+	"""Queue arrival mail for enabled holders of the request's stored route.
+
+	The request is already durable before this hook runs. Email Queue failures
+	therefore cannot roll back a portal filing; they are logged for the operator
+	to retry while the request remains visible to its requester.
+	"""
+	role = doc.routed_to_role
+	users = _enabled_users_with_role(role)
+	if not users and role != "HR Manager":
+		frappe.log_error(
+			f"HR Request {doc.name} is routed to {role}, which has no enabled holders; falling back to HR Manager.",
+		"HelixHR request routing",
+		)
+		users = _enabled_users_with_role("HR Manager")
+	if not users:
+		frappe.log_error(
+			f"HR Request {doc.name} has no enabled recipient for route {role}.",
+			"HelixHR request routing",
+		)
+		return
+	tokens = {
+		"category": frappe.utils.escape_html(doc.category),
+		"subject": frappe.utils.escape_html(doc.subject),
+		"portal_url": frappe.utils.get_url("/helixhr/requests"),
+	}
+	template = get_message_template("request_arrival")
+	if template:
+		subject = render_tokens(template.subject, tokens)
+		message = render_tokens(template.body, tokens)
+	else:
+		subject = f"New {doc.category} request: {doc.subject}"
+		message = (
+			f"A new {tokens['category']} request, “{tokens['subject']}”, "
+			f"is waiting for you. <a href=\"{tokens['portal_url']}\">Open requests</a>."
+		)
+	try:
+		frappe.sendmail(
+			recipients=users,
+			subject=subject,
+			message=message,
+			reference_doctype="HR Request",
+			reference_name=doc.name,
+		)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "HelixHR request arrival mail failed")
+
+
+def _enabled_users_with_role(role):
+	if not role:
+		return []
+	holders = frappe.get_all("Has Role", filters={"role": role, "parenttype": "User"}, pluck="parent")
+	if not holders:
+		return []
+	return frappe.get_all("User", filters={"name": ["in", holders], "enabled": 1}, pluck="name")
+
 
 def hr_request_on_update(doc, method=None):
 	"""One notification per new employee-visible reply, and none for
@@ -348,6 +544,9 @@ def hr_request_on_update(doc, method=None):
 		# An insert. HR cannot write hr_note at creation (permlevel 1), and
 		# an employee's own new request has nothing to reply to yet.
 		return
+
+	if before.status != doc.status:
+		_notify_hr_request_status(doc)
 
 	note = (doc.hr_note or "").strip()
 	if not note or note == (before.hr_note or "").strip():
@@ -370,6 +569,47 @@ def hr_request_on_update(doc, method=None):
 			# Notification Log mirrors description <-> email_content in its
 			# own before_insert, so one of the pair is enough.
 			"description": frappe.utils.escape_html(note),
+		}
+	).insert(ignore_permissions=True)
+
+
+def _notify_hr_request_status(doc):
+	if doc.status not in {
+		HR_REQUEST_IN_PROGRESS,
+		HR_REQUEST_WAITING_ON_EMPLOYEE,
+		HR_REQUEST_DONE,
+		HR_REQUEST_REJECTED,
+	}:
+		return
+	for_user = frappe.db.get_value("Employee", doc.employee, "user_id") or doc.owner
+	if not for_user or for_user == frappe.session.user:
+		return
+	reason = (doc.get(DECISION_REASON_FIELD) or "").strip()
+	state = {
+		HR_REQUEST_IN_PROGRESS: "is being worked on",
+		HR_REQUEST_WAITING_ON_EMPLOYEE: "needs more information from you",
+		HR_REQUEST_DONE: "is done",
+		HR_REQUEST_REJECTED: "was declined",
+	}[doc.status]
+	tokens = {
+		"category": frappe.utils.escape_html(doc.category),
+		"subject": frappe.utils.escape_html(doc.subject),
+		"state": state,
+		"reason": frappe.utils.escape_html(reason) if reason else "",
+	}
+	template = get_message_template("request_status_changed")
+	subject = render_tokens(template.subject, tokens) if template else f"Your request {state}: {doc.subject}"
+	description = render_tokens(template.body, tokens) if template else (tokens["reason"] or None)
+	frappe.get_doc(
+		{
+			"doctype": "Notification Log",
+			"for_user": for_user,
+			"from_user": frappe.session.user,
+			"type": "Alert",
+			"document_type": "HR Request",
+			"document_name": doc.name,
+			"subject": subject,
+			"description": description or None,
 		}
 	).insert(ignore_permissions=True)
 
@@ -622,18 +862,32 @@ def attendance_request_on_update(doc, method=None):
 	exists only while the request is Pending Manager and only for the Active
 	reports-to user.
 	"""
+	before = doc.get_doc_before_save()
+
 	if doc.workflow_state == REQUEST_PENDING_MANAGER and doc.docstatus == 0:
+		manager_user = _approver_user(doc.employee)
 		_reconcile_share(
 			"Attendance Request",
 			doc.name,
 			doc.employee,
-			_approver_user(doc.employee),
+			manager_user,
 			submit=1,
 		)
+		# P5-U10, same transition guard as the Timesheet arrival notice: only
+		# the move into Pending Manager, not a later save that happens to
+		# still be there.
+		if not before or before.get("workflow_state") != REQUEST_PENDING_MANAGER:
+			_notify_manager_of_arrival(
+				"Attendance Request",
+				doc,
+				manager_user,
+				_("{0} sent an attendance request for {1}").format(
+					doc.employee_name or doc.employee, doc.from_date
+				),
+			)
 	else:
 		_reconcile_share("Attendance Request", doc.name, doc.employee, None)
 
-	before = doc.get_doc_before_save()
 	if not before or before.get("workflow_state") == doc.workflow_state:
 		return
 	_notify_attendance_request(doc)

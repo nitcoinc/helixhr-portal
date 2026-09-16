@@ -285,3 +285,86 @@ test('HR works what a manager handed over, tagged and with the note, and has no 
   })
   await admin.dispose()
 })
+
+/**
+ * P5-U11. The routed-worker capability shape, under the fourth identity
+ * (`it-team@helixhr.test`, seeded by `make_test_it_user` -- P5-U2). Runs
+ * against the single `IT / Asset` request `ensure_test_it_request` seeds:
+ * one request, picked up, questioned and finished, so this is single-run-
+ * per-site the same way the manager and HR tests above already are --
+ * re-running against a site this has already consumed needs a fresh site
+ * (see docs/runbook.md's Verify section).
+ */
+test('an IT identity works only its own routed requests, end to end', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'it', 'this is the routed-worker capability shape')
+  test.setTimeout(60000)
+
+  const baseURL = process.env.BASE_URL || 'http://localhost:8080'
+  const admin = await adminContext(baseURL)
+  const name = await getValue(
+    admin,
+    'HR Request',
+    { category: 'IT / Asset', routed_to_role: 'IT Team' },
+    'name',
+  )
+  await admin.dispose()
+  expect(name, 'ensure_test_it_request should have seeded one IT / Asset request').toBeTruthy()
+
+  await page.goto('/helixhr/approvals')
+  await expect(page.getByRole('heading', { name: 'Approvals' })).toBeVisible()
+
+  // P5-R5: the only kind on this queue is the one routed to IT Team -- a
+  // leave or timesheet row here would mean the scoping gate regressed.
+  const queue = page.getByTestId('approvals-queue')
+  const row = queue.locator(`[data-approval-name="${name}"]`)
+  await expect(row).toBeVisible({ timeout: 10000 })
+  await expect(queue.locator('[data-approval-kind]:not([data-approval-kind="request"])')).toHaveCount(0)
+
+  await row.click()
+  await expect(page).toHaveURL(new RegExp(`/helixhr/approvals/request/${name}$`))
+  const panel = page.getByTestId('approval-detail')
+  await expect(panel.getByTestId('pick-up')).toBeVisible({ timeout: 10000 })
+
+  // A decision closes the detail panel back to the queue, the same as every
+  // other kind (P2-U7 step 4) -- so each outcome re-opens the row.
+  await panel.getByTestId('pick-up').click()
+  await expect(page).toHaveURL(/\/helixhr\/approvals$/)
+
+  await row.click()
+  await expect(panel.getByTestId('done')).toBeVisible({ timeout: 10000 })
+  await panel.getByTestId('need-info').click()
+  await panel.getByRole('textbox', { name: 'Ask a question' }).fill('Which laptop model do you have?')
+  await panel.getByTestId('need-info').click()
+  await expect(page).toHaveURL(/\/helixhr\/approvals$/)
+
+  const check1 = await adminContext(baseURL)
+  await expect
+    .poll(async () => getValue(check1, 'HR Request', { name }, 'status'), { timeout: 15000 })
+    .toBe('Waiting on Employee')
+  await check1.dispose()
+
+  // The employee's reply is not a workflow action (P5-KTD5) and has no page
+  // of its own in this spec file -- requests.spec.ts owns the /requests UI.
+  // This test only needs the state to move back to `In Progress` so `Done`
+  // is reachable, which the API method itself proves end to end.
+  const employeeApi = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+  await employeeApi.post('/api/method/login', { form: { usr: EMPLOYEE, pwd: PASSWORD } })
+  const modified = await getValue(employeeApi, 'HR Request', { name }, 'modified')
+  const replied = await employeeApi.post('/api/method/helixhr.api.reply_to_my_request', {
+    form: { name, message: 'It is a Dell XPS 13.', expected_modified: modified },
+  })
+  expect(replied.ok(), await replied.text()).toBeTruthy()
+  await employeeApi.dispose()
+
+  await page.reload()
+  await expect(row).toBeVisible({ timeout: 10000 })
+  await row.click()
+  await expect(panel.getByTestId('request-thread')).toContainText('Dell XPS 13', { timeout: 10000 })
+  await panel.getByTestId('done').click()
+
+  const check2 = await adminContext(baseURL)
+  await expect
+    .poll(async () => getValue(check2, 'HR Request', { name }, 'status'), { timeout: 15000 })
+    .toBe('Done')
+  await check2.dispose()
+})

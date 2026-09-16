@@ -478,6 +478,8 @@ class TestPermissionDeltas(IntegrationTestCase):
 		"Employee Checkin",
 		"Attendance Request",
 		"Salary Slip",
+		"HR Request",
+		"HelixHR Request Category",
 	)
 
 	def test_no_standard_role_lost_access_to_a_customised_doctype(self):
@@ -547,6 +549,18 @@ class TestPermissionDeltas(IntegrationTestCase):
 		self.assertFalse(not_owner["if_owner"].get("delete"), "and only their own")
 		self.assertFalse(not_owner.get("delete"), "an employee must not delete another employee's leave")
 		self.assertTrue(not_owner.get("read"), "reading a request HR filed for them must still work")
+
+	def test_it_team_permissions_keep_existing_hr_request_roles_and_limit_category_access(self):
+		for permlevel in (0, 1):
+			rule = _rule("HR Request", "IT Team", permlevel=permlevel)
+			self.assertIsNotNone(rule, f"IT Team is missing HR Request level {permlevel}")
+			self.assertTrue(rule.read and rule.write)
+
+		category = _rule("HelixHR Request Category", "IT Team")
+		self.assertIsNotNone(category)
+		self.assertTrue(category.read)
+		for ptype in ("create", "write", "delete", "share"):
+			self.assertEqual(category.get(ptype), 0, ptype)
 
 	def test_the_employee_role_can_submit_a_timesheet(self):
 		"""R17: the portal's send-for-approval transition submits the week as
@@ -655,6 +669,20 @@ _TIMESHEET_EDGES = frozenset(
 		("Sent Back", "Edit", "Draft", _MANAGER),
 	}
 )
+_HR_REQUEST_EDGES = frozenset(
+	{
+		(state, action, next_state, role)
+		for role in ("HR Manager", "IT Team")
+		for state, action, next_state in (
+			("Open", "Pick up", "In Progress"),
+			("Open", "Reject", "Rejected"),
+			("In Progress", "Need info", "Waiting on Employee"),
+			("In Progress", "Done", "Done"),
+			("In Progress", "Reject", "Rejected"),
+		)
+	}
+)
+
 _ATTENDANCE_EDGES = frozenset(
 	{
 		("Draft", "Submit", "Pending Manager", _MANAGER),
@@ -702,6 +730,16 @@ class TestApprovalWorkflowFixtures(IntegrationTestCase):
 		)
 		# P4-KTD2: no terminal reject on a week, in either pending state.
 		self.assertNotIn("Reject", {t.action for t in workflow.transitions})
+
+	def test_the_hr_request_workflow_matches_the_table(self):
+		workflow = self._workflow("HR Request Handling")
+		self.assertEqual(self._edges(workflow), _HR_REQUEST_EDGES)
+		self.assertEqual(workflow.workflow_state_field, "status")
+		self.assertEqual(workflow.states[0].state, "Open")
+		self.assertEqual(
+			[row.state for row in workflow.states],
+			["Open", "In Progress", "Waiting on Employee", "Done", "Rejected"],
+		)
 
 	def test_the_attendance_request_workflow_matches_the_table(self):
 		workflow = self._workflow("Attendance Request Approval")

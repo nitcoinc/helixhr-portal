@@ -290,6 +290,23 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 			client_submit(frappe.get_doc(DOCTYPE, name).as_dict())
 		self.assertEqual(self._state(name).docstatus, 0)
 
+	def test_sending_notifies_the_manager_once_and_a_resave_does_not_repeat_it(self):
+		"""P5-U10: the manager's arrival notice, alongside the employee's own
+		(`_logs`'s `logs_before == logs` assertion in `test_full_lifecycle`
+		already proves the *employee* hears nothing on send)."""
+		created = self._create()
+		self._send(created)
+		name = created["name"]
+
+		manager_logs = self._logs(name, for_user=MANAGER_USER)
+		self.assertEqual(len(manager_logs), 1)
+
+		frappe.set_user("Administrator")
+		frappe.get_doc(DOCTYPE, name).save(ignore_permissions=True)
+
+		manager_logs = self._logs(name, for_user=MANAGER_USER)
+		self.assertEqual(len(manager_logs), 1, "a re-save while still Pending Manager must not notify again")
+
 	def test_an_unrelated_manager_is_refused(self):
 		frappe.set_user("Administrator")
 		make_test_user(OTHER_MANAGER_USER, self.company)

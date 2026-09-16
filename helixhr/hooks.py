@@ -86,6 +86,9 @@ website_route_rules = [
 
 fixtures = [
 	{"dt": "Property Setter", "filters": [["module", "=", "HelixHR"]]},
+	# P5-U2: this role is a portal role, so its fixture pins desk_access=0
+	# rather than inheriting Frappe's Desk-user default.
+	{"dt": "Role", "filters": [["name", "=", "IT Team"]]},
 	# Custom DocPerm is deliberately NOT a fixture. Frappe *replaces* a
 	# doctype's standard DocPerm rows with its Custom DocPerm rows rather than
 	# merging them (frappe.permissions.get_valid_perms), so shipping a partial
@@ -107,7 +110,11 @@ fixtures = [
 		# Workflows that link to them.
 		"dt": "Workflow State",
 		"filters": [
-			["name", "in", ["Draft", "Pending Approval", "Pending Manager", "Pending HR", "Sent Back"]]
+			[
+				"name",
+				"in",
+				["Draft", "Pending Approval", "Pending Manager", "Pending HR", "Sent Back", "Waiting on Employee"],
+			]
 		],
 	},
 	# Timesheet Approval (KTD7) and Attendance Request Approval (P3-KTD6),
@@ -127,13 +134,18 @@ fixtures = [
 	# `frappe.client.submit` route the fixture never sees. The Employee-role
 	# (line manager) transitions keep `allow_self_approval: 0`, where `owner`
 	# genuinely is the employee.
-	{"dt": "Workflow", "filters": [["document_type", "in", ["Timesheet", "Attendance Request"]]]},
+	{
+		"dt": "Workflow",
+		"filters": [["document_type", "in", ["Timesheet", "Attendance Request", "HR Request"]]],
+	},
 	{
 		# Likewise "Approve" and "Reject" already exist as shared Workflow
 		# Action Master records; "Submit", "Edit", "Send Back" and
 		# "Send to HR" are this app's own.
 		"dt": "Workflow Action Master",
-		"filters": [["name", "in", ["Submit", "Edit", "Send Back", "Send to HR"]]],
+		"filters": [
+			["name", "in", ["Submit", "Edit", "Send Back", "Send to HR", "Pick up", "Need info", "Done"]]
+		],
 	},
 	# P4-KTD7a: `helixhr_decision_reason` on the two workflow kinds, at
 	# permlevel 1 so only the roles `apply_permission_deltas` names can read
@@ -175,6 +187,8 @@ doc_events = {
 	# watches `status`, so a reply written without a status change produced
 	# no notification and therefore no obligation the employee could clear.
 	"HR Request": {
+		"after_insert": "helixhr.events.hr_request_after_insert",
+		"validate": "helixhr.events.hr_request_validate",
 		"on_update": "helixhr.events.hr_request_on_update",
 	},
 	# P4-U2 / P4-R8, P4-R8a. Leave has no Workflow, so the only guard on the
@@ -186,6 +200,10 @@ doc_events = {
 	"Leave Application": {
 		"validate": "helixhr.events.leave_application_validate",
 		"before_submit": "helixhr.events.leave_application_before_submit",
+		# P5-U10. The manager's arrival notice -- unlike Timesheet and
+		# Attendance Request, filing a leave application is the insert
+		# itself, not a later workflow-state move.
+		"after_insert": "helixhr.events.leave_application_after_insert",
 	},
 	# P3-KTD8 / P4-KTD5. Frappe does not enforce a workflow state's
 	# `allow_edit` on the server, so the attendance approval carries its
@@ -287,6 +305,7 @@ after_install = "helixhr.install.after_install"
 # browser-side filter is not a boundary; these are.
 
 permission_query_conditions = {
+	"HR Request": "helixhr.helixhr.doctype.hr_request.hr_request.get_permission_query_conditions",
 	"HelixHR Document Link": (
 		"helixhr.helixhr.doctype.helixhr_document_link.helixhr_document_link"
 		".get_permission_query_conditions"
@@ -294,6 +313,7 @@ permission_query_conditions = {
 }
 
 has_permission = {
+	"HR Request": "helixhr.helixhr.doctype.hr_request.hr_request.has_permission",
 	"HelixHR Document Link": (
 		"helixhr.helixhr.doctype.helixhr_document_link.helixhr_document_link.has_permission"
 	),

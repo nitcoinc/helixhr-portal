@@ -136,6 +136,16 @@ DELTAS = {
 		(("Employee", 0, 0), {"share": 0}),
 		(("HR Manager", 1, 0), {"read": 1, "write": 1}),
 	),
+	# P5-U2: IT Team works HR Requests in the portal. The level-0 row is
+	# required before its level-1 row; the preflight guard names the complete
+	# level-1 field inventory so a later field cannot be exposed silently.
+	"HR Request": (
+		(("IT Team", 0, 0), {"read": 1, "write": 1}),
+		(("IT Team", 1, 0), {"read": 1, "write": 1}),
+	),
+	"HelixHR Request Category": (
+		(("IT Team", 0, 0), {"read": 1}),
+	),
 }
 
 

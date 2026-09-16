@@ -4,18 +4,27 @@ A Frappe v16 app that gives employees a plain, mobile-first portal for leave,
 attendance (including a located check-in and a "Fix a day" request), payslips,
 holidays, timesheets, HR requests, documents, a colleague directory,
 notifications and profile, plus an Approvals page and a team leave week for
-managers. Frappe HR stays the only source of truth; HR
-keeps working in Frappe Desk. The portal is served at `/helixhr` on the same
-site as ERPNext and HRMS, and an employee signing in lands there rather than
-on Desk -- see [docs/deployment.md](docs/deployment.md) for how that is decided
-and how to keep employees out of Desk entirely.
+managers. Frappe HR stays the only source of truth. A routed HR Request
+(category, IT/asset, payroll, or other) now reaches a real worker queue in
+the portal too -- HR by default, or `IT Team`, a portal-only role, for the
+categories HR routes to it -- and HR configures that routing, the portal's
+own notification wording, and a short named field set on three HRMS masters
+(leave types, holiday lists, shift types) from a Settings screen, without
+Desk. Everything else -- payroll, onboarding, recruitment, company and role
+administration -- stays in Frappe Desk; the portal does not re-implement it.
+An HR Manager or System Manager also gets a read-only Organisation view:
+aggregate counts, never per-person detail, and no action from it. The portal
+is served at `/helixhr` on the same site as ERPNext and HRMS, and an employee
+signing in lands there rather than on Desk -- see
+[docs/deployment.md](docs/deployment.md) for how that is decided and how to
+keep employees out of Desk entirely.
 
 - What it is and is not: [PRODUCT.md](PRODUCT.md)
 - How it is put together: [docs/architecture.md](docs/architecture.md)
 - Deploying it: exposure, host names, onboarding an employee: [docs/deployment.md](docs/deployment.md)
 - Operating it, and every hard-won gotcha: [docs/runbook.md](docs/runbook.md)
 - Visual system, copy rules and measured contrast: [docs/design-system.md](docs/design-system.md)
-- The plans the code was built from, phases 1 to 3: [docs/plans/](docs/plans/)
+- The plans the code was built from, phases 1 to 5: [docs/plans/](docs/plans/)
 
 ## Screens
 

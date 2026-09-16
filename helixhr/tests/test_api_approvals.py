@@ -1298,8 +1298,15 @@ class TestAttendanceRequestApprovals(IntegrationTestCase):
 				msg=doctype,
 			)
 		self.assertEqual(set(api._QUEUE_TITLE), set(api._APPROVAL_DOCTYPES))
-		self.assertEqual(len(api._APPROVAL_SUMMARY_COLLECTORS), len(doctypes))
-		self.assertEqual(len(api._DECIDED_COLLECTORS), len(doctypes))
+		# HR Request has no line-manager half and no "recently decided" receipt
+		# feed yet -- its whole queue is `_hr_request_summaries`, reached
+		# through `_APPROVAL_KINDS["HR Request"]["hr_queue"]` rather than
+		# either tuple below (P5-U6; the receipts feed is explicitly deferred
+		# in the plan's Deferred to Follow-Up Work). The three doctypes that
+		# do have both must still each have exactly one entry.
+		line_manager_doctypes = doctypes - {"HR Request"}
+		self.assertEqual(len(api._APPROVAL_SUMMARY_COLLECTORS), len(line_manager_doctypes))
+		self.assertEqual(len(api._DECIDED_COLLECTORS), len(line_manager_doctypes))
 		# Each kind's "already decided" sentence names its own record type.
 		self.assertEqual(
 			len({kind["open_message"] for kind in api._APPROVAL_KINDS.values()}), len(doctypes)

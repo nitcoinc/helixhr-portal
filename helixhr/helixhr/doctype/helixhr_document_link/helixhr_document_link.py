@@ -7,6 +7,8 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
+from helixhr.utils import _session_company
+
 # P2-R19: a document link is a policy-link catalogue entry, so the only
 # schemes that can ever be right are the two a browser will follow to a
 # document. `javascript:` and `data:` are the interesting ones -- both are
@@ -99,10 +101,3 @@ def has_permission(doc, ptype=None, user=None, **kwargs):
 
 def _sees_every_company(user):
 	return user == "Administrator" or bool(set(frappe.get_roles(user)) & _UNSCOPED_ROLES)
-
-
-def _session_company(user):
-	"""The company of the active Employee behind `user`, or None. Derived
-	from the session the same way every other portal read is (KTD5) --
-	never from an argument the caller controls."""
-	return frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "company")

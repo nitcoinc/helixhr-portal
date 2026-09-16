@@ -572,6 +572,40 @@ notification carries it. Send to HR takes an optional note. Every outcome is
 still refused if the record moved since the approver read it (the
 `expected_modified` / `expected_state` contract).
 
+### The fourth kind: routed requests
+
+`HR Request` joined the queue as a fourth kind, and it does not fit the
+manager/HR shape above at all -- it has no line manager and no HR-stage
+escalation. Instead it has a **routed role**, stamped onto the record at
+insert from `HelixHR Request Category.route_to_role` and never re-resolved
+(re-pointing a category changes where the *next* request goes, never a
+request already filed). A worker holding that role picks the request up
+(`picked_up_by`, recorded, so a second worker is told it is already taken),
+then moves it through `Need info` / `Done` / `Reject` like any workflow kind
+-- `HR Request Handling`'s own transitions are the rule, exactly the way
+`get_transitions` already drives Timesheet and Attendance.
+
+Two things about this kind are genuinely different from the other three:
+
+- **The employee's `Reply` is not a workflow transition.** Role `Employee`
+  has no `write` on `HR Request` at all, so `apply_workflow`'s `doc.save()`
+  is unreachable for the requester. `reply_to_my_request` is a whitelisted
+  method that checks ownership and the *stored* status itself, then moves
+  the state with `db_set` after authorizing -- a bounded, documented
+  exception to "the workflow is the rule table," scoped to the one
+  transition the requester owns.
+- **A worker can be `IT Team`, not only HR.** `IT Team` is a portal-only role
+  (`desk_access: 0`, kept out of `utils.DESK_ROLES`) that works only the
+  categories routed to it and reads nothing else -- enforced by a
+  `get_permission_query_conditions` / `has_permission` pair on `HR Request`
+  scoped to the caller's own company, the stored `routed_to_role`, and (for
+  HR Manager / System Manager) the caller's own company rather than every
+  company. Because a routed-role holder is not `_is_hr()`, the queue's HR
+  gate is "is HR **or** holds a routed role with anything queued" --
+  `_holds_routed_role` in `api.py` -- and `get_portal_bootstrap.can_approve`
+  follows the same rule so the nav item and the server's own answer can
+  never disagree.
+
 ### One queue, tagged
 
 An HR Manager gets **one** oldest-first list, not a second backlog:
@@ -599,7 +633,10 @@ HR Managers with an Active Employee record also **land in the portal** now:
 `utils.DESK_ROLES` is `HR User`, `System Manager`, `Administrator` and no longer
 HR Manager (P4-KTD8). A `default_workspace` pinned on the User still wins over
 the hook, by Frappe's own precedence — `preflight.check_portal_landing` FAILs
-and names those users.
+and names those users. `IT Team` never reaches Desk at all: `desk_access: 0`
+is stated verbatim on the fixture rather than defaulted, because `Role.on_update`
+promotes any `desk_access: 1` holder to System User the moment the role is
+saved, which is both a Desk door and a billable seat this role must not open.
 
 
 ## Punch derivation, and why the portal method is the only create route
@@ -853,7 +890,13 @@ KTD4 — not because of a line count.
 - `App.vue` mounts `AppShell` for every route except the three state routes
   (`meta.shell: false`). The shell is a desktop sidebar at 1024px and up, and
   an app bar plus a five-item bottom tab bar below that, with a "More" dialog
-  for the rest. Approvals appears only when the bootstrap says `can_approve`.
+  for the rest. Approvals appears only when the bootstrap says `can_approve`
+  (now true for a routed-role holder with anything queued, not only HR);
+  Settings appears only on `can_configure` (HR); Organisation only on
+  `can_see_organisation` (HR Manager / System Manager, company-scoped,
+  read-only). Every nav gate is a bootstrap boolean, never a role list --
+  the frontend carries no role names of its own, and the server enforces the
+  read or write independently of what the nav happens to show.
 - `lib/session.js` owns the portal bootstrap (`ensureBootstrap`, at most once
   per hard load; `retryBootstrap` only on an explicit user retry), the
   `idle`/`loading`/`ready`/`not-linked`/`unavailable` status the router and
@@ -899,8 +942,14 @@ KTD4 — not because of a line count.
 `bench export-fixtures` never captures another app's rows. Permission rows are
 deliberately **not** among them — see "Permission deltas are a patch, not a
 fixture" above. Fixtures are installed by `bench migrate`;
-`preflight.check_fixtures` confirms the five that the app cannot work without
-(both Workflows included, since P3-U5).
+`preflight.check_fixtures` confirms every one the app cannot work without --
+three Workflows (`HR Request Handling` since phase 5), their states and
+action masters, and the request/leave/timesheet/attendance HR-facing
+Notifications. `preflight.check_retired_request_notifications` is the
+mirror image: the two request Notifications phase 5 retired
+(`HelixHR New Request For HR`, `HelixHR Request Status Changed`) must never
+come back enabled, on a site that had already installed them before the
+routing release.
 
 ## Tests
 
@@ -911,7 +960,8 @@ fixture" above. Fixtures are installed by `bench migrate`;
   never assert against an assumed-empty baseline.
 - **Vitest** (`frontend/src/**/*.test.js`): pure functions only, currently the
   error-message mapping.
-- **Playwright** (`frontend/tests/e2e/`): `setup` logs the two fixture users
+- **Playwright** (`frontend/tests/e2e/`): `setup` logs the four fixture users
+  (`employee`, `manager`, `hr`, and `it` since phase 5's routed-role queue)
   in once and stores state; `employee` and `manager` reuse it on desktop
   Chromium; `employee-mobile-webkit` re-runs the critical flows on iOS's only engine
   under a coarse pointer; `baseline` exists only when `BASELINE_MODE` is set
@@ -931,4 +981,23 @@ method that asserts real data, and one clicked navigation in the e2e suite.
 
 Adding a setting: prefer site config read in `www/helixhr.py`'s `boot` (as
 `helixhr_hr_contact` is) over a new Single doctype, and add a line to
-`preflight.py` so the value is checked on every deploy.
+`preflight.py` so the value is checked on every deploy. This is the rule for
+a **scalar deploy-time flag** -- a threshold, a toggle, an address.
+
+It is not the rule for something HR edits at runtime. This app's standing
+position is that Desk owns HR administration and the portal does not
+re-implement HRMS rules -- the routed-requests plan (phase 5) partly reverses
+that, deliberately and within bounds: HR now configures request categories
+and routing (`HelixHR Request Category`), the wording of the portal's own
+notifications (`HelixHR Message Template`, plain `{token}` substitution --
+**never** `frappe.render_template`, since a template evaluated as code would
+let HR's own text become remote code execution the moment it renders), and a
+**named, deliberately short** field set on three HRMS masters (Leave Type,
+Holiday List, Shift Type -- `helixhr/utils.py`'s `*_EDITABLE_FIELDS`
+constants, not every field the doctype has). Everything else that changes
+rarely -- payroll runs, salary structures, onboarding, recruitment, company
+and department masters, role assignment -- stays in Desk; this plan does not
+touch it. A new HR-editable surface of this shape gets its own `save_*`
+method in `api.py` (explicit permission check, an allow-listed field set,
+`doc.save()` so the underlying doctype's own `validate` still runs -- never
+`db_set`), not a site config value and not a new Single.

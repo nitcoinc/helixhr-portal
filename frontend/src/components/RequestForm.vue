@@ -1,6 +1,7 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, watch } from 'vue'
 import { createResource, FormControl, Button } from 'frappe-ui'
+import AsyncState from '@/components/AsyncState.vue'
 import { attachToRequest } from '@/lib/api'
 
 // P2-U8. The new-request sheet.
@@ -24,15 +25,13 @@ const props = defineProps({
 })
 const emit = defineEmits(['created', 'cancel'])
 
-// The four tiles, in the canvas's order. `value` is the DocType's own Select
-// option; the title and line under it are what the employee reads. The server
-// checks the value against the same options again (P2-R27).
-const CATEGORIES = [
-  { value: 'HR Letter', title: 'HR letter', hint: 'Address, employment, visa' },
-  { value: 'Payroll Question', title: 'Payroll', hint: 'Payslip, tax, overtime' },
-  { value: 'IT / Asset', title: 'IT / asset', hint: 'Laptop, access, badge' },
-  { value: 'Other', title: 'Something else', hint: 'Anything HR can help with' },
-]
+// P5-R1: categories are app records. HR can add or retire one without a
+// frontend deploy; the server validates the selected name again on submit.
+const categories = createResource({
+  url: 'helixhr.api.get_request_categories',
+  auto: true,
+})
+const categoryOptions = computed(() => categories.data || [])
 
 // The rule, stated up front on the sheet and enforced by
 // `helixhr.api.attach_to_my_request`. Both numbers come from one place here
@@ -45,12 +44,18 @@ const MAX_MB = 10
 // offers something the server will refuse is a promise the app then breaks.
 const ACCEPT = '.pdf,.png,.jpg,.jpeg,.docx,.xlsx'
 
-const category = ref(
-  CATEGORIES.some((c) => c.value === props.initialCategory)
-    ? props.initialCategory
-    : CATEGORIES[0].value,
-)
+const category = ref(props.initialCategory)
 const subject = ref(props.initialSubject || '')
+
+watch(
+  categoryOptions,
+  (options) => {
+    if (!options.some((option) => option.name === category.value)) {
+      category.value = options[0]?.name || ''
+    }
+  },
+  { immediate: true },
+)
 const details = ref('')
 const file = ref(null)
 const error = ref('')
@@ -85,7 +90,7 @@ const uploading = ref(false)
 // so a second press cannot start a second create against the same key or a
 // second upload against the same request.
 const busy = computed(() => create.loading || uploading.value)
-const canSend = computed(() => !!subject.value.trim() && !busy.value)
+const canSend = computed(() => !!category.value && !!subject.value.trim() && !busy.value)
 
 function onFileChange(e) {
   file.value = e.target.files?.[0] || null
@@ -186,33 +191,40 @@ async function submit() {
     class="space-y-5"
     @submit.prevent="submit"
   >
-    <fieldset>
-      <legend class="label mb-2">
-        What is it about?
-      </legend>
-      <!-- Four explained tiles, not a select. The hint under each title is
-           what stops "Other" from being the default answer to a word the
-           employee has to guess the meaning of. -->
-      <div class="grid grid-cols-2 gap-2">
-        <button
-          v-for="option in CATEGORIES"
-          :key="option.value"
-          type="button"
-          :disabled="frozen"
-          class="min-h-11 cursor-pointer rounded-lg border p-3 text-left transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-60"
-          :class="
-            category === option.value
-              ? 'border-field bg-surface-white ring-1 ring-field'
-              : 'border-outline-gray-2 bg-surface-white hover:bg-surface-gray-2'
-          "
-          :aria-pressed="category === option.value"
-          @click="category = option.value"
-        >
-          <span class="block font-medium text-ink-gray-9">{{ option.title }}</span>
-          <span class="mt-0.5 block text-sm text-ink-gray-6">{{ option.hint }}</span>
-        </button>
-      </div>
-    </fieldset>
+    <AsyncState
+      :resource="categories"
+      section="request-categories"
+      :empty="categoryOptions.length === 0"
+      empty-title="No request categories are available"
+      empty-body="Ask HR to add one before sending a request."
+      skeleton="field"
+      skeleton-height="h-28"
+    >
+      <fieldset>
+        <legend class="label mb-2">
+          What is it about?
+        </legend>
+        <div class="grid grid-cols-2 gap-2">
+          <button
+            v-for="option in categoryOptions"
+            :key="option.name"
+            type="button"
+            :disabled="frozen"
+            class="min-h-11 cursor-pointer rounded-lg border p-3 text-left transition-colors duration-200 disabled:cursor-not-allowed disabled:opacity-60"
+            :class="
+              category === option.name
+                ? 'border-field bg-surface-white ring-1 ring-field'
+                : 'border-outline-gray-2 bg-surface-white hover:bg-surface-gray-2'
+            "
+            :aria-pressed="category === option.name"
+            @click="category = option.name"
+          >
+            <span class="block font-medium text-ink-gray-9">{{ option.category_name }}</span>
+            <span class="mt-0.5 block text-sm text-ink-gray-6">{{ option.hint }}</span>
+          </button>
+        </div>
+      </fieldset>
+    </AsyncState>
 
     <FormControl
       v-model="subject"

@@ -64,28 +64,22 @@ export function call(method, params) {
 }
 
 /**
- * Attach one private file to an HR Request the signed-in employee owns.
+ * POST one file, multipart, to a whitelisted upload method.
  *
  * frappe-ui's frappeRequest always JSON-encodes the body and forces a JSON
  * Content-Type header, so it can't carry multipart form data -- this goes
  * straight through fetch instead, letting the browser set its own multipart
  * boundary.
  *
- * P2-U8: the endpoint is the portal's own, not Frappe's generic
- * `upload_file`. That one gates on `write` permission for the target
- * document, and role Employee deliberately no longer has write on HR Request
- * -- so the ownership rule, the private flag, and the file type and size
- * policy the sheet promises all live in one session-scoped method (P2-R27).
- *
  * The failure carries `helixhrMethod` and a plain `messages` array, so a
  * failed attachment reads the same way in the UI as any other API failure.
  */
-export async function attachToRequest(file, { name }) {
+async function uploadFile(method, file, params) {
   const formData = new FormData()
   formData.append('file', file)
-  formData.append('name', name)
+  for (const [key, value] of Object.entries(params)) formData.append(key, value)
 
-  const url = '/api/method/helixhr.api.attach_to_my_request'
+  const url = `/api/method/${method}`
   const response = await fetch(url, {
     method: 'POST',
     headers: {
@@ -111,6 +105,29 @@ export async function attachToRequest(file, { name }) {
     throw error
   }
   return (await response.json()).message
+}
+
+/**
+ * Attach one private file to an HR Request the signed-in employee owns.
+ *
+ * P2-U8: the endpoint is the portal's own, not Frappe's generic
+ * `upload_file`. That one gates on `write` permission for the target
+ * document, and role Employee deliberately no longer has write on HR Request
+ * -- so the ownership rule, the private flag, and the file type and size
+ * policy the sheet promises all live in one session-scoped method (P2-R27).
+ */
+export function attachToRequest(file, { name }) {
+  return uploadFile('helixhr.api.attach_to_my_request', file, { name })
+}
+
+/**
+ * The routed worker's side of the same upload (P5-R10a): what makes an
+ * HR Letter request completable without opening Desk. Same multipart shape,
+ * a different session-scoped method whose ownership check is inverted --
+ * see `helixhr.api.attach_to_request_reply`.
+ */
+export function attachToRequestReply(file, { name }) {
+  return uploadFile('helixhr.api.attach_to_request_reply', file, { name })
 }
 
 /**

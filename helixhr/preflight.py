@@ -44,6 +44,7 @@ from frappe.utils import cint
 from helixhr.patches.v1_0.apply_permission_deltas import DELTAS
 from helixhr.utils import (
 	ALLOWED_UPLOAD_EXTENSIONS,
+	DESK_ROLES,
 	RATE_LIMIT_POLICY,
 	UPLOAD_MAX_BYTES,
 	portal_home_page,
@@ -51,6 +52,10 @@ from helixhr.utils import (
 )
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
+IT_TEAM = "IT Team"
+IT_TEAM_HR_REQUEST_PERMLEVEL_ONE_FIELDS = frozenset(
+	{"status", "hr_note", "helixhr_decision_reason", "picked_up_by", "routed_to_role"}
+)
 
 
 def run():
@@ -349,6 +354,36 @@ def check_portal_landing():
 	return _result("Portal landing", PASS, "employees land on /helixhr; Desk users are untouched")
 
 
+def check_it_team_role():
+	"""P5-U2: IT Team stays portal-only and its writable request fields are reviewed."""
+	problems = []
+	role = frappe.db.get_value("Role", IT_TEAM, ["desk_access", "is_custom"], as_dict=True)
+	if not role:
+		problems.append("Role fixture is missing")
+	else:
+		if cint(role.desk_access):
+			problems.append("desk_access must be 0")
+		if cint(role.is_custom):
+			problems.append("is_custom must be 0")
+	if IT_TEAM in DESK_ROLES:
+		problems.append("IT Team is in DESK_ROLES")
+
+	actual = {
+		field.fieldname
+		for field in frappe.get_meta("HR Request").fields
+		if cint(field.permlevel) == 1
+	}
+	if actual != IT_TEAM_HR_REQUEST_PERMLEVEL_ONE_FIELDS:
+		problems.append(
+			"HR Request permlevel-1 fields are not reviewed: "
+			f"expected {sorted(IT_TEAM_HR_REQUEST_PERMLEVEL_ONE_FIELDS)}, got {sorted(actual)}"
+		)
+
+	if problems:
+		return _result("IT Team role", FAIL, "; ".join(problems) + " -- run bench migrate")
+	return _result("IT Team role", PASS, "portal-only role and HR Request field inventory reviewed")
+
+
 def check_signup_disabled():
 	off = frappe.utils.cint(frappe.db.get_single_value("Website Settings", "disable_signup"))
 	return _result(
@@ -642,6 +677,7 @@ def check_fixtures():
 		# P4-U1: the single-step attendance approval, with Pending HR reached
 		# only by Send to HR (was two mandatory steps in P3).
 		("Workflow", "Attendance Request Approval"),
+		("Workflow", "HR Request Handling"),
 		# Its two new states. A Workflow's `workflow_state` values are Links
 		# and fixture import runs with `ignore_links`, so a Workflow State
 		# row that never installed leaves the workflow itself looking fine.
@@ -652,8 +688,12 @@ def check_fixtures():
 		# outcomes. Same reason as above -- a Workflow's action and state
 		# names are Links, and the import runs with `ignore_links`.
 		("Workflow State", "Sent Back"),
+		("Workflow State", "Waiting on Employee"),
 		("Workflow Action Master", "Send Back"),
 		("Workflow Action Master", "Send to HR"),
+		("Workflow Action Master", "Pick up"),
+		("Workflow Action Master", "Need info"),
+		("Workflow Action Master", "Done"),
 		("Activity Type", "General"),
 		("Notification", "HelixHR Timesheet Status Changed"),
 		("Notification", "HelixHR Leave Status Changed"),
@@ -671,6 +711,90 @@ def check_fixtures():
 	if missing:
 		return _result("Fixtures installed", FAIL, "missing " + ", ".join(missing) + " -- run bench migrate")
 	return _result("Fixtures installed", PASS, f"{len(expected)} checked")
+
+
+def check_retired_request_notifications():
+	"""P5-U4 / P5-KTD8: the two Notification fixtures the routed-request
+	release retired -- the bell-only arrival one (it cannot route to a
+	category's role) and the hardcoded status ladder (it would call a
+	`Waiting on Employee` request "open", and double every employee-facing
+	notification the new code path sends) -- must never come back enabled.
+
+	Neither is in `helixhr/fixtures/notification.json` any more, so a fresh
+	site never creates them and this passes trivially. An existing site
+	that had already installed them before this plan gets them disabled by
+	`helixhr.patches.v1_0.retire_request_notifications`; this is the standing
+	guard that a later `bench migrate` regression, or a Desk re-enable,
+	cannot bring either one back silently.
+	"""
+	retired = ("HelixHR New Request For HR", "HelixHR Request Status Changed")
+	enabled = [
+		name for name in retired if frappe.db.get_value("Notification", name, "enabled")
+	]
+	if enabled:
+		return _result(
+			"Retired request notifications",
+			FAIL,
+			f"{', '.join(enabled)} still enabled -- run helixhr.patches.v1_0.retire_request_notifications",
+		)
+	return _result("Retired request notifications", PASS, f"{len(retired)} confirmed absent or disabled")
+
+
+def check_hr_request_workflow_state_order():
+	"""P5-KTD4: `Open` must be `states[0]` on the `HR Request Handling`
+	workflow, or every `create_my_request` throws -- `HR Request.status`
+	defaults to `Open`, and `validate_workflow` has no `_doc_before_save` on
+	insert, so it takes the *first* state row as ground truth and refuses a
+	document that disagrees with it. A future edit to the fixture (in Desk,
+	or a later patch) that reorders the states breaks every request filed
+	after it, silently, until someone happens to try.
+	"""
+	if not frappe.db.exists("Workflow", "HR Request Handling"):
+		return _result("HR Request workflow state order", WARN, "HR Request Handling workflow not installed")
+	states = frappe.get_doc("Workflow", "HR Request Handling").states
+	if not states or states[0].state != "Open":
+		return _result(
+			"HR Request workflow state order",
+			FAIL,
+			f"states[0] is {states[0].state if states else 'missing'}, not Open -- every new request will throw",
+		)
+	return _result("HR Request workflow state order", PASS, "Open is states[0]")
+
+
+def check_request_category_routes():
+	"""P5-KTD8's fallback ('a category whose role has no enabled holder
+	falls back to HR Manager and logs it') is a runtime safety net, not a
+	reason to leave the misconfiguration unnoticed at deploy time. An active
+	category routed to a role nobody currently holds -- or holds but has
+	disabled -- silently sends every new request in that category through
+	the HR Manager fallback rather than the queue HR configured, which is
+	exactly the "I file one and cannot find it" complaint this plan closes.
+	"""
+	if not frappe.db.exists("DocType", "HelixHR Request Category"):
+		return _result("Request category routes", WARN, "HelixHR Request Category not installed")
+	categories = frappe.get_all(
+		"HelixHR Request Category", filters={"is_active": 1}, fields=["name", "route_to_role"]
+	)
+	unrouted = []
+	for category in categories:
+		holders = frappe.get_all(
+			"Has Role", filters={"role": category.route_to_role, "parenttype": "User"}, pluck="parent"
+		)
+		enabled = frappe.get_all(
+			"User",
+			filters={"name": ["in", holders or [""]], "enabled": 1},
+			pluck="name",
+			limit=1,
+		)
+		if not enabled:
+			unrouted.append(f"{category.name} -> {category.route_to_role}")
+	if unrouted:
+		return _result(
+			"Request category routes",
+			WARN,
+			"no enabled holder, falls back to HR Manager: " + ", ".join(unrouted),
+		)
+	return _result("Request category routes", PASS, f"{len(categories)} active categor{'y' if len(categories) == 1 else 'ies'} routable")
 
 
 # --- check-in (P3-U1 step 6, P3-R26) ---------------------------------------
@@ -921,6 +1045,62 @@ def check_hr_manager_self_scope():
 	return _result("HR queue scoping", PASS, f"{len(enabled)} HR Manager(s), none scoped to one Employee")
 
 
+def check_template_tokens():
+	"""P5-U13 / P5-KTD11: every token `helixhr.utils.TEMPLATE_TOKENS` promises
+	for a message key is one its caller actually supplies to `render_tokens`.
+
+	This can only be verified by rendering, not by reading source, so it
+	sends each seeded template through its real caller with a sentinel
+	request and asserts every documented token was substituted -- a token
+	the plan promises but the code forgot to pass would otherwise render as
+	itself (a literal `{token}`) forever, silently.
+	"""
+	from helixhr.utils import TEMPLATE_TOKENS, render_tokens
+
+	problems = []
+	for template_key, tokens in TEMPLATE_TOKENS.items():
+		probe = {token: f"__probe_{token}__" for token in tokens}
+		body = " ".join(f"{{{token}}}" for token in tokens)
+		rendered = render_tokens(body, probe)
+		missing = [token for token in tokens if probe[token] not in rendered]
+		if missing:
+			problems.append(f"{template_key}: {', '.join(missing)} never substituted")
+	if problems:
+		return _result("Message template tokens", FAIL, "; ".join(problems))
+	return _result("Message template tokens", PASS, f"{len(TEMPLATE_TOKENS)} templates checked")
+
+
+def check_configuration_field_sets():
+	"""P5-U13 / P5-KTD12: the named short field set behind each save_* method
+	still exists on its HRMS doctype.
+
+	These are portal-owned allow-lists over doctypes HelixHR does not own --
+	an HRMS upgrade that renames or removes one of these fields would make
+	the corresponding `save_*` method silently drop a value on every call,
+	with no error anywhere. A FAIL here is the loud version of that.
+	"""
+	from helixhr.utils import (
+		HOLIDAY_LIST_EDITABLE_FIELDS,
+		LEAVE_TYPE_EDITABLE_FIELDS,
+		SHIFT_TYPE_EDITABLE_FIELDS,
+	)
+
+	field_sets = {
+		"Leave Type": LEAVE_TYPE_EDITABLE_FIELDS,
+		"Holiday List": HOLIDAY_LIST_EDITABLE_FIELDS,
+		"Shift Type": SHIFT_TYPE_EDITABLE_FIELDS,
+	}
+	problems = []
+	for doctype, fields in field_sets.items():
+		meta = frappe.get_meta(doctype)
+		missing = [field for field in fields if not meta.has_field(field)]
+		if missing:
+			problems.append(f"{doctype}: {', '.join(missing)} no longer exist")
+	if problems:
+		return _result("Configuration field sets", FAIL, "; ".join(problems))
+	return _result("Configuration field sets", PASS, f"{len(field_sets)} doctypes checked")
+
+
 def check_pdf_generator():
 	"""P3-R2: the payslip PDF is rendered by a binary on the host, not by this
 	app, so a site without one answers 500 on a download that looks fine in
@@ -960,6 +1140,7 @@ CHECKS = [
 	check_unsubmitted_approved_leave,
 	check_document_link_urls,
 	check_portal_landing,
+	check_it_team_role,
 	check_signup_disabled,
 	check_password_login,
 	check_entra,
@@ -972,6 +1153,9 @@ CHECKS = [
 	check_public_endpoint,
 	check_hr_contact,
 	check_fixtures,
+	check_retired_request_notifications,
+	check_hr_request_workflow_state_order,
+	check_request_category_routes,
 	check_checkin_settings,
 	check_shift_types,
 	check_checkin_location_retention,
@@ -979,6 +1163,8 @@ CHECKS = [
 	check_celebration_reminders,
 	check_outgoing_email,
 	check_hr_manager_self_scope,
+	check_template_tokens,
+	check_configuration_field_sets,
 	check_pdf_generator,
 	check_frontend_built,
 ]

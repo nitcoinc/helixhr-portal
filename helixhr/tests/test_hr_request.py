@@ -3,9 +3,23 @@ import io
 import uuid
 
 import frappe
+from frappe.model.workflow import apply_workflow
 from frappe.tests import IntegrationTestCase
 
-from helixhr.tests.utils import EMPLOYEE_USER, MANAGER_USER, make_test_employee_and_manager
+from helixhr.tests.utils import (
+	EMPLOYEE_USER,
+	HR_MANAGER_EMPLOYEE_USER,
+	IT_TEAM_USER,
+	MANAGER_USER,
+	ensure_baseline_company,
+	ensure_hr_manager_user,
+	ensure_test_company,
+	ensure_test_email_account,
+	make_test_employee_and_manager,
+	make_test_hr_manager_employee,
+	make_test_it_user,
+	make_test_user,
+)
 
 
 class _UploadedFile:
@@ -52,6 +66,7 @@ def with_uploaded_file(filename, content=SAFE_PDF):
 class TestHRRequest(IntegrationTestCase):
 	def setUp(self):
 		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		make_test_it_user()
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
@@ -227,16 +242,173 @@ class TestHRRequest(IntegrationTestCase):
 		frappe.set_user(EMPLOYEE_USER)
 		doc = self._make_request()
 
-		frappe.set_user("Administrator")
+		frappe.set_user(ensure_hr_manager_user())
+		apply_workflow({"doctype": "HR Request", "name": doc.name}, "Pick up")
 		desk_doc = frappe.get_doc("HR Request", doc.name)
-		desk_doc.status = "Done"
 		desk_doc.hr_note = "Sent to your personal email"
 		desk_doc.save()
+		apply_workflow({"doctype": "HR Request", "name": doc.name}, "Done")
 
 		frappe.set_user(EMPLOYEE_USER)
 		employee_view = frappe.get_doc("HR Request", doc.name)
 		self.assertEqual(employee_view.status, "Done")
 		self.assertEqual(employee_view.hr_note, "Sent to your personal email")
+
+	def test_route_is_stamped_and_the_it_worker_can_pick_up_its_request(self):
+		doc = self._make_request(category="IT / Asset")
+		self.assertEqual(doc.routed_to_role, "IT Team")
+
+		frappe.set_user(IT_TEAM_USER)
+		apply_workflow({"doctype": "HR Request", "name": doc.name}, "Pick up")
+		doc.reload()
+		self.assertEqual(doc.status, "In Progress")
+		self.assertEqual(doc.picked_up_by, IT_TEAM_USER)
+		self.assertIsNotNone(doc.picked_up_on)
+
+	def test_a_worker_cannot_decide_their_own_request_on_a_raw_save(self):
+		doc = self._make_request(as_user=IT_TEAM_USER, category="IT / Asset")
+		frappe.set_user(IT_TEAM_USER)
+		doc.status = "In Progress"
+		with self.assertRaises(frappe.PermissionError):
+			doc.save()
+
+	def test_request_filing_details_are_frozen_after_pickup(self):
+		doc = self._make_request(category="IT / Asset")
+		frappe.set_user(IT_TEAM_USER)
+		apply_workflow({"doctype": "HR Request", "name": doc.name}, "Pick up")
+		doc.reload()
+		doc.subject = "A changed request"
+		with self.assertRaises(frappe.PermissionError):
+			doc.save()
+
+	def test_it_worker_lists_only_stored_it_routes_and_can_read_them(self):
+		it_request = self._make_request(category="IT / Asset")
+		hr_request = self._make_request(category="HR Letter")
+		frappe.set_user(IT_TEAM_USER)
+
+		names = frappe.get_list("HR Request", pluck="name")
+		self.assertIn(it_request.name, names)
+		self.assertNotIn(hr_request.name, names)
+		self.assertTrue(frappe.has_permission("HR Request", "read", it_request.name))
+		self.assertFalse(frappe.has_permission("HR Request", "read", hr_request.name))
+
+	def test_repointing_a_category_does_not_retroactively_change_a_request_route(self):
+		doc = self._make_request(category="IT / Asset")
+		frappe.set_user("Administrator")
+		category = frappe.get_doc("HelixHR Request Category", "IT / Asset")
+		original_route = category.route_to_role
+		self.addCleanup(frappe.db.set_value, category.doctype, category.name, "route_to_role", original_route)
+		category.route_to_role = "HR Manager"
+		category.save(ignore_permissions=True)
+
+		doc.reload()
+		self.assertEqual(doc.routed_to_role, "IT Team")
+
+	def test_a_company_anchored_hr_manager_sees_only_their_own_company(self):
+		"""P5-R5: 'HR Manager and System Manager see their whole company' --
+		not every company. `make_test_hr_manager_employee` is the portal
+		persona this scopes; `ensure_hr_manager_user` (no Employee, Desk
+		only) is deliberately left wide-open below, matching the existing
+		P3-KTD7/P4-KTD7 precedent for that persona."""
+		own_request = self._make_request(category="HR Letter")
+
+		other_company = ensure_baseline_company()
+		other_user = "hr-scope-other-company@helixhr.test"
+		make_test_user(other_user, other_company)
+		other_request = self._make_request(as_user=other_user, category="HR Letter")
+
+		make_test_hr_manager_employee()
+		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+
+		names = frappe.get_list("HR Request", pluck="name")
+		self.assertIn(own_request.name, names)
+		self.assertNotIn(other_request.name, names)
+		self.assertTrue(frappe.has_permission("HR Request", "read", own_request.name))
+		self.assertFalse(frappe.has_permission("HR Request", "read", other_request.name))
+
+	def test_a_desk_only_hr_manager_with_no_employee_still_reaches_every_company(self):
+		"""The existing, deliberate exception: `ensure_hr_manager_user` holds
+		no Employee record at all, the same Desk-only persona P3-KTD7 and
+		P4-KTD7 already grant an unscoped read to for the other three kinds.
+		"""
+		own_company_request = self._make_request(category="HR Letter")
+
+		other_company = ensure_baseline_company()
+		other_user = "hr-scope-desk-other-company@helixhr.test"
+		make_test_user(other_user, other_company)
+		other_company_request = self._make_request(as_user=other_user, category="HR Letter")
+
+		frappe.set_user(ensure_hr_manager_user())
+		names = frappe.get_list("HR Request", pluck="name")
+		self.assertIn(own_company_request.name, names)
+		self.assertIn(other_company_request.name, names)
+
+
+class TestRequestCategories(IntegrationTestCase):
+	"""P5-U1: categories are routable records, not a static Select list."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		from helixhr.patches.v1_0.seed_request_categories import execute
+		from helixhr.tests.utils import make_test_employee_and_manager
+
+		make_test_employee_and_manager()
+		execute()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def test_seeded_categories_keep_the_legacy_values_as_their_names(self):
+		from helixhr.patches.v1_0.seed_request_categories import CATEGORIES, execute
+
+		execute()
+		self.assertEqual(
+			set(frappe.get_all("HelixHR Request Category", pluck="name")),
+			{spec["category_name"] for spec in CATEGORIES},
+		)
+
+	def test_picker_returns_new_active_categories_and_create_refuses_inactive_ones(self):
+		from helixhr.api import create_my_request, get_request_categories
+		from helixhr.tests.utils import EMPLOYEE_USER
+
+		category = frappe.get_doc(
+			{
+				"doctype": "HelixHR Request Category",
+				"category_name": "Facilities",
+				"hint": "Workspace and building help",
+				"route_to_role": "HR Manager",
+			}
+		).insert()
+		self.addCleanup(
+			frappe.delete_doc,
+			"HelixHR Request Category",
+			category.name,
+			force=True,
+			ignore_permissions=True,
+		)
+		frappe.db.set_value("HelixHR Request Category", "Other", "is_active", 0)
+		self.addCleanup(frappe.db.set_value, "HelixHR Request Category", "Other", "is_active", 1)
+
+		names = [row["name"] for row in get_request_categories()]
+		self.assertIn("Facilities", names)
+		self.assertNotIn("Other", names)
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.ValidationError):
+			create_my_request(
+				category="Other", subject="Inactive category", operation_key=str(uuid.uuid4())
+			)
+
+	def test_a_category_cannot_route_requests_to_a_broad_role(self):
+		category = frappe.get_doc(
+			{
+				"doctype": "HelixHR Request Category",
+				"category_name": "P5-U1 broad role test",
+				"hint": "Must not be saved",
+				"route_to_role": "Employee",
+			}
+		)
+		with self.assertRaises(frappe.ValidationError):
+			category.insert()
 
 
 class TestHelixHRDocumentLink(IntegrationTestCase):
@@ -419,6 +591,251 @@ class TestDocumentLinkUrlSafety(IntegrationTestCase):
 		frappe.delete_doc("HelixHR Document Link", doc.name, force=True, ignore_permissions=True)
 
 
+class TestRequestApprovalQueue(IntegrationTestCase):
+	"""P5-U6: a routed request is a fourth kind in the existing approval
+	queue, workable end to end, with a conversation the employee can
+	answer."""
+
+	def setUp(self):
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		self.it_employee, self.it_user = make_test_it_user()
+		# Arrival mail (P5-U4) and the reply mail this class exercises both call
+		# `frappe.sendmail` inside the write; a site with no default outgoing
+		# Email Account throws there (P4-KTD9's failure mode, reused by P5-U6).
+		ensure_test_email_account()
+		self.addCleanup(setattr, frappe.local, "request", None)
+		self._mailed = []
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		for row in self._mailed:
+			frappe.db.delete("Email Queue Recipient", {"parent": row})
+			frappe.db.delete("Email Queue", {"name": row})
+
+	def _file(self, category="IT / Asset", **extra):
+		from helixhr.api import create_my_request
+
+		frappe.set_user(EMPLOYEE_USER)
+		fields = {"category": category, "subject": "Need a new laptop", "details": "Mine died", **extra}
+		created = create_my_request(operation_key=str(uuid.uuid4()), **fields)
+		frappe.set_user("Administrator")
+		return created["name"]
+
+	def _token(self, name):
+		row = frappe.db.get_value("HR Request", name, ["modified", "status"], as_dict=True)
+		return {"expected_modified": str(row.modified), "expected_state": row.status}
+
+	def _second_it_worker(self):
+		company = ensure_test_company()
+		user = "second-it-team@helixhr.test"
+		employee = make_test_user(user, company)
+		user_doc = frappe.get_doc("User", user)
+		roles = [row.role for row in user_doc.roles if row.role != "Employee"]
+		if "IT Team" not in roles:
+			roles.append("IT Team")
+			user_doc.set("roles", [{"role": role} for role in roles])
+			user_doc.save(ignore_permissions=True)
+			frappe.clear_cache(user=user)
+		return employee, user
+
+	def _watch_mail(self):
+		before = set(frappe.get_all("Email Queue", pluck="name"))
+
+		def added():
+			rows = set(frappe.get_all("Email Queue", pluck="name")) - before
+			self._mailed.extend(rows)
+			return rows
+
+		return added
+
+	def test_get_approval_detail_actions_match_get_transitions_and_others_are_refused(self):
+		from helixhr.api import act_on_approval, get_approval_detail
+
+		name = self._file()
+		frappe.set_user(self.it_user)
+		detail = get_approval_detail("request", name)
+		self.assertEqual(set(detail["actions"]), {"Pick up", "Reject"})
+
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval("HR Request", name, "Done", **self._token(name))
+
+	def test_a_stale_token_is_refused_and_current_state_then_works(self):
+		from helixhr.api import act_on_approval
+
+		name = self._file()
+		stale = self._token(name)
+
+		frappe.set_user(self.it_user)
+		act_on_approval("HR Request", name, "Pick up", **stale)
+
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval("HR Request", name, "Done", **stale)
+
+		act_on_approval("HR Request", name, "Done", **self._token(name))
+		self.assertEqual(frappe.db.get_value("HR Request", name, "status"), "Done")
+
+	def test_two_workers_picking_up_the_same_request_the_second_is_refused_and_named(self):
+		from helixhr.api import act_on_approval
+
+		name = self._file()
+		_, second_user = self._second_it_worker()
+		token = self._token(name)
+
+		frappe.set_user(self.it_user)
+		act_on_approval("HR Request", name, "Pick up", **token)
+
+		frappe.set_user(second_user)
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval("HR Request", name, "Pick up", **token)
+		self.assertEqual(frappe.db.get_value("HR Request", name, "picked_up_by"), self.it_user)
+
+	def test_need_info_and_reject_require_a_reason_written_before_the_transition(self):
+		from helixhr.api import act_on_approval
+		from helixhr.events import DECISION_REASON_FIELD
+
+		name = self._file()
+		frappe.set_user(self.it_user)
+		act_on_approval("HR Request", name, "Pick up", **self._token(name))
+
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval("HR Request", name, "Need info", **self._token(name))
+
+		act_on_approval(
+			"HR Request", name, "Need info", comment="Which laptop model?", **self._token(name)
+		)
+		doc = frappe.get_doc("HR Request", name)
+		self.assertEqual(doc.status, "Waiting on Employee")
+		self.assertEqual(doc.get(DECISION_REASON_FIELD), "Which laptop model?")
+
+	def test_employee_reply_moves_the_request_back_and_emails_the_routed_role(self):
+		from helixhr.api import act_on_approval, reply_to_my_request
+
+		name = self._file()
+		frappe.set_user(self.it_user)
+		act_on_approval("HR Request", name, "Pick up", **self._token(name))
+		act_on_approval("HR Request", name, "Need info", comment="Which model?", **self._token(name))
+
+		added = self._watch_mail()
+		frappe.set_user(EMPLOYEE_USER)
+		result = reply_to_my_request(
+			name, "A Dell Latitude, please.", expected_modified=self._token(name)["expected_modified"]
+		)
+
+		self.assertEqual(result["status"], "In Progress")
+		mails = added()
+		self.assertEqual(len(mails), 1)
+		recipients = frappe.get_all(
+			"Email Queue Recipient", filters={"parent": next(iter(mails))}, pluck="recipient"
+		)
+		self.assertIn(self.it_user, recipients)
+
+	def test_reply_against_a_status_that_isnt_waiting_on_employee_is_refused(self):
+		from helixhr.api import reply_to_my_request
+
+		name = self._file()
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.ValidationError):
+			reply_to_my_request(name, "hello", expected_modified=self._token(name)["expected_modified"])
+
+	def test_an_over_long_reply_is_refused(self):
+		from helixhr.api import _DETAILS_MAX, act_on_approval, reply_to_my_request
+
+		name = self._file()
+		frappe.set_user(self.it_user)
+		act_on_approval("HR Request", name, "Pick up", **self._token(name))
+		act_on_approval("HR Request", name, "Need info", comment="model?", **self._token(name))
+
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.ValidationError):
+			reply_to_my_request(
+				name, "x" * (_DETAILS_MAX + 1), expected_modified=self._token(name)["expected_modified"]
+			)
+
+	def test_reply_and_attach_rate_limits_are_enforced(self):
+		from helixhr.utils import rate_limit_bounds, rate_limit_per_user, reset_rate_limit
+
+		frappe.set_user(EMPLOYEE_USER)
+		for action in ("reply_to_my_request", "attach_to_request_reply"):
+			limit, _seconds = rate_limit_bounds(action)
+			frappe.flags.helixhr_enforce_rate_limits = True
+			try:
+				reset_rate_limit(action)
+				with self.assertRaises(frappe.RateLimitExceededError, msg=action):
+					for _ in range(limit + 5):
+						rate_limit_per_user(action)
+			finally:
+				frappe.flags.helixhr_enforce_rate_limits = False
+				reset_rate_limit(action)
+
+	def test_an_employee_cannot_reply_to_somebody_elses_request(self):
+		from helixhr.api import reply_to_my_request
+
+		name = self._file()
+		frappe.set_user(MANAGER_USER)
+		with self.assertRaises(frappe.PermissionError):
+			reply_to_my_request(name, "not mine", expected_modified=self._token(name)["expected_modified"])
+
+	def test_hr_attaches_a_file_to_a_reply_employee_can_see_it_a_non_worker_cannot_attach(self):
+		from helixhr.api import act_on_approval, attach_to_request_reply, get_my_request
+
+		name = self._file()
+		frappe.set_user(self.it_user)
+		act_on_approval("HR Request", name, "Pick up", **self._token(name))
+
+		frappe.local.request = with_uploaded_file("replacement-quote.pdf")
+		attach_to_request_reply(name)
+		frappe.local.request = None
+
+		frappe.set_user(EMPLOYEE_USER)
+		detail = get_my_request(name)
+		self.assertEqual([row["file_name"] for row in detail["hr_attachments"]], ["replacement-quote.pdf"])
+
+		# The request's own employee is refused: they may not act on their
+		# own request (P5-R9), which is what this method reuses to authorise.
+		frappe.local.request = with_uploaded_file("sneaky.pdf")
+		with self.assertRaises(frappe.PermissionError):
+			attach_to_request_reply(name)
+
+	def test_the_thread_excludes_the_handover_prefix_and_reads_as_plain_conversation(self):
+		from helixhr.api import act_on_approval, get_approval_detail
+
+		name = self._file(details="My laptop died over the weekend.")
+		frappe.set_user(self.it_user)
+		act_on_approval("HR Request", name, "Pick up", **self._token(name))
+		act_on_approval("HR Request", name, "Need info", comment="Which model?", **self._token(name))
+		# Simulate a hand-over note landing on this record's Comments some
+		# other way -- never reachable through this doctype's own actions,
+		# but the filter should hold regardless of how one got there.
+		frappe.get_doc("HR Request", name).add_comment("Comment", "Sent to HR: escalate this please")
+
+		frappe.set_user(self.it_user)
+		thread = get_approval_detail("request", name)["thread"]
+		messages = [entry["message"] for entry in thread]
+		self.assertIn("My laptop died over the weekend.", messages)
+		self.assertIn("Which model?", messages)
+		self.assertFalse(any(message.startswith("Sent to HR:") for message in messages))
+		self.assertTrue(all("workflow" not in message.lower() for message in messages))
+
+	def test_homes_action_queue_renders_with_a_request_pending(self):
+		from helixhr.api import _pending_approvals
+
+		self._file()
+		frappe.set_user(self.it_user)
+		decisions = _pending_approvals(self.it_employee)
+		self.assertTrue(any(row["reference_doctype"] == "HR Request" for row in decisions))
+
+	def test_an_it_team_holders_queue_is_populated(self):
+		from helixhr.api import _approval_summaries
+
+		name = self._file()
+		frappe.set_user(self.it_user)
+		rows, _capped = _approval_summaries(self.it_employee)
+		matching = [row for row in rows if row["name"] == name]
+		self.assertEqual(len(matching), 1)
+		self.assertEqual(matching[0]["kind"], "request")
+		self.assertFalse(matching[0]["for_hr"], "IT-routed rows must never carry HR's caption")
+
+
 class TestRequestIdempotency(IntegrationTestCase):
 	"""P2-U8 / P2-AE7. Creating a request and attaching its file are two
 	steps, and neither may duplicate itself when a response goes missing."""
@@ -548,11 +965,12 @@ class TestRequestDetailAndScope(IntegrationTestCase):
 		frappe.local.request = with_uploaded_file("id-scan.pdf")
 		attach_to_my_request(created["name"])
 
-		frappe.set_user("Administrator")
+		frappe.set_user(ensure_hr_manager_user())
+		apply_workflow({"doctype": "HR Request", "name": created["name"]}, "Pick up")
 		desk = frappe.get_doc("HR Request", created["name"])
-		desk.status = "Done"
 		desk.hr_note = "Attached the signed letter."
 		desk.save()
+		apply_workflow({"doctype": "HR Request", "name": created["name"]}, "Done")
 
 		frappe.set_user(EMPLOYEE_USER)
 		detail = get_my_request(created["name"])

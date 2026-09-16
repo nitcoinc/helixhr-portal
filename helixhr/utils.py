@@ -22,6 +22,78 @@ PROFILE_EDITABLE_FIELDS = (
 )
 
 
+# --- HR-editable message templates (P5-U13, P5-KTD11) ----------------------
+
+# The documented token contract per `template_key`. `render_tokens` supplies
+# exactly these, `preflight.check_template_tokens` asserts every key here is
+# actually rendered by its caller, and `docs/deployment.md` quotes the same
+# table -- so an undocumented token can never silently render as itself.
+TEMPLATE_TOKENS = {
+	"request_arrival": ("category", "subject", "portal_url"),
+	"request_status_changed": ("category", "subject", "state", "reason"),
+}
+
+
+def render_tokens(text, tokens):
+	"""Plain `{token}` substitution over a fixed map -- never Jinja, never
+	`frappe.render_template` (P5-KTD11). HR's body is data, not code: a
+	template containing `{{ frappe.get_doc(...) }}` must come back as that
+	literal string, executing nothing.
+
+	An unknown `{token}` in the text is left alone rather than rendered empty
+	or raising -- a typo in HR's own edit should not blank the sentence around
+	it or break the send.
+	"""
+	rendered = text or ""
+	for token, value in tokens.items():
+		rendered = rendered.replace("{" + token + "}", "" if value is None else str(value))
+	return rendered
+
+
+def get_message_template(template_key):
+	"""The enabled `HelixHR Message Template` for `template_key`, or `None`.
+
+	Callers fall back to their own hardcoded wording when this is `None` --
+	a fresh install with the seed patch not yet run, or a template HR has
+	turned off, must keep sending the request notification it always sent.
+	"""
+	name = frappe.db.get_value(
+		"HelixHR Message Template", {"template_key": template_key, "is_enabled": 1}, ["subject", "body"], as_dict=True
+	)
+	return name
+
+
+# The named, deliberately short field sets P5-KTD12 hands to the portal's
+# configuration screens -- not every permlevel-0 field the underlying HRMS
+# doctype ships. Each is written into the plan itself; this is not an
+# implementation choice.
+LEAVE_TYPE_EDITABLE_FIELDS = (
+	"leave_type_name",
+	"max_leaves_allowed",
+	"is_carry_forward",
+	"is_lwp",
+	"helixhr_hr_approves",
+)
+
+HOLIDAY_LIST_EDITABLE_FIELDS = (
+	"holiday_list_name",
+	"from_date",
+	"to_date",
+	"weekly_off",
+	"holidays",
+)
+
+# Shift Type is prompt-autonamed (`name` is set once, at creation, and is not
+# itself a field) -- the "name" in P5-KTD12's list is the identifier a create
+# call supplies, not something `save_shift_type` rewrites on an existing row.
+SHIFT_TYPE_EDITABLE_FIELDS = (
+	"start_time",
+	"end_time",
+	"begin_check_in_before_shift_start_time",
+	"allow_check_out_after_shift_end_time",
+)
+
+
 def get_week_bounds(any_date):
 	"""Monday..Sunday for the week containing `any_date` (KTD10 -- one
 	week equals one Timesheet, always Monday to Sunday regardless of the
@@ -72,6 +144,11 @@ DESK_ROLES = frozenset({"HR User", "System Manager", "Administrator"})
 PORTAL_HOME_PAGE = "helixhr"
 
 
+def _session_company(user):
+	"""Return the active Employee's company for ``user``, if any."""
+	return frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "company")
+
+
 def portal_home_page(user=None):
 	"""Where this user lands after signing in.
 
@@ -107,6 +184,10 @@ RATE_LIMIT_POLICY = {
 	"withdraw_my_leave": (20, 3600),
 	"create_my_request": (10, 3600),
 	"attach_to_my_request": (20, 3600),
+	# Both trigger mail to the routed role, so an unbounded reply or
+	# attachment is mail amplification, not just a write to police (P5-U6).
+	"reply_to_my_request": (20, 3600),
+	"attach_to_request_reply": (20, 3600),
 	"mark_notifications_read": (60, 60),
 	# P3-U1 step 5 / P3-R25. Writes first; the two reads are bounded too
 	# because each one fans out to a per-employee lookup.
@@ -118,6 +199,17 @@ RATE_LIMIT_POLICY = {
 	"download_my_payslip": (10, 60),
 	"get_directory": (60, 60),
 	"get_my_team_week": (60, 60),
+	"get_organisation_view": (60, 60),
+	"get_request_categories": (60, 60),
+	# P5-U13 configuration writes. Reads (`get_portal_config`) are cheap and
+	# server-scoped like `get_directory`; every write checks permission itself
+	# and still deserves a bound against a scripted flood.
+	"get_portal_config": (60, 60),
+	"save_request_category": (30, 3600),
+	"save_message_template": (30, 3600),
+	"save_leave_type": (30, 3600),
+	"save_holiday_list": (30, 3600),
+	"save_shift_type": (30, 3600),
 }
 
 

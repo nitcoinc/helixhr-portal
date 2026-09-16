@@ -27,6 +27,8 @@ const NAV = [
   { label: 'Directory', to: '/directory', icon: 'users' },
   { label: 'Team', to: '/team', icon: 'users', reportsOnly: true },
   { label: 'Approvals', to: '/approvals', icon: 'approvals', managerOnly: true },
+  { label: 'Settings', to: '/settings', icon: 'settings', configureOnly: true },
+  { label: 'Organisation', to: '/organisation', icon: 'organisation', organisationOnly: true },
   { label: 'Notifications', to: '/notifications', icon: 'notifications', badge: true },
   { label: 'Profile', to: '/profile', icon: 'profile' },
 ]
@@ -42,11 +44,20 @@ const unreadLabel = computed(() => (unread.value > 9 ? '9+' : String(unread.valu
 // manager whose only pending work is a timesheet has a decision to make with
 // no direct-report leave in sight -- both had no Approvals item at all while
 // this read a direct-report count.
-const isManager = computed(() => session.canApprove)
+//
+// P5-U11: `canWorkRequests` is OR'd in rather than folded into `canApprove`
+// itself -- a routed-role holder (IT Team) has requests to work even with an
+// empty queue, the same "always present" rule `canApprove` already gives HR,
+// but IT holds none of the leave/timesheet/attendance approval capability
+// `canApprove` otherwise means.
+const isManager = computed(() => session.canApprove || session.canWorkRequests)
 const navItems = computed(() =>
   NAV.filter(
     (item) =>
-      (!item.managerOnly || isManager.value) && (!item.reportsOnly || session.hasReports),
+      (!item.managerOnly || isManager.value) &&
+      (!item.reportsOnly || session.hasReports) &&
+      (!item.configureOnly || session.canConfigure) &&
+      (!item.organisationOnly || session.canSeeOrganisation),
   ),
 )
 const primaryItems = computed(() => navItems.value.filter((item) => item.primary))

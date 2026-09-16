@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { createResource, Button, Dialog } from 'frappe-ui'
+import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
 import RequestForm from '@/components/RequestForm.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
@@ -92,9 +92,21 @@ const detail = createResource({
   onSuccess: (data) => clearReadObligation(data),
 })
 
+// --- replying (P5-R10, P5-R6) --------------------------------------------
+//
+// Not a workflow action -- role Employee has no write on HR Request at all
+// (P5-KTD5), so this is the one transition the employee owns, and it moves
+// through `reply_to_my_request` rather than `act_on_approval`.
+
+const reply = createResource({ url: 'helixhr.api.reply_to_my_request', method: 'POST' })
+const replyMessage = ref('')
+const replyError = ref('')
+
 watch(
   () => props.name,
   (name) => {
+    replyMessage.value = ''
+    replyError.value = ''
     if (name) detail.fetch()
   },
   { immediate: true },
@@ -104,6 +116,26 @@ const selected = computed(() => (props.name ? detail.data : null))
 
 function closeDetail() {
   router.push({ name: 'Requests' })
+}
+
+async function submitReply() {
+  const item = selected.value
+  const message = replyMessage.value.trim()
+  if (!item || reply.loading) return
+  if (!message) {
+    replyError.value = 'Say something before sending your reply.'
+    return
+  }
+  replyError.value = ''
+  try {
+    await reply.submit({ name: item.name, message, expected_modified: item.modified })
+    replyMessage.value = ''
+    detail.fetch()
+    requests.reload()
+  } catch (error) {
+    replyError.value =
+      error?.messages?.[0] || "That reply didn't go through. Reload and try again."
+  }
 }
 
 // --- clearing the obligation --------------------------------------------
@@ -599,6 +631,71 @@ const timeline = computed(() => {
                   </p>
                 </div>
               </div>
+            </section>
+
+            <!-- P5-R10: the request and every reply after it, one
+                 conversation, the same thread the routed worker reads on
+                 their side of the Approvals queue. -->
+            <section
+              v-if="selected.thread?.length > 1"
+              class="mt-4 border-t border-outline-gray-1 pt-4"
+              data-testid="request-thread"
+            >
+              <h3 class="label">
+                Conversation
+              </h3>
+              <ul class="mt-2 space-y-2">
+                <li
+                  v-for="(entry, index) in selected.thread"
+                  :key="index"
+                  class="surface-inset p-3 text-sm"
+                >
+                  <p class="text-xs font-medium text-ink-gray-5">
+                    {{ entry.by === 'employee' ? 'You' : 'HR / IT' }}
+                    · {{ formatDateTime(entry.on) }}
+                  </p>
+                  <p class="mt-0.5 whitespace-pre-line text-ink-gray-8">
+                    {{ entry.message }}
+                  </p>
+                </li>
+              </ul>
+            </section>
+
+            <!-- P5-R6, P5-KTD5: replying is the employee's one transition
+                 out of "Waiting on Employee", and it is not a workflow
+                 action -- role Employee has no write on this doctype. -->
+            <section
+              v-if="selected.can_reply"
+              class="mt-4 border-t border-outline-gray-1 pt-4"
+              data-testid="request-reply"
+            >
+              <h3 class="label">
+                {{ selected.category }} needs your reply
+              </h3>
+              <FormControl
+                v-model="replyMessage"
+                class="mt-2"
+                type="textarea"
+                placeholder="Write your reply"
+                aria-label="Your reply"
+              />
+              <p
+                v-if="replyError"
+                class="mt-1 text-sm font-medium text-signal"
+                role="alert"
+              >
+                {{ replyError }}
+              </p>
+              <Button
+                class="mt-2"
+                variant="solid"
+                theme="blue"
+                :loading="reply.loading"
+                :disabled="reply.loading"
+                @click="submitReply"
+              >
+                Send reply
+              </Button>
             </section>
 
             <div class="mt-4 border-t border-outline-gray-1 pt-4">

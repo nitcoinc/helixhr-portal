@@ -15,6 +15,7 @@ from helixhr.tests.utils import (
 	ensure_leave_allocation,
 	ensure_test_email_account,
 	make_test_employee_and_manager,
+	make_test_it_user,
 	make_test_user,
 )
 from helixhr.utils import get_week_bounds
@@ -65,9 +66,12 @@ class TestNotifications(IntegrationTestCase):
 		self.assertIn("Approved", log.subject)
 
 	def _leave_subjects(self, name):
+		"""The employee's own notifications on this application -- not P5-U10's
+		manager arrival notice, which lands in the same document_type/
+		document_name bucket and would otherwise double-count here."""
 		return frappe.get_all(
 			"Notification Log",
-			filters={"document_type": "Leave Application", "document_name": name},
+			filters={"for_user": EMPLOYEE_USER, "document_type": "Leave Application", "document_name": name},
 			pluck="subject",
 		)
 
@@ -226,11 +230,12 @@ class TestNotifications(IntegrationTestCase):
 
 		before = self._unread_count(EMPLOYEE_USER)
 
-		frappe.set_user("Administrator")
+		frappe.set_user(ensure_hr_manager_user())
+		apply_workflow({"doctype": "HR Request", "name": doc.name}, "Pick up")
 		doc.reload()
-		doc.status = "Done"
 		doc.hr_note = "Sent to your email"
 		doc.save()
+		apply_workflow({"doctype": "HR Request", "name": doc.name}, "Done")
 
 		after = self._unread_count(EMPLOYEE_USER)
 		self.assertGreater(after, before)
@@ -308,10 +313,12 @@ class TestNotifications(IntegrationTestCase):
 		first = self._reply_logs(doc.name)[0]
 		frappe.db.set_value("Notification Log", first.name, "read", 1)
 
+		frappe.set_user(ensure_hr_manager_user())
+		apply_workflow({"doctype": "HR Request", "name": doc.name}, "Pick up")
 		doc.reload()
 		doc.hr_note = "Reception is closed today -- collect it tomorrow."
-		doc.status = "Done"
 		doc.save()
+		apply_workflow({"doctype": "HR Request", "name": doc.name}, "Done")
 
 		logs = self._reply_logs(doc.name)
 		self.assertEqual(len(logs), 2)
@@ -331,41 +338,20 @@ class TestNotifications(IntegrationTestCase):
 
 		self.assertEqual(len(self._reply_logs(doc.name)), 1)
 
-	def test_new_hr_request_notifies_hr_manager_without_details(self):
+	def test_new_hr_request_does_not_write_an_unrouted_hr_bell_notification(self):
 		from helixhr.api import create_my_request
 
-		hr_manager_user = "hr-manager-notif@helixhr.test"
-		if not frappe.db.exists("User", hr_manager_user):
-			frappe.get_doc(
-				{
-					"doctype": "User",
-					"email": hr_manager_user,
-					"first_name": "HR",
-					"last_name": "Manager",
-					"send_welcome_email": 0,
-					"roles": [{"doctype": "Has Role", "role": "HR Manager"}],
-				}
-			).insert(ignore_permissions=True)
-
+		hr_manager_user = ensure_hr_manager_user()
 		before = self._unread_count(hr_manager_user)
-
 		frappe.set_user(EMPLOYEE_USER)
 		create_my_request(
 			category="Payroll Question",
 			subject="Why is my payslip late",
-			details="Some very private salary detail that should not leak into the subject line",
+			details="Some very private salary detail",
 			operation_key=str(uuid.uuid4()),
 		)
-
 		frappe.set_user("Administrator")
-		after = self._unread_count(hr_manager_user)
-		self.assertGreater(after, before)
-
-		log = frappe.get_last_doc(
-			"Notification Log", filters={"for_user": hr_manager_user, "document_type": "HR Request"}
-		)
-		self.assertIn("Payroll Question", log.subject)
-		self.assertNotIn("private salary detail", log.subject)
+		self.assertEqual(self._unread_count(hr_manager_user), before)
 
 	def test_mark_all_as_read_zeroes_the_count(self):
 		from frappe.desk.doctype.notification_log.notification_log import mark_all_as_read
@@ -501,6 +487,79 @@ class TestHrQueueEmails(IntegrationTestCase):
 		if frappe.db.exists("Leave Application", name):
 			frappe.delete_doc("Leave Application", name, force=True, ignore_permissions=True)
 
+	def _manager_logs(self, name):
+		return frappe.get_all(
+			"Notification Log",
+			filters={"for_user": MANAGER_USER, "document_type": "Leave Application", "document_name": name},
+			pluck="subject",
+		)
+
+	def test_filing_a_leave_application_notifies_the_manager_once(self):
+		"""P5-U10: the manager's arrival notice, a Notification Log (the
+		portal bell) rather than mail -- unlike everything else in this
+		class, which is HR's separate Email-channel fixture path."""
+		leave = self._leave()
+
+		subjects = self._manager_logs(leave.name)
+		self.assertEqual(len(subjects), 1)
+		self.assertIn("Casual Leave", subjects[0])
+
+	def test_a_resave_does_not_notify_the_manager_again(self):
+		leave = self._leave()
+		self.assertEqual(len(self._manager_logs(leave.name)), 1)
+
+		frappe.set_user("Administrator")
+		leave.reload()
+		leave.description = "edited"
+		leave.save(ignore_permissions=True)
+
+		self.assertEqual(len(self._manager_logs(leave.name)), 1)
+
+	def test_an_hr_approves_leave_type_notifies_hr_not_the_manager(self):
+		"""The fixture-mailed HR path (tested elsewhere in this class) must
+		not *also* ring the manager's portal bell for a request that was
+		never theirs to act on (P4-R7)."""
+		from helixhr.api import apply_for_leave
+
+		leave_type = self._hr_approves_leave_type()
+		ensure_leave_allocation(self.employee_name, leave_type, 30)
+		date = str(add_days(self.leave_date, 8))
+		frappe.set_user("Administrator")
+		for existing in frappe.get_all(
+			"Leave Application", filters={"employee": self.employee_name, "from_date": date}, pluck="name"
+		):
+			frappe.delete_doc("Leave Application", existing, force=True, ignore_permissions=True)
+
+		frappe.set_user(self.EMAIL_EMPLOYEE_USER)
+		result = apply_for_leave(leave_type=leave_type, from_date=date, to_date=date)
+		frappe.set_user("Administrator")
+		self.addCleanup(self._remove, result["name"])
+
+		self.assertEqual(result["stage"], "HR")
+		self.assertEqual(self._manager_logs(result["name"]), [])
+
+	def test_a_manager_whose_employee_is_inactive_is_not_notified_and_filing_still_succeeds(self):
+		frappe.db.set_value("Employee", self.manager_name, "status", "Left")
+		self.addCleanup(frappe.db.set_value, "Employee", self.manager_name, "status", "Active")
+
+		leave = self._leave()
+		self.assertTrue(frappe.db.exists("Leave Application", leave.name))
+		self.assertEqual(self._manager_logs(leave.name), [])
+
+	def test_the_notifier_never_addresses_the_acting_session_user(self):
+		"""Direct unit coverage of the shared guard -- constructing a real
+		document whose manager and submitter are the same login is not a
+		reachable state through any portal path, so this calls the helper
+		the way `leave_application_after_insert` does."""
+		from helixhr.events import _notify_manager_of_arrival
+
+		leave = self._leave()
+		before = frappe.db.count("Notification Log")
+		frappe.set_user(MANAGER_USER)
+		_notify_manager_of_arrival("Leave Application", leave, MANAGER_USER, "should never be written")
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.count("Notification Log"), before)
+
 	def test_a_leave_moving_to_the_hr_stage_mails_every_hr_manager_once(self):
 		leave = self._leave()
 		added = self._watch_mail()
@@ -607,6 +666,29 @@ class TestHrQueueEmails(IntegrationTestCase):
 		leave.save(ignore_permissions=True)
 
 		self.assertEqual(added(), [], "a send-back is the employee's news, not HR's")
+
+	def test_a_routed_request_mails_its_it_holders_without_employee_text(self):
+		from helixhr.api import create_my_request
+
+		_, it_user = make_test_it_user()
+		added = self._watch_mail()
+		frappe.set_user(EMPLOYEE_USER)
+		created = create_my_request(
+			category="IT / Asset",
+			subject="Laptop replacement",
+			details="Private asset serial 12345",
+			operation_key=str(uuid.uuid4()),
+		)
+		frappe.set_user("Administrator")
+
+		mails = added()
+		self.assertEqual(len(mails), 1)
+		self.assertIn(it_user, mails[0][1])
+		self.assertNotIn(EMPLOYEE_USER, mails[0][1])
+		body = frappe.db.get_value("Email Queue", mails[0][0], "message") or ""
+		self.assertIn("Laptop replacement", body)
+		self.assertNotIn("Private asset serial", body)
+		self.assertEqual(frappe.db.get_value("Email Queue", mails[0][0], "reference_name"), created["name"])
 
 	def test_the_four_fixtures_are_email_channel_and_addressed_by_role(self):
 		"""The mechanism is the fixture, so the fixture's shape is the

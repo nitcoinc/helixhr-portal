@@ -8,11 +8,12 @@ from frappe.model.document import Document
 from frappe.utils import now_datetime
 from hrms.api import get_current_employee
 
-# The statuses that mean HR has taken the request off the pile, and the ones
-# that mean it is finished. Both are read off the DocType's own Select
-# options; a status added in Desk that is in neither set simply stamps
-# nothing rather than guessing (P2-U8).
-PICKED_UP_STATUSES = ("In Progress", "Done", "Rejected")
+from helixhr.utils import _session_company
+
+# The first worker claim and terminal outcomes. Both are read off the
+# DocType's own Select options; a status added in Desk that is in neither set
+# simply stamps nothing rather than guessing (P2-U8, P5-R6).
+PICKED_UP_STATUSES = ("In Progress",)
 CLOSED_STATUSES = ("Done", "Rejected")
 
 
@@ -23,6 +24,11 @@ class HRRequest(Document):
 		# different employee on the very first insert -- resolve it from
 		# the session instead of trusting whatever was posted (KTD5).
 		self.employee = get_current_employee()
+		self.routed_to_role = frappe.db.get_value(
+			"HelixHR Request Category", self.category, "route_to_role"
+		)
+		if not self.routed_to_role:
+			frappe.throw("This request category has no worker role configured.")
 
 		# P2-U8 step 2. The idempotency key is a *unique* column, and a
 		# unique column with several empty strings in it is not unique in
@@ -53,6 +59,7 @@ class HRRequest(Document):
 
 		if not self.picked_up_on and self.status in PICKED_UP_STATUSES:
 			self.picked_up_on = now_datetime()
+			self.picked_up_by = frappe.session.user
 		if not self.closed_on and self.status in CLOSED_STATUSES:
 			self.closed_on = now_datetime()
 
@@ -63,7 +70,7 @@ class HRRequest(Document):
 			# stamp and the notification can never disagree.
 			self.replied_on = now_datetime()
 
-	# status and hr_note are permlevel 1 with only HR Manager/HR User/
+	# status and hr_note are permlevel 1 with only HR Manager and
 	# System Manager granted write there (see this doctype's own
 	# permissions, not a fixture) -- Frappe resets an ESS write to either
 	# field the same way it does for Employee's locked fields (KTD6), so
@@ -75,6 +82,72 @@ class HRRequest(Document):
 	# `helixhr.api.attach_to_my_request`, both field-allow-listed and
 	# session-scoped (P2-R27), so there is no generic Frappe route left that
 	# writes an HR Request as an employee.
+
+
+_WORKER_ROLES = frozenset({"IT Team"})
+_UNSCOPED_ROLES = frozenset({"HR Manager", "System Manager"})
+
+
+def _company_scope_condition(company):
+	"""The list-route half of an HR Manager / System Manager's company scope
+	(P5-R5): every request whose employee is in that company.
+
+	`ensure_hr_manager_user()` deliberately holds no Employee record -- the
+	same Desk-only, no-company HR Manager P3-KTD7/P4-KTD7 already reach every
+	Attendance Request and Timesheet through the role alone. `company` is
+	`None` for that holder, and the wide-open behaviour for *that* persona is
+	preserved on purpose. A portal HR Manager who does have an active
+	Employee (`make_test_hr_manager_employee`) is the one this scope narrows,
+	since they are the multi-company risk P5-R5 exists to close.
+	"""
+	if not company:
+		return ""
+	company_employees = frappe.get_all("Employee", filters={"company": company}, pluck="name")
+	if not company_employees:
+		return "1=0"
+	return f"employee in ({', '.join(frappe.db.escape(name, percent=False) for name in company_employees)})"
+
+
+def get_permission_query_conditions(user=None, doctype=None, **kwargs):
+	"""Limit lists to a requester's records, their routed work, or (for a
+	company-anchored HR Manager / System Manager) their own company."""
+	user = user or frappe.session.user
+	if user == "Administrator":
+		return ""
+	if set(frappe.get_roles(user)) & _UNSCOPED_ROLES:
+		return _company_scope_condition(_session_company(user))
+	employee = frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "name")
+	if not employee:
+		return "1=0"
+	roles = set(frappe.get_roles(user)) & _WORKER_ROLES
+	if not roles:
+		return f"employee = {frappe.db.escape(employee, percent=False)}"
+	company_employees = frappe.get_all(
+		"Employee", filters={"company": _session_company(user)}, pluck="name"
+	)
+	return (
+		f"(employee = {frappe.db.escape(employee, percent=False)} or "
+		f"(employee in ({', '.join(frappe.db.escape(name, percent=False) for name in company_employees)}) "
+		f"and routed_to_role in ({', '.join(frappe.db.escape(role, percent=False) for role in roles)})))"
+	)
+
+
+def has_permission(doc, ptype=None, user=None, **kwargs):
+	"""The single-document half of routed request visibility (P5-KTD13:
+	every branch returns an explicit boolean)."""
+	user = user or frappe.session.user
+	if user == "Administrator":
+		return True
+	roles = set(frappe.get_roles(user))
+	if doc.employee == frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "name"):
+		return True
+	if roles & _UNSCOPED_ROLES:
+		company = _session_company(user)
+		return not company or frappe.db.get_value("Employee", doc.employee, "company") == company
+	return (
+		doc.routed_to_role in roles
+		and frappe.db.get_value("Employee", doc.employee, "company") == _session_company(user)
+	)
 
 
 def request_belongs_to_session(name):

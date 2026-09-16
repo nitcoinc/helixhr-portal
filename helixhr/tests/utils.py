@@ -14,6 +14,7 @@ HR_MANAGER_USER = "hr-manager@helixhr.test"
 # second identity: HR_MANAGER_USER has no Employee record on purpose and must
 # keep not having one.
 HR_MANAGER_EMPLOYEE_USER = "hr-manager-employee@helixhr.test"
+IT_TEAM_USER = "it-team@helixhr.test"
 OTHER_MANAGER_USER = "other-manager@helixhr.test"
 # Not "password" -- some sites (any with System Settings' password policy
 # enabled, unlike a barebones fresh test site) reject it as a top-10
@@ -238,6 +239,21 @@ def make_test_hr_manager_employee():
 		frappe.clear_cache(user=HR_MANAGER_EMPLOYEE_USER)
 
 	return employee_name, HR_MANAGER_EMPLOYEE_USER
+
+
+def make_test_it_user():
+	"""An IT Team portal user with an Employee record but no Desk role (P5-U2)."""
+	company = ensure_test_company()
+	employee_name = make_test_user(IT_TEAM_USER, company)
+	user = frappe.get_doc("User", IT_TEAM_USER)
+	roles = [row.role for row in user.roles if row.role != "Employee"]
+	if "IT Team" not in roles:
+		roles.append("IT Team")
+	if roles != [row.role for row in user.roles]:
+		user.set("roles", [{"role": role} for role in roles])
+		user.save(ignore_permissions=True)
+		frappe.clear_cache(user=IT_TEAM_USER)
+	return employee_name, IT_TEAM_USER
 
 
 TEST_EMAIL_ACCOUNT = "_Test HelixHR Outgoing"
@@ -520,7 +536,42 @@ def setup_playwright_fixtures():
 	# has a name and a day on it.
 	ensure_celebration_fixtures()
 
+	# P5-U11: a fourth Playwright identity, `it`, plus one `IT / Asset`
+	# request already routed to it -- `route_it_asset_requests` (U2) points
+	# the seeded category at `IT Team` by default, so filing it as the
+	# employee is enough to give the IT identity a real, workable row rather
+	# than an empty queue on every run.
+	make_test_it_user()
+	ensure_test_it_request(employee_name)
+
 	frappe.db.commit()  # nosemgrep
+
+
+def ensure_test_it_request(employee_name):
+	"""One `IT / Asset` request, filed once, for `approvals.spec.ts`'s `it`
+	project to pick up, question and finish. Idempotent like the rest of this
+	module's `ensure_*` fixtures -- re-running setup must not pile up a fresh
+	request (and a fresh arrival email) on every CI run."""
+	from helixhr.api import create_my_request
+
+	existing = frappe.db.exists(
+		"HR Request", {"employee": employee_name, "category": "IT / Asset"}
+	)
+	if existing:
+		return existing
+
+	user = frappe.session.user
+	try:
+		frappe.set_user(frappe.db.get_value("Employee", employee_name, "user_id"))
+		created = create_my_request(
+			category="IT / Asset",
+			subject="New laptop request",
+			details="My laptop won't turn on any more.",
+			operation_key=frappe.generate_hash(length=32),
+		)
+	finally:
+		frappe.set_user(user)
+	return created["name"]
 
 
 def ensure_leave_approver_role(user):
