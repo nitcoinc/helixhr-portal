@@ -60,6 +60,14 @@ def _ensure_org_employee(number, company, user=None, extra_roles=()):
 			"date_of_joining": "2020-01-01",
 			"gender": frappe.db.get_value("Gender", {}, "name"),
 			"status": "Active",
+			# `create_user_permission` defaults to 1 on Employee -- for
+			# ORG_HR_USER (HR Manager) that would self-scope them, emptying
+			# their own HR queue (P4-R11) and permanently tripping
+			# `preflight.check_hr_manager_self_scope` for every later test on
+			# this site, since this fixture is never torn down. The other HR
+			# Manager fixtures (`make_test_hr_manager_employee`) avoid this
+			# for the same reason.
+			"create_user_permission": 0,
 		}
 	)
 	doc.insert(ignore_permissions=True)
