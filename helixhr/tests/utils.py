@@ -536,6 +536,11 @@ def setup_playwright_fixtures():
 	# has a name and a day on it.
 	ensure_celebration_fixtures()
 
+	# P4-U9: the same spec's documents rail needs at least one visible
+	# HelixHR Document Link, or the (correctly) empty-hides-the-card rule
+	# leaves nothing to assert against.
+	ensure_dashboard_document_fixture()
+
 	# P5-U11: a fourth Playwright identity, `it`, plus one `IT / Asset`
 	# request already routed to it -- `route_it_asset_requests` (U2) points
 	# the seeded category at `IT Team` by default, so filing it as the
@@ -1398,6 +1403,30 @@ def _ensure_directory_employee(suffix, company, status="Active", **fields):
 	)
 	employee.insert(ignore_permissions=True)
 	return employee.name
+
+
+DASHBOARD_DOCUMENT_TITLE = "Employee Handbook"
+
+
+def ensure_dashboard_document_fixture():
+	"""P4-U9: `login-dashboard.spec.ts`'s documents rail needs at least one
+	visible `HelixHR Document Link` -- global, so every identity this suite
+	signs in as can see it regardless of company. HR adds these in Desk on a
+	real site; nothing else in this module creates one, so a fresh site (a
+	real headless install, or CI, unlike the long-lived dev bench this was
+	first written against) renders the card empty and the rail hides it
+	(the very rule `test('the documents card is absent when HR has added
+	none')` checks). Idempotent on title."""
+	if frappe.db.exists("HelixHR Document Link", {"title": DASHBOARD_DOCUMENT_TITLE}):
+		return
+	frappe.get_doc(
+		{
+			"doctype": "HelixHR Document Link",
+			"title": DASHBOARD_DOCUMENT_TITLE,
+			"url": "https://example.invalid/policies/handbook",
+			"description": "Seeded for the Playwright dashboard documents rail.",
+		}
+	).insert(ignore_permissions=True)
 
 
 def ensure_directory_fixtures():
