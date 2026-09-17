@@ -181,6 +181,18 @@ onUnmounted(() => {
           <Icon name="signOut" />
           Sign out
         </button>
+
+        <!-- AGPLv3 section 5(c): this credit is part of the license notice
+             and stays intact in any copy or modified version, the same as
+             the notice in index.html and LICENSE. -->
+        <a
+          href="https://nitcoinc.ai"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="block px-5 pb-4 text-xs text-blue-200/70 hover:text-blue-100"
+        >
+          Powered by Nitco Inc
+        </a>
       </aside>
     </div>
 
@@ -299,6 +311,14 @@ onUnmounted(() => {
             Sign out
           </button>
         </div>
+        <a
+          href="https://nitcoinc.ai"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="mt-3 block px-3 text-center text-xs text-ink-gray-4"
+        >
+          Powered by Nitco Inc
+        </a>
       </template>
     </Dialog>
   </div>

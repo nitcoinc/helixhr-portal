@@ -291,6 +291,17 @@ Desk — a System User holding a role with `desk_access` — never merely
 because they hold an HR role; the two are correlated on this bench today but
 `can_open_desk` does not assume they stay that way.
 
+### An anonymous install ping, off until an operator turns it on
+
+`helixhr/telemetry.py` sends a weekly ping so Nitco can count installs. It is
+a no-op until both `helixhr_telemetry_enabled` and `helixhr_telemetry_url`
+are set in site config, and even then it never reads an Employee, User or
+Company record — the payload is exactly `install_id` (a random value
+generated once per site, not derived from anything about who runs it),
+`app_version` and `frappe_version`. See the README's "Anonymous install
+ping" section for the exact commands. A failed request is logged and
+swallowed, never surfaced to a signed-in user.
+
 ## What HR sets up before the self-service surfaces work (P3-U9)
 
 Six screens shipped in phase 3 — Payslips, Holidays, check-in on Attendance,

@@ -3,7 +3,7 @@ app_title = "HelixHR"
 app_publisher = "Nitco Inc"
 app_description = "HelixHR Employee Portal"
 app_email = "dev@nitcoinc.ai"
-app_license = "mit"
+app_license = "GNU Affero General Public License v3"
 
 # Apps
 # ------------------
@@ -349,6 +349,12 @@ scheduler_events = {
 	"daily": [
 		"helixhr.tasks.null_stale_checkin_coordinates",
 		"helixhr.reminders.send_celebration_reminders",
+	],
+	# Off by default -- helixhr.telemetry.send_ping is a no-op until an
+	# operator sets both helixhr_telemetry_enabled and helixhr_telemetry_url
+	# (docs/deployment.md).
+	"weekly": [
+		"helixhr.telemetry.send_ping",
 	],
 }
 

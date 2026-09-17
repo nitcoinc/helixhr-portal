@@ -13,9 +13,14 @@ own notification wording, and a short named field set on three HRMS masters
 Desk. Everything else -- payroll, onboarding, recruitment, company and role
 administration -- stays in Frappe Desk; the portal does not re-implement it.
 An HR Manager or System Manager also gets a read-only Organisation view:
-aggregate counts, never per-person detail, and no action from it. The portal
-is served at `/helixhr` on the same site as ERPNext and HRMS, and an employee
-signing in lands there rather than on Desk -- see
+aggregate counts, never per-person detail, and no action from it. The same
+roles can also find and open one person (leave balance, attendance,
+requests, shift, holiday list and manager -- read-only, and no more than
+Desk already shows them for the same roles) and reach a curated list of
+Frappe's own HR reports, pre-filtered to that person, from a Reports screen
+-- the portal never re-implements a report or an export, both stay Frappe's.
+The portal is served at `/helixhr` on the same site as ERPNext and HRMS, and
+an employee signing in lands there rather than on Desk -- see
 [docs/deployment.md](docs/deployment.md) for how that is decided and how to
 keep employees out of Desk entirely.
 
@@ -174,6 +179,27 @@ bench --site <site> set-config helixhr_hr_contact hr@example.com
 
 Until it is set, the not-linked page says "Contact HR" with no link, and the
 preflight reports a WARN. Setting it to an empty value removes the link again.
+
+### Anonymous install ping (off by default)
+
+`helixhr/telemetry.py` can send a weekly, anonymous ping so Nitco can count
+installs. It never reads an Employee, User or Company record, and the
+payload is exactly:
+
+```json
+{ "install_id": "<a random value, generated once per site>", "app_version": "0.0.1", "frappe_version": "16.33.0" }
+```
+
+It is a no-op on every site until both keys below are set:
+
+```bash
+bench --site <site> set-config helixhr_telemetry_enabled true
+bench --site <site> set-config helixhr_telemetry_url https://<your-endpoint>/ping
+```
+
+Setting `helixhr_telemetry_enabled` back to `false` (or removing
+`helixhr_telemetry_url`) turns it off again immediately -- the check runs
+fresh on every scheduled call, nothing is cached.
 
 Every portal user needs an active Employee record whose `user_id` is their User,
 the **Employee Self Service** role, and a User Permission on their own Employee.
@@ -401,7 +427,22 @@ password in that file's `TEST_PASSWORD`. They exist only on sites where
 
 ## License
 
-MIT
+AGPLv3 (GNU Affero General Public License v3) — see [LICENSE](LICENSE).
+
+HelixHR runs as a Frappe app loaded into the same process as ERPNext and
+HRMS, both GPLv3, and imports their modules directly rather than merely
+calling an external service. AGPLv3 is what the FSF's own compatibility
+table lists as combinable with GPLv3 code (AGPLv3 section 13), so this is
+the license that keeps the combined product on solid ground while still
+giving Nitco Inc real copyleft: anyone who takes HelixHR, modifies it, and
+runs it as a network service for others has to make *that* modified source
+available too — the one thing plain GPLv3 does not require, and the gap a
+permissive license (MIT) or a proprietary one would leave wide open here.
+
+Two things the license requires stay in the product on purpose, in every
+copy: the "Powered by Nitco Inc" credit in the app shell, and the notice
+block at the top of `frontend/index.html`. Removing either is a license
+violation, not just a style choice.
 
 ---
 
