@@ -10,9 +10,9 @@
 <h1 align="center">HelixHR Employee Portal</h1>
 
 <p align="center">
-  A plain, mobile-first employee portal for Frappe HR.<br>
-  Employees clear what is waiting for them without learning a single Frappe word.<br>
-  HR keeps Frappe HR as the only source of truth.
+  A modern, mobile-first employee portal built on top of Frappe HR, providing employees with<br>
+  seamless access to HR services, information, and self-service tools.<br>
+  HelixHR empowers employees with quick and easy access to their HR information, benefits, and workplace resources.
 </p>
 
 <p align="center">
@@ -37,19 +37,26 @@
 
 ## Why HelixHR
 
-Frappe HR is an excellent system of record and a hard place to *do a small
-thing*. An employee who wants to see their leave balance, fix a missed
-check-in, or answer HR's question about a request has to learn DocTypes, list
-views and workflow vocabulary first. Frappe's stock mobile app covers part of
-that and cannot be restyled.
+Frappe HR provides a robust and comprehensive HR system of record. NITCO's
+HelixHR enhances that foundation with a modern, intuitive employee
+experience designed for everyday HR interactions.
 
-HelixHR is a Frappe v16 app that adds one portal at `/helixhr`, on the same
-site as ERPNext and HRMS, and makes it where employees land after sign-in.
-It never becomes a second system: every screen reads and writes Frappe's own
-records, every server call runs as the signed-in Frappe user, and Frappe's
-permissions are the security model. Payroll, onboarding, recruitment and
-company administration stay in Frappe Desk on purpose — the portal does not
-re-implement them and does not pretend to.
+HelixHR is a Frappe v16 application that adds a streamlined, mobile-first
+employee portal at `/helixhr`, giving employees a simple and engaging
+interface for common HR tasks such as checking leave balances, updating
+attendance, responding to HR requests, and accessing employment information.
+
+Built directly on top of Frappe HR, HelixHR does not create a separate
+system or data store. All employee interactions continue to use Frappe's
+native records, workflows, permissions, and security model. NITCO's focus
+was to modernize the user experience, simplify navigation, and improve
+employee self-service adoption while preserving the power, governance, and
+scalability of the underlying Frappe HR platform.
+
+By separating the employee experience from administrative functions,
+HelixHR delivers a consumer-grade interface for employees while allowing
+HR, payroll, onboarding, recruitment, and other administrative processes to
+remain within the standard Frappe HR and ERPNext environments.
 
 ## What it does
 
