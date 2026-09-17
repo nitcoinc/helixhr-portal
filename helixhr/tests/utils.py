@@ -1674,3 +1674,103 @@ def leaving_employee_fixture():
 	)
 	employee.insert(ignore_permissions=True)
 	return employee.name
+
+
+# --- README showcase data -------------------------------------------------
+
+SHOWCASE_EMPLOYEE_USER = "priya.sharma@helixhr.test"
+SHOWCASE_MANAGER_USER = "arjun.mehta@helixhr.test"
+SHOWCASE_HR_USER = "ananya.rao@helixhr.test"
+SHOWCASE_SHIFT_TYPE = "General Shift"
+
+
+def ensure_showcase_fixtures():
+	"""The plainly named records `frontend/tests/screenshots.mjs` needs for the
+	People and Reports shots in the README -- a colleague with a manager, a
+	real shift, a real holiday list, two leave allocations and a few days of
+	attendance, plus an HR Manager identity to view them as.
+
+	Separate from every test identity on purpose: the test fixtures are
+	named to be *found* by tests (`_Test ...`, `Directory Colleague`), which
+	is exactly what a README image must not show. Nothing here is asserted on
+	by any test, so it can be renamed freely. Idempotent; returns the ids the
+	screenshot script needs, and prints them when run via `bench execute`.
+	"""
+	from frappe.utils import add_days, get_first_day, get_year_ending, get_year_start, today
+
+	company = ensure_test_company()
+
+	manager = make_test_user(SHOWCASE_MANAGER_USER, company, first_name="Arjun", last_name="Mehta")
+	employee = make_test_user(
+		SHOWCASE_EMPLOYEE_USER,
+		company,
+		first_name="Priya",
+		last_name="Sharma",
+		reports_to=manager,
+		company_email="priya.sharma@example.com",
+		date_of_joining="2023-04-17",
+	)
+
+	# Same shape as `make_test_hr_manager_employee`: no self-scoping User
+	# Permission, or HR Manager sees nobody but themselves (P4-R11).
+	make_test_user(SHOWCASE_HR_USER, company, first_name="Ananya", last_name="Rao", create_user_permission=0)
+	hr_user = frappe.get_doc("User", SHOWCASE_HR_USER)
+	if "HR Manager" not in [row.role for row in hr_user.roles]:
+		hr_user.append_roles("HR Manager")
+		hr_user.save(ignore_permissions=True)
+		frappe.clear_cache(user=SHOWCASE_HR_USER)
+
+	ensure_leave_allocation(employee, "Casual Leave", 12)
+	ensure_leave_allocation(employee, "Privilege Leave", 18)
+
+	ensure_test_shift_type(SHOWCASE_SHIFT_TYPE, start_time="09:00:00", end_time="18:00:00")
+	assign_test_shift(employee, SHOWCASE_SHIFT_TYPE)
+
+	# An employee-level assignment wins over the company's `_Test Holiday List`
+	# (`get_assigned_holiday_list` checks the employee first).
+	list_name = f"Company Holidays {frappe.utils.getdate(today()).year}"
+	if not frappe.db.exists("Holiday List", list_name):
+		frappe.get_doc(
+			{
+				"doctype": "Holiday List",
+				"holiday_list_name": list_name,
+				"from_date": get_year_start(today()),
+				"to_date": get_year_ending(today()),
+			}
+		).insert(ignore_permissions=True)
+	if not frappe.db.exists(
+		"Holiday List Assignment", {"assigned_to": employee, "holiday_list": list_name, "docstatus": 1}
+	):
+		assignment = frappe.get_doc(
+			{
+				"doctype": "Holiday List Assignment",
+				"applicable_for": "Employee",
+				"assigned_to": employee,
+				"holiday_list": list_name,
+				"from_date": get_year_start(today()),
+				"to_date": get_year_ending(today()),
+			}
+		)
+		assignment.insert(ignore_permissions=True)
+		assignment.submit()
+
+	start = get_first_day(today())
+	for offset, status in ((0, "Present"), (1, "Present"), (2, "Work From Home"), (3, "Present")):
+		date = str(add_days(start, offset))
+		if frappe.db.exists("Attendance", {"employee": employee, "attendance_date": date}):
+			continue
+		doc = frappe.get_doc(
+			{
+				"doctype": "Attendance",
+				"employee": employee,
+				"attendance_date": date,
+				"status": status,
+				"company": company,
+			}
+		)
+		doc.insert(ignore_permissions=True)
+		doc.submit()
+
+	ids = {"employee": employee, "manager": manager, "hr_user": SHOWCASE_HR_USER}
+	print(f"PERSON_ID={employee}")
+	return ids

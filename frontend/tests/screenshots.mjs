@@ -26,14 +26,27 @@ const DESKTOP = { width: 1280, height: 860 }
 const PHONE = devices['iPhone 14']
 
 // [file, identity, path, viewport]
+//
+// `PERSON` is the Employee id the People shot opens. It is a fixture id, so
+// it differs per site: pass it as PERSON_ID=HR-EMP-00001, or the People shot
+// falls back to the search screen.
+const PERSON = process.env.PERSON_ID
 const SHOTS = [
   ['portal-dashboard.png', 'employee', '/helixhr/', DESKTOP],
   ['portal-timesheet.png', 'employee', '/helixhr/timesheet/2026-08-31', DESKTOP],
   ['portal-payslips.png', 'employee', '/helixhr/payslips', DESKTOP],
   ['portal-approvals.png', 'manager', '/helixhr/approvals', DESKTOP],
+  ['portal-people.png', 'showcase-hr', PERSON ? `/helixhr/people/${PERSON}` : '/helixhr/people', DESKTOP],
+  ['portal-reports.png', 'showcase-hr', '/helixhr/reports', DESKTOP],
   ['portal-attendance-mobile.png', 'employee', '/helixhr/attendance', PHONE],
   ['portal-leave-mobile.png', 'employee', '/helixhr/leave', PHONE],
 ]
+
+// Regenerate a subset: `node tests/screenshots.mjs portal-people.png portal-reports.png`.
+// The committed shots were taken on a hand-curated site (README, Screenshots);
+// being able to refresh two without disturbing six is what keeps that true.
+const only = process.argv.slice(2)
+const selected = only.length ? SHOTS.filter(([file]) => only.includes(file)) : SHOTS
 
 async function login() {
   const context = await request.newContext({
@@ -44,6 +57,10 @@ async function login() {
   for (const [key, user] of [
     ['employee', 'employee@helixhr.test'],
     ['manager', 'manager@helixhr.test'],
+    // The HR shots sign in as the plainly named identity
+    // `helixhr.tests.utils.ensure_showcase_fixtures` creates, not the test
+    // suite's `hr-manager-employee@...` -- its name is what the sidebar shows.
+    ['showcase-hr', 'ananya.rao@helixhr.test'],
   ]) {
     const response = await context.post('/api/method/login', {
       form: { usr: user, pwd: PASSWORD },
@@ -61,7 +78,7 @@ const states = await login()
 await mkdir(outDir, { recursive: true })
 const browser = await chromium.launch()
 
-for (const [file, identity, path, viewport] of SHOTS) {
+for (const [file, identity, path, viewport] of selected) {
   const context = await browser.newContext({
     ...(viewport === DESKTOP ? { viewport } : viewport),
     storageState: states[identity],
