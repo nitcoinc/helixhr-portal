@@ -10,9 +10,10 @@
 <h1 align="center">HelixHR Employee Portal</h1>
 
 <p align="center">
-  A modern, mobile-first employee portal built on top of Frappe HR, providing employees with<br>
-  seamless access to HR services, information, and self-service tools.<br>
-  HelixHR empowers employees with quick and easy access to their HR information, benefits, and workplace resources.
+  A modern, mobile-first employee portal built on top of Frappe HR,<br>
+  providing employees with seamless access to HR services, information,<br>
+  and self-service tools. HelixHR empowers employees with quick and easy<br>
+  access to their HR information, benefits, and workplace resources.
 </p>
 
 <p align="center">
