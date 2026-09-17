@@ -1,6 +1,7 @@
 import frappe
 from frappe.tests import IntegrationTestCase
 
+from helixhr.api import search_people
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	HR_MANAGER_EMPLOYEE_USER,
@@ -118,3 +119,106 @@ class TestResolveAdminScope(IntegrationTestCase):
 	def test_empty_scope_never_leaks_a_filter_that_matches_everybody(self):
 		scope = {"kind": "none", "company": None}
 		self.assertIsNone(admin_scope_employee_filters(scope))
+
+
+class TestSearchPeople(IntegrationTestCase):
+	"""P6-U2 / P6-R1, P6-R8, P6-R13."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		self.hr_employee, self.hr_user = make_test_hr_manager_employee()
+		make_test_it_user()
+		self.colleague = make_test_user(
+			"people-search-colleague@helixhr.test",
+			self.company,
+			# `set_employee_name` (erpnext/setup/doctype/employee/employee.py)
+			# always overwrites `employee_name` from first/middle/last name
+			# on save, so the searchable name has to be set here, not passed
+			# as `employee_name` directly.
+			first_name="Zara",
+			last_name="Colleague",
+			company_email="zara.colleague@helixhr.test",
+		)
+		other_company = _ensure_other_company()
+		self.other_company_employee = make_test_user(OTHER_COMPANY_USER, other_company)
+
+		left_name = frappe.db.get_value(
+			"Employee", {"employee_number": "_test-people-search-left"}, "name"
+		)
+		if not left_name:
+			left = frappe.get_doc(
+				{
+					"doctype": "Employee",
+					"employee_number": "_test-people-search-left",
+					"first_name": "Zara",
+					"last_name": "Departed",
+					"company": self.company,
+					"date_of_birth": "1990-01-01",
+					"date_of_joining": "2018-01-01",
+					"relieving_date": "2020-01-01",
+					"gender": frappe.db.get_value("Gender", {}, "name"),
+					"status": "Left",
+					"create_user_permission": 0,
+				}
+			)
+			left.insert(ignore_permissions=True)
+			left_name = left.name
+		self.left_employee = left_name
+
+		frappe.set_user(EMPLOYEE_USER)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def test_an_hr_administrator_finds_a_colleague_by_name_number_or_email(self):
+		frappe.set_user(self.hr_user)
+		by_name = search_people(query="Zara Colleague")
+		self.assertIn(self.colleague, [row["name"] for row in by_name["people"]])
+
+		by_number = search_people(query="people-search-colleague")
+		self.assertIn(self.colleague, [row["name"] for row in by_number["people"]])
+
+		by_email = search_people(query="zara.colleague@helixhr.test")
+		self.assertIn(self.colleague, [row["name"] for row in by_email["people"]])
+
+	def test_an_employee_in_another_company_is_never_returned(self):
+		frappe.set_user(self.hr_user)
+		result = search_people(query=self.other_company_employee)
+		self.assertNotIn(self.other_company_employee, [row["name"] for row in result["people"]])
+
+	def test_a_plain_employee_and_an_it_team_holder_are_refused(self):
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.PermissionError):
+			search_people(query="Zara")
+
+		frappe.set_user(IT_TEAM_USER)
+		with self.assertRaises(frappe.PermissionError):
+			search_people(query="Zara")
+
+	def test_a_search_shorter_than_the_minimum_is_ignored(self):
+		frappe.set_user(self.hr_user)
+		everyone = search_people()
+		for needle in ("", " ", "z"):
+			self.assertEqual(
+				search_people(query=needle)["total"],
+				everyone["total"],
+				f"a {needle!r} search filtered the results",
+			)
+
+	def test_the_page_is_bounded_and_reports_its_true_total(self):
+		frappe.set_user(self.hr_user)
+		result = search_people(limit=999999)
+		self.assertEqual(result["limit"], 200)
+		directly_counted = frappe.db.count("Employee", {"status": "Active", "company": self.company})
+		self.assertEqual(result["total"], directly_counted)
+
+	def test_left_employees_are_excluded_by_default(self):
+		frappe.set_user(self.hr_user)
+		result = search_people(query="Zara Departed")
+		self.assertNotIn(self.left_employee, [row["name"] for row in result["people"]])
+
+	def test_the_read_is_rate_limited(self):
+		from helixhr.utils import RATE_LIMIT_POLICY
+
+		self.assertIn("search_people", RATE_LIMIT_POLICY)

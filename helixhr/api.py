@@ -65,9 +65,11 @@ from helixhr.utils import (
 	SHIFT_TYPE_EDITABLE_FIELDS,
 	TEMPLATE_TOKENS,
 	UPLOAD_MAX_BYTES,
+	admin_scope_employee_filters,
 	get_manager_user,
 	get_week_bounds,
 	rate_limit_per_user,
+	resolve_admin_scope,
 	validate_portal_upload,
 )
 
@@ -6220,6 +6222,94 @@ def get_directory(query=None, department=None, start=0, limit=None):
 		"limit": limit,
 		"start": start,
 		"departments": _directory_departments(company),
+	}
+
+
+# ---------------------------------------------------------------------------
+# Finding a person, for HR (P6-U2 / P6-R1, P6-R8, P6-R13)
+#
+# The administrative sibling of `get_directory` just above -- same bounded,
+# paged, server-side-filtered shape -- but scoped by `resolve_admin_scope`
+# (every company an admin persona may see) rather than to the caller's own
+# company, and refused entirely for anyone the scope helper does not grant.
+# The employee-facing directory is untouched.
+
+_PEOPLE_SEARCH_PAGE = 50
+_PEOPLE_SEARCH_MAX_PAGE = 200
+_PEOPLE_SEARCH_QUERY_MIN = 2
+_PEOPLE_SEARCH_QUERY_MAX = 60
+
+_PEOPLE_SEARCH_FIELDS = (
+	"name",
+	"employee_name",
+	"employee_number",
+	"designation",
+	"department",
+	"company",
+	"company_email",
+)
+
+
+def _people_search_projection(row):
+	return {
+		"name": row.name,
+		"employee_name": row.employee_name,
+		"employee_number": row.employee_number,
+		"initials": _initials(row.employee_name),
+		"designation": row.designation or None,
+		"department": row.department or None,
+		"company": row.company,
+	}
+
+
+@frappe.whitelist()
+def search_people(query=None, start=0, limit=None):
+	"""A bounded page of active employees this caller may administer,
+	matched by name, employee number or work email (P6-R1, P6-R8).
+
+	Refused server-side, before any row is read, for anyone
+	`resolve_admin_scope` does not grant a scope to (P6-R6, P6-R13) --
+	`PermissionError`, the same as every other admin-only read in this file.
+	"""
+	rate_limit_per_user("search_people")
+	scope = resolve_admin_scope(frappe.session.user)
+	if scope["kind"] == "none":
+		frappe.throw(_("You are not authorised to look up other people."), frappe.PermissionError)
+
+	limit = min(max(cint(limit) or _PEOPLE_SEARCH_PAGE, 1), _PEOPLE_SEARCH_MAX_PAGE)
+	start = max(cint(start), 0)
+
+	filters = admin_scope_employee_filters(scope)
+	filters = {**(filters or {}), "status": "Active"}
+
+	# Left and Inactive employees are excluded by default -- looking somebody
+	# up means a current colleague unless HR says otherwise (P6 Open
+	# Questions: findability of Left employees is deferred until asked).
+	needle = (query or "").strip()[:_PEOPLE_SEARCH_QUERY_MAX]
+	or_filters = None
+	if len(needle) >= _PEOPLE_SEARCH_QUERY_MIN:
+		or_filters = [
+			["employee_name", "like", f"%{needle}%"],
+			["employee_number", "like", f"%{needle}%"],
+			["company_email", "like", f"%{needle}%"],
+		]
+
+	scope_query = {"filters": filters, "or_filters": or_filters, "ignore_permissions": True}
+	rows = frappe.get_all(
+		"Employee",
+		fields=list(_PEOPLE_SEARCH_FIELDS),
+		order_by="employee_name asc",
+		limit_start=start,
+		limit_page_length=limit,
+		**scope_query,
+	)
+	total = _aggregate_count(frappe.get_all("Employee", fields=[{"COUNT": "*"}], **scope_query)[0])
+
+	return {
+		"people": [_people_search_projection(row) for row in rows],
+		"total": total,
+		"limit": limit,
+		"start": start,
 	}
 
 
