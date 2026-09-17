@@ -6429,12 +6429,16 @@ def get_report_url(report, filters=None):
 def get_report_link(report, employee=None):
 	"""A curated report's Desk URL, pre-filtered to `employee` when given
 	(P6-R9, P6-R10) -- the one method in this plan that hands out a Desk URL
-	outside `get_person`, so it carries the same two gates that method's own
-	`desk_url` field does: `report` must be on the curated list, and the
-	caller must be able to reach Desk at all (P6-R12), checked here rather
-	than left to the frontend to merely hide.
+	outside `get_person`, checked here server-side rather than left to the
+	frontend to merely hide (P6-R8's standard, applied to reports too):
+	`report` must be on the curated list, the caller must hold the same
+	admin scope every other read in this plan requires, and -- P6-KTD4's own
+	extra condition -- must be able to reach Desk at all (P6-R12).
 	"""
 	rate_limit_per_user("get_report_link")
+	scope = resolve_admin_scope(frappe.session.user)
+	if scope["kind"] == "none":
+		frappe.throw(_("You are not authorised to open reports here."), frappe.PermissionError)
 	if report not in ADMIN_REPORTS:
 		frappe.throw(_("That report is not offered here."), frappe.PermissionError)
 	if not _can_open_desk(frappe.session.user):
@@ -6442,8 +6446,7 @@ def get_report_link(report, employee=None):
 
 	filters = None
 	if employee:
-		scope = resolve_admin_scope(frappe.session.user)
-		if scope["kind"] == "none" or not employee_in_admin_scope(employee, scope):
+		if not employee_in_admin_scope(employee, scope):
 			frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
 		filters = {"employee": employee}
 

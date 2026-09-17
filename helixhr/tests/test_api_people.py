@@ -468,6 +468,17 @@ class TestDeskLinks(IntegrationTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			get_report_link("Employee Leave Balance")
 
+	def test_a_plain_employee_is_refused_even_with_no_employee_filter(self):
+		# The launcher is an HR capability (P6-R9), not a general pass to any
+		# System User who happens to have Desk access -- `Employee` carries
+		# desk_access on this bench, so `_can_open_desk` alone would not
+		# refuse this caller; `resolve_admin_scope` is what does.
+		from helixhr.api import get_report_link
+
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.PermissionError):
+			get_report_link("Employee Leave Balance")
+
 	def test_a_report_link_filtered_to_an_employee_outside_scope_is_refused(self):
 		from helixhr.api import get_report_link
 
