@@ -94,6 +94,26 @@ SHIFT_TYPE_EDITABLE_FIELDS = (
 )
 
 
+# P6-U4 / P6-R9. The reports the launcher offers -- a short, deliberate list
+# in the style above, not every report installed. Payroll reports are
+# excluded on purpose (P6-KTD2): the portal does not route HR into payroll.
+ADMIN_REPORTS = (
+	"Employee Leave Balance",
+	"Employee Leave Balance Summary",
+	"Monthly Attendance Sheet",
+	"Shift Attendance",
+	"Leave Ledger",
+	"Employee Information",
+	"Employee Exits",
+)
+
+# The roles the report launcher (and the person view's Desk link) are
+# offered to -- the same set `resolve_admin_scope` grants a scope to
+# (defined again here, deliberately, rather than imported forward: this
+# constant sits above `resolve_admin_scope` in the file).
+ADMIN_REPORT_ROLES = frozenset({"HR Manager", "System Manager"})
+
+
 def get_week_bounds(any_date):
 	"""Monday..Sunday for the week containing `any_date` (KTD10 -- one
 	week equals one Timesheet, always Monday to Sunday regardless of the
@@ -263,6 +283,7 @@ RATE_LIMIT_POLICY = {
 	"get_organisation_view": (60, 60),
 	"search_people": (60, 60),
 	"get_person": (60, 60),
+	"get_report_link": (60, 60),
 	"get_request_categories": (60, 60),
 	# P5-U13 configuration writes. Reads (`get_portal_config`) are cheap and
 	# server-scoped like `get_directory`; every write checks permission itself

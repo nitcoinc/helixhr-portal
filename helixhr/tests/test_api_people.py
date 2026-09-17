@@ -273,6 +273,7 @@ class TestGetPerson(IntegrationTestCase):
 				"requests",
 				"shift",
 				"holiday_list",
+				"desk_url",
 				"failed_sections",
 			},
 		)
@@ -405,3 +406,108 @@ class TestGetPerson(IntegrationTestCase):
 		frappe.set_user(EMPLOYEE_USER)
 		with self.assertRaises(frappe.PermissionError):
 			get_person(self.colleague)
+
+	def test_the_desk_url_resolves_through_frappes_own_helper(self):
+		from frappe.utils import get_url_to_form
+
+		frappe.set_user(self.hr_user)
+		payload = get_person(self.colleague)
+		self.assertEqual(payload["desk_url"], get_url_to_form("Employee", self.colleague))
+
+
+class TestDeskLinks(IntegrationTestCase):
+	"""P6-U4 / P6-R9, P6-R10, P6-R12."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		self.hr_employee, self.hr_user = make_test_hr_manager_employee()
+		self.it_employee, self.it_user = make_test_it_user()
+		self.colleague, self.colleague_user, self.manager, self.manager_user = (
+			make_test_employee_and_manager()
+		)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def test_can_open_desk_is_true_for_hr_and_false_for_an_it_team_website_user(self):
+		from helixhr.api import _can_open_desk
+
+		self.assertTrue(_can_open_desk(self.hr_user))
+		self.assertFalse(_can_open_desk(self.it_user))
+
+	def test_a_report_link_resolves_through_frappes_own_helper_and_carries_filters(self):
+		from frappe.utils import get_url_to_report, get_url_to_report_with_filters
+
+		from helixhr.api import get_report_link
+
+		frappe.set_user(self.hr_user)
+		bare_url = get_report_link("Employee Leave Balance")
+		self.assertEqual(bare_url, get_url_to_report("Employee Leave Balance"))
+
+		filtered_url = get_report_link("Employee Leave Balance", employee=self.colleague)
+		self.assertEqual(
+			filtered_url,
+			get_url_to_report_with_filters("Employee Leave Balance", f"employee={self.colleague}"),
+		)
+		self.assertIn(self.colleague, filtered_url)
+
+	def test_a_report_not_on_the_curated_list_is_refused(self):
+		from helixhr.api import get_report_link
+
+		frappe.set_user(self.hr_user)
+		with self.assertRaises(frappe.PermissionError):
+			get_report_link("Salary Register")
+
+	def test_a_caller_who_cannot_open_desk_is_refused_a_report_link(self):
+		# `IT Team` is the plan's own example of a caller who cannot reach
+		# Desk (a Website User): P6-KTD4, P6-AE4.
+		from helixhr.api import get_report_link
+
+		frappe.set_user(self.it_user)
+		with self.assertRaises(frappe.PermissionError):
+			get_report_link("Employee Leave Balance")
+
+	def test_a_report_link_filtered_to_an_employee_outside_scope_is_refused(self):
+		from helixhr.api import get_report_link
+
+		other_company = _ensure_other_company()
+		outsider = make_test_user(OTHER_COMPANY_USER, other_company)
+
+		frappe.set_user(self.hr_user)
+		with self.assertRaises(frappe.PermissionError):
+			get_report_link("Employee Leave Balance", employee=outsider)
+
+	def test_preflight_passes_on_the_curated_report_list(self):
+		from helixhr import preflight
+
+		result = preflight.check_curated_reports()
+		self.assertEqual(result["status"], preflight.PASS)
+
+	def test_preflight_fails_when_a_curated_report_is_not_installed(self):
+		from unittest.mock import patch
+
+		from helixhr import preflight
+
+		with patch("helixhr.utils.ADMIN_REPORTS", ("Not A Real Report",)):
+			result = preflight.check_curated_reports()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("Not A Real Report", result["detail"])
+
+	def test_the_read_is_rate_limited(self):
+		from helixhr.utils import RATE_LIMIT_POLICY
+
+		self.assertIn("get_report_link", RATE_LIMIT_POLICY)
+
+	def test_bootstrap_flags_agree_with_the_servers_own_gates(self):
+		from helixhr.api import get_portal_bootstrap
+
+		frappe.set_user(self.hr_user)
+		boot = get_portal_bootstrap()
+		self.assertTrue(boot["can_see_people"])
+		self.assertTrue(boot["can_open_desk"])
+
+		frappe.set_user(self.it_user)
+		boot = get_portal_bootstrap()
+		self.assertFalse(boot["can_see_people"])
+		self.assertFalse(boot["can_open_desk"])

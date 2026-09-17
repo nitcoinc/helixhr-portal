@@ -17,6 +17,9 @@ from frappe.utils import (
 	get_first_day,
 	get_last_day,
 	get_system_timezone,
+	get_url_to_form,
+	get_url_to_report,
+	get_url_to_report_with_filters,
 	getdate,
 	now_datetime,
 	time_diff_in_seconds,
@@ -59,6 +62,7 @@ from helixhr.events import (
 # `hr_request.get_permission_query_conditions` cannot drift apart.
 from helixhr.helixhr.doctype.hr_request.hr_request import _WORKER_ROLES as _ROUTED_WORKER_ROLES
 from helixhr.utils import (
+	ADMIN_REPORTS,
 	HOLIDAY_LIST_EDITABLE_FIELDS,
 	LEAVE_TYPE_EDITABLE_FIELDS,
 	PROFILE_EDITABLE_FIELDS,
@@ -239,6 +243,16 @@ def get_portal_bootstrap():
 		# so the nav item and the server's own gate can never disagree --
 		# same shape as `can_configure` just above.
 		"can_see_organisation": _is_hr(frappe.session.user),
+		# P6-U4: same shape again -- `search_people` and `get_person` are
+		# gated by `resolve_admin_scope`, which grants a scope to exactly
+		# the roles `_is_hr` names, so the nav item and the server's gate
+		# agree by construction.
+		"can_see_people": _is_hr(frappe.session.user),
+		# P6-KTD4: resolved on the caller's own ability to reach Desk (a
+		# System User holding a `desk_access` role), never on "is HR" --
+		# the two are correlated today but the flag must not assume they
+		# stay that way.
+		"can_open_desk": _can_open_desk(frappe.session.user),
 		"unread_notifications": 0,
 	}
 
@@ -6375,6 +6389,67 @@ def _person_profile(employee):
 	return data
 
 
+def _can_open_desk(user):
+	"""Whether `user` can actually reach Desk -- a System User holding a
+	role with `desk_access` -- rather than "holds an HR role" (P6-KTD4). The
+	two are correlated today (an `IT Team` holder is a Website User and
+	cannot) but nothing here assumes that stays true."""
+	if user == "Administrator":
+		return True
+	if frappe.db.get_value("User", user, "user_type") != "System User":
+		return False
+	return bool(
+		frappe.get_all(
+			"Role",
+			filters={"name": ["in", frappe.get_roles(user)], "desk_access": 1},
+			limit=1,
+		)
+	)
+
+
+def _report_filter_query(filters):
+	"""A simple-value filter dict as the `key=value&...` query string
+	`get_url_to_report_with_filters` expects -- built the same way Frappe's
+	own `get_link_to_report` does for a non-Report-Builder report."""
+	from urllib.parse import quote
+
+	return "&".join(f"{key}={quote(str(value))}" for key, value in filters.items())
+
+
+def get_report_url(report, filters=None):
+	"""A curated report's Desk URL, pre-filtered when `filters` is given
+	(P6-R10), built by Frappe's own `get_url_to_report*` helpers (P6-KTD3)
+	-- never a hand-concatenated Desk path."""
+	if filters:
+		return get_url_to_report_with_filters(report, _report_filter_query(filters))
+	return get_url_to_report(report)
+
+
+@frappe.whitelist()
+def get_report_link(report, employee=None):
+	"""A curated report's Desk URL, pre-filtered to `employee` when given
+	(P6-R9, P6-R10) -- the one method in this plan that hands out a Desk URL
+	outside `get_person`, so it carries the same two gates that method's own
+	`desk_url` field does: `report` must be on the curated list, and the
+	caller must be able to reach Desk at all (P6-R12), checked here rather
+	than left to the frontend to merely hide.
+	"""
+	rate_limit_per_user("get_report_link")
+	if report not in ADMIN_REPORTS:
+		frappe.throw(_("That report is not offered here."), frappe.PermissionError)
+	if not _can_open_desk(frappe.session.user):
+		frappe.throw(_("You do not have access to Frappe's Desk."), frappe.PermissionError)
+
+	filters = None
+	if employee:
+		scope = resolve_admin_scope(frappe.session.user)
+		if scope["kind"] == "none" or not employee_in_admin_scope(employee, scope):
+			frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
+		filters = {"employee": employee}
+
+	return get_report_url(report, filters)
+
+
 @frappe.whitelist()
 def get_person(employee):
 	"""Everything HR asks about a person, on one screen (P6-R2): leave
@@ -6420,6 +6495,10 @@ def get_person(employee):
 		"holiday_list": section(
 			"holiday_list", lambda: get_holiday_list_for_employee(employee, raise_exception=False)
 		),
+		# None for a caller who cannot reach Desk at all (P6-R12) -- the
+		# frontend never has to be trusted to hide this on its own, since
+		# no other method in this plan hands out this employee's Desk URL.
+		"desk_url": get_url_to_form("Employee", employee) if _can_open_desk(frappe.session.user) else None,
 		"failed_sections": failed,
 	}
 
