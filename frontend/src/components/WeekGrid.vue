@@ -1,5 +1,6 @@
 <script setup>
 import { computed } from 'vue'
+import { roundHours } from '@/lib/hours'
 
 // P2-U6. The week editor, in both of its shapes.
 //
@@ -121,7 +122,7 @@ function cellValue(line, iso) {
           {{ selectedDay.weekday }}, {{ selectedDay.label }}
         </h2>
         <p class="text-sm text-ink-gray-6">
-          <span class="tabular text-xl font-semibold text-ink-gray-9">{{ selectedDay.total.toFixed(1) }}</span>
+          <span class="tabular text-xl font-semibold text-ink-gray-9">{{ selectedDay.total }}</span>
           h
         </p>
       </div>
@@ -400,7 +401,7 @@ function cellValue(line, iso) {
                 >{{ cellValue(line, day.iso) || '–' }}</span>
               </td>
               <td class="tabular px-3 py-2 text-right font-semibold text-ink-gray-9">
-                {{ Object.values(line.hours).reduce((sum, value) => sum + (value || 0), 0).toFixed(1) }}
+                {{ roundHours(Object.values(line.hours).reduce((sum, value) => sum + (value || 0), 0)) }}
               </td>
               <td class="px-4 py-2">
                 <input
@@ -432,7 +433,7 @@ function cellValue(line, iso) {
                 class="px-1.5 py-3 text-center align-top"
                 :class="day.isWeekend ? 'bg-surface-gray-3/50' : ''"
               >
-                <span class="tabular block font-semibold text-ink-gray-9">{{ day.total.toFixed(0) }}</span>
+                <span class="tabular block font-semibold text-ink-gray-9">{{ day.total }}</span>
                 <!-- The bar is read against an 8h day, the same rule the
                      dashboard week spine uses, so a full day looks full on
                      both screens. -->
@@ -444,7 +445,7 @@ function cellValue(line, iso) {
                 </span>
               </td>
               <td class="tabular px-3 py-3 text-right font-semibold text-ink-gray-9">
-                {{ days.reduce((sum, day) => sum + day.total, 0).toFixed(1) }}
+                {{ roundHours(days.reduce((sum, day) => sum + day.total, 0)) }}
               </td>
               <td class="tabular px-4 py-3 text-sm text-ink-gray-6">
                 of {{ fullWeekHours }} h

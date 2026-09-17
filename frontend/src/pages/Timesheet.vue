@@ -1,5 +1,6 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { roundHours } from '@/lib/hours'
 import { useRouter } from 'vue-router'
 import { createResource, Button, Dialog } from 'frappe-ui'
 import WeekGrid from '@/components/WeekGrid.vue'
@@ -70,10 +71,6 @@ function newLine(fields = {}) {
   return { id: `line-${nextLineId}`, project: '', task: '', note: '', hours: {}, ...fields }
 }
 
-function round(value) {
-  return Math.round(value * 100) / 100
-}
-
 /** Server rows are one row per project/task/note *per day*; a line is the
  * same booking across the week. Two server rows that agree on all three and
  * fall on the same day are summed -- the portal cannot create that, but a
@@ -91,7 +88,7 @@ function linesFrom(rows, weekMonday) {
       )
     }
     const line = found.get(key)
-    line.hours[row.date] = round((line.hours[row.date] || 0) + Number(row.hours || 0))
+    line.hours[row.date] = roundHours((line.hours[row.date] || 0) + Number(row.hours || 0))
   }
   return [...found.values()]
 }
@@ -117,7 +114,7 @@ function snapshot() {
 const isDirty = computed(() => snapshot() !== savedSnapshot)
 
 function dayTotal(iso) {
-  return round(lines.value.reduce((sum, line) => sum + (line.hours[iso] || 0), 0))
+  return roundHours(lines.value.reduce((sum, line) => sum + (line.hours[iso] || 0), 0))
 }
 
 const days = computed(() =>
@@ -131,7 +128,7 @@ const days = computed(() =>
   })),
 )
 
-const weekTotal = computed(() => round(days.value.reduce((sum, day) => sum + day.total, 0)))
+const weekTotal = computed(() => roundHours(days.value.reduce((sum, day) => sum + day.total, 0)))
 
 function loadFromServer() {
   lines.value = linesFrom(week.data?.timesheet?.rows, monday.value)
@@ -168,7 +165,7 @@ function removeLine({ id, date }) {
 function setHours({ id, date, value }) {
   const line = lines.value.find((row) => row.id === id)
   if (!line) return
-  line.hours[date] = Number.isFinite(value) ? Math.min(24, Math.max(0, round(value))) : 0
+  line.hours[date] = Number.isFinite(value) ? Math.min(24, Math.max(0, roundHours(value))) : 0
 }
 
 function updateLine({ id, field, value }) {

@@ -302,4 +302,30 @@ test.describe.serial('timesheet entry', () => {
     }
     expect(labels[0]).toBe(labels[1])
   })
+
+  test('a part-hour day total is shown exactly, not rounded to whole hours', async ({
+    browser,
+  }: {
+    browser: Browser
+  }) => {
+    // The reported defect: the desktop grid's Day total row rendered through
+    // `toFixed(0)`, so a 7.1 day read "7" and a 7.9 day read "8" while the
+    // row and week totals beside them still added up to the real figure --
+    // three cells disagreeing about one week. The source week already
+    // carries 4.25 on its Monday from the first test, which is the same
+    // defect a step along: `toFixed(1)` would report it as "4.3".
+    const context = await browser.newContext({
+      storageState: 'tests/.auth/employee.json',
+      viewport: { width: 1280, height: 900 },
+    })
+    const page = await context.newPage()
+
+    await page.goto(`/helixhr/timesheet/${SOURCE_WEEK}`)
+    await expect(page.getByRole('heading', { name: 'Timesheet' })).toBeVisible()
+
+    const dayTotals = page.getByRole('row').filter({ hasText: 'Day total' })
+    await expect(dayTotals.getByRole('cell').first()).toHaveText('4.25')
+
+    await context.close()
+  })
 })
