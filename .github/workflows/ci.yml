@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# Nothing here writes to the repo, opens issues or publishes; the default
+# GITHUB_TOKEN grant is wider than that.
+permissions:
+  contents: read
+
 # Structured against the standard Frappe bench CI recipe (see
 # docs/runbook.md). Runs from a genuinely fresh site on every push and PR,
 # which is why it catches the order-dependent fixture bugs a long-lived dev
