@@ -257,6 +257,40 @@ Every save still runs through `doc.save()`, so HRMS's own `validate()` always
 runs — a value HRMS itself would reject is rejected here too. A field outside
 the named set posted to the save method is silently ignored, never written.
 
+### Finding a person, and the curated report list (P6-U1—U6)
+
+`/people` (HR Manager and System Manager only) is a read-only lookup, never a
+Desk reskin: search finds an employee within the caller's own company (or
+every company, for the Desk-only HR persona with no Employee record —
+`resolve_admin_scope`, `helixhr/utils.py`, is the one place this is decided),
+and the person view answers leave balance, a month of attendance, open and
+recent requests, shift, holiday list, manager, joining date and status. It
+writes nothing, and a field above Employee permlevel 0 — salary, bank
+details, tax — never reaches this projection.
+
+`/reports` hands HR a short, deliberately curated list of Frappe's own
+reports, pre-filtered to a person when opened from their page — never a
+report the portal re-implements, and never an export the portal performs
+itself. The list is `helixhr.utils.ADMIN_REPORTS`, a **named constant** in
+the same style as the `*_EDITABLE_FIELDS` sets above:
+
+```
+Employee Leave Balance, Employee Leave Balance Summary,
+Monthly Attendance Sheet, Shift Attendance, Leave Ledger,
+Employee Information, Employee Exits
+```
+
+Payroll reports are excluded on purpose — this list does not route HR into
+payroll, and adding one here is a deliberate scope decision, not a
+convenience. `preflight.py`'s `check_curated_reports` FAILs when a name here
+is no longer installed on the site, or is no longer readable as a report by
+HR Manager or System Manager — both are the loud version of a link that
+would otherwise just go dead. A Desk link (in the person view, and behind
+every report entry) is offered only to a caller who can actually reach
+Desk — a System User holding a role with `desk_access` — never merely
+because they hold an HR role; the two are correlated on this bench today but
+`can_open_desk` does not assume they stay that way.
+
 ## What HR sets up before the self-service surfaces work (P3-U9)
 
 Six screens shipped in phase 3 — Payslips, Holidays, check-in on Attendance,
