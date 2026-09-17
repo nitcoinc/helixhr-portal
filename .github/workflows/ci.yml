@@ -5,11 +5,10 @@ on:
     branches: [main]
   pull_request:
 
-# NOTE: written and structured against the standard Frappe bench CI recipe
-# and everything this plan's U1-U3 units verified by hand on the dev VM
-# (see docs/runbook.md), but has not yet run for real -- this repo has no
-# remote yet. Treat the first real run as the actual verification and fix
-# forward from whatever it finds, per U3's Verification Contract entry.
+# Structured against the standard Frappe bench CI recipe (see
+# docs/runbook.md). Runs from a genuinely fresh site on every push and PR,
+# which is why it catches the order-dependent fixture bugs a long-lived dev
+# site hides -- treat it as the authoritative signal over a local run.
 
 jobs:
   python-tests:
