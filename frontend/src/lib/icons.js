@@ -75,6 +75,19 @@ export const icons = {
     'M4 21h17',
     'M7.5 7h1.5M7.5 11h1.5M7.5 15h1.5M11.5 7h1.5M11.5 11h1.5M11.5 15h1.5',
   ],
+  // P6-U5: the People nav item -- a search glyph, distinct from Directory's
+  // "users" (a lookup, not a browse).
+  peopleSearch: [
+    'M11 21a10 10 0 1 0 0-20 10 10 0 0 0 0 20z',
+    'm21 21-4.35-4.35',
+  ],
+  // P6-U6: the Reports nav item.
+  reports: [
+    'M3 3v18h18',
+    'M18 17V9',
+    'M13 17V5',
+    'M8 17v-3',
+  ],
 }
 
 // Every kind `helixhr.api._get_needs_you` emits, and the glyph its row draws.

@@ -1001,3 +1001,21 @@ touch it. A new HR-editable surface of this shape gets its own `save_*`
 method in `api.py` (explicit permission check, an allow-listed field set,
 `doc.save()` so the underlying doctype's own `validate` still runs -- never
 `db_set`), not a site config value and not a new Single.
+
+Phase 6 widens the reversal again, in the other direction: **reading** a
+person, never computing one. HR can now find an employee (`search_people`)
+and open a read-only projection of them (`get_person`) -- leave balance,
+attendance, requests, shift, holiday list, manager, joining date and status,
+all assembled from readers the portal already has, never a second
+derivation. It writes nothing, and it discloses no more than HR already
+reaches in Desk through the roles it holds (`resolve_admin_scope`,
+`helixhr/utils.py`, is the one place "which employees may this caller
+administer" is decided; every administrative read in this plan calls it).
+For anything beyond that read -- a report, an export, a number this app is
+not the source of truth for -- the portal hands HR a **curated, named**
+launcher into Frappe's own report engine (`ADMIN_REPORTS`, `helixhr/
+utils.py`) rather than re-implementing one. A report opens in Frappe,
+pre-filtered when the portal knows the filter, and export happens there --
+the portal never re-implements a report or an export path. Payroll reports
+are deliberately excluded from the curated list; payroll stays a Desk-only
+concern this plan does not touch.

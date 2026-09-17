@@ -169,6 +169,29 @@ const routes = [
     name: 'Organisation',
     component: () => import('@/pages/Organisation.vue'),
   },
+  {
+    // P6-U5. `search_people` is the server's own gate (`resolve_admin_
+    // scope`) -- same posture as /organisation and /settings above.
+    path: '/people',
+    name: 'People',
+    component: () => import('@/pages/People.vue'),
+  },
+  {
+    // The person's record is addressable directly, like every other detail
+    // route (P2-R12): a reload or a shared link lands on the same person.
+    path: '/people/:employee',
+    name: 'PersonDetail',
+    component: () => import('@/pages/People.vue'),
+    props: true,
+  },
+  {
+    // P6-U6. `?employee=<id>` pre-filters the launcher from a person's view
+    // -- a filter, not a record, so it stays a query param rather than a
+    // path segment (P6-R10).
+    path: '/reports',
+    name: 'Reports',
+    component: () => import('@/pages/Reports.vue'),
+  },
   // The three states that are not a page of the portal. All of them render
   // NotLinked.vue, which reads the session status; none of them get the nav
   // shell (there is nothing to navigate with, and for a Guest there is

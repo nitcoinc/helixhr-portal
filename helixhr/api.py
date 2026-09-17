@@ -17,6 +17,9 @@ from frappe.utils import (
 	get_first_day,
 	get_last_day,
 	get_system_timezone,
+	get_url_to_form,
+	get_url_to_report,
+	get_url_to_report_with_filters,
 	getdate,
 	now_datetime,
 	time_diff_in_seconds,
@@ -59,15 +62,19 @@ from helixhr.events import (
 # `hr_request.get_permission_query_conditions` cannot drift apart.
 from helixhr.helixhr.doctype.hr_request.hr_request import _WORKER_ROLES as _ROUTED_WORKER_ROLES
 from helixhr.utils import (
+	ADMIN_REPORTS,
 	HOLIDAY_LIST_EDITABLE_FIELDS,
 	LEAVE_TYPE_EDITABLE_FIELDS,
 	PROFILE_EDITABLE_FIELDS,
 	SHIFT_TYPE_EDITABLE_FIELDS,
 	TEMPLATE_TOKENS,
 	UPLOAD_MAX_BYTES,
+	admin_scope_employee_filters,
+	employee_in_admin_scope,
 	get_manager_user,
 	get_week_bounds,
 	rate_limit_per_user,
+	resolve_admin_scope,
 	validate_portal_upload,
 )
 
@@ -90,6 +97,7 @@ def get_dashboard(**kwargs):
 	employee's open leave and the caller's pending decisions were each
 	fetched by more than one section.
 	"""
+	rate_limit_per_user("get_dashboard")
 	employee = get_current_employee()
 	failed = []
 	cache = {}
@@ -236,6 +244,16 @@ def get_portal_bootstrap():
 		# so the nav item and the server's own gate can never disagree --
 		# same shape as `can_configure` just above.
 		"can_see_organisation": _is_hr(frappe.session.user),
+		# P6-U4: same shape again -- `search_people` and `get_person` are
+		# gated by `resolve_admin_scope`, which grants a scope to exactly
+		# the roles `_is_hr` names, so the nav item and the server's gate
+		# agree by construction.
+		"can_see_people": resolve_admin_scope(frappe.session.user)["kind"] != "none",
+		# P6-KTD4: resolved on the caller's own ability to reach Desk (a
+		# System User holding a `desk_access` role), never on "is HR" --
+		# the two are correlated today but the flag must not assume they
+		# stay that way.
+		"can_open_desk": _can_open_desk(frappe.session.user),
 		"unread_notifications": 0,
 	}
 
@@ -1430,16 +1448,47 @@ def _hr_senders(doctype, rows):
 	return senders
 
 
+def _hr_queue_employee_filter(employee):
+	"""The `employee` filter for HR's own queue collectors: everyone but the
+	caller, inside the company scope every administrative read uses
+	(`resolve_admin_scope`, P6-R6). `None` means the caller may see nobody.
+
+	The HRMS doctypes these collectors read (Leave Application, Timesheet,
+	Attendance Request) carry no company scoping of this app's own, so a
+	company-anchored HR Manager used to see every company's queue here while
+	`hr_request.py`'s hook scoped the fourth kind -- the two halves of the
+	same queue disagreed. HR Request is deliberately NOT routed through this:
+	its collector also serves routed workers (`IT Team`), who hold no admin
+	scope at all, and its own permission hook already narrows both personas.
+	"""
+	scope = resolve_admin_scope(frappe.session.user)
+	if scope["kind"] == "none":
+		return None
+	if scope["kind"] == "unscoped":
+		return ["!=", employee]
+	names = [
+		name
+		for name in frappe.get_all(
+			"Employee", filters=admin_scope_employee_filters(scope), pluck="name"
+		)
+		if name != employee
+	]
+	return ["in", names] if names else None
+
+
 def _hr_leave_summaries(employee, today):
 	"""Leave waiting for HR: status Open at docstatus 0 in stage HR, whether a
 	manager sent it over or the Leave Type routed it there (P4-R5, P4-R7)."""
+	employee_filter = _hr_queue_employee_filter(employee)
+	if employee_filter is None:
+		return []
 	rows = frappe.get_list(
 		"Leave Application",
 		filters={
 			"status": "Open",
 			"docstatus": 0,
 			"helixhr_stage": LEAVE_STAGE_HR,
-			"employee": ["!=", employee],
+			"employee": employee_filter,
 		},
 		fields=[
 			"name",
@@ -1482,12 +1531,15 @@ def _hr_leave_summaries(employee, today):
 def _hr_timesheet_summaries(employee, today):
 	"""Weeks a manager handed over. Pending HR carries no DocShare on
 	purpose (P4-U1) -- HR reaches these through the role."""
+	employee_filter = _hr_queue_employee_filter(employee)
+	if employee_filter is None:
+		return []
 	rows = frappe.get_list(
 		"Timesheet",
 		filters={
 			"workflow_state": TIMESHEET_PENDING_HR,
 			"docstatus": 0,
-			"employee": ["!=", employee],
+			"employee": employee_filter,
 		},
 		fields=[
 			"name",
@@ -1529,12 +1581,15 @@ def _hr_attendance_request_summaries(employee, today):
 	manager read before doing so -- including what the calendar shows for
 	each day, which is the whole reason an overwrite is HR's decision and not
 	theirs (P4-KTD5)."""
+	employee_filter = _hr_queue_employee_filter(employee)
+	if employee_filter is None:
+		return []
 	rows = frappe.get_list(
 		"Attendance Request",
 		filters={
 			"workflow_state": REQUEST_PENDING_HR,
 			"docstatus": 0,
-			"employee": ["!=", employee],
+			"employee": employee_filter,
 		},
 		fields=[
 			"name",
@@ -1988,12 +2043,29 @@ def _approver_names(rows):
 	}
 
 
+def _leave_balance_map(employee):
+	"""`hrms.api.get_leave_balance_map`'s own shape, resolved for `employee`
+	directly rather than through that call's built-in session scoping
+	(P6-KTD5) -- so U3's person view reads the same number the employee's
+	own screen would, for whichever employee is asked about, without a
+	second derivation."""
+	from hrms.hr.doctype.leave_application.leave_application import get_leave_details
+
+	allocation = get_leave_details(employee, getdate())["leave_allocation"]
+	return {
+		leave_type: {
+			"allocated_leaves": details.get("total_leaves"),
+			"balance_leaves": details.get("remaining_leaves"),
+		}
+		for leave_type, details in allocation.items()
+	}
+
+
 def _leave_balances(employee):
 	"""Allocated / used / left per leave type, in the shape the field block
-	draws. `get_leave_balance_map` is already session-scoped to the caller's
-	own Employee, so nothing here widens it."""
+	draws."""
 	balances = []
-	for leave_type, details in (get_leave_balance_map() or {}).items():
+	for leave_type, details in (_leave_balance_map(employee) or {}).items():
 		allocated = flt(details.get("allocated_leaves"))
 		left = flt(details.get("balance_leaves"))
 		balances.append(
@@ -2051,6 +2123,7 @@ def get_my_leave_detail(name):
 	an old record reached from a notification or a bookmark is not
 	necessarily on the page the list returned.
 	"""
+	rate_limit_per_user("get_my_leave_detail")
 	employee = get_current_employee()
 	row = frappe.db.get_value(
 		"Leave Application", name, [*_LEAVE_FIELDS, "employee"], as_dict=True
@@ -2135,6 +2208,8 @@ def get_leave_day_count(leave_type, from_date, to_date, half_day=0, half_day_dat
 		get_leave_balance_on,
 		get_number_of_leave_days,
 	)
+
+	rate_limit_per_user("get_leave_day_count")
 
 	employee = get_current_employee()
 	start, end = _as_date(from_date), _as_date(to_date)
@@ -2302,10 +2377,9 @@ _ATTENDANCE_MAX_DAYS = 366
 _CHECKIN_LIMIT = 50
 
 
-@frappe.whitelist()
-def get_my_attendance(from_date, to_date):
-	"""One month of attendance for the logged-in employee: a status per day,
-	the late/early flags Frappe records, and the four exceptions R16 asks for
+def _attendance_month_summary(employee, from_date, to_date):
+	"""One range of attendance for `employee`: a status per day, the
+	late/early flags Frappe records, and the four exceptions R16 asks for
 	(absent, half day, late, missing).
 
 	"Missing" is the careful one. No check-in device is configured yet, so a
@@ -2316,8 +2390,12 @@ def get_my_attendance(from_date, to_date):
 	was not recording, so nothing can be absent from it. That makes the whole
 	feature dormant until real data arrives, and correct the moment it does,
 	with no further change here.
+
+	Deliberately carries no check-in *affordance* -- "may this employee punch
+	right now" (`_checkin_state`, added by `get_my_attendance` below) is a
+	self-service prompt about the session's own owner, not a fact about a
+	person HR is reading (P6-KTD5).
 	"""
-	employee = get_current_employee()
 	start, end = _as_date(from_date), _as_date(to_date)
 	# Bounded at the API, not at the caller (P2-R22). The screen only ever
 	# asks for one month, so anything else is a typo or a probe -- and both
@@ -2378,14 +2456,6 @@ def get_my_attendance(from_date, to_date):
 		"days": days,
 		"missing": missing,
 		"summary": summary,
-		# P3-U4 step 1 / P3-R5, P3-R8. The Today strip's whole input: may this
-		# employee punch right now, what the next punch is, and what to say
-		# when they may not.
-		"checkin": _safe(
-			lambda: _checkin_state(employee),
-			"HelixHR check-in state failed",
-			_checkin_unavailable(),
-		),
 		# P3-R19. Counted over the days a request did *not* mark: a
 		# half-day Work From Home request writes a Half Day row, and
 		# flagging it would send the employee back to HR about a day they
@@ -2405,6 +2475,22 @@ def get_my_attendance(from_date, to_date):
 			"late": sum(1 for entry in days.values() if entry["late"] and not entry["by_request"]),
 			"missing": len(missing),
 		},
+	}
+
+
+@frappe.whitelist()
+def get_my_attendance(from_date, to_date):
+	"""`_attendance_month_summary` for the logged-in employee, plus the Today
+	strip's own affordance -- may this employee punch right now, and what the
+	next punch is (P3-U4 step 1 / P3-R5, P3-R8)."""
+	employee = get_current_employee()
+	return {
+		**_attendance_month_summary(employee, from_date, to_date),
+		"checkin": _safe(
+			lambda: _checkin_state(employee),
+			"HelixHR check-in state failed",
+			_checkin_unavailable(),
+		),
 	}
 
 
@@ -2877,6 +2963,7 @@ def get_my_attendance_requests(limit=None, start=0):
 def get_my_attendance_request(name):
 	"""One request, by name -- the list is bounded, so a request reached from
 	a notification or a bookmark has to be answerable on its own."""
+	rate_limit_per_user("get_my_attendance_request")
 	employee = get_current_employee()
 	row = frappe.db.get_value(
 		"Attendance Request",
@@ -3950,6 +4037,7 @@ def get_my_approvals():
 	reason -- costs a document read per item, so it is loaded by
 	`get_approval_detail` for the one item actually selected (P2-R22).
 	"""
+	rate_limit_per_user("get_my_approvals")
 	employee = get_current_employee()
 	pending, capped = _approval_summaries(employee)
 	return {
@@ -4252,12 +4340,13 @@ def get_approval_detail(kind, name):
 	`frappe.get_doc` performs no read check of its own, which is why the
 	assert is not optional.
 	"""
+	rate_limit_per_user("get_approval_detail")
 	doctype = _APPROVAL_DOCTYPES.get(kind)
 	if not doctype:
 		frappe.throw(_("Not a valid request."))
 
 	if not frappe.db.exists(doctype, name):
-		frappe.throw(_("That request no longer exists."), frappe.DoesNotExistError)
+		frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
 
 	doc = frappe.get_doc(doctype, name)
 	_assert_may_act_on(doc)
@@ -4280,6 +4369,12 @@ _APPROVAL_DOCTYPES = {
 	"attendance": "Attendance Request",
 	"request": "HR Request",
 }
+
+# One refusal for "missing", "not yours to decide" and "outside your company"
+# alike, the way `_PAYSLIP_NOT_FOUND` already works: record names are
+# sequential, so distinct messages would let any signed-in employee walk the
+# id space and learn which records exist and whose they are.
+_APPROVAL_NOT_FOUND = "That request isn't here."
 
 
 # The seven outcomes, in the order the screen draws them: the decision, the
@@ -4668,7 +4763,7 @@ def act_on_approval(
 	# refused by the state check below rather than racing it (P2-U1 step 1).
 	current_modified = frappe.db.get_value(doctype, name, "modified", for_update=True)
 	if current_modified is None:
-		frappe.throw(_("That request no longer exists."), frappe.DoesNotExistError)
+		frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
 
 	doc = frappe.get_doc(doctype, name)
 	_assert_may_act_on(doc)
@@ -4731,7 +4826,7 @@ def _may_act_on_leave(doc, user):
 		)
 	if user != doc.leave_approver:
 		frappe.throw(
-			_("Only {0}'s approver or HR can act on this leave request.").format(doc.employee),
+			_(_APPROVAL_NOT_FOUND),
 			frappe.PermissionError,
 		)
 
@@ -4742,7 +4837,7 @@ def _may_act_on_timesheet(doc, user):
 	# goes with it are covered by it too.
 	if user != get_manager_user(doc.employee):
 		frappe.throw(
-			_("Only {0}'s manager or HR can act on this timesheet.").format(doc.employee),
+			_(_APPROVAL_NOT_FOUND),
 			frappe.PermissionError,
 		)
 
@@ -4754,7 +4849,7 @@ def _may_act_on_attendance_request(doc, user):
 	and the workflow condition already assume."""
 	if user != _approver_user(doc.employee):
 		frappe.throw(
-			_("Only {0}'s manager or HR can act on this attendance request.").format(doc.employee),
+			_(_APPROVAL_NOT_FOUND),
 			frappe.PermissionError,
 		)
 
@@ -4782,6 +4877,15 @@ def _assert_may_act_on(doc):
 			frappe.PermissionError,
 		)
 	if _is_hr(user):
+		# HR's reach is the same one every administrative read uses
+		# (`resolve_admin_scope`, P6-R6): a company-anchored HR Manager
+		# decides -- and reads the evidence for -- their own company's
+		# records and no other's. Before this, "is HR" alone was the whole
+		# check, and the list routes were scoped while the record routes were
+		# not. The refusal is the same words as for a missing record, so this
+		# endpoint cannot be used to learn whether a record exists.
+		if not employee_in_admin_scope(doc.employee, resolve_admin_scope(user)):
+			frappe.throw(_APPROVAL_NOT_FOUND, frappe.PermissionError)
 		return
 
 	_APPROVAL_KINDS[doc.doctype]["may_act"](doc, user)
@@ -4939,7 +5043,7 @@ def _may_act_on_hr_request(doc, user):
 	both happen to hold."""
 	if doc.routed_to_role not in frappe.get_roles(user):
 		frappe.throw(
-			_("Only {0} can act on this request.").format(doc.routed_to_role),
+			_(_APPROVAL_NOT_FOUND),
 			frappe.PermissionError,
 		)
 
@@ -5196,16 +5300,14 @@ _SUBJECT_MAX = 140
 _DETAILS_MAX = 5000
 
 
-@frappe.whitelist()
-def get_my_requests(limit=None):
-	"""A bounded page of this employee's own requests, newest first.
+def _requests_summary(employee, limit=None):
+	"""A bounded page of `employee`'s requests, newest first.
 
 	Carries what the list actually renders and nothing else: the lifecycle
 	dates, HR's reply, how many files are on it, and whether there is an
 	unread notification about it -- which is what puts a row under "Needs
 	you" rather than a status word (P2-R13).
 	"""
-	employee = get_current_employee()
 	limit = min(max(cint(limit) or _REQUEST_PAGE, 1), _REQUEST_MAX_PAGE)
 
 	rows = frappe.get_all(
@@ -5235,6 +5337,11 @@ def get_my_requests(limit=None):
 
 
 @frappe.whitelist()
+def get_my_requests(limit=None):
+	return _requests_summary(get_current_employee(), limit)
+
+
+@frappe.whitelist()
 def get_my_request(name):
 	"""One request, in full: what the employee wrote, when it moved, HR's
 	reply, and every file on it (P2-R12, P2-R18).
@@ -5243,6 +5350,7 @@ def get_my_request(name):
 	bounded -- an old request reached from a notification or a bookmark is
 	not necessarily on the page the list returned.
 	"""
+	rate_limit_per_user("get_my_request")
 	employee = get_current_employee()
 	return _request_detail(name, employee)
 
@@ -5848,9 +5956,14 @@ def attach_to_request_reply(name):
 	"""
 	rate_limit_per_user("attach_to_request_reply")
 	if not frappe.db.exists("HR Request", name):
-		frappe.throw(_("That request no longer exists."), frappe.DoesNotExistError)
+		frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
 	doc = frappe.get_doc("HR Request", name)
 	_assert_may_act_on(doc)
+	# A closed request takes no more files, the same rule a decision on it
+	# already obeys -- otherwise a worker could keep attaching to a Done or
+	# Rejected request indefinitely, and the employee would keep seeing new
+	# "HR attachments" on something already settled.
+	_assert_still_open(doc)
 
 	upload = (getattr(frappe.request, "files", None) or {}).get("file")
 	if upload is None:
@@ -6220,6 +6333,240 @@ def get_directory(query=None, department=None, start=0, limit=None):
 		"limit": limit,
 		"start": start,
 		"departments": _directory_departments(company),
+	}
+
+
+# ---------------------------------------------------------------------------
+# Finding a person, for HR (P6-U2 / P6-R1, P6-R8, P6-R13)
+#
+# The administrative sibling of `get_directory` just above -- same bounded,
+# paged, server-side-filtered shape -- but scoped by `resolve_admin_scope`
+# (every company an admin persona may see) rather than to the caller's own
+# company, and refused entirely for anyone the scope helper does not grant.
+# The employee-facing directory is untouched.
+
+_PEOPLE_SEARCH_PAGE = 50
+_PEOPLE_SEARCH_MAX_PAGE = 200
+_PEOPLE_SEARCH_QUERY_MIN = 2
+_PEOPLE_SEARCH_QUERY_MAX = 60
+
+_PEOPLE_SEARCH_FIELDS = (
+	"name",
+	"employee_name",
+	"employee_number",
+	"designation",
+	"department",
+	"company",
+	"company_email",
+)
+
+
+def _people_search_projection(row):
+	return {
+		"name": row.name,
+		"employee_name": row.employee_name,
+		"employee_number": row.employee_number,
+		"initials": _initials(row.employee_name),
+		"designation": row.designation or None,
+		"department": row.department or None,
+		"company": row.company,
+	}
+
+
+@frappe.whitelist()
+def search_people(query=None, start=0, limit=None):
+	"""A bounded page of active employees this caller may administer,
+	matched by name, employee number or work email (P6-R1, P6-R8).
+
+	Refused server-side, before any row is read, for anyone
+	`resolve_admin_scope` does not grant a scope to (P6-R6, P6-R13) --
+	`PermissionError`, the same as every other admin-only read in this file.
+	"""
+	rate_limit_per_user("search_people")
+	scope = resolve_admin_scope(frappe.session.user)
+	if scope["kind"] == "none":
+		frappe.throw(_("You are not authorised to look up other people."), frappe.PermissionError)
+
+	limit = min(max(cint(limit) or _PEOPLE_SEARCH_PAGE, 1), _PEOPLE_SEARCH_MAX_PAGE)
+	start = max(cint(start), 0)
+
+	filters = admin_scope_employee_filters(scope)
+	filters = {**(filters or {}), "status": "Active"}
+
+	# Left and Inactive employees are excluded by default -- looking somebody
+	# up means a current colleague unless HR says otherwise (P6 Open
+	# Questions: findability of Left employees is deferred until asked).
+	needle = (query or "").strip()[:_PEOPLE_SEARCH_QUERY_MAX]
+	or_filters = None
+	if len(needle) >= _PEOPLE_SEARCH_QUERY_MIN:
+		or_filters = [
+			["employee_name", "like", f"%{needle}%"],
+			["employee_number", "like", f"%{needle}%"],
+			["company_email", "like", f"%{needle}%"],
+		]
+
+	scope_query = {"filters": filters, "or_filters": or_filters, "ignore_permissions": True}
+	rows = frappe.get_all(
+		"Employee",
+		fields=list(_PEOPLE_SEARCH_FIELDS),
+		order_by="employee_name asc",
+		limit_start=start,
+		limit_page_length=limit,
+		**scope_query,
+	)
+	total = _aggregate_count(frappe.get_all("Employee", fields=[{"COUNT": "*"}], **scope_query)[0])
+
+	return {
+		"people": [_people_search_projection(row) for row in rows],
+		"total": total,
+		"limit": limit,
+		"start": start,
+	}
+
+
+# ---------------------------------------------------------------------------
+# The person view, for HR (P6-U3 / P6-R2, P6-R3, P6-R4, P6-R5, P6-R8)
+#
+# An explicit projection, assembled from readers the portal already has
+# (P6-KTD5) -- never a second derivation of what the employee's own screens
+# already compute. Every section fails independently, `get_dashboard`'s own
+# shape: an absent section is named in `failed_sections`, never a broken
+# screen.
+
+
+def _person_profile(employee):
+	"""Identity, manager, employment status and joining date -- the part of
+	the person view that is not one of the portal's other existing readers."""
+	fields = [
+		"name",
+		"employee_name",
+		"designation",
+		"department",
+		"branch",
+		"reports_to",
+		"status",
+		"date_of_joining",
+	]
+	data = frappe.db.get_value("Employee", employee, fields, as_dict=True)
+	data["manager_name"] = (
+		frappe.db.get_value("Employee", data.reports_to, "employee_name") if data.reports_to else None
+	)
+	return data
+
+
+def _can_open_desk(user):
+	"""Whether `user` can actually reach Desk -- a System User holding a
+	role with `desk_access` -- rather than "holds an HR role" (P6-KTD4). The
+	two are correlated today (an `IT Team` holder is a Website User and
+	cannot) but nothing here assumes that stays true."""
+	if user == "Administrator":
+		return True
+	# The user type is the whole answer, by Frappe's own definition: every
+	# System User is automatically given the `Desk User` role (desk_access=1,
+	# `frappe.permissions.AUTOMATIC_ROLES`), so a "holds a desk_access role"
+	# check on top of this is true for every System User and false for every
+	# Website User -- i.e. the same test, done twice. A Website User who has
+	# been handed `HR Manager` is still refused here: the role does not make
+	# Desk load for them, and this flag must not say otherwise.
+	return frappe.db.get_value("User", user, "user_type") == "System User"
+
+
+def _report_filter_query(filters):
+	"""A simple-value filter dict as the `key=value&...` query string
+	`get_url_to_report_with_filters` expects -- built the same way Frappe's
+	own `get_link_to_report` does for a non-Report-Builder report."""
+	from urllib.parse import quote
+
+	return "&".join(f"{key}={quote(str(value))}" for key, value in filters.items())
+
+
+def get_report_url(report, filters=None):
+	"""A curated report's Desk URL, pre-filtered when `filters` is given
+	(P6-R10), built by Frappe's own `get_url_to_report*` helpers (P6-KTD3)
+	-- never a hand-concatenated Desk path."""
+	if filters:
+		return get_url_to_report_with_filters(report, _report_filter_query(filters))
+	return get_url_to_report(report)
+
+
+@frappe.whitelist()
+def get_report_link(report, employee=None):
+	"""A curated report's Desk URL, pre-filtered to `employee` when given
+	(P6-R9, P6-R10) -- the one method in this plan that hands out a Desk URL
+	outside `get_person`, checked here server-side rather than left to the
+	frontend to merely hide (P6-R8's standard, applied to reports too):
+	`report` must be on the curated list, the caller must hold the same
+	admin scope every other read in this plan requires, and -- P6-KTD4's own
+	extra condition -- must be able to reach Desk at all (P6-R12).
+	"""
+	rate_limit_per_user("get_report_link")
+	scope = resolve_admin_scope(frappe.session.user)
+	if scope["kind"] == "none":
+		frappe.throw(_("You are not authorised to open reports here."), frappe.PermissionError)
+	if report not in ADMIN_REPORTS:
+		frappe.throw(_("That report is not offered here."), frappe.PermissionError)
+	if not _can_open_desk(frappe.session.user):
+		frappe.throw(_("You do not have access to Frappe's Desk."), frappe.PermissionError)
+
+	filters = None
+	if employee:
+		if not employee_in_admin_scope(employee, scope):
+			frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
+		filters = {"employee": employee}
+
+	return get_report_url(report, filters)
+
+
+@frappe.whitelist()
+def get_person(employee):
+	"""Everything HR asks about a person, on one screen (P6-R2): leave
+	balance by type, this month's attendance, open and recent requests, the
+	assigned shift and holiday list, the reporting manager, the joining date
+	and employment status.
+
+	Resolved through `resolve_admin_scope` before anything else is read
+	(P6-R6): a caller who may not administer `employee` is refused before
+	any record is touched, and the refusal is the same `PermissionError`
+	whether or not the employee exists (P6-R8) -- it never discloses which.
+
+	Read-only (P6-R3): no field above Employee permlevel 0, no leave
+	*reason*, no check-in *coordinates* -- a faster route to what HR already
+	reaches in Desk through the roles it holds, never a wider one (P6-R5).
+	"""
+	rate_limit_per_user("get_person")
+	scope = resolve_admin_scope(frappe.session.user)
+	if scope["kind"] == "none" or not employee_in_admin_scope(employee, scope):
+		frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
+
+	missing = object()
+	failed = []
+
+	def section(name, fn):
+		value = _safe(fn, title=f"HelixHR person view section failed: {name}", default=missing)
+		if value is missing:
+			failed.append(name)
+			return None
+		return value
+
+	today = user_today()
+	month_start, month_end = str(get_first_day(today)), str(get_last_day(today))
+
+	return {
+		"employee": section("employee", lambda: _person_profile(employee)),
+		"leave_balances": section("leave_balances", lambda: _leave_balances(employee)),
+		"attendance": section(
+			"attendance", lambda: _attendance_month_summary(employee, month_start, month_end)
+		),
+		"requests": section("requests", lambda: _requests_summary(employee)),
+		"shift": section("shift", lambda: _request_shift(employee, today)),
+		"holiday_list": section(
+			"holiday_list", lambda: get_holiday_list_for_employee(employee, raise_exception=False)
+		),
+		# None for a caller who cannot reach Desk at all (P6-R12) -- the
+		# frontend never has to be trusted to hide this on its own, since
+		# no other method in this plan hands out this employee's Desk URL.
+		"desk_url": get_url_to_form("Employee", employee) if _can_open_desk(frappe.session.user) else None,
+		"failed_sections": failed,
 	}
 
 

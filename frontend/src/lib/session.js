@@ -45,6 +45,14 @@ const state = reactive({
    * `helixhr.api.get_organisation_view` itself enforces server-side, so the
    * nav item and the server's own gate can never disagree. */
   canSeeOrganisation: false,
+  /** P6-U4: gates the People nav item. Mirrors `resolve_admin_scope`'s own
+   * gate on `search_people`/`get_person`. */
+  canSeePeople: false,
+  /** P6-U4: whether this caller can actually reach Desk (a System User
+   * holding a `desk_access` role) -- decides whether a Desk link is drawn
+   * anywhere in the portal, never whether one works: every method that
+   * hands one out checks this again itself (P6-KTD4). */
+  canOpenDesk: false,
   unread: 0,
   /** The authoritative calendar (P2-R5). Mirrored into lib/dates.js. */
   timeZone: null,
@@ -103,6 +111,8 @@ function apply(boot) {
   state.canWorkRequests = !!boot?.can_work_requests
   state.canConfigure = !!boot?.can_configure
   state.canSeeOrganisation = !!boot?.can_see_organisation
+  state.canSeePeople = !!boot?.can_see_people
+  state.canOpenDesk = !!boot?.can_open_desk
   state.unread = boot?.unread_notifications ?? 0
   state.timeZone = boot?.time_zone || null
   state.systemTimeZone = boot?.system_time_zone || null

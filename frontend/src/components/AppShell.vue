@@ -29,6 +29,8 @@ const NAV = [
   { label: 'Approvals', to: '/approvals', icon: 'approvals', managerOnly: true },
   { label: 'Settings', to: '/settings', icon: 'settings', configureOnly: true },
   { label: 'Organisation', to: '/organisation', icon: 'organisation', organisationOnly: true },
+  { label: 'People', to: '/people', icon: 'peopleSearch', peopleOnly: true },
+  { label: 'Reports', to: '/reports', icon: 'reports', peopleOnly: true },
   { label: 'Notifications', to: '/notifications', icon: 'notifications', badge: true },
   { label: 'Profile', to: '/profile', icon: 'profile' },
 ]
@@ -57,7 +59,8 @@ const navItems = computed(() =>
       (!item.managerOnly || isManager.value) &&
       (!item.reportsOnly || session.hasReports) &&
       (!item.configureOnly || session.canConfigure) &&
-      (!item.organisationOnly || session.canSeeOrganisation),
+      (!item.organisationOnly || session.canSeeOrganisation) &&
+      (!item.peopleOnly || session.canSeePeople),
   ),
 )
 const primaryItems = computed(() => navItems.value.filter((item) => item.primary))
@@ -178,6 +181,18 @@ onUnmounted(() => {
           <Icon name="signOut" />
           Sign out
         </button>
+
+        <!-- AGPLv3 section 5(c): this credit is part of the license notice
+             and stays intact in any copy or modified version, the same as
+             the notice in index.html and LICENSE. -->
+        <a
+          href="https://nitcoinc.ai"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="block px-5 pb-4 text-xs text-blue-200/70 hover:text-blue-100"
+        >
+          Powered by Nitco Inc
+        </a>
       </aside>
     </div>
 
@@ -296,6 +311,14 @@ onUnmounted(() => {
             Sign out
           </button>
         </div>
+        <a
+          href="https://nitcoinc.ai"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="mt-3 block px-3 text-center text-xs text-ink-gray-4"
+        >
+          Powered by Nitco Inc
+        </a>
       </template>
     </Dialog>
   </div>

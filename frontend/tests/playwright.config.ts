@@ -54,8 +54,9 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/hr.json' },
       dependencies: ['setup'],
       // P5-U15: organisation.spec.ts joins this list -- HR is the actor
-      // `get_organisation_view` is written for.
-      testMatch: /(approvals|settings|organisation)\.spec\.ts/,
+      // `get_organisation_view` is written for. P6-U5/U6: people.spec.ts
+      // and reports.spec.ts join it the same way, for `resolve_admin_scope`.
+      testMatch: /(approvals|settings|organisation|people|reports)\.spec\.ts/,
     },
     // P5-U11. The routed-worker identity: `IT Team`, portal-only
     // (desk_access: 0), which never reaches Desk and works only the requests
@@ -65,12 +66,14 @@ export default defineConfig({
     //
     // P5-U15: also `organisation.spec.ts`, for one negative assertion --
     // IT Team works requests but is not HR, so the organisation view must
-    // refuse it exactly as it refuses a plain employee.
+    // refuse it exactly as it refuses a plain employee. P6-U5/U6: same for
+    // people.spec.ts and reports.spec.ts -- IT Team is a routed worker,
+    // never an admin scope, and sees no Desk link anywhere.
     {
       name: 'it',
       use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/it.json' },
       dependencies: ['setup'],
-      testMatch: /(approvals|organisation)\.spec\.ts/,
+      testMatch: /(approvals|organisation|people|reports)\.spec\.ts/,
     },
     // P2-U9 step 9. Mobile WebKit is the second mandatory browser: it is the
     // only engine on iOS, it is where a coarse pointer, a real safe-area

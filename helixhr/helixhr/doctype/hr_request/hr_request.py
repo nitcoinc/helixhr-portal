@@ -8,7 +8,7 @@ from frappe.model.document import Document
 from frappe.utils import now_datetime
 from hrms.api import get_current_employee
 
-from helixhr.utils import _session_company
+from helixhr.utils import _session_company, resolve_admin_scope
 
 # The first worker claim and terminal outcomes. Both are read off the
 # DocType's own Select options; a status added in Desk that is in neither set
@@ -115,7 +115,13 @@ def get_permission_query_conditions(user=None, doctype=None, **kwargs):
 	if user == "Administrator":
 		return ""
 	if set(frappe.get_roles(user)) & _UNSCOPED_ROLES:
-		return _company_scope_condition(_session_company(user))
+		# One answer for "which employees may this user administer"
+		# (`resolve_admin_scope`, P6-R6): an HR Manager whose own Employee is
+		# Left, Inactive or Suspended resolves to nobody, never to everybody.
+		scope = resolve_admin_scope(user)
+		if scope["kind"] == "none":
+			return "1=0"
+		return _company_scope_condition(scope["company"])
 	employee = frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "name")
 	if not employee:
 		return "1=0"
@@ -125,6 +131,11 @@ def get_permission_query_conditions(user=None, doctype=None, **kwargs):
 	company_employees = frappe.get_all(
 		"Employee", filters={"company": _session_company(user)}, pluck="name"
 	)
+	if not company_employees:
+		# A worker whose Employee carries no company: their own requests and
+		# nothing routed -- and never `employee in ()`, which is a SQL error
+		# on every list this hook guards.
+		return f"employee = {frappe.db.escape(employee, percent=False)}"
 	return (
 		f"(employee = {frappe.db.escape(employee, percent=False)} or "
 		f"(employee in ({', '.join(frappe.db.escape(name, percent=False) for name in company_employees)}) "
@@ -142,8 +153,12 @@ def has_permission(doc, ptype=None, user=None, **kwargs):
 	if doc.employee == frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "name"):
 		return True
 	if roles & _UNSCOPED_ROLES:
-		company = _session_company(user)
-		return not company or frappe.db.get_value("Employee", doc.employee, "company") == company
+		scope = resolve_admin_scope(user)
+		if scope["kind"] == "none":
+			return False
+		if scope["kind"] == "unscoped":
+			return True
+		return frappe.db.get_value("Employee", doc.employee, "company") == scope["company"]
 	return (
 		doc.routed_to_role in roles
 		and frappe.db.get_value("Employee", doc.employee, "company") == _session_company(user)

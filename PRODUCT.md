@@ -19,8 +19,12 @@ web
   rather than browse their numbers. Mobile-first; phones are the primary device.
 - **Manager**: an Employee who is `reports_to` or `leave_approver` for others.
   Same portal as everyone, plus one Approvals page.
-- **HR Manager**: works HR Requests, configures workflows, and is the approval
-  fallback. Works in Frappe Desk, not in this portal.
+- **HR Manager**: works the HR request queue, is the approval fallback,
+  configures request routing, notification wording and three HRMS masters
+  from the portal's Settings screen, reads the Organisation view, and can
+  find and open one person's read-only record and reach Frappe's own HR
+  reports from a curated launcher. Everything that computes or writes a
+  number -- payroll, allocation, onboarding -- still happens in Frappe Desk.
 
 ## Product Purpose
 

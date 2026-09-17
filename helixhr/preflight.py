@@ -1131,6 +1131,31 @@ def check_frontend_built():
 	return _result("Frontend built", FAIL, "www/helixhr.html missing -- cd frontend && yarn build")
 
 
+def check_curated_reports():
+	"""P6-U4 / P6-AE6: the report launcher's curated list names only reports
+	actually installed on this site, and each is reachable by the roles the
+	portal offers it to -- a renamed or removed upstream report otherwise
+	becomes a dead link nobody notices."""
+	from helixhr.utils import ADMIN_REPORT_ROLES, ADMIN_REPORTS
+
+	problems = []
+	for name in ADMIN_REPORTS:
+		ref_doctype = frappe.db.get_value("Report", name, "ref_doctype")
+		if not ref_doctype:
+			problems.append(f"{name}: not installed")
+			continue
+		reachable = frappe.get_all(
+			"DocPerm",
+			filters={"parent": ref_doctype, "role": ["in", list(ADMIN_REPORT_ROLES)], "report": 1},
+			limit=1,
+		)
+		if not reachable:
+			problems.append(f"{name}: no role the launcher offers it to can read it as a report")
+	if problems:
+		return _result("Curated reports", FAIL, "; ".join(problems))
+	return _result("Curated reports", PASS, f"{len(ADMIN_REPORTS)} reports checked")
+
+
 CHECKS = [
 	check_strict_user_permissions,
 	check_employee_user_permissions,
@@ -1167,4 +1192,5 @@ CHECKS = [
 	check_configuration_field_sets,
 	check_pdf_generator,
 	check_frontend_built,
+	check_curated_reports,
 ]

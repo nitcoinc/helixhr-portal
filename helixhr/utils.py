@@ -94,6 +94,26 @@ SHIFT_TYPE_EDITABLE_FIELDS = (
 )
 
 
+# P6-U4 / P6-R9. The reports the launcher offers -- a short, deliberate list
+# in the style above, not every report installed. Payroll reports are
+# excluded on purpose (P6-KTD2): the portal does not route HR into payroll.
+ADMIN_REPORTS = (
+	"Employee Leave Balance",
+	"Employee Leave Balance Summary",
+	"Monthly Attendance Sheet",
+	"Shift Attendance",
+	"Leave Ledger",
+	"Employee Information",
+	"Employee Exits",
+)
+
+# The roles the report launcher (and the person view's Desk link) are
+# offered to -- the same set `resolve_admin_scope` grants a scope to
+# (defined again here, deliberately, rather than imported forward: this
+# constant sits above `resolve_admin_scope` in the file).
+ADMIN_REPORT_ROLES = frozenset({"HR Manager", "System Manager"})
+
+
 def get_week_bounds(any_date):
 	"""Monday..Sunday for the week containing `any_date` (KTD10 -- one
 	week equals one Timesheet, always Monday to Sunday regardless of the
@@ -149,6 +169,76 @@ def _session_company(user):
 	return frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "company")
 
 
+# P6-R6, P6-R7. Every persona this app knows how to grant an administrative
+# read to -- "HR Manager or System Manager" -- named once so U1's answer and
+# `hr_request.py`'s own `_UNSCOPED_ROLES` describe the same set without one
+# importing the other (that would cycle: `hr_request.py` already imports
+# `_session_company` from this module).
+_ADMIN_UNSCOPED_ROLES = frozenset({"HR Manager", "System Manager"})
+
+
+def resolve_admin_scope(user):
+	"""Which employees ``user`` may administer -- one answer, in one place,
+	so a list read (U2) and a single-record check (U3) consume the same
+	result without re-deriving it.
+
+	Returns a dict with a ``kind`` of:
+
+	- ``"unscoped"`` -- every employee, on every company. Administrator, and
+	  the Desk-only HR Manager / System Manager who holds no Employee record
+	  (P3-KTD7, P4-KTD7: `ensure_hr_manager_user()` is built to be exactly
+	  this, on purpose, and must keep working).
+	- ``"company"`` -- the named company only. An HR Manager / System
+	  Manager anchored to an active Employee (the 2026-09-16 fix this
+	  mirrors) is scoped to that company, never another.
+	- ``"none"`` -- nobody. A plain employee, an `IT Team` holder, or any
+	  other caller with no administrative role.
+
+	The one deliberate distinction: "no Employee record" and "an Employee
+	record that is not Active" are NOT the same case. The first is the
+	Desk-only persona above. The second is somebody who has been offboarded,
+	suspended, or marked Inactive while their User still holds the role --
+	an offboarding lag, not a persona -- and it resolves to ``"none"``, never
+	to unscoped. Before this rule, marking an HR Manager's Employee as Left
+	silently widened their reach from one company to every company.
+	"""
+	if user == "Administrator":
+		return {"kind": "unscoped", "company": None}
+	if set(frappe.get_roles(user)) & _ADMIN_UNSCOPED_ROLES:
+		anchor = frappe.db.get_value(
+			"Employee", {"user_id": user}, ["status", "company"], as_dict=True
+		)
+		if not anchor:
+			return {"kind": "unscoped", "company": None}
+		if anchor.status != "Active":
+			return {"kind": "none", "company": None}
+		return {"kind": "company", "company": anchor.company}
+	return {"kind": "none", "company": None}
+
+
+def admin_scope_employee_filters(scope):
+	"""Turn `resolve_admin_scope`'s answer into an Employee filter dict for
+	`frappe.get_all`, or ``None`` when the scope holds nobody -- the caller's
+	cue to return an empty page rather than run a query at all."""
+	if scope["kind"] == "unscoped":
+		return {}
+	if scope["kind"] == "company":
+		return {"company": scope["company"]}
+	return None
+
+
+def employee_in_admin_scope(employee, scope):
+	"""Whether ``employee`` falls inside `resolve_admin_scope`'s answer --
+	the single-record half U3 resolves *before* reading anything else, so a
+	caller who may not administer this person is refused before any record
+	is touched, not filtered afterwards."""
+	if scope["kind"] == "unscoped":
+		return bool(frappe.db.exists("Employee", employee))
+	if scope["kind"] == "company":
+		return bool(frappe.db.exists("Employee", {"name": employee, "company": scope["company"]}))
+	return False
+
+
 def portal_home_page(user=None):
 	"""Where this user lands after signing in.
 
@@ -200,6 +290,20 @@ RATE_LIMIT_POLICY = {
 	"get_directory": (60, 60),
 	"get_my_team_week": (60, 60),
 	"get_organisation_view": (60, 60),
+	"search_people": (60, 60),
+	"get_person": (60, 60),
+	"get_report_link": (60, 60),
+	# Reads that fan out (the home page and the approvals queue each run
+	# several queries) or that answer for one record by name -- bounded so
+	# a scripted walk over sequential record ids is a flood the limiter
+	# sees, not a free enumeration.
+	"get_dashboard": (60, 60),
+	"get_my_approvals": (60, 60),
+	"get_approval_detail": (60, 60),
+	"get_leave_day_count": (60, 60),
+	"get_my_leave_detail": (60, 60),
+	"get_my_request": (60, 60),
+	"get_my_attendance_request": (60, 60),
 	"get_request_categories": (60, 60),
 	# P5-U13 configuration writes. Reads (`get_portal_config`) are cheap and
 	# server-scoped like `get_directory`; every write checks permission itself

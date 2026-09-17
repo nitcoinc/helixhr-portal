@@ -141,7 +141,7 @@ Company/Fiscal Year records that overlap with what it tries to create.
 ## Multi-site gotchas found while wiring up this VM (read before adding another site)
 
 This dev VM's nginx (`helixhr-platform`'s image) is built for **one fixed site**: it hardcodes
-`try_files /10.10.16.26/public/$uri ...` and `X-Frappe-Site-Name 10.10.16.26` regardless of
+`try_files /<dev-vm-ip>/public/$uri ...` and `X-Frappe-Site-Name <dev-vm-ip>` regardless of
 what `Host` header a client sends. A second site (`test.localhost`, used for the Python
 integration test suite -- see below) is real, but it is **not reachable over HTTP through this
 nginx at all** (see the lock-wait section below for a separate, real problem with running its
@@ -151,7 +151,7 @@ tests over SSH on this VM). Two consequences:
   they select the site directly. In principle a dedicated site (`test.localhost` here) is fine
   for these; in practice, running them over SSH on **this specific VM** hits a separate, real
   problem -- see the next section.
-- **Playwright** (real browser, needs real HTTP) runs against the dev site (`10.10.16.26`)
+- **Playwright** (real browser, needs real HTTP) runs against the dev site (`<dev-vm-ip>`)
   instead, using the three clearly-named test users above. `bench serve --port <n>` (Frappe's
   own dev server, which *does* do Host-header-based multi-site routing) was tried as a way to
   reach `test.localhost` over HTTP, but never resolved the header correctly in this
