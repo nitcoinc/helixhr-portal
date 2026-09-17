@@ -454,7 +454,11 @@ def hr_request_validate(doc, method=None):
 			_("You can't decide your own request. Ask another worker."), frappe.PermissionError
 		)
 
-	if stored_status == HR_REQUEST_OPEN or _is_hr():
+	# HR may correct a filing (a wrong category, a typo in the subject); a
+	# routed worker may not, at any status -- the Open state used to be
+	# exempt, which let an `IT Team` holder rewrite what the employee wrote
+	# through the generic /api/resource route before picking it up.
+	if _is_hr():
 		return
 
 	changed = [

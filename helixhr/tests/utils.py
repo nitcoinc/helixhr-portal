@@ -485,9 +485,12 @@ def setup_playwright_fixtures():
 	"""Whitelisted so Playwright's Node-side setup project can create the
 	fixtures over HTTP; gated on the same allow_tests config bench
 	run-tests itself requires, so it can never do anything on a real
-	site."""
+	site -- and, belt and braces, on System Manager, so that even on a
+	test site an ordinary signed-in user cannot mint the HR Manager and
+	System Manager fixture logins (CI signs in as Administrator first)."""
 	if not frappe.conf.get("allow_tests"):
 		frappe.throw("Test fixtures are disabled on this site (allow_tests is off).")
+	frappe.only_for("System Manager")
 	employee_name, _, _, _ = make_test_employee_and_manager()
 	make_test_user_without_employee()
 

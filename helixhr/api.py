@@ -97,6 +97,7 @@ def get_dashboard(**kwargs):
 	employee's open leave and the caller's pending decisions were each
 	fetched by more than one section.
 	"""
+	rate_limit_per_user("get_dashboard")
 	employee = get_current_employee()
 	failed = []
 	cache = {}
@@ -247,7 +248,7 @@ def get_portal_bootstrap():
 		# gated by `resolve_admin_scope`, which grants a scope to exactly
 		# the roles `_is_hr` names, so the nav item and the server's gate
 		# agree by construction.
-		"can_see_people": _is_hr(frappe.session.user),
+		"can_see_people": resolve_admin_scope(frappe.session.user)["kind"] != "none",
 		# P6-KTD4: resolved on the caller's own ability to reach Desk (a
 		# System User holding a `desk_access` role), never on "is HR" --
 		# the two are correlated today but the flag must not assume they
@@ -1447,16 +1448,47 @@ def _hr_senders(doctype, rows):
 	return senders
 
 
+def _hr_queue_employee_filter(employee):
+	"""The `employee` filter for HR's own queue collectors: everyone but the
+	caller, inside the company scope every administrative read uses
+	(`resolve_admin_scope`, P6-R6). `None` means the caller may see nobody.
+
+	The HRMS doctypes these collectors read (Leave Application, Timesheet,
+	Attendance Request) carry no company scoping of this app's own, so a
+	company-anchored HR Manager used to see every company's queue here while
+	`hr_request.py`'s hook scoped the fourth kind -- the two halves of the
+	same queue disagreed. HR Request is deliberately NOT routed through this:
+	its collector also serves routed workers (`IT Team`), who hold no admin
+	scope at all, and its own permission hook already narrows both personas.
+	"""
+	scope = resolve_admin_scope(frappe.session.user)
+	if scope["kind"] == "none":
+		return None
+	if scope["kind"] == "unscoped":
+		return ["!=", employee]
+	names = [
+		name
+		for name in frappe.get_all(
+			"Employee", filters=admin_scope_employee_filters(scope), pluck="name"
+		)
+		if name != employee
+	]
+	return ["in", names] if names else None
+
+
 def _hr_leave_summaries(employee, today):
 	"""Leave waiting for HR: status Open at docstatus 0 in stage HR, whether a
 	manager sent it over or the Leave Type routed it there (P4-R5, P4-R7)."""
+	employee_filter = _hr_queue_employee_filter(employee)
+	if employee_filter is None:
+		return []
 	rows = frappe.get_list(
 		"Leave Application",
 		filters={
 			"status": "Open",
 			"docstatus": 0,
 			"helixhr_stage": LEAVE_STAGE_HR,
-			"employee": ["!=", employee],
+			"employee": employee_filter,
 		},
 		fields=[
 			"name",
@@ -1499,12 +1531,15 @@ def _hr_leave_summaries(employee, today):
 def _hr_timesheet_summaries(employee, today):
 	"""Weeks a manager handed over. Pending HR carries no DocShare on
 	purpose (P4-U1) -- HR reaches these through the role."""
+	employee_filter = _hr_queue_employee_filter(employee)
+	if employee_filter is None:
+		return []
 	rows = frappe.get_list(
 		"Timesheet",
 		filters={
 			"workflow_state": TIMESHEET_PENDING_HR,
 			"docstatus": 0,
-			"employee": ["!=", employee],
+			"employee": employee_filter,
 		},
 		fields=[
 			"name",
@@ -1546,12 +1581,15 @@ def _hr_attendance_request_summaries(employee, today):
 	manager read before doing so -- including what the calendar shows for
 	each day, which is the whole reason an overwrite is HR's decision and not
 	theirs (P4-KTD5)."""
+	employee_filter = _hr_queue_employee_filter(employee)
+	if employee_filter is None:
+		return []
 	rows = frappe.get_list(
 		"Attendance Request",
 		filters={
 			"workflow_state": REQUEST_PENDING_HR,
 			"docstatus": 0,
-			"employee": ["!=", employee],
+			"employee": employee_filter,
 		},
 		fields=[
 			"name",
@@ -2085,6 +2123,7 @@ def get_my_leave_detail(name):
 	an old record reached from a notification or a bookmark is not
 	necessarily on the page the list returned.
 	"""
+	rate_limit_per_user("get_my_leave_detail")
 	employee = get_current_employee()
 	row = frappe.db.get_value(
 		"Leave Application", name, [*_LEAVE_FIELDS, "employee"], as_dict=True
@@ -2169,6 +2208,8 @@ def get_leave_day_count(leave_type, from_date, to_date, half_day=0, half_day_dat
 		get_leave_balance_on,
 		get_number_of_leave_days,
 	)
+
+	rate_limit_per_user("get_leave_day_count")
 
 	employee = get_current_employee()
 	start, end = _as_date(from_date), _as_date(to_date)
@@ -2922,6 +2963,7 @@ def get_my_attendance_requests(limit=None, start=0):
 def get_my_attendance_request(name):
 	"""One request, by name -- the list is bounded, so a request reached from
 	a notification or a bookmark has to be answerable on its own."""
+	rate_limit_per_user("get_my_attendance_request")
 	employee = get_current_employee()
 	row = frappe.db.get_value(
 		"Attendance Request",
@@ -3995,6 +4037,7 @@ def get_my_approvals():
 	reason -- costs a document read per item, so it is loaded by
 	`get_approval_detail` for the one item actually selected (P2-R22).
 	"""
+	rate_limit_per_user("get_my_approvals")
 	employee = get_current_employee()
 	pending, capped = _approval_summaries(employee)
 	return {
@@ -4297,12 +4340,13 @@ def get_approval_detail(kind, name):
 	`frappe.get_doc` performs no read check of its own, which is why the
 	assert is not optional.
 	"""
+	rate_limit_per_user("get_approval_detail")
 	doctype = _APPROVAL_DOCTYPES.get(kind)
 	if not doctype:
 		frappe.throw(_("Not a valid request."))
 
 	if not frappe.db.exists(doctype, name):
-		frappe.throw(_("That request no longer exists."), frappe.DoesNotExistError)
+		frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
 
 	doc = frappe.get_doc(doctype, name)
 	_assert_may_act_on(doc)
@@ -4325,6 +4369,12 @@ _APPROVAL_DOCTYPES = {
 	"attendance": "Attendance Request",
 	"request": "HR Request",
 }
+
+# One refusal for "missing", "not yours to decide" and "outside your company"
+# alike, the way `_PAYSLIP_NOT_FOUND` already works: record names are
+# sequential, so distinct messages would let any signed-in employee walk the
+# id space and learn which records exist and whose they are.
+_APPROVAL_NOT_FOUND = "That request isn't here."
 
 
 # The seven outcomes, in the order the screen draws them: the decision, the
@@ -4713,7 +4763,7 @@ def act_on_approval(
 	# refused by the state check below rather than racing it (P2-U1 step 1).
 	current_modified = frappe.db.get_value(doctype, name, "modified", for_update=True)
 	if current_modified is None:
-		frappe.throw(_("That request no longer exists."), frappe.DoesNotExistError)
+		frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
 
 	doc = frappe.get_doc(doctype, name)
 	_assert_may_act_on(doc)
@@ -4776,7 +4826,7 @@ def _may_act_on_leave(doc, user):
 		)
 	if user != doc.leave_approver:
 		frappe.throw(
-			_("Only {0}'s approver or HR can act on this leave request.").format(doc.employee),
+			_(_APPROVAL_NOT_FOUND),
 			frappe.PermissionError,
 		)
 
@@ -4787,7 +4837,7 @@ def _may_act_on_timesheet(doc, user):
 	# goes with it are covered by it too.
 	if user != get_manager_user(doc.employee):
 		frappe.throw(
-			_("Only {0}'s manager or HR can act on this timesheet.").format(doc.employee),
+			_(_APPROVAL_NOT_FOUND),
 			frappe.PermissionError,
 		)
 
@@ -4799,7 +4849,7 @@ def _may_act_on_attendance_request(doc, user):
 	and the workflow condition already assume."""
 	if user != _approver_user(doc.employee):
 		frappe.throw(
-			_("Only {0}'s manager or HR can act on this attendance request.").format(doc.employee),
+			_(_APPROVAL_NOT_FOUND),
 			frappe.PermissionError,
 		)
 
@@ -4827,6 +4877,15 @@ def _assert_may_act_on(doc):
 			frappe.PermissionError,
 		)
 	if _is_hr(user):
+		# HR's reach is the same one every administrative read uses
+		# (`resolve_admin_scope`, P6-R6): a company-anchored HR Manager
+		# decides -- and reads the evidence for -- their own company's
+		# records and no other's. Before this, "is HR" alone was the whole
+		# check, and the list routes were scoped while the record routes were
+		# not. The refusal is the same words as for a missing record, so this
+		# endpoint cannot be used to learn whether a record exists.
+		if not employee_in_admin_scope(doc.employee, resolve_admin_scope(user)):
+			frappe.throw(_APPROVAL_NOT_FOUND, frappe.PermissionError)
 		return
 
 	_APPROVAL_KINDS[doc.doctype]["may_act"](doc, user)
@@ -4984,7 +5043,7 @@ def _may_act_on_hr_request(doc, user):
 	both happen to hold."""
 	if doc.routed_to_role not in frappe.get_roles(user):
 		frappe.throw(
-			_("Only {0} can act on this request.").format(doc.routed_to_role),
+			_(_APPROVAL_NOT_FOUND),
 			frappe.PermissionError,
 		)
 
@@ -5291,6 +5350,7 @@ def get_my_request(name):
 	bounded -- an old request reached from a notification or a bookmark is
 	not necessarily on the page the list returned.
 	"""
+	rate_limit_per_user("get_my_request")
 	employee = get_current_employee()
 	return _request_detail(name, employee)
 
@@ -5896,9 +5956,14 @@ def attach_to_request_reply(name):
 	"""
 	rate_limit_per_user("attach_to_request_reply")
 	if not frappe.db.exists("HR Request", name):
-		frappe.throw(_("That request no longer exists."), frappe.DoesNotExistError)
+		frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
 	doc = frappe.get_doc("HR Request", name)
 	_assert_may_act_on(doc)
+	# A closed request takes no more files, the same rule a decision on it
+	# already obeys -- otherwise a worker could keep attaching to a Done or
+	# Rejected request indefinitely, and the employee would keep seeing new
+	# "HR attachments" on something already settled.
+	_assert_still_open(doc)
 
 	upload = (getattr(frappe.request, "files", None) or {}).get("file")
 	if upload is None:
@@ -6396,15 +6461,14 @@ def _can_open_desk(user):
 	cannot) but nothing here assumes that stays true."""
 	if user == "Administrator":
 		return True
-	if frappe.db.get_value("User", user, "user_type") != "System User":
-		return False
-	return bool(
-		frappe.get_all(
-			"Role",
-			filters={"name": ["in", frappe.get_roles(user)], "desk_access": 1},
-			limit=1,
-		)
-	)
+	# The user type is the whole answer, by Frappe's own definition: every
+	# System User is automatically given the `Desk User` role (desk_access=1,
+	# `frappe.permissions.AUTOMATIC_ROLES`), so a "holds a desk_access role"
+	# check on top of this is true for every System User and false for every
+	# Website User -- i.e. the same test, done twice. A Website User who has
+	# been handed `HR Manager` is still refused here: the role does not make
+	# Desk load for them, and this flag must not say otherwise.
+	return frappe.db.get_value("User", user, "user_type") == "System User"
 
 
 def _report_filter_query(filters):

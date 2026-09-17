@@ -262,7 +262,13 @@ the named set posted to the save method is silently ignored, never written.
 `/people` (HR Manager and System Manager only) is a read-only lookup, never a
 Desk reskin: search finds an employee within the caller's own company (or
 every company, for the Desk-only HR persona with no Employee record —
-`resolve_admin_scope`, `helixhr/utils.py`, is the one place this is decided),
+`resolve_admin_scope`, `helixhr/utils.py`, is the one place this is decided,
+and the HR halves of the Approvals queue and the HR Request permission hooks
+ask it too). An HR Manager whose own Employee record is **Left, Inactive or
+Suspended** while their User still holds the role resolves to *nobody*, not
+to everybody: offboarding lag narrows their reach to zero rather than
+silently widening it to every company. Clear the role, or leave it — either
+way the portal shows them nothing until the Employee is Active again.
 and the person view answers leave balance, a month of attendance, open and
 recent requests, shift, holiday list, manager, joining date and status. It
 writes nothing, and a field above Employee permlevel 0 — salary, bank

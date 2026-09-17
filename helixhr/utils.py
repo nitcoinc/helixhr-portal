@@ -194,16 +194,25 @@ def resolve_admin_scope(user):
 	- ``"none"`` -- nobody. A plain employee, an `IT Team` holder, or any
 	  other caller with no administrative role.
 
-	Preserves today's behaviour exactly (P6-KTD1): this adds a caller, it
-	does not change what `hr_request.py`'s own scoping already does.
+	The one deliberate distinction: "no Employee record" and "an Employee
+	record that is not Active" are NOT the same case. The first is the
+	Desk-only persona above. The second is somebody who has been offboarded,
+	suspended, or marked Inactive while their User still holds the role --
+	an offboarding lag, not a persona -- and it resolves to ``"none"``, never
+	to unscoped. Before this rule, marking an HR Manager's Employee as Left
+	silently widened their reach from one company to every company.
 	"""
 	if user == "Administrator":
 		return {"kind": "unscoped", "company": None}
 	if set(frappe.get_roles(user)) & _ADMIN_UNSCOPED_ROLES:
-		company = _session_company(user)
-		if company:
-			return {"kind": "company", "company": company}
-		return {"kind": "unscoped", "company": None}
+		anchor = frappe.db.get_value(
+			"Employee", {"user_id": user}, ["status", "company"], as_dict=True
+		)
+		if not anchor:
+			return {"kind": "unscoped", "company": None}
+		if anchor.status != "Active":
+			return {"kind": "none", "company": None}
+		return {"kind": "company", "company": anchor.company}
 	return {"kind": "none", "company": None}
 
 
@@ -284,6 +293,17 @@ RATE_LIMIT_POLICY = {
 	"search_people": (60, 60),
 	"get_person": (60, 60),
 	"get_report_link": (60, 60),
+	# Reads that fan out (the home page and the approvals queue each run
+	# several queries) or that answer for one record by name -- bounded so
+	# a scripted walk over sequential record ids is a flood the limiter
+	# sees, not a free enumeration.
+	"get_dashboard": (60, 60),
+	"get_my_approvals": (60, 60),
+	"get_approval_detail": (60, 60),
+	"get_leave_day_count": (60, 60),
+	"get_my_leave_detail": (60, 60),
+	"get_my_request": (60, 60),
+	"get_my_attendance_request": (60, 60),
 	"get_request_categories": (60, 60),
 	# P5-U13 configuration writes. Reads (`get_portal_config`) are cheap and
 	# server-scoped like `get_directory`; every write checks permission itself
