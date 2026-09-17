@@ -66,6 +66,7 @@ from helixhr.utils import (
 	TEMPLATE_TOKENS,
 	UPLOAD_MAX_BYTES,
 	admin_scope_employee_filters,
+	employee_in_admin_scope,
 	get_manager_user,
 	get_week_bounds,
 	rate_limit_per_user,
@@ -1990,12 +1991,29 @@ def _approver_names(rows):
 	}
 
 
+def _leave_balance_map(employee):
+	"""`hrms.api.get_leave_balance_map`'s own shape, resolved for `employee`
+	directly rather than through that call's built-in session scoping
+	(P6-KTD5) -- so U3's person view reads the same number the employee's
+	own screen would, for whichever employee is asked about, without a
+	second derivation."""
+	from hrms.hr.doctype.leave_application.leave_application import get_leave_details
+
+	allocation = get_leave_details(employee, getdate())["leave_allocation"]
+	return {
+		leave_type: {
+			"allocated_leaves": details.get("total_leaves"),
+			"balance_leaves": details.get("remaining_leaves"),
+		}
+		for leave_type, details in allocation.items()
+	}
+
+
 def _leave_balances(employee):
 	"""Allocated / used / left per leave type, in the shape the field block
-	draws. `get_leave_balance_map` is already session-scoped to the caller's
-	own Employee, so nothing here widens it."""
+	draws."""
 	balances = []
-	for leave_type, details in (get_leave_balance_map() or {}).items():
+	for leave_type, details in (_leave_balance_map(employee) or {}).items():
 		allocated = flt(details.get("allocated_leaves"))
 		left = flt(details.get("balance_leaves"))
 		balances.append(
@@ -2304,10 +2322,9 @@ _ATTENDANCE_MAX_DAYS = 366
 _CHECKIN_LIMIT = 50
 
 
-@frappe.whitelist()
-def get_my_attendance(from_date, to_date):
-	"""One month of attendance for the logged-in employee: a status per day,
-	the late/early flags Frappe records, and the four exceptions R16 asks for
+def _attendance_month_summary(employee, from_date, to_date):
+	"""One range of attendance for `employee`: a status per day, the
+	late/early flags Frappe records, and the four exceptions R16 asks for
 	(absent, half day, late, missing).
 
 	"Missing" is the careful one. No check-in device is configured yet, so a
@@ -2318,8 +2335,12 @@ def get_my_attendance(from_date, to_date):
 	was not recording, so nothing can be absent from it. That makes the whole
 	feature dormant until real data arrives, and correct the moment it does,
 	with no further change here.
+
+	Deliberately carries no check-in *affordance* -- "may this employee punch
+	right now" (`_checkin_state`, added by `get_my_attendance` below) is a
+	self-service prompt about the session's own owner, not a fact about a
+	person HR is reading (P6-KTD5).
 	"""
-	employee = get_current_employee()
 	start, end = _as_date(from_date), _as_date(to_date)
 	# Bounded at the API, not at the caller (P2-R22). The screen only ever
 	# asks for one month, so anything else is a typo or a probe -- and both
@@ -2380,14 +2401,6 @@ def get_my_attendance(from_date, to_date):
 		"days": days,
 		"missing": missing,
 		"summary": summary,
-		# P3-U4 step 1 / P3-R5, P3-R8. The Today strip's whole input: may this
-		# employee punch right now, what the next punch is, and what to say
-		# when they may not.
-		"checkin": _safe(
-			lambda: _checkin_state(employee),
-			"HelixHR check-in state failed",
-			_checkin_unavailable(),
-		),
 		# P3-R19. Counted over the days a request did *not* mark: a
 		# half-day Work From Home request writes a Half Day row, and
 		# flagging it would send the employee back to HR about a day they
@@ -2407,6 +2420,22 @@ def get_my_attendance(from_date, to_date):
 			"late": sum(1 for entry in days.values() if entry["late"] and not entry["by_request"]),
 			"missing": len(missing),
 		},
+	}
+
+
+@frappe.whitelist()
+def get_my_attendance(from_date, to_date):
+	"""`_attendance_month_summary` for the logged-in employee, plus the Today
+	strip's own affordance -- may this employee punch right now, and what the
+	next punch is (P3-U4 step 1 / P3-R5, P3-R8)."""
+	employee = get_current_employee()
+	return {
+		**_attendance_month_summary(employee, from_date, to_date),
+		"checkin": _safe(
+			lambda: _checkin_state(employee),
+			"HelixHR check-in state failed",
+			_checkin_unavailable(),
+		),
 	}
 
 
@@ -5198,16 +5227,14 @@ _SUBJECT_MAX = 140
 _DETAILS_MAX = 5000
 
 
-@frappe.whitelist()
-def get_my_requests(limit=None):
-	"""A bounded page of this employee's own requests, newest first.
+def _requests_summary(employee, limit=None):
+	"""A bounded page of `employee`'s requests, newest first.
 
 	Carries what the list actually renders and nothing else: the lifecycle
 	dates, HR's reply, how many files are on it, and whether there is an
 	unread notification about it -- which is what puts a row under "Needs
 	you" rather than a status word (P2-R13).
 	"""
-	employee = get_current_employee()
 	limit = min(max(cint(limit) or _REQUEST_PAGE, 1), _REQUEST_MAX_PAGE)
 
 	rows = frappe.get_all(
@@ -5234,6 +5261,11 @@ def get_my_requests(limit=None):
 		"limit": limit,
 		"today": user_today(),
 	}
+
+
+@frappe.whitelist()
+def get_my_requests(limit=None):
+	return _requests_summary(get_current_employee(), limit)
 
 
 @frappe.whitelist()
@@ -6310,6 +6342,85 @@ def search_people(query=None, start=0, limit=None):
 		"total": total,
 		"limit": limit,
 		"start": start,
+	}
+
+
+# ---------------------------------------------------------------------------
+# The person view, for HR (P6-U3 / P6-R2, P6-R3, P6-R4, P6-R5, P6-R8)
+#
+# An explicit projection, assembled from readers the portal already has
+# (P6-KTD5) -- never a second derivation of what the employee's own screens
+# already compute. Every section fails independently, `get_dashboard`'s own
+# shape: an absent section is named in `failed_sections`, never a broken
+# screen.
+
+
+def _person_profile(employee):
+	"""Identity, manager, employment status and joining date -- the part of
+	the person view that is not one of the portal's other existing readers."""
+	fields = [
+		"name",
+		"employee_name",
+		"designation",
+		"department",
+		"branch",
+		"reports_to",
+		"status",
+		"date_of_joining",
+	]
+	data = frappe.db.get_value("Employee", employee, fields, as_dict=True)
+	data["manager_name"] = (
+		frappe.db.get_value("Employee", data.reports_to, "employee_name") if data.reports_to else None
+	)
+	return data
+
+
+@frappe.whitelist()
+def get_person(employee):
+	"""Everything HR asks about a person, on one screen (P6-R2): leave
+	balance by type, this month's attendance, open and recent requests, the
+	assigned shift and holiday list, the reporting manager, the joining date
+	and employment status.
+
+	Resolved through `resolve_admin_scope` before anything else is read
+	(P6-R6): a caller who may not administer `employee` is refused before
+	any record is touched, and the refusal is the same `PermissionError`
+	whether or not the employee exists (P6-R8) -- it never discloses which.
+
+	Read-only (P6-R3): no field above Employee permlevel 0, no leave
+	*reason*, no check-in *coordinates* -- a faster route to what HR already
+	reaches in Desk through the roles it holds, never a wider one (P6-R5).
+	"""
+	rate_limit_per_user("get_person")
+	scope = resolve_admin_scope(frappe.session.user)
+	if scope["kind"] == "none" or not employee_in_admin_scope(employee, scope):
+		frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
+
+	missing = object()
+	failed = []
+
+	def section(name, fn):
+		value = _safe(fn, title=f"HelixHR person view section failed: {name}", default=missing)
+		if value is missing:
+			failed.append(name)
+			return None
+		return value
+
+	today = user_today()
+	month_start, month_end = str(get_first_day(today)), str(get_last_day(today))
+
+	return {
+		"employee": section("employee", lambda: _person_profile(employee)),
+		"leave_balances": section("leave_balances", lambda: _leave_balances(employee)),
+		"attendance": section(
+			"attendance", lambda: _attendance_month_summary(employee, month_start, month_end)
+		),
+		"requests": section("requests", lambda: _requests_summary(employee)),
+		"shift": section("shift", lambda: _request_shift(employee, today)),
+		"holiday_list": section(
+			"holiday_list", lambda: get_holiday_list_for_employee(employee, raise_exception=False)
+		),
+		"failed_sections": failed,
 	}
 
 

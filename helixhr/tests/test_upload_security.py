@@ -229,6 +229,8 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"download_my_payslip": (10, 60),
 			"get_directory": (60, 60),
 			"get_my_team_week": (60, 60),
+			"search_people": (60, 60),
+			"get_person": (60, 60),
 			"get_request_categories": (60, 60),
 			"reply_to_my_request": (20, 3600),
 			"attach_to_request_reply": (20, 3600),

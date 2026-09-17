@@ -262,6 +262,7 @@ RATE_LIMIT_POLICY = {
 	"get_my_team_week": (60, 60),
 	"get_organisation_view": (60, 60),
 	"search_people": (60, 60),
+	"get_person": (60, 60),
 	"get_request_categories": (60, 60),
 	# P5-U13 configuration writes. Reads (`get_portal_config`) are cheap and
 	# server-scoped like `get_directory`; every write checks permission itself

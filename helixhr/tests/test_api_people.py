@@ -1,7 +1,7 @@
 import frappe
 from frappe.tests import IntegrationTestCase
 
-from helixhr.api import search_people
+from helixhr.api import get_person, search_people
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	HR_MANAGER_EMPLOYEE_USER,
@@ -10,6 +10,7 @@ from helixhr.tests.utils import (
 	TEST_COMPANY,
 	ensure_hr_manager_user,
 	ensure_test_company,
+	make_test_employee_and_manager,
 	make_test_hr_manager_employee,
 	make_test_it_user,
 	make_test_user,
@@ -222,3 +223,185 @@ class TestSearchPeople(IntegrationTestCase):
 		from helixhr.utils import RATE_LIMIT_POLICY
 
 		self.assertIn("search_people", RATE_LIMIT_POLICY)
+
+
+class TestGetPerson(IntegrationTestCase):
+	"""P6-U3 / P6-R2, P6-R3, P6-R4, P6-R5, P6-R8."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		self.hr_employee, self.hr_user = make_test_hr_manager_employee()
+		make_test_it_user()
+		self.colleague, self.colleague_user, self.manager, self.manager_user = (
+			make_test_employee_and_manager()
+		)
+		other_company = _ensure_other_company()
+		self.other_company_employee = make_test_user(OTHER_COMPANY_USER, other_company)
+
+		frappe.set_user(EMPLOYEE_USER)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _mark_attendance(self, employee, date, status):
+		existing = frappe.db.exists("Attendance", {"employee": employee, "attendance_date": date})
+		if existing:
+			return existing
+		doc = frappe.get_doc(
+			{
+				"doctype": "Attendance",
+				"employee": employee,
+				"attendance_date": date,
+				"status": status,
+				"company": self.company,
+			}
+		)
+		doc.insert(ignore_permissions=True)
+		doc.submit()
+		return doc.name
+
+	def test_the_key_set_is_exhaustive(self):
+		frappe.set_user(self.hr_user)
+		payload = get_person(self.colleague)
+		self.assertEqual(
+			set(payload.keys()),
+			{
+				"employee",
+				"leave_balances",
+				"attendance",
+				"requests",
+				"shift",
+				"holiday_list",
+				"failed_sections",
+			},
+		)
+		self.assertEqual(
+			set(payload["employee"].keys()),
+			{
+				"name",
+				"employee_name",
+				"designation",
+				"department",
+				"branch",
+				"reports_to",
+				"status",
+				"date_of_joining",
+				"manager_name",
+			},
+		)
+
+	def test_leave_balance_matches_what_the_employees_own_get_my_leave_returns(self):
+		from helixhr.api import get_my_leave
+
+		frappe.set_user(self.hr_user)
+		hr_view = get_person(self.colleague)["leave_balances"]
+
+		frappe.set_user(self.colleague_user)
+		self_view = get_my_leave()["balances"]
+
+		self.assertEqual(hr_view, self_view)
+
+	def test_attendance_for_a_named_month_matches_directly_computed_fixture_data(self):
+		from frappe.utils import get_first_day, today
+
+		start = str(get_first_day(today()))
+		self._mark_attendance(self.colleague, start, "Present")
+		self._mark_attendance(self.colleague, frappe.utils.add_days(start, 1), "Absent")
+
+		frappe.set_user(self.hr_user)
+		attendance = get_person(self.colleague)["attendance"]
+		self.assertEqual(attendance["summary"].get("Present"), 1)
+		self.assertEqual(attendance["summary"].get("Absent"), 1)
+		self.assertEqual(attendance["exceptions"]["absent"], 1)
+
+	def test_no_leave_reason_no_checkin_coordinates_no_field_above_permlevel_zero(self):
+		leave = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": self.colleague,
+				"leave_type": "Casual Leave",
+				"from_date": "2019-01-01",
+				"to_date": "2019-01-02",
+				"description": "_Test person view leave reason, never returned by this projection",
+				"status": "Open",
+				"docstatus": 0,
+			}
+		)
+		leave.db_insert()
+		try:
+			frappe.set_user(self.hr_user)
+			payload = get_person(self.colleague)
+			rendered = frappe.as_json(payload)
+			self.assertNotIn("person view leave reason", rendered)
+			self.assertNotIn("latitude", rendered)
+			self.assertNotIn("longitude", rendered)
+			self.assertNotIn("checkin", rendered)
+			# Employee has no "attendance" key of its own -- the top-level
+			# "attendance" is the month summary, and "requests" carries no
+			# salary/bank/tax field, which all sit above permlevel 0.
+			self.assertNotIn("salary", rendered.lower())
+			self.assertNotIn("bank_ac_no", rendered)
+		finally:
+			frappe.db.delete("Leave Application", {"name": leave.name})
+
+	def test_an_hr_administrator_in_another_company_is_refused_without_disclosing_existence(self):
+		frappe.set_user(self.hr_user)
+		with self.assertRaises(frappe.PermissionError):
+			get_person(self.other_company_employee)
+		with self.assertRaises(frappe.PermissionError):
+			get_person("HR-EMP-does-not-exist")
+
+	def test_a_plain_employee_and_an_it_team_holder_are_refused(self):
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.PermissionError):
+			get_person(self.colleague)
+
+		frappe.set_user(IT_TEAM_USER)
+		with self.assertRaises(frappe.PermissionError):
+			get_person(self.colleague)
+
+	def test_an_employee_with_no_shift_no_holiday_list_and_no_manager_returns_named_absent_sections(self):
+		bare_name = frappe.db.get_value("Employee", {"employee_number": "_test-people-bare"}, "name")
+		if not bare_name:
+			bare = frappe.get_doc(
+				{
+					"doctype": "Employee",
+					"employee_number": "_test-people-bare",
+					"first_name": "Bare",
+					"company": self.company,
+					"date_of_birth": "1990-01-01",
+					"date_of_joining": "2020-01-01",
+					"gender": frappe.db.get_value("Gender", {}, "name"),
+					"status": "Active",
+					"create_user_permission": 0,
+				}
+			)
+			bare.insert(ignore_permissions=True)
+			bare_name = bare.name
+
+		frappe.set_user(self.hr_user)
+		payload = get_person(bare_name)
+		self.assertIsNone(payload["employee"]["manager_name"])
+		self.assertIsNone(payload["shift"])
+
+	def test_a_failed_section_is_named_while_the_rest_of_the_payload_still_returns(self):
+		from unittest.mock import patch
+
+		frappe.set_user(self.hr_user)
+		with patch("helixhr.api._requests_summary", side_effect=Exception("boom")):
+			payload = get_person(self.colleague)
+
+		self.assertEqual(payload["failed_sections"], ["requests"])
+		self.assertIsNone(payload["requests"])
+		self.assertIsNotNone(payload["employee"])
+
+	def test_the_read_is_rate_limited(self):
+		from helixhr.utils import RATE_LIMIT_POLICY
+
+		self.assertIn("get_person", RATE_LIMIT_POLICY)
+
+	def test_asserted_as_the_role_never_as_administrator(self):
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.PermissionError):
+			get_person(self.colleague)
