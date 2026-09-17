@@ -149,6 +149,67 @@ def _session_company(user):
 	return frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "company")
 
 
+# P6-R6, P6-R7. Every persona this app knows how to grant an administrative
+# read to -- "HR Manager or System Manager" -- named once so U1's answer and
+# `hr_request.py`'s own `_UNSCOPED_ROLES` describe the same set without one
+# importing the other (that would cycle: `hr_request.py` already imports
+# `_session_company` from this module).
+_ADMIN_UNSCOPED_ROLES = frozenset({"HR Manager", "System Manager"})
+
+
+def resolve_admin_scope(user):
+	"""Which employees ``user`` may administer -- one answer, in one place,
+	so a list read (U2) and a single-record check (U3) consume the same
+	result without re-deriving it.
+
+	Returns a dict with a ``kind`` of:
+
+	- ``"unscoped"`` -- every employee, on every company. Administrator, and
+	  the Desk-only HR Manager / System Manager who holds no Employee record
+	  (P3-KTD7, P4-KTD7: `ensure_hr_manager_user()` is built to be exactly
+	  this, on purpose, and must keep working).
+	- ``"company"`` -- the named company only. An HR Manager / System
+	  Manager anchored to an active Employee (the 2026-09-16 fix this
+	  mirrors) is scoped to that company, never another.
+	- ``"none"`` -- nobody. A plain employee, an `IT Team` holder, or any
+	  other caller with no administrative role.
+
+	Preserves today's behaviour exactly (P6-KTD1): this adds a caller, it
+	does not change what `hr_request.py`'s own scoping already does.
+	"""
+	if user == "Administrator":
+		return {"kind": "unscoped", "company": None}
+	if set(frappe.get_roles(user)) & _ADMIN_UNSCOPED_ROLES:
+		company = _session_company(user)
+		if company:
+			return {"kind": "company", "company": company}
+		return {"kind": "unscoped", "company": None}
+	return {"kind": "none", "company": None}
+
+
+def admin_scope_employee_filters(scope):
+	"""Turn `resolve_admin_scope`'s answer into an Employee filter dict for
+	`frappe.get_all`, or ``None`` when the scope holds nobody -- the caller's
+	cue to return an empty page rather than run a query at all."""
+	if scope["kind"] == "unscoped":
+		return {}
+	if scope["kind"] == "company":
+		return {"company": scope["company"]}
+	return None
+
+
+def employee_in_admin_scope(employee, scope):
+	"""Whether ``employee`` falls inside `resolve_admin_scope`'s answer --
+	the single-record half U3 resolves *before* reading anything else, so a
+	caller who may not administer this person is refused before any record
+	is touched, not filtered afterwards."""
+	if scope["kind"] == "unscoped":
+		return bool(frappe.db.exists("Employee", employee))
+	if scope["kind"] == "company":
+		return bool(frappe.db.exists("Employee", {"name": employee, "company": scope["company"]}))
+	return False
+
+
 def portal_home_page(user=None):
 	"""Where this user lands after signing in.
 
