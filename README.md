@@ -475,5 +475,5 @@ licenses are their own.
   <b>Built and maintained by <a href="https://nitcoinc.ai">Nitco Inc</a></b><br><br>
   <a href="https://nitcoinc.ai">nitcoinc.ai</a> ·
   <a href="https://www.linkedin.com/company/nitcoincofficial">LinkedIn</a> ·
-  <a href="mailto:dev@nitcoinc.ai">dev@nitcoinc.ai</a>
+  <a href="mailto:YourPartner@nitcoinc.com">YourPartner@nitcoinc.com</a>
 </p>
