@@ -11,6 +11,7 @@ from frappe.tests import IntegrationTestCase
 
 from helixhr.tests.utils import (
 	TEST_COMPANY,
+	ensure_baseline_company,
 	ensure_hr_manager_user,
 	ensure_test_company,
 	make_test_delivery_manager,
@@ -19,7 +20,7 @@ from helixhr.tests.utils import (
 	make_test_project,
 	make_test_user,
 )
-from helixhr.utils import project_scope_filters, resolve_project_scope
+from helixhr.utils import RATE_LIMIT_POLICY, project_scope_filters, resolve_project_scope
 
 # --- U2: resolve_project_scope -----------------------------------------------
 
@@ -191,3 +192,166 @@ class TestDeliveryManagerRestRouteScope(IntegrationTestCase):
 
 		self.assertEqual(frappe.db.get_value("User", self.dm_user, "user_type"), "Website User")
 		self.assertFalse(_can_open_desk(self.dm_user))
+
+
+# --- U3: search_projects / get_project ---------------------------------------
+
+
+class TestSearchAndGetProject(IntegrationTestCase):
+	"""P7-U3. `search_projects` and `get_project`, the read half of R1-R4 --
+	scoped by `resolve_project_scope` exactly like the REST routes above, but
+	reached through HelixHR's own whitelisted methods rather than the
+	generic `frappe.client` routes."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		self.other_company = ensure_baseline_company()
+		_, self.dm_user = make_test_delivery_manager()
+		_, self.hr_user = make_test_hr_manager_employee()
+		_, self.employee_user, _, _ = make_test_employee_and_manager()
+
+		self.member_project = make_test_project(
+			self.company, "_Test U3 Member Project", members=[self.dm_user]
+		)
+		self.other_project = make_test_project(self.company, "_Test U3 Other Project")
+		self.other_company_project = make_test_project(self.other_company, "_Test U3 Other Company Project")
+		self.empty_project = make_test_project(self.company, "_Test U3 Empty Project")
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def test_a_delivery_manager_lists_exactly_their_member_projects(self):
+		from helixhr.api import search_projects
+
+		frappe.set_user(self.dm_user)
+		names = {row["name"] for row in search_projects()["projects"]}
+		self.assertEqual(names, {self.member_project})
+
+	def test_an_hr_manager_lists_projects_in_their_own_company_only(self):
+		from helixhr.api import search_projects
+
+		frappe.set_user(self.hr_user)
+		names = {row["name"] for row in search_projects()["projects"]}
+		self.assertIn(self.member_project, names)
+		self.assertIn(self.other_project, names)
+		self.assertIn(self.empty_project, names)
+		self.assertNotIn(self.other_company_project, names)
+
+	def test_a_plain_employee_is_refused_by_both_methods(self):
+		from helixhr.api import get_project, search_projects
+
+		frappe.set_user(self.employee_user)
+		with self.assertRaises(frappe.PermissionError):
+			search_projects()
+		with self.assertRaises(frappe.PermissionError):
+			get_project(self.member_project)
+
+	def test_opening_a_project_outside_scope_matches_the_missing_project_error(self):
+		from helixhr.api import get_project
+
+		frappe.set_user(self.dm_user)
+		with self.assertRaises(frappe.PermissionError) as outside_scope:
+			get_project(self.other_project)
+		with self.assertRaises(frappe.PermissionError) as missing:
+			get_project("_Test U3 Project That Does Not Exist")
+		self.assertEqual(str(outside_scope.exception), str(missing.exception))
+
+	def test_the_refusal_names_no_project_no_customer_no_person(self):
+		from helixhr.api import get_project
+
+		frappe.set_user(self.dm_user)
+		with self.assertRaises(frappe.PermissionError) as caught:
+			get_project(self.other_project)
+		message = str(caught.exception)
+		for leak in (self.other_project, "_Test U3 Other Project", self.company, self.dm_user):
+			self.assertNotIn(leak, message)
+
+	def test_get_project_returns_members_as_employee_names_never_logins(self):
+		from helixhr.api import get_project
+
+		frappe.set_user(self.dm_user)
+		result = get_project(self.member_project)
+		dm_employee_name = frappe.db.get_value("Employee", {"user_id": self.dm_user}, "employee_name")
+		names = [member["employee_name"] for member in result["members"]]
+		self.assertEqual(names, [dm_employee_name])
+		for member in result["members"]:
+			self.assertNotEqual(member["employee_name"], self.dm_user)
+
+	def test_get_project_excludes_every_costing_and_link_field(self):
+		from helixhr.api import get_project
+
+		frappe.set_user(self.dm_user)
+		result = get_project(self.member_project)
+		expected_keys = {
+			"name",
+			"project_name",
+			"status",
+			"billable",
+			"expected_start_date",
+			"expected_end_date",
+			"tasks",
+			"members",
+		}
+		self.assertEqual(set(result.keys()), expected_keys)
+		for forbidden in (
+			"estimated_costing",
+			"total_costing_amount",
+			"total_billable_amount",
+			"total_billed_amount",
+			"total_sales_amount",
+			"gross_margin",
+			"customer",
+			"sales_order",
+		):
+			self.assertNotIn(forbidden, result)
+
+	def test_a_new_project_field_does_not_appear_in_the_response(self):
+		from helixhr.api import get_project
+
+		fieldname = "custom_helixhr_u3_leak_probe"
+		custom_field = frappe.get_doc(
+			{
+				"doctype": "Custom Field",
+				"dt": "Project",
+				"fieldname": fieldname,
+				"label": "HelixHR U3 Leak Probe",
+				"fieldtype": "Data",
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.set_value("Project", self.member_project, fieldname, "leaked-value")
+		try:
+			frappe.set_user(self.dm_user)
+			result = get_project(self.member_project)
+			self.assertNotIn(fieldname, result)
+			self.assertNotIn("leaked-value", result.values())
+		finally:
+			frappe.set_user("Administrator")
+			frappe.delete_doc("Custom Field", custom_field.name, ignore_permissions=True, force=True)
+
+	def test_get_project_with_no_tasks_and_no_members_returns_empty_collections(self):
+		from helixhr.api import get_project
+
+		frappe.set_user(self.hr_user)
+		result = get_project(self.empty_project)
+		self.assertEqual(result["tasks"], [])
+		self.assertEqual(result["members"], [])
+
+	def test_a_member_with_no_linked_employee_is_still_reported(self):
+		from helixhr.api import get_project
+		from helixhr.tests.utils import make_test_user_without_employee
+
+		orphan_user = make_test_user_without_employee()
+		project = make_test_project(self.company, "_Test U3 Orphan Member Project", members=[orphan_user])
+
+		frappe.set_user(self.hr_user)
+		result = get_project(project)
+		self.assertEqual(len(result["members"]), 1)
+		member = result["members"][0]
+		self.assertIsNone(member["employee"])
+		self.assertNotEqual(member["employee_name"], orphan_user)
+		self.assertTrue(member["employee_name"])
+
+	def test_both_methods_appear_in_the_rate_limit_policy(self):
+		self.assertIn("search_projects", RATE_LIMIT_POLICY)
+		self.assertIn("get_project", RATE_LIMIT_POLICY)
