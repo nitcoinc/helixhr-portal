@@ -192,6 +192,21 @@ const routes = [
     name: 'Reports',
     component: () => import('@/pages/Reports.vue'),
   },
+  {
+    // P7-U5. `search_projects` is the server's own gate (`resolve_project_
+    // scope`) -- same posture as /people, /organisation and /settings above.
+    path: '/projects',
+    name: 'Projects',
+    component: () => import('@/pages/Projects.vue'),
+  },
+  {
+    // The project's record is addressable directly, like every other detail
+    // route (P2-R12): a reload or a shared link lands on the same project.
+    path: '/projects/:project',
+    name: 'ProjectDetail',
+    component: () => import('@/pages/Projects.vue'),
+    props: true,
+  },
   // The three states that are not a page of the portal. All of them render
   // NotLinked.vue, which reads the session status; none of them get the nav
   // shell (there is nothing to navigate with, and for a Guest there is

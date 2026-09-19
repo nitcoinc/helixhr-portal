@@ -48,6 +48,9 @@ const state = reactive({
   /** P6-U4: gates the People nav item. Mirrors `resolve_admin_scope`'s own
    * gate on `search_people`/`get_person`. */
   canSeePeople: false,
+  /** P7-U5: gates the Projects nav item. Mirrors `resolve_project_scope`'s own
+   * gate on `search_projects`/`get_project`. */
+  canSeeProjects: false,
   /** P6-U4: whether this caller can actually reach Desk (a System User
    * holding a `desk_access` role) -- decides whether a Desk link is drawn
    * anywhere in the portal, never whether one works: every method that
@@ -112,6 +115,7 @@ function apply(boot) {
   state.canConfigure = !!boot?.can_configure
   state.canSeeOrganisation = !!boot?.can_see_organisation
   state.canSeePeople = !!boot?.can_see_people
+  state.canSeeProjects = !!boot?.can_see_projects
   state.canOpenDesk = !!boot?.can_open_desk
   state.unread = boot?.unread_notifications ?? 0
   state.timeZone = boot?.time_zone || null

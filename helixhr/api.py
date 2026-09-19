@@ -252,6 +252,11 @@ def get_portal_bootstrap():
 		# the roles `_is_hr` names, so the nav item and the server's gate
 		# agree by construction.
 		"can_see_people": resolve_admin_scope(frappe.session.user)["kind"] != "none",
+		# P7-U5: same shape as `can_see_people` just above -- `search_projects`
+		# and `get_project` are gated by `resolve_project_scope`, which grants a
+		# scope to exactly the callers this flag names, so the nav item and the
+		# server's gate agree by construction.
+		"can_see_projects": resolve_project_scope(frappe.session.user)["kind"] != "none",
 		# P6-KTD4: resolved on the caller's own ability to reach Desk (a
 		# System User holding a `desk_access` role), never on "is HR" --
 		# the two are correlated today but the flag must not assume they
