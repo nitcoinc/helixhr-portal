@@ -107,6 +107,39 @@ class TestPreflight(IntegrationTestCase):
 		self.assertEqual(result["status"], preflight.FAIL)
 		self.assertIn("hook", result["detail"])
 
+	def test_no_role_this_app_grants_holds_report_permission_on_timesheet(self):
+		"""P7-U8 / R16: the standing guard, not `check_delivery_manager_role`'s
+		own narrower one -- grant `report` on Timesheet to `IT Team` (a role
+		that check does not look at), run the check, and clean up, mirroring
+		how `test_an_hr_manager_scoped_to_their_own_employee_is_named` above
+		grants and cleans up a User Permission."""
+		from frappe.permissions import add_permission
+
+		from helixhr.preflight import FAIL, IT_TEAM, PASS, check_no_timesheet_report_permission
+
+		self.assertEqual(check_no_timesheet_report_permission()["status"], PASS)
+
+		existing = frappe.db.get_value(
+			"Custom DocPerm", {"parent": "Timesheet", "role": IT_TEAM, "permlevel": 0}, "name"
+		)
+		if not existing:
+			add_permission("Timesheet", IT_TEAM, 0)
+			existing = frappe.db.get_value(
+				"Custom DocPerm", {"parent": "Timesheet", "role": IT_TEAM, "permlevel": 0}, "name"
+			)
+			self.addCleanup(frappe.delete_doc, "Custom DocPerm", existing, force=True)
+		else:
+			self.addCleanup(frappe.db.set_value, "Custom DocPerm", existing, "report", 0)
+
+		frappe.db.set_value("Custom DocPerm", existing, "report", 1)
+		frappe.clear_cache(doctype="Timesheet")
+		self.addCleanup(frappe.clear_cache, doctype="Timesheet")
+
+		result = check_no_timesheet_report_permission()
+		self.assertEqual(result["status"], FAIL)
+		self.assertIn(IT_TEAM, result["detail"])
+		self.assertIn("Timesheet", result["detail"])
+
 	def test_a_linked_employee_without_a_user_permission_fails(self):
 		perms = frappe.get_all(
 			"User Permission",

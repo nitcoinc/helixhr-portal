@@ -237,6 +237,8 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"create_project": (20, 3600),
 			"save_task": (30, 3600),
 			"set_project_members": (20, 3600),
+			"get_billable_hours": (60, 60),
+			"run_portal_report": (30, 60),
 			"get_dashboard": (60, 60),
 			"get_my_approvals": (60, 60),
 			"get_approval_detail": (60, 60),

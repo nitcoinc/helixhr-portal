@@ -1202,6 +1202,45 @@ def check_curated_reports():
 	return _result("Curated reports", PASS, f"{len(ADMIN_REPORTS)} reports checked")
 
 
+def check_no_timesheet_report_permission():
+	"""P7-U8 / R16: no role this app grants -- every entry in
+	`helixhr/fixtures/role.json`, not just `HelixHR Delivery Manager` --
+	holds the doctype-wide `report` permission on Timesheet.
+
+	`check_delivery_manager_role` already guards that one role specifically,
+	as part of U1's own acceptance criterion; this check is the standing,
+	general guard KTD3 asks for, so a *future* fixture role (or a Custom
+	DocPerm hand-added in Desk) reopens the same bypass and is caught the
+	same way: granting `report` on Timesheet is doctype-wide, and Frappe's
+	report engine is directly callable by any signed-in user, so that grant
+	would hand the holder every Timesheet report -- including
+	`Timesheet Billing Summary`'s `billing_amount` -- with HelixHR's curated
+	list offering no protection at all, because the bypass never goes
+	through HelixHR (verified by exploit on the dev bench, see the plan's
+	Sources and Research).
+
+	Pre-existing and deliberately out of scope: `HR Manager` and `HR User`
+	already hold `report` on Timesheet today via ERPNext/HRMS's own DocPerm
+	fixtures, not a grant this app made -- narrowing that is a separate
+	decision about existing roles, not this plan's.
+	"""
+	granted_roles = [row.name for row in frappe.get_all("Role", filters={"name": ["in", (IT_TEAM, DELIVERY_MANAGER)]})]
+	problems = []
+	for role in granted_roles:
+		if frappe.db.get_value("Custom DocPerm", {"parent": "Timesheet", "role": role, "report": 1}):
+			problems.append(f"{role} holds report permission on Timesheet (Custom DocPerm)")
+		if frappe.db.get_value("DocPerm", {"parent": "Timesheet", "role": role, "report": 1}):
+			problems.append(f"{role} holds report permission on Timesheet (standard DocPerm)")
+
+	if problems:
+		return _result("Timesheet report guard", FAIL, "; ".join(problems))
+	return _result(
+		"Timesheet report guard",
+		PASS,
+		f"no role this app grants ({', '.join((IT_TEAM, DELIVERY_MANAGER))}) holds report on Timesheet",
+	)
+
+
 CHECKS = [
 	check_strict_user_permissions,
 	check_employee_user_permissions,
@@ -1240,4 +1279,5 @@ CHECKS = [
 	check_pdf_generator,
 	check_frontend_built,
 	check_curated_reports,
+	check_no_timesheet_report_permission,
 ]
