@@ -3751,9 +3751,11 @@ def get_my_projects():
 	projects = frappe.get_all(
 		"Project",
 		filters={"name": ["in", list(project_names)], "status": "Open"},
-		fields=["name", "project_name"],
+		fields=["name", "project_name", "helixhr_is_billable as billable"],
 		order_by="project_name",
 	)
+	for project in projects:
+		project["billable"] = bool(project["billable"])
 	if not projects:
 		return []
 
@@ -3781,6 +3783,24 @@ def _bookable_tasks_by_project():
 	writes below validate against. The browser's dropdown is a convenience;
 	this is the check (P2-R27)."""
 	return {project["name"]: {task["name"] for task in project["tasks"]} for project in get_my_projects()}
+
+
+def _project_billable_flags(project_names):
+	"""`{project: bool}` read straight from `helixhr_is_billable` (P7-KTD2).
+
+	The row's `is_billable` is derived from this, never from the request --
+	a payload cannot mark its own hours billable independent of the
+	project it names. Read directly rather than through `get_my_projects`
+	so a project's flag is authoritative even if the caller's bookable set
+	changed underneath a row already on the week."""
+	if not project_names:
+		return {}
+	rows = frappe.get_all(
+		"Project",
+		filters={"name": ["in", list(project_names)]},
+		fields=["name", "helixhr_is_billable"],
+	)
+	return {row.name: bool(row.helixhr_is_billable) for row in rows}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -3939,6 +3959,15 @@ def _write_my_week(employee, monday, sunday, rows, existing_name=None):
 	# a window, and two projects on one day is the ordinary case the grid is
 	# built for. Midnight rather than 09:00 as the anchor: a day validated up
 	# to 24 hours has to fit inside its own day.
+	#
+	# `is_billable` (P7-R6, R7, KTD1, KTD2) is derived here from the
+	# project's own flag, never taken from `row` -- the request is never
+	# consulted for it, so a row that names a billable-ish key of its own
+	# is silently ignored. ERPNext's `update_billing_hours` then derives
+	# `billing_hours` from `hours` on validate; nothing here reads or
+	# writes `billing_rate`, `billing_amount`, `costing_rate`, or
+	# `costing_amount` (R8).
+	billable_by_project = _project_billable_flags({row["project"] for row in rows})
 	day_offset = {}
 	for row in rows:
 		date = str(getdate(row["date"]))
@@ -3957,6 +3986,7 @@ def _write_my_week(employee, monday, sunday, rows, existing_name=None):
 				"activity_type": "General",
 				"from_time": start,
 				"to_time": frappe.utils.add_to_date(start, hours=hours),
+				"is_billable": cint(billable_by_project.get(row["project"], False)),
 			},
 		)
 	doc.save()

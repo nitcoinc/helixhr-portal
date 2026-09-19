@@ -68,10 +68,25 @@ async function setUp() {
           project_name: PROJECT_NAME,
           status: 'Open',
           company,
+          // Billable (P7-U6, KTD2): a fixed project-level flag this spec
+          // never toggles, so the grid's non-interactive indicator has
+          // something to show.
+          helixhr_is_billable: 1,
         }),
       },
     })
     projectName = (await created.json()).message.name
+  } else {
+    // A run against a site that already has this project from before U6
+    // shipped still needs the flag set -- insert only runs once.
+    await api.post('/api/method/frappe.client.set_value', {
+      form: {
+        doctype: 'Project',
+        name: projectName,
+        fieldname: 'helixhr_is_billable',
+        value: '1',
+      },
+    })
   }
 
   const permission = await getValue(
@@ -190,6 +205,14 @@ test.describe.serial('timesheet entry', () => {
     const hours = dayList.getByLabel(new RegExp(`^Hours on ${PROJECT_NAME}$`))
     await hours.fill('4')
     await hours.blur()
+
+    // P7-U6, KTD2: PROJECT_NAME is billable (setUp marks it so). The grid
+    // shows this as information only -- a badge, never a control the
+    // employee can flip.
+    const billableBadge = dayList.getByText('Billable', { exact: true })
+    await expect(billableBadge).toBeVisible()
+    await expect(page.getByRole('checkbox', { name: /billable/i })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /billable/i })).toHaveCount(0)
 
     // Per-day and weekly totals, and the 0.25 stepper.
     await expect(page.getByText('4 of 40 hours this week')).toBeVisible()

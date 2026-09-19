@@ -51,6 +51,13 @@ function projectLabel(line) {
   return project?.project_name || project?.name || line.project || ''
 }
 
+// Informational only (KTD2): the consultant does not decide whether their
+// hours are billable, so this never renders as a control -- the project's
+// own flag, read straight from `get_my_projects`.
+function isBillable(line) {
+  return Boolean(props.projects.find((p) => p.name === line.project)?.billable)
+}
+
 const projectOptions = computed(() => [
   { label: 'Pick a project', value: '' },
   ...props.projects.map((p) => ({ label: p.project_name || p.name, value: p.name })),
@@ -138,27 +145,36 @@ function cellValue(line, iso) {
                  A borderless select keeps the artboard's plain-text row
                  without hiding the only way to change it behind an edit
                  mode. -->
-            <select
-              v-if="!readOnly"
-              class="-ml-1 w-full cursor-pointer appearance-none truncate rounded-md border-0 bg-transparent bg-none px-1 py-0.5 font-semibold text-ink-gray-9"
-              :value="line.project"
-              :aria-label="`Project for row ${line.id}`"
-              @change="emit('update-line', { id: line.id, field: 'project', value: $event.target.value })"
-            >
-              <option
-                v-for="option in projectOptions"
-                :key="option.value"
-                :value="option.value"
+            <div class="flex items-center gap-1.5">
+              <select
+                v-if="!readOnly"
+                class="-ml-1 w-full cursor-pointer appearance-none truncate rounded-md border-0 bg-transparent bg-none px-1 py-0.5 font-semibold text-ink-gray-9"
+                :value="line.project"
+                :aria-label="`Project for row ${line.id}`"
+                @change="emit('update-line', { id: line.id, field: 'project', value: $event.target.value })"
               >
-                {{ option.label }}
-              </option>
-            </select>
-            <p
-              v-else
-              class="truncate font-semibold text-ink-gray-9"
-            >
-              {{ projectLabel(line) }}
-            </p>
+                <option
+                  v-for="option in projectOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+              <p
+                v-else
+                class="truncate font-semibold text-ink-gray-9"
+              >
+                {{ projectLabel(line) }}
+              </p>
+              <span
+                v-if="line.project && isBillable(line)"
+                class="shrink-0 rounded-full bg-surface-green-2 px-1.5 py-0.5 text-[10px] font-medium text-ink-green-3"
+                title="Billable project"
+              >
+                Billable
+              </span>
+            </div>
 
             <select
               v-if="!readOnly"
@@ -333,27 +349,36 @@ function cellValue(line, iso) {
                 class="w-56 min-w-56 px-4 py-2 text-left font-normal"
                 scope="row"
               >
-                <select
-                  v-if="!readOnly"
-                  class="-ml-1 w-full cursor-pointer appearance-none truncate rounded-md border-0 bg-transparent bg-none px-1 py-0.5 font-semibold text-ink-gray-9"
-                  :value="line.project"
-                  :aria-label="`Project for row ${line.id}`"
-                  @change="emit('update-line', { id: line.id, field: 'project', value: $event.target.value })"
-                >
-                  <option
-                    v-for="option in projectOptions"
-                    :key="option.value"
-                    :value="option.value"
+                <div class="flex items-center gap-1.5">
+                  <select
+                    v-if="!readOnly"
+                    class="-ml-1 w-full cursor-pointer appearance-none truncate rounded-md border-0 bg-transparent bg-none px-1 py-0.5 font-semibold text-ink-gray-9"
+                    :value="line.project"
+                    :aria-label="`Project for row ${line.id}`"
+                    @change="emit('update-line', { id: line.id, field: 'project', value: $event.target.value })"
                   >
-                    {{ option.label }}
-                  </option>
-                </select>
-                <p
-                  v-else
-                  class="font-semibold text-ink-gray-9"
-                >
-                  {{ projectLabel(line) }}
-                </p>
+                    <option
+                      v-for="option in projectOptions"
+                      :key="option.value"
+                      :value="option.value"
+                    >
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <p
+                    v-else
+                    class="font-semibold text-ink-gray-9"
+                  >
+                    {{ projectLabel(line) }}
+                  </p>
+                  <span
+                    v-if="line.project && isBillable(line)"
+                    class="shrink-0 rounded-full bg-surface-green-2 px-1.5 py-0.5 text-[10px] font-medium text-ink-green-3"
+                    title="Billable project"
+                  >
+                    Billable
+                  </span>
+                </div>
                 <select
                   v-if="!readOnly"
                   class="-ml-1 w-full cursor-pointer appearance-none truncate rounded-md border-0 bg-transparent bg-none px-1 py-0.5 text-ink-gray-6"
