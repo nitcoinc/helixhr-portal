@@ -355,3 +355,283 @@ class TestSearchAndGetProject(IntegrationTestCase):
 	def test_both_methods_appear_in_the_rate_limit_policy(self):
 		self.assertIn("search_projects", RATE_LIMIT_POLICY)
 		self.assertIn("get_project", RATE_LIMIT_POLICY)
+
+
+# --- U4: create_project / save_task / set_project_members --------------------
+
+
+def _make_employee_without_user(company, employee_number):
+	"""An Employee with no `user_id` at all -- the case `set_project_members`
+	must refuse the whole call over, naming this employee, rather than
+	silently dropping them from the membership it does write.
+
+	Deliberately built here rather than in `helixhr/tests/utils.py`: this
+	unit's scope is this test file plus `api.py`/`utils.py`/the fixture, not
+	the shared test-fixture module."""
+	from helixhr.tests.utils import ensure_test_gender
+
+	existing = frappe.db.get_value("Employee", {"employee_number": employee_number})
+	if existing:
+		return existing
+	employee = frappe.get_doc(
+		{
+			"doctype": "Employee",
+			"employee_number": employee_number,
+			"first_name": employee_number,
+			"company": company,
+			"date_of_birth": "1990-01-01",
+			"date_of_joining": "2020-01-01",
+			"gender": ensure_test_gender(),
+			"status": "Active",
+		}
+	)
+	employee.insert(ignore_permissions=True)
+	return employee.name
+
+
+class TestCreateProject(IntegrationTestCase):
+	"""P7-U4. `create_project` -- the company comes from the caller, never
+	the request, and the creator must not immediately fall out of their own
+	`resolve_project_scope` (KTD... / the plan's own named risk for this
+	unit)."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		self.other_company = ensure_baseline_company()
+		self.dm_employee, self.dm_user = make_test_delivery_manager()
+		_, self.employee_user, _, _ = make_test_employee_and_manager()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def test_a_delivery_manager_creates_a_project_and_is_immediately_a_member(self):
+		from helixhr.api import create_project, search_projects
+
+		frappe.set_user(self.dm_user)
+		result = create_project(project_name="_Test U4 New Project", is_billable=1)
+
+		self.assertTrue(result["billable"])
+		dm_employee_name = frappe.db.get_value("Employee", self.dm_employee, "employee_name")
+		self.assertEqual([m["employee_name"] for m in result["members"]], [dm_employee_name])
+
+		names = {row["name"] for row in search_projects()["projects"]}
+		self.assertIn(result["name"], names)
+
+	def test_created_project_takes_the_callers_own_company_a_request_company_is_ignored(self):
+		from helixhr.api import create_project
+
+		frappe.set_user(self.dm_user)
+		result = create_project(project_name="_Test U4 Company Ignored", company=self.other_company)
+		self.assertEqual(frappe.db.get_value("Project", result["name"], "company"), self.company)
+
+	def test_a_plain_employee_is_refused_on_all_three_methods(self):
+		from helixhr.api import create_project, save_task, set_project_members
+
+		project = make_test_project(self.company, "_Test U4 Refusal Target Project")
+
+		frappe.set_user(self.employee_user)
+		with self.assertRaises(frappe.PermissionError):
+			create_project(project_name="_Test U4 Refused Project")
+		with self.assertRaises(frappe.PermissionError):
+			save_task(project, subject="_Test U4 Refused Task")
+		with self.assertRaises(frappe.PermissionError):
+			set_project_members(project, [])
+
+	def test_all_three_methods_are_post_only(self):
+		from helixhr import api
+
+		for fn in (api.create_project, api.save_task, api.set_project_members):
+			self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[fn], ["POST"])
+
+	def test_all_three_methods_appear_in_the_rate_limit_policy(self):
+		for action in ("create_project", "save_task", "set_project_members"):
+			self.assertIn(action, RATE_LIMIT_POLICY)
+
+
+class TestSaveTaskAndSetProjectMembers(IntegrationTestCase):
+	"""P7-U4. `save_task` (add, rename, close) and `set_project_members`
+	(replace, idempotent), both scoped by the same `resolve_project_scope`
+	pair `get_project` already uses -- no separate authorisation logic."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		self.other_company = ensure_baseline_company()
+		self.dm_employee, self.dm_user = make_test_delivery_manager()
+		_, self.hr_user = make_test_hr_manager_employee()
+		# `HelixHR Delivery Manager` deliberately carries no `Employee` role
+		# (P7-U1 -- the same shape as `IT Team`), so it cannot book its own
+		# time through `save_my_week`. Booking time needs a real Employee;
+		# this one is added to `member_project` alongside the Delivery
+		# Manager so `save_my_week`'s own bookable-project check passes.
+		#
+		# A fresh identity of this class's own, not the shared
+		# `make_test_employee_and_manager()` fixture: on a long-lived bench
+		# that identity accumulates a strict-mode `User Permission` on every
+		# Project it has ever booked time on (`test_api_timesheet.py`'s own
+		# fixture), which would restrict it to projects this class never
+		# created (docs/runbook.md's own warning about this site).
+		self.worker_user = "u4-worker@helixhr.test"
+		make_test_user(self.worker_user, self.company)
+
+		self.member_project = make_test_project(
+			self.company, "_Test U4 Member Project", members=[self.dm_user, self.worker_user]
+		)
+		self.other_project = make_test_project(self.company, "_Test U4 Other Project")
+		self.other_company_project = make_test_project(
+			self.other_company, "_Test U4 Other Company Project"
+		)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _book_time(self, project, task, hours=2):
+		"""One row of the current week's Timesheet, through `save_my_week`
+		exactly as an employee's own week screen would -- not a Timesheet
+		inserted directly -- so "time already booked" means what it means
+		for a real caller of this API. Booked as `worker_user`, the plain
+		Employee added to `member_project` in `setUp`, since the Delivery
+		Manager holds no `Employee` role to book time with."""
+		from frappe.utils import today
+
+		from helixhr.api import save_my_week
+		from helixhr.utils import get_week_bounds
+
+		monday, _sunday = get_week_bounds(today())
+		frappe.set_user(self.worker_user)
+		save_my_week(str(monday), [{"date": str(monday), "project": project, "task": task, "hours": hours}])
+		return monday
+
+	def test_a_delivery_manager_cannot_add_a_task_to_a_project_they_are_not_a_member_of(self):
+		from helixhr.api import save_task
+
+		frappe.set_user(self.dm_user)
+		with self.assertRaises(frappe.PermissionError):
+			save_task(self.other_project, subject="_Test U4 Non-Member Task")
+
+	def test_an_hr_manager_cannot_write_to_a_project_in_another_company(self):
+		from helixhr.api import save_task, set_project_members
+
+		frappe.set_user(self.hr_user)
+		with self.assertRaises(frappe.PermissionError):
+			save_task(self.other_company_project, subject="_Test U4 Cross-Company Task")
+		with self.assertRaises(frappe.PermissionError):
+			set_project_members(self.other_company_project, [])
+
+	def test_closing_a_task_sets_status_and_keeps_booked_time_readable(self):
+		from helixhr.api import save_task
+
+		frappe.set_user(self.dm_user)
+		task = save_task(self.member_project, subject="_Test U4 Task To Close")
+		self.assertEqual(task["status"], "Open")
+
+		self._book_time(self.member_project, task["name"], hours=3)
+
+		frappe.set_user(self.dm_user)
+		closed = save_task(self.member_project, task=task["name"], status="Completed")
+		self.assertEqual(closed["status"], "Completed")
+		self.assertTrue(frappe.db.exists("Task", task["name"]))
+
+		rows = frappe.get_all(
+			"Timesheet Detail", filters={"task": task["name"]}, fields=["hours", "is_billable"]
+		)
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0].hours, 3)
+
+	def test_renaming_a_task_does_not_change_its_status(self):
+		from helixhr.api import save_task
+
+		frappe.set_user(self.dm_user)
+		task = save_task(self.member_project, subject="_Test U4 Task To Rename")
+		renamed = save_task(self.member_project, task=task["name"], subject="_Test U4 Task Renamed")
+		self.assertEqual(renamed["name"], task["name"])
+		self.assertEqual(renamed["subject"], "_Test U4 Task Renamed")
+		self.assertEqual(renamed["status"], "Open")
+
+	def test_adding_a_task_to_a_project_the_caller_does_not_administer_by_id_is_refused(self):
+		"""A task that belongs to `other_project` cannot be reached by
+		naming `member_project` (the caller's own scope) alongside it."""
+		from helixhr.api import save_task
+
+		other_task = frappe.get_doc(
+			{"doctype": "Task", "project": self.other_project, "subject": "_Test U4 Foreign Task"}
+		).insert(ignore_permissions=True)
+
+		frappe.set_user(self.dm_user)
+		with self.assertRaises(frappe.PermissionError):
+			save_task(self.member_project, task=other_task.name, subject="Hijacked")
+
+	def test_assigning_an_employee_with_no_linked_user_refuses_the_whole_call_and_names_them(self):
+		from helixhr.api import set_project_members
+
+		linked_employee = frappe.db.get_value("Employee", {"user_id": self.dm_user})
+		orphan_name = _make_employee_without_user(self.company, "_Test U4 Orphan Employee")
+		orphan_display_name = frappe.db.get_value("Employee", orphan_name, "employee_name")
+
+		frappe.set_user(self.dm_user)
+		with self.assertRaises(frappe.ValidationError) as caught:
+			set_project_members(self.member_project, [linked_employee, orphan_name])
+		self.assertIn(orphan_display_name, str(caught.exception))
+
+		# The whole call refused -- membership is unchanged, not partially applied.
+		members = {row.user for row in frappe.get_doc("Project", self.member_project).users}
+		self.assertEqual(members, {self.dm_user, self.worker_user})
+
+	def test_assigning_the_same_set_twice_is_idempotent(self):
+		from helixhr.api import set_project_members
+
+		linked_employee = frappe.db.get_value("Employee", {"user_id": self.dm_user})
+
+		frappe.set_user(self.dm_user)
+		first = set_project_members(self.member_project, [linked_employee])
+		second = set_project_members(self.member_project, [linked_employee])
+		self.assertEqual(first, second)
+		members = [row.user for row in frappe.get_doc("Project", self.member_project).users]
+		self.assertEqual(members, [self.dm_user])
+
+	def test_removing_a_member_does_not_alter_time_they_already_recorded(self):
+		from helixhr.api import save_task, set_project_members
+
+		frappe.set_user(self.dm_user)
+		task = save_task(self.member_project, subject="_Test U4 Removed Member Task")
+		self._book_time(self.member_project, task["name"], hours=4)
+
+		# Replace the membership with an empty set -- the caller removes
+		# themselves along with everyone else.
+		frappe.set_user(self.dm_user)
+		set_project_members(self.member_project, [])
+
+		rows = frappe.get_all("Timesheet Detail", filters={"task": task["name"]}, fields=["hours"])
+		self.assertEqual(len(rows), 1)
+		self.assertEqual(rows[0].hours, 4)
+		# `setUp`'s `make_test_project` re-adds any member missing from its
+		# `members` list on the next test, so membership left empty here
+		# does not need restoring for this class's other tests to hold.
+
+	def test_marking_a_project_billable_does_not_alter_an_existing_timesheet_detail_row(self):
+		"""R9, thin per the plan's own note: full billable-hours capture is
+		U6. This only confirms flipping the flag never touches a
+		`Timesheet Detail` row that already exists."""
+		from helixhr.api import save_task
+
+		frappe.set_user(self.dm_user)
+		task = save_task(self.member_project, subject="_Test U4 Billable Flip Task")
+		self._book_time(self.member_project, task["name"], hours=1)
+
+		before = frappe.get_all(
+			"Timesheet Detail",
+			filters={"task": task["name"]},
+			fields=["name", "hours", "is_billable", "billing_hours"],
+		)
+		self.assertEqual(len(before), 1)
+
+		frappe.set_user("Administrator")
+		frappe.db.set_value("Project", self.member_project, "helixhr_is_billable", 1)
+
+		after = frappe.get_all(
+			"Timesheet Detail",
+			filters={"task": task["name"]},
+			fields=["name", "hours", "is_billable", "billing_hours"],
+		)
+		self.assertEqual(after, before)

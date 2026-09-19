@@ -6591,7 +6591,14 @@ _PROJECT_NOT_FOUND = "That project isn't here."
 
 _PROJECT_SEARCH_FIELDS = ("name", "project_name", "status", "company")
 
-_PROJECT_FIELDS = ("name", "project_name", "status", "expected_start_date", "expected_end_date")
+_PROJECT_FIELDS = (
+	"name",
+	"project_name",
+	"status",
+	"expected_start_date",
+	"expected_end_date",
+	"helixhr_is_billable",
+)
 
 # Task.status has no single "closed" value -- Completed and Cancelled both
 # are -- so "open" is everything else, not one literal status string.
@@ -6716,14 +6723,229 @@ def get_project(project):
 		"name": data.name,
 		"project_name": data.project_name,
 		"status": data.status,
-		# The billable flag ships as a custom field in P7-U4; until then this
-		# is a stable stub so the response shape does not change under it.
-		"billable": False,
+		"billable": bool(data.helixhr_is_billable),
 		"expected_start_date": data.expected_start_date,
 		"expected_end_date": data.expected_end_date,
 		"tasks": _project_open_tasks(project),
 		"members": _project_members(project),
 	}
+
+
+# ---------------------------------------------------------------------------
+# P7-U4: creating projects and tasks, and assigning people.
+#
+# Three POST-only, rate-limited writes, each gated by the same
+# `resolve_project_scope` / `project_in_scope` pair that gates the reads
+# above -- no separate authorisation logic (the plan's own instruction for
+# this unit).
+# ---------------------------------------------------------------------------
+
+
+def _write_project_users(doc, *, insert):
+	"""Insert or save a Project whose `users` child table changed, without
+	needing the caller's own session to hold Frappe's `share` doc-perm on
+	Project.
+
+	ERPNext's own `Project.after_insert` / `validate` auto-shares the
+	document with everyone newly added to `users`
+	(`control_access_for_project_users`), and that share step -- unlike the
+	surrounding `insert`/`save` -- checks the *session user's* `share`
+	permission regardless of `ignore_permissions`. The `HelixHR Delivery
+	Manager` DocPerm (P7-U1) grants read/write/create only, on purpose:
+	`resolve_project_scope` / `project_in_scope` (KTD8) is this app's real
+	authorisation boundary for Project, not Frappe's own permission system,
+	so the write runs as Administrator rather than widening every Delivery
+	Manager's standing grant just to satisfy an internal Frappe side effect.
+
+	Attribution is restored immediately after: the technical actor that
+	satisfied Frappe's check is not who actually asked for this write.
+	"""
+	caller = frappe.session.user
+	frappe.set_user("Administrator")
+	try:
+		if insert:
+			doc.insert(ignore_permissions=True)
+		else:
+			doc.save(ignore_permissions=True)
+	finally:
+		frappe.set_user(caller)
+	frappe.db.set_value(
+		doc.doctype, doc.name, {"owner": caller, "modified_by": caller}, update_modified=False
+	)
+
+
+@frappe.whitelist(methods=["POST"])
+def create_project(project_name, is_billable=0, **kwargs):
+	"""Create a project the caller administers (P7-R1, P7-R6).
+
+	`company` is never read from the request -- it comes from the caller's
+	own Employee record, the same one `resolve_project_scope`'s "company"
+	and "assigned" branches key on, so a company named in the request body
+	(accepted here only via `**kwargs`, then ignored, the same pattern
+	`get_dashboard` uses to swallow extra caller input) can never steer
+	which company the project lands in.
+
+	The creator is added as a `Project User` in the same operation: without
+	it, a HelixHR Delivery Manager who just created the project would fall
+	straight back out of their own "assigned" scope and lose it the instant
+	they made it (the plan's own named risk for this unit).
+	"""
+	rate_limit_per_user("create_project")
+	scope = resolve_project_scope(frappe.session.user)
+	if scope["kind"] == "none":
+		frappe.throw(_("You are not authorised to create projects here."), frappe.PermissionError)
+
+	project_name = (project_name or "").strip()
+	if not project_name:
+		frappe.throw(_("Give the project a name."))
+
+	employee = get_current_employee()
+	company = frappe.db.get_value("Employee", employee, "company")
+
+	doc = frappe.get_doc(
+		{
+			"doctype": "Project",
+			"project_name": project_name,
+			"company": company,
+			"helixhr_is_billable": cint(is_billable),
+			"users": [{"user": frappe.session.user}],
+		}
+	)
+	_write_project_users(doc, insert=True)
+
+	return {
+		"name": doc.name,
+		"project_name": doc.project_name,
+		"status": doc.status,
+		"billable": bool(doc.helixhr_is_billable),
+		"expected_start_date": doc.expected_start_date,
+		"expected_end_date": doc.expected_end_date,
+		"tasks": [],
+		"members": _project_members(doc.name),
+	}
+
+
+def _task_projection(doc):
+	return {
+		"name": doc.name,
+		"subject": doc.subject,
+		"status": doc.status,
+		"priority": doc.priority,
+		"exp_start_date": doc.exp_start_date,
+		"exp_end_date": doc.exp_end_date,
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+def save_task(project, task=None, subject=None, status=None):
+	"""Add, rename, or close a task on `project` (P7-R2).
+
+	`task` absent means add a new one; present means rename and/or close an
+	existing one. Closing sets ERPNext's own `status` (a `Task.status` of
+	`Completed` or `Cancelled`, validated by ERPNext's own Select options on
+	save) rather than deleting the record, so time already booked against
+	the task keeps a task to be read back against.
+
+	Scoped by `resolve_project_scope` / `project_in_scope` exactly like
+	`get_project` -- refused, with the same not-found wording, for a caller
+	outside their scope or for a `task` that does not actually belong to
+	`project`, so a caller cannot reach a task by naming a project they do
+	administer alongside a task id from one they do not.
+	"""
+	rate_limit_per_user("save_task")
+	scope = resolve_project_scope(frappe.session.user)
+	if scope["kind"] == "none" or not project_in_scope(project, scope):
+		frappe.throw(_(_PROJECT_NOT_FOUND), frappe.PermissionError)
+
+	if task:
+		current_project = frappe.db.get_value("Task", task, "project")
+		if not current_project or current_project != project:
+			frappe.throw(_(_PROJECT_NOT_FOUND), frappe.PermissionError)
+		doc = frappe.get_doc("Task", task)
+		if subject is not None:
+			subject = subject.strip()
+			if not subject:
+				frappe.throw(_("Give the task a subject."))
+			doc.subject = subject
+	else:
+		subject = (subject or "").strip()
+		if not subject:
+			frappe.throw(_("Give the task a subject."))
+		# ERPNext's `Task.status` carries no doctype-level default -- Desk's
+		# new-task form fills "Open" client-side, which this write path has
+		# no client side to borrow, so it is named explicitly here.
+		doc = frappe.get_doc(
+			{"doctype": "Task", "project": project, "subject": subject, "status": "Open"}
+		)
+
+	if status is not None:
+		doc.status = status
+
+	if task:
+		doc.save(ignore_permissions=True)
+	else:
+		doc.insert(ignore_permissions=True)
+
+	return _task_projection(doc)
+
+
+@frappe.whitelist(methods=["POST"])
+def set_project_members(project, employees):
+	"""Replace `project`'s full `Project User` membership with `employees`
+	(P7-R3, KTD5).
+
+	The portal's surface is people, not logins, so each Employee is resolved
+	to its linked `user_id` -- the field ERPNext's own `Project User` child
+	table keys on. If *any* employee named has no linked user the whole call
+	is refused, naming which one: that is the caller's own directory data
+	(they administer this project), not a disclosure.
+
+	Replaces the set rather than patching it, so calling this twice with the
+	same employees is a no-op, and calling it with a shorter list removes
+	whoever is missing -- without touching any time they already recorded,
+	since `Project User` carries no reference to `Timesheet Detail`.
+	"""
+	rate_limit_per_user("set_project_members")
+	scope = resolve_project_scope(frappe.session.user)
+	if scope["kind"] == "none" or not project_in_scope(project, scope):
+		frappe.throw(_(_PROJECT_NOT_FOUND), frappe.PermissionError)
+
+	if isinstance(employees, str):
+		employees = frappe.parse_json(employees)
+	# De-duplicated, order preserved: a caller sending the same employee
+	# twice should not raise "duplicate row" from ERPNext's own child-table
+	# validation.
+	employees = list(dict.fromkeys(employees or []))
+
+	rows = (
+		frappe.get_all(
+			"Employee",
+			filters={"name": ["in", employees]},
+			fields=["name", "employee_name", "user_id"],
+		)
+		if employees
+		else []
+	)
+	by_name = {row.name: row for row in rows}
+
+	users = []
+	for employee in employees:
+		row = by_name.get(employee)
+		if not row:
+			frappe.throw(_("{0} isn't an employee here.").format(employee))
+		if not row.user_id:
+			frappe.throw(
+				_("{0} has no linked user, so they can't be assigned to a project.").format(
+					row.employee_name or employee
+				)
+			)
+		users.append(row.user_id)
+
+	doc = frappe.get_doc("Project", project)
+	doc.set("users", [{"user": user} for user in users])
+	_write_project_users(doc, insert=False)
+
+	return {"members": _project_members(project)}
 
 
 # ---------------------------------------------------------------------------

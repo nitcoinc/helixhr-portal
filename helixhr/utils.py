@@ -382,6 +382,11 @@ RATE_LIMIT_POLICY = {
 	# `search_people` / `get_person` are bounded above.
 	"search_projects": (60, 60),
 	"get_project": (60, 60),
+	# P7-U4. Occasional administrative writes, not a per-keystroke path --
+	# bounded like `save_request_category` and the other config writes above.
+	"create_project": (20, 3600),
+	"save_task": (30, 3600),
+	"set_project_members": (20, 3600),
 	# Reads that fan out (the home page and the approvals queue each run
 	# several queries) or that answer for one record by name -- bounded so
 	# a scripted walk over sequential record ids is a flood the limiter
