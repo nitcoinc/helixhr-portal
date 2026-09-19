@@ -46,3 +46,9 @@ helixhr.patches.v1_0.seed_celebration_templates
 # HelixHR Message Template rows -- inserted only if absent, never
 # overwriting an HR edit, same shape as seed_celebration_templates above.
 helixhr.patches.v1_0.seed_message_templates
+# P7-U1: same module, new deltas (HelixHR Delivery Manager on Project and
+# Task -- named with the app prefix because ERPNext already ships a stock
+# "Delivery Manager" role for Delivery Note / Delivery Trip, found on the
+# bench rather than assumed; reusing that name would have handed this
+# grant to every existing Delivery Note user and vice versa).
+helixhr.patches.v1_0.apply_permission_deltas #2026-09-20 P7-U1 HelixHR Delivery Manager permissions

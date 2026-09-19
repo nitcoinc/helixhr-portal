@@ -70,6 +70,43 @@ class TestPreflight(IntegrationTestCase):
 		self.assertEqual(result["status"], preflight.FAIL)
 		self.assertIn("unreviewed_field", result["detail"])
 
+	def test_delivery_manager_role_is_portal_only_report_free_and_hooked(self):
+		self.assertEqual(preflight.check_delivery_manager_role()["status"], preflight.PASS)
+
+		from unittest.mock import patch
+
+		real_get_value = frappe.db.get_value
+
+		with patch.object(preflight, "DESK_ROLES", frozenset({"HelixHR Delivery Manager"})):
+			result = preflight.check_delivery_manager_role()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("DESK_ROLES", result["detail"])
+
+		def _no_role(doctype, filters=None, *args, **kwargs):
+			if doctype == "Role" and filters == preflight.DELIVERY_MANAGER:
+				return None
+			return real_get_value(doctype, filters, *args, **kwargs)
+
+		with patch.object(preflight.frappe.db, "get_value", side_effect=_no_role):
+			result = preflight.check_delivery_manager_role()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("Role fixture is missing", result["detail"])
+
+		def _report_grant(doctype, filters=None, *args, **kwargs):
+			if doctype == "Custom DocPerm" and isinstance(filters, dict) and filters.get("parent") == "Timesheet":
+				return "some-row"
+			return real_get_value(doctype, filters, *args, **kwargs)
+
+		with patch.object(preflight.frappe.db, "get_value", side_effect=_report_grant):
+			result = preflight.check_delivery_manager_role()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("report permission on Timesheet", result["detail"])
+
+		with patch.object(preflight.frappe, "get_hooks", return_value={}):
+			result = preflight.check_delivery_manager_role()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("hook", result["detail"])
+
 	def test_a_linked_employee_without_a_user_permission_fails(self):
 		perms = frappe.get_all(
 			"User Permission",

@@ -256,6 +256,66 @@ def make_test_it_user():
 	return employee_name, IT_TEAM_USER
 
 
+DELIVERY_MANAGER_USER = "delivery-manager@helixhr.test"
+
+
+def make_test_delivery_manager(**employee_fields):
+	"""A HelixHR Delivery Manager portal user with an Employee record and no Desk
+	role (P7-U1) -- the same shape as `make_test_it_user`. Accepts
+	`employee_fields` (e.g. `status="Left"`) so the offboarding scope tests
+	can create one whose Employee is not Active."""
+	company = ensure_test_company()
+	employee_name = make_test_user(DELIVERY_MANAGER_USER, company, **employee_fields)
+	user = frappe.get_doc("User", DELIVERY_MANAGER_USER)
+	roles = [row.role for row in user.roles if row.role != "Employee"]
+	if "HelixHR Delivery Manager" not in roles:
+		roles.append("HelixHR Delivery Manager")
+	if roles != [row.role for row in user.roles]:
+		user.set("roles", [{"role": role} for role in roles])
+		user.save(ignore_permissions=True)
+		frappe.clear_cache(user=DELIVERY_MANAGER_USER)
+	return employee_name, DELIVERY_MANAGER_USER
+
+
+def make_test_project(company, name, members=()):
+	"""A Project for the permission and scope tests, with `members` (Frappe
+	user ids) added to its `Project User` child table -- the same field
+	ERPNext's own bookable-project lookup already keys on (KTD5).
+
+	Looked up by `project_name` (the field these tests name), not by
+	`name` -- Project autonames off a naming series, so its docname is
+	never the string a test passed in. `IntegrationTestCase` rolls its
+	database back once per *class*, not per test method, so a fixed
+	project name reused across several test methods in the same class
+	must find and extend the row an earlier method already created rather
+	than trying to insert it again."""
+	existing_name = frappe.db.get_value("Project", {"project_name": name})
+	if existing_name:
+		project = frappe.get_doc("Project", existing_name)
+	else:
+		project = frappe.get_doc(
+			{
+				"doctype": "Project",
+				"project_name": name,
+				"naming_series": "PROJ-.####",
+				"company": company,
+				"users": [{"user": user} for user in members],
+			}
+		)
+		project.insert(ignore_permissions=True)
+		return project.name
+
+	existing = {row.user for row in project.users}
+	changed = False
+	for user in members:
+		if user not in existing:
+			project.append("users", {"user": user})
+			changed = True
+	if changed:
+		project.save(ignore_permissions=True)
+	return project.name
+
+
 TEST_EMAIL_ACCOUNT = "_Test HelixHR Outgoing"
 
 

@@ -146,6 +146,26 @@ DELTAS = {
 	"HelixHR Request Category": (
 		(("IT Team", 0, 0), {"read": 1}),
 	),
+	# P7-U1: HelixHR Delivery Manager administers projects and tasks from the
+	# portal. Named with the app prefix -- ERPNext already ships a stock
+	# "Delivery Manager" role for Delivery Note / Delivery Trip, found on the
+	# bench rather than assumed, and reusing that name would have handed this
+	# grant to every existing Delivery Note user (and vice versa).
+	# No Employee permission -- the people picker resolves names through
+	# existing scoped reads -- and deliberately no `report` permission on
+	# Timesheet: that permission is doctype-wide and would hand the holder
+	# every Timesheet report through Frappe's own report endpoint, including
+	# the one carrying `billing_amount` (KTD3). A DocPerm alone carries no
+	# scope, so this grant is paired with the hooks in
+	# `helixhr/project_permissions.py`, registered in hooks.py (KTD8) -- the
+	# hooks are the real boundary, this grant is what makes the framework
+	# consider the role for these doctypes at all.
+	"Project": (
+		(("HelixHR Delivery Manager", 0, 0), {"read": 1, "write": 1, "create": 1}),
+	),
+	"Task": (
+		(("HelixHR Delivery Manager", 0, 0), {"read": 1, "write": 1, "create": 1}),
+	),
 }
 
 
@@ -157,8 +177,34 @@ def execute():
 		# exactly the access their installed app version gave them.
 		setup_custom_perms(doctype)
 		for (role, permlevel, if_owner), values in deltas:
+			_ensure_role(role)
 			_apply(doctype, role, permlevel, if_owner, values)
 		frappe.clear_cache(doctype=doctype)
+
+
+def _ensure_role(role):
+	"""Create ``role`` with the portal-only shape `fixtures/role.json` ships
+	(`desk_access=0`, `is_custom=0`), if migrate's own fixture sync has not
+	created it yet.
+
+	Patches always run *before* fixtures on every `bench migrate`
+	(`frappe.migrate.Migrate.run_schema_updates` then `post_schema_updates`),
+	and a fresh `bench install-app` marks every patch complete without
+	running it at all (`frappe.installer.install_app` calls
+	`set_all_patches_as_completed` before `sync_fixtures`) -- so a role this
+	app owns and a patch that grants it access can only safely land in
+	different migrate cycles unless the patch also knows how to create its
+	own role. Verified on the bench: `HelixHR Delivery Manager` referenced by
+	this same patch, in the same migrate that first ships its fixture, threw
+	`LinkValidationError` without this. A no-op for a role that already
+	exists (`IT Team`, or any stock role named in `DELTAS`), and harmless
+	when the fixture sync moments later reconciles the same row.
+	"""
+	if frappe.db.exists("Role", role):
+		return
+	frappe.get_doc({"doctype": "Role", "role_name": role, "desk_access": 0, "is_custom": 0}).insert(
+		ignore_permissions=True
+	)
 
 
 def _drop_legacy_fixture_rows(doctype):
