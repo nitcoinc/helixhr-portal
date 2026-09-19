@@ -351,4 +351,78 @@ test.describe.serial('timesheet entry', () => {
 
     await context.close()
   })
+
+  test('one line keeps a separate note per day, round-trips them, and Copy day copies the source day, not the line', async ({
+    browser,
+  }: {
+    browser: Browser
+  }) => {
+    // P7-U7, R10, R11. Runs last in this file's serial sequence, after the
+    // source week already carries 4.25h on its Monday from the first test
+    // -- this test only adds to it, so it cannot disturb the day-total and
+    // history assertions that already ran against that week.
+    test.setTimeout(60000)
+    const context = await phone(browser)
+    const page = await context.newPage()
+
+    await page.goto(`/helixhr/timesheet/${SOURCE_WEEK}`)
+    await expect(page.getByRole('heading', { name: 'Timesheet' })).toBeVisible()
+    const dayList = page.getByTestId('week-days')
+
+    // Monday already books this project (from the first test); give that
+    // day's row its own note.
+    await page.getByRole('tab', { name: /^Mon / }).click()
+    const note = dayList.getByLabel(/^Note for row/)
+    await note.fill("Monday's own note")
+    await note.blur()
+
+    // Wednesday: the *same* project, so this is the same line -- but a
+    // different note. Before P7-U7 a note lived on the line, so this could
+    // never have been expressed; the regression it guards is one day's
+    // note silently overwriting, or being overwritten by, the other's.
+    await page.getByRole('tab', { name: /^Wed / }).click()
+    await dayList.getByRole('button', { name: /Add time to Wed/ }).click()
+    await dayList.getByLabel(/^Project for row/).selectOption({ label: PROJECT_NAME })
+    await dayList.getByLabel(new RegExp(`^Hours on ${PROJECT_NAME}$`)).fill('2')
+    const wedNote = dayList.getByLabel(/^Note for row/)
+    await wedNote.fill("Wednesday's different note")
+    await wedNote.blur()
+
+    // The note sits behind the day's own entry affordance rather than as
+    // seven always-visible inputs, so this phone layout never needs to
+    // scroll sideways to reach it.
+    const overflows = await dayList.evaluate((el) => el.scrollWidth > el.clientWidth + 1)
+    expect(overflows).toBe(false)
+
+    await expect(page.getByText('Unsaved changes')).toBeVisible()
+    await page.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(page.getByText('Saved just now')).toBeVisible({ timeout: 10000 })
+
+    // Reload from the server -- not just the in-memory model -- and check
+    // each day still carries its own note rather than the other's (R11).
+    await page.reload()
+    await page.getByRole('tab', { name: /^Mon / }).click()
+    await expect(dayList.getByLabel(/^Note for row/)).toHaveValue("Monday's own note")
+    await page.getByRole('tab', { name: /^Wed / }).click()
+    await expect(dayList.getByLabel(/^Note for row/)).toHaveValue("Wednesday's different note")
+
+    // Thursday has nothing yet, so the nearest booked day before it --
+    // Wednesday -- offers "Copy them". Accepting it must bring Wednesday's
+    // note, not Monday's (an actual bug risk the plan calls out: before
+    // this change the note lived on the line, so copying "rode along" by
+    // accident rather than by day).
+    await page.getByRole('tab', { name: /^Thu / }).click()
+    await page.getByRole('button', { name: 'Copy them' }).click()
+    await expect(dayList.getByLabel(/^Note for row/)).toHaveValue("Wednesday's different note")
+
+    // Clearing a note saves as empty, not as whatever was there before.
+    await dayList.getByLabel(/^Note for row/).fill('')
+    await page.getByRole('button', { name: 'Save', exact: true }).click()
+    await expect(page.getByText('Saved just now')).toBeVisible({ timeout: 10000 })
+    await page.reload()
+    await page.getByRole('tab', { name: /^Thu / }).click()
+    await expect(dayList.getByLabel(/^Note for row/)).toHaveValue('')
+
+    await context.close()
+  })
 })
