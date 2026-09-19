@@ -50,10 +50,17 @@ const projects = createResource({
 
 // --- the model ----------------------------------------------------------
 //
-// One model feeds both layouts (P2-U6 step 9): a *line* is a project + task
-// + note, carrying an hours map keyed by calendar date. The phone renders
-// the selected day's slice of it; the desktop renders it whole. Nothing is
-// duplicated between the two, so nothing can drift between them.
+// One model feeds both layouts (P2-U6 step 9): a *line* is a project + task,
+// carrying an hours map and a notes map, both keyed by calendar date. The
+// phone renders the selected day's slice of it; the desktop renders it
+// whole. Nothing is duplicated between the two, so nothing can drift
+// between them.
+//
+// P7-U7 / KTD7: the note used to be part of a line's identity (project +
+// task + note), which forced one note across the whole week -- two days
+// with different notes could never share a line, so the grid silently
+// dropped one of them. The note is now per day, carried beside `hours` the
+// same way, and dropped from the grouping key entirely.
 
 const lines = ref([])
 const selectedDate = ref(today())
@@ -68,39 +75,47 @@ let nextLineId = 0
  * it and moves the focus and the typed value with it. */
 function newLine(fields = {}) {
   nextLineId += 1
-  return { id: `line-${nextLineId}`, project: '', task: '', note: '', hours: {}, ...fields }
+  return { id: `line-${nextLineId}`, project: '', task: '', hours: {}, notes: {}, ...fields }
 }
 
-/** Server rows are one row per project/task/note *per day*; a line is the
- * same booking across the week. Two server rows that agree on all three and
- * fall on the same day are summed -- the portal cannot create that, but a
- * timesheet edited in Desk can. */
+/** Server rows are one row per project/task *per day*; a line is the same
+ * booking across the week. Two server rows that agree on project and task
+ * and fall on the same day are summed -- the portal cannot create that, but
+ * a timesheet edited in Desk can. The note travels with its own row's date;
+ * a duplicate row on the same day keeps the first note seen, the same rule
+ * `hours` already applied to its own value before this change. */
 function linesFrom(rows, weekMonday) {
   const found = new Map()
   const inWeek = new Set(weekDates(weekMonday))
   for (const row of rows || []) {
     if (!inWeek.has(row.date)) continue
-    const key = [row.project || '', row.task || '', row.note || ''].join(' | ')
+    const key = [row.project || '', row.task || ''].join(' | ')
     if (!found.has(key)) {
-      found.set(
-        key,
-        newLine({ project: row.project || '', task: row.task || '', note: row.note || '' }),
-      )
+      found.set(key, newLine({ project: row.project || '', task: row.task || '' }))
     }
     const line = found.get(key)
     line.hours[row.date] = roundHours((line.hours[row.date] || 0) + Number(row.hours || 0))
+    if (line.notes[row.date] === undefined) line.notes[row.date] = row.note || ''
   }
   return [...found.values()]
 }
 
 /** What the server is asked to store: only days that carry real hours. A
- * line added but not filled in is a state of the editor, not of the week. */
+ * line added but not filled in is a state of the editor, not of the week.
+ * A day with a note but no hours is likewise never sent -- the note map
+ * only ever contributes to a row that `hours` already produced. */
 function serialize() {
   const rows = []
   for (const line of lines.value) {
     for (const [date, hours] of Object.entries(line.hours)) {
       if (!hours) continue
-      rows.push({ date, project: line.project, task: line.task || '', hours, note: line.note || '' })
+      rows.push({
+        date,
+        project: line.project,
+        task: line.task || '',
+        hours,
+        note: line.notes[date] || '',
+      })
     }
   }
   return rows
@@ -156,7 +171,10 @@ function removeLine({ id, date }) {
   if (!line) return
   // Removing a row on the phone removes it from *that day*; a line still
   // booked on other days is not deleted out from under them.
-  if (date) delete line.hours[date]
+  if (date) {
+    delete line.hours[date]
+    delete line.notes[date]
+  }
   if (!date || !Object.keys(line.hours).length) {
     lines.value = lines.value.filter((row) => row.id !== id)
   }
@@ -177,12 +195,26 @@ function updateLine({ id, field, value }) {
   if (field === 'project') line.task = ''
 }
 
-/** "Same projects as Wednesday? Copy them." Hours and the note come with it;
- * nothing about approval does. */
+/** The note is per day (P7-U7), so it is set independently of `updateLine`
+ * -- an empty string is a deliberate value here (clearing a note), not a
+ * falsy one to skip. */
+function setNote({ id, date, value }) {
+  const line = lines.value.find((row) => row.id === id)
+  if (!line) return
+  line.notes[date] = value
+}
+
+/** "Same projects as Wednesday? Copy them." Hours and *that day's* note
+ * come with it; nothing about approval does. Before P7-U7 the note lived on
+ * the line, not the day, so it rode along by accident -- now it has to be
+ * copied explicitly, from the source day, or a copy would silently drop it. */
 function copyDay(fromIso) {
   for (const line of lines.value) {
     const hours = line.hours[fromIso]
-    if (hours) line.hours[selectedDate.value] = hours
+    if (hours) {
+      line.hours[selectedDate.value] = hours
+      line.notes[selectedDate.value] = line.notes[fromIso] || ''
+    }
   }
 }
 
@@ -528,6 +560,7 @@ const savedLabel = computed(() => {
           @remove-line="removeLine"
           @set-hours="setHours"
           @update-line="updateLine"
+          @set-note="setNote"
           @copy-day="copyDay"
         />
       </div>

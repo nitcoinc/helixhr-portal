@@ -907,3 +907,115 @@ class TestApiTimesheet(IntegrationTestCase):
 		doc = frappe.get_doc("Timesheet", name)
 		self.assertEqual(doc.workflow_state, "Pending Approval")
 		self.assertEqual(doc.time_logs[0].is_billable, 1)
+
+
+	# -----------------------------------------------------------------------
+	# P7-U7 / R10, R11: per-day notes.
+	#
+	# The write path already stores one `description` per Timesheet Detail
+	# row, and `get_my_week` already returns that row's own `description` as
+	# `note` (helixhr/api.py get_my_week, `"note": row.description`). The
+	# change for per-day notes is entirely in the frontend's grouping key
+	# (P7-KTD7) -- these tests exist to prove that claim rather than to guard
+	# a code change, and would already have passed before U7 touched a
+	# single line of Vue.
+	# -----------------------------------------------------------------------
+
+	def test_two_days_on_one_line_carry_different_notes_and_read_back_correctly(self):
+		tuesday_row = self._week_row(hours=3)
+		tuesday_row["date"] = str(add_days(self.monday, 1))
+		tuesday_row["note"] = "Monday's note"
+
+		wednesday_row = self._week_row(hours=2)
+		wednesday_row["date"] = str(add_days(self.monday, 2))
+		wednesday_row["note"] = "a different note entirely"
+
+		frappe.set_user(EMPLOYEE_USER)
+		save_my_week(str(self.monday), json.dumps([tuesday_row, wednesday_row]))
+
+		rows = {row["date"]: row for row in get_my_week(str(self.monday))["timesheet"]["rows"]}
+		self.assertEqual(rows[tuesday_row["date"]]["note"], "Monday's note")
+		self.assertEqual(rows[wednesday_row["date"]]["note"], "a different note entirely")
+
+	def test_a_note_on_one_day_only_reads_back_with_the_other_day_empty(self):
+		noted_row = self._week_row(hours=4)
+		noted_row["note"] = "only this day has a note"
+
+		bare_row = self._week_row(hours=1)
+		bare_row["date"] = str(add_days(self.monday, 1))
+		bare_row["note"] = ""
+
+		frappe.set_user(EMPLOYEE_USER)
+		save_my_week(str(self.monday), json.dumps([noted_row, bare_row]))
+
+		rows = {row["date"]: row for row in get_my_week(str(self.monday))["timesheet"]["rows"]}
+		self.assertEqual(rows[noted_row["date"]]["note"], "only this day has a note")
+		self.assertIn(rows[bare_row["date"]]["note"], (None, ""))
+
+	def test_clearing_a_note_saves_as_empty_not_the_previous_value(self):
+		frappe.set_user(EMPLOYEE_USER)
+		first_row = self._week_row(hours=4)
+		first_row["note"] = "will be cleared"
+		save_my_week(str(self.monday), json.dumps([first_row]))
+
+		cleared_row = self._week_row(hours=4)
+		cleared_row["note"] = ""
+		save_my_week(str(self.monday), json.dumps([cleared_row]))
+
+		row = get_my_week(str(self.monday))["timesheet"]["rows"][0]
+		self.assertIn(row["note"], (None, ""))
+
+	def test_a_note_without_hours_is_refused_rather_than_saved_as_a_phantom_row(self):
+		"""The frontend never sends a day with a note but no hours (P7-U7),
+		and the server backs that up independently: `_validate_rows` refuses
+		any row below 0.25 hours, note or not."""
+		phantom_row = self._week_row(hours=0)
+		phantom_row["note"] = "a note with nothing behind it"
+
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.ValidationError):
+			save_my_week(str(self.monday), json.dumps([phantom_row]))
+
+	def test_a_timesheet_written_before_per_day_notes_reads_back_with_each_days_note_intact(self):
+		"""R11. Simulates a Timesheet written the way the pre-U7 code path
+		always wrote it -- one `Timesheet Detail` row per project/task/date,
+		each with its own `description` -- by inserting the document directly
+		rather than through `save_my_week`, and confirms `get_my_week` still
+		attaches each row's own note to its own day rather than merging or
+		dropping either. Nothing here is new server behaviour; it is the
+		existing read path exercised against data it never wrote itself."""
+		company = frappe.db.get_value("Employee", self.employee_name, "company")
+		monday_start = get_datetime(f"{self.monday} 00:00:00")
+		tuesday_start = get_datetime(f"{add_days(self.monday, 1)} 00:00:00")
+
+		doc = frappe.get_doc(
+			{
+				"doctype": "Timesheet",
+				"employee": self.employee_name,
+				"company": company,
+				"time_logs": [
+					{
+						"project": self.project,
+						"hours": 3,
+						"description": "Monday's pre-U7 note",
+						"activity_type": "General",
+						"from_time": monday_start,
+						"to_time": frappe.utils.add_to_date(monday_start, hours=3),
+					},
+					{
+						"project": self.project,
+						"hours": 5,
+						"description": "Tuesday's pre-U7 note",
+						"activity_type": "General",
+						"from_time": tuesday_start,
+						"to_time": frappe.utils.add_to_date(tuesday_start, hours=5),
+					},
+				],
+			}
+		)
+		doc.insert(ignore_permissions=True)
+
+		frappe.set_user(EMPLOYEE_USER)
+		rows = {row["date"]: row for row in get_my_week(str(self.monday))["timesheet"]["rows"]}
+		self.assertEqual(rows[str(self.monday)]["note"], "Monday's pre-U7 note")
+		self.assertEqual(rows[str(add_days(self.monday, 1))]["note"], "Tuesday's pre-U7 note")
