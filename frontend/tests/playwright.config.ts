@@ -56,7 +56,13 @@ export default defineConfig({
       // P5-U15: organisation.spec.ts joins this list -- HR is the actor
       // `get_organisation_view` is written for. P6-U5/U6: people.spec.ts
       // and reports.spec.ts join it the same way, for `resolve_admin_scope`.
-      testMatch: /(approvals|settings|organisation|people|reports)\.spec\.ts/,
+      // P7-U5: projects.spec.ts joins it too -- an HR Manager resolves to
+      // the "company" branch of `resolve_project_scope`, the same as every
+      // other admin-scope read here. There is no seeded Playwright identity
+      // for the HelixHR Delivery Manager's "assigned" branch (only a Python
+      // integration fixture, `make_test_delivery_manager_employee`), so that
+      // branch is covered there, not here.
+      testMatch: /(approvals|settings|organisation|people|reports|projects)\.spec\.ts/,
     },
     // P5-U11. The routed-worker identity: `IT Team`, portal-only
     // (desk_access: 0), which never reaches Desk and works only the requests
