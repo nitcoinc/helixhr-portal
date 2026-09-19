@@ -387,6 +387,12 @@ RATE_LIMIT_POLICY = {
 	"create_project": (20, 3600),
 	"save_task": (30, 3600),
 	"set_project_members": (20, 3600),
+	# P7-U8. `get_billable_hours` fans out with a join per row, the same
+	# reason `search_projects` / `get_project` are bounded above.
+	# `run_portal_report` runs Frappe's own report engine, which is heavier
+	# per call, so it gets the tighter of the two bounds.
+	"get_billable_hours": (60, 60),
+	"run_portal_report": (30, 60),
 	# Reads that fan out (the home page and the approvals queue each run
 	# several queries) or that answer for one record by name -- bounded so
 	# a scripted walk over sequential record ids is a flood the limiter
