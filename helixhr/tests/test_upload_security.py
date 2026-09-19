@@ -232,6 +232,8 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"search_people": (60, 60),
 			"get_person": (60, 60),
 			"get_report_link": (60, 60),
+			"search_projects": (60, 60),
+			"get_project": (60, 60),
 			"get_dashboard": (60, 60),
 			"get_my_approvals": (60, 60),
 			"get_approval_detail": (60, 60),

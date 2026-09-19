@@ -305,6 +305,25 @@ def project_scope_filters(scope):
 	return None
 
 
+def project_in_scope(project, scope):
+	"""Whether ``project`` falls inside `resolve_project_scope`'s answer --
+	the project-scope sibling of `employee_in_admin_scope` (U3): checked
+	before any other field of the record is read, so a caller outside the
+	scope is refused before the record is touched rather than after.
+
+	Deliberately a fresh `frappe.db.exists` per kind, not a call into
+	`project_scope_filters` plus a membership test against the result --
+	that would mean pulling every project name the caller's scope covers
+	just to answer one yes/no."""
+	if scope["kind"] == "unscoped":
+		return bool(frappe.db.exists("Project", project))
+	if scope["kind"] == "company":
+		return bool(frappe.db.exists("Project", {"name": project, "company": scope["company"]}))
+	if scope["kind"] == "assigned":
+		return bool(frappe.db.exists("Project User", {"parent": project, "user": scope["user"]}))
+	return False
+
+
 def portal_home_page(user=None):
 	"""Where this user lands after signing in.
 
@@ -359,6 +378,10 @@ RATE_LIMIT_POLICY = {
 	"search_people": (60, 60),
 	"get_person": (60, 60),
 	"get_report_link": (60, 60),
+	# P7-U3. Both fan out per project (tasks, members), the same reason
+	# `search_people` / `get_person` are bounded above.
+	"search_projects": (60, 60),
+	"get_project": (60, 60),
 	# Reads that fan out (the home page and the approvals queue each run
 	# several queries) or that answer for one record by name -- bounded so
 	# a scripted walk over sequential record ids is a flood the limiter

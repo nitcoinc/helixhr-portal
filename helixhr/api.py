@@ -73,8 +73,11 @@ from helixhr.utils import (
 	employee_in_admin_scope,
 	get_manager_user,
 	get_week_bounds,
+	project_in_scope,
+	project_scope_filters,
 	rate_limit_per_user,
 	resolve_admin_scope,
+	resolve_project_scope,
 	validate_portal_upload,
 )
 
@@ -6567,6 +6570,159 @@ def get_person(employee):
 		# no other method in this plan hands out this employee's Desk URL.
 		"desk_url": get_url_to_form("Employee", employee) if _can_open_desk(frappe.session.user) else None,
 		"failed_sections": failed,
+	}
+
+
+# ---------------------------------------------------------------------------
+# Reading projects, tasks and members (P7-U3 / R1-R4 read half)
+#
+# The Delivery Manager / HR Manager / System Manager sibling of
+# `search_people` and `get_person` just above -- same shape, scoped by
+# `resolve_project_scope` (U2) instead of `resolve_admin_scope`, and refused
+# entirely for anyone that scope does not grant.
+#
+# One refusal message covers "does not exist", "not yours" and "outside your
+# scope" in `get_project` (KTD9's uniform-refusal ordering, `get_person`'s
+# own pattern): project ids are sequential, so a distinct message per case
+# would let a caller learn which ids exist and whose they are just by
+# reading the wording back.
+
+_PROJECT_NOT_FOUND = "That project isn't here."
+
+_PROJECT_SEARCH_FIELDS = ("name", "project_name", "status", "company")
+
+_PROJECT_FIELDS = ("name", "project_name", "status", "expected_start_date", "expected_end_date")
+
+# Task.status has no single "closed" value -- Completed and Cancelled both
+# are -- so "open" is everything else, not one literal status string.
+_CLOSED_TASK_STATUSES = ("Completed", "Cancelled")
+
+
+def _project_search_projection(row):
+	return {
+		"name": row.name,
+		"project_name": row.project_name,
+		"status": row.status,
+		"company": row.company,
+	}
+
+
+@frappe.whitelist()
+def search_projects():
+	"""Every project this caller administers, per `resolve_project_scope`
+	(P7-R1-R4): unscoped for System Manager, the caller's own company for an
+	HR Manager, exactly the projects a HelixHR Delivery Manager is a member
+	of, refused for anyone else.
+
+	No `query`/paging parameters -- unlike `search_people`'s employee search,
+	a project list is small enough per caller (a company, or one person's
+	memberships) that a page control would be UI the plan never asked for."""
+	rate_limit_per_user("search_projects")
+	scope = resolve_project_scope(frappe.session.user)
+	if scope["kind"] == "none":
+		frappe.throw(_("You are not authorised to view projects here."), frappe.PermissionError)
+
+	filters = project_scope_filters(scope)
+	if filters is None:
+		return {"projects": []}
+
+	rows = frappe.get_all(
+		"Project",
+		filters=filters,
+		fields=list(_PROJECT_SEARCH_FIELDS),
+		order_by="project_name asc",
+		ignore_permissions=True,
+	)
+	return {"projects": [_project_search_projection(row) for row in rows]}
+
+
+def _project_open_tasks(project):
+	return frappe.get_all(
+		"Task",
+		filters={"project": project, "status": ["not in", _CLOSED_TASK_STATUSES]},
+		fields=["name", "subject", "status", "priority", "exp_start_date", "exp_end_date"],
+		order_by="exp_start_date asc, name asc",
+		ignore_permissions=True,
+	)
+
+
+def _project_members(project):
+	"""Every `Project User` row on `project`, resolved to an employee name
+	(KTD5) -- never the raw Frappe User login that `Project User.user`
+	actually stores. An Employee link is preferred; a member with none is
+	still returned, named from the User's own full name, so a missing
+	Employee record is a renderable row rather than a broken one."""
+	rows = frappe.get_all(
+		"Project User", filters={"parent": project}, fields=["user"], order_by="idx asc", ignore_permissions=True
+	)
+	logins = [row.user for row in rows]
+	if not logins:
+		return []
+
+	employees = {
+		row.user_id: row
+		for row in frappe.get_all(
+			"Employee",
+			filters={"user_id": ["in", logins]},
+			fields=["name", "user_id", "employee_name"],
+			ignore_permissions=True,
+		)
+	}
+	full_names = {
+		row.name: row.full_name
+		for row in frappe.get_all(
+			"User", filters={"name": ["in", logins]}, fields=["name", "full_name"], ignore_permissions=True
+		)
+	}
+
+	members = []
+	for login in logins:
+		employee = employees.get(login)
+		employee_name = (employee.employee_name if employee else None) or full_names.get(login) or _(
+			"Unknown member"
+		)
+		members.append(
+			{
+				"employee": employee.name if employee else None,
+				"employee_name": employee_name,
+				"initials": _initials(employee_name),
+			}
+		)
+	return members
+
+
+@frappe.whitelist()
+def get_project(project):
+	"""One project, as a named field list (KTD9) -- never the whole
+	document. ERPNext's `Project` carries a costing tab (estimated cost,
+	total costing/billable/billed/sales amount, gross margin) and links to
+	Customer and Sales Order; none of it belongs in this response, and a
+	whole-document read would carry all of it regardless of what this
+	function goes on to return.
+
+	Resolved through `resolve_project_scope` before anything else is read:
+	a caller outside their scope is refused with `_PROJECT_NOT_FOUND`, the
+	same message a nonexistent project id gets, so this can never become an
+	oracle for which project ids exist.
+	"""
+	rate_limit_per_user("get_project")
+	scope = resolve_project_scope(frappe.session.user)
+	if scope["kind"] == "none" or not project_in_scope(project, scope):
+		frappe.throw(_(_PROJECT_NOT_FOUND), frappe.PermissionError)
+
+	data = frappe.db.get_value("Project", project, list(_PROJECT_FIELDS), as_dict=True)
+
+	return {
+		"name": data.name,
+		"project_name": data.project_name,
+		"status": data.status,
+		# The billable flag ships as a custom field in P7-U4; until then this
+		# is a stable stub so the response shape does not change under it.
+		"billable": False,
+		"expected_start_date": data.expected_start_date,
+		"expected_end_date": data.expected_end_date,
+		"tasks": _project_open_tasks(project),
+		"members": _project_members(project),
 	}
 
 
