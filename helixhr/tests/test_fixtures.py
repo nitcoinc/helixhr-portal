@@ -480,6 +480,8 @@ class TestPermissionDeltas(IntegrationTestCase):
 		"Salary Slip",
 		"HR Request",
 		"HelixHR Request Category",
+		"Project",
+		"Task",
 	)
 
 	def test_no_standard_role_lost_access_to_a_customised_doctype(self):
@@ -628,6 +630,23 @@ class TestPermissionDeltas(IntegrationTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			client_delete("Employee Checkin", punch)
 		self.assertEqual(frappe.db.get_value("Employee Checkin", punch, "time"), get_datetime(punch_time))
+
+	def test_delivery_manager_holds_project_and_task_access_and_nothing_more(self):
+		"""P7-U1's most important line: no report permission on Timesheet
+		(KTD3 -- that permission is doctype-wide and would hand the holder
+		every Timesheet report, including `Timesheet Billing Summary`'s
+		`billing_amount`), and no read on Employee -- the people picker
+		resolves names through existing scoped reads instead."""
+		for doctype in ("Project", "Task"):
+			rule = _rule(doctype, "HelixHR Delivery Manager")
+			self.assertIsNotNone(rule, f"HelixHR Delivery Manager is missing {doctype}")
+			self.assertTrue(rule.read and rule.write and rule.create)
+
+		timesheet_rule = _rule("Timesheet", "HelixHR Delivery Manager")
+		self.assertIsNone(timesheet_rule, "HelixHR Delivery Manager must hold nothing on Timesheet")
+
+		employee_rule = _rule("Employee", "HelixHR Delivery Manager")
+		self.assertIsNone(employee_rule, "HelixHR Delivery Manager must hold nothing on Employee")
 
 	def test_the_patch_is_idempotent(self):
 		"""It runs once through the patch log, but a re-run by hand (or a
