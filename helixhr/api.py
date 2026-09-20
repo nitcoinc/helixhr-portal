@@ -6701,11 +6701,26 @@ def run_portal_report(report_name, filters=None, **kwargs):
 		filters = frappe.parse_json(filters) if filters else {}
 	filters = dict(filters or {})
 
+	# `requested_employee` must be a single document name, never an
+	# operator-shaped value (code review finding): `frappe.db.exists`'s
+	# filter dict treats a list value as `[operator, value]`, so
+	# `["in", ["own-emp", "other-companys-emp"]]` would satisfy
+	# `employee_in_admin_scope` as long as *any* one name in the list is
+	# in-scope -- and the whole list, unmodified, would then reach Frappe's
+	# report engine as a literal filter, returning rows for every name in
+	# it. Refusing anything but a plain string closes that off before the
+	# scope check ever runs.
 	requested_employee = filters.get("employee")
 	if requested_employee:
+		if not isinstance(requested_employee, str):
+			frappe.throw(_("Invalid employee filter."))
 		if not employee_in_admin_scope(requested_employee, scope):
 			frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
-	elif scope["kind"] == "company":
+	# Company is forced to the caller's own scope unconditionally -- not
+	# only when no employee filter is present -- so a caller cannot pin an
+	# arbitrary `company` alongside a legitimately in-scope `employee` and
+	# have a report's independent company dimension honour it.
+	if scope["kind"] == "company":
 		filters["company"] = scope["company"]
 
 	result = run_query_report(report_name=report_name, filters=filters)

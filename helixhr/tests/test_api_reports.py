@@ -29,6 +29,7 @@ from helixhr.tests.utils import (
 	make_test_employee_and_manager,
 	make_test_hr_manager_employee,
 	make_test_project,
+	make_test_user,
 )
 from helixhr.utils import RATE_LIMIT_POLICY
 
@@ -338,3 +339,51 @@ class TestRunPortalReport(IntegrationTestCase):
 	def test_both_report_methods_appear_in_the_rate_limit_policy(self):
 		self.assertIn("get_billable_hours", RATE_LIMIT_POLICY)
 		self.assertIn("run_portal_report", RATE_LIMIT_POLICY)
+
+	def test_an_operator_shaped_employee_filter_is_rejected_rather_than_forwarded(self):
+		"""Code review finding: `frappe.db.exists`'s filter dict treats a
+		list value as `[operator, value]`, so `employee_in_admin_scope`
+		would pass as long as *any* one name in an `["in", [...]]` list is
+		in the caller's own company -- and the whole list, unmodified,
+		would then reach Frappe's report engine as a literal filter,
+		returning rows for every name in it, including ones outside the
+		caller's scope. A non-string `employee` filter must be refused
+		outright, before that check ever runs."""
+		other_company = ensure_baseline_company()
+		# A dedicated identity, not the shared `EMPLOYEE_USER` singleton
+		# `make_test_employee_and_manager` returns -- mutating that one's
+		# company would leak across every other test method in this class,
+		# since `IntegrationTestCase` rolls back once per class here, not
+		# per method.
+		make_test_user("other-company-report-probe@helixhr.test", other_company)
+		other_employee = frappe.db.get_value(
+			"Employee", {"user_id": "other-company-report-probe@helixhr.test"}, "name"
+		)
+
+		own_employee = frappe.db.get_value("Employee", {"user_id": self.employee_user}, "name")
+
+		frappe.set_user(self.hr_user)
+		with self.assertRaises(frappe.ValidationError):
+			run_portal_report(
+				"Employee Information",
+				filters={"employee": ["in", [own_employee, other_employee]]},
+			)
+
+	def test_company_is_forced_even_when_a_valid_employee_filter_is_present(self):
+		"""The docstring's own promise -- "a company named in the request
+		can only ever be overridden, never trusted" -- must hold even when
+		an `employee` filter is also present, not only when it is absent."""
+		other_company = ensure_baseline_company()
+		own_employee = frappe.db.get_value("Employee", {"user_id": self.employee_user}, "name")
+
+		from unittest.mock import patch
+
+		frappe.set_user(self.hr_user)
+		with patch("frappe.desk.query_report.run") as run_query_report:
+			run_query_report.return_value = {"columns": [], "result": []}
+			run_portal_report(
+				"Employee Information",
+				filters={"employee": own_employee, "company": other_company},
+			)
+			forwarded_filters = run_query_report.call_args.kwargs["filters"]
+		self.assertNotEqual(forwarded_filters.get("company"), other_company)
