@@ -40,6 +40,56 @@ test.describe('hr', () => {
     await expect(page.getByRole('heading', { name: COLLEAGUE_NAME })).toBeVisible()
   })
 
+  test('P8-U8: editing overview persists and reflects without a full reload', async ({ page }) => {
+    await page.goto('/helixhr/people')
+    await page.getByLabel('Search').fill(COLLEAGUE_NAME)
+    await page.getByRole('button', { name: new RegExp(COLLEAGUE_NAME) }).first().click()
+    await expect(page.getByRole('heading', { name: COLLEAGUE_NAME })).toBeVisible()
+
+    const email = `manager-e2e-${Date.now()}@helixhr.test`
+    await page.getByTestId('person-edit-overview').click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByRole('heading', { name: 'Edit overview' })).toBeVisible()
+    await page.getByLabel('Work email').fill(email)
+    await page.getByRole('button', { name: 'Save' }).click()
+
+    await expect(dialog).toBeHidden()
+    await expect(page.getByText(email)).toBeVisible()
+
+    // Read back from the server, not just the in-memory response.
+    await page.reload()
+    await expect(page.getByText(email)).toBeVisible()
+  })
+
+  test('P8-U9: setting an approver persists and shows the resolved name', async ({ page }) => {
+    await page.goto('/helixhr/people')
+    await page.getByLabel('Search').fill(COLLEAGUE_NAME)
+    await page.getByRole('button', { name: new RegExp(COLLEAGUE_NAME) }).first().click()
+    await expect(page.getByRole('heading', { name: COLLEAGUE_NAME })).toBeVisible()
+
+    await page.getByTestId('person-edit-approvers').click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByRole('heading', { name: 'Edit approvers and shift' })).toBeVisible()
+
+    // The manager picker offers themself among the options (any active
+    // employee in their own company, per get_person_form_options) --
+    // picking the second option (index 1) avoids "None" at index 0
+    // without depending on a specific fixture name. get_person_form_options
+    // loads lazily on first open, so wait for it past the "None"-only state
+    // before reading the list.
+    const managerSelect = page.getByLabel('Manager')
+    await expect(async () => {
+      expect(await managerSelect.locator('option').count()).toBeGreaterThan(1)
+    }).toPass({ timeout: 10000 })
+    const options = await managerSelect.locator('option').allTextContents()
+    await managerSelect.selectOption({ index: 1 })
+    const chosenName = options[1]
+
+    await page.getByRole('button', { name: 'Save' }).click()
+    await expect(dialog).toBeHidden()
+    await expect(page.getByText(chosenName)).toBeVisible()
+  })
+
   test('a search nobody matches names it plainly', async ({ page }) => {
     await page.goto('/helixhr/people')
     await page.getByLabel('Search').fill('zzz-nobody-by-that-name')
