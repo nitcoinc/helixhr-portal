@@ -58,14 +58,27 @@ test.describe('hr', () => {
     await page.getByRole('button', { name: 'Add task' }).click()
     await expect(page.getByText(taskName)).toBeVisible()
 
-    // Assigning a person shows them in the member list by name.
-    await expect(page.getByText('Nobody is assigned to this project yet.')).toBeVisible()
+    // Assigning a person shows them in the member list by name. The
+    // creator (this HR identity) is already a member the moment the
+    // project exists -- create_project adds them in the same write, or
+    // they would fall straight back out of their own scope the instant
+    // they created it (see the endpoint's own docstring) -- so "Nobody is
+    // assigned" is never true here; the count going from one to two is
+    // what proves the add.
+    await expect(page.getByText('Nobody is assigned to this project yet.')).toHaveCount(0)
+    // Scoped to the section housing the picker, so this never counts the
+    // picker's own dropdown <li> rows once one opens.
+    const membersSection = page.locator('section', { has: page.getByLabel('Add a person') })
+    const before = await membersSection.locator('li').count()
     await page.getByLabel('Add a person').fill(COLLEAGUE_NAME)
     const match = page.getByRole('button', { name: new RegExp(COLLEAGUE_NAME) }).first()
     await expect(match).toBeVisible()
     await match.click()
-    await expect(page.getByText('Nobody is assigned to this project yet.')).toHaveCount(0)
     await expect(page.locator('ul li').filter({ hasText: COLLEAGUE_NAME }).first()).toBeVisible()
+    // The picker dropdown closes itself on a successful add (memberQuery is
+    // cleared), so this count is the members list alone again, not the
+    // dropdown's own <li> rows.
+    await expect(membersSection.locator('li')).toHaveCount(before + 1)
 
     // Back to the list: the new project narrows into view by name, without a
     // full reload of the page.
