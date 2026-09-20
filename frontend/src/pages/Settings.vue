@@ -34,6 +34,17 @@ const SECTIONS = [
 
 const activeSection = computed(() => props.section || 'categories')
 
+// P8-U6: `get_portal_config`'s `desk_urls` keys match its own response
+// shape (`leave_types`, `holiday_lists`, `shift_types`), snake_case like
+// every other key in that payload -- SECTIONS' keys are kebab-case for the
+// URL segment they route to, so the two are reconciled here rather than
+// making one side match the other's convention for a reason that belongs
+// to it alone.
+const activeDeskUrl = computed(() => {
+  const key = activeSection.value.replace(/-/g, '_')
+  return config.data?.desk_urls?.[key] || null
+})
+
 function selectSection(key) {
   router.push(key === 'categories' ? '/settings' : `/settings/${key}`)
 }
@@ -48,7 +59,23 @@ function reload() {
     <PageHeader
       title="Settings"
       subtitle="Request categories, message text, and the day-to-day HRMS masters -- without Desk."
-    />
+    >
+      <template #actions>
+        <!-- P8-U6: the server's own gate (`_can_open_desk`), not merely
+             hidden client-side -- a caller who cannot reach Desk never
+             receives a URL to it at all. -->
+        <a
+          v-if="activeDeskUrl"
+          :href="activeDeskUrl"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="inline-flex min-h-11 items-center rounded-lg border border-outline-gray-2 px-3 text-sm font-medium text-ink-gray-7 hover:bg-surface-gray-2"
+          data-testid="settings-desk-link"
+        >
+          Open in Desk
+        </a>
+      </template>
+    </PageHeader>
 
     <AsyncState
       section="settings"

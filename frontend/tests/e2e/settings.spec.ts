@@ -43,6 +43,12 @@ test('an HR identity reaches Settings; an employee has no nav entry and the serv
     await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
     await expect(page.getByTestId('settings-tab-categories')).toBeVisible()
     await expect(page.getByRole('link', { name: 'Settings' })).toBeVisible()
+
+    // P8-U6: every section offers its own Desk link, server-gated by
+    // `_can_open_desk` -- present for this System User HR identity.
+    await expect(page.getByTestId('settings-desk-link')).toBeVisible()
+    await page.getByTestId('settings-tab-leave-types').click()
+    await expect(page.getByTestId('settings-desk-link')).toHaveAttribute('href', /\/desk\/leave-type$/)
     return
   }
 

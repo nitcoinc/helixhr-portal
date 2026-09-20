@@ -18,6 +18,7 @@ from frappe.utils import (
 	get_last_day,
 	get_system_timezone,
 	get_url_to_form,
+	get_url_to_list,
 	get_url_to_report,
 	get_url_to_report_with_filters,
 	getdate,
@@ -5666,6 +5667,32 @@ def _apply_allowed_fields(doc, fields, allowed, skip_on_update=()):
 			doc.set(field, fields[field])
 
 
+# P8-U6: one Desk list-view link per Settings section, named once here so
+# the section->doctype mapping cannot drift from what the tabs actually are
+# (`Settings.vue`'s own `SECTIONS` list). "Categories" is the one section
+# with no key here -- it maps to `HelixHR Request Category` the same way
+# every other section maps to its own doctype, added in the same order the
+# tabs render.
+_SETTINGS_DESK_DOCTYPES = {
+	"categories": "HelixHR Request Category",
+	"templates": "HelixHR Message Template",
+	"leave_types": "Leave Type",
+	"holiday_lists": "Holiday List",
+	"shift_types": "Shift Type",
+}
+
+
+def _settings_desk_urls():
+	"""A Desk list-view URL per Settings section (P8-R4), or `None` for a
+	caller who cannot reach Desk at all -- the same `_can_open_desk` gate
+	`get_person`'s own `desk_url` already uses (P6-KTD4): the server
+	decides whether the link is ever handed out, never merely hides it on
+	a caller who could still follow the URL directly."""
+	if not _can_open_desk(frappe.session.user):
+		return None
+	return {section: get_url_to_list(doctype) for section, doctype in _SETTINGS_DESK_DOCTYPES.items()}
+
+
 @frappe.whitelist()
 def get_portal_config():
 	"""Everything the Settings screen needs, in one call (P5-R13, P5-R14,
@@ -5676,6 +5703,7 @@ def get_portal_config():
 		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
 
 	return {
+		"desk_urls": _settings_desk_urls(),
 		"categories": frappe.get_all(
 			"HelixHR Request Category",
 			fields=["name", "category_name", "hint", "route_to_role", "sla_days", "is_active"],
