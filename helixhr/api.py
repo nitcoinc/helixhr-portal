@@ -70,6 +70,7 @@ from helixhr.utils import (
 	TEMPLATE_TOKENS,
 	UPLOAD_MAX_BYTES,
 	admin_scope_employee_filters,
+	as_administrator,
 	employee_in_admin_scope,
 	get_manager_user,
 	get_week_bounds,
@@ -6980,19 +6981,23 @@ def _write_project_users(doc, *, insert):
 
 	Attribution is restored immediately after: the technical actor that
 	satisfied Frappe's check is not who actually asked for this write.
+
+	The escalation runs through `as_administrator()`, not
+	`frappe.set_user()` (P8-U1 / KTD1): `set_user` mutates the caller's live
+	session in place -- wiping `session.data` and clobbering `session.sid`
+	-- and that gutted payload is what got written back to the session
+	cache, signing the caller out on their very next request. See
+	`as_administrator`'s own docstring for the full mechanism.
 	"""
 	caller = frappe.session.user
 	members = [row.user for row in doc.users]
-	frappe.set_user("Administrator")
-	try:
+	with as_administrator():
 		if insert:
 			doc.insert(ignore_permissions=True)
 		else:
 			doc.save(ignore_permissions=True)
 		for member in members:
 			frappe.share.remove(doc.doctype, doc.name, member)
-	finally:
-		frappe.set_user(caller)
 	frappe.db.set_value(
 		doc.doctype, doc.name, {"owner": caller, "modified_by": caller}, update_modified=False
 	)

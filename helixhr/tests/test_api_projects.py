@@ -675,3 +675,144 @@ class TestSaveTaskAndSetProjectMembers(IntegrationTestCase):
 			fields=["name", "hours", "is_billable", "billing_hours"],
 		)
 		self.assertEqual(after, before)
+
+
+# --- P8-U1: the Administrator escalation must not damage the caller's session ---
+
+
+class TestWriteProjectUsersSessionSafety(IntegrationTestCase):
+	"""P8-R1 / KTD1. `_write_project_users` escalates to Administrator to
+	satisfy ERPNext's `control_access_for_project_users` auto-share. Before
+	this fix that escalation ran through `frappe.set_user`, which mutates
+	`frappe.local.session` in place -- wiping `session.data` and
+	overwriting `session.sid` with the escalated username -- so whichever
+	request handled a project write signed its own caller out. These tests
+	construct a real `Session` (the same object a live HTTP request would
+	build) so the assertions exercise the actual session shape, not a
+	simplified stand-in.
+	"""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		self.dm_employee, self.dm_user = make_test_delivery_manager()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _sign_in(self, user):
+		"""A `Session` shaped exactly like one a live HTTP request would
+		build -- `session.sid` a real generated hash, `session.data` a
+		top-level `user`/`sid` plus a nested `data` dict carrying `user` and
+		`csrf_token` -- built without going through `Session.__init__`'s
+		`start()` path.
+
+		`Session.start()` always ends with `frappe.db.commit()` (twice, in
+		fact, once here and again in `Session.update()`): it is written for
+		a real request, where committing is exactly right, but calling it
+		from a test permanently commits whatever the test creates to this
+		shared, long-lived `test_site` database -- there is no per-test
+		rollback once a commit has happened. Building the object's slots
+		directly gets the same shape `set_user`'s bug depends on (a live
+		`session.sid` and populated `session.data`) without that side
+		effect, so a bare `frappe.set_user` still would not have caught
+		this defect, but this construction does not corrupt the site
+		either."""
+		from frappe.sessions import Session
+
+		sid = frappe.generate_hash()
+		session = Session.__new__(Session)
+		session.sid = sid
+		session.user = user
+		session.user_type = "System User"
+		session.full_name = user
+		session.time_diff = None
+		session._update_in_cache = False
+		session.data = frappe._dict(
+			{
+				"user": user,
+				"sid": sid,
+				"data": frappe._dict(
+					{
+						"user": user,
+						"csrf_token": frappe.generate_hash(),
+						"last_updated": frappe.utils.now(),
+						"session_expiry": "240:00:00",
+					}
+				),
+			}
+		)
+		frappe.local.session_obj = session
+		frappe.local.session = session.data
+		frappe.local.form_dict = frappe._dict({"answer": 42})
+		return session
+
+	def test_create_project_leaves_the_caller_signed_in(self):
+		from helixhr.api import create_project
+
+		session = self._sign_in(self.dm_user)
+		original_sid = session.sid
+		original_session_user = frappe.session.data.get("user")
+
+		create_project(project_name="_Test U1 Session Safety Create")
+
+		self.assertEqual(frappe.session.sid, original_sid)
+		self.assertEqual(frappe.session.user, self.dm_user)
+		self.assertEqual(frappe.session.data.get("user"), original_session_user)
+		self.assertEqual(frappe.local.form_dict.get("answer"), 42)
+
+	def test_set_project_members_leaves_the_caller_signed_in(self):
+		from helixhr.api import create_project, set_project_members
+
+		session = self._sign_in(self.dm_user)
+		project = create_project(project_name="_Test U1 Session Safety Members")["name"]
+		original_sid = session.sid
+
+		set_project_members(project, [])
+
+		self.assertEqual(frappe.session.sid, original_sid)
+		self.assertEqual(frappe.session.user, self.dm_user)
+		self.assertEqual(frappe.session.data.get("user"), self.dm_user)
+
+	def test_the_caller_is_restored_even_when_the_write_raises(self):
+		from unittest.mock import patch
+
+		from helixhr import api
+
+		self._sign_in(self.dm_user)
+		with (
+			self.assertRaises(RuntimeError),
+			patch.object(frappe.model.document.Document, "insert", side_effect=RuntimeError("boom")),
+		):
+			api.create_project(project_name="_Test U1 Session Safety Raises")
+
+		self.assertEqual(frappe.session.user, self.dm_user)
+
+	def test_regression_the_cached_session_survives_a_write_back(self):
+		"""The actual symptom, reproduced at the exact boundary it happens
+		at: `Session.update()`'s last line is
+		`frappe.cache.hset("session", self.sid, self.data)` -- it writes
+		back whatever `self.data` (== `frappe.local.session`) holds *at
+		that moment*, under the sid captured in the `Session` object's own
+		slot. Before this fix, `_write_project_users` reassigned
+		`session.sid` to the escalated/restored username and replaced
+		`session.data` with an empty dict, so this exact write-back would
+		have cached a payload with no `user` under the *original* sid --
+		which is precisely what signed the caller out on their next
+		request. `Session.update()` itself is not called here (see
+		`_sign_in`'s docstring): it forces a real commit that this shared
+		`test_site` database cannot afford, and the commit is orthogonal to
+		what this test is actually checking -- what ends up in the cache
+		under `session.sid`."""
+		from helixhr.api import create_project
+
+		session = self._sign_in(self.dm_user)
+		create_project(project_name="_Test U1 Session Safety Cache Roundtrip")
+
+		frappe.cache.hset("session", session.sid, frappe.local.session)
+		cached = frappe.cache.hget("session", session.sid)
+
+		self.assertIsNotNone(cached)
+		self.assertEqual(cached["data"]["user"], self.dm_user)
+		self.assertEqual(cached["sid"], session.sid)
+		frappe.cache.hdel("session", session.sid)
