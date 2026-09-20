@@ -58,13 +58,33 @@ function openProject(project) {
 const showCreateForm = ref(false)
 const newProjectName = ref('')
 const newProjectBillable = ref(false)
+const newProjectPriority = ref('')
+const newProjectType = ref('')
 const createError = ref('')
 const createProject = createResource({ url: 'helixhr.api.create_project', method: 'POST' })
+
+// P8-U2: `search_projects`'s own response carries the create form's option
+// lists and the caller's company, so the page that hosts the form needs no
+// second request for them. `company` is `None` for the Desk-only,
+// no-Employee-record persona `create_project` itself refuses (see its
+// docstring) -- the form says so instead of offering Create to a caller who
+// would only be refused.
+const creatorCompany = computed(() => projects.data?.company ?? null)
+const projectTypeOptions = computed(() => [
+  { label: 'No project type', value: '' },
+  ...(projects.data?.project_types || []).map((name) => ({ label: name, value: name })),
+])
+const priorityOptions = computed(() => [
+  { label: 'Default priority', value: '' },
+  ...(projects.data?.priority_options || []).map((name) => ({ label: name, value: name })),
+])
 
 function startCreate() {
   showCreateForm.value = true
   newProjectName.value = ''
   newProjectBillable.value = false
+  newProjectPriority.value = ''
+  newProjectType.value = ''
   createError.value = ''
 }
 
@@ -84,10 +104,13 @@ async function submitCreate() {
     const created = await createProject.submit({
       project_name,
       is_billable: newProjectBillable.value ? 1 : 0,
+      priority: newProjectPriority.value || undefined,
+      project_type: newProjectType.value || undefined,
     })
     // Shows in the list without a reload of `search_projects` -- the write's
     // own response already carries everything the row needs to render.
     projects.data = {
+      ...projects.data,
       projects: [
         { name: created.name, project_name: created.project_name, status: created.status },
         ...rows.value,
@@ -303,13 +326,29 @@ async function removeMember(member) {
           v-if="detail.data"
           class="space-y-6"
         >
-          <section class="surface-card elev-1 grid grid-cols-1 gap-4 p-4 sm:grid-cols-2 lg:grid-cols-4">
+          <section class="surface-card elev-1 grid grid-cols-1 gap-4 p-4 sm:grid-cols-2 lg:grid-cols-6">
             <div>
               <p class="text-sm text-ink-gray-6">
                 Status
               </p>
               <p class="font-medium text-ink-gray-9">
                 {{ detail.data.status }}
+              </p>
+            </div>
+            <div>
+              <p class="text-sm text-ink-gray-6">
+                Priority
+              </p>
+              <p class="font-medium text-ink-gray-9">
+                {{ detail.data.priority || '—' }}
+              </p>
+            </div>
+            <div>
+              <p class="text-sm text-ink-gray-6">
+                Type
+              </p>
+              <p class="font-medium text-ink-gray-9">
+                {{ detail.data.project_type || '—' }}
               </p>
             </div>
             <div>
@@ -568,12 +607,73 @@ async function removeMember(member) {
         class="surface-card elev-1 mb-4 space-y-3 p-4"
         data-testid="project-create-form"
       >
+        <!-- P8-U2: `company` is server-derived, never asked for (KTD2 --
+             the create endpoint refuses a company named in the request
+             body). A caller with no company at all -- the Desk-only
+             persona `create_project` itself refuses -- sees why instead
+             of a form that would only fail on submit. -->
+        <p
+          v-if="creatorCompany"
+          class="text-sm text-ink-gray-6"
+        >
+          This project will be created in <span class="font-medium text-ink-gray-8">{{ creatorCompany }}</span>.
+        </p>
+        <p
+          v-else
+          class="surface-alert p-3 text-sm"
+          role="alert"
+        >
+          Your account has no linked employee record, so a project can't be created from here.
+          Use Desk instead.
+        </p>
         <FormControl
           v-model="newProjectName"
           type="text"
           label="Project name"
           maxlength="140"
         />
+        <div>
+          <label
+            for="project-create-priority"
+            class="text-sm text-ink-gray-7"
+          >
+            Priority
+          </label>
+          <select
+            id="project-create-priority"
+            v-model="newProjectPriority"
+            class="mt-1 block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
+          >
+            <option
+              v-for="option in priorityOptions"
+              :key="option.value"
+              :value="option.value"
+            >
+              {{ option.label }}
+            </option>
+          </select>
+        </div>
+        <div>
+          <label
+            for="project-create-type"
+            class="text-sm text-ink-gray-7"
+          >
+            Project type
+          </label>
+          <select
+            id="project-create-type"
+            v-model="newProjectType"
+            class="mt-1 block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
+          >
+            <option
+              v-for="option in projectTypeOptions"
+              :key="option.value"
+              :value="option.value"
+            >
+              {{ option.label }}
+            </option>
+          </select>
+        </div>
         <FormControl
           v-model="newProjectBillable"
           type="checkbox"
@@ -590,6 +690,7 @@ async function removeMember(member) {
           <Button
             variant="solid"
             theme="blue"
+            :disabled="!creatorCompany"
             :loading="createProject.loading"
             @click="submitCreate"
           >

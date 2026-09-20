@@ -27,9 +27,18 @@ test.describe('hr', () => {
     // built from the create call's own response.
     const projectName = `E2E Project ${Date.now()}`
     await page.getByRole('button', { name: 'New project' }).click()
+    // P8-U2: name/priority/type/billable, the same fields Desk asks for
+    // minus the server-derived company (shown as static text, never asked
+    // for -- KTD2 -- so this only confirms it renders, not its wording).
+    // `exact: true` on Create below -- a stray fixture project from
+    // another spec file whose name happens to contain "creates" would
+    // otherwise collide with this button under Playwright's default
+    // case-insensitive substring match.
+    await expect(page.getByTestId('project-create-form').getByText('Company', { exact: false })).toBeVisible()
     await page.getByLabel('Project name').fill(projectName)
+    await page.getByLabel('Priority').selectOption('High')
     await page.getByLabel('Billable').check()
-    await page.getByRole('button', { name: 'Create' }).click()
+    await page.getByRole('button', { name: 'Create', exact: true }).click()
 
     await expect(page).toHaveURL(/\/helixhr\/projects\/[^/]+$/)
     await expect(page.getByRole('heading', { name: projectName })).toBeVisible()
@@ -37,9 +46,11 @@ test.describe('hr', () => {
 
     // Marking a project billable persists across a reload -- not just in the
     // create response held in memory, but read back from `get_project`.
+    // Priority rides along the same way.
     await page.reload()
     await expect(page.getByRole('heading', { name: projectName })).toBeVisible()
     await expect(page.getByTestId('project-billable')).toHaveText('Yes')
+    await expect(page.getByText('High')).toBeVisible()
 
     // Adding a task shows it under the project.
     const taskName = `Kickoff call ${Date.now()}`

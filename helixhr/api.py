@@ -6816,7 +6816,19 @@ _PROJECT_FIELDS = (
 	"expected_start_date",
 	"expected_end_date",
 	"helixhr_is_billable",
+	"priority",
+	"project_type",
 )
+
+
+def _project_priority_options():
+	"""`Project.priority`'s own Select options, read from the doctype meta
+	rather than duplicated here as a literal list (P8-U2) -- a Desk-side
+	customisation of the field's options is then the only place this ever
+	needs editing, and the create form can never drift from what
+	`doc.insert()`'s own validation actually accepts."""
+	options = frappe.get_meta("Project").get_field("priority").options or ""
+	return [option for option in options.split("\n") if option]
 
 # Task.status has no single "closed" value -- Completed and Cancelled both
 # are -- so "open" is everything else, not one literal status string.
@@ -6848,17 +6860,31 @@ def search_projects():
 		frappe.throw(_("You are not authorised to view projects here."), frappe.PermissionError)
 
 	filters = project_scope_filters(scope)
-	if filters is None:
-		return {"projects": []}
+	projects = []
+	if filters is not None:
+		rows = frappe.get_all(
+			"Project",
+			filters=filters,
+			fields=list(_PROJECT_SEARCH_FIELDS),
+			order_by="project_name asc",
+			ignore_permissions=True,
+		)
+		projects = [_project_search_projection(row) for row in rows]
 
-	rows = frappe.get_all(
-		"Project",
-		filters=filters,
-		fields=list(_PROJECT_SEARCH_FIELDS),
-		order_by="project_name asc",
-		ignore_permissions=True,
-	)
-	return {"projects": [_project_search_projection(row) for row in rows]}
+	# P8-U2: the create form's own option lists, read in the same call so
+	# the page that hosts it needs no second request. `company` mirrors
+	# `create_project`'s own derivation exactly -- `None` for the
+	# Desk-only, no-Employee-record persona `resolve_project_scope`
+	# deliberately admits as "unscoped" (see `create_project`'s docstring),
+	# so the create form can say so instead of offering a company it does
+	# not have.
+	employee_info = get_current_employee_info()
+	return {
+		"projects": projects,
+		"project_types": frappe.get_all("Project Type", pluck="name", order_by="name asc"),
+		"priority_options": _project_priority_options(),
+		"company": employee_info.get("company") if employee_info else None,
+	}
 
 
 def _project_open_tasks(project):
@@ -6942,6 +6968,8 @@ def get_project(project):
 		"project_name": data.project_name,
 		"status": data.status,
 		"billable": bool(data.helixhr_is_billable),
+		"priority": data.priority,
+		"project_type": data.project_type,
 		"expected_start_date": data.expected_start_date,
 		"expected_end_date": data.expected_end_date,
 		"tasks": _project_open_tasks(project),
@@ -7014,7 +7042,7 @@ def _write_project_users(doc, *, insert):
 
 
 @frappe.whitelist(methods=["POST"])
-def create_project(project_name, is_billable=0, **kwargs):
+def create_project(project_name, is_billable=0, priority=None, project_type=None, **kwargs):
 	"""Create a project the caller administers (P7-R1, P7-R6).
 
 	`company` is never read from the request -- it comes from the caller's
@@ -7023,6 +7051,12 @@ def create_project(project_name, is_billable=0, **kwargs):
 	(accepted here only via `**kwargs`, then ignored, the same pattern
 	`get_dashboard` uses to swallow extra caller input) can never steer
 	which company the project lands in.
+
+	`priority` and `project_type` (P8-U2) are the two fields Desk asks for
+	that the portal's create form did not -- both optional, both left to
+	`doc.insert()`'s own validation (`priority` against `Project`'s own
+	Select options, `project_type` as a plain Link) rather than re-checked
+	here, so the two can never drift from what the doctype itself accepts.
 
 	The creator is added as a `Project User` in the same operation: without
 	it, a HelixHR Delivery Manager who just created the project would fall
@@ -7065,6 +7099,8 @@ def create_project(project_name, is_billable=0, **kwargs):
 			"project_name": project_name,
 			"company": company,
 			"helixhr_is_billable": cint(is_billable),
+			"priority": priority or None,
+			"project_type": project_type or None,
 			"users": [{"user": frappe.session.user}],
 		}
 	)
@@ -7075,6 +7111,8 @@ def create_project(project_name, is_billable=0, **kwargs):
 		"project_name": doc.project_name,
 		"status": doc.status,
 		"billable": bool(doc.helixhr_is_billable),
+		"priority": doc.priority,
+		"project_type": doc.project_type,
 		"expected_start_date": doc.expected_start_date,
 		"expected_end_date": doc.expected_end_date,
 		"tasks": [],

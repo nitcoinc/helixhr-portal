@@ -311,6 +311,9 @@ class TestSearchAndGetProject(IntegrationTestCase):
 			"project_name",
 			"status",
 			"billable",
+			# P8-U2: the create form's own two extra fields.
+			"priority",
+			"project_type",
 			"expected_start_date",
 			"expected_end_date",
 			"tasks",
@@ -447,6 +450,76 @@ class TestCreateProject(IntegrationTestCase):
 		frappe.set_user(self.dm_user)
 		result = create_project(project_name="_Test U4 Company Ignored", company=self.other_company)
 		self.assertEqual(frappe.db.get_value("Project", result["name"], "company"), self.company)
+
+	# --- P8-U2: priority and project type on create -------------------------
+
+	def test_priority_and_project_type_persist_and_are_returned(self):
+		from helixhr.api import create_project
+
+		if not frappe.db.exists("Project Type", "_Test U2 Project Type"):
+			frappe.get_doc(
+				{"doctype": "Project Type", "project_type": "_Test U2 Project Type"}
+			).insert(ignore_permissions=True)
+
+		frappe.set_user(self.dm_user)
+		result = create_project(
+			project_name="_Test U2 Priority And Type",
+			priority="High",
+			project_type="_Test U2 Project Type",
+		)
+		self.assertEqual(result["priority"], "High")
+		self.assertEqual(result["project_type"], "_Test U2 Project Type")
+		self.assertEqual(frappe.db.get_value("Project", result["name"], "priority"), "High")
+		self.assertEqual(
+			frappe.db.get_value("Project", result["name"], "project_type"), "_Test U2 Project Type"
+		)
+
+	def test_creating_with_neither_leaves_erpnexts_own_defaults(self):
+		from helixhr.api import _project_priority_options, create_project
+
+		frappe.set_user(self.dm_user)
+		result = create_project(project_name="_Test U2 No Priority Or Type")
+		# `Project.priority` carries no explicit `default` in its own
+		# metadata -- Frappe's own new-document defaulting falls back to a
+		# Select field's first option when none is given, so this asserts
+		# against that same first option (from the meta, not a hardcoded
+		# "Medium") rather than re-deriving Frappe's own rule.
+		self.assertEqual(result["priority"], _project_priority_options()[0])
+		self.assertIsNone(result["project_type"])
+
+	def test_an_invalid_priority_is_refused(self):
+		from helixhr.api import create_project
+
+		frappe.set_user(self.dm_user)
+		with self.assertRaises(frappe.ValidationError):
+			create_project(project_name="_Test U2 Bad Priority", priority="Urgent-ish")
+
+	def test_a_project_type_that_does_not_exist_is_refused(self):
+		from helixhr.api import create_project
+
+		frappe.set_user(self.dm_user)
+		with self.assertRaises(frappe.ValidationError):
+			create_project(
+				project_name="_Test U2 Bad Project Type", project_type="_Test U2 Nonexistent Type"
+			)
+
+	def test_search_projects_returns_the_create_forms_option_lists_and_company(self):
+		from helixhr.api import search_projects
+
+		frappe.set_user(self.dm_user)
+		result = search_projects()
+		self.assertIn("Low", result["priority_options"])
+		self.assertIn("Medium", result["priority_options"])
+		self.assertIn("High", result["priority_options"])
+		self.assertIsInstance(result["project_types"], list)
+		self.assertEqual(result["company"], self.company)
+
+	def test_search_projects_reports_no_company_for_the_unscoped_no_employee_persona(self):
+		from helixhr.api import search_projects
+
+		hr_user_no_employee = ensure_hr_manager_user()
+		frappe.set_user(hr_user_no_employee)
+		self.assertIsNone(search_projects()["company"])
 
 	def test_a_plain_employee_is_refused_on_all_three_methods(self):
 		from helixhr.api import create_project, save_task, set_project_members
