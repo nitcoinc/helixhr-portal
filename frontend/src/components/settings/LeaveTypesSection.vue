@@ -1,6 +1,6 @@
 <script setup>
-import { reactive, ref } from 'vue'
-import { createResource, FormControl, Button } from 'frappe-ui'
+import { computed, reactive, ref } from 'vue'
+import { createResource, Dialog, FormControl, Button } from 'frappe-ui'
 
 // P5-KTD12: exactly the five fields `LEAVE_TYPE_EDITABLE_FIELDS` names in
 // helixhr/utils.py -- not the thirty HRMS ships on this form.
@@ -18,6 +18,22 @@ const form = reactive({
   helixhr_hr_approves: false,
 })
 const formError = ref('')
+
+// P8-U5: the editor was one flat stack of five controls rendered *below*
+// the whole list -- on a site with more than a screenful of leave types,
+// clicking Edit on the last row opened a form the person had to scroll
+// away to find, with nothing on screen saying which leave type it
+// belonged to. A dialog titled with the leave type itself fixes both: it
+// is never off-screen, and its own title is the "which one" answer.
+const dialogOpen = computed({
+  get: () => editing.value !== null,
+  set: (value) => {
+    if (!value) cancel()
+  },
+})
+const dialogTitle = computed(() =>
+  editing.value === '__new__' ? 'New leave type' : `Edit ${form.leave_type_name || 'leave type'}`,
+)
 
 function startCreate() {
   editing.value = '__new__'
@@ -114,59 +130,82 @@ async function submit() {
       </p>
     </div>
 
-    <div
-      v-if="editing"
-      class="surface-card elev-1 space-y-4 p-4"
-      data-testid="settings-leave-type-form"
+    <Dialog
+      v-model="dialogOpen"
+      :options="{ title: dialogTitle, size: 'md' }"
     >
-      <FormControl
-        v-model="form.leave_type_name"
-        label="Name"
-        :disabled="editing !== '__new__'"
-      />
-      <FormControl
-        v-model="form.max_leaves_allowed"
-        type="number"
-        label="Maximum days allowed"
-      />
-      <FormControl
-        v-model="form.is_carry_forward"
-        type="checkbox"
-        label="Carries forward to the next leave period"
-      />
-      <FormControl
-        v-model="form.is_lwp"
-        type="checkbox"
-        label="Leave without pay"
-      />
-      <FormControl
-        v-model="form.helixhr_hr_approves"
-        type="checkbox"
-        label="HR approves this leave type (not the line manager)"
-      />
-      <p
-        v-if="formError"
-        class="surface-alert p-3 text-sm"
-        role="alert"
-      >
-        {{ formError }}
-      </p>
-      <div class="flex items-center gap-2">
-        <Button
-          variant="solid"
-          theme="blue"
-          :loading="save.loading"
-          @click="submit"
+      <template #body-content>
+        <div
+          class="space-y-4"
+          data-testid="settings-leave-type-form"
         >
-          Save
-        </Button>
-        <Button
-          variant="ghost"
-          @click="cancel"
-        >
-          Cancel
-        </Button>
-      </div>
-    </div>
+          <FormControl
+            v-model="form.leave_type_name"
+            label="Name"
+            :disabled="editing !== '__new__'"
+          />
+          <FormControl
+            v-model="form.max_leaves_allowed"
+            type="number"
+            label="Maximum days allowed"
+          />
+
+          <!-- P8-U5: grouped under one subheading, each label shortened to
+               its own noun phrase -- the full sentence moves to help text
+               under the control rather than doing double duty as the
+               label, which is what made three checkboxes in a row read as
+               a wall of text. -->
+          <div class="space-y-3 border-t border-outline-gray-1 pt-4">
+            <h3 class="text-sm font-medium text-ink-gray-8">
+              Rules
+            </h3>
+            <FormControl
+              v-model="form.is_carry_forward"
+              type="checkbox"
+              label="Carry forward"
+              description="Unused days roll into the next leave period instead of expiring."
+            />
+            <FormControl
+              v-model="form.is_lwp"
+              type="checkbox"
+              label="Leave without pay"
+              description="Time off under this type is unpaid."
+            />
+            <FormControl
+              v-model="form.helixhr_hr_approves"
+              type="checkbox"
+              label="HR approves"
+              description="HR decides requests of this type, not the employee's line manager."
+            />
+          </div>
+
+          <p
+            v-if="formError"
+            class="surface-alert p-3 text-sm"
+            role="alert"
+          >
+            {{ formError }}
+          </p>
+        </div>
+      </template>
+      <template #actions>
+        <div class="flex items-center gap-2">
+          <Button
+            variant="solid"
+            theme="blue"
+            :loading="save.loading"
+            @click="submit"
+          >
+            Save
+          </Button>
+          <Button
+            variant="ghost"
+            @click="cancel"
+          >
+            Cancel
+          </Button>
+        </div>
+      </template>
+    </Dialog>
   </div>
 </template>

@@ -74,6 +74,30 @@ test('creating a usable leave type touches no more than the five named fields', 
   await expect(form.locator('input, textarea, select')).toHaveCount(5)
 })
 
+test('P8-U5: the leave type editor is a dialog, titled with the row being edited, closed by Escape', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'settings is an HR-only screen')
+
+  await page.goto('/helixhr/settings')
+  await page.getByTestId('settings-tab-leave-types').click()
+
+  const row = page.getByTestId('settings-leave-type-row').first()
+  const rowName = (await row.locator('p').first().textContent())?.trim()
+  await row.getByRole('button', { name: 'Edit' }).click()
+
+  // A dialog, not an inline block appended after the whole list -- so
+  // editing the row is visible without scrolling regardless of how many
+  // leave types are above it, and its own title says which one is open.
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByRole('heading', { name: new RegExp(`^Edit ${rowName}$`) })).toBeVisible()
+  await expect(page.getByTestId('settings-leave-type-form')).toBeVisible()
+
+  await page.keyboard.press('Escape')
+  await expect(dialog).toBeHidden()
+})
+
 test("changing a category's routed role changes where the next request goes", async ({
   page,
   baseURL,
