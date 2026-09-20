@@ -934,11 +934,18 @@ class TestPreflightCelebrationReminders(IntegrationTestCase):
 	import, a raw `db_set`, a restored site.
 	"""
 
+	# P8-U10/U11: the picker moved from two HR Settings Custom Fields to
+	# one `HelixHR Celebration Reminder` row per event -- `_set` still
+	# takes the old field names (every call site below is unchanged) and
+	# routes them to whichever store now actually owns the value.
 	FIELDS = (
 		"helixhr_birthday_template",
 		"helixhr_anniversary_template",
 		"send_birthday_reminders",
 		"send_work_anniversary_reminders",
+	)
+	_FIELD_TO_EVENT = MappingProxyType(
+		{"helixhr_birthday_template": "birthday", "helixhr_anniversary_template": "work_anniversary"}
 	)
 	TEMPLATE = "_Test HelixHR Birthday"
 
@@ -947,17 +954,51 @@ class TestPreflightCelebrationReminders(IntegrationTestCase):
 		from helixhr.tests.test_reminders import _template
 
 		_template(self.TEMPLATE, "BDAYMARK {{ names }}")
+		for event in ("birthday", "work_anniversary"):
+			if not frappe.db.exists("HelixHR Celebration Reminder", event):
+				frappe.get_doc(
+					{
+						"doctype": "HelixHR Celebration Reminder",
+						"event": event,
+						"recipient_mode": "All employees",
+					}
+				).insert(ignore_permissions=True)
 		self.original = {
-			field: frappe.db.get_single_value("HR Settings", field) for field in self.FIELDS
+			field: frappe.db.get_single_value("HR Settings", field)
+			for field in ("send_birthday_reminders", "send_work_anniversary_reminders")
+		}
+		self.original_reminders = {
+			event: frappe.db.get_value(
+				"HelixHR Celebration Reminder", event, ["is_enabled", "email_template"], as_dict=True
+			)
+			for event in self._FIELD_TO_EVENT.values()
 		}
 		self._set(dict.fromkeys(self.FIELDS, None))
 
 	def tearDown(self):
 		self._set(self.original)
+		for event, snapshot in self.original_reminders.items():
+			frappe.db.set_value(
+				"HelixHR Celebration Reminder",
+				event,
+				{"is_enabled": snapshot.is_enabled, "email_template": snapshot.email_template},
+				update_modified=False,
+			)
+			frappe.clear_document_cache("HelixHR Celebration Reminder", event)
 
 	def _set(self, values):
 		for field, value in values.items():
-			frappe.db.set_single_value("HR Settings", field, value)
+			if field in self._FIELD_TO_EVENT:
+				event = self._FIELD_TO_EVENT[field]
+				frappe.db.set_value(
+					"HelixHR Celebration Reminder",
+					event,
+					{"email_template": value, "is_enabled": 1 if value else 0},
+					update_modified=False,
+				)
+				frappe.clear_document_cache("HelixHR Celebration Reminder", event)
+			else:
+				frappe.db.set_single_value("HR Settings", field, value)
 		frappe.clear_document_cache("HR Settings", "HR Settings")
 
 	def _check(self):
@@ -974,7 +1015,6 @@ class TestPreflightCelebrationReminders(IntegrationTestCase):
 		self.assertEqual(result["status"], FAIL)
 		self.assertIn("Birthday", result["detail"])
 		self.assertIn("Birthdays", result["detail"])
-		self.assertIn("HelixHR Birthday Template", result["detail"])
 
 	def test_a_picked_template_that_does_not_exist_fails(self):
 		from helixhr.preflight import FAIL

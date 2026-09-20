@@ -990,20 +990,24 @@ def check_celebration_reminders():
 	from helixhr.reminders import EVENTS
 
 	problems, notes, quiet = [], [], []
-	for spec in EVENTS.values():
-		template = _hr_setting(spec["template_field"])
+	for event, spec in EVENTS.items():
+		row = frappe.db.get_value(
+			"HelixHR Celebration Reminder", event, ["is_enabled", "email_template"], as_dict=True
+		)
+		enabled = bool(row and row.is_enabled and row.email_template)
+		template = row.email_template if row else None
 		hrms_on = cint(_hr_setting(spec["hrms_field"]))
-		if template and hrms_on:
+		if enabled and hrms_on:
 			problems.append(
 				f"{spec['label']}: both HRMS and HelixHR would send -- untick "
-				f"'{spec['hrms_label']}' in HR Settings or clear '{spec['template_label']}'"
+				f"'{spec['hrms_label']}' in HR Settings or disable it on Settings > Celebrations"
 			)
-		elif template and not frappe.db.exists("Email Template", template):
+		elif enabled and not frappe.db.exists("Email Template", template):
 			problems.append(
-				f"{spec['label']}: '{spec['template_label']}' names Email Template "
-				f"'{template}', which does not exist -- nothing is sent"
+				f"{spec['label']}: names Email Template '{template}', which does not exist -- "
+				"nothing is sent"
 			)
-		elif template:
+		elif enabled:
 			notes.append(f"{spec['label']}: HelixHR sends '{template}'")
 		elif hrms_on:
 			notes.append(f"{spec['label']}: HRMS sends its own")

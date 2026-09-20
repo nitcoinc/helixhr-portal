@@ -110,6 +110,12 @@ def _boom_template(company):
 	return BOOM_TEMPLATE
 
 
+_FIELD_TO_EVENT = {
+	"helixhr_birthday_template": "birthday",
+	"helixhr_anniversary_template": "work_anniversary",
+}
+
+
 class TestCelebrationReminders(IntegrationTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")
@@ -124,31 +130,63 @@ class TestCelebrationReminders(IntegrationTestCase):
 		# absent from every list.
 		self.other_month = 1 if self.today.month != 1 else 7
 		self.queued = set()
-		self.settings = {
-			field: frappe.db.get_single_value("HR Settings", field)
-			for field in ("helixhr_birthday_template", "helixhr_anniversary_template")
-		}
-		for field in self.settings:
+		# P8-U10/U11: the picker moved from two HR Settings Custom Fields to
+		# one `HelixHR Celebration Reminder` row per event -- captured and
+		# restored the same way, just against the new doctype.
+		self.original = {}
+		for field, event in _FIELD_TO_EVENT.items():
+			self._ensure_reminder(event)
+			self.original[field] = frappe.db.get_value(
+				"HelixHR Celebration Reminder", event, ["is_enabled", "email_template", "recipient_mode"], as_dict=True
+			)
 			self._pick(field, None)
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
-		for field, value in self.settings.items():
-			self._pick(field, value)
+		for field, snapshot in self.original.items():
+			event = _FIELD_TO_EVENT[field]
+			frappe.db.set_value(
+				"HelixHR Celebration Reminder",
+				event,
+				{
+					"is_enabled": snapshot.is_enabled,
+					"email_template": snapshot.email_template,
+					"recipient_mode": snapshot.recipient_mode,
+				},
+				update_modified=False,
+			)
+			frappe.clear_document_cache("HelixHR Celebration Reminder", event)
 		for row in self.queued:
 			frappe.db.delete("Email Queue Recipient", {"parent": row})
 			frappe.db.delete("Email Queue", {"name": row})
 
+	def _ensure_reminder(self, event):
+		"""This suite runs standalone from `migrate_celebration_reminders`
+		(which normally creates both rows once, on install/migrate) -- a
+		test run against a site that has not migrated since P8-U10 shipped
+		would otherwise fail every test here on a missing row."""
+		if not frappe.db.exists("HelixHR Celebration Reminder", event):
+			frappe.get_doc(
+				{"doctype": "HelixHR Celebration Reminder", "event": event, "recipient_mode": "All employees"}
+			).insert(ignore_permissions=True)
+
 	# --- fixtures ----------------------------------------------------------
 
 	def _pick(self, field, template):
-		"""Set the picker without going through `HR Settings.validate`.
-
-		The refusal that hook carries is asserted on its own below; here the
-		HRMS checkbox is beside the point, and a site whose checkbox happens
-		to be ticked must not make the job's own tests unrunnable."""
-		frappe.db.set_single_value("HR Settings", field, template)
-		frappe.clear_document_cache("HR Settings", "HR Settings")
+		"""Set the picker without going through
+		`HelixHRCelebrationReminder.validate` -- "All employees" always
+		satisfies it regardless of `template`, so the refusal that
+		controller carries (an empty `recipients` list in "Selected
+		employees" mode) never fires here; it is asserted on its own
+		below."""
+		event = _FIELD_TO_EVENT[field]
+		frappe.db.set_value(
+			"HelixHR Celebration Reminder",
+			event,
+			{"email_template": template, "is_enabled": 1 if template else 0},
+			update_modified=False,
+		)
+		frappe.clear_document_cache("HelixHR Celebration Reminder", event)
 
 	def _stage(self, birthdays=(), anniversaries=(), years=None):
 		"""Re-date every person this suite owns: a birthday or a joining
@@ -353,10 +391,10 @@ class TestCelebrationReminders(IntegrationTestCase):
 
 		real = reminders._send_event
 
-		def boom(event, template_name):
+		def boom(event, reminder):
 			if event == "birthday":
 				raise RuntimeError("HRMS grouping blew up")
-			return real(event, template_name)
+			return real(event, reminder)
 
 		with patch("helixhr.reminders._send_event", side_effect=boom):
 			result = send_celebration_reminders()
@@ -388,6 +426,139 @@ class TestCelebrationReminders(IntegrationTestCase):
 			frappe.get_hooks("scheduler_events")["daily"],
 		)
 
+	# --- P8-U11: "Selected employees" recipient mode ------------------------
+
+	def _employee_id(self, suffix):
+		from helixhr.tests.utils import CELEBRATION_TAG
+
+		return frappe.db.get_value("Employee", {"employee_number": f"{CELEBRATION_TAG}-REM-{suffix}"}, "name")
+
+	def _select(self, event, *suffixes):
+		frappe.db.set_value(
+			"HelixHR Celebration Reminder", event, "recipient_mode", "Selected employees", update_modified=False
+		)
+		frappe.db.delete("HelixHR Celebration Recipient", {"parent": event})
+		doc = frappe.get_doc("HelixHR Celebration Reminder", event)
+		doc.set("recipients", [{"employee": self._employee_id(suffix)} for suffix in suffixes])
+		doc.save(ignore_permissions=True)
+		frappe.clear_document_cache("HelixHR Celebration Reminder", event)
+
+	def test_selected_employees_mode_only_mails_the_selected_list(self):
+		self._stage(birthdays=("A1",))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		self._select("birthday", "A2")
+		added = self._watch_mail()
+
+		send_celebration_reminders()
+		mails = added()
+
+		self.assertEqual(len(mails), 1)
+		self.assertEqual(mails[0]["recipients"], [self._address("A2")])
+		self.assertNotIn(self._address("A3"), mails[0]["recipients"])
+
+	def test_selected_employees_excludes_a_selected_person_in_another_company(self):
+		self._stage(birthdays=("A1",))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		# B2 is in COMPANY_B, not the celebrating COMPANY_A -- never mailed
+		# for A1's birthday regardless of being on the selected list.
+		self._select("birthday", "A2", "B2")
+		added = self._watch_mail()
+
+		send_celebration_reminders()
+		mails = added()
+
+		self.assertEqual(len(mails), 1)
+		self.assertEqual(mails[0]["recipients"], [self._address("A2")])
+
+	def test_selected_employees_where_a_selected_person_is_celebrating_is_excluded_but_still_hears_about_others(self):
+		self._stage(birthdays=("A1", "A2"))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		# A1 is celebrating and also on the selected list -- excluded from
+		# the announcement (they are the news, not the audience), but still
+		# gets the shared-day mail about A2, unconditional on selection.
+		self._select("birthday", "A1", "A3")
+		added = self._watch_mail()
+
+		send_celebration_reminders()
+		mails = {tuple(mail["recipients"]): mail for mail in added()}
+
+		self.assertIn((self._address("A3"),), mails, "the announcement to the rest of the selected list")
+		self.assertNotIn(
+			self._address("A1"),
+			mails[(self._address("A3"),)]["recipients"],
+			"A1 must not be in the announcement about their own birthday",
+		)
+		# The shared-day mail: A1 still hears about A2, unconditional on
+		# whether A1 is themselves selected.
+		self.assertIn((self._address("A1"),), mails, "A1 still gets the shared-day mail about A2")
+		self.assertIn("A2", mails[(self._address("A1"),)]["subject"])
+
+	def test_selected_employees_where_everyone_selected_is_celebrating_sends_no_announcement(self):
+		self._stage(birthdays=("A1",))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		self._select("birthday", "A1")
+		added = self._watch_mail()
+
+		result = send_celebration_reminders()
+
+		self.assertEqual(result["birthday"]["emails"], 0)
+		self.assertEqual(added(), [])
+
+	def test_switching_back_to_all_employees_does_not_lose_the_saved_selection(self):
+		self._select("birthday", "A2")
+		frappe.db.set_value(
+			"HelixHR Celebration Reminder", "birthday", "recipient_mode", "All employees", update_modified=False
+		)
+		frappe.clear_document_cache("HelixHR Celebration Reminder", "birthday")
+
+		recipients = frappe.get_all(
+			"HelixHR Celebration Recipient", filters={"parent": "birthday"}, pluck="employee"
+		)
+		self.assertEqual(recipients, [self._employee_id("A2")])
+
+	# --- P8-KTD7: restricted Jinja rendering ---------------------------------
+
+	def test_restricted_rendering_blocks_a_template_side_effect_write(self):
+		"""The security assertion KTD7 actually buys: `frappe.db.get_value`
+		is exposed under *both* `get_safe_globals()` and the restricted
+		`render_safe_globals()` -- it is a permission-free raw read either
+		way, restricted or not, so a template reading it behaves the same
+		under `restrict_globals=True` as without it. What the restricted
+		set drops is anything with a *side effect*: `frappe.db.set_value`,
+		`frappe.new_doc`/`delete_doc`, `frappe.call` (arbitrary whitelisted
+		method invocation), `frappe.sendmail`, `db.commit`. This is the
+		actual boundary HR's own template body is held to, and the one
+		worth pinning."""
+		mutating_name = "_Test Reminders Mutating Template"
+		if not frappe.db.exists("Email Template", mutating_name):
+			frappe.get_doc(
+				{
+					"doctype": "Email Template",
+					"name": mutating_name,
+					"use_html": 1,
+					"subject": "MUTATE {{ names }}",
+					"response_html": "{{ frappe.db.set_value('User', 'Administrator', 'full_name', 'Pwned') }}",
+				}
+			).insert(ignore_permissions=True)
+
+		before = frappe.db.get_value("User", "Administrator", "full_name")
+
+		self._stage(birthdays=("A1",))
+		self._pick("helixhr_birthday_template", mutating_name)
+		added = self._watch_mail()
+		errors = self._errors()
+
+		result = send_celebration_reminders()
+
+		self.assertEqual(result["birthday"]["emails"], 0)
+		self.assertEqual(added(), [])
+		self.assertEqual(len(errors()), 1, "the render failure is in the scheduler log, not swallowed")
+		self.assertEqual(
+			frappe.db.get_value("User", "Administrator", "full_name"),
+			before,
+			"the template's write must never have executed",
+		)
+
 
 class TestHRSettingsBothSendersRefusal(IntegrationTestCase):
 	"""P4-R18 / P4-KTD10: the contradiction is refused where HR creates it.
@@ -399,25 +570,45 @@ class TestHRSettingsBothSendersRefusal(IntegrationTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")
 		_template(BIRTHDAY_TEMPLATE, "BDAYMARK {{ names }}")
-		self.original = {
+		if not frappe.db.exists("HelixHR Celebration Reminder", "birthday"):
+			frappe.get_doc(
+				{
+					"doctype": "HelixHR Celebration Reminder",
+					"event": "birthday",
+					"recipient_mode": "All employees",
+				}
+			).insert(ignore_permissions=True)
+		self.original_reminder = frappe.db.get_value(
+			"HelixHR Celebration Reminder", "birthday", ["is_enabled", "email_template"], as_dict=True
+		)
+		self.original_hrms = {
 			field: frappe.db.get_single_value("HR Settings", field)
-			for field in (
-				"helixhr_birthday_template",
-				"helixhr_anniversary_template",
-				"send_birthday_reminders",
-				"send_work_anniversary_reminders",
-			)
+			for field in ("send_birthday_reminders", "send_work_anniversary_reminders")
 		}
 
 	def tearDown(self):
-		for field, value in self.original.items():
+		frappe.db.set_value(
+			"HelixHR Celebration Reminder",
+			"birthday",
+			{"is_enabled": self.original_reminder.is_enabled, "email_template": self.original_reminder.email_template},
+			update_modified=False,
+		)
+		frappe.clear_document_cache("HelixHR Celebration Reminder", "birthday")
+		for field, value in self.original_hrms.items():
 			frappe.db.set_single_value("HR Settings", field, value)
 		frappe.clear_document_cache("HR Settings", "HR Settings")
 
-	def test_a_helixhr_template_with_the_hrms_checkbox_on_is_refused(self):
+	def test_a_helixhr_reminder_enabled_with_the_hrms_checkbox_on_is_refused(self):
+		frappe.db.set_value(
+			"HelixHR Celebration Reminder",
+			"birthday",
+			{"is_enabled": 1, "email_template": BIRTHDAY_TEMPLATE},
+			update_modified=False,
+		)
+		frappe.clear_document_cache("HelixHR Celebration Reminder", "birthday")
+
 		settings = frappe.get_doc("HR Settings")
 		settings.send_birthday_reminders = 1
-		settings.helixhr_birthday_template = BIRTHDAY_TEMPLATE
 
 		with self.assertRaises(frappe.ValidationError) as caught:
 			settings.save()
@@ -425,18 +616,48 @@ class TestHRSettingsBothSendersRefusal(IntegrationTestCase):
 		message = str(caught.exception)
 		spec = EVENTS["birthday"]
 		self.assertIn(spec["hrms_label"], message)
-		self.assertIn(spec["template_label"], message)
 
 	def test_unticking_the_hrms_checkbox_in_the_same_save_is_accepted(self):
+		frappe.db.set_value(
+			"HelixHR Celebration Reminder",
+			"birthday",
+			{"is_enabled": 1, "email_template": BIRTHDAY_TEMPLATE},
+			update_modified=False,
+		)
+		frappe.clear_document_cache("HelixHR Celebration Reminder", "birthday")
+
 		settings = frappe.get_doc("HR Settings")
 		settings.send_birthday_reminders = 0
-		settings.helixhr_birthday_template = BIRTHDAY_TEMPLATE
+		# Never raises: HelixHR's own reminder stays enabled, but the HRMS
+		# checkbox this save turns off means the two are no longer both on.
 		settings.save()
 
-		self.assertEqual(
-			frappe.db.get_single_value("HR Settings", "helixhr_birthday_template"),
-			BIRTHDAY_TEMPLATE,
+		self.assertEqual(frappe.db.get_single_value("HR Settings", "send_birthday_reminders"), 0)
+
+	def test_a_disabled_helixhr_reminder_never_refuses_the_hrms_checkbox(self):
+		frappe.db.set_value(
+			"HelixHR Celebration Reminder",
+			"birthday",
+			{"is_enabled": 0, "email_template": BIRTHDAY_TEMPLATE},
+			update_modified=False,
 		)
+		frappe.clear_document_cache("HelixHR Celebration Reminder", "birthday")
+
+		settings = frappe.get_doc("HR Settings")
+		settings.send_birthday_reminders = 1
+		settings.save()
+
+		self.assertEqual(frappe.db.get_single_value("HR Settings", "send_birthday_reminders"), 1)
+
+	def test_the_two_hrms_checkboxes_are_desk_read_only_fixtures(self):
+		"""P8-KTD8: the affordance for the hazard is never offered in Desk
+		in the first place -- a Property Setter, not just the `validate`
+		refusal above."""
+		for field in ("send_birthday_reminders", "send_work_anniversary_reminders"):
+			self.assertTrue(
+				frappe.get_meta("HR Settings").get_field(field).read_only,
+				f"{field} is not read-only in Desk",
+			)
 
 
 class TestCelebrationTemplateSeed(IntegrationTestCase):
@@ -471,9 +692,12 @@ class TestCelebrationTemplateSeed(IntegrationTestCase):
 
 	def test_the_defaults_render_against_the_documented_context(self):
 		"""The context of P4-KTD13 is the contract; the shipped markup has to
-		read only from it."""
+		read only from it. Rendered through `_render_restricted` (P8-KTD7),
+		the same call the real job makes -- not `get_formatted_email` -- so
+		this also pins that the shipped defaults still render under
+		restricted globals."""
 		from helixhr.patches.v1_0.seed_celebration_templates import TEMPLATES
-		from helixhr.reminders import _context
+		from helixhr.reminders import _context, _render_restricted
 
 		persons = [
 			{"name": "Ada Lovelace", "image": None, "date_of_joining": "2020-01-01"},
@@ -482,7 +706,9 @@ class TestCelebrationTemplateSeed(IntegrationTestCase):
 		for spec, event in zip(TEMPLATES, ("birthday", "work_anniversary"), strict=True):
 			template = frappe.get_doc("Email Template", spec["name"])
 			for people in (persons[:1], persons):
-				rendered = template.get_formatted_email(_context(people, "_Test Reminders Co A", event))
+				rendered = _render_restricted(
+					template, _context(people, "_Test Reminders Co A", event), sender=None
+				)
 				self.assertIn("Ada Lovelace", rendered["message"])
 				self.assertTrue(rendered["subject"].strip())
 

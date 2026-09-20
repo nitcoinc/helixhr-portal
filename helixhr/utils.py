@@ -451,6 +451,8 @@ RATE_LIMIT_POLICY = {
 	# administrative write like the config saves just above it.
 	"get_person_form_options": (60, 60),
 	"save_person": (30, 3600),
+	# P8-U12: an occasional administrative write, like the config saves above.
+	"save_celebration_reminder": (30, 3600),
 }
 
 

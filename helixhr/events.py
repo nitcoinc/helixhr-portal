@@ -1067,19 +1067,28 @@ def hr_settings_validate(doc, method=None):
 	where HR creates the state, and preflight is the backstop for the routes
 	that never reach `validate` -- a fixture import, a raw `db_set`.
 
-	One sentence, naming both fields as HR sees them on the form, because the
-	fix is to clear one of the two and nothing else.
+	P8-KTD8: the two HRMS checkboxes are also Desk-read-only fixtures now
+	(a Property Setter), so a normal Desk save cannot reach this
+	contradiction through the form at all -- but a Property Setter has no
+	effect on a programmatic write (`doc.send_birthday_reminders = 1;
+	doc.save()`), which still reaches here and is still refused.
+
+	One sentence, naming the HRMS field as HR would have seen it on the
+	form and the portal tab that now owns the other half.
 	"""
 	# Local import on purpose: `helixhr.reminders` imports HRMS's own
 	# recipient helpers at module level (P4-KTD12), and every doc event in
 	# this file would otherwise carry that import.
 	from helixhr.reminders import EVENTS
 
-	for spec in EVENTS.values():
-		if doc.get(spec["template_field"]) and cint(doc.get(spec["hrms_field"])):
+	for event, spec in EVENTS.items():
+		reminder_enabled = frappe.db.get_value(
+			"HelixHR Celebration Reminder", event, "is_enabled"
+		)
+		if reminder_enabled and cint(doc.get(spec["hrms_field"])):
 			frappe.throw(
 				_(
 					"HRMS and HelixHR would both send the {0} email: untick '{1}' in "
-					"HR Settings > Reminders, or clear '{2}'."
-				).format(spec["label"].lower(), spec["hrms_label"], spec["template_label"])
+					"HR Settings > Reminders, or disable it on Settings > Celebrations in the portal."
+				).format(spec["label"].lower(), spec["hrms_label"])
 			)

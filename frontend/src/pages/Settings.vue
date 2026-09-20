@@ -9,6 +9,7 @@ import TemplatesSection from '@/components/settings/TemplatesSection.vue'
 import LeaveTypesSection from '@/components/settings/LeaveTypesSection.vue'
 import HolidayListsSection from '@/components/settings/HolidayListsSection.vue'
 import ShiftTypesSection from '@/components/settings/ShiftTypesSection.vue'
+import CelebrationsSection from '@/components/settings/CelebrationsSection.vue'
 
 // P5-U14: `get_portal_config` is HR-only (`_is_hr()`, the same predicate
 // `can_configure` mirrors in the bootstrap). A non-HR caller hitting this
@@ -30,6 +31,7 @@ const SECTIONS = [
   { key: 'leave-types', label: 'Leave types' },
   { key: 'holiday-lists', label: 'Holiday lists' },
   { key: 'shift-types', label: 'Shift types' },
+  { key: 'celebrations', label: 'Celebrations' },
 ]
 
 const activeSection = computed(() => props.section || 'categories')
@@ -131,6 +133,12 @@ function reload() {
         <ShiftTypesSection
           v-else-if="activeSection === 'shift-types'"
           :shift-types="config.data?.shift_types || []"
+          @saved="reload"
+        />
+        <CelebrationsSection
+          v-else-if="activeSection === 'celebrations'"
+          :celebrations="config.data?.celebrations || {}"
+          :template-tokens="config.data?.celebration_template_tokens || []"
           @saved="reload"
         />
       </div>

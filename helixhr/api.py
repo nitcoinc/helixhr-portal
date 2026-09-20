@@ -5680,6 +5680,10 @@ _SETTINGS_DESK_DOCTYPES = {
 	"leave_types": "Leave Type",
 	"holiday_lists": "Holiday List",
 	"shift_types": "Shift Type",
+	# P8-U12: the Email Template list, not HelixHR Celebration Reminder --
+	# the second is a thin pointer at the first, and the first is what a
+	# Desk-side look at the actual mail body means.
+	"celebrations": "Email Template",
 }
 
 
@@ -5705,6 +5709,8 @@ def get_portal_config():
 
 	return {
 		"desk_urls": _settings_desk_urls(),
+		"celebrations": _portal_celebration_config(),
+		"celebration_template_tokens": CELEBRATION_TEMPLATE_TOKENS,
 		"categories": frappe.get_all(
 			"HelixHR Request Category",
 			fields=["name", "category_name", "hint", "route_to_role", "sla_days", "is_active"],
@@ -5869,6 +5875,165 @@ def save_shift_type(name, **fields):
 	_apply_allowed_fields(doc, fields, SHIFT_TYPE_EDITABLE_FIELDS)
 	doc.save()
 	return {"name": doc.name, **{field: doc.get(field) for field in SHIFT_TYPE_EDITABLE_FIELDS}}
+
+
+# ---------------------------------------------------------------------------
+# P8-U12: authoring the birthday and work-anniversary email from the portal.
+#
+# `helixhr.reminders.EVENTS` names the two events; the Email Template each
+# `HelixHR Celebration Reminder` row links to is HR's own body, seeded once
+# by `seed_celebration_templates` under the same two names this module reuses
+# rather than creating a second template per event on first save.
+# ---------------------------------------------------------------------------
+
+# The seeded default template each event's reminder starts out linked to
+# (`patches/v1_0/seed_celebration_templates.py`) -- reused by name so a
+# first save edits that template rather than creating a duplicate.
+_CELEBRATION_DEFAULT_TEMPLATES = {
+	"birthday": "HelixHR Birthday Reminder",
+	"work_anniversary": "HelixHR Work Anniversary Reminder",
+}
+
+
+def _celebration_reminder_projection(event):
+	from helixhr.reminders import EVENTS
+
+	spec = EVENTS[event]
+	reminder = None
+	if frappe.db.exists("HelixHR Celebration Reminder", event):
+		reminder = frappe.db.get_value(
+			"HelixHR Celebration Reminder",
+			event,
+			["is_enabled", "email_template", "recipient_mode"],
+			as_dict=True,
+		)
+
+	subject = body = None
+	use_html = True
+	template_name = reminder.email_template if reminder else None
+	if template_name and frappe.db.exists("Email Template", template_name):
+		template = frappe.get_doc("Email Template", template_name)
+		subject = template.subject
+		use_html = bool(template.use_html)
+		body = template.response_html if template.use_html else template.response
+
+	recipients = []
+	if reminder:
+		recipients = frappe.get_all(
+			"HelixHR Celebration Recipient",
+			filters={"parent": event},
+			fields=["employee", "employee_name"],
+			order_by="idx asc",
+		)
+
+	return {
+		"event": event,
+		"label": spec["label"],
+		"is_enabled": bool(reminder and reminder.is_enabled),
+		"recipient_mode": reminder.recipient_mode if reminder else "All employees",
+		"subject": subject,
+		"body": body,
+		"use_html": use_html,
+		"recipients": recipients,
+	}
+
+
+def _portal_celebration_config():
+	from helixhr.reminders import EVENTS
+
+	return {event: _celebration_reminder_projection(event) for event in EVENTS}
+
+
+# The documented context every celebration template renders against
+# (`helixhr.reminders._context`) -- surfaced to the portal so the section
+# can list it the same way TemplatesSection.vue lists `template_tokens`.
+CELEBRATION_TEMPLATE_TOKENS = (
+	"persons",
+	"names",
+	"count",
+	"company",
+	"logo_url",
+	"date",
+	"portal_url",
+)
+
+
+@frappe.whitelist(methods=["POST"])
+def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode="All employees", recipients=None):
+	"""HR writes the birthday/work-anniversary email and picks its audience
+	from the portal (P8-U12 / P8-R5, P8-R6).
+
+	Writes two documents: the Email Template the reminder links to (created
+	under the seeded default name on first save, edited by name afterwards
+	-- never a second template per event), and the `HelixHR Celebration
+	Reminder` row itself. Both go through `_assert_config_write`, exactly
+	as every other config save in this module does.
+
+	`subject`/`body` are compiled with `validate_template` before anything
+	is written (P8-U12's own test scenario: a Jinja syntax error is refused
+	at save time, not at 8am the next morning) -- `restrict_globals=True`,
+	the same restriction `reminders._render_restricted` renders with, so a
+	template that only compiles under the *unrestricted* globals still
+	fails here rather than only at send time.
+	"""
+	from helixhr.reminders import EVENTS
+
+	rate_limit_per_user("save_celebration_reminder")
+	if not _is_hr():
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	if event not in EVENTS:
+		frappe.throw(_("That reminder is not offered here."))
+
+	if isinstance(recipients, str):
+		recipients = frappe.parse_json(recipients)
+	recipients = recipients or []
+
+	subject = (subject or "").strip()
+	body = body or ""
+	from frappe.utils.jinja import validate_template
+
+	validate_template(subject, restrict_globals=True)
+	validate_template(body, restrict_globals=True)
+
+	if frappe.db.exists("HelixHR Celebration Reminder", event):
+		reminder = frappe.get_doc("HelixHR Celebration Reminder", event)
+	else:
+		reminder = frappe.new_doc("HelixHR Celebration Reminder")
+		reminder.event = event
+
+	template_name = reminder.email_template or _CELEBRATION_DEFAULT_TEMPLATES[event]
+	if frappe.db.exists("Email Template", template_name):
+		template = frappe.get_doc("Email Template", template_name)
+	else:
+		template = frappe.new_doc("Email Template")
+		template.name = template_name
+		template.use_html = 1
+
+	# `ignore_permissions=True`, not `_assert_config_write` (KTD8's own
+	# framing, reused): Email Template is a shared core doctype used across
+	# the whole site, not one this app owns -- granting HR Manager a real
+	# DocPerm on it would let them edit or delete *any* Email Template, not
+	# just the two celebration ones. `_is_hr()` above is the real
+	# authorisation boundary here, and `template_name` is never caller
+	# input -- it only ever resolves to one of the two names in
+	# `_CELEBRATION_DEFAULT_TEMPLATES` or a reminder's own already-saved
+	# `email_template`, so there is no doctype this write can reach outside
+	# the two celebration templates.
+	template.subject = subject
+	if template.use_html:
+		template.response_html = body
+	else:
+		template.response = body
+	template.save(ignore_permissions=True)
+
+	_assert_config_write(reminder)
+	reminder.email_template = template.name
+	reminder.is_enabled = cint(is_enabled)
+	reminder.recipient_mode = recipient_mode
+	reminder.set("recipients", [{"employee": row} for row in recipients])
+	reminder.save()
+
+	return _celebration_reminder_projection(event)
 
 
 @frappe.whitelist(methods=["POST"])

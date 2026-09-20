@@ -52,3 +52,8 @@ helixhr.patches.v1_0.seed_message_templates
 # bench rather than assumed; reusing that name would have handed this
 # grant to every existing Delivery Note user and vice versa).
 helixhr.patches.v1_0.apply_permission_deltas #2026-09-20 P7-U1 HelixHR Delivery Manager permissions
+# P8-U10: creates the two HelixHR Celebration Reminder rows every site
+# needs, carrying forward whatever HR Settings' two now-superseded Custom
+# Fields already held. Runs after doctypes are synced, so the new doctype
+# exists by the time this executes.
+helixhr.patches.v1_0.migrate_celebration_reminders

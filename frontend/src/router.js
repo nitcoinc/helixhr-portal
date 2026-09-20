@@ -155,7 +155,7 @@ const routes = [
     // the portal) rather than only via in-page tabs. `get_portal_config` is
     // the server's own gate -- an employee hitting this route directly gets
     // AsyncState's 'forbidden' region, not a client-side redirect.
-    path: '/settings/:section(categories|templates|leave-types|holiday-lists|shift-types)',
+    path: '/settings/:section(categories|templates|leave-types|holiday-lists|shift-types|celebrations)',
     name: 'SettingsSection',
     component: () => import('@/pages/Settings.vue'),
     props: true,
