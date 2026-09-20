@@ -66,6 +66,7 @@ from helixhr.utils import (
 	ADMIN_REPORTS,
 	HOLIDAY_LIST_EDITABLE_FIELDS,
 	LEAVE_TYPE_EDITABLE_FIELDS,
+	PERSON_EDITABLE_FIELDS,
 	PROFILE_EDITABLE_FIELDS,
 	SHIFT_TYPE_EDITABLE_FIELDS,
 	TEMPLATE_TOKENS,
@@ -6511,22 +6512,57 @@ def search_people(query=None, start=0, limit=None):
 # screen.
 
 
+def _employee_for_user(user):
+	"""The Employee id and display name behind a Link-to-User value (an
+	approver), or `(None, None)` -- the inverse of `get_manager_user`
+	(P8-U9). Both are needed: the id is what the edit form's picker
+	pre-selects (the picker's own values are employee ids, never logins,
+	same as every other picker in this app), the name is what the
+	read-only card renders."""
+	if not user:
+		return None, None
+	row = frappe.db.get_value("Employee", {"user_id": user}, ["name", "employee_name"], as_dict=True)
+	return (row.name, row.employee_name) if row else (None, None)
+
+
 def _person_profile(employee):
-	"""Identity, manager, employment status and joining date -- the part of
-	the person view that is not one of the portal's other existing readers."""
+	"""Identity, manager, employment status and joining date, plus the
+	overview/joining/approver/shift fields P8-U8/U9 make editable -- the
+	part of the person view that is not one of the portal's other existing
+	readers. Every field here is permlevel 0 (KTD3)."""
 	fields = [
 		"name",
 		"employee_name",
 		"designation",
 		"department",
 		"branch",
+		"company_email",
 		"reports_to",
 		"status",
 		"date_of_joining",
+		"employment_type",
+		"grade",
+		"scheduled_confirmation_date",
+		"final_confirmation_date",
+		"leave_approver",
+		"expense_approver",
+		"shift_request_approver",
+		"default_shift",
+		"holiday_list",
 	]
 	data = frappe.db.get_value("Employee", employee, fields, as_dict=True)
 	data["manager_name"] = (
 		frappe.db.get_value("Employee", data.reports_to, "employee_name") if data.reports_to else None
+	)
+	# `*_employee` is what the edit form's picker pre-selects (its own
+	# values are employee ids, never logins); `*_name` is what the
+	# read-only card renders.
+	data["leave_approver_employee"], data["leave_approver_name"] = _employee_for_user(data.leave_approver)
+	data["expense_approver_employee"], data["expense_approver_name"] = _employee_for_user(
+		data.expense_approver
+	)
+	data["shift_request_approver_employee"], data["shift_request_approver_name"] = _employee_for_user(
+		data.shift_request_approver
 	)
 	return data
 
@@ -6817,6 +6853,146 @@ def get_person(employee):
 		"desk_url": get_url_to_form("Employee", employee) if _can_open_desk(frappe.session.user) else None,
 		"failed_sections": failed,
 	}
+
+
+# ---------------------------------------------------------------------------
+# P8-U7/U8/U9: editing a person's overview, joining details, approvers and
+# default shift from the portal -- reversing `get_person`'s read-only
+# posture (P6-R3) deliberately, at exactly the width `PERSON_EDITABLE_FIELDS`
+# names (KTD3), scoped by the same `resolve_admin_scope` /
+# `employee_in_admin_scope` pair `get_person` already uses.
+# ---------------------------------------------------------------------------
+
+_PERSON_APPROVER_FIELDS = ("leave_approver", "expense_approver", "shift_request_approver")
+
+_PERSON_APPROVER_LABELS = {
+	"leave_approver": "leave approver",
+	"expense_approver": "expense approver",
+	"shift_request_approver": "shift request approver",
+}
+
+_PERSON_ALL_EDITABLE_FIELDS = tuple(
+	field for group in PERSON_EDITABLE_FIELDS.values() for field in group
+)
+
+
+def _validate_reports_to(employee_id, scope):
+	"""`reports_to` is Link-to-Employee, unlike the three approver fields
+	below -- the chosen manager's own id is exactly the value stored, once
+	it is confirmed to exist and to fall inside the caller's own admin
+	scope (the same "picker's options are the caller's own reach" rule
+	KTD5 applies to project members)."""
+	if not employee_id:
+		return None
+	if not employee_in_admin_scope(employee_id, scope):
+		frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
+	if not frappe.db.exists("Employee", employee_id):
+		frappe.throw(_("{0} isn't an employee here.").format(employee_id))
+	return employee_id
+
+
+def _resolve_approver_user(employee_id, scope, field_label):
+	"""An approver, named the way every portal picker names a person -- by
+	Employee, never by login -- resolved to `Employee.user_id` (KTD5).
+	Refused, by name, for a chosen person outside the caller's admin scope,
+	who does not exist, or who has no linked user to hold the approval."""
+	if not employee_id:
+		return None
+	if not employee_in_admin_scope(employee_id, scope):
+		frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
+	row = frappe.db.get_value("Employee", employee_id, ["employee_name", "user_id"], as_dict=True)
+	if not row:
+		frappe.throw(_("{0} isn't an employee here.").format(employee_id))
+	if not row.user_id:
+		frappe.throw(
+			_("{0} has no linked user, so they can't be set as {1}.").format(
+				row.employee_name, field_label
+			)
+		)
+	return row.user_id
+
+
+@frappe.whitelist()
+def get_person_form_options(employee):
+	"""The option lists the person-view edit cards need, in one call
+	(P8-U7): Designation, Department, Branch, Employment Type, Employee
+	Grade, Shift Type and Holiday List, plus a company-scoped employee
+	list for the reporting-manager and the three approver pickers.
+
+	Scoped exactly like `get_person` -- a caller outside their admin scope,
+	or a target outside it, is refused before anything is read. Department
+	narrows to the target's own company; the employee list narrows there
+	too, so the pickers this call feeds never offer someone outside the
+	target's own company as a manager or approver.
+	"""
+	rate_limit_per_user("get_person_form_options")
+	scope = resolve_admin_scope(frappe.session.user)
+	if scope["kind"] == "none" or not employee_in_admin_scope(employee, scope):
+		frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
+
+	company = frappe.db.get_value("Employee", employee, "company")
+	people_filters = {"status": "Active"}
+	if company:
+		people_filters["company"] = company
+	people = frappe.get_all(
+		"Employee",
+		filters=people_filters,
+		fields=["name", "employee_name"],
+		order_by="employee_name asc",
+		ignore_permissions=True,
+	)
+
+	return {
+		"designations": frappe.get_all("Designation", pluck="name", order_by="name asc"),
+		"departments": frappe.get_all(
+			"Department",
+			filters={"company": company} if company else {},
+			pluck="name",
+			order_by="name asc",
+		),
+		"branches": frappe.get_all("Branch", pluck="name", order_by="name asc"),
+		"employment_types": frappe.get_all("Employment Type", pluck="name", order_by="name asc"),
+		"grades": frappe.get_all("Employee Grade", pluck="name", order_by="name asc"),
+		"shift_types": frappe.get_all("Shift Type", pluck="name", order_by="name asc"),
+		"holiday_lists": frappe.get_all("Holiday List", pluck="name", order_by="name asc"),
+		"people": [{"name": row.name, "employee_name": row.employee_name} for row in people],
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+def save_person(employee, **fields):
+	"""Edit a person's overview, joining details, approvers and default
+	shift from the portal (P8-R3) -- the write surface `PERSON_EDITABLE_FIELDS`
+	names, no wider (KTD3): every field is permlevel 0, and anything else
+	in `fields` is silently ignored, the same rule `_apply_allowed_fields`
+	already applies to every other config write in this module.
+
+	`doc.save()`, not an `ignore_permissions=True` insert-style write:
+	Employee's own `validate()` still runs -- the `reports_to` cycle
+	check, the joining/relieving-date rules -- and Frappe's own Employee
+	permissions remain a second gate under the scope helper, exactly the
+	posture `_assert_config_write`'s callers already take.
+	"""
+	rate_limit_per_user("save_person")
+	scope = resolve_admin_scope(frappe.session.user)
+	if scope["kind"] == "none" or not employee_in_admin_scope(employee, scope):
+		frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
+
+	doc = frappe.get_doc("Employee", employee)
+
+	resolved = dict(fields)
+	if "reports_to" in fields:
+		resolved["reports_to"] = _validate_reports_to(fields["reports_to"], scope)
+	for field in _PERSON_APPROVER_FIELDS:
+		if field in fields:
+			resolved[field] = _resolve_approver_user(
+				fields[field], scope, _PERSON_APPROVER_LABELS[field]
+			)
+
+	_apply_allowed_fields(doc, resolved, _PERSON_ALL_EDITABLE_FIELDS)
+	doc.save()
+
+	return _person_profile(employee)
 
 
 # ---------------------------------------------------------------------------

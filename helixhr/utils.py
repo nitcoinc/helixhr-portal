@@ -95,6 +95,36 @@ SHIFT_TYPE_EDITABLE_FIELDS = (
 )
 
 
+# P8-U7/U8/U9. What `save_person` may write on Employee, grouped the same
+# way the person view's own edit cards are grouped -- every field here is
+# permlevel 0, verified against ERPNext's `employee.json` and HRMS's own
+# `hrms/setup.py` custom fields (P8-U7's own research note). This reverses
+# P6-R3's "read-only" posture deliberately (KTD3): the write surface is
+# exactly as wide as the read surface `get_person` already grants.
+PERSON_EDITABLE_FIELDS = {
+	"overview": ("designation", "department", "branch", "company_email"),
+	"joining": (
+		"date_of_joining",
+		"employment_type",
+		"grade",
+		"scheduled_confirmation_date",
+		"final_confirmation_date",
+		"status",
+	),
+	# The three approver fields are Link-to-User -- `save_person` accepts
+	# employee ids like every other portal picker and resolves each to
+	# `Employee.user_id` itself (KTD5), so this list names the Employee
+	# doctype fieldnames a caller may set, not the User values actually
+	# written.
+	"approvers": ("reports_to", "leave_approver", "expense_approver", "shift_request_approver"),
+	# `default_shift` (KTD4): a dated Shift Assignment is Desk-only, on
+	# purpose -- this is the one field HRMS's own `get_employee_shift`
+	# falls back to, so the change is visible everywhere the portal
+	# resolves a shift without this app modelling scheduling itself.
+	"shift": ("default_shift", "holiday_list"),
+}
+
+
 # P6-U4 / P6-R9. The reports the launcher offers -- a short, deliberate list
 # in the style above, not every report installed. Payroll reports are
 # excluded on purpose (P6-KTD2): the portal does not route HR into payroll.
@@ -415,6 +445,12 @@ RATE_LIMIT_POLICY = {
 	"save_leave_type": (30, 3600),
 	"save_holiday_list": (30, 3600),
 	"save_shift_type": (30, 3600),
+	# P8-U7/U8/U9. `get_person_form_options` fans out across several Link
+	# doctypes plus a scoped employee list, the same reason `get_person`
+	# itself is bounded above; `save_person` is an occasional
+	# administrative write like the config saves just above it.
+	"get_person_form_options": (60, 60),
+	"save_person": (30, 3600),
 }
 
 
