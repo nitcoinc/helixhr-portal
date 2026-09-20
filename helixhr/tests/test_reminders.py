@@ -180,10 +180,15 @@ class TestCelebrationReminders(IntegrationTestCase):
 		employees" mode) never fires here; it is asserted on its own
 		below."""
 		event = _FIELD_TO_EVENT[field]
+		# `recipient_mode` is forced back to "All employees" here too --
+		# every scenario in this class assumes it except the ones that
+		# explicitly call `_select()` afterwards, and a real site's saved
+		# selection (from HR actually using Settings > Celebrations) must
+		# not silently narrow this suite's own mail-everyone assertions.
 		frappe.db.set_value(
 			"HelixHR Celebration Reminder",
 			event,
-			{"email_template": template, "is_enabled": 1 if template else 0},
+			{"email_template": template, "is_enabled": 1 if template else 0, "recipient_mode": "All employees"},
 			update_modified=False,
 		)
 		frappe.clear_document_cache("HelixHR Celebration Reminder", event)
