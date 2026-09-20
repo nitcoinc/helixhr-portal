@@ -448,6 +448,23 @@ class TestCreateProject(IntegrationTestCase):
 		for action in ("create_project", "save_task", "set_project_members"):
 			self.assertIn(action, RATE_LIMIT_POLICY)
 
+	def test_an_unscoped_caller_with_no_employee_record_is_refused_clearly(self):
+		"""`resolve_project_scope` deliberately resolves an HR-role holder
+		with no Employee record at all to "unscoped" (the Desk-only persona
+		`ensure_hr_manager_user` builds). `create_project` must not crash with
+		an unhandled `AttributeError` from `get_current_employee` for that
+		caller -- `Project.company` is mandatory and there is no "own record"
+		to take one from, so the call is refused with a clear message
+		instead of guessing a company or propagating a crash."""
+		from helixhr.api import create_project
+
+		hr_user_no_employee = ensure_hr_manager_user()
+		self.assertEqual(resolve_project_scope(hr_user_no_employee)["kind"], "unscoped")
+
+		frappe.set_user(hr_user_no_employee)
+		with self.assertRaises(frappe.ValidationError):
+			create_project(project_name="_Test U4 Unscoped No Employee Project")
+
 
 class TestSaveTaskAndSetProjectMembers(IntegrationTestCase):
 	"""P7-U4. `save_task` (add, rename, close) and `set_project_members`

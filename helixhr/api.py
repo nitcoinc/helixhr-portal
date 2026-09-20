@@ -6991,8 +6991,26 @@ def create_project(project_name, is_billable=0, **kwargs):
 	if not project_name:
 		frappe.throw(_("Give the project a name."))
 
-	employee = get_current_employee()
-	company = frappe.db.get_value("Employee", employee, "company")
+	# `resolve_project_scope`'s "unscoped" branch deliberately admits a
+	# System Manager or an HR-role holder with no Employee record at all
+	# (the Desk-only persona `ensure_hr_manager_user` builds) -- there is no
+	# "own record" to take a company from for that caller, and `Project.company`
+	# is mandatory, so there is no safe company to guess on their behalf
+	# (Frappe's global default company is a site-wide setting, not this
+	# caller's own, and silently attaching their project to it would be a
+	# guess dressed up as a decision). `get_current_employee` has no defined
+	# behaviour for this persona either -- it calls `.get("name")` on
+	# whatever `get_current_employee_info` returned, which is `None` (not a
+	# dict) here, so it raises an unhandled `AttributeError` rather than the
+	# `PermissionError` its own body appears to promise. Refuse clearly
+	# instead: this persona already has Desk for project creation.
+	employee_info = get_current_employee_info()
+	if not employee_info:
+		frappe.throw(
+			_("Your account has no linked employee record, so a project can't be created from here."),
+			frappe.ValidationError,
+		)
+	company = employee_info.get("company")
 
 	doc = frappe.get_doc(
 		{
