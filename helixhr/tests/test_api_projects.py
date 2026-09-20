@@ -118,7 +118,22 @@ class TestDeliveryManagerRestRouteScope(IntegrationTestCase):
 	real acceptance criterion -- the portal methods are not." Every case
 	here goes through `frappe.client`, the generic route Frappe itself
 	exposes as `/api/resource/...`, never through a HelixHR whitelisted
-	method."""
+	method.
+
+	Revised after code review: U1 originally paired a plain read/write/
+	create DocPerm with these hooks so REST access would be *scoped* to
+	member projects rather than open to every project. That pairing had no
+	field-level notion of scope, and neither Project's nor Task's
+	costing-tab fields carry any permlevel restriction in stock ERPNext, so
+	a Delivery Manager reading even their own member project through this
+	route got the whole document -- costing tab included -- bypassing
+	`get_project`'s field allow-list entirely (R8, KTD9). The role now
+	holds no DocPerm on either doctype at all, so this route is refused
+	outright rather than scoped; the class name and its position as U1's
+	acceptance criterion stay, since the criterion itself -- "does the
+	generic REST route leak something HelixHR's own methods would refuse"
+	-- is unchanged, only the answer is now "nothing, ever" rather than
+	"only member projects"."""
 
 	def setUp(self):
 		frappe.set_user("Administrator")
@@ -142,41 +157,49 @@ class TestDeliveryManagerRestRouteScope(IntegrationTestCase):
 			{"doctype": "Task", "project": project, "subject": subject}
 		).insert(ignore_permissions=True).name
 
-	def test_listing_project_shows_only_member_projects(self):
+	def test_listing_projects_returns_none_even_for_a_member_project(self):
 		from frappe.client import get_list
 
 		frappe.set_user(self.dm_user)
 		names = {row["name"] for row in get_list("Project", filters={})}
-		self.assertIn(self.member_project, names)
+		self.assertNotIn(self.member_project, names)
 		self.assertNotIn(self.other_project, names)
 
-	def test_reading_a_non_member_project_is_refused(self):
+	def test_reading_any_project_is_refused_member_or_not(self):
 		from frappe.client import get
 
 		frappe.set_user(self.dm_user)
-		get("Project", self.member_project)
+		with self.assertRaises(frappe.PermissionError):
+			get("Project", self.member_project)
 		with self.assertRaises(frappe.PermissionError):
 			get("Project", self.other_project)
 
-	def test_task_listing_and_reading_is_confined_to_member_project_tasks(self):
+	def test_task_listing_and_reading_is_refused_member_or_not(self):
 		from frappe.client import get, get_list
 
 		frappe.set_user(self.dm_user)
-		names = {row["name"] for row in get_list("Task", filters={})}
-		self.assertIn(self.member_task, names)
-		self.assertNotIn(self.other_task, names)
+		# With zero standing permission at all on Task, `get_list` refuses
+		# outright rather than degrading to an empty result (unlike
+		# Project's list route) -- both mean the same thing here: no
+		# accessible task, member or not.
+		with self.assertRaises(frappe.PermissionError):
+			get_list("Task", filters={})
 
-		get("Task", self.member_task)
+		with self.assertRaises(frappe.PermissionError):
+			get("Task", self.member_task)
 		with self.assertRaises(frappe.PermissionError):
 			get("Task", self.other_task)
 
-	def test_writing_to_non_member_project_or_task_is_refused(self):
+	def test_writing_to_any_project_or_task_is_refused_member_or_not(self):
 		from frappe.client import set_value
 
 		frappe.set_user(self.dm_user)
-		set_value("Project", self.member_project, "status", "On hold")
+		with self.assertRaises(frappe.PermissionError):
+			set_value("Project", self.member_project, "status", "On hold")
 		with self.assertRaises(frappe.PermissionError):
 			set_value("Project", self.other_project, "status", "On hold")
+		with self.assertRaises(frappe.PermissionError):
+			set_value("Task", self.member_task, "status", "Cancelled")
 		with self.assertRaises(frappe.PermissionError):
 			set_value("Task", self.other_task, "status", "Cancelled")
 

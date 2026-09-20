@@ -288,7 +288,18 @@ def make_test_project(company, name, members=()):
 	database back once per *class*, not per test method, so a fixed
 	project name reused across several test methods in the same class
 	must find and extend the row an earlier method already created rather
-	than trying to insert it again."""
+	than trying to insert it again.
+
+	Mirrors `helixhr.api._write_project_users`'s own cleanup: ERPNext's
+	`Project.after_insert`/`validate` auto-shares the document with every
+	member added to `users` (`control_access_for_project_users`), and
+	Frappe's `has_permission` falls back to that share whenever role-based
+	permission says no -- independent of any DocPerm or `has_permission`
+	hook. This fixture exists to stand in for projects the app's own
+	`create_project`/`set_project_members` create, so it strips that share
+	the same way, or REST-route tests built on it would pass or fail on an
+	access path the real write path never leaves open (code review
+	finding, P7-U1's REST-route tests)."""
 	existing_name = frappe.db.get_value("Project", {"project_name": name})
 	if existing_name:
 		project = frappe.get_doc("Project", existing_name)
@@ -303,6 +314,8 @@ def make_test_project(company, name, members=()):
 			}
 		)
 		project.insert(ignore_permissions=True)
+		for user in members:
+			frappe.share.remove("Project", project.name, user)
 		return project.name
 
 	existing = {row.user for row in project.users}
@@ -313,6 +326,8 @@ def make_test_project(company, name, members=()):
 			changed = True
 	if changed:
 		project.save(ignore_permissions=True)
+		for user in members:
+			frappe.share.remove("Project", project.name, user)
 	return project.name
 
 

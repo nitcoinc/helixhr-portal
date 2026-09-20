@@ -146,26 +146,38 @@ DELTAS = {
 	"HelixHR Request Category": (
 		(("IT Team", 0, 0), {"read": 1}),
 	),
-	# P7-U1: HelixHR Delivery Manager administers projects and tasks from the
-	# portal. Named with the app prefix -- ERPNext already ships a stock
-	# "Delivery Manager" role for Delivery Note / Delivery Trip, found on the
-	# bench rather than assumed, and reusing that name would have handed this
-	# grant to every existing Delivery Note user (and vice versa).
-	# No Employee permission -- the people picker resolves names through
-	# existing scoped reads -- and deliberately no `report` permission on
-	# Timesheet: that permission is doctype-wide and would hand the holder
-	# every Timesheet report through Frappe's own report endpoint, including
-	# the one carrying `billing_amount` (KTD3). A DocPerm alone carries no
-	# scope, so this grant is paired with the hooks in
-	# `helixhr/project_permissions.py`, registered in hooks.py (KTD8) -- the
-	# hooks are the real boundary, this grant is what makes the framework
-	# consider the role for these doctypes at all.
-	"Project": (
-		(("HelixHR Delivery Manager", 0, 0), {"read": 1, "write": 1, "create": 1}),
-	),
-	"Task": (
-		(("HelixHR Delivery Manager", 0, 0), {"read": 1, "write": 1, "create": 1}),
-	),
+	# P7-U1 originally granted HelixHR Delivery Manager a plain read/write/
+	# create DocPerm on Project and Task here, paired with the scope hooks
+	# in `helixhr/project_permissions.py` (KTD8). Code review found that
+	# pairing insufficient: a DocPerm has no field-level notion of scope,
+	# and neither Project's nor Task's costing-tab fields
+	# (`estimated_costing`, `total_billable_amount`, `gross_margin`,
+	# `customer`, `sales_order`, `total_costing_amount` on Task, etc.) carry
+	# any permlevel restriction in stock ERPNext -- they are ordinary
+	# permlevel-0 fields, the same level this grant was made at. A Delivery
+	# Manager calling Frappe's generic REST route directly
+	# (`/api/resource/Project/<name>`) would therefore receive the whole
+	# document for any project they administer, including every costing
+	# field, bypassing `helixhr.api.get_project`'s explicit field allow-list
+	# entirely -- exactly the exposure R8 exists to prevent (KTD9).
+	#
+	# The role needs no DocPerm at all to function: every HelixHR method
+	# that touches Project or Task already reads via `frappe.db.get_value`/
+	# `frappe.get_all(..., ignore_permissions=True)` or writes via
+	# `doc.insert(ignore_permissions=True)`/`doc.save(ignore_permissions=True)`
+	# (see `_write_project_users`, `save_task` in `helixhr/api.py`) --
+	# `resolve_project_scope`/`project_in_scope`, not Frappe's own DocPerm
+	# system, is this app's real authorisation boundary for these two
+	# doctypes (KTD8's own framing). So the grant is removed rather than
+	# narrowed: Delivery Manager gets zero standing Frappe permission on
+	# Project or Task, the portal's own functionality is unaffected, and
+	# direct REST-route access is refused outright instead of scoped.
+	#
+	# The `permission_query_conditions`/`has_permission` hooks in
+	# `project_permissions.py` stay registered -- they still narrow access
+	# for every other role that resolves a project scope (HR Manager's
+	# "company" branch), just not for a role with no base grant to reach
+	# them through in the first place.
 }
 
 

@@ -6951,29 +6951,46 @@ def get_project(project):
 def _write_project_users(doc, *, insert):
 	"""Insert or save a Project whose `users` child table changed, without
 	needing the caller's own session to hold Frappe's `share` doc-perm on
-	Project.
+	Project, and without leaving behind the standing document-level access
+	ERPNext's own auto-share grants.
 
 	ERPNext's own `Project.after_insert` / `validate` auto-shares the
 	document with everyone newly added to `users`
 	(`control_access_for_project_users`), and that share step -- unlike the
 	surrounding `insert`/`save` -- checks the *session user's* `share`
-	permission regardless of `ignore_permissions`. The `HelixHR Delivery
-	Manager` DocPerm (P7-U1) grants read/write/create only, on purpose:
-	`resolve_project_scope` / `project_in_scope` (KTD8) is this app's real
-	authorisation boundary for Project, not Frappe's own permission system,
-	so the write runs as Administrator rather than widening every Delivery
-	Manager's standing grant just to satisfy an internal Frappe side effect.
+	permission regardless of `ignore_permissions`, so the write runs as
+	Administrator rather than widening every member's standing grant just
+	to satisfy an internal Frappe side effect.
+
+	Code review found that the resulting `DocShare` row is not merely a
+	permission-check formality: Frappe's own `has_permission` falls back to
+	"is this document shared with the user?" whenever role-based permission
+	says no, *before* consulting any custom `has_permission` hook's answer.
+	So the auto-share alone -- independent of any DocPerm this app grants or
+	refuses, and independent of `helixhr.project_permissions`'s hooks --
+	would let any member read the whole Project document, costing tab
+	included, through Frappe's generic REST route (R8, KTD9). This app
+	never relies on that share for anything -- every HelixHR method reads
+	and writes Project via `ignore_permissions=True`/`frappe.db.get_value`,
+	never through Frappe's permission or sharing system -- so the shares
+	this call creates are removed immediately after, for every member named
+	in `doc.users` at the time of this write. Desk-created projects and
+	their own shares (created by a Projects Manager working directly in
+	Desk, not through this endpoint) are untouched.
 
 	Attribution is restored immediately after: the technical actor that
 	satisfied Frappe's check is not who actually asked for this write.
 	"""
 	caller = frappe.session.user
+	members = [row.user for row in doc.users]
 	frappe.set_user("Administrator")
 	try:
 		if insert:
 			doc.insert(ignore_permissions=True)
 		else:
 			doc.save(ignore_permissions=True)
+		for member in members:
+			frappe.share.remove(doc.doctype, doc.name, member)
 	finally:
 		frappe.set_user(caller)
 	frappe.db.set_value(
