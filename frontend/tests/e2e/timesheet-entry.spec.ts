@@ -425,4 +425,52 @@ test.describe.serial('timesheet entry', () => {
 
     await context.close()
   })
+
+  test("the desktop grid's + note opens the field with the cursor already in it", async ({
+    browser,
+  }: {
+    browser: Browser
+  }) => {
+    // P8-U4. Before this fix, clicking "+ note" only flipped a reactive
+    // flag -- the input rendered on the next tick with nothing focused, so
+    // typing took a second click to place the cursor. This types
+    // immediately after the one click that opens the field.
+    test.setTimeout(60000)
+    const context = await browser.newContext({
+      storageState: 'tests/.auth/employee.json',
+      viewport: { width: 1280, height: 900 },
+    })
+    const page = await context.newPage()
+
+    await page.goto(`/helixhr/timesheet/${SOURCE_WEEK}`)
+    await expect(page.getByRole('heading', { name: 'Timesheet' })).toBeVisible()
+
+    // Monday's row already books PROJECT_NAME (from the first test in this
+    // file) but Friday has never been touched on this line, so its note
+    // toggle is still the "+ note" button rather than an already-open
+    // field. Scoped to Friday's own `<td>` via the hours input beside it
+    // (`Fri` here always identifies the day, regardless of which day of
+    // the month it lands on) -- Thursday's note was cleared to empty by an
+    // earlier test and would also render "+ note", so `.first()` over the
+    // whole row is not safe.
+    const fridayCell = page
+      .locator('td')
+      .filter({ has: page.getByLabel(new RegExp(`^${PROJECT_NAME}, Fri`)) })
+    await fridayCell.getByRole('button', { name: '+ note' }).click()
+
+    const note = page.getByLabel(new RegExp(`^Note for ${PROJECT_NAME}, Fri`))
+    await expect(note).toBeVisible()
+    await expect(note).toBeFocused()
+    await page.keyboard.type("Friday's note, typed without a second click")
+    await expect(note).toHaveValue("Friday's note, typed without a second click")
+
+    // Visual: the note field reads as a field at rest, not as loose text --
+    // it carries the same bordered, non-transparent treatment as the hours
+    // input beside it (P8-U4's other half of the screenshot).
+    await expect(note).toHaveCSS('border-style', 'solid')
+    const borderColor = await note.evaluate((el) => getComputedStyle(el).borderColor)
+    expect(borderColor).not.toBe('rgba(0, 0, 0, 0)')
+
+    await context.close()
+  })
 })
