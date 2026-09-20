@@ -14,6 +14,7 @@ from helixhr.tests.utils import (
 	ensure_baseline_company,
 	ensure_hr_manager_user,
 	ensure_test_company,
+	ensure_test_email_account,
 	make_test_delivery_manager,
 	make_test_employee_and_manager,
 	make_test_hr_manager_employee,
@@ -157,13 +158,22 @@ class TestDeliveryManagerRestRouteScope(IntegrationTestCase):
 			{"doctype": "Task", "project": project, "subject": subject}
 		).insert(ignore_permissions=True).name
 
-	def test_listing_projects_returns_none_even_for_a_member_project(self):
+	def test_listing_projects_is_refused_outright_not_silently_filtered(self):
+		"""Stale before this fix: asserted an empty list, the *scoped*
+		behaviour U1 abandoned per this class's own docstring above ("the
+		role now holds no DocPerm... refused outright rather than
+		scoped"). A long-lived dev bench passed it anyway on a leftover
+		Custom DocPerm row from before that revision -- `apply_permission_deltas`
+		only ever adds or edits rows, never deletes one it has stopped
+		naming, so the stale row silently kept the pre-revision behaviour
+		alive there. A genuinely fresh site, with no such row, throws
+		`PermissionError` instead -- what the class docstring actually
+		documents, and what the fresh-site gate exists to catch."""
 		from frappe.client import get_list
 
 		frappe.set_user(self.dm_user)
-		names = {row["name"] for row in get_list("Project", filters={})}
-		self.assertNotIn(self.member_project, names)
-		self.assertNotIn(self.other_project, names)
+		with self.assertRaises(frappe.PermissionError):
+			get_list("Project", filters={})
 
 	def test_reading_any_project_is_refused_member_or_not(self):
 		from frappe.client import get
@@ -353,6 +363,21 @@ class TestSearchAndGetProject(IntegrationTestCase):
 			self.assertNotIn("leaked-value", result.values())
 		finally:
 			frappe.set_user("Administrator")
+			# Custom Field insert is a DDL (ALTER TABLE ADD COLUMN), which
+			# MariaDB commits implicitly regardless of the surrounding
+			# transaction -- IntegrationTestCase's own class-level rollback
+			# does not undo it, so without this cleanup the field survives
+			# every future test run on this site. Deleting the Custom Field
+			# *document* is an ordinary DELETE, not DDL, so it IS undone by
+			# that same rollback unless committed explicitly here -- this
+			# was tried without the commit first and reproduced the leak on
+			# the very next run. The explicit commit is safe: every other
+			# row this class's setUp created (company, delivery manager,
+			# project) is from idempotent `ensure_*`/`make_test_*`
+			# fixtures, safe to persist the same way this whole suite
+			# already tolerates on a long-lived site.
+			frappe.delete_doc("Custom Field", custom_field.name, ignore_permissions=True, force=True)
+			frappe.db.commit()
 			frappe.delete_doc("Custom Field", custom_field.name, ignore_permissions=True, force=True)
 
 	def test_get_project_with_no_tasks_and_no_members_returns_empty_collections(self):
@@ -423,6 +448,12 @@ class TestCreateProject(IntegrationTestCase):
 
 	def setUp(self):
 		frappe.set_user("Administrator")
+		# `create_project` reaches ERPNext's own `Project.validate` ->
+		# `send_welcome_email`, called directly here rather than through
+		# `make_test_project` -- that fixture ensures this on its own path,
+		# this class needs the same guard on its own (see `make_test_project`'s
+		# own docstring for the full reason).
+		ensure_test_email_account()
 		self.company = ensure_test_company()
 		self.other_company = ensure_baseline_company()
 		self.dm_employee, self.dm_user = make_test_delivery_manager()
@@ -767,6 +798,10 @@ class TestWriteProjectUsersSessionSafety(IntegrationTestCase):
 
 	def setUp(self):
 		frappe.set_user("Administrator")
+		# create_project reaches Project.validate -> send_welcome_email
+		# (see make_test_project's own docstring for the full reason);
+		# called directly here, not through that fixture.
+		ensure_test_email_account()
 		self.company = ensure_test_company()
 		self.dm_employee, self.dm_user = make_test_delivery_manager()
 

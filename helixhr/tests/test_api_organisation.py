@@ -3,7 +3,12 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days
 
 from helixhr.api import create_my_request, get_organisation_view
-from helixhr.tests.utils import EMPLOYEE_USER, ensure_test_email_account, make_test_it_user
+from helixhr.tests.utils import (
+	EMPLOYEE_USER,
+	ensure_test_email_account,
+	ensure_test_gender,
+	make_test_it_user,
+)
 
 # P5-U15 / P5-R20, P5-R23. A read-only, company-scoped, aggregate-only view
 # for HR Manager and System Manager.
@@ -68,7 +73,7 @@ def _ensure_org_employee(number, company, user=None, extra_roles=()):
 			"user_id": user,
 			"date_of_birth": "1990-01-01",
 			"date_of_joining": "2020-01-01",
-			"gender": frappe.db.get_value("Gender", {}, "name"),
+			"gender": ensure_test_gender(),
 			"status": "Active",
 			# `create_user_permission` defaults to 1 on Employee -- for
 			# ORG_HR_USER (HR Manager) that would self-scope them, emptying

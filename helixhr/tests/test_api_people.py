@@ -591,13 +591,22 @@ class TestSavePerson(IntegrationTestCase):
 		frappe.set_user("Administrator")
 
 	def test_hr_manager_edits_overview_and_joining_fields_in_their_own_company(self):
-		# Reuses whichever Designation already exists on this fixture
-		# company's bench rather than creating one: fresh Designation and
-		# Department inserts have reproducibly hit a MariaDB lock-wait
-		# timeout in this suite's own fixtures before (see
-		# `make_test_employee_and_manager`'s docstring in utils.py).
+		# Reuses whichever Designation already exists on this bench when one
+		# does (a long-lived local site always has one by now); creates a
+		# named one otherwise, so a genuinely fresh site -- no Designation
+		# at all -- still runs this test rather than skipping the assertion.
+		# `make_test_employee_and_manager`'s own docstring in utils.py
+		# documents a *Department* first-insert lock-wait timeout on this
+		# bench, not Designation; if the same ever reproduces here, the fix
+		# is the same shape as that one -- move the creation into
+		# `helixhr/tests/utils.py` as a dedicated `ensure_*` helper.
 		designation = frappe.db.get_value("Designation", {}, "name")
-		self.assertTrue(designation, "no Designation fixture exists on this bench to reuse")
+		if not designation:
+			designation = "_Test U7 Designation"
+			if not frappe.db.exists("Designation", designation):
+				frappe.get_doc(
+					{"doctype": "Designation", "designation_name": designation}
+				).insert(ignore_permissions=True)
 
 		frappe.set_user(self.hr_user)
 		result = save_person(
