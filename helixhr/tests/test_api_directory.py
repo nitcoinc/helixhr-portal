@@ -161,6 +161,20 @@ class DirectoryTestCase(IntegrationTestCase):
 
 		self.assertEqual(get_directory(query="zzz-nobody-by-that-name")["people"], [])
 
+	def test_a_search_matches_an_employee_id_or_a_work_email(self):
+		"""P8-U3: the project member picker's own placeholder promises a
+		match on "employee number or work email" -- this is the reader it
+		reuses (Projects.vue), so the promise is only true if `name` (the
+		employee id) and `company_email` are actually searched, not just
+		selected."""
+		colleague = self.people["colleague"]
+
+		found = self._search(colleague)
+		self.assertIn(colleague, found, "searching the employee id did not find the colleague")
+
+		found = self._search(DIRECTORY_COLLEAGUE_EMAIL)
+		self.assertIn(colleague, found, "searching the work email did not find the colleague")
+
 	def test_a_long_search_is_cut_to_sixty_characters_rather_than_refused(self):
 		colleague_name = frappe.db.get_value(
 			"Employee", self.people["colleague"], "employee_name"

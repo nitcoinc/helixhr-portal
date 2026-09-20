@@ -6346,10 +6346,20 @@ def get_directory(query=None, department=None, start=0, limit=None):
 	needle = (query or "").strip()[:_DIRECTORY_QUERY_MAX]
 	or_filters = None
 	if len(needle) >= _DIRECTORY_QUERY_MIN:
+		# P8-U3: `name` (the employee id) and `company_email` widen this to
+		# match what the project member picker's own placeholder already
+		# promises ("Name, employee number or work email") -- this reader
+		# is the one it reuses (Projects.vue's own comment explains why:
+		# no admin permission required, every employee's own company).
+		# Purely additive over the existing three fields, so Directory.vue's
+		# own search only ever matches more, never less, and stays scoped
+		# to the caller's own company exactly as before.
 		or_filters = [
+			["name", "like", f"%{needle}%"],
 			["employee_name", "like", f"%{needle}%"],
 			["designation", "like", f"%{needle}%"],
 			["department", "like", f"%{needle}%"],
+			["company_email", "like", f"%{needle}%"],
 		]
 
 	scope = {"filters": filters, "or_filters": or_filters, "ignore_permissions": True}
