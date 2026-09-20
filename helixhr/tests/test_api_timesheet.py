@@ -793,3 +793,229 @@ class TestApiTimesheet(IntegrationTestCase):
 			lock.reset_mock()
 			submit_my_week(str(self.monday), json.dumps([self._week_row()]), self._token())
 			self.assertTrue(lock.called, "submit_my_week took no lock")
+
+	# --- P7-U6: billable-hours capture (R6, R7, R8, R9, KTD1, KTD2) --------
+
+	def _mark_billable(self, project):
+		frappe.set_user("Administrator")
+		frappe.db.set_value("Project", project, "helixhr_is_billable", 1)
+
+	def _timesheet_detail_row(self, project):
+		"""The lone `Timesheet Detail` row for `project` in this test's
+		week, read with the fields KTD1 cares about."""
+		rows = frappe.get_all(
+			"Timesheet Detail",
+			filters={"project": project},
+			fields=["name", "hours", "is_billable", "billing_hours"],
+		)
+		self.assertEqual(len(rows), 1)
+		return rows[0]
+
+	def test_hours_on_a_billable_project_persist_billable_with_matching_billing_hours(self):
+		self._mark_billable(self.project)
+
+		frappe.set_user(EMPLOYEE_USER)
+		save_my_week(str(self.monday), json.dumps([self._week_row(hours=6)]))
+
+		row = self._timesheet_detail_row(self.project)
+		self.assertEqual(row.is_billable, 1)
+		self.assertEqual(row.hours, 6)
+		self.assertEqual(row.billing_hours, 6)
+
+	def test_hours_on_a_non_billable_project_persist_not_billable_with_zero_billing_hours(self):
+		# self.project is never marked billable in setUp -- this is the
+		# default path.
+		frappe.set_user(EMPLOYEE_USER)
+		save_my_week(str(self.monday), json.dumps([self._week_row(hours=6)]))
+
+		row = self._timesheet_detail_row(self.project)
+		self.assertEqual(row.is_billable, 0)
+		self.assertEqual(row.billing_hours, 0)
+
+	def test_a_billable_flag_on_the_row_itself_is_ignored_the_project_wins(self):
+		"""KTD2: the consultant does not decide this. A row that tries to
+		set its own billable-ish key is silently overridden by the
+		project's own flag either way."""
+		# Non-billable project, row claims billable -- project wins (0).
+		frappe.set_user(EMPLOYEE_USER)
+		row = self._week_row(hours=3)
+		row["is_billable"] = 1
+		save_my_week(str(self.monday), json.dumps([row]))
+		self.assertEqual(self._timesheet_detail_row(self.project).is_billable, 0)
+
+		# Billable project, row claims not billable -- project still wins (1).
+		self._mark_billable(self.project)
+		frappe.set_user(EMPLOYEE_USER)
+		row = self._week_row(hours=3)
+		row["is_billable"] = 0
+		save_my_week(str(self.monday), json.dumps([row]))
+		self.assertEqual(self._timesheet_detail_row(self.project).is_billable, 1)
+
+	def test_a_billing_rate_or_amount_on_the_row_is_ignored_and_nothing_monetary_persists(self):
+		"""R8/KTD1: the request may carry a rate or amount; nothing here
+		reads it, and nothing monetary is persisted from it."""
+		self._mark_billable(self.project)
+		frappe.set_user(EMPLOYEE_USER)
+		row = self._week_row(hours=4)
+		row["billing_rate"] = 999
+		row["billing_amount"] = 999
+		row["costing_rate"] = 999
+		row["costing_amount"] = 999
+		save_my_week(str(self.monday), json.dumps([row]))
+
+		detail = frappe.get_doc(
+			"Timesheet Detail", {"project": self.project}
+		)
+		self.assertEqual(detail.billing_rate, 0)
+		self.assertEqual(detail.billing_amount, 0)
+		self.assertEqual(detail.costing_rate, 0)
+		self.assertEqual(detail.costing_amount, 0)
+
+	def test_marking_a_project_billable_afterward_leaves_a_saved_week_unchanged(self):
+		"""R9, timesheet-specific: a week already written through
+		`save_my_week` is not retroactively altered just because the
+		project it books to is later marked billable -- flipping the
+		project's flag alone never rewrites a `Timesheet Detail` row that
+		already exists."""
+		frappe.set_user(EMPLOYEE_USER)
+		save_my_week(str(self.monday), json.dumps([self._week_row(hours=5)]))
+		before = self._timesheet_detail_row(self.project)
+
+		self._mark_billable(self.project)
+
+		after = self._timesheet_detail_row(self.project)
+		self.assertEqual(after, before)
+		self.assertEqual(after.is_billable, 0)
+
+	def test_parent_timesheet_billable_hours_reflect_rows_and_amount_stays_zero(self):
+		"""KTD1: on a site with no `Activity Cost` record, billable hours
+		roll up but the amount stays 0 -- money never appears just because
+		hours were marked billable."""
+		self._mark_billable(self.project)
+		frappe.set_user(EMPLOYEE_USER)
+		name = save_my_week(str(self.monday), json.dumps([self._week_row(hours=7)]))
+
+		doc = frappe.get_doc("Timesheet", name)
+		self.assertEqual(doc.total_billable_hours, 7)
+		self.assertEqual(doc.total_billable_amount, 0)
+
+	def test_submitting_a_billable_week_still_transitions_through_the_workflow(self):
+		"""R7 does not disturb the existing approval workflow (P2-U6)."""
+		self._mark_billable(self.project)
+		name = self._save_and_submit()
+
+		doc = frappe.get_doc("Timesheet", name)
+		self.assertEqual(doc.workflow_state, "Pending Approval")
+		self.assertEqual(doc.time_logs[0].is_billable, 1)
+
+
+	# -----------------------------------------------------------------------
+	# P7-U7 / R10, R11: per-day notes.
+	#
+	# The write path already stores one `description` per Timesheet Detail
+	# row, and `get_my_week` already returns that row's own `description` as
+	# `note` (helixhr/api.py get_my_week, `"note": row.description`). The
+	# change for per-day notes is entirely in the frontend's grouping key
+	# (P7-KTD7) -- these tests exist to prove that claim rather than to guard
+	# a code change, and would already have passed before U7 touched a
+	# single line of Vue.
+	# -----------------------------------------------------------------------
+
+	def test_two_days_on_one_line_carry_different_notes_and_read_back_correctly(self):
+		tuesday_row = self._week_row(hours=3)
+		tuesday_row["date"] = str(add_days(self.monday, 1))
+		tuesday_row["note"] = "Monday's note"
+
+		wednesday_row = self._week_row(hours=2)
+		wednesday_row["date"] = str(add_days(self.monday, 2))
+		wednesday_row["note"] = "a different note entirely"
+
+		frappe.set_user(EMPLOYEE_USER)
+		save_my_week(str(self.monday), json.dumps([tuesday_row, wednesday_row]))
+
+		rows = {row["date"]: row for row in get_my_week(str(self.monday))["timesheet"]["rows"]}
+		self.assertEqual(rows[tuesday_row["date"]]["note"], "Monday's note")
+		self.assertEqual(rows[wednesday_row["date"]]["note"], "a different note entirely")
+
+	def test_a_note_on_one_day_only_reads_back_with_the_other_day_empty(self):
+		noted_row = self._week_row(hours=4)
+		noted_row["note"] = "only this day has a note"
+
+		bare_row = self._week_row(hours=1)
+		bare_row["date"] = str(add_days(self.monday, 1))
+		bare_row["note"] = ""
+
+		frappe.set_user(EMPLOYEE_USER)
+		save_my_week(str(self.monday), json.dumps([noted_row, bare_row]))
+
+		rows = {row["date"]: row for row in get_my_week(str(self.monday))["timesheet"]["rows"]}
+		self.assertEqual(rows[noted_row["date"]]["note"], "only this day has a note")
+		self.assertIn(rows[bare_row["date"]]["note"], (None, ""))
+
+	def test_clearing_a_note_saves_as_empty_not_the_previous_value(self):
+		frappe.set_user(EMPLOYEE_USER)
+		first_row = self._week_row(hours=4)
+		first_row["note"] = "will be cleared"
+		save_my_week(str(self.monday), json.dumps([first_row]))
+
+		cleared_row = self._week_row(hours=4)
+		cleared_row["note"] = ""
+		save_my_week(str(self.monday), json.dumps([cleared_row]))
+
+		row = get_my_week(str(self.monday))["timesheet"]["rows"][0]
+		self.assertIn(row["note"], (None, ""))
+
+	def test_a_note_without_hours_is_refused_rather_than_saved_as_a_phantom_row(self):
+		"""The frontend never sends a day with a note but no hours (P7-U7),
+		and the server backs that up independently: `_validate_rows` refuses
+		any row below 0.25 hours, note or not."""
+		phantom_row = self._week_row(hours=0)
+		phantom_row["note"] = "a note with nothing behind it"
+
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.ValidationError):
+			save_my_week(str(self.monday), json.dumps([phantom_row]))
+
+	def test_a_timesheet_written_before_per_day_notes_reads_back_with_each_days_note_intact(self):
+		"""R11. Simulates a Timesheet written the way the pre-U7 code path
+		always wrote it -- one `Timesheet Detail` row per project/task/date,
+		each with its own `description` -- by inserting the document directly
+		rather than through `save_my_week`, and confirms `get_my_week` still
+		attaches each row's own note to its own day rather than merging or
+		dropping either. Nothing here is new server behaviour; it is the
+		existing read path exercised against data it never wrote itself."""
+		company = frappe.db.get_value("Employee", self.employee_name, "company")
+		monday_start = get_datetime(f"{self.monday} 00:00:00")
+		tuesday_start = get_datetime(f"{add_days(self.monday, 1)} 00:00:00")
+
+		doc = frappe.get_doc(
+			{
+				"doctype": "Timesheet",
+				"employee": self.employee_name,
+				"company": company,
+				"time_logs": [
+					{
+						"project": self.project,
+						"hours": 3,
+						"description": "Monday's pre-U7 note",
+						"activity_type": "General",
+						"from_time": monday_start,
+						"to_time": frappe.utils.add_to_date(monday_start, hours=3),
+					},
+					{
+						"project": self.project,
+						"hours": 5,
+						"description": "Tuesday's pre-U7 note",
+						"activity_type": "General",
+						"from_time": tuesday_start,
+						"to_time": frappe.utils.add_to_date(tuesday_start, hours=5),
+					},
+				],
+			}
+		)
+		doc.insert(ignore_permissions=True)
+
+		frappe.set_user(EMPLOYEE_USER)
+		rows = {row["date"]: row for row in get_my_week(str(self.monday))["timesheet"]["rows"]}
+		self.assertEqual(rows[str(self.monday)]["note"], "Monday's pre-U7 note")
+		self.assertEqual(rows[str(add_days(self.monday, 1))]["note"], "Tuesday's pre-U7 note")

@@ -384,6 +384,52 @@ def check_it_team_role():
 	return _result("IT Team role", PASS, "portal-only role and HR Request field inventory reviewed")
 
 
+DELIVERY_MANAGER = "HelixHR Delivery Manager"
+
+
+def check_delivery_manager_role():
+	"""P7-U1: HelixHR Delivery Manager stays portal-only, never acquires the
+	doctype-wide `report` permission on Timesheet (KTD3 -- that grant would
+	hand the holder every Timesheet report, including
+	`Timesheet Billing Summary`'s `billing_amount`), and keeps both its
+	Project/Task scope hooks registered -- a hook silently dropped from the
+	config is indistinguishable from an unscoped role at runtime (KTD8)."""
+	problems = []
+	role = frappe.db.get_value("Role", DELIVERY_MANAGER, ["desk_access", "is_custom"], as_dict=True)
+	if not role:
+		problems.append("Role fixture is missing")
+	else:
+		if cint(role.desk_access):
+			problems.append("desk_access must be 0")
+		if cint(role.is_custom):
+			problems.append("is_custom must be 0")
+	if DELIVERY_MANAGER in DESK_ROLES:
+		problems.append("HelixHR Delivery Manager is in DESK_ROLES")
+
+	if frappe.db.get_value(
+		"Custom DocPerm", {"parent": "Timesheet", "role": DELIVERY_MANAGER, "report": 1}
+	):
+		problems.append("HelixHR Delivery Manager holds report permission on Timesheet")
+	if frappe.db.get_value("Custom DocPerm", {"parent": "Employee", "role": DELIVERY_MANAGER, "read": 1}):
+		problems.append("HelixHR Delivery Manager holds read on Employee")
+
+	for doctype in ("Project", "Task"):
+		conditions = frappe.get_hooks("permission_query_conditions", {}).get(doctype, [])
+		if "helixhr.project_permissions.get_permission_query_conditions" not in conditions:
+			problems.append(f"{doctype} has no permission-query-conditions hook registered")
+		checks = frappe.get_hooks("has_permission", {}).get(doctype, [])
+		if "helixhr.project_permissions.has_permission" not in checks:
+			problems.append(f"{doctype} has no has_permission hook registered")
+
+	if problems:
+		return _result("HelixHR Delivery Manager role", FAIL, "; ".join(problems) + " -- run bench migrate")
+	return _result(
+		"HelixHR Delivery Manager role",
+		PASS,
+		"portal-only role, no Timesheet report grant, Project/Task hooks registered",
+	)
+
+
 def check_signup_disabled():
 	off = frappe.utils.cint(frappe.db.get_single_value("Website Settings", "disable_signup"))
 	return _result(
@@ -1156,6 +1202,45 @@ def check_curated_reports():
 	return _result("Curated reports", PASS, f"{len(ADMIN_REPORTS)} reports checked")
 
 
+def check_no_timesheet_report_permission():
+	"""P7-U8 / R16: no role this app grants -- every entry in
+	`helixhr/fixtures/role.json`, not just `HelixHR Delivery Manager` --
+	holds the doctype-wide `report` permission on Timesheet.
+
+	`check_delivery_manager_role` already guards that one role specifically,
+	as part of U1's own acceptance criterion; this check is the standing,
+	general guard KTD3 asks for, so a *future* fixture role (or a Custom
+	DocPerm hand-added in Desk) reopens the same bypass and is caught the
+	same way: granting `report` on Timesheet is doctype-wide, and Frappe's
+	report engine is directly callable by any signed-in user, so that grant
+	would hand the holder every Timesheet report -- including
+	`Timesheet Billing Summary`'s `billing_amount` -- with HelixHR's curated
+	list offering no protection at all, because the bypass never goes
+	through HelixHR (verified by exploit on the dev bench, see the plan's
+	Sources and Research).
+
+	Pre-existing and deliberately out of scope: `HR Manager` and `HR User`
+	already hold `report` on Timesheet today via ERPNext/HRMS's own DocPerm
+	fixtures, not a grant this app made -- narrowing that is a separate
+	decision about existing roles, not this plan's.
+	"""
+	granted_roles = [row.name for row in frappe.get_all("Role", filters={"name": ["in", (IT_TEAM, DELIVERY_MANAGER)]})]
+	problems = []
+	for role in granted_roles:
+		if frappe.db.get_value("Custom DocPerm", {"parent": "Timesheet", "role": role, "report": 1}):
+			problems.append(f"{role} holds report permission on Timesheet (Custom DocPerm)")
+		if frappe.db.get_value("DocPerm", {"parent": "Timesheet", "role": role, "report": 1}):
+			problems.append(f"{role} holds report permission on Timesheet (standard DocPerm)")
+
+	if problems:
+		return _result("Timesheet report guard", FAIL, "; ".join(problems))
+	return _result(
+		"Timesheet report guard",
+		PASS,
+		f"no role this app grants ({', '.join((IT_TEAM, DELIVERY_MANAGER))}) holds report on Timesheet",
+	)
+
+
 CHECKS = [
 	check_strict_user_permissions,
 	check_employee_user_permissions,
@@ -1166,6 +1251,7 @@ CHECKS = [
 	check_document_link_urls,
 	check_portal_landing,
 	check_it_team_role,
+	check_delivery_manager_role,
 	check_signup_disabled,
 	check_password_login,
 	check_entra,
@@ -1193,4 +1279,5 @@ CHECKS = [
 	check_pdf_generator,
 	check_frontend_built,
 	check_curated_reports,
+	check_no_timesheet_report_permission,
 ]

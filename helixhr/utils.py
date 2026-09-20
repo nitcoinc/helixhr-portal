@@ -239,6 +239,91 @@ def employee_in_admin_scope(employee, scope):
 	return False
 
 
+# P7-U2: the role this app grants an ability to administer a project, named
+# once so `resolve_project_scope` and `project_permissions.py`'s hooks answer
+# from the same constant (KTD8 -- every DocPerm this plan grants must be
+# paired with a hook expressing the identical rule).
+DELIVERY_MANAGER_ROLE = "HelixHR Delivery Manager"
+
+
+def resolve_project_scope(user):
+	"""Which projects ``user`` may administer -- one answer, in the same
+	``{"kind": ..., ...}`` shape `resolve_admin_scope` returns, so every
+	caller after U2 (the REST-route hooks in `project_permissions.py`, and
+	every read and write in later units) branches on one vocabulary.
+
+	Returns a dict with a ``kind`` of:
+
+	- ``"unscoped"`` -- every project. System Manager, and an HR-role holder
+	  with no Employee record at all (the same Desk-only persona
+	  `resolve_admin_scope` names) -- delegated to that helper outright
+	  rather than re-derived, per U2's dependency note.
+	- ``"company"`` -- every project in the named company. An HR Manager
+	  anchored to an Active Employee.
+	- ``"assigned"`` -- the projects named in ERPNext's own ``Project User``
+	  child table for this user (KTD5: membership keys on User, not
+	  Employee). A `HelixHR Delivery Manager` holder.
+	- ``"none"`` -- nobody. A plain employee, a holder of neither
+	  administrative role, or -- the offboarding lesson from the previous
+	  phase's security review, carried forward rather than re-learned -- an
+	  Employee record that exists but is not Active. That last case applies
+	  to a HelixHR Delivery Manager exactly as it does to an HR Manager: an
+	  Employee row going to Left, Inactive or Suspended must narrow this
+	  scope, never leave it at whatever the role alone would otherwise grant.
+	"""
+	admin = resolve_admin_scope(user)
+	if admin["kind"] != "none":
+		return admin
+	if DELIVERY_MANAGER_ROLE not in frappe.get_roles(user):
+		return {"kind": "none"}
+	status = frappe.db.get_value("Employee", {"user_id": user}, "status")
+	if status and status != "Active":
+		return {"kind": "none"}
+	return {"kind": "assigned", "user": user}
+
+
+def project_scope_filters(scope):
+	"""Turn `resolve_project_scope`'s answer into a Project filter dict for
+	`frappe.get_all`, or ``None`` when the scope holds nobody -- the same
+	"return an empty page rather than run a query" contract
+	`admin_scope_employee_filters` uses.
+
+	A HelixHR Delivery Manager who is a member of zero projects resolves to ``None``
+	here rather than to ``{"name": ["in", []]}`` -- not because the latter is
+	unsafe (`frappe.get_all` handles an empty ``in`` list without error), but
+	because a caller that already treats ``None`` as "skip the query" would
+	otherwise run one for a list that can only ever come back empty."""
+	if scope["kind"] == "unscoped":
+		return {}
+	if scope["kind"] == "company":
+		return {"company": scope["company"]}
+	if scope["kind"] == "assigned":
+		projects = frappe.get_all("Project User", filters={"user": scope["user"]}, pluck="parent")
+		if not projects:
+			return None
+		return {"name": ["in", projects]}
+	return None
+
+
+def project_in_scope(project, scope):
+	"""Whether ``project`` falls inside `resolve_project_scope`'s answer --
+	the project-scope sibling of `employee_in_admin_scope` (U3): checked
+	before any other field of the record is read, so a caller outside the
+	scope is refused before the record is touched rather than after.
+
+	Deliberately a fresh `frappe.db.exists` per kind, not a call into
+	`project_scope_filters` plus a membership test against the result --
+	that would mean pulling every project name the caller's scope covers
+	just to answer one yes/no."""
+	if scope["kind"] == "unscoped":
+		return bool(frappe.db.exists("Project", project))
+	if scope["kind"] == "company":
+		return bool(frappe.db.exists("Project", {"name": project, "company": scope["company"]}))
+	if scope["kind"] == "assigned":
+		return bool(frappe.db.exists("Project User", {"parent": project, "user": scope["user"]}))
+	return False
+
+
 def portal_home_page(user=None):
 	"""Where this user lands after signing in.
 
@@ -293,6 +378,21 @@ RATE_LIMIT_POLICY = {
 	"search_people": (60, 60),
 	"get_person": (60, 60),
 	"get_report_link": (60, 60),
+	# P7-U3. Both fan out per project (tasks, members), the same reason
+	# `search_people` / `get_person` are bounded above.
+	"search_projects": (60, 60),
+	"get_project": (60, 60),
+	# P7-U4. Occasional administrative writes, not a per-keystroke path --
+	# bounded like `save_request_category` and the other config writes above.
+	"create_project": (20, 3600),
+	"save_task": (30, 3600),
+	"set_project_members": (20, 3600),
+	# P7-U8. `get_billable_hours` fans out with a join per row, the same
+	# reason `search_projects` / `get_project` are bounded above.
+	# `run_portal_report` runs Frappe's own report engine, which is heavier
+	# per call, so it gets the tighter of the two bounds.
+	"get_billable_hours": (60, 60),
+	"run_portal_report": (30, 60),
 	# Reads that fan out (the home page and the approvals queue each run
 	# several queries) or that answer for one record by name -- bounded so
 	# a scripted walk over sequential record ids is a flood the limiter

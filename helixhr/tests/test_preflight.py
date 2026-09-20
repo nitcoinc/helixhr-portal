@@ -70,6 +70,76 @@ class TestPreflight(IntegrationTestCase):
 		self.assertEqual(result["status"], preflight.FAIL)
 		self.assertIn("unreviewed_field", result["detail"])
 
+	def test_delivery_manager_role_is_portal_only_report_free_and_hooked(self):
+		self.assertEqual(preflight.check_delivery_manager_role()["status"], preflight.PASS)
+
+		from unittest.mock import patch
+
+		real_get_value = frappe.db.get_value
+
+		with patch.object(preflight, "DESK_ROLES", frozenset({"HelixHR Delivery Manager"})):
+			result = preflight.check_delivery_manager_role()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("DESK_ROLES", result["detail"])
+
+		def _no_role(doctype, filters=None, *args, **kwargs):
+			if doctype == "Role" and filters == preflight.DELIVERY_MANAGER:
+				return None
+			return real_get_value(doctype, filters, *args, **kwargs)
+
+		with patch.object(preflight.frappe.db, "get_value", side_effect=_no_role):
+			result = preflight.check_delivery_manager_role()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("Role fixture is missing", result["detail"])
+
+		def _report_grant(doctype, filters=None, *args, **kwargs):
+			if doctype == "Custom DocPerm" and isinstance(filters, dict) and filters.get("parent") == "Timesheet":
+				return "some-row"
+			return real_get_value(doctype, filters, *args, **kwargs)
+
+		with patch.object(preflight.frappe.db, "get_value", side_effect=_report_grant):
+			result = preflight.check_delivery_manager_role()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("report permission on Timesheet", result["detail"])
+
+		with patch.object(preflight.frappe, "get_hooks", return_value={}):
+			result = preflight.check_delivery_manager_role()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("hook", result["detail"])
+
+	def test_no_role_this_app_grants_holds_report_permission_on_timesheet(self):
+		"""P7-U8 / R16: the standing guard, not `check_delivery_manager_role`'s
+		own narrower one -- grant `report` on Timesheet to `IT Team` (a role
+		that check does not look at), run the check, and clean up, mirroring
+		how `test_an_hr_manager_scoped_to_their_own_employee_is_named` above
+		grants and cleans up a User Permission."""
+		from frappe.permissions import add_permission
+
+		from helixhr.preflight import FAIL, IT_TEAM, PASS, check_no_timesheet_report_permission
+
+		self.assertEqual(check_no_timesheet_report_permission()["status"], PASS)
+
+		existing = frappe.db.get_value(
+			"Custom DocPerm", {"parent": "Timesheet", "role": IT_TEAM, "permlevel": 0}, "name"
+		)
+		if not existing:
+			add_permission("Timesheet", IT_TEAM, 0)
+			existing = frappe.db.get_value(
+				"Custom DocPerm", {"parent": "Timesheet", "role": IT_TEAM, "permlevel": 0}, "name"
+			)
+			self.addCleanup(frappe.delete_doc, "Custom DocPerm", existing, force=True)
+		else:
+			self.addCleanup(frappe.db.set_value, "Custom DocPerm", existing, "report", 0)
+
+		frappe.db.set_value("Custom DocPerm", existing, "report", 1)
+		frappe.clear_cache(doctype="Timesheet")
+		self.addCleanup(frappe.clear_cache, doctype="Timesheet")
+
+		result = check_no_timesheet_report_permission()
+		self.assertEqual(result["status"], FAIL)
+		self.assertIn(IT_TEAM, result["detail"])
+		self.assertIn("Timesheet", result["detail"])
+
 	def test_a_linked_employee_without_a_user_permission_fails(self):
 		perms = frappe.get_all(
 			"User Permission",

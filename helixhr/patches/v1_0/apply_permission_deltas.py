@@ -146,6 +146,38 @@ DELTAS = {
 	"HelixHR Request Category": (
 		(("IT Team", 0, 0), {"read": 1}),
 	),
+	# P7-U1 originally granted HelixHR Delivery Manager a plain read/write/
+	# create DocPerm on Project and Task here, paired with the scope hooks
+	# in `helixhr/project_permissions.py` (KTD8). Code review found that
+	# pairing insufficient: a DocPerm has no field-level notion of scope,
+	# and neither Project's nor Task's costing-tab fields
+	# (`estimated_costing`, `total_billable_amount`, `gross_margin`,
+	# `customer`, `sales_order`, `total_costing_amount` on Task, etc.) carry
+	# any permlevel restriction in stock ERPNext -- they are ordinary
+	# permlevel-0 fields, the same level this grant was made at. A Delivery
+	# Manager calling Frappe's generic REST route directly
+	# (`/api/resource/Project/<name>`) would therefore receive the whole
+	# document for any project they administer, including every costing
+	# field, bypassing `helixhr.api.get_project`'s explicit field allow-list
+	# entirely -- exactly the exposure R8 exists to prevent (KTD9).
+	#
+	# The role needs no DocPerm at all to function: every HelixHR method
+	# that touches Project or Task already reads via `frappe.db.get_value`/
+	# `frappe.get_all(..., ignore_permissions=True)` or writes via
+	# `doc.insert(ignore_permissions=True)`/`doc.save(ignore_permissions=True)`
+	# (see `_write_project_users`, `save_task` in `helixhr/api.py`) --
+	# `resolve_project_scope`/`project_in_scope`, not Frappe's own DocPerm
+	# system, is this app's real authorisation boundary for these two
+	# doctypes (KTD8's own framing). So the grant is removed rather than
+	# narrowed: Delivery Manager gets zero standing Frappe permission on
+	# Project or Task, the portal's own functionality is unaffected, and
+	# direct REST-route access is refused outright instead of scoped.
+	#
+	# The `permission_query_conditions`/`has_permission` hooks in
+	# `project_permissions.py` stay registered -- they still narrow access
+	# for every other role that resolves a project scope (HR Manager's
+	# "company" branch), just not for a role with no base grant to reach
+	# them through in the first place.
 }
 
 
@@ -157,8 +189,34 @@ def execute():
 		# exactly the access their installed app version gave them.
 		setup_custom_perms(doctype)
 		for (role, permlevel, if_owner), values in deltas:
+			_ensure_role(role)
 			_apply(doctype, role, permlevel, if_owner, values)
 		frappe.clear_cache(doctype=doctype)
+
+
+def _ensure_role(role):
+	"""Create ``role`` with the portal-only shape `fixtures/role.json` ships
+	(`desk_access=0`, `is_custom=0`), if migrate's own fixture sync has not
+	created it yet.
+
+	Patches always run *before* fixtures on every `bench migrate`
+	(`frappe.migrate.Migrate.run_schema_updates` then `post_schema_updates`),
+	and a fresh `bench install-app` marks every patch complete without
+	running it at all (`frappe.installer.install_app` calls
+	`set_all_patches_as_completed` before `sync_fixtures`) -- so a role this
+	app owns and a patch that grants it access can only safely land in
+	different migrate cycles unless the patch also knows how to create its
+	own role. Verified on the bench: `HelixHR Delivery Manager` referenced by
+	this same patch, in the same migrate that first ships its fixture, threw
+	`LinkValidationError` without this. A no-op for a role that already
+	exists (`IT Team`, or any stock role named in `DELTAS`), and harmless
+	when the fixture sync moments later reconciles the same row.
+	"""
+	if frappe.db.exists("Role", role):
+		return
+	frappe.get_doc({"doctype": "Role", "role_name": role, "desk_access": 0, "is_custom": 0}).insert(
+		ignore_permissions=True
+	)
 
 
 def _drop_legacy_fixture_rows(doctype):

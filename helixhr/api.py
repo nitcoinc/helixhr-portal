@@ -73,8 +73,11 @@ from helixhr.utils import (
 	employee_in_admin_scope,
 	get_manager_user,
 	get_week_bounds,
+	project_in_scope,
+	project_scope_filters,
 	rate_limit_per_user,
 	resolve_admin_scope,
+	resolve_project_scope,
 	validate_portal_upload,
 )
 
@@ -249,6 +252,11 @@ def get_portal_bootstrap():
 		# the roles `_is_hr` names, so the nav item and the server's gate
 		# agree by construction.
 		"can_see_people": resolve_admin_scope(frappe.session.user)["kind"] != "none",
+		# P7-U5: same shape as `can_see_people` just above -- `search_projects`
+		# and `get_project` are gated by `resolve_project_scope`, which grants a
+		# scope to exactly the callers this flag names, so the nav item and the
+		# server's gate agree by construction.
+		"can_see_projects": resolve_project_scope(frappe.session.user)["kind"] != "none",
 		# P6-KTD4: resolved on the caller's own ability to reach Desk (a
 		# System User holding a `desk_access` role), never on "is HR" --
 		# the two are correlated today but the flag must not assume they
@@ -3743,9 +3751,11 @@ def get_my_projects():
 	projects = frappe.get_all(
 		"Project",
 		filters={"name": ["in", list(project_names)], "status": "Open"},
-		fields=["name", "project_name"],
+		fields=["name", "project_name", "helixhr_is_billable as billable"],
 		order_by="project_name",
 	)
+	for project in projects:
+		project["billable"] = bool(project["billable"])
 	if not projects:
 		return []
 
@@ -3773,6 +3783,24 @@ def _bookable_tasks_by_project():
 	writes below validate against. The browser's dropdown is a convenience;
 	this is the check (P2-R27)."""
 	return {project["name"]: {task["name"] for task in project["tasks"]} for project in get_my_projects()}
+
+
+def _project_billable_flags(project_names):
+	"""`{project: bool}` read straight from `helixhr_is_billable` (P7-KTD2).
+
+	The row's `is_billable` is derived from this, never from the request --
+	a payload cannot mark its own hours billable independent of the
+	project it names. Read directly rather than through `get_my_projects`
+	so a project's flag is authoritative even if the caller's bookable set
+	changed underneath a row already on the week."""
+	if not project_names:
+		return {}
+	rows = frappe.get_all(
+		"Project",
+		filters={"name": ["in", list(project_names)]},
+		fields=["name", "helixhr_is_billable"],
+	)
+	return {row.name: bool(row.helixhr_is_billable) for row in rows}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -3931,6 +3959,15 @@ def _write_my_week(employee, monday, sunday, rows, existing_name=None):
 	# a window, and two projects on one day is the ordinary case the grid is
 	# built for. Midnight rather than 09:00 as the anchor: a day validated up
 	# to 24 hours has to fit inside its own day.
+	#
+	# `is_billable` (P7-R6, R7, KTD1, KTD2) is derived here from the
+	# project's own flag, never taken from `row` -- the request is never
+	# consulted for it, so a row that names a billable-ish key of its own
+	# is silently ignored. ERPNext's `update_billing_hours` then derives
+	# `billing_hours` from `hours` on validate; nothing here reads or
+	# writes `billing_rate`, `billing_amount`, `costing_rate`, or
+	# `costing_amount` (R8).
+	billable_by_project = _project_billable_flags({row["project"] for row in rows})
 	day_offset = {}
 	for row in rows:
 		date = str(getdate(row["date"]))
@@ -3949,6 +3986,7 @@ def _write_my_week(employee, monday, sunday, rows, existing_name=None):
 				"activity_type": "General",
 				"from_time": start,
 				"to_time": frappe.utils.add_to_date(start, hours=hours),
+				"is_billable": cint(billable_by_project.get(row["project"], False)),
 			},
 		)
 	doc.save()
@@ -6517,6 +6555,178 @@ def get_report_link(report, employee=None):
 	return get_report_url(report, filters)
 
 
+# ---------------------------------------------------------------------------
+# P7-U8: reports inside the portal.
+#
+# Two methods, because there are two different things wearing the word
+# "report" (KTD3a). `run_portal_report` renders one of the existing curated
+# HR reports through Frappe's own report engine (KTD4) -- HelixHR computes
+# nothing, it narrows filters and renders what came back. `get_billable_hours`
+# is HelixHR's own scoped query over `Timesheet Detail` rows -- deliberately
+# *not* a Frappe Report, because registering it as one would require granting
+# the `report` permission on Timesheet to a role that needs a task dimension,
+# and that permission is doctype-wide: it would hand the holder every
+# Timesheet report through Frappe's own report endpoint, including
+# `Timesheet Billing Summary`'s `billing_amount` (KTD3, verified by exploit --
+# see the plan's Sources and Research). Neither method grants nor requires
+# `report` on Timesheet; `helixhr.preflight.check_no_timesheet_report_permission`
+# is the standing guard that this stays true.
+# ---------------------------------------------------------------------------
+
+_REPORT_NOT_OFFERED = "That report is not offered here."
+
+# KTD3: the named column list `get_billable_hours` selects -- date, employee,
+# employee name, project, task, task subject, hours, billable hours. No
+# monetary column (`billing_rate`, `billing_amount`, `costing_rate`,
+# `costing_amount`) is ever named here, so none can be returned (R8). This is
+# the mechanism, not a side effect.
+_BILLABLE_HOURS_FIELDS = (
+	"date(td.from_time) as `date`",
+	"ts.employee as employee",
+	"ts.employee_name as employee_name",
+	"td.project as project",
+	"td.task as task",
+	"tsk.subject as task_subject",
+	"td.hours as hours",
+	"td.billing_hours as billing_hours",
+)
+
+
+@frappe.whitelist()
+def get_billable_hours(employee=None, project=None, task=None, from_date=None, to_date=None, **kwargs):
+	"""HelixHR's own scoped query over `Timesheet Detail` rows (P7-R13, KTD3)
+	-- not a Frappe Report.
+
+	Accepts exactly four filter keys -- `employee`, `project`, `task`, and a
+	date range (`from_date`/`to_date`) -- as explicit keyword arguments;
+	anything else in the request lands in `**kwargs` and is never read, the
+	same swallow-extra-input pattern `create_project` uses for `company`
+	(P7-KTD5's cousin here: a request cannot smuggle in a key this method
+	does not name, such as one naming a different user to run as, because
+	nothing here ever forwards the request dict anywhere -- unlike
+	`run_portal_report`, this method never reaches Frappe's report engine at
+	all).
+
+	Filters INTERSECT with `resolve_project_scope`'s answer, they never
+	replace it (KTD3a): naming a project outside the caller's scope can only
+	narrow the caller's own rows to nothing, never substitute somebody
+	else's. An empty "assigned" scope (a HelixHR Delivery Manager who is a
+	member of zero projects) returns an empty result rather than running an
+	unbounded query or refusing outright -- the same contract
+	`project_scope_filters` already promises `search_projects`.
+	"""
+	rate_limit_per_user("get_billable_hours")
+	scope = resolve_project_scope(frappe.session.user)
+	if scope["kind"] == "none":
+		frappe.throw(_("You are not authorised to view billable hours here."), frappe.PermissionError)
+
+	conditions = ["ts.docstatus != 2"]
+	values = {}
+
+	if scope["kind"] == "company":
+		conditions.append("ts.company = %(scope_company)s")
+		values["scope_company"] = scope["company"]
+	elif scope["kind"] == "assigned":
+		scope_filters = project_scope_filters(scope)
+		if scope_filters is None:
+			return {"rows": []}
+		conditions.append("td.project in %(scope_projects)s")
+		values["scope_projects"] = tuple(scope_filters["name"][1])
+	# "unscoped" (System Manager, or an HR-role holder with no Employee
+	# record) adds no extra condition -- every project, per U2.
+
+	if employee:
+		conditions.append("ts.employee = %(employee)s")
+		values["employee"] = employee
+	if project:
+		conditions.append("td.project = %(project)s")
+		values["project"] = project
+	if task:
+		conditions.append("td.task = %(task)s")
+		values["task"] = task
+	if from_date:
+		conditions.append("date(td.from_time) >= %(from_date)s")
+		values["from_date"] = getdate(from_date)
+	if to_date:
+		conditions.append("date(td.from_time) <= %(to_date)s")
+		values["to_date"] = getdate(to_date)
+
+	rows = frappe.db.sql(
+		f"""
+		select {", ".join(_BILLABLE_HOURS_FIELDS)}
+		from `tabTimesheet Detail` td
+		inner join `tabTimesheet` ts on ts.name = td.parent
+		left join `tabTask` tsk on tsk.name = td.task
+		where {" and ".join(conditions)}
+		order by date desc, ts.employee asc, td.idx asc
+		""",
+		values,
+		as_dict=True,
+	)
+	return {"rows": rows}
+
+
+@frappe.whitelist()
+def run_portal_report(report_name, filters=None, **kwargs):
+	"""Render one of the existing curated HR reports inside the portal
+	(P7-R12, P7-R13, KTD4), by calling Frappe's own report engine --
+	HelixHR computes nothing here, it narrows filters and renders what came
+	back.
+
+	`report_name` must be on the curated list (`ADMIN_REPORTS`); anything
+	else -- a real report this app has not curated, or one that does not
+	exist at all -- gets the exact same refusal, the same uniform-refusal
+	pattern `get_report_link` and `get_project` already use, so this can
+	never become an oracle for which reports exist upstream.
+
+	`filters` is narrowed to `resolve_admin_scope` before the report runs:
+	an `employee` filter is checked against the caller's scope exactly like
+	`get_report_link` already does, and an HR Manager's own company is
+	injected regardless of what the request supplied, so a company named in
+	the request can only ever be overridden, never trusted. Frappe's report
+	engine is then called with a FIXED keyword set -- `report_name` and the
+	narrowed `filters`, nothing else -- never the caller's raw request
+	forwarded wholesale: the engine accepts parameters beyond filters,
+	including one naming a user to run the report as, and none of those may
+	originate from the request body (KTD3, KTD3a).
+	"""
+	from frappe.desk.query_report import run as run_query_report
+
+	rate_limit_per_user("run_portal_report")
+	scope = resolve_admin_scope(frappe.session.user)
+	if scope["kind"] == "none" or report_name not in ADMIN_REPORTS:
+		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
+
+	if isinstance(filters, str):
+		filters = frappe.parse_json(filters) if filters else {}
+	filters = dict(filters or {})
+
+	# `requested_employee` must be a single document name, never an
+	# operator-shaped value (code review finding): `frappe.db.exists`'s
+	# filter dict treats a list value as `[operator, value]`, so
+	# `["in", ["own-emp", "other-companys-emp"]]` would satisfy
+	# `employee_in_admin_scope` as long as *any* one name in the list is
+	# in-scope -- and the whole list, unmodified, would then reach Frappe's
+	# report engine as a literal filter, returning rows for every name in
+	# it. Refusing anything but a plain string closes that off before the
+	# scope check ever runs.
+	requested_employee = filters.get("employee")
+	if requested_employee:
+		if not isinstance(requested_employee, str):
+			frappe.throw(_("Invalid employee filter."))
+		if not employee_in_admin_scope(requested_employee, scope):
+			frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
+	# Company is forced to the caller's own scope unconditionally -- not
+	# only when no employee filter is present -- so a caller cannot pin an
+	# arbitrary `company` alongside a legitimately in-scope `employee` and
+	# have a report's independent company dimension honour it.
+	if scope["kind"] == "company":
+		filters["company"] = scope["company"]
+
+	result = run_query_report(report_name=report_name, filters=filters)
+	return {"columns": result.get("columns"), "result": result.get("result")}
+
+
 @frappe.whitelist()
 def get_person(employee):
 	"""Everything HR asks about a person, on one screen (P6-R2): leave
@@ -6568,6 +6778,416 @@ def get_person(employee):
 		"desk_url": get_url_to_form("Employee", employee) if _can_open_desk(frappe.session.user) else None,
 		"failed_sections": failed,
 	}
+
+
+# ---------------------------------------------------------------------------
+# Reading projects, tasks and members (P7-U3 / R1-R4 read half)
+#
+# The Delivery Manager / HR Manager / System Manager sibling of
+# `search_people` and `get_person` just above -- same shape, scoped by
+# `resolve_project_scope` (U2) instead of `resolve_admin_scope`, and refused
+# entirely for anyone that scope does not grant.
+#
+# One refusal message covers "does not exist", "not yours" and "outside your
+# scope" in `get_project` (KTD9's uniform-refusal ordering, `get_person`'s
+# own pattern): project ids are sequential, so a distinct message per case
+# would let a caller learn which ids exist and whose they are just by
+# reading the wording back.
+
+_PROJECT_NOT_FOUND = "That project isn't here."
+
+_PROJECT_SEARCH_FIELDS = ("name", "project_name", "status", "company")
+
+_PROJECT_FIELDS = (
+	"name",
+	"project_name",
+	"status",
+	"expected_start_date",
+	"expected_end_date",
+	"helixhr_is_billable",
+)
+
+# Task.status has no single "closed" value -- Completed and Cancelled both
+# are -- so "open" is everything else, not one literal status string.
+_CLOSED_TASK_STATUSES = ("Completed", "Cancelled")
+
+
+def _project_search_projection(row):
+	return {
+		"name": row.name,
+		"project_name": row.project_name,
+		"status": row.status,
+		"company": row.company,
+	}
+
+
+@frappe.whitelist()
+def search_projects():
+	"""Every project this caller administers, per `resolve_project_scope`
+	(P7-R1-R4): unscoped for System Manager, the caller's own company for an
+	HR Manager, exactly the projects a HelixHR Delivery Manager is a member
+	of, refused for anyone else.
+
+	No `query`/paging parameters -- unlike `search_people`'s employee search,
+	a project list is small enough per caller (a company, or one person's
+	memberships) that a page control would be UI the plan never asked for."""
+	rate_limit_per_user("search_projects")
+	scope = resolve_project_scope(frappe.session.user)
+	if scope["kind"] == "none":
+		frappe.throw(_("You are not authorised to view projects here."), frappe.PermissionError)
+
+	filters = project_scope_filters(scope)
+	if filters is None:
+		return {"projects": []}
+
+	rows = frappe.get_all(
+		"Project",
+		filters=filters,
+		fields=list(_PROJECT_SEARCH_FIELDS),
+		order_by="project_name asc",
+		ignore_permissions=True,
+	)
+	return {"projects": [_project_search_projection(row) for row in rows]}
+
+
+def _project_open_tasks(project):
+	return frappe.get_all(
+		"Task",
+		filters={"project": project, "status": ["not in", _CLOSED_TASK_STATUSES]},
+		fields=["name", "subject", "status", "priority", "exp_start_date", "exp_end_date"],
+		order_by="exp_start_date asc, name asc",
+		ignore_permissions=True,
+	)
+
+
+def _project_members(project):
+	"""Every `Project User` row on `project`, resolved to an employee name
+	(KTD5) -- never the raw Frappe User login that `Project User.user`
+	actually stores. An Employee link is preferred; a member with none is
+	still returned, named from the User's own full name, so a missing
+	Employee record is a renderable row rather than a broken one."""
+	rows = frappe.get_all(
+		"Project User", filters={"parent": project}, fields=["user"], order_by="idx asc", ignore_permissions=True
+	)
+	logins = [row.user for row in rows]
+	if not logins:
+		return []
+
+	employees = {
+		row.user_id: row
+		for row in frappe.get_all(
+			"Employee",
+			filters={"user_id": ["in", logins]},
+			fields=["name", "user_id", "employee_name"],
+			ignore_permissions=True,
+		)
+	}
+	full_names = {
+		row.name: row.full_name
+		for row in frappe.get_all(
+			"User", filters={"name": ["in", logins]}, fields=["name", "full_name"], ignore_permissions=True
+		)
+	}
+
+	members = []
+	for login in logins:
+		employee = employees.get(login)
+		employee_name = (employee.employee_name if employee else None) or full_names.get(login) or _(
+			"Unknown member"
+		)
+		members.append(
+			{
+				"employee": employee.name if employee else None,
+				"employee_name": employee_name,
+				"initials": _initials(employee_name),
+			}
+		)
+	return members
+
+
+@frappe.whitelist()
+def get_project(project):
+	"""One project, as a named field list (KTD9) -- never the whole
+	document. ERPNext's `Project` carries a costing tab (estimated cost,
+	total costing/billable/billed/sales amount, gross margin) and links to
+	Customer and Sales Order; none of it belongs in this response, and a
+	whole-document read would carry all of it regardless of what this
+	function goes on to return.
+
+	Resolved through `resolve_project_scope` before anything else is read:
+	a caller outside their scope is refused with `_PROJECT_NOT_FOUND`, the
+	same message a nonexistent project id gets, so this can never become an
+	oracle for which project ids exist.
+	"""
+	rate_limit_per_user("get_project")
+	scope = resolve_project_scope(frappe.session.user)
+	if scope["kind"] == "none" or not project_in_scope(project, scope):
+		frappe.throw(_(_PROJECT_NOT_FOUND), frappe.PermissionError)
+
+	data = frappe.db.get_value("Project", project, list(_PROJECT_FIELDS), as_dict=True)
+
+	return {
+		"name": data.name,
+		"project_name": data.project_name,
+		"status": data.status,
+		"billable": bool(data.helixhr_is_billable),
+		"expected_start_date": data.expected_start_date,
+		"expected_end_date": data.expected_end_date,
+		"tasks": _project_open_tasks(project),
+		"members": _project_members(project),
+	}
+
+
+# ---------------------------------------------------------------------------
+# P7-U4: creating projects and tasks, and assigning people.
+#
+# Three POST-only, rate-limited writes, each gated by the same
+# `resolve_project_scope` / `project_in_scope` pair that gates the reads
+# above -- no separate authorisation logic (the plan's own instruction for
+# this unit).
+# ---------------------------------------------------------------------------
+
+
+def _write_project_users(doc, *, insert):
+	"""Insert or save a Project whose `users` child table changed, without
+	needing the caller's own session to hold Frappe's `share` doc-perm on
+	Project, and without leaving behind the standing document-level access
+	ERPNext's own auto-share grants.
+
+	ERPNext's own `Project.after_insert` / `validate` auto-shares the
+	document with everyone newly added to `users`
+	(`control_access_for_project_users`), and that share step -- unlike the
+	surrounding `insert`/`save` -- checks the *session user's* `share`
+	permission regardless of `ignore_permissions`, so the write runs as
+	Administrator rather than widening every member's standing grant just
+	to satisfy an internal Frappe side effect.
+
+	Code review found that the resulting `DocShare` row is not merely a
+	permission-check formality: Frappe's own `has_permission` falls back to
+	"is this document shared with the user?" whenever role-based permission
+	says no, *before* consulting any custom `has_permission` hook's answer.
+	So the auto-share alone -- independent of any DocPerm this app grants or
+	refuses, and independent of `helixhr.project_permissions`'s hooks --
+	would let any member read the whole Project document, costing tab
+	included, through Frappe's generic REST route (R8, KTD9). This app
+	never relies on that share for anything -- every HelixHR method reads
+	and writes Project via `ignore_permissions=True`/`frappe.db.get_value`,
+	never through Frappe's permission or sharing system -- so the shares
+	this call creates are removed immediately after, for every member named
+	in `doc.users` at the time of this write. Desk-created projects and
+	their own shares (created by a Projects Manager working directly in
+	Desk, not through this endpoint) are untouched.
+
+	Attribution is restored immediately after: the technical actor that
+	satisfied Frappe's check is not who actually asked for this write.
+	"""
+	caller = frappe.session.user
+	members = [row.user for row in doc.users]
+	frappe.set_user("Administrator")
+	try:
+		if insert:
+			doc.insert(ignore_permissions=True)
+		else:
+			doc.save(ignore_permissions=True)
+		for member in members:
+			frappe.share.remove(doc.doctype, doc.name, member)
+	finally:
+		frappe.set_user(caller)
+	frappe.db.set_value(
+		doc.doctype, doc.name, {"owner": caller, "modified_by": caller}, update_modified=False
+	)
+
+
+@frappe.whitelist(methods=["POST"])
+def create_project(project_name, is_billable=0, **kwargs):
+	"""Create a project the caller administers (P7-R1, P7-R6).
+
+	`company` is never read from the request -- it comes from the caller's
+	own Employee record, the same one `resolve_project_scope`'s "company"
+	and "assigned" branches key on, so a company named in the request body
+	(accepted here only via `**kwargs`, then ignored, the same pattern
+	`get_dashboard` uses to swallow extra caller input) can never steer
+	which company the project lands in.
+
+	The creator is added as a `Project User` in the same operation: without
+	it, a HelixHR Delivery Manager who just created the project would fall
+	straight back out of their own "assigned" scope and lose it the instant
+	they made it (the plan's own named risk for this unit).
+	"""
+	rate_limit_per_user("create_project")
+	scope = resolve_project_scope(frappe.session.user)
+	if scope["kind"] == "none":
+		frappe.throw(_("You are not authorised to create projects here."), frappe.PermissionError)
+
+	project_name = (project_name or "").strip()
+	if not project_name:
+		frappe.throw(_("Give the project a name."))
+
+	# `resolve_project_scope`'s "unscoped" branch deliberately admits a
+	# System Manager or an HR-role holder with no Employee record at all
+	# (the Desk-only persona `ensure_hr_manager_user` builds) -- there is no
+	# "own record" to take a company from for that caller, and `Project.company`
+	# is mandatory, so there is no safe company to guess on their behalf
+	# (Frappe's global default company is a site-wide setting, not this
+	# caller's own, and silently attaching their project to it would be a
+	# guess dressed up as a decision). `get_current_employee` has no defined
+	# behaviour for this persona either -- it calls `.get("name")` on
+	# whatever `get_current_employee_info` returned, which is `None` (not a
+	# dict) here, so it raises an unhandled `AttributeError` rather than the
+	# `PermissionError` its own body appears to promise. Refuse clearly
+	# instead: this persona already has Desk for project creation.
+	employee_info = get_current_employee_info()
+	if not employee_info:
+		frappe.throw(
+			_("Your account has no linked employee record, so a project can't be created from here."),
+			frappe.ValidationError,
+		)
+	company = employee_info.get("company")
+
+	doc = frappe.get_doc(
+		{
+			"doctype": "Project",
+			"project_name": project_name,
+			"company": company,
+			"helixhr_is_billable": cint(is_billable),
+			"users": [{"user": frappe.session.user}],
+		}
+	)
+	_write_project_users(doc, insert=True)
+
+	return {
+		"name": doc.name,
+		"project_name": doc.project_name,
+		"status": doc.status,
+		"billable": bool(doc.helixhr_is_billable),
+		"expected_start_date": doc.expected_start_date,
+		"expected_end_date": doc.expected_end_date,
+		"tasks": [],
+		"members": _project_members(doc.name),
+	}
+
+
+def _task_projection(doc):
+	return {
+		"name": doc.name,
+		"subject": doc.subject,
+		"status": doc.status,
+		"priority": doc.priority,
+		"exp_start_date": doc.exp_start_date,
+		"exp_end_date": doc.exp_end_date,
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+def save_task(project, task=None, subject=None, status=None):
+	"""Add, rename, or close a task on `project` (P7-R2).
+
+	`task` absent means add a new one; present means rename and/or close an
+	existing one. Closing sets ERPNext's own `status` (a `Task.status` of
+	`Completed` or `Cancelled`, validated by ERPNext's own Select options on
+	save) rather than deleting the record, so time already booked against
+	the task keeps a task to be read back against.
+
+	Scoped by `resolve_project_scope` / `project_in_scope` exactly like
+	`get_project` -- refused, with the same not-found wording, for a caller
+	outside their scope or for a `task` that does not actually belong to
+	`project`, so a caller cannot reach a task by naming a project they do
+	administer alongside a task id from one they do not.
+	"""
+	rate_limit_per_user("save_task")
+	scope = resolve_project_scope(frappe.session.user)
+	if scope["kind"] == "none" or not project_in_scope(project, scope):
+		frappe.throw(_(_PROJECT_NOT_FOUND), frappe.PermissionError)
+
+	if task:
+		current_project = frappe.db.get_value("Task", task, "project")
+		if not current_project or current_project != project:
+			frappe.throw(_(_PROJECT_NOT_FOUND), frappe.PermissionError)
+		doc = frappe.get_doc("Task", task)
+		if subject is not None:
+			subject = subject.strip()
+			if not subject:
+				frappe.throw(_("Give the task a subject."))
+			doc.subject = subject
+	else:
+		subject = (subject or "").strip()
+		if not subject:
+			frappe.throw(_("Give the task a subject."))
+		# ERPNext's `Task.status` carries no doctype-level default -- Desk's
+		# new-task form fills "Open" client-side, which this write path has
+		# no client side to borrow, so it is named explicitly here.
+		doc = frappe.get_doc(
+			{"doctype": "Task", "project": project, "subject": subject, "status": "Open"}
+		)
+
+	if status is not None:
+		doc.status = status
+
+	if task:
+		doc.save(ignore_permissions=True)
+	else:
+		doc.insert(ignore_permissions=True)
+
+	return _task_projection(doc)
+
+
+@frappe.whitelist(methods=["POST"])
+def set_project_members(project, employees):
+	"""Replace `project`'s full `Project User` membership with `employees`
+	(P7-R3, KTD5).
+
+	The portal's surface is people, not logins, so each Employee is resolved
+	to its linked `user_id` -- the field ERPNext's own `Project User` child
+	table keys on. If *any* employee named has no linked user the whole call
+	is refused, naming which one: that is the caller's own directory data
+	(they administer this project), not a disclosure.
+
+	Replaces the set rather than patching it, so calling this twice with the
+	same employees is a no-op, and calling it with a shorter list removes
+	whoever is missing -- without touching any time they already recorded,
+	since `Project User` carries no reference to `Timesheet Detail`.
+	"""
+	rate_limit_per_user("set_project_members")
+	scope = resolve_project_scope(frappe.session.user)
+	if scope["kind"] == "none" or not project_in_scope(project, scope):
+		frappe.throw(_(_PROJECT_NOT_FOUND), frappe.PermissionError)
+
+	if isinstance(employees, str):
+		employees = frappe.parse_json(employees)
+	# De-duplicated, order preserved: a caller sending the same employee
+	# twice should not raise "duplicate row" from ERPNext's own child-table
+	# validation.
+	employees = list(dict.fromkeys(employees or []))
+
+	rows = (
+		frappe.get_all(
+			"Employee",
+			filters={"name": ["in", employees]},
+			fields=["name", "employee_name", "user_id"],
+		)
+		if employees
+		else []
+	)
+	by_name = {row.name: row for row in rows}
+
+	users = []
+	for employee in employees:
+		row = by_name.get(employee)
+		if not row:
+			frappe.throw(_("{0} isn't an employee here.").format(employee))
+		if not row.user_id:
+			frappe.throw(
+				_("{0} has no linked user, so they can't be assigned to a project.").format(
+					row.employee_name or employee
+				)
+			)
+		users.append(row.user_id)
+
+	doc = frappe.get_doc("Project", project)
+	doc.set("users", [{"user": user} for user in users])
+	_write_project_users(doc, insert=False)
+
+	return {"members": _project_members(project)}
 
 
 # ---------------------------------------------------------------------------

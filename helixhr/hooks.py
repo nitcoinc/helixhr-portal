@@ -86,9 +86,9 @@ website_route_rules = [
 
 fixtures = [
 	{"dt": "Property Setter", "filters": [["module", "=", "HelixHR"]]},
-	# P5-U2: this role is a portal role, so its fixture pins desk_access=0
-	# rather than inheriting Frappe's Desk-user default.
-	{"dt": "Role", "filters": [["name", "=", "IT Team"]]},
+	# P5-U2 / P7-U1: both are portal roles, so their fixtures pin
+	# desk_access=0 rather than inheriting Frappe's Desk-user default.
+	{"dt": "Role", "filters": [["name", "in", ["IT Team", "HelixHR Delivery Manager"]]]},
 	# Custom DocPerm is deliberately NOT a fixture. Frappe *replaces* a
 	# doctype's standard DocPerm rows with its Custom DocPerm rows rather than
 	# merging them (frappe.permissions.get_valid_perms), so shipping a partial
@@ -304,12 +304,19 @@ after_install = "helixhr.install.after_install"
 # single-document route (frappe.client.get, print, the Desk form). A
 # browser-side filter is not a boundary; these are.
 
+# P7-U1: Project and Task carry a plain DocPerm grant for HelixHR Delivery
+# Manager and no scope of their own -- ERPNext ships no permission-query-conditions
+# for either doctype, so an unpaired grant would be unscoped over every REST
+# route (KTD8). Both point at the same module because the rule -- "which
+# projects does this caller administer" -- is one definition, not two.
 permission_query_conditions = {
 	"HR Request": "helixhr.helixhr.doctype.hr_request.hr_request.get_permission_query_conditions",
 	"HelixHR Document Link": (
 		"helixhr.helixhr.doctype.helixhr_document_link.helixhr_document_link"
 		".get_permission_query_conditions"
 	),
+	"Project": "helixhr.project_permissions.get_permission_query_conditions",
+	"Task": "helixhr.project_permissions.get_permission_query_conditions",
 }
 
 has_permission = {
@@ -317,6 +324,8 @@ has_permission = {
 	"HelixHR Document Link": (
 		"helixhr.helixhr.doctype.helixhr_document_link.helixhr_document_link.has_permission"
 	),
+	"Project": "helixhr.project_permissions.has_permission",
+	"Task": "helixhr.project_permissions.has_permission",
 }
 
 # Document Events

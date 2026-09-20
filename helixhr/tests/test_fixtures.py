@@ -480,6 +480,8 @@ class TestPermissionDeltas(IntegrationTestCase):
 		"Salary Slip",
 		"HR Request",
 		"HelixHR Request Category",
+		"Project",
+		"Task",
 	)
 
 	def test_no_standard_role_lost_access_to_a_customised_doctype(self):
@@ -628,6 +630,24 @@ class TestPermissionDeltas(IntegrationTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			client_delete("Employee Checkin", punch)
 		self.assertEqual(frappe.db.get_value("Employee Checkin", punch, "time"), get_datetime(punch_time))
+
+	def test_delivery_manager_holds_no_standing_frappe_permission_anywhere(self):
+		"""P7-U1's most important line, revised after code review: a plain
+		DocPerm on Project/Task has no field-level notion of scope, and
+		neither doctype's costing-tab fields carry any permlevel
+		restriction in stock ERPNext -- a Delivery Manager with ordinary
+		read/write/create would see the whole document, costing tab
+		included, through Frappe's generic REST route, bypassing
+		`get_project`'s field allow-list entirely (R8, KTD9). Every HelixHR
+		method that touches Project or Task already bypasses Frappe's
+		permission system outright (`ignore_permissions=True`,
+		`frappe.db.get_value`) -- `resolve_project_scope`/`project_in_scope`
+		is this app's real authorisation boundary, not a DocPerm -- so the
+		role holds no standing grant on Project, Task, Timesheet, or
+		Employee at all."""
+		for doctype in ("Project", "Task", "Timesheet", "Employee"):
+			rule = _rule(doctype, "HelixHR Delivery Manager")
+			self.assertIsNone(rule, f"HelixHR Delivery Manager must hold nothing on {doctype}")
 
 	def test_the_patch_is_idempotent(self):
 		"""It runs once through the patch log, but a re-run by hand (or a

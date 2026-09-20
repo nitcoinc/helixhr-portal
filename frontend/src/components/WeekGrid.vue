@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, reactive } from 'vue'
 import { roundHours } from '@/lib/hours'
 
 // P2-U6. The week editor, in both of its shapes.
@@ -37,7 +37,14 @@ const props = defineProps({
   readOnly: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['add-line', 'remove-line', 'set-hours', 'update-line', 'copy-day'])
+const emit = defineEmits([
+  'add-line',
+  'remove-line',
+  'set-hours',
+  'update-line',
+  'set-note',
+  'copy-day',
+])
 
 const STEP = 0.25
 const MAX_HOURS = 24
@@ -49,6 +56,13 @@ function tasksFor(projectName) {
 function projectLabel(line) {
   const project = props.projects.find((p) => p.name === line.project)
   return project?.project_name || project?.name || line.project || ''
+}
+
+// Informational only (KTD2): the consultant does not decide whether their
+// hours are billable, so this never renders as a control -- the project's
+// own flag, read straight from `get_my_projects`.
+function isBillable(line) {
+  return Boolean(props.projects.find((p) => p.name === line.project)?.billable)
 }
 
 const projectOptions = computed(() => [
@@ -105,6 +119,30 @@ function cellValue(line, iso) {
   const value = hoursOn(line, iso)
   return value === null || value === 0 ? '' : value
 }
+
+// --- per-day notes (desktop) ---------------------------------------------
+//
+// The desktop grid shows all seven days at once, so a note input on every
+// cell of every row is the same "too much" problem the phone layout avoids
+// by only ever showing one day's lines -- here the day's own hours cell is
+// already the entry affordance (P7-KTD7), so the note rides behind a small
+// toggle in that same cell rather than a permanent eighth column. A cell
+// that already carries a note is shown open; an empty one opens on request
+// and, once opened, stays open for the rest of the session so a half-typed
+// note is never hidden out from under the person typing it.
+const openNotes = reactive({})
+
+function noteKey(line, iso) {
+  return `${line.id}::${iso}`
+}
+
+function noteVisible(line, iso) {
+  return Boolean(line.notes[iso]) || Boolean(openNotes[noteKey(line, iso)])
+}
+
+function openNote(line, iso) {
+  openNotes[noteKey(line, iso)] = true
+}
 </script>
 
 <template>
@@ -138,27 +176,36 @@ function cellValue(line, iso) {
                  A borderless select keeps the artboard's plain-text row
                  without hiding the only way to change it behind an edit
                  mode. -->
-            <select
-              v-if="!readOnly"
-              class="-ml-1 w-full cursor-pointer appearance-none truncate rounded-md border-0 bg-transparent bg-none px-1 py-0.5 font-semibold text-ink-gray-9"
-              :value="line.project"
-              :aria-label="`Project for row ${line.id}`"
-              @change="emit('update-line', { id: line.id, field: 'project', value: $event.target.value })"
-            >
-              <option
-                v-for="option in projectOptions"
-                :key="option.value"
-                :value="option.value"
+            <div class="flex items-center gap-1.5">
+              <select
+                v-if="!readOnly"
+                class="-ml-1 w-full cursor-pointer appearance-none truncate rounded-md border-0 bg-transparent bg-none px-1 py-0.5 font-semibold text-ink-gray-9"
+                :value="line.project"
+                :aria-label="`Project for row ${line.id}`"
+                @change="emit('update-line', { id: line.id, field: 'project', value: $event.target.value })"
               >
-                {{ option.label }}
-              </option>
-            </select>
-            <p
-              v-else
-              class="truncate font-semibold text-ink-gray-9"
-            >
-              {{ projectLabel(line) }}
-            </p>
+                <option
+                  v-for="option in projectOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+              <p
+                v-else
+                class="truncate font-semibold text-ink-gray-9"
+              >
+                {{ projectLabel(line) }}
+              </p>
+              <span
+                v-if="line.project && isBillable(line)"
+                class="shrink-0 rounded-full bg-surface-green-2 px-1.5 py-0.5 text-[10px] font-medium text-ink-green-3"
+                title="Billable project"
+              >
+                Billable
+              </span>
+            </div>
 
             <select
               v-if="!readOnly"
@@ -182,20 +229,24 @@ function cellValue(line, iso) {
               {{ tasksFor(line.project).find((t) => t.name === line.task)?.subject || line.task }}
             </p>
 
+            <!-- The phone layout already only ever shows one day's lines
+                 (P7-KTD7), so this note input is already behind the day's
+                 own entry affordance -- no further collapsing is needed
+                 here the way the desktop grid needs it. -->
             <input
               v-if="!readOnly"
               class="-ml-1 w-full appearance-none rounded-md border-0 bg-transparent px-1 py-0.5 text-sm italic text-ink-gray-6 placeholder:underline placeholder:decoration-ink-gray-4"
               type="text"
-              :value="line.note"
+              :value="line.notes[selectedDate] || ''"
               placeholder="Add a note"
               :aria-label="`Note for row ${line.id}`"
-              @input="emit('update-line', { id: line.id, field: 'note', value: $event.target.value })"
+              @input="emit('set-note', { id: line.id, date: selectedDate, value: $event.target.value })"
             >
             <p
-              v-else-if="line.note"
+              v-else-if="line.notes[selectedDate]"
               class="text-sm italic text-ink-gray-6"
             >
-              {{ line.note }}
+              {{ line.notes[selectedDate] }}
             </p>
           </div>
 
@@ -315,12 +366,6 @@ function cellValue(line, iso) {
               >
                 Total
               </th>
-              <th
-                class="label px-4 py-3 text-left"
-                scope="col"
-              >
-                Note
-              </th>
             </tr>
           </thead>
           <tbody>
@@ -333,27 +378,36 @@ function cellValue(line, iso) {
                 class="w-56 min-w-56 px-4 py-2 text-left font-normal"
                 scope="row"
               >
-                <select
-                  v-if="!readOnly"
-                  class="-ml-1 w-full cursor-pointer appearance-none truncate rounded-md border-0 bg-transparent bg-none px-1 py-0.5 font-semibold text-ink-gray-9"
-                  :value="line.project"
-                  :aria-label="`Project for row ${line.id}`"
-                  @change="emit('update-line', { id: line.id, field: 'project', value: $event.target.value })"
-                >
-                  <option
-                    v-for="option in projectOptions"
-                    :key="option.value"
-                    :value="option.value"
+                <div class="flex items-center gap-1.5">
+                  <select
+                    v-if="!readOnly"
+                    class="-ml-1 w-full cursor-pointer appearance-none truncate rounded-md border-0 bg-transparent bg-none px-1 py-0.5 font-semibold text-ink-gray-9"
+                    :value="line.project"
+                    :aria-label="`Project for row ${line.id}`"
+                    @change="emit('update-line', { id: line.id, field: 'project', value: $event.target.value })"
                   >
-                    {{ option.label }}
-                  </option>
-                </select>
-                <p
-                  v-else
-                  class="font-semibold text-ink-gray-9"
-                >
-                  {{ projectLabel(line) }}
-                </p>
+                    <option
+                      v-for="option in projectOptions"
+                      :key="option.value"
+                      :value="option.value"
+                    >
+                      {{ option.label }}
+                    </option>
+                  </select>
+                  <p
+                    v-else
+                    class="font-semibold text-ink-gray-9"
+                  >
+                    {{ projectLabel(line) }}
+                  </p>
+                  <span
+                    v-if="line.project && isBillable(line)"
+                    class="shrink-0 rounded-full bg-surface-green-2 px-1.5 py-0.5 text-[10px] font-medium text-ink-green-3"
+                    title="Billable project"
+                  >
+                    Billable
+                  </span>
+                </div>
                 <select
                   v-if="!readOnly"
                   class="-ml-1 w-full cursor-pointer appearance-none truncate rounded-md border-0 bg-transparent bg-none px-1 py-0.5 text-ink-gray-6"
@@ -399,24 +453,43 @@ function cellValue(line, iso) {
                   v-else
                   class="tabular text-ink-gray-9"
                 >{{ cellValue(line, day.iso) || '–' }}</span>
+
+                <!-- The note lives per day, not per line (P7-U7, KTD7): it
+                     rides behind a small toggle in the same cell as the
+                     day's hours rather than a permanent eighth column, so
+                     the grid does not grow seven always-visible note
+                     inputs per row. -->
+                <div
+                  v-if="!readOnly"
+                  class="mt-1"
+                >
+                  <input
+                    v-if="noteVisible(line, day.iso)"
+                    class="w-full min-w-20 appearance-none rounded-md border-0 bg-transparent px-1 py-0.5 text-xs italic text-ink-gray-6"
+                    type="text"
+                    :value="line.notes[day.iso] || ''"
+                    placeholder="Note"
+                    :aria-label="`Note for ${projectLabel(line)}, ${day.weekday} ${day.dayOfMonth}`"
+                    @input="emit('set-note', { id: line.id, date: day.iso, value: $event.target.value })"
+                  >
+                  <button
+                    v-else
+                    class="cursor-pointer text-[11px] text-ink-gray-5 underline underline-offset-2 hover:text-ink-gray-7"
+                    type="button"
+                    @click="openNote(line, day.iso)"
+                  >
+                    + note
+                  </button>
+                </div>
+                <p
+                  v-else-if="line.notes[day.iso]"
+                  class="mt-1 text-xs italic text-ink-gray-6"
+                >
+                  {{ line.notes[day.iso] }}
+                </p>
               </td>
               <td class="tabular px-3 py-2 text-right font-semibold text-ink-gray-9">
                 {{ roundHours(Object.values(line.hours).reduce((sum, value) => sum + (value || 0), 0)) }}
-              </td>
-              <td class="px-4 py-2">
-                <input
-                  v-if="!readOnly"
-                  class="w-full min-w-28 appearance-none rounded-md border-0 bg-transparent px-1 py-1 italic text-ink-gray-6"
-                  type="text"
-                  :value="line.note"
-                  placeholder="Add a note"
-                  :aria-label="`Note for row ${line.id}`"
-                  @input="emit('update-line', { id: line.id, field: 'note', value: $event.target.value })"
-                >
-                <span
-                  v-else
-                  class="italic text-ink-gray-6"
-                >{{ line.note }}</span>
               </td>
             </tr>
 
@@ -444,11 +517,11 @@ function cellValue(line, iso) {
                   />
                 </span>
               </td>
-              <td class="tabular px-3 py-3 text-right font-semibold text-ink-gray-9">
-                {{ roundHours(days.reduce((sum, day) => sum + day.total, 0)) }}
-              </td>
-              <td class="tabular px-4 py-3 text-sm text-ink-gray-6">
-                of {{ fullWeekHours }} h
+              <td class="px-3 py-3 text-right">
+                <span class="tabular block font-semibold text-ink-gray-9">
+                  {{ roundHours(days.reduce((sum, day) => sum + day.total, 0)) }}
+                </span>
+                <span class="tabular block text-xs text-ink-gray-6">of {{ fullWeekHours }} h</span>
               </td>
             </tr>
           </tbody>
