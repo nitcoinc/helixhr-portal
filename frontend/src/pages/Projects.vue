@@ -58,13 +58,33 @@ function openProject(project) {
 const showCreateForm = ref(false)
 const newProjectName = ref('')
 const newProjectBillable = ref(false)
+const newProjectPriority = ref('')
+const newProjectType = ref('')
 const createError = ref('')
 const createProject = createResource({ url: 'helixhr.api.create_project', method: 'POST' })
+
+// P8-U2: `search_projects`'s own response carries the create form's option
+// lists and the caller's company, so the page that hosts the form needs no
+// second request for them. `company` is `None` for the Desk-only,
+// no-Employee-record persona `create_project` itself refuses (see its
+// docstring) -- the form says so instead of offering Create to a caller who
+// would only be refused.
+const creatorCompany = computed(() => projects.data?.company ?? null)
+const projectTypeOptions = computed(() => [
+  { label: 'No project type', value: '' },
+  ...(projects.data?.project_types || []).map((name) => ({ label: name, value: name })),
+])
+const priorityOptions = computed(() => [
+  { label: 'Default priority', value: '' },
+  ...(projects.data?.priority_options || []).map((name) => ({ label: name, value: name })),
+])
 
 function startCreate() {
   showCreateForm.value = true
   newProjectName.value = ''
   newProjectBillable.value = false
+  newProjectPriority.value = ''
+  newProjectType.value = ''
   createError.value = ''
 }
 
@@ -84,10 +104,13 @@ async function submitCreate() {
     const created = await createProject.submit({
       project_name,
       is_billable: newProjectBillable.value ? 1 : 0,
+      priority: newProjectPriority.value || undefined,
+      project_type: newProjectType.value || undefined,
     })
     // Shows in the list without a reload of `search_projects` -- the write's
     // own response already carries everything the row needs to render.
     projects.data = {
+      ...projects.data,
       projects: [
         { name: created.name, project_name: created.project_name, status: created.status },
         ...rows.value,
@@ -189,11 +212,21 @@ async function closeTask(task) {
 // plan's own note for the Delivery Manager role (P7-U1) is that the picker
 // "resolves names through existing scoped reads", and `get_directory` is
 // exactly that: every employee's own company, no admin permission required.
+// P8-U3: `_DIRECTORY_QUERY_MIN` on the server (helixhr/api.py) -- below this,
+// `get_directory` ignores the search entirely and returns an *unfiltered*
+// page, which this picker must never show as if it were a set of matches.
+// The limit is raised well past the old `8`: at eight or more people
+// already on the project, `memberMatches` filtering assigned people out
+// *after* the server's page could leave nothing to show even though real
+// matches exist further down the company.
+const MEMBER_QUERY_MIN = 2
+const MEMBER_RESULTS_LIMIT = 20
+
 const memberQuery = ref('')
 const memberSearch = ref('')
 const memberResults = createResource({
   url: 'helixhr.api.get_directory',
-  makeParams: () => ({ query: memberSearch.value || undefined, limit: 8 }),
+  makeParams: () => ({ query: memberSearch.value, limit: MEMBER_RESULTS_LIMIT }),
   auto: false,
 })
 const memberError = ref('')
@@ -202,8 +235,17 @@ const setMembers = createResource({ url: 'helixhr.api.set_project_members', meth
 let memberPending = null
 watch(memberQuery, (value) => {
   clearTimeout(memberPending)
+  const trimmed = value.trim()
+  if (trimmed.length < MEMBER_QUERY_MIN) {
+    // Below the server's own minimum, `get_directory` would return everyone
+    // in the company unfiltered -- clear the panel instead of showing that
+    // as a set of "matches" for a query the server never actually ran.
+    memberSearch.value = ''
+    memberResults.data = null
+    return
+  }
   memberPending = setTimeout(() => {
-    memberSearch.value = value.trim()
+    memberSearch.value = trimmed
     memberResults.reload()
   }, 250)
 })
@@ -212,6 +254,18 @@ onUnmounted(() => clearTimeout(memberPending))
 const memberMatches = computed(() =>
   (memberResults.data?.people || []).filter((person) => !memberEmployeeIds.value.includes(person.name)),
 )
+// Distinguishes "haven't searched enough yet" from "searched and found
+// nobody" -- both look like an empty `memberMatches`, but only the second
+// should render "Nobody matches that".
+const memberSearchActive = computed(() => memberQuery.value.trim().length >= MEMBER_QUERY_MIN)
+
+function focusMemberSearch() {
+  // Re-running the *previous* search's stale results on focus (P8-U3) --
+  // e.g. right after `addMember` clears `memberQuery` -- showed a panel that
+  // did not match anything currently typed. Only reload when there is an
+  // actual query in the box to reload.
+  if (memberSearchActive.value) memberResults.reload()
+}
 
 async function addMember(person) {
   memberError.value = ''
@@ -223,6 +277,7 @@ async function addMember(person) {
       { employee: person.name, employee_name: person.employee_name, initials: person.initials },
     ]
     memberQuery.value = ''
+    memberSearch.value = ''
     memberResults.data = null
   } catch (error) {
     memberError.value = error?.messages?.[0] || 'Could not assign that person. Please try again.'
@@ -271,13 +326,29 @@ async function removeMember(member) {
           v-if="detail.data"
           class="space-y-6"
         >
-          <section class="surface-card elev-1 grid grid-cols-1 gap-4 p-4 sm:grid-cols-2 lg:grid-cols-4">
+          <section class="surface-card elev-1 grid grid-cols-1 gap-4 p-4 sm:grid-cols-2 lg:grid-cols-6">
             <div>
               <p class="text-sm text-ink-gray-6">
                 Status
               </p>
               <p class="font-medium text-ink-gray-9">
                 {{ detail.data.status }}
+              </p>
+            </div>
+            <div>
+              <p class="text-sm text-ink-gray-6">
+                Priority
+              </p>
+              <p class="font-medium text-ink-gray-9">
+                {{ detail.data.priority || '—' }}
+              </p>
+            </div>
+            <div>
+              <p class="text-sm text-ink-gray-6">
+                Type
+              </p>
+              <p class="font-medium text-ink-gray-9">
+                {{ detail.data.project_type || '—' }}
               </p>
             </div>
             <div>
@@ -460,34 +531,53 @@ async function removeMember(member) {
                 v-model="memberQuery"
                 type="text"
                 label="Add a person"
-                placeholder="Name, employee number or work email"
+                placeholder="Name, employee ID or work email"
                 maxlength="60"
-                @focus="memberResults.reload()"
+                data-testid="project-member-search"
+                @focus="focusMemberSearch"
               />
-              <ul
-                v-if="memberMatches.length"
+              <div
+                v-if="memberSearchActive"
                 class="surface-card elev-1 mt-2 divide-y divide-outline-gray-1"
+                data-testid="project-member-results"
               >
-                <li
-                  v-for="person in memberMatches"
-                  :key="person.name"
+                <p
+                  v-if="memberResults.loading"
+                  class="p-2.5 text-sm text-ink-gray-6"
                 >
-                  <button
-                    type="button"
-                    class="flex w-full min-w-0 items-center gap-3 p-2.5 text-left"
-                    :disabled="setMembers.loading"
-                    @click="addMember(person)"
+                  Searching…
+                </p>
+                <ul
+                  v-else-if="memberMatches.length"
+                  class="divide-y divide-outline-gray-1"
+                >
+                  <li
+                    v-for="person in memberMatches"
+                    :key="person.name"
                   >
-                    <span
-                      class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-xs font-bold text-ink-gray-7"
-                      aria-hidden="true"
-                    >{{ person.initials }}</span>
-                    <span class="min-w-0 flex-1 truncate text-sm text-ink-gray-8">
-                      {{ person.employee_name }}
-                    </span>
-                  </button>
-                </li>
-              </ul>
+                    <button
+                      type="button"
+                      class="flex w-full min-w-0 items-center gap-3 p-2.5 text-left"
+                      :disabled="setMembers.loading"
+                      @click="addMember(person)"
+                    >
+                      <span
+                        class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-xs font-bold text-ink-gray-7"
+                        aria-hidden="true"
+                      >{{ person.initials }}</span>
+                      <span class="min-w-0 flex-1 truncate text-sm text-ink-gray-8">
+                        {{ person.employee_name }}
+                      </span>
+                    </button>
+                  </li>
+                </ul>
+                <p
+                  v-else
+                  class="p-2.5 text-sm text-ink-gray-6"
+                >
+                  Nobody matches that.
+                </p>
+              </div>
             </div>
           </section>
         </div>
@@ -517,12 +607,73 @@ async function removeMember(member) {
         class="surface-card elev-1 mb-4 space-y-3 p-4"
         data-testid="project-create-form"
       >
+        <!-- P8-U2: `company` is server-derived, never asked for (KTD2 --
+             the create endpoint refuses a company named in the request
+             body). A caller with no company at all -- the Desk-only
+             persona `create_project` itself refuses -- sees why instead
+             of a form that would only fail on submit. -->
+        <p
+          v-if="creatorCompany"
+          class="text-sm text-ink-gray-6"
+        >
+          This project will be created in <span class="font-medium text-ink-gray-8">{{ creatorCompany }}</span>.
+        </p>
+        <p
+          v-else
+          class="surface-alert p-3 text-sm"
+          role="alert"
+        >
+          Your account has no linked employee record, so a project can't be created from here.
+          Use Desk instead.
+        </p>
         <FormControl
           v-model="newProjectName"
           type="text"
           label="Project name"
           maxlength="140"
         />
+        <div>
+          <label
+            for="project-create-priority"
+            class="text-sm text-ink-gray-7"
+          >
+            Priority
+          </label>
+          <select
+            id="project-create-priority"
+            v-model="newProjectPriority"
+            class="mt-1 block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
+          >
+            <option
+              v-for="option in priorityOptions"
+              :key="option.value"
+              :value="option.value"
+            >
+              {{ option.label }}
+            </option>
+          </select>
+        </div>
+        <div>
+          <label
+            for="project-create-type"
+            class="text-sm text-ink-gray-7"
+          >
+            Project type
+          </label>
+          <select
+            id="project-create-type"
+            v-model="newProjectType"
+            class="mt-1 block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
+          >
+            <option
+              v-for="option in projectTypeOptions"
+              :key="option.value"
+              :value="option.value"
+            >
+              {{ option.label }}
+            </option>
+          </select>
+        </div>
         <FormControl
           v-model="newProjectBillable"
           type="checkbox"
@@ -539,6 +690,7 @@ async function removeMember(member) {
           <Button
             variant="solid"
             theme="blue"
+            :disabled="!creatorCompany"
             :loading="createProject.loading"
             @click="submitCreate"
           >

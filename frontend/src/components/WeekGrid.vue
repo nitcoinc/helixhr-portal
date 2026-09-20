@@ -1,5 +1,5 @@
 <script setup>
-import { computed, reactive } from 'vue'
+import { computed, nextTick, reactive } from 'vue'
 import { roundHours } from '@/lib/hours'
 
 // P2-U6. The week editor, in both of its shapes.
@@ -140,8 +140,27 @@ function noteVisible(line, iso) {
   return Boolean(line.notes[iso]) || Boolean(openNotes[noteKey(line, iso)])
 }
 
+// P8-U4: flipping `openNotes` renders the input on the *next* tick, by
+// which time the click that opened it is long over -- nothing focuses it,
+// so typing a note took a click to open it and a second click to place the
+// cursor. `pendingNoteFocus` names the one cell whose input should claim
+// focus the moment it exists; the `:ref` callback below (present only on
+// that render) does the actual focusing once Vue has mounted it.
+let pendingNoteFocus = null
+
 function openNote(line, iso) {
-  openNotes[noteKey(line, iso)] = true
+  const key = noteKey(line, iso)
+  openNotes[key] = true
+  pendingNoteFocus = key
+  nextTick(() => {
+    pendingNoteFocus = null
+  })
+}
+
+function focusIfPending(key) {
+  return (el) => {
+    if (el && pendingNoteFocus === key) el.focus()
+  }
 }
 </script>
 
@@ -235,7 +254,7 @@ function openNote(line, iso) {
                  here the way the desktop grid needs it. -->
             <input
               v-if="!readOnly"
-              class="-ml-1 w-full appearance-none rounded-md border-0 bg-transparent px-1 py-0.5 text-sm italic text-ink-gray-6 placeholder:underline placeholder:decoration-ink-gray-4"
+              class="w-full appearance-none rounded-md border border-outline-gray-2 bg-surface-white px-2 py-1 text-sm text-ink-gray-8 focus:border-outline-gray-4"
               type="text"
               :value="line.notes[selectedDate] || ''"
               placeholder="Add a note"
@@ -465,7 +484,8 @@ function openNote(line, iso) {
                 >
                   <input
                     v-if="noteVisible(line, day.iso)"
-                    class="w-full min-w-20 appearance-none rounded-md border-0 bg-transparent px-1 py-0.5 text-xs italic text-ink-gray-6"
+                    :ref="focusIfPending(noteKey(line, day.iso))"
+                    class="w-full min-w-20 appearance-none rounded-md border border-outline-gray-2 bg-surface-white px-1 py-0.5 text-xs text-ink-gray-8 focus:border-outline-gray-4"
                     type="text"
                     :value="line.notes[day.iso] || ''"
                     placeholder="Note"

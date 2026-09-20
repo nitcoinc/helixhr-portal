@@ -1,7 +1,7 @@
 import frappe
 from frappe.tests import IntegrationTestCase
 
-from helixhr.api import get_person, search_people
+from helixhr.api import get_person, get_person_form_options, save_person, search_people
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	HR_MANAGER_EMPLOYEE_USER,
@@ -285,10 +285,29 @@ class TestGetPerson(IntegrationTestCase):
 				"designation",
 				"department",
 				"branch",
+				# P8-U7/U8/U9: overview/joining/approver/shift fields, all
+				# permlevel 0, added so the person view's edit cards start
+				# pre-filled without a second request.
+				"company_email",
 				"reports_to",
 				"status",
 				"date_of_joining",
+				"employment_type",
+				"grade",
+				"scheduled_confirmation_date",
+				"final_confirmation_date",
+				"leave_approver",
+				"expense_approver",
+				"shift_request_approver",
+				"default_shift",
+				"holiday_list",
 				"manager_name",
+				"leave_approver_employee",
+				"leave_approver_name",
+				"expense_approver_employee",
+				"expense_approver_name",
+				"shift_request_approver_employee",
+				"shift_request_approver_name",
 			},
 		)
 
@@ -522,3 +541,202 @@ class TestDeskLinks(IntegrationTestCase):
 		boot = get_portal_bootstrap()
 		self.assertFalse(boot["can_see_people"])
 		self.assertFalse(boot["can_open_desk"])
+
+
+# --- P8-U7/U8/U9: editing a person from the portal --------------------------
+
+
+def _make_employee_without_user(company, employee_number):
+	"""An Employee with no `user_id` at all -- the case `save_person` must
+	refuse the whole call over, naming this employee, when chosen as an
+	approver. Mirrors `test_api_projects.py`'s own helper of the same
+	shape and reason -- built locally rather than shared, since each
+	file's scope is its own module plus the fixture."""
+	from helixhr.tests.utils import ensure_test_gender
+
+	existing = frappe.db.get_value("Employee", {"employee_number": employee_number})
+	if existing:
+		return existing
+	employee = frappe.get_doc(
+		{
+			"doctype": "Employee",
+			"employee_number": employee_number,
+			"first_name": employee_number,
+			"company": company,
+			"date_of_birth": "1990-01-01",
+			"date_of_joining": "2020-01-01",
+			"gender": ensure_test_gender(),
+			"status": "Active",
+		}
+	)
+	employee.insert(ignore_permissions=True)
+	return employee.name
+
+
+class TestSavePerson(IntegrationTestCase):
+	"""P8-U7/U8/U9 / P8-R3."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		self.hr_employee, self.hr_user = make_test_hr_manager_employee()
+		self.colleague, self.colleague_user, self.manager, self.manager_user = (
+			make_test_employee_and_manager()
+		)
+		other_company = _ensure_other_company()
+		self.other_company_employee = make_test_user(OTHER_COMPANY_USER, other_company)
+		self.orphan = _make_employee_without_user(self.company, "_Test U7 Orphan Employee")
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def test_hr_manager_edits_overview_and_joining_fields_in_their_own_company(self):
+		# Reuses whichever Designation already exists on this bench when one
+		# does (a long-lived local site always has one by now); creates a
+		# named one otherwise, so a genuinely fresh site -- no Designation
+		# at all -- still runs this test rather than skipping the assertion.
+		# `make_test_employee_and_manager`'s own docstring in utils.py
+		# documents a *Department* first-insert lock-wait timeout on this
+		# bench, not Designation; if the same ever reproduces here, the fix
+		# is the same shape as that one -- move the creation into
+		# `helixhr/tests/utils.py` as a dedicated `ensure_*` helper.
+		designation = frappe.db.get_value("Designation", {}, "name")
+		if not designation:
+			designation = "_Test U7 Designation"
+			if not frappe.db.exists("Designation", designation):
+				frappe.get_doc(
+					{"doctype": "Designation", "designation_name": designation}
+				).insert(ignore_permissions=True)
+
+		frappe.set_user(self.hr_user)
+		result = save_person(
+			self.colleague,
+			designation=designation,
+			branch="",
+			date_of_joining="2021-06-01",
+			scheduled_confirmation_date="2021-12-01",
+			status="Active",
+		)
+		self.assertEqual(result["designation"], designation)
+		self.assertEqual(str(result["date_of_joining"]), "2021-06-01")
+		self.assertEqual(frappe.db.get_value("Employee", self.colleague, "designation"), designation)
+
+	def test_a_caller_outside_admin_scope_is_refused(self):
+		frappe.set_user(self.colleague_user)
+		with self.assertRaises(frappe.PermissionError):
+			save_person(self.colleague, designation="Should Not Land")
+
+	def test_editing_a_person_in_another_company_is_refused(self):
+		frappe.set_user(self.hr_user)
+		with self.assertRaises(frappe.PermissionError):
+			save_person(self.other_company_employee, designation="Should Not Land")
+
+	def test_a_field_outside_the_allow_list_is_silently_ignored_and_unchanged(self):
+		frappe.set_user(self.hr_user)
+		before = frappe.db.get_value("Employee", self.colleague, "ctc")
+		save_person(self.colleague, ctc=999999, ctc_currency="USD")
+		self.assertEqual(frappe.db.get_value("Employee", self.colleague, "ctc"), before)
+
+	def test_setting_the_person_as_their_own_manager_is_refused_by_the_cycle_check(self):
+		frappe.set_user(self.hr_user)
+		with self.assertRaises(frappe.ValidationError):
+			save_person(self.colleague, reports_to=self.colleague)
+
+	def test_reports_to_outside_admin_scope_is_refused(self):
+		frappe.set_user(self.hr_user)
+		with self.assertRaises(frappe.PermissionError):
+			save_person(self.colleague, reports_to=self.other_company_employee)
+
+	def test_setting_and_clearing_an_approver_persists_the_resolved_user(self):
+		frappe.set_user(self.hr_user)
+		result = save_person(self.colleague, leave_approver=self.manager)
+		self.assertEqual(result["leave_approver"], self.manager_user)
+		self.assertEqual(result["leave_approver_employee"], self.manager)
+		self.assertEqual(result["leave_approver_name"], frappe.db.get_value("Employee", self.manager, "employee_name"))
+		self.assertEqual(frappe.db.get_value("Employee", self.colleague, "leave_approver"), self.manager_user)
+
+		cleared = save_person(self.colleague, leave_approver="")
+		self.assertIsNone(cleared["leave_approver"])
+		self.assertIsNone(cleared["leave_approver_employee"])
+
+	def test_an_approver_with_no_linked_user_is_refused_and_named(self):
+		frappe.set_user(self.hr_user)
+		orphan_name = frappe.db.get_value("Employee", self.orphan, "employee_name")
+		with self.assertRaises(frappe.ValidationError) as caught:
+			save_person(self.colleague, expense_approver=self.orphan)
+		self.assertIn(orphan_name, str(caught.exception))
+
+	def test_an_approver_outside_admin_scope_is_refused(self):
+		frappe.set_user(self.hr_user)
+		with self.assertRaises(frappe.PermissionError):
+			save_person(self.colleague, shift_request_approver=self.other_company_employee)
+
+	def test_setting_default_shift_persists(self):
+		if not frappe.db.exists("Shift Type", "_Test U7 Shift"):
+			frappe.get_doc(
+				{"doctype": "Shift Type", "name": "_Test U7 Shift", "start_time": "09:00:00", "end_time": "18:00:00"}
+			).insert(ignore_permissions=True)
+
+		frappe.set_user(self.hr_user)
+		result = save_person(self.colleague, default_shift="_Test U7 Shift")
+		self.assertEqual(result["default_shift"], "_Test U7 Shift")
+
+	def test_clearing_date_of_joining_is_refused_its_a_mandatory_field(self):
+		frappe.set_user(self.hr_user)
+		with self.assertRaises(frappe.ValidationError):
+			save_person(self.colleague, date_of_joining="")
+
+	def test_the_write_is_rate_limited(self):
+		from helixhr.utils import RATE_LIMIT_POLICY
+
+		self.assertIn("save_person", RATE_LIMIT_POLICY)
+
+
+class TestGetPersonFormOptions(IntegrationTestCase):
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		self.hr_employee, self.hr_user = make_test_hr_manager_employee()
+		self.colleague, self.colleague_user, self.manager, self.manager_user = (
+			make_test_employee_and_manager()
+		)
+		other_company = _ensure_other_company()
+		self.other_company_employee = make_test_user(OTHER_COMPANY_USER, other_company)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def test_returns_the_option_lists_the_edit_cards_need(self):
+		frappe.set_user(self.hr_user)
+		options = get_person_form_options(self.colleague)
+		for key in (
+			"designations",
+			"departments",
+			"branches",
+			"employment_types",
+			"grades",
+			"shift_types",
+			"holiday_lists",
+			"people",
+		):
+			self.assertIn(key, options)
+			self.assertIsInstance(options[key], list)
+		self.assertIn(self.colleague, [row["name"] for row in options["people"]])
+		self.assertIn(self.manager, [row["name"] for row in options["people"]])
+
+	def test_the_people_list_does_not_cross_company(self):
+		frappe.set_user(self.hr_user)
+		options = get_person_form_options(self.colleague)
+		self.assertNotIn(
+			self.other_company_employee, [row["name"] for row in options["people"]]
+		)
+
+	def test_a_caller_outside_admin_scope_is_refused(self):
+		frappe.set_user(self.colleague_user)
+		with self.assertRaises(frappe.PermissionError):
+			get_person_form_options(self.colleague)
+
+	def test_the_read_is_rate_limited(self):
+		from helixhr.utils import RATE_LIMIT_POLICY
+
+		self.assertIn("get_person_form_options", RATE_LIMIT_POLICY)

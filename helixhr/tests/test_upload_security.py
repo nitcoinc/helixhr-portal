@@ -256,6 +256,11 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"save_leave_type": (30, 3600),
 			"save_holiday_list": (30, 3600),
 			"save_shift_type": (30, 3600),
+			# P8-U7/U8/U9.
+			"get_person_form_options": (60, 60),
+			"save_person": (30, 3600),
+			# P8-U12.
+			"save_celebration_reminder": (30, 3600),
 		}
 		self.assertEqual(utils.RATE_LIMIT_POLICY, expected)
 		self.assertEqual(preflight.check_rate_limits()["status"], preflight.PASS)

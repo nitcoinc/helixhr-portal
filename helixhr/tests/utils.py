@@ -299,7 +299,18 @@ def make_test_project(company, name, members=()):
 	`create_project`/`set_project_members` create, so it strips that share
 	the same way, or REST-route tests built on it would pass or fail on an
 	access path the real write path never leaves open (code review
-	finding, P7-U1's REST-route tests)."""
+	finding, P7-U1's REST-route tests).
+
+	Every insert or member-append below reaches ERPNext's own
+	`Project.validate` -> `send_welcome_email`, which calls
+	`frappe.sendmail` for each newly added member unconditionally -- no
+	site-level toggle skips it. Without a default outgoing Email Account
+	that raises on a bare fresh site (never on the long-lived local one,
+	which has carried `ensure_test_email_account`'s row since some
+	earlier suite created it, masking the dependency). `ensure_test_email_account`
+	is idempotent, so calling it here on every project creation costs
+	nothing on a site that already has the row."""
+	ensure_test_email_account()
 	existing_name = frappe.db.get_value("Project", {"project_name": name})
 	if existing_name:
 		project = frappe.get_doc("Project", existing_name)

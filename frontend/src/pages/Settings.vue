@@ -9,6 +9,7 @@ import TemplatesSection from '@/components/settings/TemplatesSection.vue'
 import LeaveTypesSection from '@/components/settings/LeaveTypesSection.vue'
 import HolidayListsSection from '@/components/settings/HolidayListsSection.vue'
 import ShiftTypesSection from '@/components/settings/ShiftTypesSection.vue'
+import CelebrationsSection from '@/components/settings/CelebrationsSection.vue'
 
 // P5-U14: `get_portal_config` is HR-only (`_is_hr()`, the same predicate
 // `can_configure` mirrors in the bootstrap). A non-HR caller hitting this
@@ -30,9 +31,21 @@ const SECTIONS = [
   { key: 'leave-types', label: 'Leave types' },
   { key: 'holiday-lists', label: 'Holiday lists' },
   { key: 'shift-types', label: 'Shift types' },
+  { key: 'celebrations', label: 'Celebrations' },
 ]
 
 const activeSection = computed(() => props.section || 'categories')
+
+// P8-U6: `get_portal_config`'s `desk_urls` keys match its own response
+// shape (`leave_types`, `holiday_lists`, `shift_types`), snake_case like
+// every other key in that payload -- SECTIONS' keys are kebab-case for the
+// URL segment they route to, so the two are reconciled here rather than
+// making one side match the other's convention for a reason that belongs
+// to it alone.
+const activeDeskUrl = computed(() => {
+  const key = activeSection.value.replace(/-/g, '_')
+  return config.data?.desk_urls?.[key] || null
+})
 
 function selectSection(key) {
   router.push(key === 'categories' ? '/settings' : `/settings/${key}`)
@@ -48,7 +61,23 @@ function reload() {
     <PageHeader
       title="Settings"
       subtitle="Request categories, message text, and the day-to-day HRMS masters -- without Desk."
-    />
+    >
+      <template #actions>
+        <!-- P8-U6: the server's own gate (`_can_open_desk`), not merely
+             hidden client-side -- a caller who cannot reach Desk never
+             receives a URL to it at all. -->
+        <a
+          v-if="activeDeskUrl"
+          :href="activeDeskUrl"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="inline-flex min-h-11 items-center rounded-lg border border-outline-gray-2 px-3 text-sm font-medium text-ink-gray-7 hover:bg-surface-gray-2"
+          data-testid="settings-desk-link"
+        >
+          Open in Desk
+        </a>
+      </template>
+    </PageHeader>
 
     <AsyncState
       section="settings"
@@ -104,6 +133,12 @@ function reload() {
         <ShiftTypesSection
           v-else-if="activeSection === 'shift-types'"
           :shift-types="config.data?.shift_types || []"
+          @saved="reload"
+        />
+        <CelebrationsSection
+          v-else-if="activeSection === 'celebrations'"
+          :celebrations="config.data?.celebrations || {}"
+          :template-tokens="config.data?.celebration_template_tokens || []"
           @saved="reload"
         />
       </div>

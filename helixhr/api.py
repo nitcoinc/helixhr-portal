@@ -18,6 +18,7 @@ from frappe.utils import (
 	get_last_day,
 	get_system_timezone,
 	get_url_to_form,
+	get_url_to_list,
 	get_url_to_report,
 	get_url_to_report_with_filters,
 	getdate,
@@ -65,11 +66,13 @@ from helixhr.utils import (
 	ADMIN_REPORTS,
 	HOLIDAY_LIST_EDITABLE_FIELDS,
 	LEAVE_TYPE_EDITABLE_FIELDS,
+	PERSON_EDITABLE_FIELDS,
 	PROFILE_EDITABLE_FIELDS,
 	SHIFT_TYPE_EDITABLE_FIELDS,
 	TEMPLATE_TOKENS,
 	UPLOAD_MAX_BYTES,
 	admin_scope_employee_filters,
+	as_administrator,
 	employee_in_admin_scope,
 	get_manager_user,
 	get_week_bounds,
@@ -5665,6 +5668,36 @@ def _apply_allowed_fields(doc, fields, allowed, skip_on_update=()):
 			doc.set(field, fields[field])
 
 
+# P8-U6: one Desk list-view link per Settings section, named once here so
+# the section->doctype mapping cannot drift from what the tabs actually are
+# (`Settings.vue`'s own `SECTIONS` list). "Categories" is the one section
+# with no key here -- it maps to `HelixHR Request Category` the same way
+# every other section maps to its own doctype, added in the same order the
+# tabs render.
+_SETTINGS_DESK_DOCTYPES = {
+	"categories": "HelixHR Request Category",
+	"templates": "HelixHR Message Template",
+	"leave_types": "Leave Type",
+	"holiday_lists": "Holiday List",
+	"shift_types": "Shift Type",
+	# P8-U12: the Email Template list, not HelixHR Celebration Reminder --
+	# the second is a thin pointer at the first, and the first is what a
+	# Desk-side look at the actual mail body means.
+	"celebrations": "Email Template",
+}
+
+
+def _settings_desk_urls():
+	"""A Desk list-view URL per Settings section (P8-R4), or `None` for a
+	caller who cannot reach Desk at all -- the same `_can_open_desk` gate
+	`get_person`'s own `desk_url` already uses (P6-KTD4): the server
+	decides whether the link is ever handed out, never merely hides it on
+	a caller who could still follow the URL directly."""
+	if not _can_open_desk(frappe.session.user):
+		return None
+	return {section: get_url_to_list(doctype) for section, doctype in _SETTINGS_DESK_DOCTYPES.items()}
+
+
 @frappe.whitelist()
 def get_portal_config():
 	"""Everything the Settings screen needs, in one call (P5-R13, P5-R14,
@@ -5675,6 +5708,9 @@ def get_portal_config():
 		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
 
 	return {
+		"desk_urls": _settings_desk_urls(),
+		"celebrations": _portal_celebration_config(),
+		"celebration_template_tokens": CELEBRATION_TEMPLATE_TOKENS,
 		"categories": frappe.get_all(
 			"HelixHR Request Category",
 			fields=["name", "category_name", "hint", "route_to_role", "sla_days", "is_active"],
@@ -5839,6 +5875,165 @@ def save_shift_type(name, **fields):
 	_apply_allowed_fields(doc, fields, SHIFT_TYPE_EDITABLE_FIELDS)
 	doc.save()
 	return {"name": doc.name, **{field: doc.get(field) for field in SHIFT_TYPE_EDITABLE_FIELDS}}
+
+
+# ---------------------------------------------------------------------------
+# P8-U12: authoring the birthday and work-anniversary email from the portal.
+#
+# `helixhr.reminders.EVENTS` names the two events; the Email Template each
+# `HelixHR Celebration Reminder` row links to is HR's own body, seeded once
+# by `seed_celebration_templates` under the same two names this module reuses
+# rather than creating a second template per event on first save.
+# ---------------------------------------------------------------------------
+
+# The seeded default template each event's reminder starts out linked to
+# (`patches/v1_0/seed_celebration_templates.py`) -- reused by name so a
+# first save edits that template rather than creating a duplicate.
+_CELEBRATION_DEFAULT_TEMPLATES = {
+	"birthday": "HelixHR Birthday Reminder",
+	"work_anniversary": "HelixHR Work Anniversary Reminder",
+}
+
+
+def _celebration_reminder_projection(event):
+	from helixhr.reminders import EVENTS
+
+	spec = EVENTS[event]
+	reminder = None
+	if frappe.db.exists("HelixHR Celebration Reminder", event):
+		reminder = frappe.db.get_value(
+			"HelixHR Celebration Reminder",
+			event,
+			["is_enabled", "email_template", "recipient_mode"],
+			as_dict=True,
+		)
+
+	subject = body = None
+	use_html = True
+	template_name = reminder.email_template if reminder else None
+	if template_name and frappe.db.exists("Email Template", template_name):
+		template = frappe.get_doc("Email Template", template_name)
+		subject = template.subject
+		use_html = bool(template.use_html)
+		body = template.response_html if template.use_html else template.response
+
+	recipients = []
+	if reminder:
+		recipients = frappe.get_all(
+			"HelixHR Celebration Recipient",
+			filters={"parent": event},
+			fields=["employee", "employee_name"],
+			order_by="idx asc",
+		)
+
+	return {
+		"event": event,
+		"label": spec["label"],
+		"is_enabled": bool(reminder and reminder.is_enabled),
+		"recipient_mode": reminder.recipient_mode if reminder else "All employees",
+		"subject": subject,
+		"body": body,
+		"use_html": use_html,
+		"recipients": recipients,
+	}
+
+
+def _portal_celebration_config():
+	from helixhr.reminders import EVENTS
+
+	return {event: _celebration_reminder_projection(event) for event in EVENTS}
+
+
+# The documented context every celebration template renders against
+# (`helixhr.reminders._context`) -- surfaced to the portal so the section
+# can list it the same way TemplatesSection.vue lists `template_tokens`.
+CELEBRATION_TEMPLATE_TOKENS = (
+	"persons",
+	"names",
+	"count",
+	"company",
+	"logo_url",
+	"date",
+	"portal_url",
+)
+
+
+@frappe.whitelist(methods=["POST"])
+def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode="All employees", recipients=None):
+	"""HR writes the birthday/work-anniversary email and picks its audience
+	from the portal (P8-U12 / P8-R5, P8-R6).
+
+	Writes two documents: the Email Template the reminder links to (created
+	under the seeded default name on first save, edited by name afterwards
+	-- never a second template per event), and the `HelixHR Celebration
+	Reminder` row itself. Both go through `_assert_config_write`, exactly
+	as every other config save in this module does.
+
+	`subject`/`body` are compiled with `validate_template` before anything
+	is written (P8-U12's own test scenario: a Jinja syntax error is refused
+	at save time, not at 8am the next morning) -- `restrict_globals=True`,
+	the same restriction `reminders._render_restricted` renders with, so a
+	template that only compiles under the *unrestricted* globals still
+	fails here rather than only at send time.
+	"""
+	from helixhr.reminders import EVENTS
+
+	rate_limit_per_user("save_celebration_reminder")
+	if not _is_hr():
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	if event not in EVENTS:
+		frappe.throw(_("That reminder is not offered here."))
+
+	if isinstance(recipients, str):
+		recipients = frappe.parse_json(recipients)
+	recipients = recipients or []
+
+	subject = (subject or "").strip()
+	body = body or ""
+	from frappe.utils.jinja import validate_template
+
+	validate_template(subject, restrict_globals=True)
+	validate_template(body, restrict_globals=True)
+
+	if frappe.db.exists("HelixHR Celebration Reminder", event):
+		reminder = frappe.get_doc("HelixHR Celebration Reminder", event)
+	else:
+		reminder = frappe.new_doc("HelixHR Celebration Reminder")
+		reminder.event = event
+
+	template_name = reminder.email_template or _CELEBRATION_DEFAULT_TEMPLATES[event]
+	if frappe.db.exists("Email Template", template_name):
+		template = frappe.get_doc("Email Template", template_name)
+	else:
+		template = frappe.new_doc("Email Template")
+		template.name = template_name
+		template.use_html = 1
+
+	# `ignore_permissions=True`, not `_assert_config_write` (KTD8's own
+	# framing, reused): Email Template is a shared core doctype used across
+	# the whole site, not one this app owns -- granting HR Manager a real
+	# DocPerm on it would let them edit or delete *any* Email Template, not
+	# just the two celebration ones. `_is_hr()` above is the real
+	# authorisation boundary here, and `template_name` is never caller
+	# input -- it only ever resolves to one of the two names in
+	# `_CELEBRATION_DEFAULT_TEMPLATES` or a reminder's own already-saved
+	# `email_template`, so there is no doctype this write can reach outside
+	# the two celebration templates.
+	template.subject = subject
+	if template.use_html:
+		template.response_html = body
+	else:
+		template.response = body
+	template.save(ignore_permissions=True)
+
+	_assert_config_write(reminder)
+	reminder.email_template = template.name
+	reminder.is_enabled = cint(is_enabled)
+	reminder.recipient_mode = recipient_mode
+	reminder.set("recipients", [{"employee": row} for row in recipients])
+	reminder.save()
+
+	return _celebration_reminder_projection(event)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -6345,10 +6540,20 @@ def get_directory(query=None, department=None, start=0, limit=None):
 	needle = (query or "").strip()[:_DIRECTORY_QUERY_MAX]
 	or_filters = None
 	if len(needle) >= _DIRECTORY_QUERY_MIN:
+		# P8-U3: `name` (the employee id) and `company_email` widen this to
+		# match what the project member picker's own placeholder already
+		# promises ("Name, employee number or work email") -- this reader
+		# is the one it reuses (Projects.vue's own comment explains why:
+		# no admin permission required, every employee's own company).
+		# Purely additive over the existing three fields, so Directory.vue's
+		# own search only ever matches more, never less, and stays scoped
+		# to the caller's own company exactly as before.
 		or_filters = [
+			["name", "like", f"%{needle}%"],
 			["employee_name", "like", f"%{needle}%"],
 			["designation", "like", f"%{needle}%"],
 			["department", "like", f"%{needle}%"],
+			["company_email", "like", f"%{needle}%"],
 		]
 
 	scope = {"filters": filters, "or_filters": or_filters, "ignore_permissions": True}
@@ -6472,22 +6677,57 @@ def search_people(query=None, start=0, limit=None):
 # screen.
 
 
+def _employee_for_user(user):
+	"""The Employee id and display name behind a Link-to-User value (an
+	approver), or `(None, None)` -- the inverse of `get_manager_user`
+	(P8-U9). Both are needed: the id is what the edit form's picker
+	pre-selects (the picker's own values are employee ids, never logins,
+	same as every other picker in this app), the name is what the
+	read-only card renders."""
+	if not user:
+		return None, None
+	row = frappe.db.get_value("Employee", {"user_id": user}, ["name", "employee_name"], as_dict=True)
+	return (row.name, row.employee_name) if row else (None, None)
+
+
 def _person_profile(employee):
-	"""Identity, manager, employment status and joining date -- the part of
-	the person view that is not one of the portal's other existing readers."""
+	"""Identity, manager, employment status and joining date, plus the
+	overview/joining/approver/shift fields P8-U8/U9 make editable -- the
+	part of the person view that is not one of the portal's other existing
+	readers. Every field here is permlevel 0 (KTD3)."""
 	fields = [
 		"name",
 		"employee_name",
 		"designation",
 		"department",
 		"branch",
+		"company_email",
 		"reports_to",
 		"status",
 		"date_of_joining",
+		"employment_type",
+		"grade",
+		"scheduled_confirmation_date",
+		"final_confirmation_date",
+		"leave_approver",
+		"expense_approver",
+		"shift_request_approver",
+		"default_shift",
+		"holiday_list",
 	]
 	data = frappe.db.get_value("Employee", employee, fields, as_dict=True)
 	data["manager_name"] = (
 		frappe.db.get_value("Employee", data.reports_to, "employee_name") if data.reports_to else None
+	)
+	# `*_employee` is what the edit form's picker pre-selects (its own
+	# values are employee ids, never logins); `*_name` is what the
+	# read-only card renders.
+	data["leave_approver_employee"], data["leave_approver_name"] = _employee_for_user(data.leave_approver)
+	data["expense_approver_employee"], data["expense_approver_name"] = _employee_for_user(
+		data.expense_approver
+	)
+	data["shift_request_approver_employee"], data["shift_request_approver_name"] = _employee_for_user(
+		data.shift_request_approver
 	)
 	return data
 
@@ -6781,6 +7021,146 @@ def get_person(employee):
 
 
 # ---------------------------------------------------------------------------
+# P8-U7/U8/U9: editing a person's overview, joining details, approvers and
+# default shift from the portal -- reversing `get_person`'s read-only
+# posture (P6-R3) deliberately, at exactly the width `PERSON_EDITABLE_FIELDS`
+# names (KTD3), scoped by the same `resolve_admin_scope` /
+# `employee_in_admin_scope` pair `get_person` already uses.
+# ---------------------------------------------------------------------------
+
+_PERSON_APPROVER_FIELDS = ("leave_approver", "expense_approver", "shift_request_approver")
+
+_PERSON_APPROVER_LABELS = {
+	"leave_approver": "leave approver",
+	"expense_approver": "expense approver",
+	"shift_request_approver": "shift request approver",
+}
+
+_PERSON_ALL_EDITABLE_FIELDS = tuple(
+	field for group in PERSON_EDITABLE_FIELDS.values() for field in group
+)
+
+
+def _validate_reports_to(employee_id, scope):
+	"""`reports_to` is Link-to-Employee, unlike the three approver fields
+	below -- the chosen manager's own id is exactly the value stored, once
+	it is confirmed to exist and to fall inside the caller's own admin
+	scope (the same "picker's options are the caller's own reach" rule
+	KTD5 applies to project members)."""
+	if not employee_id:
+		return None
+	if not employee_in_admin_scope(employee_id, scope):
+		frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
+	if not frappe.db.exists("Employee", employee_id):
+		frappe.throw(_("{0} isn't an employee here.").format(employee_id))
+	return employee_id
+
+
+def _resolve_approver_user(employee_id, scope, field_label):
+	"""An approver, named the way every portal picker names a person -- by
+	Employee, never by login -- resolved to `Employee.user_id` (KTD5).
+	Refused, by name, for a chosen person outside the caller's admin scope,
+	who does not exist, or who has no linked user to hold the approval."""
+	if not employee_id:
+		return None
+	if not employee_in_admin_scope(employee_id, scope):
+		frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
+	row = frappe.db.get_value("Employee", employee_id, ["employee_name", "user_id"], as_dict=True)
+	if not row:
+		frappe.throw(_("{0} isn't an employee here.").format(employee_id))
+	if not row.user_id:
+		frappe.throw(
+			_("{0} has no linked user, so they can't be set as {1}.").format(
+				row.employee_name, field_label
+			)
+		)
+	return row.user_id
+
+
+@frappe.whitelist()
+def get_person_form_options(employee):
+	"""The option lists the person-view edit cards need, in one call
+	(P8-U7): Designation, Department, Branch, Employment Type, Employee
+	Grade, Shift Type and Holiday List, plus a company-scoped employee
+	list for the reporting-manager and the three approver pickers.
+
+	Scoped exactly like `get_person` -- a caller outside their admin scope,
+	or a target outside it, is refused before anything is read. Department
+	narrows to the target's own company; the employee list narrows there
+	too, so the pickers this call feeds never offer someone outside the
+	target's own company as a manager or approver.
+	"""
+	rate_limit_per_user("get_person_form_options")
+	scope = resolve_admin_scope(frappe.session.user)
+	if scope["kind"] == "none" or not employee_in_admin_scope(employee, scope):
+		frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
+
+	company = frappe.db.get_value("Employee", employee, "company")
+	people_filters = {"status": "Active"}
+	if company:
+		people_filters["company"] = company
+	people = frappe.get_all(
+		"Employee",
+		filters=people_filters,
+		fields=["name", "employee_name"],
+		order_by="employee_name asc",
+		ignore_permissions=True,
+	)
+
+	return {
+		"designations": frappe.get_all("Designation", pluck="name", order_by="name asc"),
+		"departments": frappe.get_all(
+			"Department",
+			filters={"company": company} if company else {},
+			pluck="name",
+			order_by="name asc",
+		),
+		"branches": frappe.get_all("Branch", pluck="name", order_by="name asc"),
+		"employment_types": frappe.get_all("Employment Type", pluck="name", order_by="name asc"),
+		"grades": frappe.get_all("Employee Grade", pluck="name", order_by="name asc"),
+		"shift_types": frappe.get_all("Shift Type", pluck="name", order_by="name asc"),
+		"holiday_lists": frappe.get_all("Holiday List", pluck="name", order_by="name asc"),
+		"people": [{"name": row.name, "employee_name": row.employee_name} for row in people],
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+def save_person(employee, **fields):
+	"""Edit a person's overview, joining details, approvers and default
+	shift from the portal (P8-R3) -- the write surface `PERSON_EDITABLE_FIELDS`
+	names, no wider (KTD3): every field is permlevel 0, and anything else
+	in `fields` is silently ignored, the same rule `_apply_allowed_fields`
+	already applies to every other config write in this module.
+
+	`doc.save()`, not an `ignore_permissions=True` insert-style write:
+	Employee's own `validate()` still runs -- the `reports_to` cycle
+	check, the joining/relieving-date rules -- and Frappe's own Employee
+	permissions remain a second gate under the scope helper, exactly the
+	posture `_assert_config_write`'s callers already take.
+	"""
+	rate_limit_per_user("save_person")
+	scope = resolve_admin_scope(frappe.session.user)
+	if scope["kind"] == "none" or not employee_in_admin_scope(employee, scope):
+		frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
+
+	doc = frappe.get_doc("Employee", employee)
+
+	resolved = dict(fields)
+	if "reports_to" in fields:
+		resolved["reports_to"] = _validate_reports_to(fields["reports_to"], scope)
+	for field in _PERSON_APPROVER_FIELDS:
+		if field in fields:
+			resolved[field] = _resolve_approver_user(
+				fields[field], scope, _PERSON_APPROVER_LABELS[field]
+			)
+
+	_apply_allowed_fields(doc, resolved, _PERSON_ALL_EDITABLE_FIELDS)
+	doc.save()
+
+	return _person_profile(employee)
+
+
+# ---------------------------------------------------------------------------
 # Reading projects, tasks and members (P7-U3 / R1-R4 read half)
 #
 # The Delivery Manager / HR Manager / System Manager sibling of
@@ -6805,7 +7185,19 @@ _PROJECT_FIELDS = (
 	"expected_start_date",
 	"expected_end_date",
 	"helixhr_is_billable",
+	"priority",
+	"project_type",
 )
+
+
+def _project_priority_options():
+	"""`Project.priority`'s own Select options, read from the doctype meta
+	rather than duplicated here as a literal list (P8-U2) -- a Desk-side
+	customisation of the field's options is then the only place this ever
+	needs editing, and the create form can never drift from what
+	`doc.insert()`'s own validation actually accepts."""
+	options = frappe.get_meta("Project").get_field("priority").options or ""
+	return [option for option in options.split("\n") if option]
 
 # Task.status has no single "closed" value -- Completed and Cancelled both
 # are -- so "open" is everything else, not one literal status string.
@@ -6837,17 +7229,31 @@ def search_projects():
 		frappe.throw(_("You are not authorised to view projects here."), frappe.PermissionError)
 
 	filters = project_scope_filters(scope)
-	if filters is None:
-		return {"projects": []}
+	projects = []
+	if filters is not None:
+		rows = frappe.get_all(
+			"Project",
+			filters=filters,
+			fields=list(_PROJECT_SEARCH_FIELDS),
+			order_by="project_name asc",
+			ignore_permissions=True,
+		)
+		projects = [_project_search_projection(row) for row in rows]
 
-	rows = frappe.get_all(
-		"Project",
-		filters=filters,
-		fields=list(_PROJECT_SEARCH_FIELDS),
-		order_by="project_name asc",
-		ignore_permissions=True,
-	)
-	return {"projects": [_project_search_projection(row) for row in rows]}
+	# P8-U2: the create form's own option lists, read in the same call so
+	# the page that hosts it needs no second request. `company` mirrors
+	# `create_project`'s own derivation exactly -- `None` for the
+	# Desk-only, no-Employee-record persona `resolve_project_scope`
+	# deliberately admits as "unscoped" (see `create_project`'s docstring),
+	# so the create form can say so instead of offering a company it does
+	# not have.
+	employee_info = get_current_employee_info()
+	return {
+		"projects": projects,
+		"project_types": frappe.get_all("Project Type", pluck="name", order_by="name asc"),
+		"priority_options": _project_priority_options(),
+		"company": employee_info.get("company") if employee_info else None,
+	}
 
 
 def _project_open_tasks(project):
@@ -6931,6 +7337,8 @@ def get_project(project):
 		"project_name": data.project_name,
 		"status": data.status,
 		"billable": bool(data.helixhr_is_billable),
+		"priority": data.priority,
+		"project_type": data.project_type,
 		"expected_start_date": data.expected_start_date,
 		"expected_end_date": data.expected_end_date,
 		"tasks": _project_open_tasks(project),
@@ -6980,26 +7388,30 @@ def _write_project_users(doc, *, insert):
 
 	Attribution is restored immediately after: the technical actor that
 	satisfied Frappe's check is not who actually asked for this write.
+
+	The escalation runs through `as_administrator()`, not
+	`frappe.set_user()` (P8-U1 / KTD1): `set_user` mutates the caller's live
+	session in place -- wiping `session.data` and clobbering `session.sid`
+	-- and that gutted payload is what got written back to the session
+	cache, signing the caller out on their very next request. See
+	`as_administrator`'s own docstring for the full mechanism.
 	"""
 	caller = frappe.session.user
 	members = [row.user for row in doc.users]
-	frappe.set_user("Administrator")
-	try:
+	with as_administrator():
 		if insert:
 			doc.insert(ignore_permissions=True)
 		else:
 			doc.save(ignore_permissions=True)
 		for member in members:
 			frappe.share.remove(doc.doctype, doc.name, member)
-	finally:
-		frappe.set_user(caller)
 	frappe.db.set_value(
 		doc.doctype, doc.name, {"owner": caller, "modified_by": caller}, update_modified=False
 	)
 
 
 @frappe.whitelist(methods=["POST"])
-def create_project(project_name, is_billable=0, **kwargs):
+def create_project(project_name, is_billable=0, priority=None, project_type=None, **kwargs):
 	"""Create a project the caller administers (P7-R1, P7-R6).
 
 	`company` is never read from the request -- it comes from the caller's
@@ -7008,6 +7420,12 @@ def create_project(project_name, is_billable=0, **kwargs):
 	(accepted here only via `**kwargs`, then ignored, the same pattern
 	`get_dashboard` uses to swallow extra caller input) can never steer
 	which company the project lands in.
+
+	`priority` and `project_type` (P8-U2) are the two fields Desk asks for
+	that the portal's create form did not -- both optional, both left to
+	`doc.insert()`'s own validation (`priority` against `Project`'s own
+	Select options, `project_type` as a plain Link) rather than re-checked
+	here, so the two can never drift from what the doctype itself accepts.
 
 	The creator is added as a `Project User` in the same operation: without
 	it, a HelixHR Delivery Manager who just created the project would fall
@@ -7050,6 +7468,8 @@ def create_project(project_name, is_billable=0, **kwargs):
 			"project_name": project_name,
 			"company": company,
 			"helixhr_is_billable": cint(is_billable),
+			"priority": priority or None,
+			"project_type": project_type or None,
 			"users": [{"user": frappe.session.user}],
 		}
 	)
@@ -7060,6 +7480,8 @@ def create_project(project_name, is_billable=0, **kwargs):
 		"project_name": doc.project_name,
 		"status": doc.status,
 		"billable": bool(doc.helixhr_is_billable),
+		"priority": doc.priority,
+		"project_type": doc.project_type,
 		"expected_start_date": doc.expected_start_date,
 		"expected_end_date": doc.expected_end_date,
 		"tasks": [],

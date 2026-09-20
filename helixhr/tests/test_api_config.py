@@ -107,6 +107,52 @@ class TestConfigApi(IntegrationTestCase):
 			{"leave_type_name", "max_leaves_allowed", "is_carry_forward", "is_lwp", "helixhr_hr_approves"},
 		)
 
+	# --- P8-U6: a Desk list-view link per section ---------------------------
+
+	def test_desk_urls_covers_every_settings_section_for_a_caller_who_can_open_desk(self):
+		from frappe.utils import get_url_to_list
+
+		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+		desk_urls = get_portal_config()["desk_urls"]
+		self.assertEqual(
+			set(desk_urls),
+			{"categories", "templates", "leave_types", "holiday_lists", "shift_types", "celebrations"},
+		)
+		self.assertEqual(desk_urls["categories"], get_url_to_list("HelixHR Request Category"))
+		self.assertEqual(desk_urls["templates"], get_url_to_list("HelixHR Message Template"))
+		self.assertEqual(desk_urls["leave_types"], get_url_to_list("Leave Type"))
+		self.assertEqual(desk_urls["holiday_lists"], get_url_to_list("Holiday List"))
+		self.assertEqual(desk_urls["shift_types"], get_url_to_list("Shift Type"))
+		# P8-U12: the Email Template list, not HelixHR Celebration Reminder.
+		self.assertEqual(desk_urls["celebrations"], get_url_to_list("Email Template"))
+
+	def test_desk_urls_is_none_for_a_caller_who_cannot_open_desk(self):
+		"""`_can_open_desk` is exhaustively tested on its own in
+		test_api_people.py (`TestDeskLinks`); this only checks that
+		`get_portal_config` actually consults it rather than handing out
+		every URL unconditionally -- mocking the gate keeps this test from
+		needing a role combination Frappe's own auto-promotion of
+		desk-access roles to System User makes impossible to construct for
+		real (every role `_is_hr` accepts also grants Desk access)."""
+		from unittest.mock import patch
+
+		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+		with patch("helixhr.api._can_open_desk", return_value=False):
+			self.assertIsNone(get_portal_config()["desk_urls"])
+
+	def test_get_portal_config_returns_a_celebrations_projection_per_event(self):
+		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+		config = get_portal_config()
+		self.assertEqual(set(config["celebrations"]), {"birthday", "work_anniversary"})
+		for event in ("birthday", "work_anniversary"):
+			row = config["celebrations"][event]
+			self.assertEqual(
+				set(row),
+				{"event", "label", "is_enabled", "recipient_mode", "subject", "body", "use_html", "recipients"},
+			)
+		self.assertIn("company", config["celebration_template_tokens"])
+		self.assertIn("portal_url", config["celebration_template_tokens"])
+
 	def test_save_request_category_refuses_a_caller_without_write(self):
 		frappe.set_user(EMPLOYEE_USER)
 		with self.assertRaises(frappe.PermissionError):

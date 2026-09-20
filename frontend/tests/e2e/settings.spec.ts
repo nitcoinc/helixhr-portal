@@ -43,6 +43,12 @@ test('an HR identity reaches Settings; an employee has no nav entry and the serv
     await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible()
     await expect(page.getByTestId('settings-tab-categories')).toBeVisible()
     await expect(page.getByRole('link', { name: 'Settings' })).toBeVisible()
+
+    // P8-U6: every section offers its own Desk link, server-gated by
+    // `_can_open_desk` -- present for this System User HR identity.
+    await expect(page.getByTestId('settings-desk-link')).toBeVisible()
+    await page.getByTestId('settings-tab-leave-types').click()
+    await expect(page.getByTestId('settings-desk-link')).toHaveAttribute('href', /\/desk\/leave-type$/)
     return
   }
 
@@ -72,6 +78,30 @@ test('creating a usable leave type touches no more than the five named fields', 
   // LWP, HR-approves. Counting inputs is what catches a "just one more
   // field for convenience" regression that a screenshot would not.
   await expect(form.locator('input, textarea, select')).toHaveCount(5)
+})
+
+test('P8-U5: the leave type editor is a dialog, titled with the row being edited, closed by Escape', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'settings is an HR-only screen')
+
+  await page.goto('/helixhr/settings')
+  await page.getByTestId('settings-tab-leave-types').click()
+
+  const row = page.getByTestId('settings-leave-type-row').first()
+  const rowName = (await row.locator('p').first().textContent())?.trim()
+  await row.getByRole('button', { name: 'Edit' }).click()
+
+  // A dialog, not an inline block appended after the whole list -- so
+  // editing the row is visible without scrolling regardless of how many
+  // leave types are above it, and its own title says which one is open.
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  await expect(dialog.getByRole('heading', { name: new RegExp(`^Edit ${rowName}$`) })).toBeVisible()
+  await expect(page.getByTestId('settings-leave-type-form')).toBeVisible()
+
+  await page.keyboard.press('Escape')
+  await expect(dialog).toBeHidden()
 })
 
 test("changing a category's routed role changes where the next request goes", async ({
@@ -170,4 +200,58 @@ test('a rejected save keeps the user input', async ({ page }, testInfo) => {
 
   await expect(form.getByRole('alert')).toBeVisible()
   await expect(form.getByLabel('Subject')).toHaveValue(tooLong)
+})
+
+test('P8-U12: HR authors the celebration email and switches to a selected audience', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'settings is an HR-only screen')
+
+  await page.goto('/helixhr/settings')
+  await page.getByTestId('settings-tab-celebrations').click()
+  await expect(page.getByText('Celebrations')).toBeVisible()
+
+  await page.getByTestId('settings-celebration-edit-birthday').click()
+  const form = page.getByTestId('settings-celebration-form')
+  await expect(form).toBeVisible()
+
+  const subject = `E2E birthday subject ${Date.now()}`
+  await form.getByLabel('Send this reminder').check()
+  await form.getByLabel('Subject').fill(subject)
+  await form.getByLabel('Body').fill('Cheers, {{ names }}')
+
+  // Switch to a selected audience and pick one person.
+  await form.getByLabel('Send to').selectOption('Selected employees')
+  await form.getByLabel('Add a person').fill('Manager')
+  const match = form.getByRole('button', { name: /Manager/ }).first()
+  await expect(match).toBeVisible()
+  await match.click()
+  await expect(form.getByText('Nobody selected yet.')).toHaveCount(0)
+
+  await form.getByRole('button', { name: 'Save' }).click()
+  await expect(form).toBeHidden()
+
+  // Read back from the server, not just the in-memory response.
+  await page.reload()
+  await page.getByTestId('settings-tab-celebrations').click()
+  await expect(page.getByTestId('settings-celebration-row').filter({ hasText: 'Birthday' })).toContainText('1 selected')
+
+  await page.getByTestId('settings-celebration-edit-birthday').click()
+  await expect(page.getByTestId('settings-celebration-form').getByLabel('Subject')).toHaveValue(subject)
+
+  // Open in Desk points at the Email Template list, not the reminder row.
+  await expect(page.getByTestId('settings-desk-link')).toHaveAttribute('href', /\/desk\/email-template$/)
+})
+
+test('P8-U12: switching to Selected employees with nobody picked is refused before saving', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'settings is an HR-only screen')
+
+  await page.goto('/helixhr/settings')
+  await page.getByTestId('settings-tab-celebrations').click()
+  await page.getByTestId('settings-celebration-edit-work_anniversary').click()
+
+  const form = page.getByTestId('settings-celebration-form')
+  await form.getByLabel('Send to').selectOption('Selected employees')
+  await form.getByRole('button', { name: 'Save' }).click()
+
+  await expect(form.getByRole('alert')).toBeVisible()
+  await expect(form).toBeVisible()
 })

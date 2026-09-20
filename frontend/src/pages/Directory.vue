@@ -140,7 +140,7 @@ const emptyBody = computed(() =>
           v-model="query"
           type="text"
           label="Search"
-          placeholder="Name, role or department"
+          placeholder="Name, employee ID, role, department or email"
           maxlength="60"
         />
       </div>

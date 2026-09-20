@@ -1150,5 +1150,37 @@
   "property_type": "Check",
   "row_name": null,
   "value": "1"
+ },
+ {
+  "default_value": null,
+  "doc_type": "HR Settings",
+  "docstatus": 0,
+  "doctype": "Property Setter",
+  "doctype_or_field": "DocField",
+  "field_name": "send_birthday_reminders",
+  "is_system_generated": 0,
+  "modified": "2026-09-20 00:00:00.000000",
+  "module": "HelixHR",
+  "name": "HR Settings-send_birthday_reminders-read_only",
+  "property": "read_only",
+  "property_type": "Check",
+  "row_name": null,
+  "value": "1"
+ },
+ {
+  "default_value": null,
+  "doc_type": "HR Settings",
+  "docstatus": 0,
+  "doctype": "Property Setter",
+  "doctype_or_field": "DocField",
+  "field_name": "send_work_anniversary_reminders",
+  "is_system_generated": 0,
+  "modified": "2026-09-20 00:00:00.000000",
+  "module": "HelixHR",
+  "name": "HR Settings-send_work_anniversary_reminders-read_only",
+  "property": "read_only",
+  "property_type": "Check",
+  "row_name": null,
+  "value": "1"
  }
 ]

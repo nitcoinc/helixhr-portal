@@ -1,6 +1,7 @@
 import io
 import os
 import zipfile
+from contextlib import contextmanager
 from urllib.parse import quote
 
 import frappe
@@ -92,6 +93,36 @@ SHIFT_TYPE_EDITABLE_FIELDS = (
 	"begin_check_in_before_shift_start_time",
 	"allow_check_out_after_shift_end_time",
 )
+
+
+# P8-U7/U8/U9. What `save_person` may write on Employee, grouped the same
+# way the person view's own edit cards are grouped -- every field here is
+# permlevel 0, verified against ERPNext's `employee.json` and HRMS's own
+# `hrms/setup.py` custom fields (P8-U7's own research note). This reverses
+# P6-R3's "read-only" posture deliberately (KTD3): the write surface is
+# exactly as wide as the read surface `get_person` already grants.
+PERSON_EDITABLE_FIELDS = {
+	"overview": ("designation", "department", "branch", "company_email"),
+	"joining": (
+		"date_of_joining",
+		"employment_type",
+		"grade",
+		"scheduled_confirmation_date",
+		"final_confirmation_date",
+		"status",
+	),
+	# The three approver fields are Link-to-User -- `save_person` accepts
+	# employee ids like every other portal picker and resolves each to
+	# `Employee.user_id` itself (KTD5), so this list names the Employee
+	# doctype fieldnames a caller may set, not the User values actually
+	# written.
+	"approvers": ("reports_to", "leave_approver", "expense_approver", "shift_request_approver"),
+	# `default_shift` (KTD4): a dated Shift Assignment is Desk-only, on
+	# purpose -- this is the one field HRMS's own `get_employee_shift`
+	# falls back to, so the change is visible everywhere the portal
+	# resolves a shift without this app modelling scheduling itself.
+	"shift": ("default_shift", "holiday_list"),
+}
 
 
 # P6-U4 / P6-R9. The reports the launcher offers -- a short, deliberate list
@@ -414,6 +445,14 @@ RATE_LIMIT_POLICY = {
 	"save_leave_type": (30, 3600),
 	"save_holiday_list": (30, 3600),
 	"save_shift_type": (30, 3600),
+	# P8-U7/U8/U9. `get_person_form_options` fans out across several Link
+	# doctypes plus a scoped employee list, the same reason `get_person`
+	# itself is bounded above; `save_person` is an occasional
+	# administrative write like the config saves just above it.
+	"get_person_form_options": (60, 60),
+	"save_person": (30, 3600),
+	# P8-U12: an occasional administrative write, like the config saves above.
+	"save_celebration_reminder": (30, 3600),
 }
 
 
@@ -687,3 +726,53 @@ def _force_download_portal_attachment(response, request):
 
 	filename = os.path.basename(path)
 	response.headers["Content-Disposition"] = f"attachment; filename*=UTF-8''{quote(filename)}"
+
+
+@contextmanager
+def as_administrator():
+	"""Run the wrapped block as Administrator, then restore the caller --
+	without touching the live session (P8-U1 / P8-R1, KTD1).
+
+	`frappe.set_user` is the wrong primitive for this: it does not just
+	change *who* the current request acts as, it mutates
+	`frappe.local.session` in place -- and `frappe.local.session` **is**
+	`Session.data` (`Session.__init__` in frappe/sessions.py assigns
+	`frappe.local.session = self.data`). `set_user` overwrites
+	`session.sid` with the target username and replaces `session.data` with
+	an empty dict, wiping `user`, `csrf_token` and `session_expiry`. At the
+	end of the request `Session.update()` writes that gutted payload back
+	into the Redis session cache under the *real* sid (the `Session`
+	object's own `self.sid` slot, untouched by `set_user`), so the next
+	request resumes a session with no `user` -- Guest -- and the caller is
+	signed out. This was the actual cause of the "creating a project logs
+	me out" defect: every call this helper replaces used to run through
+	`frappe.set_user("Administrator")` for exactly the reason documented on
+	`_write_project_users`.
+
+	This changes only `frappe.local.session.user` (the in-memory attribute
+	code reads to ask "who am I", not the session store) plus the two
+	permission caches `set_user` also resets, so the target user's rights
+	take effect immediately rather than the caller's stale ones:
+	`frappe.local.role_permissions` and `frappe.local.user_perms`. It never
+	touches `session.sid`, `session.data`, or `frappe.local.form_dict`.
+
+	The escalation itself is not gratuitous and should not be "simplified"
+	away: ERPNext's `Project.control_access_for_project_users` calls
+	`frappe.share.add_docshare`, which checks the *session user's* `share`
+	permission on Project regardless of `ignore_permissions` -- there is no
+	flag ERPNext passes to skip that check, so something has to run as a
+	user who already holds it. Administrator is that user. Upgrade path:
+	if ERPNext ever grows a flag or hook for that side effect, drop the
+	escalation entirely -- callers already remove the resulting `DocShare`
+	rows immediately afterwards and rely on nothing else it grants.
+	"""
+	caller = frappe.session.user
+	frappe.session.user = "Administrator"
+	frappe.local.role_permissions = {}
+	frappe.local.user_perms = None
+	try:
+		yield
+	finally:
+		frappe.session.user = caller
+		frappe.local.role_permissions = {}
+		frappe.local.user_perms = None

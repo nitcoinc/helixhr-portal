@@ -862,27 +862,39 @@ class TestApprovalWorkflowFixtures(IntegrationTestCase):
 		self.assertEqual(frappe.new_doc("Leave Application").helixhr_stage, "Manager")
 
 	def test_the_reminder_template_pickers_are_installed_on_hr_settings(self):
-		"""P4-R17 / P4-KTD10. Picking a template is how HR switches the
-		branded email on, so the two fields are the switch itself -- and they
-		sit in HRMS's own Reminders section, next to the checkboxes they
-		replace."""
-		from helixhr.reminders import EVENTS
-
-		for spec in EVENTS.values():
+		"""P4-R17 / P4-KTD10 -- superseded by `HelixHR Celebration Reminder`
+		(P8-U10), but the two Custom Fields these check are deliberately
+		left in place, unused, rather than removed (P8's own Scope
+		Boundaries: removing them is a separate, later patch). `reminders.EVENTS`
+		no longer carries the field/label pair that named them -- this test's
+		own fixed values do, since the fixture JSON itself is unchanged."""
+		fields = (
+			{
+				"fieldname": "helixhr_birthday_template",
+				"label": "HelixHR Birthday Template",
+				"insert_after": "send_birthday_reminders",
+			},
+			{
+				"fieldname": "helixhr_anniversary_template",
+				"label": "HelixHR Work Anniversary Template",
+				"insert_after": "send_work_anniversary_reminders",
+			},
+		)
+		for spec in fields:
 			field = frappe.db.get_value(
 				"Custom Field",
-				{"dt": "HR Settings", "fieldname": spec["template_field"]},
+				{"dt": "HR Settings", "fieldname": spec["fieldname"]},
 				["fieldtype", "options", "module", "insert_after", "label"],
 				as_dict=True,
 			)
-			self.assertIsNotNone(field, msg=spec["template_field"])
-			self.assertEqual(field.fieldtype, "Link", msg=spec["template_field"])
-			self.assertEqual(field.options, "Email Template", msg=spec["template_field"])
-			self.assertEqual(field.module, "HelixHR", msg=spec["template_field"])
+			self.assertIsNotNone(field, msg=spec["fieldname"])
+			self.assertEqual(field.fieldtype, "Link", msg=spec["fieldname"])
+			self.assertEqual(field.options, "Email Template", msg=spec["fieldname"])
+			self.assertEqual(field.module, "HelixHR", msg=spec["fieldname"])
 			# The refusal and the preflight line quote these back to HR, so
 			# the label on the form has to be the label they name.
-			self.assertEqual(field.label, spec["template_label"], msg=spec["template_field"])
-			self.assertEqual(field.insert_after, spec["hrms_field"], msg=spec["template_field"])
+			self.assertEqual(field.label, spec["label"], msg=spec["fieldname"])
+			self.assertEqual(field.insert_after, spec["insert_after"], msg=spec["fieldname"])
 
 	def test_the_rename_patch_is_idempotent_and_leaves_submitted_rows_alone(self):
 		"""P4-KTD1. A site with legacy docstatus-0 Rejected rows ends with

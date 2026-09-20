@@ -27,9 +27,18 @@ test.describe('hr', () => {
     // built from the create call's own response.
     const projectName = `E2E Project ${Date.now()}`
     await page.getByRole('button', { name: 'New project' }).click()
+    // P8-U2: name/priority/type/billable, the same fields Desk asks for
+    // minus the server-derived company (shown as static text, never asked
+    // for -- KTD2 -- so this only confirms it renders, not its wording).
+    // `exact: true` on Create below -- a stray fixture project from
+    // another spec file whose name happens to contain "creates" would
+    // otherwise collide with this button under Playwright's default
+    // case-insensitive substring match.
+    await expect(page.getByTestId('project-create-form').getByText('Company', { exact: false })).toBeVisible()
     await page.getByLabel('Project name').fill(projectName)
+    await page.getByLabel('Priority').selectOption('High')
     await page.getByLabel('Billable').check()
-    await page.getByRole('button', { name: 'Create' }).click()
+    await page.getByRole('button', { name: 'Create', exact: true }).click()
 
     await expect(page).toHaveURL(/\/helixhr\/projects\/[^/]+$/)
     await expect(page.getByRole('heading', { name: projectName })).toBeVisible()
@@ -37,9 +46,11 @@ test.describe('hr', () => {
 
     // Marking a project billable persists across a reload -- not just in the
     // create response held in memory, but read back from `get_project`.
+    // Priority rides along the same way.
     await page.reload()
     await expect(page.getByRole('heading', { name: projectName })).toBeVisible()
     await expect(page.getByTestId('project-billable')).toHaveText('Yes')
+    await expect(page.getByText('High')).toBeVisible()
 
     // Adding a task shows it under the project.
     const taskName = `Kickoff call ${Date.now()}`
@@ -47,14 +58,27 @@ test.describe('hr', () => {
     await page.getByRole('button', { name: 'Add task' }).click()
     await expect(page.getByText(taskName)).toBeVisible()
 
-    // Assigning a person shows them in the member list by name.
-    await expect(page.getByText('Nobody is assigned to this project yet.')).toBeVisible()
+    // Assigning a person shows them in the member list by name. The
+    // creator (this HR identity) is already a member the moment the
+    // project exists -- create_project adds them in the same write, or
+    // they would fall straight back out of their own scope the instant
+    // they created it (see the endpoint's own docstring) -- so "Nobody is
+    // assigned" is never true here; the count going from one to two is
+    // what proves the add.
+    await expect(page.getByText('Nobody is assigned to this project yet.')).toHaveCount(0)
+    // Scoped to the section housing the picker, so this never counts the
+    // picker's own dropdown <li> rows once one opens.
+    const membersSection = page.locator('section', { has: page.getByLabel('Add a person') })
+    const before = await membersSection.locator('li').count()
     await page.getByLabel('Add a person').fill(COLLEAGUE_NAME)
     const match = page.getByRole('button', { name: new RegExp(COLLEAGUE_NAME) }).first()
     await expect(match).toBeVisible()
     await match.click()
-    await expect(page.getByText('Nobody is assigned to this project yet.')).toHaveCount(0)
     await expect(page.locator('ul li').filter({ hasText: COLLEAGUE_NAME }).first()).toBeVisible()
+    // The picker dropdown closes itself on a successful add (memberQuery is
+    // cleared), so this count is the members list alone again, not the
+    // dropdown's own <li> rows.
+    await expect(membersSection.locator('li')).toHaveCount(before + 1)
 
     // Back to the list: the new project narrows into view by name, without a
     // full reload of the page.
