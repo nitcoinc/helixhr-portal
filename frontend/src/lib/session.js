@@ -22,6 +22,9 @@ const state = reactive({
    * 'loading'     bootstrap in flight
    * 'ready'       signed in, with an active Employee
    * 'not-linked'  signed in, no active Employee -- HR has to link them
+   * 'desk-only'   signed in, no active Employee, but an HR or System
+   *               Manager (`desk_url` set): the admin pages and a way to
+   *               Desk, never the "not set up" page
    * 'unavailable' the request failed. NOT the same thing as 'not-linked',
    *               which is the whole point: a service failure used to be
    *               rendered as "your account is not set up" (P2-U2 sc. 3).
@@ -56,6 +59,10 @@ const state = reactive({
    * anywhere in the portal, never whether one works: every method that
    * hands one out checks this again itself (P6-KTD4). */
   canOpenDesk: false,
+  /** Where the shell's "Open Desk" button goes, or null to draw none. The
+   * server sets it for HR and System Manager roles only -- an ordinary
+   * employee is a System User too, and must not be shown a door to Desk. */
+  deskUrl: null,
   unread: 0,
   /** The authoritative calendar (P2-R5). Mirrored into lib/dates.js. */
   timeZone: null,
@@ -72,7 +79,7 @@ let inFlight = null
 /** Resolve the bootstrap, at most once per hard load. Concurrent callers
  * (the router guard racing a component) share the one request. */
 export function ensureBootstrap() {
-  if (state.status === 'ready' || state.status === 'not-linked') {
+  if (['ready', 'not-linked', 'desk-only'].includes(state.status)) {
     return Promise.resolve(session)
   }
   if (!inFlight) inFlight = load()
@@ -117,6 +124,7 @@ function apply(boot) {
   state.canSeePeople = !!boot?.can_see_people
   state.canSeeProjects = !!boot?.can_see_projects
   state.canOpenDesk = !!boot?.can_open_desk
+  state.deskUrl = boot?.desk_url || null
   state.unread = boot?.unread_notifications ?? 0
   state.timeZone = boot?.time_zone || null
   state.systemTimeZone = boot?.system_time_zone || null
@@ -129,7 +137,8 @@ function apply(boot) {
     systemTimeZone: state.systemTimeZone,
     today: state.today,
   })
-  state.status = employee?.name ? 'ready' : 'not-linked'
+  if (employee?.name) state.status = 'ready'
+  else state.status = state.deskUrl ? 'desk-only' : 'not-linked'
 }
 
 export async function signOut() {

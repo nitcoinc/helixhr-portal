@@ -15,8 +15,11 @@ import { watchDialogs, unwatchDialogs } from '@/lib/dialogA11y'
 // `canApprove` (there is a decision waiting, or someone reports to you);
 // `reportsOnly` reads `hasReports` (someone reports to you). A leave
 // approver with no reports gets Approvals and not an empty Team page.
+//
+// `deskOnly` marks the items a 'desk-only' session (HR or System Manager
+// with no Employee record) keeps: Home and the role-scoped admin pages.
 const NAV = [
-  { label: 'Home', to: '/', icon: 'home', primary: true },
+  { label: 'Home', to: '/', icon: 'home', primary: true, deskOnly: true },
   { label: 'Leave', to: '/leave', icon: 'leave', primary: true },
   { label: 'Timesheet', to: '/timesheet', icon: 'timesheet', primary: true },
   { label: 'Requests', to: '/requests', icon: 'requests', primary: true },
@@ -27,11 +30,11 @@ const NAV = [
   { label: 'Directory', to: '/directory', icon: 'users' },
   { label: 'Team', to: '/team', icon: 'users', reportsOnly: true },
   { label: 'Approvals', to: '/approvals', icon: 'approvals', managerOnly: true },
-  { label: 'Settings', to: '/settings', icon: 'settings', configureOnly: true },
-  { label: 'Organisation', to: '/organisation', icon: 'organisation', organisationOnly: true },
-  { label: 'People', to: '/people', icon: 'peopleSearch', peopleOnly: true },
-  { label: 'Reports', to: '/reports', icon: 'reports', peopleOnly: true },
-  { label: 'Projects', to: '/projects', icon: 'folder', projectsOnly: true },
+  { label: 'Settings', to: '/settings', icon: 'settings', configureOnly: true, deskOnly: true },
+  { label: 'Organisation', to: '/organisation', icon: 'organisation', organisationOnly: true, deskOnly: true },
+  { label: 'People', to: '/people', icon: 'peopleSearch', peopleOnly: true, deskOnly: true },
+  { label: 'Reports', to: '/reports', icon: 'reports', peopleOnly: true, deskOnly: true },
+  { label: 'Projects', to: '/projects', icon: 'folder', projectsOnly: true, deskOnly: true },
   { label: 'Notifications', to: '/notifications', icon: 'notifications', badge: true },
   { label: 'Profile', to: '/profile', icon: 'profile' },
 ]
@@ -62,13 +65,19 @@ const navItems = computed(() =>
       (!item.configureOnly || session.canConfigure) &&
       (!item.organisationOnly || session.canSeeOrganisation) &&
       (!item.peopleOnly || session.canSeePeople) &&
-      (!item.projectsOnly || session.canSeeProjects),
+      (!item.projectsOnly || session.canSeeProjects) &&
+      (session.status !== 'desk-only' || item.deskOnly),
   ),
 )
 const primaryItems = computed(() => navItems.value.filter((item) => item.primary))
 const moreItems = computed(() => navItems.value.filter((item) => !item.primary))
 
-const employeeName = computed(() => session.employee?.employee_name || '')
+const deskOnly = computed(() => session.status === 'desk-only')
+// A desk-only session has no Employee to name, and no Profile page to open.
+const employeeName = computed(
+  () => session.employee?.employee_name || (deskOnly.value ? session.user : ''),
+)
+const identityRoute = computed(() => (deskOnly.value ? '/' : '/profile'))
 const employeeRole = computed(() =>
   [session.employee?.designation, session.employee?.department].filter(Boolean).join(' · '),
 )
@@ -125,10 +134,17 @@ onUnmounted(() => {
             H
           </span>
           <span class="font-heading text-base font-semibold text-white">HelixHR</span>
+          <a
+            v-if="session.deskUrl"
+            :href="session.deskUrl"
+            class="ml-auto inline-flex min-h-8 cursor-pointer items-center rounded-md border border-white/25 px-2.5 text-xs font-medium text-blue-100 hover:bg-white/10 hover:text-white"
+          >
+            Open Desk
+          </a>
         </div>
 
         <router-link
-          to="/profile"
+          :to="identityRoute"
           class="mx-3 flex cursor-pointer items-center gap-3 rounded-lg px-2 py-2 hover:bg-white/10"
         >
           <span
@@ -219,7 +235,15 @@ onUnmounted(() => {
           </span>
           <span class="font-heading text-sm font-semibold text-white">HelixHR</span>
         </router-link>
+        <a
+          v-if="session.deskUrl"
+          :href="session.deskUrl"
+          class="ml-auto mr-1 inline-flex min-h-11 cursor-pointer items-center rounded-md px-3 text-xs font-medium text-blue-100 hover:bg-white/10 hover:text-white"
+        >
+          Open Desk
+        </a>
         <router-link
+          v-if="!deskOnly"
           to="/notifications"
           class="relative flex h-11 w-11 cursor-pointer items-center justify-center rounded-full text-blue-100 hover:bg-white/10"
           aria-label="Notifications"

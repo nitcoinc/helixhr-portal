@@ -160,6 +160,38 @@ test.describe('user with no active Employee', () => {
   })
 })
 
+test.describe('HR Manager with no Employee record', () => {
+  // The desk-only portal: Home, the role-scoped admin pages and a way to
+  // Desk -- never the not-linked page an ordinary unlinked user gets.
+  test.use({ storageState: { cookies: [], origins: [] } })
+
+  test('gets the desk-only portal with an Open Desk button', async ({ page, baseURL }) => {
+    const api = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+    const login = await api.post('/api/method/login', {
+      form: { usr: 'hr-manager@helixhr.test', pwd: PASSWORD },
+    })
+    expect(login.ok()).toBeTruthy()
+    const storageState = await api.storageState()
+    await api.dispose()
+
+    await page.context().addCookies(storageState.cookies)
+    await page.goto('/helixhr')
+
+    await expect(page.locator('[data-portal-state="desk-only"]')).toBeVisible()
+    await expect(page.getByText('Your account is not set up')).toHaveCount(0)
+    const desk = page.getByRole('link', { name: 'Open Desk' }).first()
+    await expect(desk).toHaveAttribute('href', /\/desk$/)
+    await expect(
+      page.locator('[data-portal-state="desk-only"]').getByRole('link', { name: 'People' }),
+    ).toBeVisible()
+
+    // A page that reads "my" records is not reachable; it falls back to Home.
+    await page.goto('/helixhr/leave')
+    await expect(page).toHaveURL(/\/helixhr\/?$/)
+    await expect(page.locator('[data-portal-state="desk-only"]')).toBeVisible()
+  })
+})
+
 test.describe('dashboard week spine (redesign)', () => {
   test('shows the Monday..Sunday spine and the action queue', async ({ page }, testInfo) => {
     test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')

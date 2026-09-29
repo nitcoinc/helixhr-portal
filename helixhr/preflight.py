@@ -480,11 +480,26 @@ def check_password_login():
 	return _result("Username/Password Login", PASS, f"enabled ({phase}-login phase)")
 
 
+_OFFICE365_CALLBACK = "frappe.integrations.oauth2_logins.login_via_office365"
+_OFFICE365_LANDING = "helixhr.api.login_via_office365"
+
+
 def check_entra():
 	"""Phase-aware: informational while the site says it is on local login,
 	a FAIL once it says it is on Entra and the key is not there."""
 	phase = _auth_phase()
 	if _entra_enabled():
+		# `override_whitelisted_methods` is last-app-wins across the bench, so
+		# another app overriding the same callback silently puts employees
+		# back on Desk after Microsoft sign-in (helixhr.api.login_via_office365).
+		resolved = frappe.override_whitelisted_method(_OFFICE365_CALLBACK)
+		if resolved != _OFFICE365_LANDING:
+			return _result(
+				"Entra ID (Office 365 key)",
+				FAIL,
+				f"the Microsoft callback resolves to {resolved}, not {_OFFICE365_LANDING} -- "
+				"employees will land on Desk after sign-in",
+			)
 		return _result(
 			"Entra ID (Office 365 key)",
 			PASS if phase == "entra" else WARN,

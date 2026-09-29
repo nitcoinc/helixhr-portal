@@ -579,6 +579,8 @@ def setup_playwright_fixtures():
 	frappe.only_for("System Manager")
 	employee_name, _, _, _ = make_test_employee_and_manager()
 	make_test_user_without_employee()
+	# The desk-only portal's identity: HR Manager, no Employee record.
+	ensure_hr_manager_user()
 
 	# So leave.spec.ts can apply for leave and see a real, non-error
 	# "Waiting for ..." status rather than hedging on whichever plain

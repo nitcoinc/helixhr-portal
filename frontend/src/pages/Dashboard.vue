@@ -7,10 +7,26 @@ import WeekSpine from '@/components/WeekSpine.vue'
 import NeedsYou from '@/components/NeedsYou.vue'
 import QuickActions from '@/components/QuickActions.vue'
 import Celebrations from '@/components/Celebrations.vue'
+import { session } from '@/lib/session'
+
+// An HR or System Manager with no Employee record ('desk-only') has no
+// personal dashboard -- `get_dashboard` is scoped to the caller's Employee
+// and would refuse -- so Home becomes a way into the pages their roles do
+// open, and to Desk. The router has already resolved the session.
+const deskOnly = computed(() => session.status === 'desk-only')
+const adminAreas = computed(() =>
+  [
+    { label: 'People', to: '/people', icon: 'peopleSearch', show: session.canSeePeople },
+    { label: 'Organisation', to: '/organisation', icon: 'organisation', show: session.canSeeOrganisation },
+    { label: 'Projects', to: '/projects', icon: 'folder', show: session.canSeeProjects },
+    { label: 'Reports', to: '/reports', icon: 'reports', show: session.canSeePeople },
+    { label: 'Settings', to: '/settings', icon: 'settings', show: session.canConfigure },
+  ].filter((area) => area.show),
+)
 
 const dashboard = createResource({
   url: 'helixhr.api.get_dashboard',
-  auto: true,
+  auto: !deskOnly.value,
 })
 
 const employee = computed(() => dashboard.data?.employee)
@@ -100,7 +116,45 @@ const today = new Intl.DateTimeFormat(undefined, {
     an "unstable element". Re-measured on the same pinned U0 profile and
     fixture set after this change: 0.0002.
   -->
+  <section
+    v-if="deskOnly"
+    data-portal-state="desk-only"
+  >
+    <header class="mb-4 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
+      <h1 class="font-heading text-xl font-semibold tracking-tight text-ink-gray-9">
+        {{ session.user }}
+      </h1>
+      <p class="text-sm text-ink-gray-6">
+        {{ today }}
+      </p>
+      <p class="w-full text-sm text-ink-gray-5">
+        Signed in without an Employee record, so leave, timesheets and payslips are not shown.
+      </p>
+    </header>
+
+    <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <router-link
+        v-for="area in adminAreas"
+        :key="area.to"
+        :to="area.to"
+        class="flex min-h-14 cursor-pointer items-center gap-3 rounded-xl bg-surface-white px-4 py-3 font-medium text-ink-gray-8 shadow-sm hover:bg-surface-gray-2"
+      >
+        <Icon :name="area.icon" />
+        {{ area.label }}
+      </router-link>
+      <a
+        v-if="session.deskUrl"
+        :href="session.deskUrl"
+        class="flex min-h-14 cursor-pointer items-center gap-3 rounded-xl bg-blue-700 px-4 py-3 font-medium text-white hover:bg-blue-800"
+      >
+        <Icon name="chevronRight" />
+        Open Desk
+      </a>
+    </div>
+  </section>
+
   <AsyncState
+    v-else
     section="dashboard"
     :resource="dashboard"
     :empty="false"
