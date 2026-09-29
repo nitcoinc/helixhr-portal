@@ -261,6 +261,8 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"save_person": (30, 3600),
 			# P8-U12.
 			"save_celebration_reminder": (30, 3600),
+			# Plan 2026-09-29-001 U3.
+			"get_my_profile": (60, 60),
 		}
 		self.assertEqual(utils.RATE_LIMIT_POLICY, expected)
 		self.assertEqual(preflight.check_rate_limits()["status"], preflight.PASS)
