@@ -15,12 +15,12 @@ from helixhr.utils import PORTAL_HOME_PAGE, portal_home_page
 
 
 class TestPortalLanding(IntegrationTestCase):
-	"""P2: where a user lands after signing in.
+	"""Where a user lands after signing in: /helixhr, for every signed-in
+	user (2026-09-29). Desk roles reach Desk from the shell's Open Desk
+	button; the portal decides what each caller sees once they are there.
 
 	Registered as `get_website_user_home_page`, which Frappe consults before
-	`role_home_page` and before Website Settings. The rule cannot be "holds
-	the Employee role" -- HR staff are employees too -- so it is "has an
-	active Employee record and does not work in Desk"."""
+	`role_home_page` and before Website Settings."""
 
 	@classmethod
 	def setUpClass(cls):
@@ -31,24 +31,12 @@ class TestPortalLanding(IntegrationTestCase):
 	def test_an_employee_lands_on_the_portal(self):
 		self.assertEqual(portal_home_page(EMPLOYEE_USER), PORTAL_HOME_PAGE)
 
-	def test_a_manager_is_an_employee_too_and_lands_on_the_portal(self):
+	def test_a_manager_lands_on_the_portal(self):
 		self.assertEqual(portal_home_page(MANAGER_USER), PORTAL_HOME_PAGE)
 
 	def test_an_hr_manager_with_an_employee_record_lands_on_the_portal(self):
-		"""P4-KTD8 inverts the assertion this test used to make.
-
-		HR Manager kept Desk while the portal had nothing for HR to do. It
-		now has an HR queue (P4-R10, P4-R11), so HR belongs in the portal and
-		Desk is one click away in the shell. HR User, System Manager and
-		Administrator still keep Desk -- none of them has a portal queue --
-		which is why the rule stays a role set and not "holds the Employee
-		role".
-		"""
 		employee, user = make_test_hr_manager_employee()
 		self.assertTrue(employee)
-		frappe.clear_cache(user=user)
-		self.addCleanup(frappe.clear_cache, user=user)
-
 		self.assertEqual(portal_home_page(user), PORTAL_HOME_PAGE)
 
 	def test_an_it_team_member_is_a_website_user_and_lands_on_the_portal(self):
@@ -59,56 +47,32 @@ class TestPortalLanding(IntegrationTestCase):
 		self.assertEqual(frappe.db.get_value("User", user, "user_type"), "Website User")
 		self.assertEqual(portal_home_page(user), PORTAL_HOME_PAGE)
 
-	def test_an_hr_manager_with_no_employee_record_keeps_desk(self):
-		"""The other half of KTD8. An HR Manager who is not an employee has
-		no portal identity of their own, so Frappe's own landing is the
-		honest answer. If they open /helixhr they get the desk-only portal
-		(TestDeskOnlyPortal below), not a redirect into it."""
-		user = ensure_hr_manager_user()
-		self.assertIsNone(portal_home_page(user))
+	def test_desk_roles_land_on_the_portal_too(self):
+		"""Inverts the old rule, which kept HR User, System Manager and
+		Administrator on Desk: one landing page for everyone, Desk one click
+		away. An HR Manager with no Employee record gets the desk-only portal
+		there (TestDeskOnlyPortal)."""
+		self.assertEqual(portal_home_page(ensure_hr_manager_user()), PORTAL_HOME_PAGE)
+		self.assertEqual(portal_home_page("Administrator"), PORTAL_HOME_PAGE)
 
-	def test_hr_user_still_keeps_desk(self):
-		"""HR User has no queue of its own in the portal (the HR queue is the
-		HR Manager role, P4 scope), so the role still means "works in Desk"."""
 		user = frappe.get_doc("User", EMPLOYEE_USER)
-		user.append_roles("HR User")
+		user.append_roles("HR User", "System Manager")
 		user.save(ignore_permissions=True)
-		frappe.clear_cache(user=EMPLOYEE_USER)
-		self.addCleanup(frappe.clear_cache, user=EMPLOYEE_USER)
-		self.addCleanup(self._drop_role, EMPLOYEE_USER, "HR User")
+		self.addCleanup(self._drop_roles, EMPLOYEE_USER, {"HR User", "System Manager"})
+		self.assertEqual(portal_home_page(EMPLOYEE_USER), PORTAL_HOME_PAGE)
 
-		self.assertIsNone(portal_home_page(EMPLOYEE_USER))
-
-	def _drop_role(self, user, role):
+	def _drop_roles(self, user, roles):
 		doc = frappe.get_doc("User", user)
-		doc.set("roles", [row for row in doc.roles if row.role != role])
+		doc.set("roles", [row for row in doc.roles if row.role not in roles])
 		doc.save(ignore_permissions=True)
 
-	def test_a_user_with_no_employee_record_is_left_alone(self):
-		"""They get Frappe's own landing, and the portal's own not-linked
-		state if they navigate to it -- not a redirect loop into a portal
-		that has nothing to show them."""
-		self.assertIsNone(portal_home_page(ORPHAN_USER))
+	def test_a_user_with_no_employee_record_lands_on_the_portal(self):
+		"""Where the portal shows them "not set up" and the HR contact --
+		the one page that tells them what to do."""
+		self.assertEqual(portal_home_page(ORPHAN_USER), PORTAL_HOME_PAGE)
 
-	def test_guest_and_administrator_are_left_alone(self):
+	def test_guest_has_no_landing(self):
 		self.assertIsNone(portal_home_page("Guest"))
-		self.assertIsNone(portal_home_page("Administrator"))
-
-	def test_a_left_employee_is_left_alone(self):
-		"""Status, not merely a user_id link: someone who has left keeps
-		their login until IT disables it, and must not be sent to a portal
-		that will refuse every read."""
-		employee = frappe.db.get_value("Employee", {"user_id": EMPLOYEE_USER}, "name")
-		frappe.db.set_value("Employee", employee, "status", "Left")
-		self.addCleanup(frappe.db.set_value, "Employee", employee, "status", "Active")
-		# `set_value` runs no doc hooks, so ERPNext does not disable the login
-		# here -- but any *other* suite that saves this Employee while the
-		# status reads Left does, and then the fixture identity cannot sign in
-		# for the rest of the run. Restoring it costs one write and makes the
-		# order these suites happen to run in stop mattering.
-		self.addCleanup(frappe.db.set_value, "User", EMPLOYEE_USER, "enabled", 1)
-
-		self.assertIsNone(portal_home_page(EMPLOYEE_USER))
 
 	def test_the_hook_is_registered(self):
 		"""Without this the whole feature is dead code: Frappe only calls it
@@ -121,8 +85,9 @@ class TestPortalLanding(IntegrationTestCase):
 
 class TestMicrosoftLoginLanding(IntegrationTestCase):
 	"""Frappe's OAuth callback lands a System User on `get_default_path()`
-	(`/desk/people`, `/apps`) without ever asking `portal_home_page`, so
-	`helixhr.api.login_via_office365` corrects the redirect afterwards."""
+	(the User's Default App, `/desk/people`, `/apps`) without ever asking
+	`portal_home_page`, so `helixhr.api.login_via_office365` corrects the
+	redirect afterwards -- unless the login was asked to go somewhere."""
 
 	@classmethod
 	def setUpClass(cls):
@@ -130,33 +95,48 @@ class TestMicrosoftLoginLanding(IntegrationTestCase):
 		make_test_employee_and_manager()
 		ensure_hr_manager_user()
 
-	def _land(self, user, location, response_type="redirect"):
-		from helixhr.api import _redirect_portal_user_home
+	def _sign_in(self, user, frappe_location, requested="", response_type="redirect"):
+		"""Run the override with Frappe's own callback stubbed to what it
+		would do: sign `user` in and answer with `frappe_location`."""
+		from unittest.mock import patch
 
-		frappe.set_user(user)
-		self.addCleanup(frappe.set_user, "Administrator")
+		from frappe.utils.oauth import create_oauth_state
+
+		from helixhr.api import login_via_office365
+
+		state = create_oauth_state(requested)
 		saved = dict(frappe.local.response)
 		self.addCleanup(lambda: (frappe.local.response.clear(), frappe.local.response.update(saved)))
-		frappe.local.response["type"] = response_type
-		frappe.local.response["location"] = location
-		_redirect_portal_user_home()
+		self.addCleanup(frappe.set_user, "Administrator")
+
+		def frappe_callback(code, state):
+			from frappe.utils.oauth import consume_oauth_state
+
+			consume_oauth_state(state)
+			frappe.set_user(user)
+			frappe.local.response["type"] = response_type
+			frappe.local.response["location"] = frappe_location
+
+		with patch("frappe.integrations.oauth2_logins.login_via_office365", side_effect=frappe_callback):
+			login_via_office365("code", state)
 		return frappe.local.response["location"]
 
-	def test_an_employee_bound_for_desk_lands_on_the_portal(self):
-		for location in ("/desk/people", "/apps", "/desk", "https://site.example/app/home", "/", ""):
-			with self.subTest(location=location):
-				self.assertTrue(self._land(EMPLOYEE_USER, location).endswith(f"/{PORTAL_HOME_PAGE}"))
+	def test_frappes_default_landing_becomes_the_portal(self):
+		for user in (EMPLOYEE_USER, HR_MANAGER_USER):
+			for location in ("https://site.example/desk/people", "/apps", "/desk", "/"):
+				with self.subTest(user=user, location=location):
+					self.assertTrue(self._sign_in(user, location).endswith(f"/{PORTAL_HOME_PAGE}"))
 
-	def test_a_portal_deep_link_is_kept(self):
-		self.assertEqual(self._land(EMPLOYEE_USER, "/helixhr/leave/HR-LAP-1"), "/helixhr/leave/HR-LAP-1")
-
-	def test_a_desk_role_user_keeps_frappes_landing(self):
-		self.assertEqual(self._land(HR_MANAGER_USER, "/desk/people"), "/desk/people")
+	def test_a_requested_destination_is_honoured(self):
+		# A Desk record followed from an email, or a portal deep link.
+		for requested in ("https://site.example/desk/leave-application/X", "https://site.example/helixhr/leave/X"):
+			with self.subTest(requested=requested):
+				self.assertEqual(self._sign_in(HR_MANAGER_USER, requested, requested=requested), requested)
 
 	def test_an_error_page_is_not_turned_into_a_redirect(self):
 		# Frappe answers a refused login (signup disabled, expired state)
 		# with a web page, not a redirect; that must reach the user as is.
-		self.assertEqual(self._land(EMPLOYEE_USER, "/desk", response_type="page"), "/desk")
+		self.assertEqual(self._sign_in(EMPLOYEE_USER, "/desk", response_type="page"), "/desk")
 
 	def test_the_callback_override_is_registered(self):
 		self.assertEqual(

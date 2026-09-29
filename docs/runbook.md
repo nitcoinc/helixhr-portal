@@ -85,8 +85,11 @@ Frappe's OAuth callback does not ask `get_website_user_home_page` where to land:
 with HRMS installed, both 404 on the portal host. `helixhr.api.login_via_office365` is
 registered over `frappe.integrations.oauth2_logins.login_via_office365`
 (`override_whitelisted_methods` in `hooks.py`), runs Frappe's own login unchanged, then
-sends anyone `portal_home_page` would send to the portal to `/helixhr`. HR User, System
-Manager and Administrator keep Frappe's landing. The Azure redirect URI does not change.
+sends every user to `/helixhr` -- unless the login carried a `redirect-to` (read from the
+login attempt's `state` before Frappe consumes it), which is honoured. HR and System
+Managers reach Desk from **Open Desk** or by typing `/desk`. The Azure redirect URI does not
+change. After deploying, `bench --site <site> clear-cache`: Frappe caches each user's
+landing page.
 
 An HR Manager, HR User or System Manager with **no** Employee record opening `/helixhr`
 gets a desk-only portal (Home, plus whichever of People, Organisation, Projects, Reports and
@@ -1058,7 +1061,7 @@ would keep them out of the portal.
 
 Six more arrived with phase 5 (routed requests, the `IT Team` role, and the
 portal's own configuration surface). `IT Team role` **FAILs** if the role
-ever gains `desk_access`, if it ever lands in `DESK_ROLES`, or if a new field
+ever gains `desk_access`, or if a new field
 lands at permlevel 1 on `HR Request` without being added to the reviewed
 inventory it checks against -- each of those would hand `IT Team` more than
 the routed categories it is meant to see. `Message template tokens` and

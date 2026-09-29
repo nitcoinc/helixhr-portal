@@ -11,9 +11,9 @@ const IDENTITIES = [
   { user: 'manager@helixhr.test', storageState: 'tests/.auth/manager.json' },
   // P4-KTD8 / P4-R10. The HR queue's own identity: an HR Manager who *has* an
   // Active Employee record, seeded by `make_test_hr_manager_employee`. Its
-  // sibling `ensure_hr_manager_user` deliberately has no Employee: it lands
-  // on Desk and gets the desk-only portal, which login-dashboard.spec.ts
-  // signs in for on its own.
+  // sibling `ensure_hr_manager_user` deliberately has no Employee: it gets
+  // the desk-only portal, which login-dashboard.spec.ts signs in for on its
+  // own.
   { user: 'hr-manager-employee@helixhr.test', storageState: 'tests/.auth/hr.json' },
   // P5-U11. The fourth identity: `IT Team`, portal-only (desk_access: 0,
   // P5-KTD10), seeded by `make_test_it_user` with an Active Employee record

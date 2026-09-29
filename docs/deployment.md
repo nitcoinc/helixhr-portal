@@ -32,31 +32,29 @@ Both audiences use the same `/login`. What happens next is decided by
 `helixhr.utils.portal_home_page`, registered as Frappe's
 `get_website_user_home_page` hook:
 
-- A user with an **active Employee record** who does **not** hold `HR User`,
-  `System Manager` or `Administrator` → `/helixhr`.
-- Everybody else → whatever Frappe would have done anyway, which for a System
-  User is Desk.
+- **Every signed-in user → `/helixhr`**, Desk roles included (2026-09-29;
+  until then HR User, System Manager and Administrator kept Desk). One landing
+  page is one thing to test.
+- A `redirect-to` the login carried (a Desk record linked from an email, a
+  portal deep link) still wins — only Frappe's default landing is replaced.
 
-Managers are employees too, so they also land on the portal; their extra
-Approvals page appears inside it.
-
-**`HR Manager` left that list in P4 (P4-KTD8).** HR now works a queue *inside*
-the portal — everything managers have handed over, across leave, timesheets and
-attendance requests — so an HR Manager with an active Employee record lands on
-`/helixhr` like anybody else, with Desk one click away in the shell (the
-**Open Desk** button, drawn for HR Manager, HR User and System Manager). Their
-bookmarks still work. `HR User` and `System Manager` are unchanged and still
-land in Desk, and an HR Manager with **no** Employee record has no portal
-identity of their own, so the rule does not move them either. If one of them
-opens `/helixhr` anyway they get the desk-only portal — Home, People,
-Organisation, Projects, Reports and Settings as their roles allow — rather than
-"not set up"; Directory and Organisation show the site's default company
-(Global Defaults) for them.
+What the portal shows depends on who arrives: an employee gets their own pages
+(managers and HR also get Approvals); HR Manager, HR User, System Manager and
+Administrator get an **Open Desk** button in the shell, and can equally type
+`/desk`. An HR or System Manager with **no** Employee record gets the desk-only
+portal — Home, People, Organisation, Projects, Reports and Settings as their
+roles allow — with Directory and Organisation showing the site's default
+company (Global Defaults). Anyone else with no Employee record gets "not set
+up" and the HR contact.
 
 The same rule applies after Microsoft sign-in, through
 `helixhr.api.login_via_office365`: Frappe's own OAuth callback skips the
-landing hook, so the app wraps it. Preflight's Entra check FAILs if another
-app's `override_whitelisted_methods` has taken that callback over. On a
+landing hook — it goes to the User's **Default App** (`/desk/people` for
+`hrms`) or `/apps` — so the app wraps it. Preflight's Entra check FAILs if
+another app's `override_whitelisted_methods` has taken that callback over.
+
+Frappe caches each user's resolved landing page, so after deploying a change
+to this rule run `bench --site <site> clear-cache`. On a
 two-host deployment, set `host_name` to the Desk host so **Open Desk** does not
 point at the portal host's 404.
 
