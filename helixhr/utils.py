@@ -12,6 +12,10 @@ from frappe import _
 # fixtures) -- this list is a second, independent gate in front of
 # `update_my_profile` so a caller can never widen what gets written just by
 # adding another keyword argument.
+# The request category the Profile page files corrections under. Seeded by
+# `patches/v1_0/seed_profile_correction_category`; HR may reroute or retire it.
+PROFILE_CORRECTION_CATEGORY = "Profile correction"
+
 PROFILE_EDITABLE_FIELDS = (
 	"cell_number",
 	"personal_email",
