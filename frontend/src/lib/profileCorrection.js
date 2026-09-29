@@ -1,3 +1,5 @@
+import { formatDate, isCalendarDate } from './dates'
+
 // Plan 2026-09-29-001 U4. What "Request a correction" pre-fills, as pure
 // functions so the wording is held by a test rather than by a template.
 //
@@ -25,6 +27,12 @@ function inSentence(label) {
 export function displayValue(value, format = (v) => String(v)) {
   if (value === null || value === undefined || value === '') return NOT_RECORDED
   return format(value)
+}
+
+/** A profile value (a field or a table cell) as the page prints it: dates
+ * in the user's own format, "Not recorded" for nothing. */
+export function formatProfileValue(value) {
+  return displayValue(value, (v) => (isCalendarDate(v) ? formatDate(v) : String(v)))
 }
 
 /** Screen readers read "••••1234" as a string of bullets. */

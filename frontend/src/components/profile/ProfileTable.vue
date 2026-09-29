@@ -1,6 +1,5 @@
 <script setup>
-import { formatDate, isCalendarDate } from '@/lib/dates'
-import { displayValue } from '@/lib/profileCorrection'
+import { formatProfileValue as cell } from '@/lib/profileCorrection'
 
 // Plan 2026-09-29-001 U5. One of the Employee child tables (education, work
 // history) as the server projected it: named columns only. A table on a
@@ -12,10 +11,6 @@ defineProps({
   canCorrect: { type: Boolean, default: true },
 })
 const emit = defineEmits(['correct'])
-
-function cell(value) {
-  return displayValue(value, (v) => (isCalendarDate(v) ? formatDate(v) : String(v)))
-}
 </script>
 
 <template>

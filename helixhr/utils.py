@@ -7,15 +7,15 @@ from urllib.parse import quote
 import frappe
 from frappe import _
 
+# The request category the Profile page files corrections under. Seeded by
+# `patches/v1_0/seed_profile_correction_category`; HR may reroute or retire it.
+PROFILE_CORRECTION_CATEGORY = "Profile correction"
+
 # The only Employee fields the portal lets an employee change themselves
 # (R9). Everything else on Employee sits behind permlevel 1 or 2 (U5
 # fixtures) -- this list is a second, independent gate in front of
 # `update_my_profile` so a caller can never widen what gets written just by
 # adding another keyword argument.
-# The request category the Profile page files corrections under. Seeded by
-# `patches/v1_0/seed_profile_correction_category`; HR may reroute or retire it.
-PROFILE_CORRECTION_CATEGORY = "Profile correction"
-
 PROFILE_EDITABLE_FIELDS = (
 	"cell_number",
 	"personal_email",
@@ -104,6 +104,9 @@ PROFILE_SECTION_TABLES = {
 	},
 }
 
+# Link-to-User fields, shown by the person's name rather than their login.
+PROFILE_USER_LINK_FIELDS = frozenset({"leave_approver", "expense_approver", "shift_request_approver"})
+
 # Identifiers that reach the browser only as their last four characters.
 PROFILE_MASKED_FIELDS = frozenset(
 	{"bank_ac_no", "iban", "pan_number", "provident_fund_account", "passport_number", "health_insurance_no"}
@@ -125,7 +128,6 @@ PROFILE_LABELS = {
 	"maj_opt_subj": "Subjects",
 	"company_name": "Company",
 	"health_insurance_no": "Health insurance number",
-	"passport_number": "Passport number",
 }
 
 

@@ -74,6 +74,7 @@ from helixhr.utils import (
 	PROFILE_MASKED_FIELDS,
 	PROFILE_SECTION_FIELDS,
 	PROFILE_SECTION_TABLES,
+	PROFILE_USER_LINK_FIELDS,
 	SHIFT_TYPE_EDITABLE_FIELDS,
 	TEMPLATE_TOKENS,
 	UPLOAD_MAX_BYTES,
@@ -197,7 +198,8 @@ def get_my_profile(**kwargs):
 	independent `_safe` section named in `failed_sections` when it breaks.
 	"""
 	rate_limit_per_user("get_my_profile")
-	employee = (get_current_employee_info() or {}).get("name")
+	info = get_current_employee_info() or {}
+	employee = info.get("name")
 	if not employee:
 		# HRMS's own `get_current_employee()` means to raise this but hits
 		# AttributeError (a 500) on its own None first.
@@ -221,7 +223,7 @@ def get_my_profile(**kwargs):
 	category_active = frappe.db.get_value("HelixHR Request Category", PROFILE_CORRECTION_CATEGORY, "is_active")
 	return {
 		"employee": employee,
-		"employee_name": frappe.db.get_value("Employee", employee, "employee_name"),
+		"employee_name": info.get("employee_name"),
 		"sections": {name: section(name) for name in PROFILE_SECTION_FIELDS},
 		"failed_sections": failed,
 		"correction_category": PROFILE_CORRECTION_CATEGORY if cint(category_active) else None,
@@ -275,7 +277,7 @@ def _profile_value(field, value):
 		return value
 	if field == "reports_to":
 		return frappe.db.get_value("Employee", value, "employee_name")
-	if field in ("leave_approver", "expense_approver", "shift_request_approver"):
+	if field in PROFILE_USER_LINK_FIELDS:
 		return _employee_for_user(value)[1] or frappe.db.get_value("User", value, "full_name")
 	return value
 

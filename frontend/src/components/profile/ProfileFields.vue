@@ -1,7 +1,7 @@
 <script setup>
 import { computed } from 'vue'
-import { formatDate, isCalendarDate, today } from '@/lib/dates'
-import { NOT_RECORDED, displayValue, spokenValue } from '@/lib/profileCorrection'
+import { isCalendarDate, today } from '@/lib/dates'
+import { NOT_RECORDED, formatProfileValue, spokenValue } from '@/lib/profileCorrection'
 
 // Plan 2026-09-29-001 U5. One Profile tab's fields, as label/value rows.
 //
@@ -35,7 +35,7 @@ const runs = computed(() => {
 })
 
 function display(field) {
-  return displayValue(field.value, (value) => (isCalendarDate(value) ? formatDate(value) : String(value)))
+  return formatProfileValue(field.value)
 }
 
 // "Valid until" in the past is worth saying out loud: an expired passport on
