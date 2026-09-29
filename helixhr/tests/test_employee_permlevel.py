@@ -113,3 +113,65 @@ class TestEmployeePermlevel(IntegrationTestCase):
 		self.assertEqual(
 			frappe.db.get_value("Employee", self.employee_name, "bank_ac_no"), "ACCT-HR-SET"
 		)
+
+	def test_regional_payroll_fields_are_hr_only(self):
+		"""HRMS's India setup adds PAN, IFSC, MICR and PF account as Custom
+		Fields at permlevel 0 -- employee-writable -- whenever an Indian
+		company is created, which can be long after install. The fixture
+		Property Setters lock them to level 2 whenever they exist. A fresh CI
+		site has no Indian company, so the fields are created here."""
+		from frappe.custom.doctype.custom_field.custom_field import create_custom_field
+
+		regional = ("pan_number", "ifsc_code", "micr_code", "provident_fund_account")
+		for fieldname in regional:
+			if frappe.get_meta("Employee").has_field(fieldname):
+				continue
+			create_custom_field(
+				"Employee", {"fieldname": fieldname, "label": fieldname, "fieldtype": "Data", "insert_after": "bank_ac_no"}
+			)
+			self.addCleanup(_drop_custom_field, f"Employee-{fieldname}")
+		# Deleting a Custom Field also deletes its Property Setters
+		# (`CustomField.on_trash`), so an earlier run's cleanup may have
+		# removed the fixture rows: put them back exactly as migrate does.
+		_import_fixture_setters(f"Employee-{fieldname}-permlevel" for fieldname in regional)
+		frappe.clear_cache(doctype="Employee")
+		self.addCleanup(frappe.clear_cache, doctype="Employee")
+
+		meta = frappe.get_meta("Employee")
+		for fieldname in regional:
+			self.assertEqual(meta.get_field(fieldname).permlevel, 2, fieldname)
+
+		frappe.db.set_value("Employee", self.employee_name, "pan_number", "ABCDE1234F")
+		frappe.set_user(EMPLOYEE_USER)
+		doc = frappe.get_doc("Employee", self.employee_name)
+		doc.pan_number = "ZZZZZ9999Z"
+		doc.save()
+		self.assertEqual(frappe.db.get_value("Employee", self.employee_name, "pan_number"), "ABCDE1234F")
+
+
+def _drop_custom_field(name):
+	"""Undo a test-created Custom Field for good. Adding the field ran DDL,
+	which MariaDB commits implicitly, so the per-test rollback would restore
+	the Custom Field row but not undo the column -- delete and commit
+	instead, leaving the site as it was."""
+	frappe.set_user("Administrator")
+	frappe.delete_doc("Custom Field", name, ignore_permissions=True)
+	# The delete took the field's fixture Property Setter with it; restore it
+	# so the site keeps what migrate installed.
+	_import_fixture_setters([f"{name}-permlevel"])
+	frappe.db.commit()  # nosemgrep
+	frappe.clear_cache(doctype="Employee")
+
+
+def _import_fixture_setters(names):
+	"""Insert the named Property Setters from helixhr's fixture file if the
+	site lacks them -- what `bench migrate`'s fixture sync would do."""
+	import json
+
+	wanted = set(names)
+	path = frappe.get_app_path("helixhr", "fixtures", "property_setter.json")
+	with open(path) as handle:
+		rows = [row for row in json.load(handle) if row["name"] in wanted]
+	for row in rows:
+		if not frappe.db.exists("Property Setter", row["name"]):
+			frappe.get_doc(row).insert(ignore_permissions=True)

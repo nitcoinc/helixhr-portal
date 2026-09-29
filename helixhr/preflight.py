@@ -44,6 +44,7 @@ from frappe.utils import cint
 from helixhr.patches.v1_0.apply_permission_deltas import DELTAS
 from helixhr.utils import (
 	ALLOWED_UPLOAD_EXTENSIONS,
+	PROFILE_EDITABLE_FIELDS,
 	RATE_LIMIT_POLICY,
 	UPLOAD_MAX_BYTES,
 	portal_home_page,
@@ -351,6 +352,44 @@ def check_portal_landing():
 	if problems:
 		return _result("Portal landing", FAIL, "; ".join(problems))
 	return _result("Portal landing", PASS, "employees land on /helixhr; Desk users are untouched")
+
+
+# Employee fields a fresh site legitimately leaves at permlevel 0 beyond the
+# employee's own editable set: the nested-set tree bookkeeping, which no
+# form exposes. Anything else at level 0 is writable by the employee through
+# the raw API.
+EMPLOYEE_LEVEL_ZERO_EXEMPT = frozenset({"lft", "rgt", "old_parent"})
+
+
+def check_employee_open_fields():
+	"""Every Employee value field at effective permlevel 0 is one the employee
+	may edit (`PROFILE_EDITABLE_FIELDS`) or a reviewed exemption.
+
+	Level 0 is what role Employee writes. A field that lands there by default
+	-- a site's own Custom Field, or a regional one HRMS adds when an Indian
+	company is set up -- is silently self-editable: the four India payroll
+	fields sat there until the fixture locked them. Named here so HR decides
+	each one (a permlevel Property Setter via Customize Form) instead of
+	finding out from a changed PAN.
+	"""
+	from frappe.model import no_value_fields
+
+	allowed = set(PROFILE_EDITABLE_FIELDS) | EMPLOYEE_LEVEL_ZERO_EXEMPT
+	open_fields = sorted(
+		field.fieldname
+		for field in frappe.get_meta("Employee").fields
+		if field.fieldtype not in no_value_fields
+		and not cint(field.permlevel)
+		and field.fieldname not in allowed
+	)
+	if open_fields:
+		return _result(
+			"Employee field locks",
+			FAIL,
+			f"employee-writable at permlevel 0: {', '.join(open_fields)} -- give each a permlevel "
+			"(Customize Form) or add it to the reviewed exemptions",
+		)
+	return _result("Employee field locks", PASS, "only the employee's own contact fields are at level 0")
 
 
 def check_it_team_role():
@@ -1264,6 +1303,7 @@ CHECKS = [
 	check_unsubmitted_approved_leave,
 	check_document_link_urls,
 	check_portal_landing,
+	check_employee_open_fields,
 	check_it_team_role,
 	check_delivery_manager_role,
 	check_signup_disabled,

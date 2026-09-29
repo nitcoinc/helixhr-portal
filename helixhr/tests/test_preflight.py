@@ -49,6 +49,20 @@ class TestPreflight(IntegrationTestCase):
 		)
 		self.assertEqual(result["status"], preflight.FAIL)
 
+	def test_employee_field_locks_pass_on_a_clean_site(self):
+		self.assertEqual(preflight.check_employee_open_fields()["status"], preflight.PASS)
+
+	def test_an_unlocked_employee_field_fails_by_name(self):
+		from unittest.mock import patch
+
+		real = frappe.get_meta("Employee")
+		extra = SimpleNamespace(fieldname="custom_tax_id", fieldtype="Data", permlevel=0)
+		fake = SimpleNamespace(fields=[*real.fields, extra])
+		with patch.object(preflight.frappe, "get_meta", return_value=fake):
+			result = preflight.check_employee_open_fields()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("custom_tax_id", result["detail"])
+
 	def test_it_team_role_is_portal_only_and_its_hr_request_lock_is_reviewed(self):
 		self.assertEqual(preflight.check_it_team_role()["status"], preflight.PASS)
 
