@@ -31,6 +31,12 @@ describe('correctionDraft', () => {
     expect(details).not.toMatch(/\d{5,}/)
   })
 
+  it('never asks for an unrecorded identifier to be typed out', () => {
+    const { details } = correctionDraft({ label: 'PAN', display: NOT_RECORDED, masked: true })
+    expect(details).not.toContain('It should be')
+    expect(details).toContain('don’t type the full number')
+  })
+
   it('asks for the value when HR never recorded one', () => {
     expect(correctionDraft({ label: 'Blood group', display: NOT_RECORDED }).details).toBe(
       'My blood group isn’t recorded on my profile. It should be:\n',

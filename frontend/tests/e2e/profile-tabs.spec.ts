@@ -72,6 +72,33 @@ test.describe('employee', () => {
     }
   })
 
+  test('a retired category and a failed section each say so, and Retry refetches', async ({
+    page,
+  }) => {
+    // The real response, bent into both fallback states, so the page's own
+    // rendering of them is what is asserted.
+    let calls = 0
+    await page.route('**/api/method/helixhr.api.get_my_profile*', async (route) => {
+      calls += 1
+      const response = await route.fetch()
+      const body = await response.json()
+      body.message.correction_category = null
+      if (calls === 1) {
+        body.message.failed_sections = ['bank']
+        body.message.sections.bank = null
+      }
+      await route.fulfill({ response, json: body })
+    })
+
+    await page.goto('/helixhr/profile/bank')
+    await expect(page.getByTestId('profile-contact-hr')).toBeVisible()
+    await expect(page.getByText('Couldn’t load this section.')).toBeVisible()
+    await page.getByRole('button', { name: 'Retry' }).click()
+    await expect(page.getByTestId('profile-field-bank_ac_no')).toContainText('••••5678')
+    // Retired category: the per-row buttons are gone, the banner speaks instead.
+    await expect(page.getByRole('button', { name: /Request a correction/ })).toHaveCount(0)
+  })
+
   test('an unknown tab is Not found, not a blank page', async ({ page }) => {
     await page.goto('/helixhr/profile/salary')
     await expect(page.locator('[data-portal-state="not-found"]')).toBeVisible()

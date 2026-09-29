@@ -1076,8 +1076,9 @@ healthy site. The three genuinely new failure modes this release found:
   company (`pan_number`, `ifsc_code`, `micr_code`, `provident_fund_account`) are locked by
   fixture Property Setters, so this names what is left -- usually a site's own Custom Field.
   **Fix**: Desk → Customize Form → Employee → set the field's Perm Level (1 read-only, 2
-  HR-only), or add it to `preflight.EMPLOYEE_LEVEL_ZERO_EXEMPT` if it genuinely should be
-  employee-editable. Deleting and re-creating a Custom Field also deletes its Property Setters
+  HR-only). If the field genuinely should be employee-writable through the API, list it in site
+  config instead: `bench --site <site> set-config --parse helixhr_employee_open_fields_exempt
+  '["custom_field_name"]'`. Exempting it does not put it on the portal's edit form. Deleting and re-creating a Custom Field also deletes its Property Setters
   (`CustomField.on_trash`); `bench migrate` re-imports the fixture ones.
 - **The Profile correction category is missing or retired.** `Profile correction category`
   WARNs. Profile still shows everything, but its "Request a correction" buttons become one

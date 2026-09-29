@@ -142,31 +142,34 @@ put a fixed margin back.
 Measured at 390x844 the bar's bottom edge lands at 756px with the tab bar at
 788px; at 1440x900 it lands at 860px, the foot of the viewport.
 
-## Profile · phone (P2-U3 — **built**)
+## Profile · phone and desktop (P2-U3, reworked by plan 2026-09-29-001 — **built**)
 
 Identity in the field block: initials monogram in signal yellow, name, then
-`designation · department` and `Reports to X · location` beneath it. "YOUR INFORMATION" label over
-one resting card of read-only rows, hairline-divided, value right-aligned, with **Ask HR inline on
-the row it is about** — on the rows an employee would plausibly need corrected, and nowhere else.
-"YOU CAN UPDATE" label over one card of editable fields. **One Save bar for the whole form**, not a
-Save button per field: it appears only once something has actually changed, says "N unsaved
-changes", offers Discard and Save, and sits above the tab bar inside the safe area (`.action-bar`).
+`designation · department` and `Reports to X · location` beneath it. Below it five tabs —
+Personal, Job, Contact & emergency, History, Bank & IDs — as router-links with the Settings
+underline (`border-signal`), wrapping on a phone; each is its own URL (`/profile/<tab>`).
 
-Designation, department, branch and the manager's name come from `get_dashboard`, not from the
-Employee document: `frappe.client.get` strips permlevel-1 fields, and the P2-U1 fixtures put all
-four behind permlevel 1. "Work email" is the sign-in address from the bootstrap for the same reason.
+Each tab is `.label`-headed runs of resting cards, one hairline-divided row per field, value
+right-aligned, **"Not recorded"** in muted ink where HR has nothing, and an always-visible
+**"Request a correction"** on every read-only row (the correction dialog, pre-filled; never
+hover-only). Tables (education, work history) are real tables on a wide screen and stacked cards on
+a phone, with one correction action per table. Bank & IDs says up front that account and ID
+numbers show only their last four characters; an expired passport carries an "Expired" badge.
+
+Contact & emergency holds the editable fields under "YOU CAN UPDATE", with **one Save bar for the
+whole form** (it appears only once something has changed, says "N unsaved changes", offers
+Discard and Save, and sits above the tab bar inside the safe area, `.action-bar`).
+
+Everything comes from `helixhr.api.get_my_profile`, masked on the server — not from
+`frappe.client.get`, which strips the permission-locked fields this page exists to show.
 
 *Deviations from the artboard, recorded:*
 
 - The page title is the documented 26px `type-page-title` role. The artboard draws it nearer 32px.
   The role wins — the canvas's own rule is that it introduces no new type role.
-- The information card carries eight rows (Employee ID, Joined, Work email, Manager, Location,
-  Designation, Department, Status); the artboard draws four. The artboard dropped the others to fit
-  a 390x844 frame during its own fit review, not because an employee does not need them — these are
-  the fields HR corrects most often, and each one absent is a question asked by email instead. The
-  cost is that "YOU CAN UPDATE" starts below the fold on a phone, which is acceptable for a screen
-  people open to *read* far more often than to edit. Revisit if editing turns out to be the common
-  errand.
+- The artboard draws one information card of four rows. The page now shows every field HR holds,
+  split into tabs rather than one long scroll — a wrong date of birth nobody could find in the
+  portal is what prompted it. Each field absent is a question asked by email instead.
 
 ## Leave · phone, ask sheet, desktop (P2-U5 — **built**)
 

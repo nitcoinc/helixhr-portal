@@ -135,6 +135,26 @@ class TestGetMyProfile(IntegrationTestCase):
 		self.assertEqual(_sentence_case("PAN Number"), "PAN number")
 		self.assertEqual(self._field(self._profile(), "personal", "date_of_birth")["label"], "Date of birth")
 
+	def test_people_are_shown_by_name_never_by_id_or_login(self):
+		from helixhr.tests.utils import MANAGER_USER
+
+		frappe.db.set_value("Employee", self.employee_name, "leave_approver", MANAGER_USER)
+		manager_name = frappe.db.get_value("Employee", self.manager_name, "employee_name")
+		profile = self._profile()
+		self.assertEqual(self._field(profile, "job", "reports_to")["value"], manager_name)
+		self.assertEqual(self._field(profile, "job", "leave_approver")["value"], manager_name)
+		self.assertNotIn(MANAGER_USER, frappe.as_json(profile["sections"]["job"]))
+
+	def test_mask_identifier_edges(self):
+		from helixhr.utils import mask_identifier
+
+		self.assertIsNone(mask_identifier(None))
+		self.assertIsNone(mask_identifier(""))
+		self.assertIsNone(mask_identifier("   "))
+		self.assertEqual(mask_identifier("ab12"), "••••")
+		self.assertEqual(mask_identifier("abcde"), "••••bcde")
+		self.assertEqual(mask_identifier("  004512345678 "), "••••5678")
+
 	def test_another_employees_id_as_an_argument_is_ignored(self):
 		profile = self._profile(employee=self.manager_name, name=self.manager_name)
 		self.assertEqual(profile["employee"], self.employee_name)

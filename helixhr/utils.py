@@ -135,9 +135,9 @@ def mask_identifier(value):
 	"""`••••1234` for an identifier, never more than its last four
 	characters; one of four characters or fewer is masked whole. None stays
 	None so the page can say "Not recorded"."""
-	if value in (None, ""):
+	text = "" if value is None else str(value).strip()
+	if not text:
 		return None
-	text = str(value).strip()
 	return "••••" if len(text) <= 4 else f"••••{text[-4:]}"
 
 

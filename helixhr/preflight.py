@@ -372,14 +372,20 @@ def check_employee_open_fields():
 	fields sat there until the fixture locked them. Named here so HR decides
 	each one (a permlevel Property Setter via Customize Form) instead of
 	finding out from a changed PAN.
-	"""
-	from frappe.model import no_value_fields
 
-	allowed = set(PROFILE_EDITABLE_FIELDS) | EMPLOYEE_LEVEL_ZERO_EXEMPT
+	Child tables count: a level-0 Table field lets the employee add and edit
+	its rows. A site that decides a field of its own really is
+	employee-editable names it in `helixhr_employee_open_fields_exempt`
+	(site config, a list) rather than editing this module.
+	"""
+	from frappe.model import display_fieldtypes
+
+	site_exempt = frappe.conf.get("helixhr_employee_open_fields_exempt") or []
+	allowed = set(PROFILE_EDITABLE_FIELDS) | EMPLOYEE_LEVEL_ZERO_EXEMPT | set(site_exempt)
 	open_fields = sorted(
 		field.fieldname
 		for field in frappe.get_meta("Employee").fields
-		if field.fieldtype not in no_value_fields
+		if field.fieldtype not in display_fieldtypes
 		and not cint(field.permlevel)
 		and field.fieldname not in allowed
 	)
@@ -388,7 +394,7 @@ def check_employee_open_fields():
 			"Employee field locks",
 			FAIL,
 			f"employee-writable at permlevel 0: {', '.join(open_fields)} -- give each a permlevel "
-			"(Customize Form) or add it to the reviewed exemptions",
+			"(Customize Form), or list it in site config helixhr_employee_open_fields_exempt",
 		)
 	return _result("Employee field locks", PASS, "only the employee's own contact fields are at level 0")
 
@@ -866,7 +872,8 @@ def check_profile_correction_category():
 		return _result(
 			"Profile correction category",
 			WARN,
-			f"{PROFILE_CORRECTION_CATEGORY!r} is missing -- run helixhr.patches.v1_0.seed_profile_correction_category",
+			f"{PROFILE_CORRECTION_CATEGORY!r} is missing or was renamed -- rename it back in Settings, "
+			"or run helixhr.patches.v1_0.seed_profile_correction_category",
 		)
 	if not cint(active):
 		return _result(

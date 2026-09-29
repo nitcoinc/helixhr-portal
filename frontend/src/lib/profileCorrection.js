@@ -60,6 +60,15 @@ export function correctionDraft({ label, display, masked = false, table = false 
       details: `My ${inSentence(label)} is missing something or has a mistake:\n`,
     }
   }
+  if ((!display || display === NOT_RECORDED) && masked) {
+    // Nothing on record to compare with -- and still never the number itself.
+    return {
+      subject,
+      details:
+        `My ${inSentence(label)} isn’t recorded on my profile.\n\n` +
+        'HR will ask for your documents — please don’t type the full number here.',
+    }
+  }
   if (!display || display === NOT_RECORDED) {
     return {
       subject,
