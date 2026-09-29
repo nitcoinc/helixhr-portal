@@ -11,13 +11,14 @@ const MASK = '••••'
 // HR Request's subject field (helixhr/doctype/hr_request).
 export const SUBJECT_MAX = 140
 
-/** "Date of birth" -> "date of birth", but "PAN" stays "PAN". */
+/** "Date of Birth" -> "date of birth", but "PAN Number" -> "PAN number":
+ * mid-sentence case, word by word, leaving acronyms alone. */
 function inSentence(label) {
-  const text = String(label || '').trim()
-  if (text.length > 1 && text[1] === text[1].toLowerCase()) {
-    return text[0].toLowerCase() + text.slice(1)
-  }
-  return text
+  return String(label || '')
+    .trim()
+    .split(/\s+/)
+    .map((word) => (word.length > 1 && word === word.toUpperCase() ? word : word.toLowerCase()))
+    .join(' ')
 }
 
 /** A value as the page prints it: "Not recorded" for nothing at all. */

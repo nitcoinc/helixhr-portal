@@ -54,6 +54,10 @@ const subject = ref(props.initialSubject || '')
 watch(
   categoryOptions,
   (options) => {
+    // Nothing to reconcile against until the list has loaded: resetting on
+    // the first, empty pass threw away every pre-selected category (a
+    // `?category=` deep link, Profile's correction) before it could match.
+    if (!options.length) return
     if (!options.some((option) => option.name === category.value)) {
       category.value = options[0]?.name || ''
     }

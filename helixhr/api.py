@@ -240,7 +240,7 @@ def _profile_section(employee, name, meta):
 	fields = [
 		{
 			"fieldname": field,
-			"label": PROFILE_LABELS.get(field) or _(meta.get_label(field)),
+			"label": PROFILE_LABELS.get(field) or _sentence_case(_(meta.get_label(field))),
 			"value": _profile_value(field, values.get(field)),
 			"masked": field in PROFILE_MASKED_FIELDS,
 			"editable": field in PROFILE_EDITABLE_FIELDS,
@@ -253,6 +253,16 @@ def _profile_section(employee, name, meta):
 		if meta.has_field(table)
 	]
 	return {"fields": fields, "tables": tables}
+
+
+def _sentence_case(label):
+	"""The portal's sentence case for Frappe's title-case labels: "Date Of
+	Retirement" -> "Date of retirement", acronyms ("IBAN", "PAN") kept."""
+	words = (label or "").split()
+	return " ".join(
+		word if (index == 0 or (len(word) > 1 and word.isupper())) else word.lower()
+		for index, word in enumerate(words)
+	)
 
 
 def _profile_value(field, value):
@@ -281,9 +291,9 @@ def _profile_table(employee, table, columns, meta):
 	)
 	return {
 		"fieldname": table,
-		"label": _(meta.get_label(table)),
+		"label": _sentence_case(_(meta.get_label(table))),
 		"columns": [
-			{"fieldname": column, "label": PROFILE_LABELS.get(column) or _(child.get_label(column))}
+			{"fieldname": column, "label": PROFILE_LABELS.get(column) or _sentence_case(_(child.get_label(column)))}
 			for column in present
 		],
 		"rows": rows,

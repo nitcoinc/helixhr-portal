@@ -124,6 +124,8 @@ PROFILE_LABELS = {
 	"class_per": "Grade / percentage",
 	"maj_opt_subj": "Subjects",
 	"company_name": "Company",
+	"health_insurance_no": "Health insurance number",
+	"passport_number": "Passport number",
 }
 
 

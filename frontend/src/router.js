@@ -147,6 +147,14 @@ const routes = [
     component: () => import('@/pages/Profile.vue'),
   },
   {
+    // Plan 2026-09-29-001 U5. Each Profile tab is addressable, so a refresh or
+    // a shared link lands on the same tab; bare /profile is Personal.
+    path: '/profile/:section(personal|job|contact|history|bank)',
+    name: 'ProfileSection',
+    component: () => import('@/pages/Profile.vue'),
+    props: true,
+  },
+  {
     path: '/settings',
     name: 'Settings',
     meta: { deskOnly: true },

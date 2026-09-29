@@ -9,6 +9,15 @@ describe('correctionDraft', () => {
     })
   })
 
+  it('lower-cases Frappe’s title-case labels mid-sentence', () => {
+    expect(correctionDraft({ label: 'Date of Birth', display: '1 Jan 1990' }).subject).toBe(
+      'Correct my date of birth',
+    )
+    expect(correctionDraft({ label: 'PAN Number', display: '••••234F', masked: true }).subject).toBe(
+      'Correct my PAN number',
+    )
+  })
+
   it('keeps an acronym as written', () => {
     expect(correctionDraft({ label: 'PAN', display: '••••234F', masked: true }).subject).toBe(
       'Correct my PAN',

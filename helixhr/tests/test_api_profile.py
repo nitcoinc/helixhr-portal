@@ -127,6 +127,14 @@ class TestGetMyProfile(IntegrationTestCase):
 		self.assertEqual(education["rows"][0]["school_univ"], "State University")
 		self.assertEqual(profile["failed_sections"], [])
 
+	def test_labels_are_sentence_case_with_acronyms_kept(self):
+		from helixhr.api import _sentence_case
+
+		self.assertEqual(_sentence_case("Date Of Retirement"), "Date of retirement")
+		self.assertEqual(_sentence_case("IBAN"), "IBAN")
+		self.assertEqual(_sentence_case("PAN Number"), "PAN number")
+		self.assertEqual(self._field(self._profile(), "personal", "date_of_birth")["label"], "Date of birth")
+
 	def test_another_employees_id_as_an_argument_is_ignored(self):
 		profile = self._profile(employee=self.manager_name, name=self.manager_name)
 		self.assertEqual(profile["employee"], self.employee_name)
@@ -152,27 +160,6 @@ class TestGetMyProfile(IntegrationTestCase):
 		frappe.db.set_value("Employee", self.employee_name, "blood_group", "")
 		field = self._field(self._profile(), "personal", "blood_group")
 		self.assertFalse(field["value"])
-
-	def test_a_field_the_site_lacks_is_left_out_and_a_present_one_is_masked(self):
-		from helixhr.tests.test_employee_permlevel import _drop_custom_field, _import_fixture_setters
-
-		bank = self._profile()["sections"]["bank"]["fields"]
-		had_pan = any(f["fieldname"] == "pan_number" for f in bank)
-		if not had_pan:
-			from frappe.custom.doctype.custom_field.custom_field import create_custom_field
-
-			frappe.set_user("Administrator")
-			create_custom_field(
-				"Employee", {"fieldname": "pan_number", "label": "PAN", "fieldtype": "Data", "insert_after": "bank_ac_no"}
-			)
-			self.addCleanup(_drop_custom_field, "Employee-pan_number")
-			_import_fixture_setters(["Employee-pan_number-permlevel"])
-			frappe.clear_cache(doctype="Employee")
-		frappe.db.set_value("Employee", self.employee_name, "pan_number", "ABCDE1234F")
-
-		profile = self._profile()
-		self.assertEqual(self._field(profile, "bank", "pan_number")["value"], "••••234F")
-		self.assertNotIn("ABCDE1234F", frappe.as_json(profile))
 
 	def test_a_failing_section_is_named_and_the_rest_still_answer(self):
 		from unittest.mock import patch
@@ -231,3 +218,39 @@ class TestGetMyProfile(IntegrationTestCase):
 		finally:
 			frappe.flags.helixhr_enforce_rate_limits = False
 			reset_rate_limit("get_my_profile", user=EMPLOYEE_USER)
+
+
+class TestGetMyProfileRegionalField(IntegrationTestCase):
+	"""Kept apart from TestGetMyProfile on purpose: adding a Custom Field is
+	DDL, which MariaDB commits implicitly -- so this class writes nothing
+	before it that a commit would make permanent."""
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def test_a_field_the_site_lacks_is_left_out_and_a_present_one_is_masked(self):
+		from helixhr.api import get_my_profile
+		from helixhr.tests.test_employee_permlevel import _drop_custom_field, _import_fixture_setters
+
+		employee_name, _, _, _ = make_test_employee_and_manager()
+		frappe.set_user(EMPLOYEE_USER)
+		bank = get_my_profile()["sections"]["bank"]["fields"]
+		had_pan = any(f["fieldname"] == "pan_number" for f in bank)
+		if not had_pan:
+			from frappe.custom.doctype.custom_field.custom_field import create_custom_field
+
+			frappe.set_user("Administrator")
+			create_custom_field(
+				"Employee", {"fieldname": "pan_number", "label": "PAN", "fieldtype": "Data", "insert_after": "bank_ac_no"}
+			)
+			self.addCleanup(_drop_custom_field, "Employee-pan_number")
+			_import_fixture_setters(["Employee-pan_number-permlevel"])
+			frappe.clear_cache(doctype="Employee")
+		frappe.set_user("Administrator")
+		frappe.db.set_value("Employee", employee_name, "pan_number", "ABCDE1234F")
+		frappe.set_user(EMPLOYEE_USER)
+
+		profile = get_my_profile()
+		pan = next(f for f in profile["sections"]["bank"]["fields"] if f["fieldname"] == "pan_number")
+		self.assertEqual(pan["value"], "••••234F")
+		self.assertNotIn("ABCDE1234F", frappe.as_json(profile))
