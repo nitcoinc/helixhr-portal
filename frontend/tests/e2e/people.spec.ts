@@ -50,6 +50,7 @@ test.describe('hr', () => {
     await page.getByTestId('person-edit-overview').click()
     const dialog = page.getByRole('dialog')
     await expect(dialog.getByRole('heading', { name: 'Edit overview' })).toBeVisible()
+    const original = await page.getByLabel('Work email').inputValue()
     await page.getByLabel('Work email').fill(email)
     await page.getByRole('button', { name: 'Save' }).click()
 
@@ -59,6 +60,13 @@ test.describe('hr', () => {
     // Read back from the server, not just the in-memory response.
     await page.reload()
     await expect(page.getByText(email)).toBeVisible()
+
+    // Put the seeded address back: directory.spec.ts asserts the manager's
+    // published work email, and fails whenever this spec runs before it.
+    await page.getByTestId('person-edit-overview').click()
+    await page.getByLabel('Work email').fill(original)
+    await page.getByRole('button', { name: 'Save' }).click()
+    await expect(dialog).toBeHidden()
   })
 
   test('P8-U9: setting an approver persists and shows the resolved name', async ({ page }) => {

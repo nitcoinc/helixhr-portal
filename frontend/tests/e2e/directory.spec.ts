@@ -17,7 +17,7 @@ test.describe('employee', () => {
 
   test('the directory finds a colleague by name and offers their work email', async ({ page }) => {
     await page.goto('/helixhr/directory')
-    await expect(page.getByRole('heading', { name: 'Directory' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Directory', exact: true })).toBeVisible()
     await page.waitForLoadState('networkidle')
 
     // The search is a server question, so the row arrives from the API rather
@@ -86,7 +86,7 @@ test.describe('employee', () => {
     )
 
     await page.goto('/helixhr/directory')
-    await expect(page.getByRole('heading', { name: 'Directory' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Directory', exact: true })).toBeVisible()
     await page.waitForLoadState('networkidle')
 
     const cards = page.locator('li.surface-card')
