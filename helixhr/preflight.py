@@ -44,6 +44,8 @@ from frappe.utils import cint
 from helixhr.patches.v1_0.apply_permission_deltas import DELTAS
 from helixhr.utils import (
 	ALLOWED_UPLOAD_EXTENSIONS,
+	PROFILE_CORRECTION_CATEGORY,
+	PROFILE_EDITABLE_FIELDS,
 	RATE_LIMIT_POLICY,
 	UPLOAD_MAX_BYTES,
 	portal_home_page,
@@ -351,6 +353,50 @@ def check_portal_landing():
 	if problems:
 		return _result("Portal landing", FAIL, "; ".join(problems))
 	return _result("Portal landing", PASS, "employees land on /helixhr; Desk users are untouched")
+
+
+# Employee fields a fresh site legitimately leaves at permlevel 0 beyond the
+# employee's own editable set: the nested-set tree bookkeeping, which no
+# form exposes. Anything else at level 0 is writable by the employee through
+# the raw API.
+EMPLOYEE_LEVEL_ZERO_EXEMPT = frozenset({"lft", "rgt", "old_parent"})
+
+
+def check_employee_open_fields():
+	"""Every Employee value field at effective permlevel 0 is one the employee
+	may edit (`PROFILE_EDITABLE_FIELDS`) or a reviewed exemption.
+
+	Level 0 is what role Employee writes. A field that lands there by default
+	-- a site's own Custom Field, or a regional one HRMS adds when an Indian
+	company is set up -- is silently self-editable: the four India payroll
+	fields sat there until the fixture locked them. Named here so HR decides
+	each one (a permlevel Property Setter via Customize Form) instead of
+	finding out from a changed PAN.
+
+	Child tables count: a level-0 Table field lets the employee add and edit
+	its rows. A site that decides a field of its own really is
+	employee-editable names it in `helixhr_employee_open_fields_exempt`
+	(site config, a list) rather than editing this module.
+	"""
+	from frappe.model import display_fieldtypes
+
+	site_exempt = frappe.conf.get("helixhr_employee_open_fields_exempt") or []
+	allowed = set(PROFILE_EDITABLE_FIELDS) | EMPLOYEE_LEVEL_ZERO_EXEMPT | set(site_exempt)
+	open_fields = sorted(
+		field.fieldname
+		for field in frappe.get_meta("Employee").fields
+		if field.fieldtype not in display_fieldtypes
+		and not cint(field.permlevel)
+		and field.fieldname not in allowed
+	)
+	if open_fields:
+		return _result(
+			"Employee field locks",
+			FAIL,
+			f"employee-writable at permlevel 0: {', '.join(open_fields)} -- give each a permlevel "
+			"(Customize Form), or list it in site config helixhr_employee_open_fields_exempt",
+		)
+	return _result("Employee field locks", PASS, "only the employee's own contact fields are at level 0")
 
 
 def check_it_team_role():
@@ -817,6 +863,27 @@ def check_hr_request_workflow_state_order():
 	return _result("HR Request workflow state order", PASS, "Open is states[0]")
 
 
+def check_profile_correction_category():
+	"""Profile's "Request a correction" files under this category. With it
+	missing or retired the page falls back to a plain "contact HR" banner, so
+	employees can still find their details but lose the one-click path."""
+	active = frappe.db.get_value("HelixHR Request Category", PROFILE_CORRECTION_CATEGORY, "is_active")
+	if active is None:
+		return _result(
+			"Profile correction category",
+			WARN,
+			f"{PROFILE_CORRECTION_CATEGORY!r} is missing or was renamed -- rename it back in Settings, "
+			"or run helixhr.patches.v1_0.seed_profile_correction_category",
+		)
+	if not cint(active):
+		return _result(
+			"Profile correction category",
+			WARN,
+			f"{PROFILE_CORRECTION_CATEGORY!r} is inactive -- Profile shows 'contact HR' instead of a correction form",
+		)
+	return _result("Profile correction category", PASS, "active")
+
+
 def check_request_category_routes():
 	"""P5-KTD8's fallback ('a category whose role has no enabled holder
 	falls back to HR Manager and logs it') is a runtime safety net, not a
@@ -1264,6 +1331,7 @@ CHECKS = [
 	check_unsubmitted_approved_leave,
 	check_document_link_urls,
 	check_portal_landing,
+	check_employee_open_fields,
 	check_it_team_role,
 	check_delivery_manager_role,
 	check_signup_disabled,
@@ -1281,6 +1349,7 @@ CHECKS = [
 	check_retired_request_notifications,
 	check_hr_request_workflow_state_order,
 	check_request_category_routes,
+	check_profile_correction_category,
 	check_checkin_settings,
 	check_shift_types,
 	check_checkin_location_retention,

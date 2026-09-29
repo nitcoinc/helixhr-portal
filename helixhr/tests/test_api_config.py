@@ -78,6 +78,67 @@ class TestMessageTemplateSeed(IntegrationTestCase):
 		self.assertEqual(doc.body, "A survives-migrate edit")
 
 
+class TestProfileCorrectionCategorySeed(IntegrationTestCase):
+	"""Plan 2026-09-29-001 U2: the category Profile files corrections under."""
+
+	def test_seed_creates_an_active_category_routed_to_hr_manager(self):
+		from helixhr.patches.v1_0.seed_profile_correction_category import execute
+		from helixhr.utils import PROFILE_CORRECTION_CATEGORY
+
+		execute()
+		row = frappe.db.get_value(
+			"HelixHR Request Category", PROFILE_CORRECTION_CATEGORY, ["is_active", "route_to_role"], as_dict=True
+		)
+		self.assertEqual(row.route_to_role, "HR Manager")
+		self.assertTrue(row.is_active)
+
+	def test_seed_never_overwrites_hrs_edit(self):
+		from helixhr.patches.v1_0.seed_profile_correction_category import execute
+		from helixhr.utils import PROFILE_CORRECTION_CATEGORY
+
+		execute()
+		frappe.set_user("Administrator")
+		doc = frappe.get_doc("HelixHR Request Category", PROFILE_CORRECTION_CATEGORY)
+		original = doc.hint
+		doc.hint = "HR's own wording"
+		doc.save(ignore_permissions=True)
+		self.addCleanup(frappe.db.set_value, "HelixHR Request Category", PROFILE_CORRECTION_CATEGORY, "hint", original)
+
+		execute()
+		doc.reload()
+		self.assertEqual(doc.hint, "HR's own wording")
+
+	def test_preflight_warns_when_the_category_is_retired(self):
+		from helixhr import preflight
+		from helixhr.patches.v1_0.seed_profile_correction_category import execute
+		from helixhr.utils import PROFILE_CORRECTION_CATEGORY
+
+		execute()
+		self.assertEqual(preflight.check_profile_correction_category()["status"], preflight.PASS)
+		frappe.db.set_value("HelixHR Request Category", PROFILE_CORRECTION_CATEGORY, "is_active", 0)
+		self.addCleanup(frappe.db.set_value, "HelixHR Request Category", PROFILE_CORRECTION_CATEGORY, "is_active", 1)
+		result = preflight.check_profile_correction_category()
+		self.assertEqual(result["status"], preflight.WARN)
+		self.assertIn("inactive", result["detail"])
+
+	def test_an_employee_can_file_a_request_in_it(self):
+		from helixhr.api import create_my_request
+		from helixhr.patches.v1_0.seed_profile_correction_category import execute
+		from helixhr.utils import PROFILE_CORRECTION_CATEGORY
+
+		execute()
+		make_test_employee_and_manager()
+		frappe.set_user(EMPLOYEE_USER)
+		self.addCleanup(frappe.set_user, "Administrator")
+		created = create_my_request(
+			category=PROFILE_CORRECTION_CATEGORY,
+			subject="Correct my date of birth",
+			details="Date of birth is shown as 1 Jan 1990.",
+			operation_key=str(uuid.uuid4()),
+		)
+		self.assertEqual(frappe.db.get_value("HR Request", created["name"], "category"), PROFILE_CORRECTION_CATEGORY)
+
+
 class TestConfigApi(IntegrationTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")

@@ -295,8 +295,9 @@ test.describe('employee', () => {
     await page.setViewportSize({ width: 360, height: 720 })
     // Profile rather than Timesheet: every employee has an editable field, so
     // the bar is reachable without depending on which workflow state this
-    // site's current week happens to be in.
-    await page.goto('/helixhr/profile')
+    // site's current week happens to be in. The editable fields live on the
+    // Contact tab (plan 2026-09-29-001).
+    await page.goto('/helixhr/profile/contact')
     await page.waitForLoadState('networkidle')
     // A value this run has not used, so the bar is genuinely dirty. Nothing
     // is saved -- the check is about where the bar sits, not what it writes.

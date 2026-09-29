@@ -480,9 +480,9 @@ surface has to travel the way a person would.
   `setEmployee()` now, not off a component lifecycle hook.
 - Profile rendered a literal `{}` for Manager. It resolved the name with
   `frappe.client.get_value` on the *manager's* Employee row, which U5's permlevel lock correctly
-  forbids -- the call returns `{}`, not an error. It reads `manager_name` from
-  `helixhr.api.get_dashboard` (server-side `_get_employee_header`) now, so the two screens cannot
-  disagree.
+  forbids -- the call returns `{}`, not an error. Profile now reads everything, the manager's
+  name included, from `helixhr.api.get_my_profile`; the same trap is why that is a server
+  projection and not `frappe.client.get`.
 
 ### Do not run `prettier` on `frontend/`
 
@@ -1070,6 +1070,20 @@ the routed categories it is meant to see. `Message template tokens` and
 upgrade no longer has -- both are drift guards, not deploy blockers on a
 healthy site. The three genuinely new failure modes this release found:
 
+- **An Employee field an employee can write.** `Employee field locks` FAILs and names every
+  Employee value field left at permlevel 0 outside the seven contact fields (and the tree
+  bookkeeping `lft` / `rgt` / `old_parent`). The India payroll fields HRMS adds with an Indian
+  company (`pan_number`, `ifsc_code`, `micr_code`, `provident_fund_account`) are locked by
+  fixture Property Setters, so this names what is left -- usually a site's own Custom Field.
+  **Fix**: Desk → Customize Form → Employee → set the field's Perm Level (1 read-only, 2
+  HR-only). If the field genuinely should be employee-writable through the API, list it in site
+  config instead: `bench --site <site> set-config --parse helixhr_employee_open_fields_exempt
+  '["custom_field_name"]'`. Exempting it does not put it on the portal's edit form. Deleting and re-creating a Custom Field also deletes its Property Setters
+  (`CustomField.on_trash`); `bench migrate` re-imports the fixture ones.
+- **The Profile correction category is missing or retired.** `Profile correction category`
+  WARNs. Profile still shows everything, but its "Request a correction" buttons become one
+  "contact HR" banner. **Fix**: re-activate it in Settings → Categories, or run
+  `helixhr.patches.v1_0.seed_profile_correction_category`.
 - **A category whose routed role has no enabled holder.** `Request category
   routes` WARNs and names it. The runtime fallback (route to HR Manager and
   log it) means no request is ever lost, but a category nobody is actually

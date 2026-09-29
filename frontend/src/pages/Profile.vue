@@ -3,113 +3,100 @@ import { computed, reactive, ref, watch } from 'vue'
 import { createResource, FormControl, Button } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
-import { session } from '@/lib/session'
-import { formatDate } from '@/lib/dates'
+import ProfileFields from '@/components/profile/ProfileFields.vue'
+import ProfileTable from '@/components/profile/ProfileTable.vue'
+import CorrectionDialog from '@/components/profile/CorrectionDialog.vue'
 
-// P2-U3 / P2-R21. Identity comes from the one bootstrap the shell already
-// made (`lib/session.js`), not from a page-local
-// `hrms.api.get_current_employee_info`. Five pages held a copy of that
-// resource left over from before P2-U2 -- five repeated identity round trips
-// for a value that cannot change while the tab is open.
-const me = computed(() => session.employee)
-
-const employee = createResource({
-  url: 'frappe.client.get',
-  makeParams: () => ({ doctype: 'Employee', name: me.value.name }),
-  auto: false,
+// Plan 2026-09-29-001 U5. Everything HR holds about the employee, in five
+// addressable tabs, so a wrong date of birth is found here rather than in
+// Desk -- and one tap files a correction.
+//
+// One read feeds every tab: `helixhr.api.get_my_profile`, resolved from the
+// session, allow-listed and masked on the server. It replaced
+// `frappe.client.get` (which silently drops permission-locked fields) plus
+// `get_dashboard` (read only for the manager's name).
+const props = defineProps({
+  section: { type: String, default: 'personal' },
 })
 
-watch(
-  () => me.value?.name,
-  (name) => {
-    if (name) employee.fetch()
-  },
-  { immediate: true },
-)
+const profile = createResource({ url: 'helixhr.api.get_my_profile', auto: true })
 
-// The manager's name has to come from the server, not from a
-// `frappe.client.get_value` on their Employee record: U5's permlevel lock
-// means an employee cannot read another Employee row, so that call came
-// back `{}` and the field rendered a literal "{}" on screen. get_dashboard
-// already resolves the same name with the right access (_get_employee_header),
-// so the profile reads it from there and the two screens cannot disagree.
-const dashboard = createResource({
-  url: 'helixhr.api.get_dashboard',
-  auto: true,
-})
+const SECTIONS = [
+  { key: 'personal', label: 'Personal' },
+  { key: 'job', label: 'Job' },
+  { key: 'contact', label: 'Contact & emergency' },
+  { key: 'history', label: 'History' },
+  { key: 'bank', label: 'Bank & IDs' },
+]
+const active = computed(() => SECTIONS.find((tab) => tab.key === props.section) || SECTIONS[0])
 
-// `frappe.client.get` strips every permlevel-1 field before it answers, and
-// the U1 fixtures put designation, department, branch, date_of_joining and
-// the rest behind permlevel 1 -- so the document alone renders half this page
-// as em-dashes. `get_dashboard` resolves the same five values server-side
-// with `frappe.db.get_value`, which is not permlevel-filtered, and is already
-// on this page for the manager's name. `header` is that answer.
-const header = computed(() => dashboard.data?.employee || {})
-const managerName = computed(() => header.value.manager_name || '')
+// Headed runs inside the two long tabs (design review: a flat 17-row list
+// is the generic fallback the design system exists to avoid).
+const GROUPS = {
+  job: [
+    {
+      label: 'Role',
+      fields: ['company', 'department', 'designation', 'grade', 'employment_type', 'branch', 'reports_to'],
+    },
+    {
+      label: 'Dates',
+      fields: ['final_confirmation_date', 'contract_end_date', 'notice_number_of_days', 'date_of_retirement'],
+    },
+    { label: 'Schedule', fields: ['default_shift', 'holiday_list'] },
+    { label: 'Approvers', fields: ['leave_approver', 'expense_approver', 'shift_request_approver'] },
+  ],
+  bank: [
+    { label: 'Bank', fields: ['salary_mode', 'bank_name', 'bank_ac_no', 'ifsc_code', 'micr_code', 'iban'] },
+    { label: 'Tax and IDs', fields: ['pan_number', 'provident_fund_account'] },
+    { label: 'Passport', fields: ['passport_number', 'date_of_issue', 'valid_upto', 'place_of_issue'] },
+    { label: 'Health insurance', fields: ['health_insurance_provider', 'health_insurance_no'] },
+  ],
+}
 
-// ── The field block ────────────────────────────────────────────────────
-// The canvas gives Profile the same anchored region every other page has:
-// who you are, on the deep field, with the initials monogram in signal
+const sectionData = computed(() => profile.data?.sections?.[active.value.key] || null)
+const sectionFailed = computed(() => (profile.data?.failed_sections || []).includes(active.value.key))
+const correctionCategory = computed(() => profile.data?.correction_category || null)
+// `helixhr_hr_contact`, rendered as a window global by the portal shell.
+const hrContactEmail = window.helixhr_hr_contact || ''
+
+function tabRoute(key) {
+  return key === 'personal' ? '/profile' : `/profile/${key}`
+}
+
+// ── The identity band ──────────────────────────────────────────────────
+// Who you are, on the deep field, with the initials monogram in signal
 // yellow -- the one place on this screen the accent is legal.
+function valueOf(sectionKey, fieldname) {
+  return profile.data?.sections?.[sectionKey]?.fields?.find((f) => f.fieldname === fieldname)?.value || ''
+}
+const employeeName = computed(() => profile.data?.employee_name || '')
 const initials = computed(() =>
-  (me.value?.employee_name || '')
+  employeeName.value
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 2)
     .map((part) => part[0].toUpperCase())
     .join(''),
 )
-
 const roleLine = computed(() =>
-  [header.value.designation, header.value.department].filter(Boolean).join(' · '),
+  [valueOf('job', 'designation'), valueOf('job', 'department')].filter(Boolean).join(' · '),
 )
+const placeLine = computed(() => {
+  const manager = valueOf('job', 'reports_to')
+  return [manager ? `Reports to ${manager}` : null, valueOf('job', 'branch')].filter(Boolean).join(' · ')
+})
 
-const placeLine = computed(() =>
-  [managerName.value ? `Reports to ${managerName.value}` : null, header.value.branch]
-    .filter(Boolean)
-    .join(' · '),
-)
-
-// ── Read-only rows ─────────────────────────────────────────────────────
-// Name, designation, department, manager and location moved *into* the field
-// block above, so the card below holds only the facts that are not already
-// on screen. "Ask HR" stays on the rows an employee would plausibly need
-// corrected, and nowhere else -- an Ask HR link next to a joining date is an
-// invitation to raise a request nobody can act on.
-const READONLY_FIELDS = [
-  { field: 'employee_number', label: 'Employee ID', askHr: false },
-  { field: 'date_of_joining', label: 'Joined', askHr: false, date: true },
-  { field: 'work_email', label: 'Work email', askHr: true },
-  { field: 'manager_name', label: 'Manager', askHr: true, header: true },
-  { field: 'branch', label: 'Location', askHr: true, header: true },
-  { field: 'designation', label: 'Designation', askHr: true, header: true },
-  { field: 'department', label: 'Department', askHr: true, header: true },
-  { field: 'status', label: 'Status', askHr: false },
-]
-
-function readonlyValue(row) {
-  // The sign-in address is the work email as far as this portal is concerned;
-  // Employee.company_email is permlevel-locked and comes back empty.
-  if (row.field === 'work_email') return me.value?.user_id || '—'
-  const value = row.header ? header.value[row.field] : employee.data?.[row.field]
-  if (!value) return '—'
-  return row.date ? formatDate(value) : value
+// ── Corrections ────────────────────────────────────────────────────────
+const correcting = ref(null)
+const showCorrection = ref(false)
+function requestCorrection(field) {
+  correcting.value = field
+  showCorrection.value = true
 }
 
-function askHrLink(label) {
-  return {
-    path: '/requests',
-    query: { category: 'HR Letter', subject: `Update my ${label.toLowerCase()}` },
-  }
-}
-
-// ── Editable fields, one Save bar ──────────────────────────────────────
-// The page used to carry a Save button *per field* -- seven of them, each
-// its own request, each with its own "Saved" flash. Updating a phone number
-// and an address was two saves and two round trips, and there was no way to
-// tell whether you had finished. `update_my_profile` already takes several
-// fields at once, so one bar saves whatever actually changed and says how
-// much that is (the Profile artboard).
+// ── Editable contact fields, one Save bar ──────────────────────────────
+// `update_my_profile` takes several fields at once, so one bar saves
+// whatever actually changed and says how much that is.
 const EDITABLE_FIELDS = [
   { field: 'cell_number', label: 'Mobile', type: 'text' },
   { field: 'personal_email', label: 'Personal email', type: 'email' },
@@ -123,14 +110,19 @@ const EDITABLE_FIELDS = [
 const form = reactive({})
 const saved = reactive({})
 
-function resetForm(doc) {
-  if (!doc) return
+function resetForm(data) {
+  const fields = data?.sections?.contact?.fields
+  if (!fields) return
+  const values = Object.fromEntries(fields.map((f) => [f.fieldname, f.value]))
   for (const { field } of EDITABLE_FIELDS) {
-    saved[field] = doc[field] || ''
-    form[field] = saved[field]
+    // A refetch never throws away what the person is still typing: a field
+    // that differs from the *previous* baseline is theirs, and stays.
+    const typing = form[field] !== undefined && form[field] !== saved[field]
+    saved[field] = values[field] || ''
+    if (!typing) form[field] = saved[field]
   }
 }
-watch(() => employee.data, resetForm, { immediate: true })
+watch(() => profile.data, resetForm, { immediate: true })
 
 const changedFields = computed(() =>
   EDITABLE_FIELDS.map(({ field }) => field).filter((field) => form[field] !== saved[field]),
@@ -150,9 +142,8 @@ async function saveChanges() {
   saveError.value = ''
   const payload = Object.fromEntries(changedFields.value.map((field) => [field, form[field]]))
   try {
-    // The server answers with the persisted values for every editable
-    // field, so the baseline is what the record now holds rather than what
-    // the browser hoped it sent.
+    // The server answers with the persisted values, so the baseline is what
+    // the record now holds rather than what the browser hoped it sent.
     const persisted = await save.submit(payload)
     for (const { field } of EDITABLE_FIELDS) {
       saved[field] = persisted?.[field] ?? form[field]
@@ -160,9 +151,11 @@ async function saveChanges() {
     }
     justSaved.value = true
     setTimeout(() => (justSaved.value = false), 3000)
+    // Refetch so every tab agrees with the record; the data on screen stays
+    // put while it loads (`loading` below ignores a refetch).
+    profile.reload()
   } catch (error) {
-    // P2-R25: a failed save keeps every value the person typed. Nothing is
-    // reset, so Retry is one more tap rather than re-entering the form.
+    // P2-R25: a failed save keeps every value the person typed.
     saveError.value = error?.messages?.[0] || 'Could not save that. Please try again.'
   }
 }
@@ -170,20 +163,37 @@ async function saveChanges() {
 
 <template>
   <div>
-    <PageHeader title="Your profile" />
+    <PageHeader
+      title="Your profile"
+      subtitle="Everything HR holds about you. Spot something wrong? Request a correction."
+    >
+      <template #actions>
+        <!-- HR and administrators only: the server sends `desk_url` for
+             those roles and nobody else (get_my_profile). -->
+        <a
+          v-if="profile.data?.desk_url"
+          :href="profile.data.desk_url"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="inline-flex min-h-11 items-center rounded-lg border border-outline-gray-2 px-3 text-sm font-medium text-ink-gray-7 hover:bg-surface-gray-2"
+          data-testid="profile-desk-link"
+        >
+          Open in Desk
+        </a>
+      </template>
+    </PageHeader>
 
     <AsyncState
       section="profile"
-      :resource="employee"
-      :empty="!employee.data"
+      :resource="profile"
+      :loading="profile.loading && !profile.data"
+      :empty="!profile.data"
       empty-title="We couldn't find your employee record"
       empty-body="Ask HR to link your sign-in to an employee record."
       skeleton="block"
       skeleton-height="h-96"
     >
       <div class="space-y-6">
-        <!-- The one anchored region on this page. Everything below it rests
-             on paper; nothing below it may use the signal yellow. -->
         <section
           class="surface-field elev-2 flex items-center gap-4 p-5"
           aria-label="Your identity"
@@ -197,7 +207,7 @@ async function saveChanges() {
           </span>
           <div class="min-w-0">
             <h2 class="type-section font-heading text-white">
-              {{ me?.employee_name || '—' }}
+              {{ employeeName || '—' }}
             </h2>
             <p
               v-if="roleLine"
@@ -214,61 +224,112 @@ async function saveChanges() {
           </div>
         </section>
 
-        <section aria-labelledby="profile-readonly-heading">
-          <h2
-            id="profile-readonly-heading"
-            class="label mb-2"
-          >
-            Your information
-          </h2>
-          <div class="surface-card elev-1 divide-y divide-outline-gray-1">
-            <div
-              v-for="row in READONLY_FIELDS"
-              :key="row.field"
-              :data-testid="`profile-readonly-${row.field}`"
-              class="flex items-center justify-between gap-3 px-4 py-3"
-            >
-              <span class="shrink-0 text-sm text-ink-gray-6">{{ row.label }}</span>
-              <span class="flex min-w-0 items-center gap-3">
-                <span class="truncate text-right text-ink-gray-9">
-                  {{ readonlyValue(row) }}
-                </span>
-                <!-- Inline, on the row it is about: the canvas puts the way
-                     to get a wrong value fixed next to the wrong value,
-                     rather than in a "something else?" line at the bottom. -->
-                <router-link
-                  v-if="row.askHr"
-                  :to="askHrLink(row.label)"
-                  class="-my-2 inline-flex min-h-11 shrink-0 cursor-pointer items-center text-sm font-medium text-blue-700 underline decoration-dotted underline-offset-4"
-                >
-                  Ask HR
-                </router-link>
-              </span>
-            </div>
-          </div>
-        </section>
+        <!-- One banner, not a dead button per row, when HR has retired the
+             correction category. -->
+        <p
+          v-if="!correctionCategory"
+          class="surface-card elev-1 p-3 text-sm text-ink-gray-7"
+          data-testid="profile-contact-hr"
+        >
+          To correct anything on your profile, contact HR<template v-if="hrContactEmail">
+            at
+            <a
+              :href="`mailto:${hrContactEmail}`"
+              class="font-medium text-blue-700 hover:underline"
+            >{{ hrContactEmail }}</a>
+          </template>.
+        </p>
 
-        <section aria-labelledby="profile-editable-heading">
-          <h2
-            id="profile-editable-heading"
-            class="label mb-2"
+        <nav
+          class="flex flex-wrap gap-1 border-b border-outline-gray-1"
+          aria-label="Profile sections"
+        >
+          <router-link
+            v-for="tab in SECTIONS"
+            :key="tab.key"
+            :to="tabRoute(tab.key)"
+            class="inline-flex min-h-11 cursor-pointer items-center rounded-t-lg px-3 py-2 text-sm font-medium"
+            :aria-current="active.key === tab.key ? 'page' : undefined"
+            :class="
+              active.key === tab.key
+                ? 'border-b-2 border-signal text-ink-gray-9'
+                : 'text-ink-gray-6 hover:text-ink-gray-9'
+            "
+            :data-testid="`profile-tab-${tab.key}`"
           >
-            You can update
-          </h2>
-          <div class="surface-card elev-1 space-y-4 p-4">
-            <div
-              v-for="row in EDITABLE_FIELDS"
-              :key="row.field"
-              :data-testid="`profile-editable-${row.field}`"
+            {{ tab.label }}
+          </router-link>
+        </nav>
+
+        <h2 class="type-section font-heading text-ink-gray-9">
+          {{ active.label }}
+        </h2>
+
+        <div
+          v-if="sectionFailed || !sectionData"
+          class="surface-alert flex flex-wrap items-center justify-between gap-3 p-3 text-sm"
+          role="alert"
+        >
+          <span>
+            Couldn’t load this section.
+            <template v-if="active.key === 'contact'">Editing is paused until it loads.</template>
+          </span>
+          <Button
+            variant="subtle"
+            @click="profile.reload()"
+          >
+            Retry
+          </Button>
+        </div>
+
+        <template v-else>
+          <p
+            v-if="active.key === 'bank'"
+            class="text-sm text-ink-gray-6"
+          >
+            Account and ID numbers show only their last four characters.
+          </p>
+
+          <ProfileFields
+            :fields="sectionData.fields"
+            :groups="GROUPS[active.key] || []"
+            :can-correct="!!correctionCategory"
+            @correct="requestCorrection"
+          />
+
+          <ProfileTable
+            v-for="table in sectionData.tables"
+            :key="table.fieldname"
+            :table="table"
+            :can-correct="!!correctionCategory"
+            @correct="requestCorrection"
+          />
+
+          <section
+            v-if="active.key === 'contact'"
+            aria-labelledby="profile-editable-heading"
+          >
+            <h3
+              id="profile-editable-heading"
+              class="label mb-2"
             >
-              <FormControl
-                v-model="form[row.field]"
-                :label="row.label"
-                :type="row.type"
-              />
+              You can update
+            </h3>
+            <div class="surface-card elev-1 space-y-4 p-4">
+              <div
+                v-for="row in EDITABLE_FIELDS"
+                :key="row.field"
+                :data-testid="`profile-editable-${row.field}`"
+              >
+                <FormControl
+                  v-model="form[row.field]"
+                  :label="row.label"
+                  :type="row.type"
+                />
+              </div>
             </div>
-          </div>
-        </section>
+          </section>
+        </template>
 
         <p
           v-if="saveError"
@@ -278,10 +339,7 @@ async function saveChanges() {
           {{ saveError }}
         </p>
 
-        <!-- One bar for the whole form. It only appears once something has
-             actually changed, so a page you came to read has no dead control
-             on it, and it sits above the tab bar and inside the safe area
-             (index.css, `.action-bar`). -->
+        <!-- One bar for the whole form, only once something has changed. -->
         <div
           v-if="dirty || justSaved"
           class="action-bar flex items-center justify-between gap-3"
@@ -321,5 +379,12 @@ async function saveChanges() {
         </div>
       </div>
     </AsyncState>
+
+    <CorrectionDialog
+      v-if="correctionCategory"
+      v-model="showCorrection"
+      :field="correcting"
+      :category="correctionCategory"
+    />
   </div>
 </template>

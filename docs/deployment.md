@@ -224,6 +224,25 @@ Re-routing a category only changes where the **next** request goes.
 route at that moment — re-pointing `Payroll Question` from `HR Manager` to
 `IT Team` does not hand IT a single request filed before the change.
 
+### Profile shows everything HR holds, and corrections are HR Requests (plan 2026-09-29-001)
+
+`/helixhr/profile` has five tabs — Personal, Job, Contact & emergency,
+History, Bank & IDs — so an employee can check their own record without
+Desk. Bank account, IBAN, PAN, passport, PF and health-insurance numbers show
+only their last four characters; salary and CTC never appear. HR and
+administrators get **Open in Desk** to the Employee form.
+
+"Request a correction" files an HR Request in the **Profile correction**
+category, routed to HR Manager, pre-filled with the field and the value on
+screen. The category is seeded on migrate; HR may rename its hint, re-route
+it or retire it from Settings → Categories like any other. Retired, the page
+shows one "contact HR" banner instead of the buttons, and preflight warns.
+
+Release step, once per site: run preflight and look at **Employee field
+locks**. It FAILs on any Employee field an employee could still overwrite
+through the API — typically a site's own Custom Field. Give each one a Perm
+Level in Customize Form (see `docs/runbook.md`).
+
 ### HR-editable message text is a fixed token contract, never Jinja (P5-U13, P5-KTD11)
 
 Two messages the portal sends are editable at `/settings → Message text`:

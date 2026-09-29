@@ -37,6 +37,7 @@ def after_install():
 		route_it_asset_requests,
 		seed_celebration_templates,
 		seed_message_templates,
+		seed_profile_correction_category,
 		seed_request_categories,
 	)
 
@@ -44,6 +45,7 @@ def after_install():
 	seed_celebration_templates.execute()
 	seed_message_templates.execute()
 	seed_request_categories.execute()
+	seed_profile_correction_category.execute()
 	route_it_asset_requests.execute()
 	retire_request_notifications.execute()
 	apply_permission_deltas.execute()

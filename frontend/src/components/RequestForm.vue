@@ -22,6 +22,10 @@ import { attachToRequest } from '@/lib/api'
 const props = defineProps({
   initialCategory: { type: String, default: '' },
   initialSubject: { type: String, default: '' },
+  // Plan 2026-09-29-001 U4: Profile's correction dialog starts the request
+  // with the field and the value on screen. Passed as a prop, never through
+  // the URL, so profile values stay out of browser history and access logs.
+  initialDetails: { type: String, default: '' },
 })
 const emit = defineEmits(['created', 'cancel'])
 
@@ -50,13 +54,17 @@ const subject = ref(props.initialSubject || '')
 watch(
   categoryOptions,
   (options) => {
+    // Nothing to reconcile against until the list has loaded: resetting on
+    // the first, empty pass threw away every pre-selected category (a
+    // `?category=` deep link, Profile's correction) before it could match.
+    if (!options.length) return
     if (!options.some((option) => option.name === category.value)) {
       category.value = options[0]?.name || ''
     }
   },
   { immediate: true },
 )
-const details = ref('')
+const details = ref(props.initialDetails || '')
 const file = ref(null)
 const error = ref('')
 

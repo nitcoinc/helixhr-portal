@@ -7,6 +7,10 @@ from urllib.parse import quote
 import frappe
 from frappe import _
 
+# The request category the Profile page files corrections under. Seeded by
+# `patches/v1_0/seed_profile_correction_category`; HR may reroute or retire it.
+PROFILE_CORRECTION_CATEGORY = "Profile correction"
+
 # The only Employee fields the portal lets an employee change themselves
 # (R9). Everything else on Employee sits behind permlevel 1 or 2 (U5
 # fixtures) -- this list is a second, independent gate in front of
@@ -21,6 +25,120 @@ PROFILE_EDITABLE_FIELDS = (
 	"emergency_phone_number",
 	"relation",
 )
+
+
+# --- The employee's own profile (plan 2026-09-29-001, U3) -----------------
+#
+# Everything `api.get_my_profile` may return, by tab, named field by field.
+# The projection reads HR-only (permlevel 2) fields on the owner's behalf, so
+# this allow-list and `PROFILE_MASKED_FIELDS` are the whole boundary: a field
+# is on the page only if it is named here. Fields a site does not have (the
+# India payroll fields, say) are skipped. Never here: `ctc`, salary currency,
+# payroll cost center, advance accounts, health details, exit fields.
+PROFILE_SECTION_FIELDS = {
+	"personal": (
+		"salutation",
+		"first_name",
+		"middle_name",
+		"last_name",
+		"employee_number",
+		"gender",
+		"date_of_birth",
+		"marital_status",
+		"blood_group",
+		"date_of_joining",
+		"status",
+	),
+	"job": (
+		"company",
+		"department",
+		"designation",
+		"grade",
+		"employment_type",
+		"branch",
+		"reports_to",
+		"final_confirmation_date",
+		"contract_end_date",
+		"notice_number_of_days",
+		"date_of_retirement",
+		"default_shift",
+		"holiday_list",
+		"leave_approver",
+		"expense_approver",
+		"shift_request_approver",
+	),
+	"contact": (
+		*PROFILE_EDITABLE_FIELDS,
+		"company_email",
+		"prefered_contact_email",
+		"current_accommodation_type",
+		"permanent_accommodation_type",
+	),
+	"history": ("family_background",),
+	"bank": (
+		"salary_mode",
+		"bank_name",
+		"bank_ac_no",
+		"ifsc_code",
+		"micr_code",
+		"iban",
+		"pan_number",
+		"provident_fund_account",
+		"passport_number",
+		"date_of_issue",
+		"valid_upto",
+		"place_of_issue",
+		"health_insurance_provider",
+		"health_insurance_no",
+	),
+}
+
+# Child tables, by the tab they render on, with the columns that may leave
+# the server. External Work History's `salary` and `contact` are deliberately
+# absent.
+PROFILE_SECTION_TABLES = {
+	"job": {"internal_work_history": ("branch", "department", "designation", "from_date", "to_date")},
+	"history": {
+		"education": ("school_univ", "qualification", "level", "year_of_passing", "class_per", "maj_opt_subj"),
+		"external_work_history": ("company_name", "designation", "address", "total_experience"),
+	},
+}
+
+# Link-to-User fields, shown by the person's name rather than their login.
+PROFILE_USER_LINK_FIELDS = frozenset({"leave_approver", "expense_approver", "shift_request_approver"})
+
+# Identifiers that reach the browser only as their last four characters.
+PROFILE_MASKED_FIELDS = frozenset(
+	{"bank_ac_no", "iban", "pan_number", "provident_fund_account", "passport_number", "health_insurance_no"}
+)
+
+# Plain-language labels where Frappe's own reads as Frappe (design-system
+# copy rule) or is simply unclear to an employee.
+PROFILE_LABELS = {
+	"branch": "Location",
+	"bank_ac_no": "Bank account",
+	"prefered_contact_email": "Preferred contact email",
+	"current_accommodation_type": "Current address is",
+	"permanent_accommodation_type": "Permanent address is",
+	"valid_upto": "Valid until",
+	"notice_number_of_days": "Notice period (days)",
+	"final_confirmation_date": "Confirmation date",
+	"school_univ": "School / university",
+	"class_per": "Grade / percentage",
+	"maj_opt_subj": "Subjects",
+	"company_name": "Company",
+	"health_insurance_no": "Health insurance number",
+}
+
+
+def mask_identifier(value):
+	"""`••••1234` for an identifier, never more than its last four
+	characters; one of four characters or fewer is masked whole. None stays
+	None so the page can say "Not recorded"."""
+	text = "" if value is None else str(value).strip()
+	if not text:
+		return None
+	return "••••" if len(text) <= 4 else f"••••{text[-4:]}"
 
 
 # --- HR-editable message templates (P5-U13, P5-KTD11) ----------------------
@@ -390,6 +508,8 @@ RATE_LIMIT_POLICY = {
 	"get_organisation_view": (60, 60),
 	"search_people": (60, 60),
 	"get_person": (60, 60),
+	# Plan 2026-09-29-001 U3: the employee's own profile, read on every visit.
+	"get_my_profile": (60, 60),
 	"get_report_link": (60, 60),
 	# P7-U3. Both fan out per project (tasks, members), the same reason
 	# `search_people` / `get_person` are bounded above.

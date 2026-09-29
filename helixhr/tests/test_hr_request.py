@@ -360,10 +360,13 @@ class TestRequestCategories(IntegrationTestCase):
 
 	def test_seeded_categories_keep_the_legacy_values_as_their_names(self):
 		from helixhr.patches.v1_0.seed_request_categories import CATEGORIES, execute
+		from helixhr.utils import PROFILE_CORRECTION_CATEGORY
 
 		execute()
+		# Plus the Profile correction category its own patch seeds (plan
+		# 2026-09-29-001 U2) -- a new name, not a legacy Select value.
 		self.assertEqual(
-			set(frappe.get_all("HelixHR Request Category", pluck="name")),
+			set(frappe.get_all("HelixHR Request Category", pluck="name")) - {PROFILE_CORRECTION_CATEGORY},
 			{spec["category_name"] for spec in CATEGORIES},
 		)
 

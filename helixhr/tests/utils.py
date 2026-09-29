@@ -586,6 +586,12 @@ def setup_playwright_fixtures():
 	# "Waiting for ..." status rather than hedging on whichever plain
 	# error a leave-less fixture happens to hit.
 	frappe.db.set_value("Employee", employee_name, "leave_approver", MANAGER_USER)
+	# profile-tabs.spec.ts: a known account number to prove it reaches the
+	# page masked to its last four, never whole.
+	frappe.db.set_value("Employee", employee_name, {"bank_ac_no": "004512345678", "date_of_birth": "1990-01-01"})
+	from helixhr.patches.v1_0.seed_profile_correction_category import execute as seed_profile_correction
+
+	seed_profile_correction()
 	company = frappe.db.get_value("Employee", employee_name, "company")
 	ensure_leave_allocation(employee_name, "Casual Leave", 5)
 	ensure_holiday_list_assignment(company)
