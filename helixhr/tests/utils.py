@@ -214,9 +214,9 @@ def make_test_hr_manager_employee():
 	portal and work the HR queue (P4-R10, P4-R11, P4-KTD8).
 
 	Separate from `ensure_hr_manager_user`, which holds the role and *no*
-	Employee on purpose -- `portal_home_page` refuses it and every portal
-	method that starts from `get_current_employee` throws for it, so it can
-	prove the role alone reaches a record in Desk and nothing else.
+	Employee on purpose -- every portal method that starts from
+	`get_current_employee` throws for it (it gets the desk-only portal), so
+	it can prove the role alone reaches a record in Desk and nothing else.
 
 	Returns (employee_name, user).
 	"""

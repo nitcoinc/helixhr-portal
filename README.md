@@ -417,8 +417,9 @@ exactly that combination. Which phase a site is in is site config:
 
 Frappe's Microsoft callback does not consult the app's landing rule, so
 `helixhr.api.login_via_office365` wraps it (`override_whitelisted_methods`)
-and sends employees to `/helixhr` after Microsoft sign-in; HR User, System
-Manager and Administrator keep Desk. The Azure redirect URI is unchanged. An
+and sends every user to `/helixhr` after sign-in (a `redirect-to` the login
+carried still wins); HR and System Managers reach Desk from **Open Desk** or by
+typing `/desk`. The Azure redirect URI is unchanged. An
 HR or System Manager with no Employee record who opens `/helixhr` gets a
 desk-only portal (the admin pages their roles allow, plus **Open Desk**)
 instead of "not set up". See `docs/runbook.md` → Microsoft Entra ID login.

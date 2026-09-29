@@ -177,21 +177,6 @@ def get_manager_user(employee):
 #
 # These are the plan's numbers. Tighten freely; loosening one is a policy
 # decision that preflight will FAIL on until this table is edited too.
-# Roles whose holders work in Desk. Anyone holding one of these keeps
-# Frappe's own landing page; everybody else with an active Employee record is
-# sent to the portal. HR staff are employees too and hold the Employee role,
-# so the rule cannot be "has the Employee role" -- it has to be "does not work
-# in Desk".
-#
-# P4-KTD8 removed HR Manager from this set. An HR Manager now works a queue
-# *inside* the portal (P4-R10, P4-R11), so the portal is where they should
-# land; Desk is one click away in the shell. HR User keeps Desk -- the role
-# has no portal queue of its own -- and so do System Manager and
-# Administrator. The Active-Employee requirement below is what keeps an HR
-# Manager who is not an employee out of a portal that would refuse every
-# read of theirs.
-DESK_ROLES = frozenset({"HR User", "System Manager", "Administrator"})
-
 PORTAL_HOME_PAGE = "helixhr"
 
 
@@ -356,30 +341,27 @@ def project_in_scope(project, scope):
 
 
 def portal_home_page(user=None):
-	"""Where this user lands after signing in.
+	"""Where this user lands after signing in: the portal, for everyone.
 
 	Registered as `get_website_user_home_page` in hooks.py, which Frappe calls
 	with the user and consults before `role_home_page` and before Website
-	Settings. `role_home_page` cannot express this rule: it matches the *first*
-	entry in `frappe.get_roles()`, whose order is not defined, so mapping the
-	Employee role would send an HR Manager to the portal on some sites and to
-	Desk on others.
+	Settings.
 
-	Returning None means "no opinion" -- Frappe carries on down its own chain
-	and a Desk user lands where they always did.
+	Every signed-in user starts on /helixhr, Desk roles included (2026-09-29):
+	one landing page is one thing to test, and HR, System Managers and
+	Administrator reach Desk from the shell's Open Desk button or by typing
+	/desk. The portal itself decides what each of them sees -- an employee's
+	own pages, the desk-only admin pages for HR with no Employee record, or
+	"not set up" for anyone else (`lib/session.js`).
 
 	Two things still win over this, by Frappe's design, and both are in
 	docs/deployment.md: a `home_page` set on the Role doctype, and a
 	`default_workspace` set on the User.
 	"""
 	user = user or frappe.session.user
-	if user in ("Guest", "Administrator"):
+	if user == "Guest":
 		return None
-	if set(frappe.get_roles(user)) & DESK_ROLES:
-		return None
-	if frappe.db.exists("Employee", {"user_id": user, "status": "Active"}):
-		return PORTAL_HOME_PAGE
-	return None
+	return PORTAL_HOME_PAGE
 
 
 RATE_LIMIT_POLICY = {

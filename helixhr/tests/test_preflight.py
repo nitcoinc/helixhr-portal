@@ -54,11 +54,6 @@ class TestPreflight(IntegrationTestCase):
 
 		from unittest.mock import patch
 
-		with patch.object(preflight, "DESK_ROLES", frozenset({"IT Team"})):
-			result = preflight.check_it_team_role()
-		self.assertEqual(result["status"], preflight.FAIL)
-		self.assertIn("DESK_ROLES", result["detail"])
-
 		with patch.object(
 			preflight.frappe,
 			"get_meta",
@@ -76,11 +71,6 @@ class TestPreflight(IntegrationTestCase):
 		from unittest.mock import patch
 
 		real_get_value = frappe.db.get_value
-
-		with patch.object(preflight, "DESK_ROLES", frozenset({"HelixHR Delivery Manager"})):
-			result = preflight.check_delivery_manager_role()
-		self.assertEqual(result["status"], preflight.FAIL)
-		self.assertIn("DESK_ROLES", result["detail"])
 
 		def _no_role(doctype, filters=None, *args, **kwargs):
 			if doctype == "Role" and filters == preflight.DELIVERY_MANAGER:

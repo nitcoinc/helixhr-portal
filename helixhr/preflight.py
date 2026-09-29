@@ -44,7 +44,6 @@ from frappe.utils import cint
 from helixhr.patches.v1_0.apply_permission_deltas import DELTAS
 from helixhr.utils import (
 	ALLOWED_UPLOAD_EXTENSIONS,
-	DESK_ROLES,
 	RATE_LIMIT_POLICY,
 	UPLOAD_MAX_BYTES,
 	portal_home_page,
@@ -365,8 +364,6 @@ def check_it_team_role():
 			problems.append("desk_access must be 0")
 		if cint(role.is_custom):
 			problems.append("is_custom must be 0")
-	if IT_TEAM in DESK_ROLES:
-		problems.append("IT Team is in DESK_ROLES")
 
 	actual = {
 		field.fieldname
@@ -403,8 +400,6 @@ def check_delivery_manager_role():
 			problems.append("desk_access must be 0")
 		if cint(role.is_custom):
 			problems.append("is_custom must be 0")
-	if DELIVERY_MANAGER in DESK_ROLES:
-		problems.append("HelixHR Delivery Manager is in DESK_ROLES")
 
 	if frappe.db.get_value(
 		"Custom DocPerm", {"parent": "Timesheet", "role": DELIVERY_MANAGER, "report": 1}

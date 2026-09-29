@@ -2,7 +2,7 @@ import json
 import math
 import os
 import re
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 
 import frappe
 from frappe import _
@@ -304,13 +304,6 @@ def get_portal_bootstrap():
 	return boot
 
 
-# The paths Frappe's own post-login fallback resolves to for a System User
-# (`frappe.apps.get_default_path`: an app's route under /desk, the /apps
-# picker, or /desk itself) plus the website /me page. The bare site root is
-# handled separately.
-_DESK_LANDING_PATHS = ("/app", "/apps", "/desk", "/me")
-
-
 @frappe.whitelist(allow_guest=True)
 def login_via_office365(code: str, state: str):
 	"""Frappe's Microsoft Entra ID callback, then the portal's landing rule.
@@ -322,30 +315,33 @@ def login_via_office365(code: str, state: str):
 
 	Frappe's password login asks `get_home_page()` -- and therefore
 	`portal_home_page` -- where to land. Its OAuth path does not: with no
-	`redirect-to` it sends a System User to `get_default_path()`, which with
-	HRMS installed is `/desk/people` or `/apps`, and the portal host 404s
-	both (docs/deployment.md). An employee signing in with Microsoft was
-	landing on Desk instead of the portal.
+	`redirect-to` it sends a System User to `get_default_path()` (the User's
+	Default App, `/desk/people` for HRMS, or `/apps`), and the portal host
+	404s both (docs/deployment.md).
+
+	The `redirect-to` this login attempt carried is read *before* Frappe
+	consumes it (the single-use `state` cache entry), so a link somebody
+	followed into the login -- a Desk record from an email, a portal deep
+	link -- is still honoured. Only Frappe's own default is replaced.
 	"""
 	from frappe.integrations.oauth2_logins import login_via_office365 as frappe_login_via_office365
+	from frappe.utils.oauth import OAUTH_LOGIN_FLOW_CACHE_PREFIX
 
+	requested = frappe.cache.get_value(f"{OAUTH_LOGIN_FLOW_CACHE_PREFIX}:{state}") if state else None
 	frappe_login_via_office365(code, state)
-	_redirect_portal_user_home()
+	_redirect_to_portal_home(requested)
 
 
-def _redirect_portal_user_home():
-	"""Point a post-login redirect bound for Desk at the portal instead,
-	for exactly the users `portal_home_page` sends there. A `redirect-to`
-	that named a non-Desk page (a portal deep link) is left alone, and so is
-	every Desk-role user -- `portal_home_page` answers None for them."""
+def _redirect_to_portal_home(requested):
+	"""Replace Frappe's default post-login landing with the portal, unless
+	the login was asked to go somewhere (`requested`). Error pages --
+	Frappe's refused-login responses are web pages, not redirects -- are
+	left alone."""
 	response = frappe.local.response
-	if response.get("type") != "redirect" or frappe.session.user == "Guest":
+	if response.get("type") != "redirect" or frappe.session.user == "Guest" or requested:
 		return
 	home = portal_home_page(frappe.session.user)
-	if not home:
-		return
-	path = urlparse(response.get("location") or "").path.rstrip("/")
-	if not path or any(path == p or path.startswith(p + "/") for p in _DESK_LANDING_PATHS):
+	if home:
 		response["location"] = get_url(f"/{home}")
 
 

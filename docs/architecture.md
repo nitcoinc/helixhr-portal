@@ -612,7 +612,7 @@ Two things about this kind are genuinely different from the other three:
   exception to "the workflow is the rule table," scoped to the one
   transition the requester owns.
 - **A worker can be `IT Team`, not only HR.** `IT Team` is a portal-only role
-  (`desk_access: 0`, kept out of `utils.DESK_ROLES`) that works only the
+  (`desk_access: 0`) that works only the
   categories routed to it and reads nothing else -- enforced by a
   `get_permission_query_conditions` / `has_permission` pair on `HR Request`
   scoped to the caller's own company, the stored `routed_to_role`, and (for
@@ -646,9 +646,9 @@ error. `preflight.check_hr_manager_self_scope` WARNs about exactly that, and
 `check_employee_user_permissions` exempts HR Manager logins through the shared
 `_hr_manager_users()` helper so the two checks can never disagree.
 
-HR Managers with an Active Employee record also **land in the portal** now:
-`utils.DESK_ROLES` is `HR User`, `System Manager`, `Administrator` and no longer
-HR Manager (P4-KTD8). A `default_workspace` pinned on the User still wins over
+Every signed-in user **lands in the portal** (P4-KTD8 moved HR Manager there;
+since 2026-09-29 HR User, System Manager and Administrator too -- `utils.DESK_ROLES`
+is gone), and Desk roles reach Desk from Open Desk. A `default_workspace` pinned on the User still wins over
 the hook, by Frappe's own precedence — `preflight.check_portal_landing` FAILs
 and names those users. `IT Team` never reaches Desk at all: `desk_access: 0`
 is stated verbatim on the fixture rather than defaulted, because `Role.on_update`
