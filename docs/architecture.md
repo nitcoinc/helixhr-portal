@@ -315,12 +315,20 @@ company", fall back to the site's default company for that persona only
 | Documents | `get_my_documents` (`frappe.client.get_list` is scoped by the same hooks) | none | HelixHR Document Link |
 | Notifications | `notification_log.get_notification_logs` | `notification_log.mark_all_as_read`, `mark_my_request_read` | Notification Log, fed by the Notification fixtures and `events.hr_request_on_update` |
 | Approvals | `get_my_approvals`, `get_approval_detail` | `act_on_approval` | Leave Application, Timesheet, Attendance Request, Workflow actions, DocShare |
-| Profile | `get_portal_bootstrap` header, `frappe.client.get` on own Employee | `update_my_profile` | Employee |
+| Profile | `get_my_profile` (five tabs; the correction dialog files through `create_my_request`) | `update_my_profile`, `create_my_request` | Employee + its education and work-history tables, HR Request |
 
 Every method in the first two columns without a package prefix is
 `helixhr.api.<name>`. That is the point of the table: apart from Documents'
-list route, the notification log and the employee's own Employee record, no
-screen reaches a generic `frappe.client` route any more.
+list route and the notification log, no screen reaches a generic
+`frappe.client` route any more. Profile was the last: `frappe.client.get`
+silently drops permission-locked fields, so the page showed half the record.
+`get_my_profile` instead reads the caller's own Employee -- including
+HR-only (permlevel 2) bank and ID fields -- through the named allow-lists in
+`utils.PROFILE_SECTION_FIELDS` / `PROFILE_SECTION_TABLES`, and masks
+`PROFILE_MASKED_FIELDS` to their last four characters before anything leaves
+the server. The allow-list is the boundary there, so salary, CTC, payroll
+accounts and External Work History's `salary` column are simply never named
+(and `test_no_money_fields` forbids `ctc` and `salary` in app code).
 
 ### Why so many thin methods (P2-R27)
 
