@@ -401,6 +401,14 @@ scheduler_events = {
 # Overriding Methods
 # ------------------------------
 #
+# The Microsoft Entra ID callback: Frappe's own login, then the portal's
+# landing rule -- Frappe's OAuth path skips `get_website_user_home_page`
+# and drops employees on Desk. Same URL, so the Azure redirect URI is
+# unchanged. See `helixhr.api.login_via_office365`.
+override_whitelisted_methods = {
+	"frappe.integrations.oauth2_logins.login_via_office365": "helixhr.api.login_via_office365",
+}
+
 # override_whitelisted_methods = {
 # 	"frappe.desk.doctype.event.event.get_events": "helixhr.event.get_events"
 # }

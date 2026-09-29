@@ -38,6 +38,7 @@ const routes = [
   {
     path: '/',
     name: 'Dashboard',
+    meta: { deskOnly: true },
     component: () => import('@/pages/Dashboard.vue'),
   },
   {
@@ -148,6 +149,7 @@ const routes = [
   {
     path: '/settings',
     name: 'Settings',
+    meta: { deskOnly: true },
     component: () => import('@/pages/Settings.vue'),
   },
   {
@@ -157,6 +159,7 @@ const routes = [
     // AsyncState's 'forbidden' region, not a client-side redirect.
     path: '/settings/:section(categories|templates|leave-types|holiday-lists|shift-types|celebrations)',
     name: 'SettingsSection',
+    meta: { deskOnly: true },
     component: () => import('@/pages/Settings.vue'),
     props: true,
   },
@@ -167,6 +170,7 @@ const routes = [
     // /settings above).
     path: '/organisation',
     name: 'Organisation',
+    meta: { deskOnly: true },
     component: () => import('@/pages/Organisation.vue'),
   },
   {
@@ -174,6 +178,7 @@ const routes = [
     // scope`) -- same posture as /organisation and /settings above.
     path: '/people',
     name: 'People',
+    meta: { deskOnly: true },
     component: () => import('@/pages/People.vue'),
   },
   {
@@ -181,6 +186,7 @@ const routes = [
     // route (P2-R12): a reload or a shared link lands on the same person.
     path: '/people/:employee',
     name: 'PersonDetail',
+    meta: { deskOnly: true },
     component: () => import('@/pages/People.vue'),
     props: true,
   },
@@ -190,6 +196,7 @@ const routes = [
     // path segment (P6-R10).
     path: '/reports',
     name: 'Reports',
+    meta: { deskOnly: true },
     component: () => import('@/pages/Reports.vue'),
   },
   {
@@ -197,6 +204,7 @@ const routes = [
     // scope`) -- same posture as /people, /organisation and /settings above.
     path: '/projects',
     name: 'Projects',
+    meta: { deskOnly: true },
     component: () => import('@/pages/Projects.vue'),
   },
   {
@@ -204,6 +212,7 @@ const routes = [
     // route (P2-R12): a reload or a shared link lands on the same project.
     path: '/projects/:project',
     name: 'ProjectDetail',
+    meta: { deskOnly: true },
     component: () => import('@/pages/Projects.vue'),
     props: true,
   },
@@ -254,6 +263,7 @@ const router = createRouter({
 //   Guest             lib/api.js has already sent them to /login carrying
 //                     the destination in `redirect-to`.
 //   unlinked employee /not-linked, with the site's HR contact.
+//   HR, no Employee   desk-only: Home plus the role-scoped admin pages.
 //   service failure   /unavailable, with Retry -- never "not set up".
 //   unknown route     /:pathMatch -> Not found, with a way Home.
 //   permission denied stays an in-app error on the page that asked; it
@@ -270,6 +280,13 @@ router.beforeEach(async (to) => {
     // Back into /unavailable after a successful retry) means the state is
     // over; go where the user actually wanted to be.
     return STATE_ROUTES.includes(to.name) ? { name: 'Dashboard' } : true
+  }
+
+  // An HR or System Manager with no Employee record: the pages whose
+  // server methods are scoped by role (`meta.deskOnly`), and Home. Every
+  // other page reads "my" records and would only fail.
+  if (session.status === 'desk-only') {
+    return to.meta.deskOnly ? true : { name: 'Dashboard' }
   }
 
   if (session.status === 'not-linked') {

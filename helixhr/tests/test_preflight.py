@@ -513,6 +513,24 @@ class TestPreflightP2U9(IntegrationTestCase):
 		result = self._with_conf("helixhr_auth_phase", "entra", preflight.check_entra)
 		self.assertEqual(result["status"], preflight.FAIL)
 
+	def test_an_enabled_key_fails_when_the_callback_override_is_lost(self):
+		from unittest.mock import patch
+
+		with (
+			patch.object(preflight, "_entra_enabled", return_value=True),
+			patch.object(frappe, "override_whitelisted_method", side_effect=lambda cmd: cmd),
+		):
+			result = self._with_conf("helixhr_auth_phase", "entra", preflight.check_entra)
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("land on Desk", result["detail"])
+
+	def test_an_enabled_key_passes_with_the_callback_override_in_place(self):
+		from unittest.mock import patch
+
+		with patch.object(preflight, "_entra_enabled", return_value=True):
+			result = self._with_conf("helixhr_auth_phase", "entra", preflight.check_entra)
+		self.assertEqual(result["status"], preflight.PASS)
+
 	def test_the_entra_phase_fails_while_password_login_is_still_on(self):
 		result = self._with_conf(
 			"helixhr_auth_phase",

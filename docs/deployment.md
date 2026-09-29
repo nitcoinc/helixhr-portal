@@ -43,10 +43,22 @@ Approvals page appears inside it.
 **`HR Manager` left that list in P4 (P4-KTD8).** HR now works a queue *inside*
 the portal — everything managers have handed over, across leave, timesheets and
 attendance requests — so an HR Manager with an active Employee record lands on
-`/helixhr` like anybody else, with Desk one click away in the shell. Their
+`/helixhr` like anybody else, with Desk one click away in the shell (the
+**Open Desk** button, drawn for HR Manager, HR User and System Manager). Their
 bookmarks still work. `HR User` and `System Manager` are unchanged and still
 land in Desk, and an HR Manager with **no** Employee record has no portal
-identity, so the rule does not move them either.
+identity of their own, so the rule does not move them either. If one of them
+opens `/helixhr` anyway they get the desk-only portal — Home, People,
+Organisation, Projects, Reports and Settings as their roles allow — rather than
+"not set up"; Directory and Organisation show the site's default company
+(Global Defaults) for them.
+
+The same rule applies after Microsoft sign-in, through
+`helixhr.api.login_via_office365`: Frappe's own OAuth callback skips the
+landing hook, so the app wraps it. Preflight's Entra check FAILs if another
+app's `override_whitelisted_methods` has taken that callback over. On a
+two-host deployment, set `host_name` to the Desk host so **Open Desk** does not
+point at the portal host's 404.
 
 One consequence to handle **before** the deploy, not after: a
 `default_workspace` pinned on a User overrides the resolved landing page, by

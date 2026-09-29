@@ -2,7 +2,7 @@ import json
 import math
 import os
 import re
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import frappe
 from frappe import _
@@ -17,6 +17,7 @@ from frappe.utils import (
 	get_first_day,
 	get_last_day,
 	get_system_timezone,
+	get_url,
 	get_url_to_form,
 	get_url_to_list,
 	get_url_to_report,
@@ -76,6 +77,7 @@ from helixhr.utils import (
 	employee_in_admin_scope,
 	get_manager_user,
 	get_week_bounds,
+	portal_home_page,
 	project_in_scope,
 	project_scope_filters,
 	rate_limit_per_user,
@@ -265,6 +267,11 @@ def get_portal_bootstrap():
 		# the two are correlated today but the flag must not assume they
 		# stay that way.
 		"can_open_desk": _can_open_desk(frappe.session.user),
+		# The shell's "Open Desk" button, and -- when there is no Employee
+		# below -- what lets an HR or System Manager use the portal's admin
+		# pages instead of being told their account is not set up. A nav
+		# decision like every flag above; each admin method gates itself.
+		"desk_url": _portal_desk_url(frappe.session.user),
 		"unread_notifications": 0,
 	}
 
@@ -295,6 +302,51 @@ def get_portal_bootstrap():
 	)
 	boot["unread_notifications"] = _safe(_get_unread_notification_count, title=title) or 0
 	return boot
+
+
+# The paths Frappe's own post-login fallback resolves to for a System User
+# (`frappe.apps.get_default_path`: an app's route under /desk, the /apps
+# picker, or /desk itself) plus the website /me page. The bare site root is
+# handled separately.
+_DESK_LANDING_PATHS = ("/app", "/apps", "/desk", "/me")
+
+
+@frappe.whitelist(allow_guest=True)
+def login_via_office365(code: str, state: str):
+	"""Frappe's Microsoft Entra ID callback, then the portal's landing rule.
+
+	Registered over `frappe.integrations.oauth2_logins.login_via_office365`
+	in hooks.py, so the Azure redirect URI does not change. The token
+	exchange, user match and session are all Frappe's own; only the final
+	`Location` is corrected.
+
+	Frappe's password login asks `get_home_page()` -- and therefore
+	`portal_home_page` -- where to land. Its OAuth path does not: with no
+	`redirect-to` it sends a System User to `get_default_path()`, which with
+	HRMS installed is `/desk/people` or `/apps`, and the portal host 404s
+	both (docs/deployment.md). An employee signing in with Microsoft was
+	landing on Desk instead of the portal.
+	"""
+	from frappe.integrations.oauth2_logins import login_via_office365 as frappe_login_via_office365
+
+	frappe_login_via_office365(code, state)
+	_redirect_portal_user_home()
+
+
+def _redirect_portal_user_home():
+	"""Point a post-login redirect bound for Desk at the portal instead,
+	for exactly the users `portal_home_page` sends there. A `redirect-to`
+	that named a non-Desk page (a portal deep link) is left alone, and so is
+	every Desk-role user -- `portal_home_page` answers None for them."""
+	response = frappe.local.response
+	if response.get("type") != "redirect" or frappe.session.user == "Guest":
+		return
+	home = portal_home_page(frappe.session.user)
+	if not home:
+		return
+	path = urlparse(response.get("location") or "").path.rstrip("/")
+	if not path or any(path == p or path.startswith(p + "/") for p in _DESK_LANDING_PATHS):
+		response["location"] = get_url(f"/{home}")
 
 
 def _count_direct_reports(employee):
@@ -6525,11 +6577,10 @@ def get_directory(query=None, department=None, start=0, limit=None):
 	HR to fix, and the page says so in its own words.
 	"""
 	rate_limit_per_user("get_directory")
-	employee = get_current_employee()
 	limit = min(max(cint(limit) or _DIRECTORY_PAGE, 1), _DIRECTORY_MAX_PAGE)
 	start = max(cint(start), 0)
 
-	company = frappe.db.get_value("Employee", employee, "company")
+	company = _caller_company()
 	if not company:
 		return {"people": [], "total": 0, "limit": limit, "start": start, "departments": []}
 
@@ -6747,6 +6798,45 @@ def _can_open_desk(user):
 	# been handed `HR Manager` is still refused here: the role does not make
 	# Desk load for them, and this flag must not say otherwise.
 	return frappe.db.get_value("User", user, "user_type") == "System User"
+
+
+def _caller_company():
+	"""The company a company-wide read (Directory, Organisation) is about.
+
+	The caller's own Active Employee's company, as it always was. An admin
+	with no Employee record at all -- `resolve_admin_scope`'s "unscoped"
+	persona, the desk-only portal's user -- has no company of their own, so
+	they get the site's default company instead of an empty page. Anyone
+	else with no Active Employee is refused -- in particular an HR Manager
+	whose Employee is Left or Inactive resolves to scope "none" and never to
+	the fallback. Refused explicitly: HRMS's `get_current_employee()` means
+	to raise `PermissionError` here but calls `.get` on its own `None` first,
+	which surfaced as a 500.
+	"""
+	info = get_current_employee_info()
+	if info:
+		return info.get("company")
+	if resolve_admin_scope(frappe.session.user)["kind"] == "unscoped":
+		return frappe.db.get_single_value("Global Defaults", "default_company")
+	frappe.throw(_("Employee not found"), frappe.PermissionError)
+
+
+# Who gets the portal's "Open Desk" button, and the portal without an
+# Employee record of their own: the HR and administration roles. Not every
+# System User -- an ordinary employee is one too, and must still see "not
+# set up" when HR has not linked them.
+_PORTAL_DESK_ROLES = frozenset({"HR Manager", "HR User", "System Manager"})
+
+
+def _portal_desk_url(user):
+	"""The Desk URL for the shell's button, or None when `user` should not
+	be shown one. Built with `get_url`, so a site with `host_name` set sends
+	HR to the Desk host rather than the portal host that 404s /desk."""
+	if not _can_open_desk(user):
+		return None
+	if user != "Administrator" and not set(frappe.get_roles(user)) & _PORTAL_DESK_ROLES:
+		return None
+	return get_url("/desk")
 
 
 def _report_filter_query(filters):
@@ -7933,8 +8023,8 @@ def get_organisation_view():
 	if not _is_hr():
 		frappe.throw(_("Only HR may see the organisation view."), frappe.PermissionError)
 
-	employee = get_current_employee()
-	company = frappe.db.get_value("Employee", employee, "company") if employee else None
+	company = _caller_company()
+	employee = (get_current_employee_info() or {}).get("name")
 	today = user_today()
 
 	return {

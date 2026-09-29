@@ -23,6 +23,8 @@ one hard load
    -> router.beforeEach awaits lib/session.ensureBootstrap()
    -> POST helixhr.api.get_portal_bootstrap  (once, P2-R20)
       no active Employee  -> /not-linked, no shell, HR contact
+      no Employee, HR/SM  -> desk-only: shell, Home + role-scoped admin pages,
+                             Open Desk (bootstrap `desk_url` set)
       request failed      -> /unavailable, no shell, Retry
       Employee            -> lib/session state filled, shell renders
 
@@ -45,7 +47,12 @@ CSRF error reloads; any other 403 is an in-app error and must stay one.
 There is no app-level auth code. Three Frappe mechanisms carry it:
 
 1. **Session.** Every call is a browser session cookie; the SPA never holds a
-   token. `allow_guest` is never set, so Guest gets `PermissionError`.
+   token. `allow_guest` is never set, so Guest gets `PermissionError`. The
+   one exception is `helixhr.api.login_via_office365`: it overrides Frappe's
+   own Microsoft Entra ID callback (which is `allow_guest` by necessity --
+   the caller is not signed in yet), runs it unchanged, and only corrects
+   the post-login redirect to the portal. It reads nothing and writes
+   nothing of its own.
 2. **User Permission on Employee.** Each portal user is scoped to their own
    Employee record. With System Settings "Apply Strict User Permissions" on,
    that scope also filters every doctype that links to Employee (Leave
@@ -280,6 +287,16 @@ site's HR contact), `/unavailable` (the bootstrap failed — Retry, and it
 resumes the destination in `?retry-to=`), and the `/:pathMatch(.*)*` catch-all
 (unknown URL — Home). A Guest never reaches any of them: `lib/api.js` sends
 them to `/login?redirect-to=<the full portal path>`.
+
+A `desk-only` session (HR Manager, HR User, System Manager or Administrator
+with no Employee record — the bootstrap sets `desk_url` for those roles) is not
+a state page. It gets the shell, but only the routes marked `meta.deskOnly`:
+Home, Settings, Organisation, People, Reports and Projects, whose server
+methods are scoped by role rather than by the caller's Employee. Every other
+route redirects to Home, and Home renders links to those pages plus Open Desk
+instead of calling `get_dashboard`. Directory and Organisation, which read "my
+company", fall back to the site's default company for that persona only
+(`api._caller_company`).
 
 
 ## Data flow per screen
@@ -899,7 +916,7 @@ KTD4 — not because of a line count.
   read or write independently of what the nav happens to show.
 - `lib/session.js` owns the portal bootstrap (`ensureBootstrap`, at most once
   per hard load; `retryBootstrap` only on an explicit user retry), the
-  `idle`/`loading`/`ready`/`not-linked`/`unavailable` status the router and
+  `idle`/`loading`/`ready`/`not-linked`/`desk-only`/`unavailable` status the router and
   `NotLinked.vue` branch on, and `signOut` (an explicit POST to `logout`, then
   a hard redirect to `/login`).
 - `lib/dates.js` is the local-calendar module — see "Portal bootstrap, and

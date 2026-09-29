@@ -78,6 +78,39 @@ section below; nothing in the app changes.
 5. Behind a reverse proxy (nginx, the frontend container here), make sure
    `X-Forwarded-Proto` is set correctly so Frappe marks the session cookie `Secure`.
 
+### Where people land after Microsoft sign-in
+
+Frappe's OAuth callback does not ask `get_website_user_home_page` where to land: with no
+`redirect-to` it sends a System User to `get_default_path()` -- `/desk/people` or `/apps`
+with HRMS installed, both 404 on the portal host. `helixhr.api.login_via_office365` is
+registered over `frappe.integrations.oauth2_logins.login_via_office365`
+(`override_whitelisted_methods` in `hooks.py`), runs Frappe's own login unchanged, then
+sends anyone `portal_home_page` would send to the portal to `/helixhr`. HR User, System
+Manager and Administrator keep Frappe's landing. The Azure redirect URI does not change.
+
+An HR Manager, HR User or System Manager with **no** Employee record opening `/helixhr`
+gets a desk-only portal (Home, plus whichever of People, Organisation, Projects, Reports and
+Settings their roles open) and an **Open Desk** button, instead of "not set up". The button
+uses `get_url("/desk")`, so set `host_name` to the Desk host on a two-host deployment.
+Directory and Organisation show **Global Defaults → Default Company** for that persona, so
+set it on a multi-company site.
+
+The redirect correction is covered by `helixhr/tests/test_portal_landing.py` and preflight's
+Entra check; the Microsoft round trip itself still has to be signed through by hand on the
+real host after each deploy.
+
+### If the Microsoft callback returns a 500
+
+The traceback is in Desk → Error Log, or `logs/web.error.log`. Usual causes, in order:
+
+- **Client secret**: the Social Login Key holds the secret's **Value**, not its ID, and
+  it has not expired. A refused token exchange surfaces as `KeyError: 'id_token'`.
+- **Tenant**: a single-tenant app registration cannot use `/common/`. Put the tenant ID
+  in both the Authorize URL and the Access Token URL of the Social Login Key.
+- **Scheme/host**: `bench --site <site> execute frappe.utils.oauth.get_redirect_uri --args
+  "['office_365']"` must equal the Azure redirect URI exactly, `https` included. If not,
+  `bench --site <site> set-config host_name https://<public-host>`.
+
 ### Known upstream issue: `redirect-to` can be lost on the OAuth round trip
 
 Frappe has an open bug (frappe/frappe#27672) where `redirect-to` sent to `/login` can come
