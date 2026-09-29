@@ -68,7 +68,12 @@ from helixhr.utils import (
 	HOLIDAY_LIST_EDITABLE_FIELDS,
 	LEAVE_TYPE_EDITABLE_FIELDS,
 	PERSON_EDITABLE_FIELDS,
+	PROFILE_CORRECTION_CATEGORY,
 	PROFILE_EDITABLE_FIELDS,
+	PROFILE_LABELS,
+	PROFILE_MASKED_FIELDS,
+	PROFILE_SECTION_FIELDS,
+	PROFILE_SECTION_TABLES,
 	SHIFT_TYPE_EDITABLE_FIELDS,
 	TEMPLATE_TOKENS,
 	UPLOAD_MAX_BYTES,
@@ -77,6 +82,7 @@ from helixhr.utils import (
 	employee_in_admin_scope,
 	get_manager_user,
 	get_week_bounds,
+	mask_identifier,
 	portal_home_page,
 	project_in_scope,
 	project_scope_filters,
@@ -174,6 +180,114 @@ def update_my_profile(**fields):
 	doc.save()
 
 	return {field: doc.get(field) for field in PROFILE_EDITABLE_FIELDS}
+
+
+@frappe.whitelist()
+def get_my_profile(**kwargs):
+	"""Everything HR holds about the caller, by Profile tab (plan
+	2026-09-29-001, U3) -- so an employee can check their own record without
+	Desk, and ask HR to fix what is wrong.
+
+	The employee is resolved from the session; any argument is ignored
+	(KTD5). This reads HR-only (permlevel 2) bank and ID fields on the
+	owner's behalf, deliberately: the named allow-list in
+	`utils.PROFILE_SECTION_FIELDS` / `PROFILE_SECTION_TABLES` and server-side
+	masking (`PROFILE_MASKED_FIELDS`) are the boundary, so a full account,
+	PAN or passport number never leaves this function. Each tab is an
+	independent `_safe` section named in `failed_sections` when it breaks.
+	"""
+	rate_limit_per_user("get_my_profile")
+	employee = (get_current_employee_info() or {}).get("name")
+	if not employee:
+		# HRMS's own `get_current_employee()` means to raise this but hits
+		# AttributeError (a 500) on its own None first.
+		frappe.throw(_("Employee not found"), frappe.PermissionError)
+
+	meta = frappe.get_meta("Employee")
+	missing = object()
+	failed = []
+
+	def section(name):
+		value = _safe(
+			lambda: _profile_section(employee, name, meta),
+			title=f"HelixHR profile section failed: {name}",
+			default=missing,
+		)
+		if value is missing:
+			failed.append(name)
+			return None
+		return value
+
+	category_active = frappe.db.get_value("HelixHR Request Category", PROFILE_CORRECTION_CATEGORY, "is_active")
+	return {
+		"employee": employee,
+		"employee_name": frappe.db.get_value("Employee", employee, "employee_name"),
+		"sections": {name: section(name) for name in PROFILE_SECTION_FIELDS},
+		"failed_sections": failed,
+		"correction_category": PROFILE_CORRECTION_CATEGORY if cint(category_active) else None,
+		# HR and administrators only (KTD6): every employee is a System
+		# User, and the portal host 404s Desk for them.
+		"desk_url": get_url_to_form("Employee", employee) if _portal_desk_url(frappe.session.user) else None,
+	}
+
+
+def _profile_section(employee, name, meta):
+	"""One Profile tab: its present fields in allow-list order, plus its
+	child tables. A field this site does not have is left out; one HR never
+	filled comes back with a None value, for the page's "Not recorded"."""
+	fieldnames = [field for field in PROFILE_SECTION_FIELDS[name] if meta.has_field(field)]
+	values = frappe.db.get_value("Employee", employee, fieldnames, as_dict=True) if fieldnames else {}
+	fields = [
+		{
+			"fieldname": field,
+			"label": PROFILE_LABELS.get(field) or _(meta.get_label(field)),
+			"value": _profile_value(field, values.get(field)),
+			"masked": field in PROFILE_MASKED_FIELDS,
+			"editable": field in PROFILE_EDITABLE_FIELDS,
+		}
+		for field in fieldnames
+	]
+	tables = [
+		_profile_table(employee, table, columns, meta)
+		for table, columns in PROFILE_SECTION_TABLES.get(name, {}).items()
+		if meta.has_field(table)
+	]
+	return {"fields": fields, "tables": tables}
+
+
+def _profile_value(field, value):
+	"""The displayable form: masked identifiers, and people by name --
+	`reports_to` holds an Employee id and the approver fields a login, and
+	neither is something the page should print."""
+	if field in PROFILE_MASKED_FIELDS:
+		return mask_identifier(value)
+	if not value:
+		return value
+	if field == "reports_to":
+		return frappe.db.get_value("Employee", value, "employee_name")
+	if field in ("leave_approver", "expense_approver", "shift_request_approver"):
+		return _employee_for_user(value)[1] or frappe.db.get_value("User", value, "full_name")
+	return value
+
+
+def _profile_table(employee, table, columns, meta):
+	child = frappe.get_meta(meta.get_field(table).options)
+	present = [column for column in columns if child.has_field(column)]
+	rows = frappe.get_all(
+		child.name,
+		filters={"parent": employee, "parenttype": "Employee", "parentfield": table},
+		fields=present,
+		order_by="idx asc",
+	)
+	return {
+		"fieldname": table,
+		"label": _(meta.get_label(table)),
+		"columns": [
+			{"fieldname": column, "label": PROFILE_LABELS.get(column) or _(child.get_label(column))}
+			for column in present
+		],
+		"rows": rows,
+	}
 
 
 # Portal bootstrap and the user's own calendar (P2-U2, P2-R5, P2-R20, P2-R21)

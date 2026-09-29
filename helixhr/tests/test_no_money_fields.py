@@ -24,6 +24,11 @@ _FORBIDDEN = {
 	"billing_amount",
 	"costing_rate",
 	"costing_amount",
+	# Plan 2026-09-29-001 U3: the Profile projection reads Employee on its
+	# owner's behalf and must never select pay -- `Employee.ctc`, or
+	# External Work History's prior-employer `salary` column.
+	"ctc",
+	"salary",
 }
 
 _APP_ROOT = Path(__file__).resolve().parent.parent
