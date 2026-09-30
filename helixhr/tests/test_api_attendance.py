@@ -31,7 +31,10 @@ class TestHelixHRAttendance(IntegrationTestCase):
 		frappe.db.commit()
 
 	def _month(self):
-		return str(get_first_day(today())), str(get_last_day(today()))
+		# From the first of the month three days ago, not of today: the
+		# tests mark up to three days back, and on the 1st-3rd of a month
+		# those days belong to the previous month.
+		return str(get_first_day(add_days(today(), -3))), str(get_last_day(today()))
 
 	def _mark(self, date, status="Present", late=0, early=0, request=None):
 		"""One Attendance row. `request` links it to an Attendance Request the
