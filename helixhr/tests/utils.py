@@ -1655,8 +1655,11 @@ def ensure_roster_fixtures():
 def seed_roster_fixtures():
 	"""`ensure_roster_fixtures` over HTTP, for `roster.spec.ts`: called
 	before and after the HR specs so a rerun starts from the same week
-	whatever the last run assigned or ended."""
+	whatever the last run assigned or ended. System Manager only (the spec
+	signs in as Administrator): it deletes and resubmits other people's
+	Shift Assignments, which no ordinary fixture login may trigger."""
 	_require_allow_tests()
+	frappe.only_for("System Manager")
 	return ensure_roster_fixtures()
 
 

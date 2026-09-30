@@ -679,8 +679,15 @@ def _redirect_to_portal_home(requested):
 		response["location"] = get_url(f"/{home}")
 
 
+def _direct_report_filters(manager):
+	"""The one definition of "direct reports": Active Employees whose
+	`reports_to` is `manager`. Home, Team week and Roster all read it, so
+	the screens cannot drift apart."""
+	return {"reports_to": manager, "status": "Active"}
+
+
 def _count_direct_reports(employee):
-	return frappe.db.count("Employee", {"reports_to": employee, "status": "Active"})
+	return frappe.db.count("Employee", _direct_report_filters(employee))
 
 
 def _safe(fn, title="HelixHR portal section failed", default=None):
@@ -8149,7 +8156,7 @@ def get_my_team_week(week_start=None):
 
 	reports = frappe.get_all(
 		"Employee",
-		filters={"reports_to": manager, "status": "Active"},
+		filters=_direct_report_filters(manager),
 		fields=["name", "employee_name"],
 		order_by="employee_name asc",
 		limit=_TEAM_REPORT_LIMIT,
@@ -8324,7 +8331,12 @@ def _team_holiday_dates(employee, start, end, cache):
 # mode pages through the rest with `start` and narrows with `search`.
 _ROSTER_ROW_LIMIT = 50
 # The row cap times a handful of assignments a week each. A bound, not a page.
-_ROSTER_ASSIGNMENT_LIMIT = 500
+# Worst case, not a typical week: the week is read by date overlap, so each
+# row can show at most seven distinct assignments (one a day) plus the
+# overlapping Inactive ones HRMS leaves behind -- 14 a row covers both.
+_ROSTER_ASSIGNMENT_LIMIT = _ROSTER_ROW_LIMIT * 14
+# HRMS v16 Shift Type has no enabled/disabled field, so every type counts;
+# `shift_types_truncated` tells the sheet when HR has more than this.
 _ROSTER_SHIFT_TYPE_LIMIT = 200
 _ROSTER_SEARCH_MAX = 140
 _ROSTER_MODES = ("mine", "team", "hr")
@@ -8351,17 +8363,22 @@ def _hh_mm(value):
 	"""`"09:00"` from a Shift Type time (a timedelta out of MariaDB)."""
 	if value is None:
 		return None
-	seconds = int(value.total_seconds()) if hasattr(value, "total_seconds") else None
-	if seconds is None:
-		return str(value)[:5]
+	seconds = int(value.total_seconds())
 	return f"{seconds // 3600 % 24:02d}:{seconds // 60 % 60:02d}"
 
 
 def _roster_date(value):
+	"""A date from the browser, or None when blank. Not `_as_date`: that
+	turns a blank into today and lets `getdate`'s HTML message through."""
+	if not value:
+		return None
 	try:
-		return getdate(value) if value else None
-	except Exception:
-		frappe.throw(_(_ROSTER_BAD_DATE))
+		return getdate(value)
+	except frappe.ValidationError:
+		frappe.clear_last_message()  # getdate's "<b>x</b> is not a valid date string."
+	except (TypeError, ValueError, OverflowError):
+		pass
+	frappe.throw(_(_ROSTER_BAD_DATE))
 
 
 def _roster_employee_scope(mode):
@@ -8372,11 +8389,13 @@ def _roster_employee_scope(mode):
 		if filters is None:
 			frappe.throw(_(_ROSTER_NOT_HR), frappe.PermissionError)
 		return {**filters, "status": "Active"}
-	me = get_current_employee()
+	# The portal's standard not-linked refusal, like every session-employee
+	# read. Desk-only HR has no Employee and uses `hr` mode, handled above.
+	me = _my_employee()
 	if mode == "mine":
 		return {"name": me}
 	reports = frappe.get_all(
-		"Employee", filters={"reports_to": me, "status": "Active"}, pluck="name", ignore_permissions=True
+		"Employee", filters=_direct_report_filters(me), pluck="name", ignore_permissions=True
 	)
 	if not reports:
 		frappe.throw(_(_ROSTER_NO_TEAM), frappe.PermissionError)
@@ -8418,13 +8437,13 @@ def _roster_cells(rows, monday, sunday, can_edit):
 
 	cells = {}
 	for employee in ids:
-		mine = by_employee.get(employee, [])
+		employee_assignments = by_employee.get(employee, [])
 		week = []
 		for offset in range(7):
 			day = add_days(monday, offset)
 			covering = [
 				a
-				for a in mine
+				for a in employee_assignments
 				if getdate(a.start_date) <= day and (not a.end_date or getdate(a.end_date) >= day)
 			]
 			covering.sort(key=lambda a: a.status != "Active")
@@ -8479,7 +8498,7 @@ def get_roster_week(week_start=None, mode="mine", search=None, start=0):
 
 	can_edit = mode == "hr" and bool(frappe.has_permission("Shift Assignment", "create"))
 	cells, times = _roster_cells(employees, monday, sunday, can_edit)
-	leaves, _waiting = _team_leaves([row.name for row in employees], monday, sunday)
+	leaves = _team_leaves([row.name for row in employees], monday, sunday)[0]
 	holiday_cache = {}
 	rows = []
 	for row in employees:
@@ -8507,19 +8526,20 @@ def get_roster_week(week_start=None, mode="mine", search=None, start=0):
 		)
 	_with_photo_urls(rows)
 
-	shift_types = (
-		[
+	shift_types = []
+	if can_edit:
+		# One past the cap, so a full list is told apart from a cut one.
+		shift_types = [
 			{"name": shift.name, "start_time": _hh_mm(shift.start_time), "end_time": _hh_mm(shift.end_time)}
 			for shift in frappe.get_all(
 				"Shift Type",
 				fields=["name", "start_time", "end_time"],
 				order_by="name asc",
-				limit=_ROSTER_SHIFT_TYPE_LIMIT,
+				limit=_ROSTER_SHIFT_TYPE_LIMIT + 1,
 			)
 		]
-		if can_edit
-		else []
-	)
+	shift_types_truncated = len(shift_types) > _ROSTER_SHIFT_TYPE_LIMIT
+	shift_types = shift_types[:_ROSTER_SHIFT_TYPE_LIMIT]
 
 	return {
 		"week_start": str(monday),
@@ -8537,6 +8557,7 @@ def get_roster_week(week_start=None, mode="mine", search=None, start=0):
 		"limit": _ROSTER_ROW_LIMIT,
 		"can_edit": can_edit,
 		"shift_types": shift_types,
+		"shift_types_truncated": shift_types_truncated,
 	}
 
 

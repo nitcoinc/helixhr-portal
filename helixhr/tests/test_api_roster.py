@@ -17,14 +17,20 @@ from helixhr.tests.test_api_people import _ensure_other_company
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	HR_MANAGER_EMPLOYEE_USER,
+	HR_MANAGER_USER,
 	MANAGER_USER,
+	ORPHAN_USER,
 	PORTAL_SHIFT_TYPE,
 	TEST_COMPANY,
+	ensure_hr_manager_user,
 	ensure_roster_fixtures,
 	ensure_test_gender,
 	ensure_test_shift_type,
 	make_test_employee_and_manager,
 	make_test_hr_manager_employee,
+	make_test_user,
+	make_test_user_without_employee,
+	seed_roster_fixtures,
 )
 from helixhr.utils import get_week_bounds
 
@@ -140,6 +146,21 @@ class TestRosterRead(RosterTestCase):
 		frappe.set_user(EMPLOYEE_USER)
 		with self.assertRaises(frappe.ValidationError):
 			get_roster_week(WED_WEEK, mode="everyone")
+
+	def test_an_unlinked_login_gets_the_standard_refusal_not_an_empty_grid(self):
+		make_test_user_without_employee()
+		frappe.set_user(ORPHAN_USER)
+		for mode in ("mine", "team"):
+			with self.assertRaises(frappe.PermissionError) as caught:
+				get_roster_week(WED_WEEK, mode=mode)
+			self.assertEqual(str(caught.exception), "Employee not found")
+
+	def test_desk_only_hr_reads_hr_mode_but_has_no_own_row(self):
+		ensure_hr_manager_user()
+		frappe.set_user(HR_MANAGER_USER)
+		self.assertEqual(get_roster_week(WED_WEEK, mode="hr")["mode"], "hr")
+		with self.assertRaises(frappe.PermissionError):
+			get_roster_week(WED_WEEK, mode="mine")
 
 	def test_a_manager_sees_themselves_and_direct_reports_only(self):
 		report = self.fresh("direct", reports_to=self.manager_name)
@@ -417,6 +438,25 @@ class TestRosterWrites(RosterTestCase):
 		self.assertEqual(frappe.db.count("Shift Assignment", {"employee": employee}), 1)
 		self.assertIsNone(frappe.db.get_value("Shift Assignment", doc.name, "end_date"))
 
+	def test_an_in_scope_hr_user_without_cancel_gets_the_plain_refusal(self):
+		# Stock HR User holds create/submit but not cancel on Shift Assignment.
+		# System Manager puts them in admin scope (company, via the Active
+		# Employee) without adding a Shift Assignment DocPerm of its own.
+		frappe.set_user("Administrator")
+		user = "roster-hr-user@helixhr.test"
+		make_test_user(user, TEST_COMPANY, create_user_permission=0)
+		frappe.get_doc("User", user).add_roles("HR User", "System Manager")
+		frappe.clear_cache(user=user)
+		doc = seed_assignment(self.fresh("hr-user-cancel"), WRITE_WEEK, "2019-07-05")
+
+		frappe.set_user(user)
+		self.assertFalse(frappe.has_permission("Shift Assignment", "cancel", doc.name))
+		with self.assertRaises(frappe.PermissionError) as caught:
+			cancel_shift_assignment(doc.name)
+		self.assertEqual(str(caught.exception), "You don't have permission to do that.")
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("Shift Assignment", doc.name, "docstatus"), 1)
+
 	def test_a_company_scoped_hr_manager_cannot_write_for_another_company(self):
 		theirs = roster_employee("scope-b", company=_ensure_other_company())
 		frappe.db.delete("Shift Assignment", {"employee": theirs})
@@ -457,3 +497,8 @@ class TestRosterSeed(RosterTestCase):
 		frappe.set_user(EMPLOYEE_USER)
 		mine = get_roster_week(str(today))
 		self.assertEqual(cell_shifts(mine["rows"][0]), [PORTAL_SHIFT_TYPE] * 7)
+
+	def test_the_http_seed_refuses_an_ordinary_employee(self):
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.PermissionError):
+			seed_roster_fixtures()
