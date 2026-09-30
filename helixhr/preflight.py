@@ -1124,7 +1124,13 @@ def check_celebration_reminders():
 		elif enabled:
 			notes.append(f"{spec['label']}: HelixHR sends '{template}'")
 		elif hrms_on:
-			notes.append(f"{spec['label']}: HRMS sends its own")
+			# Desk has the HRMS checkbox read-only (P8-KTD8), so HR cannot
+			# stop this mail anywhere -- the portal toggle only governs
+			# HelixHR's own sender.
+			problems.append(
+				f"{spec['label']}: HRMS still sends its stock email and its checkbox is "
+				"read-only in Desk -- run `bench migrate` (turn_off_hrms_celebration_senders)"
+			)
 		else:
 			quiet.append(f"{spec['label']}: nobody sends")
 

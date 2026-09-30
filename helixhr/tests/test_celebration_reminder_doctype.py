@@ -194,6 +194,18 @@ class TestSaveCelebrationReminder(IntegrationTestCase):
 				event="birthday", subject="Happy birthday!", body="Cheers", is_enabled=1
 			)
 
+	def test_disabling_in_the_portal_also_stops_hrms_stock_email(self):
+		# The HRMS checkbox is read-only in Desk, so the portal toggle must
+		# be the only switch: HR disabled the anniversary mail and HRMS's
+		# default-on checkbox kept sending it.
+		from helixhr.api import save_celebration_reminder
+
+		frappe.db.set_single_value("HR Settings", "send_birthday_reminders", 1)
+		frappe.set_user(self.hr_user)
+		save_celebration_reminder(event="birthday", subject="Happy birthday!", body="Cheers", is_enabled=0)
+
+		self.assertEqual(frappe.db.get_single_value("HR Settings", "send_birthday_reminders"), 0)
+
 	def test_first_save_creates_the_seeded_template_name_not_a_second_one(self):
 		from helixhr.api import save_celebration_reminder
 

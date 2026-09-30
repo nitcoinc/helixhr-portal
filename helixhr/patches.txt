@@ -59,3 +59,5 @@ helixhr.patches.v1_0.apply_permission_deltas #2026-09-20 P7-U1 HelixHR Delivery 
 helixhr.patches.v1_0.migrate_celebration_reminders
 # Plan 2026-09-29-001 U2: the category Profile's "Request a correction" files under.
 helixhr.patches.v1_0.seed_profile_correction_category
+# HRMS's stock celebration mail kept sending behind a Desk-locked checkbox.
+helixhr.patches.v1_0.turn_off_hrms_celebration_senders

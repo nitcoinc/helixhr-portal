@@ -6468,6 +6468,12 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 	reminder.recipient_mode = recipient_mode
 	reminder.set("recipients", [{"employee": row} for row in recipients])
 	reminder.save()
+	# The portal owns this event: HRMS's own checkbox is read-only in Desk
+	# (P8-KTD8), so HR has no way to untick it. Leaving it on means HRMS's
+	# daily job keeps sending its stock email even after HR disables the
+	# reminder here. `set_single_value`, not a HR Settings save, so
+	# `events.hr_settings_validate` is not re-run over unrelated fields.
+	frappe.db.set_single_value("HR Settings", EVENTS[event]["hrms_field"], 0)
 
 	return _celebration_reminder_projection(event)
 
