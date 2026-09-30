@@ -15,6 +15,7 @@ import base64
 import io
 import uuid
 import zipfile
+from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
@@ -158,6 +159,96 @@ class TestPortalUploadPolicy(IntegrationTestCase):
 			set(utils.ALLOWED_UPLOAD_EXTENSIONS), {".pdf", ".png", ".jpg", ".jpeg", ".docx", ".xlsx"}
 		)
 		self.assertEqual(utils.UPLOAD_MAX_BYTES, 10 * 1024 * 1024)
+
+
+def _photo(fmt, size=(64, 32), exif=None):
+	"""A real image built with Pillow, so the re-encode has pixels to read."""
+	from PIL import Image
+
+	buffer = io.BytesIO()
+	image = Image.new("RGB", size, (200, 30, 30))
+	params = {"exif": exif} if exif is not None else {}
+	image.save(buffer, fmt, **params)
+	return buffer.getvalue()
+
+
+def _gps_exif(orientation=None):
+	from PIL import Image
+
+	exif = Image.Exif()
+	exif[0x010F] = "PhoneMaker"  # Make
+	if orientation:
+		exif[0x0112] = orientation
+	exif[0x8825] = {1: "N", 2: (12.0, 34.0, 56.0), 3: "E", 4: (65.0, 43.0, 21.0)}  # GPSInfo
+	return exif.tobytes()
+
+
+class TestProfilePhotoPolicy(IntegrationTestCase):
+	"""Plan 2026-09-30-001 U1 (R1, R2): PNG/JPEG, 5 MB, re-encoded with no
+	EXIF and a longest side of 512 px."""
+
+	def _decode(self, content):
+		from PIL import Image
+
+		return Image.open(io.BytesIO(content))
+
+	def test_a_jpeg_with_gps_exif_is_stripped_rotated_and_bounded(self):
+		# Orientation 6 = rotate 90: a 2000x1000 landscape is a portrait.
+		original = _photo("JPEG", size=(2000, 1000), exif=_gps_exif(orientation=6))
+		self.assertTrue(self._decode(original).getexif())
+
+		content, extension, content_type = utils.prepare_profile_photo("me.jpg", original)
+
+		self.assertEqual((extension, content_type), (".jpg", "image/jpeg"))
+		image = self._decode(content)
+		self.assertEqual(image.format, "JPEG")
+		self.assertLessEqual(max(image.size), utils.PHOTO_MAX_SIDE)
+		self.assertGreater(image.height, image.width, "orientation was applied")
+		self.assertFalse(image.getexif(), "no EXIF survives")
+		self.assertNotIn("exif", image.info)
+		self.assertNotIn(b"PhoneMaker", content)
+
+	def test_a_png_under_the_cap_is_accepted(self):
+		content, extension, content_type = utils.prepare_profile_photo("me.png", _photo("PNG"))
+		self.assertEqual((extension, content_type), (".png", "image/png"))
+		self.assertEqual(self._decode(content).format, "PNG")
+
+	def test_every_unsafe_shape_is_refused_with_one_sentence(self):
+		jpeg = _photo("JPEG", size=(300, 300))
+		cases = {
+			"pdf renamed png": ("me.png", PDF),
+			"oversized": ("me.png", PNG + b"x" * utils.PHOTO_MAX_BYTES),
+			"gif": ("me.gif", _photo("GIF")),
+			"svg": ("me.svg", SVG),
+			"svg renamed png": ("me.png", SVG),
+			"webp": ("me.webp", _photo("WEBP")),
+			"truncated jpeg": ("me.jpg", jpeg[: len(jpeg) // 2]),
+			"corrupt jpeg": ("me.jpg", b"\xff\xd8\xff\xe0" + b"\x00" * 200),
+			"empty": ("me.png", b""),
+		}
+		for label, (file_name, content) in cases.items():
+			with self.subTest(label):
+				with self.assertRaises(frappe.ValidationError, msg=label):
+					utils.prepare_profile_photo(file_name, content)
+
+	def test_a_decompression_bomb_is_refused_before_decoding(self):
+		from PIL import Image
+
+		# Scaled down rather than a real 50,000 px canvas: the same checks
+		# trip on a small image once the bounds are below its pixel count.
+		photo = _photo("PNG", size=(64, 32))
+		with self.subTest("our own header bound"), patch.object(utils, "PHOTO_MAX_PIXELS", 100):
+			with self.assertRaises(frappe.ValidationError):
+				utils.prepare_profile_photo("me.png", photo)
+		for limit, label in ((1000, "Pillow bomb warning"), (100, "Pillow bomb error")):
+			with self.subTest(label), patch.object(Image, "MAX_IMAGE_PIXELS", limit):
+				with self.assertRaises(frappe.ValidationError):
+					utils.prepare_profile_photo("me.png", photo)
+
+	def test_the_attachment_policy_is_unchanged(self):
+		self.assertEqual(utils.validate_portal_upload("x.pdf", PDF), "application/pdf")
+		with self.assertRaises(frappe.ValidationError):
+			utils.validate_portal_upload("x.gif", _photo("GIF"))
 
 
 class TestPerUserRateLimits(IntegrationTestCase):

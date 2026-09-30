@@ -697,7 +697,7 @@ def upload_extension(file_name):
 	return os.path.splitext(base)[1].lower()
 
 
-def validate_portal_upload(file_name, content):
+def validate_portal_upload(file_name, content, policy=None, max_bytes=UPLOAD_MAX_BYTES, kind_message=None):
 	"""Refuse anything the portal upload policy does not allow, by name and
 	by content (P2-U9 step 5).
 
@@ -712,24 +712,30 @@ def validate_portal_upload(file_name, content):
 
 	Returns the policy's content type, which the caller stores rather than
 	trusting the browser's `Content-Type`.
+
+	`policy`, `max_bytes` and `kind_message` narrow the same checks for a
+	stricter upload (the profile photo's PNG/JPEG and 5 MB); the default is
+	the HR Request attachment policy, unchanged.
 	"""
+	policy = UPLOAD_POLICY if policy is None else policy
+	kind_message = kind_message or _UPLOAD_KIND_MESSAGE
 	if not isinstance(content, bytes | bytearray):
 		frappe.throw(_("That file couldn't be read. Pick it again."))
 	if not content:
 		frappe.throw(_("That file is empty. Pick another one."))
-	if len(content) > UPLOAD_MAX_BYTES:
+	if len(content) > max_bytes:
 		frappe.throw(
-			_("That file is bigger than {0} MB. Send a smaller one.").format(UPLOAD_MAX_BYTES // (1024 * 1024))
+			_("That file is bigger than {0} MB. Send a smaller one.").format(max_bytes // (1024 * 1024))
 		)
 
 	extension = upload_extension(file_name)
-	if extension not in UPLOAD_POLICY:
-		frappe.throw(_(_UPLOAD_KIND_MESSAGE))
+	if extension not in policy:
+		frappe.throw(_(kind_message))
 
-	content_type, signatures, ooxml_part = UPLOAD_POLICY[extension]
+	content_type, signatures, ooxml_part = policy[extension]
 	if not any(bytes(content).startswith(signature) for signature in signatures):
 		# The name says one thing and the bytes say another.
-		frappe.throw(_(_UPLOAD_KIND_MESSAGE))
+		frappe.throw(_(kind_message))
 
 	if ooxml_part:
 		try:
@@ -743,6 +749,87 @@ def validate_portal_upload(file_name, content):
 			frappe.throw(_("Macro-enabled documents can't be attached. Save it without macros and try again."))
 
 	return content_type
+
+
+# --- profile photo policy (plan 2026-09-30-001, U1) ------------------------
+
+# A photo is served inline to colleagues (U3), so it is narrower than an
+# attachment: PNG or JPEG only, and re-encoded on the server so nothing the
+# camera wrote (EXIF, GPS) and nothing a crafted file smuggled survives --
+# only decoded pixels are written back out.
+PHOTO_POLICY = {extension: UPLOAD_POLICY[extension] for extension in (".png", ".jpg", ".jpeg")}
+PHOTO_MAX_BYTES = 5 * 1024 * 1024
+PHOTO_MAX_SIDE = 512
+# Checked from the header, before any pixel is decoded: a 5 MB file can
+# still claim a 50,000 x 50,000 canvas (a decompression bomb). A 48 MP
+# phone camera is comfortably inside this.
+PHOTO_MAX_PIXELS = 64_000_000
+_PHOTO_KIND_MESSAGE = "Your photo must be a PNG or JPEG image."
+_PHOTO_FORMATS = {"PNG": (".png", "image/png"), "JPEG": (".jpg", "image/jpeg")}
+
+
+def is_photo_content(content):
+	"""Whether `content` starts like a PNG or a JPEG -- the served-inline
+	test for a photo this app did not re-encode itself (U3's legacy case)."""
+	head = bytes(content or b"")[:8]
+	return any(
+		head.startswith(signature) for _type, signatures, _part in PHOTO_POLICY.values() for signature in signatures
+	)
+
+
+def prepare_profile_photo(file_name, content):
+	"""Validate an uploaded photo and re-encode it (R1, R2).
+
+	Returns `(content, extension, content_type)` of the re-encoded image:
+	orientation applied, bounded to `PHOTO_MAX_SIDE`, saved with no EXIF or
+	other metadata, in the same format it arrived in. Pillow directly rather
+	than `frappe.utils.image`, whose helpers can carry EXIF through. Anything
+	Pillow cannot fully decode -- truncated, corrupt, a bomb -- is the same
+	plain refusal as a wrong type, never a PIL traceback.
+	"""
+	import warnings
+
+	from PIL import Image, ImageFile, ImageOps
+
+	validate_portal_upload(
+		file_name, content, policy=PHOTO_POLICY, max_bytes=PHOTO_MAX_BYTES, kind_message=_PHOTO_KIND_MESSAGE
+	)
+	# Frappe's File module turns on LOAD_TRUNCATED_IMAGES process-wide; a
+	# half-uploaded photo must be refused here, not padded with grey.
+	load_truncated = ImageFile.LOAD_TRUNCATED_IMAGES
+	ImageFile.LOAD_TRUNCATED_IMAGES = False
+	try:
+		with warnings.catch_warnings():
+			warnings.simplefilter("error", Image.DecompressionBombWarning)
+			with Image.open(io.BytesIO(bytes(content))) as image:
+				if image.format not in _PHOTO_FORMATS:
+					raise ValueError("not a PNG or JPEG")
+				if image.width * image.height > PHOTO_MAX_PIXELS:
+					raise ValueError("too many pixels")
+				extension, content_type = _PHOTO_FORMATS[image.format]
+				if image.format == "JPEG":
+					# Decode at a reduced scale where JPEG allows it: same
+					# result after `thumbnail`, a fraction of the memory.
+					image.draft("RGB", (PHOTO_MAX_SIDE * 2, PHOTO_MAX_SIDE * 2))
+				image.load()
+				photo = ImageOps.exif_transpose(image)
+				photo.thumbnail((PHOTO_MAX_SIDE, PHOTO_MAX_SIDE))
+				if extension == ".jpg" and photo.mode not in ("RGB", "L"):
+					photo = photo.convert("RGB")
+				elif extension == ".png" and photo.mode not in ("1", "L", "LA", "P", "RGB", "RGBA"):
+					photo = photo.convert("RGBA")
+				# Only pixels leave: no exif, icc, text chunks or comments.
+				photo.info = {}
+				out = io.BytesIO()
+				if extension == ".jpg":
+					photo.save(out, "JPEG", quality=85, optimize=True)
+				else:
+					photo.save(out, "PNG", optimize=True)
+	except (Image.DecompressionBombError, Image.DecompressionBombWarning, OSError, ValueError, SyntaxError):
+		frappe.throw(_(_PHOTO_KIND_MESSAGE))
+	finally:
+		ImageFile.LOAD_TRUNCATED_IMAGES = load_truncated
+	return out.getvalue(), extension, content_type
 
 
 # --- response headers (P2-U9 steps 5 and 8) --------------------------------
