@@ -8168,59 +8168,7 @@ def get_my_team_week(week_start=None):
 		for date in (add_days(monday, offset) for offset in range(7))
 	]
 
-	by_employee = {}
-	waiting_count = 0
-	if reports:
-		# Explicitly *not* `description`, and explicitly not `*` (P3-R21).
-		# `docstatus` and `status` are read to decide `waiting` and are
-		# translated into that one flag rather than passed through -- the
-		# screen has no use for either word (design system copy rules).
-		for row in frappe.get_all(
-			"Leave Application",
-			filters={
-				"employee": ["in", [report.name for report in reports]],
-				"docstatus": ["<", 2],
-				"status": ["in", ["Open", "Approved"]],
-				"from_date": ["<=", str(sunday)],
-				"to_date": [">=", str(monday)],
-			},
-			fields=[
-				"name",
-				"employee",
-				"leave_type",
-				"from_date",
-				"to_date",
-				"half_day",
-				"half_day_date",
-				"status",
-				"docstatus",
-			],
-			order_by="from_date asc, name asc",
-			limit=_TEAM_LEAVE_LIMIT,
-			ignore_permissions=True,
-		):
-			waiting = not (cint(row.docstatus) == 1 and row.status == "Approved")
-			waiting_count += 1 if waiting else 0
-			by_employee.setdefault(row.employee, []).append(
-				{
-					"name": row.name,
-					"leave_type": row.leave_type,
-					# The true range, because the phone list says it in
-					# words and a bar that lies about its dates on the week
-					# it starts in is worse than no bar.
-					"from_date": str(getdate(row.from_date)),
-					"to_date": str(getdate(row.to_date)),
-					# ...and the range clipped to this week, which is the
-					# bar's geometry. Clipping on the server keeps the rule
-					# in one place and makes "a two-week leave shows in both
-					# weeks" assertable without a browser.
-					"start": str(max(getdate(row.from_date), monday)),
-					"end": str(min(getdate(row.to_date), sunday)),
-					"half_day": bool(row.half_day),
-					"half_day_date": str(getdate(row.half_day_date)) if row.half_day_date else None,
-					"waiting": waiting,
-				}
-			)
+	by_employee, waiting_count = _team_leaves([report.name for report in reports], monday, sunday)
 
 	rows = [
 		{
@@ -8271,6 +8219,68 @@ def get_my_team_week(week_start=None):
 	}
 
 
+def _team_leaves(employees, monday, sunday):
+	"""`({employee: [leave, ...]}, waiting_count)` for `employees` over
+	the week -- the Team week's leave projection, shared with the Roster so
+	the two screens can never disagree about who is out (plan 2026-09-30-001
+	U7). Never `description` (P3-R21)."""
+	by_employee = {}
+	waiting_count = 0
+	if not employees:
+		return by_employee, waiting_count
+	# Explicitly *not* `description`, and explicitly not `*` (P3-R21).
+	# `docstatus` and `status` are read to decide `waiting` and are
+	# translated into that one flag rather than passed through -- the
+	# screen has no use for either word (design system copy rules).
+	for row in frappe.get_all(
+		"Leave Application",
+		filters={
+			"employee": ["in", list(employees)],
+			"docstatus": ["<", 2],
+			"status": ["in", ["Open", "Approved"]],
+			"from_date": ["<=", str(sunday)],
+			"to_date": [">=", str(monday)],
+		},
+		fields=[
+			"name",
+			"employee",
+			"leave_type",
+			"from_date",
+			"to_date",
+			"half_day",
+			"half_day_date",
+			"status",
+			"docstatus",
+		],
+		order_by="from_date asc, name asc",
+		limit=_TEAM_LEAVE_LIMIT,
+		ignore_permissions=True,
+	):
+		waiting = not (cint(row.docstatus) == 1 and row.status == "Approved")
+		waiting_count += 1 if waiting else 0
+		by_employee.setdefault(row.employee, []).append(
+			{
+				"name": row.name,
+				"leave_type": row.leave_type,
+				# The true range, because the phone list says it in
+				# words and a bar that lies about its dates on the week
+				# it starts in is worse than no bar.
+				"from_date": str(getdate(row.from_date)),
+				"to_date": str(getdate(row.to_date)),
+				# ...and the range clipped to this week, which is the
+				# bar's geometry. Clipping on the server keeps the rule
+				# in one place and makes "a two-week leave shows in both
+				# weeks" assertable without a browser.
+				"start": str(max(getdate(row.from_date), monday)),
+				"end": str(min(getdate(row.to_date), sunday)),
+				"half_day": bool(row.half_day),
+				"half_day_date": str(getdate(row.half_day_date)) if row.half_day_date else None,
+				"waiting": waiting,
+			}
+		)
+	return by_employee, waiting_count
+
+
 def _team_holiday_dates(employee, start, end, cache):
 	"""The holiday dates HRMS resolves for `employee` across `start`..`end`,
 	as a set of `YYYY-MM-DD` strings.
@@ -8284,6 +8294,250 @@ def _team_holiday_dates(employee, start, end, cache):
 	"""
 	_, kinds = _holiday_kinds(employee, start, end, cache)
 	return {date for date, kind in (kinds or {}).items() if kind != "weekly_off"}
+
+
+# ---------------------------------------------------------------------------
+# Shift roster (plan 2026-09-30-001 U7, U8 / R7-R11, KTD7-KTD9)
+#
+# A week of who works which shift, read from HRMS Shift Assignments. HelixHR's
+# own methods over HRMS doctypes, never `hrms.api.roster` (KTD7): its dotted
+# paths are HRMS-internal and its writes assume Desk DocPerms.
+#
+#   * The row set is the server's, per mode (KTD8): `mine` is the caller's
+#     own Employee, `team` is the caller plus their Active direct reports
+#     (Team's rule -- not the nested tree), `hr` is every Active employee in
+#     `resolve_admin_scope`. A mode the caller does not hold is refused with
+#     a PermissionError, never silently downgraded, so the page's `forbidden`
+#     state is the one answer to "not yours to see".
+#   * Cells are read by docstatus 1 plus date overlap, *not* by `status`:
+#     HRMS's nightly `mark_expired_shift_assignments_as_inactive` flips an
+#     ended assignment to Inactive, and a past week must still show who
+#     worked it. Cancelled (docstatus 2) never shows. Where an Active and an
+#     Inactive assignment both cover a day (HRMS skips its overlap check for
+#     Inactive rows), the Active one wins.
+#   * Writes are HR-only, inside admin scope, through `insert`/`submit`/
+#     `save`/`cancel` so HRMS's own validation runs, and each one runs in a
+#     savepoint so a refused step leaves nothing half-written (KTD9).
+# ---------------------------------------------------------------------------
+
+# One screen, one week, the Team page's cap. `total` stays exact, and `hr`
+# mode pages through the rest with `start` and narrows with `search`.
+_ROSTER_ROW_LIMIT = 50
+# The row cap times a handful of assignments a week each. A bound, not a page.
+_ROSTER_ASSIGNMENT_LIMIT = 500
+_ROSTER_SHIFT_TYPE_LIMIT = 200
+_ROSTER_SEARCH_MAX = 140
+_ROSTER_MODES = ("mine", "team", "hr")
+
+_ROSTER_REFUSED = "You don't have permission to do that."
+_ROSTER_NO_TEAM = "Only a manager with people reporting to them has a team roster to show."
+_ROSTER_NOT_HR = "Only HR can see everyone's shifts."
+_ROSTER_NOT_FOUND = "That shift assignment could not be found."
+_ROSTER_OVERLAP = "This person already has a shift on some of those dates. End or change that one first."
+_ROSTER_CANCEL_BLOCKED = (
+	"This shift can't be cancelled because check-ins or attendance are already recorded against it. "
+	"End it on a date instead."
+)
+_ROSTER_END_BEFORE_START = "The end date can't be before the shift starts."
+_ROSTER_CHANGE_ON_START = "That is the day this shift starts. Cancel it and assign the new shift instead."
+_ROSTER_CHANGE_AFTER_END = "That date is after this shift ends."
+_ROSTER_INACTIVE_EMPLOYEE = "Shifts can only be assigned to someone who is currently employed."
+_ROSTER_NO_SHIFT_TYPE = "Choose a shift."
+_ROSTER_BAD_DATE = "Give a valid date."
+_ROSTER_SAVE_FAILED = "The shift couldn't be saved."
+
+
+def _hh_mm(value):
+	"""`"09:00"` from a Shift Type time (a timedelta out of MariaDB)."""
+	if value is None:
+		return None
+	seconds = int(value.total_seconds()) if hasattr(value, "total_seconds") else None
+	if seconds is None:
+		return str(value)[:5]
+	return f"{seconds // 3600 % 24:02d}:{seconds // 60 % 60:02d}"
+
+
+def _roster_date(value):
+	try:
+		return getdate(value) if value else None
+	except Exception:
+		frappe.throw(_(_ROSTER_BAD_DATE))
+
+
+def _roster_employee_scope(mode):
+	"""`(filters, or_filters)` for the Employee rows `mode` may see, or a
+	PermissionError when the caller does not hold that mode."""
+	if mode == "hr":
+		filters = admin_scope_employee_filters(resolve_admin_scope(frappe.session.user))
+		if filters is None:
+			frappe.throw(_(_ROSTER_NOT_HR), frappe.PermissionError)
+		return {**filters, "status": "Active"}
+	me = get_current_employee()
+	if mode == "mine":
+		return {"name": me}
+	reports = frappe.get_all(
+		"Employee", filters={"reports_to": me, "status": "Active"}, pluck="name", ignore_permissions=True
+	)
+	if not reports:
+		frappe.throw(_(_ROSTER_NO_TEAM), frappe.PermissionError)
+	return {"name": ["in", [me, *reports]]}
+
+
+def _roster_cells(rows, monday, sunday, can_edit):
+	"""`{employee: [cell x 7]}` from one Shift Assignment read and one Shift
+	Type read for the whole page, whatever the row count."""
+	ids = [row.name for row in rows]
+	if not ids:
+		return {}, {}
+	assignments = frappe.get_all(
+		"Shift Assignment",
+		filters={"employee": ["in", ids], "docstatus": 1, "start_date": ["<=", str(sunday)]},
+		or_filters=[["end_date", "is", "not set"], ["end_date", ">=", str(monday)]],
+		fields=["name", "employee", "shift_type", "start_date", "end_date", "status"],
+		order_by="start_date asc, name asc",
+		limit=_ROSTER_ASSIGNMENT_LIMIT,
+		ignore_permissions=True,
+	)
+	shift_names = {row.shift_type for row in assignments}
+	shift_names |= {row.default_shift for row in rows if row.default_shift}
+	times = {}
+	if shift_names:
+		times = {
+			shift.name: shift
+			for shift in frappe.get_all(
+				"Shift Type",
+				filters={"name": ["in", list(shift_names)]},
+				fields=["name", "start_time", "end_time"],
+				ignore_permissions=True,
+			)
+		}
+
+	by_employee = {}
+	for row in assignments:
+		by_employee.setdefault(row.employee, []).append(row)
+
+	cells = {}
+	for employee in ids:
+		mine = by_employee.get(employee, [])
+		week = []
+		for offset in range(7):
+			day = add_days(monday, offset)
+			covering = [
+				a
+				for a in mine
+				if getdate(a.start_date) <= day and (not a.end_date or getdate(a.end_date) >= day)
+			]
+			covering.sort(key=lambda a: a.status != "Active")
+			found = covering[0] if covering else None
+			shift = times.get(found.shift_type) if found else None
+			cell = {
+				"date": str(day),
+				"shift_type": found.shift_type if found else None,
+				"start_time": _hh_mm(shift.start_time) if shift else None,
+				"end_time": _hh_mm(shift.end_time) if shift else None,
+			}
+			if can_edit:
+				# Only HR acts on a cell, so only HR's payload names the record.
+				cell["assignment"] = found.name if found else None
+				cell["assignment_start"] = str(getdate(found.start_date)) if found else None
+				cell["assignment_end"] = str(getdate(found.end_date)) if found and found.end_date else None
+			week.append(cell)
+		cells[employee] = week
+	return cells, times
+
+
+@frappe.whitelist()
+def get_roster_week(week_start=None, mode="mine", search=None, start=0):
+	"""One Monday-first week of shift cells for the caller's scope (U7,
+	R7, R8). `mode` is `mine` (default), `team` or `hr`; the browser picks
+	it and the server refuses one the caller does not hold. `search`
+	(employee name or id) and `start` page the rows, capped at 50 with an
+	exact `total`."""
+	rate_limit_per_user("get_roster_week")
+	mode = (mode or "mine").strip().lower()
+	if mode not in _ROSTER_MODES:
+		frappe.throw(_("Choose whose shifts to show."))
+	today = user_today()
+	monday, sunday = get_week_bounds(week_start or today)
+	start = max(cint(start), 0)
+
+	filters = _roster_employee_scope(mode)
+	needle = (search or "").strip()[:_ROSTER_SEARCH_MAX]
+	or_filters = (
+		[["name", "like", f"%{needle}%"], ["employee_name", "like", f"%{needle}%"]] if needle else None
+	)
+	scope = {"filters": filters, "or_filters": or_filters, "ignore_permissions": True}
+	employees = frappe.get_all(
+		"Employee",
+		fields=["name", "employee_name", "default_shift"],
+		order_by="employee_name asc, name asc",
+		offset=start,
+		limit=_ROSTER_ROW_LIMIT,
+		**scope,
+	)
+	total = _aggregate_count(frappe.get_all("Employee", fields=[{"COUNT": "*"}], **scope)[0])
+
+	can_edit = mode == "hr" and bool(frappe.has_permission("Shift Assignment", "create"))
+	cells, times = _roster_cells(employees, monday, sunday, can_edit)
+	leaves, _waiting = _team_leaves([row.name for row in employees], monday, sunday)
+	holiday_cache = {}
+	rows = []
+	for row in employees:
+		default = times.get(row.default_shift) if row.default_shift else None
+		rows.append(
+			{
+				"employee": row.name,
+				"employee_name": row.employee_name,
+				"initials": _initials(row.employee_name),
+				# The hint an empty cell may show: HRMS falls back to it
+				# for check-in when no assignment covers the day.
+				"default_shift": (
+					{
+						"shift_type": row.default_shift,
+						"start_time": _hh_mm(default.start_time) if default else None,
+						"end_time": _hh_mm(default.end_time) if default else None,
+					}
+					if row.default_shift
+					else None
+				),
+				"cells": cells[row.name],
+				"leaves": leaves.get(row.name, []),
+				"holidays": sorted(_team_holiday_dates(row.name, monday, sunday, holiday_cache)),
+			}
+		)
+	_with_photo_urls(rows)
+
+	shift_types = (
+		[
+			{"name": shift.name, "start_time": _hh_mm(shift.start_time), "end_time": _hh_mm(shift.end_time)}
+			for shift in frappe.get_all(
+				"Shift Type",
+				fields=["name", "start_time", "end_time"],
+				order_by="name asc",
+				limit=_ROSTER_SHIFT_TYPE_LIMIT,
+			)
+		]
+		if can_edit
+		else []
+	)
+
+	return {
+		"week_start": str(monday),
+		"week_end": str(sunday),
+		"today": today,
+		"is_current_week": str(monday) <= today <= str(sunday),
+		"mode": mode,
+		"days": [
+			{"date": str(day), "weekday": day.strftime("%A"), "is_weekend": day.weekday() >= 5}
+			for day in (add_days(monday, offset) for offset in range(7))
+		],
+		"rows": rows,
+		"total": total,
+		"start": start,
+		"limit": _ROSTER_ROW_LIMIT,
+		"can_edit": can_edit,
+		"shift_types": shift_types,
+	}
 
 
 # Organisation view (P5-U15 / P5-R20, P5-R23)

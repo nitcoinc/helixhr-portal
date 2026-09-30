@@ -560,6 +560,8 @@ RATE_LIMIT_POLICY = {
 	# loads one per avatar.
 	"upload_my_photo": (20, 3600),
 	"remove_my_photo": (20, 3600),
+	# Plan 2026-09-30-001 U7: fans out across up to 50 rows, like `get_my_team_week`.
+	"get_roster_week": (60, 60),
 }
 
 
