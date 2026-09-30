@@ -282,10 +282,23 @@ A few HRMS behaviors that aren't obvious from the Leave Application doctype alon
 while writing `test_leave_flow.py` and `LeaveForm.vue`:
 
 - **`leave_approver` is not auto-filled from `Employee.leave_approver` server-side.**
-  `validate_leave_approver` checks the field on the Leave Application document itself. The
-  portal fetches `hrms.api.get_leave_approval_details(employee)` and sends its
-  `leave_approver` explicitly on insert (`LeaveForm.vue`); a Python test inserting a Leave
-  Application directly must do the same.
+  `validate_leave_approver` checks the field on the Leave Application document itself.
+  `apply_for_leave` resolves it with `get_employee_leave_approver` (Employee's own, else the
+  Department's first leave approver) and sends it explicitly on insert; a Python test
+  inserting a Leave Application directly must do the same.
+- **An approver set only on the Department used to empty the Ask-for-leave sheet.**
+  `hrms.api.get_leave_approval_details` checks Department *read* before its department
+  fallback, and the Employee role has none -- the whole `get_leave_form_context` call raised
+  `PermissionError`, so no leave types showed and Send was refused. The portal no longer
+  calls it; do not reintroduce it, or `hrms.api.get_leave_types`, on an employee path.
+- **The sheet's leave types are allocations + the employee's Leave Policy Assignment.**
+  HRMS creates no Leave Allocation for a policy row worth 0 days, nor ever for leave without
+  pay, and `hrms.api.get_leave_types` lists every LWP type to everybody. So: a type HR wants
+  offered at 0 (comp off before it is earned, WFH) must be on the employee's policy; a
+  negative-balance type such as WFH also needs `allow_negative` on the Leave Type or HRMS
+  refuses the send ("outside leave allocation period"); an LWP type shows only to employees
+  whose policy lists it (`_policy_leave_types`). HRMS still decides on insert -- a 0-left
+  comp off is listed but refused until a Compensatory Leave Request credits it.
 - **A Leave Allocation only counts once it's submitted** (`docstatus = 1`) --
   `get_allocation_based_on_application_dates` filters on `docstatus == 1`, so a freshly
   inserted-but-not-submitted allocation makes every Leave Application look like it's "outside

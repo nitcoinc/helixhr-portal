@@ -31,10 +31,9 @@ from hrms.api import (
 	get_attendance_calendar_events,
 	get_current_employee,
 	get_current_employee_info,
-	get_leave_approval_details,
 	get_leave_balance_map,
-	get_leave_types,
 )
+from hrms.hr.doctype.leave_application.leave_application import get_employee_leave_approver
 from hrms.utils.holiday_list import get_holiday_list_for_employee
 
 from helixhr.events import (
@@ -2333,13 +2332,21 @@ def get_leave_form_context():
 	Replaces `hrms.api.get_leave_types` + `hrms.api.get_leave_approval_details`
 	as two separate browser calls, and -- more importantly -- means the
 	browser never has to be told its own Employee id to ask the question.
+
+	Neither HRMS call is used underneath any more. `get_leave_approval_details`
+	checks Department *read* before falling back to the department's
+	approver, which the Employee role does not have, so an employee whose
+	approver is set only on their Department got a PermissionError and an
+	empty sheet. `get_leave_types` lists every leave-without-pay type to
+	everybody and nothing the policy granted 0 days; the list here is the
+	allocated types plus the employee's own policy (`_policy_leave_types`).
 	"""
 	employee = get_current_employee()
 	today = user_today()
-	details = get_leave_approval_details(employee) or {}
+	approver = get_employee_leave_approver(employee)
 	balances = {entry["leave_type"]: entry for entry in _leave_balances(employee)}
 
-	names = get_leave_types(employee, today) or []
+	names = [*balances, *(t for t in _policy_leave_types(employee, today) if t not in balances)]
 	# P4-R7: a type HR approves never reaches the manager, so the sheet says
 	# so before the employee sends it. One read for the whole list.
 	hr_approved = set(
@@ -2370,9 +2377,41 @@ def get_leave_form_context():
 	return {
 		"today": today,
 		"types": types,
-		"approver": details.get("leave_approver"),
-		"approver_name": details.get("leave_approver_name"),
+		"approver": approver,
+		"approver_name": frappe.db.get_value("User", approver, "full_name", cache=True)
+		if approver
+		else None,
 	}
+
+
+def _policy_leave_types(employee, on_date):
+	"""Every leave type in `employee`'s Leave Policy Assignment covering
+	`on_date`, in policy order.
+
+	HRMS writes no Leave Allocation for a policy row worth 0 days, nor ever
+	for leave without pay, so the allocations alone miss a comp off not yet
+	earned and a negative-allowed type such as WFH. Whether a request for one
+	is accepted stays HRMS's decision on insert (`allow_negative`, balance).
+	"""
+	policies = frappe.get_all(
+		"Leave Policy Assignment",
+		filters={
+			"employee": employee,
+			"docstatus": 1,
+			"effective_from": ["<=", on_date],
+			"effective_to": [">=", on_date],
+		},
+		pluck="leave_policy",
+	)
+	if not policies:
+		return []
+	rows = frappe.get_all(
+		"Leave Policy Detail",
+		filters={"parenttype": "Leave Policy", "parent": ["in", policies]},
+		pluck="leave_type",
+		order_by="idx asc",
+	)
+	return list(dict.fromkeys(rows))
 
 
 @frappe.whitelist()
@@ -2459,7 +2498,9 @@ def apply_for_leave(leave_type, from_date, to_date, half_day=0, description=None
 	"""
 	rate_limit_per_user("apply_for_leave")
 	employee = get_current_employee()
-	approver = (get_leave_approval_details(employee) or {}).get("leave_approver")
+	# Employee's own approver, else the Department's first -- without the
+	# Department read check `get_leave_approval_details` makes first.
+	approver = get_employee_leave_approver(employee)
 	if not approver:
 		frappe.throw(
 			_("You don't have a leave approver yet, so this can't be sent. Ask HR to set one.")

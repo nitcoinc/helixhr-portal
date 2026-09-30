@@ -38,8 +38,8 @@ class TestLeaveFlow(IntegrationTestCase):
 		# leave_approver isn't auto-fetched from Employee server-side --
 		# hrms.hr.doctype.leave_application.leave_application.
 		# validate_leave_approver checks the field on the Leave Application
-		# itself, which the portal (LeaveForm.vue) fills from
-		# hrms.api.get_leave_approval_details before insert. Set it
+		# itself, which the portal (apply_for_leave) fills from
+		# get_employee_leave_approver before insert. Set it
 		# directly on Employee so that helper has something to return, and
 		# pass it explicitly below the same way the frontend does.
 		# frappe.db.set_value writes are visible within this same
@@ -225,7 +225,7 @@ class TestPortalLeaveApi(IntegrationTestCase):
 
 	def test_missing_approver_blocks_submission_and_leaves_no_draft(self):
 		frappe.db.set_value("Employee", self.employee_name, "leave_approver", None)
-		# get_leave_approval_details falls back to the department's first
+		# get_employee_leave_approver falls back to the department's first
 		# approver, so the department has to be clear of one too.
 		frappe.db.set_value("Employee", self.employee_name, "department", None)
 		before = frappe.db.count("Leave Application", {"employee": self.employee_name})
@@ -482,6 +482,109 @@ class TestPortalLeaveApi(IntegrationTestCase):
 		self.assertTrue(context["approver_name"])
 		casual = next(t for t in context["types"] if t["leave_type"] == "Casual Leave")
 		self.assertIsNotNone(casual["left"])
+
+	def test_a_department_only_approver_opens_the_sheet_and_receives_the_request(self):
+		"""HRMS's `get_leave_approval_details` checks Department read before
+		falling back to the department's approver; the Employee role has
+		none, so the sheet used to come back empty and Send was refused."""
+		ensure_leave_allocation(self.employee_name, "Casual Leave", 5)
+		ensure_holiday_list_assignment(frappe.db.get_value("Employee", self.employee_name, "company"))
+		department = self._department_with_leave_approver(MANAGER_USER)
+		frappe.db.set_value(
+			"Employee", self.employee_name, {"leave_approver": None, "department": department}
+		)
+
+		frappe.set_user(EMPLOYEE_USER)
+		self.assertFalse(frappe.has_permission("Department", "read", department))
+		context = get_leave_form_context()
+		self.assertEqual(context["approver"], MANAGER_USER)
+		self.assertTrue(context["approver_name"])
+		self.assertIn("Casual Leave", [t["leave_type"] for t in context["types"]])
+
+		result = apply_for_leave(
+			leave_type="Casual Leave", from_date=add_days(today(), 120), to_date=add_days(today(), 120)
+		)
+		self.assertEqual(
+			frappe.db.get_value("Leave Application", result["name"], "leave_approver"), MANAGER_USER
+		)
+
+	def test_the_sheet_lists_the_policy_not_every_unpaid_type(self):
+		"""A 0-day policy row gets no Leave Allocation from HRMS, and HRMS
+		offers every leave-without-pay type to everybody; the sheet follows
+		the employee's own Leave Policy Assignment instead."""
+		frappe.set_user("Administrator")
+		zero = self._leave_type("_Test Policy Zero Leave", allow_negative=1)
+		unpaid = self._leave_type("_Test Policy Unpaid Leave", is_lwp=1)
+		other_unpaid = self._leave_type("_Test Unlisted Unpaid Leave", is_lwp=1)
+		self._assign_policy([(zero, 0), (unpaid, 0)])
+		self.assertFalse(
+			frappe.db.exists("Leave Allocation", {"employee": self.employee_name, "leave_type": zero})
+		)
+
+		frappe.set_user(EMPLOYEE_USER)
+		types = {t["leave_type"]: t for t in get_leave_form_context()["types"]}
+		self.assertIn(zero, types)
+		self.assertIn(unpaid, types)
+		self.assertNotIn(other_unpaid, types)
+		self.assertIsNone(types[zero]["left"])
+
+		# Negative-allowed, so HRMS accepts it with no allocation at all.
+		ensure_holiday_list_assignment(frappe.db.get_value("Employee", self.employee_name, "company"))
+		day = add_days(today(), 122)
+		self.assertTrue(apply_for_leave(leave_type=zero, from_date=day, to_date=day)["name"])
+
+	def _department_with_leave_approver(self, approver):
+		company = frappe.db.get_value("Employee", self.employee_name, "company")
+		name = frappe.db.get_value(
+			"Department", {"department_name": "_Test Leave Approver Dept", "company": company}
+		)
+		doc = (
+			frappe.get_doc("Department", name)
+			if name
+			else frappe.get_doc(
+				{"doctype": "Department", "department_name": "_Test Leave Approver Dept", "company": company}
+			)
+		)
+		doc.set("leave_approvers", [{"approver": approver}])
+		doc.save(ignore_permissions=True)
+		return doc.name
+
+	def _leave_type(self, name, **flags):
+		if not frappe.db.exists("Leave Type", name):
+			frappe.get_doc({"doctype": "Leave Type", "leave_type_name": name, **flags}).insert(
+				ignore_permissions=True
+			)
+		return name
+
+	def _assign_policy(self, rows):
+		"""One submitted Leave Policy Assignment covering today, replacing any
+		earlier one (HRMS refuses overlapping assignments)."""
+		for name in frappe.get_all(
+			"Leave Policy Assignment", filters={"employee": self.employee_name}, pluck="name"
+		):
+			doc = frappe.get_doc("Leave Policy Assignment", name)
+			if doc.docstatus == 1:
+				doc.cancel()
+			frappe.delete_doc("Leave Policy Assignment", name, force=True, ignore_permissions=True)
+		policy = frappe.get_doc(
+			{
+				"doctype": "Leave Policy",
+				"title": "_Test Portal Policy",
+				"leave_policy_details": [
+					{"leave_type": leave_type, "annual_allocation": days} for leave_type, days in rows
+				],
+			}
+		).insert(ignore_permissions=True)
+		policy.submit()
+		frappe.get_doc(
+			{
+				"doctype": "Leave Policy Assignment",
+				"employee": self.employee_name,
+				"leave_policy": policy.name,
+				"effective_from": add_days(today(), -30),
+				"effective_to": add_days(today(), 300),
+			}
+		).submit()
 
 
 class TestLeaveStageAndOutcomes(IntegrationTestCase):
