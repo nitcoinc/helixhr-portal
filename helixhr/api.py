@@ -8540,6 +8540,181 @@ def get_roster_week(week_start=None, mode="mine", search=None, start=0):
 	}
 
 
+def _assert_roster_employee(employee):
+	"""HR-only, inside admin scope, before anything is read (KTD8). Plain
+	employees and managers hold scope "none", so they stop here too."""
+	scope = resolve_admin_scope(frappe.session.user)
+	if not employee or not employee_in_admin_scope(employee, scope):
+		frappe.throw(_(_ROSTER_REFUSED), frappe.PermissionError)
+
+
+def _roster_assignment(name):
+	"""The submitted Shift Assignment `name`, once the caller is known to
+	administer its employee. A draft or a cancelled one is "not found": the
+	roster never shows either, so neither is anything to act on."""
+	if resolve_admin_scope(frappe.session.user)["kind"] == "none":
+		frappe.throw(_(_ROSTER_REFUSED), frappe.PermissionError)
+	row = (
+		frappe.db.get_value("Shift Assignment", name, ["employee", "docstatus"], as_dict=True)
+		if name
+		else None
+	)
+	if not row or cint(row.docstatus) != 1:
+		frappe.throw(_(_ROSTER_NOT_FOUND), frappe.DoesNotExistError)
+	_assert_roster_employee(row.employee)
+	return frappe.get_doc("Shift Assignment", name)
+
+
+def _roster_assignment_projection(doc):
+	return {
+		"name": doc.name,
+		"employee": doc.employee,
+		"shift_type": doc.shift_type,
+		"start_date": str(getdate(doc.start_date)),
+		"end_date": str(getdate(doc.end_date)) if doc.end_date else None,
+		"status": doc.status,
+	}
+
+
+def _new_roster_assignment(employee, shift_type, start_date, end_date):
+	"""Insert and submit one assignment through HRMS's controller. Company
+	comes from the Employee, never from the caller (U8)."""
+	if not shift_type or not frappe.db.exists("Shift Type", shift_type):
+		frappe.throw(_(_ROSTER_NO_SHIFT_TYPE))
+	person = frappe.db.get_value("Employee", employee, ["status", "company"], as_dict=True)
+	if person.status != "Active":
+		frappe.throw(_(_ROSTER_INACTIVE_EMPLOYEE))
+	if end_date and end_date < start_date:
+		frappe.throw(_(_ROSTER_END_BEFORE_START))
+	doc = frappe.new_doc("Shift Assignment")
+	doc.update(
+		{
+			"employee": employee,
+			"shift_type": shift_type,
+			"company": person.company,
+			"start_date": start_date,
+			"end_date": end_date,
+			"status": "Active",
+		}
+	)
+	_assert_config_write(doc)
+	doc.insert()
+	doc.submit()
+	return doc
+
+
+def _run_roster_write(write, refused=None):
+	"""Run `write` inside a savepoint. A refusal rolls back to it -- so a
+	change whose new half fails leaves the old `end_date` as it was
+	(KTD9) -- and comes back as one plain sentence: HRMS's own messages
+	carry HTML links and record names, and its msgprint is cleared so the
+	raw version never reaches the client beside ours. `refused` replaces
+	whatever HRMS said (the cancel path, whose reasons all mean the same
+	thing to HR)."""
+	from frappe.utils.messages import clear_messages
+	from hrms.hr.doctype.shift_assignment.shift_assignment import MultipleShiftError, OverlappingShiftError
+
+	savepoint = "helixhr_roster_write"
+	frappe.db.savepoint(savepoint)
+	try:
+		result = write()
+	except frappe.PermissionError:
+		frappe.db.rollback(save_point=savepoint)
+		clear_messages()
+		frappe.throw(_(_ROSTER_REFUSED), frappe.PermissionError)
+	except frappe.ValidationError as error:
+		frappe.db.rollback(save_point=savepoint)
+		clear_messages()
+		if isinstance(error, OverlappingShiftError | MultipleShiftError):
+			message = _(_ROSTER_OVERLAP)
+		else:
+			message = refused or frappe.utils.strip_html(str(error)).strip() or _(_ROSTER_SAVE_FAILED)
+		frappe.throw(message)
+	frappe.db.release_savepoint(savepoint)
+	return result
+
+
+@frappe.whitelist(methods=["POST"])
+def assign_shift(employee, shift_type, start_date, end_date=None, **kwargs):
+	"""HR assigns `shift_type` to `employee` from `start_date`, open-ended
+	or to `end_date` (U8, R9). HRMS refuses an overlap; anything else in
+	the payload, `company` included, is ignored."""
+	rate_limit_per_user("assign_shift")
+	_assert_roster_employee(employee)
+	start = _roster_date(start_date)
+	if not start:
+		frappe.throw(_(_ROSTER_BAD_DATE))
+	end = _roster_date(end_date)
+	doc = _run_roster_write(lambda: _new_roster_assignment(employee, shift_type, start, end))
+	return _roster_assignment_projection(doc)
+
+
+@frappe.whitelist(methods=["POST"])
+def end_shift_assignment(assignment, end_date, **kwargs):
+	"""HR ends a submitted assignment on `end_date`: `end_date` is
+	`allow_on_submit`, so the doc stays submitted (R10)."""
+	rate_limit_per_user("end_shift_assignment")
+	doc = _roster_assignment(assignment)
+	end = _roster_date(end_date)
+	if not end:
+		frappe.throw(_(_ROSTER_BAD_DATE))
+	if end < getdate(doc.start_date):
+		frappe.throw(_(_ROSTER_END_BEFORE_START))
+
+	def write():
+		_assert_config_write(doc)
+		doc.end_date = end
+		doc.save()
+		return doc
+
+	return _roster_assignment_projection(_run_roster_write(write))
+
+
+@frappe.whitelist(methods=["POST"])
+def change_shift_assignment(assignment, from_date, shift_type, **kwargs):
+	"""HR changes the shift from `from_date`: the current assignment ends
+	the day before and a new one starts on it, keeping the old end date, in
+	one savepoint (KTD9). `shift_type` is not `allow_on_submit`, so this is
+	never an edit in place. A change on the assignment's own first day is
+	refused -- that is a cancel plus an assign, and saying so is clearer
+	than a zero-day assignment HRMS would refuse anyway."""
+	rate_limit_per_user("change_shift_assignment")
+	doc = _roster_assignment(assignment)
+	start = _roster_date(from_date)
+	if not start:
+		frappe.throw(_(_ROSTER_BAD_DATE))
+	if start <= getdate(doc.start_date):
+		frappe.throw(_(_ROSTER_CHANGE_ON_START))
+	old_end = getdate(doc.end_date) if doc.end_date else None
+	if old_end and start > old_end:
+		frappe.throw(_(_ROSTER_CHANGE_AFTER_END))
+
+	def write():
+		_assert_config_write(doc)
+		doc.end_date = add_days(start, -1)
+		doc.save()
+		return doc, _new_roster_assignment(doc.employee, shift_type, start, old_end)
+
+	ended, assigned = _run_roster_write(write)
+	return {
+		"ended": _roster_assignment_projection(ended),
+		"assigned": _roster_assignment_projection(assigned),
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+def cancel_shift_assignment(assignment, **kwargs):
+	"""HR cancels an assignment, only where HRMS allows it -- no check-ins
+	or attendance against it (R10). Stock HR User holds no cancel on Shift
+	Assignment and gets the plain refusal; end-dating covers that need."""
+	rate_limit_per_user("cancel_shift_assignment")
+	doc = _roster_assignment(assignment)
+	if not doc.has_permission("cancel"):
+		frappe.throw(_(_ROSTER_REFUSED), frappe.PermissionError)
+	_run_roster_write(doc.cancel, refused=_(_ROSTER_CANCEL_BLOCKED))
+	return {"name": doc.name, "cancelled": True}
+
+
 # Organisation view (P5-U15 / P5-R20, P5-R23)
 #
 # Management -- HR Manager and System Manager, the roles that already have

@@ -3,7 +3,16 @@ from unittest.mock import patch
 import frappe
 from frappe.tests import IntegrationTestCase
 
-from helixhr.api import _team_holiday_dates, get_my_team_week, get_roster_week
+from helixhr.api import (
+	_shift_windows,
+	_team_holiday_dates,
+	assign_shift,
+	cancel_shift_assignment,
+	change_shift_assignment,
+	end_shift_assignment,
+	get_my_team_week,
+	get_roster_week,
+)
 from helixhr.tests.test_api_people import _ensure_other_company
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
@@ -247,3 +256,173 @@ class TestRosterRead(RosterTestCase):
 		per_row = count(lambda: _team_holiday_dates(employee, monday, sunday, warm))
 		self.assertGreater(one, 0)  # the counter is really counting
 		self.assertLessEqual(ten - one, 9 * per_row)
+
+
+WRITE_WEEK = "2019-07-01"
+
+
+class TestRosterWrites(RosterTestCase):
+	"""U8 / R9, R10, R11. Every write runs as the company-scoped HR Manager
+	fixture unless the test is about who is refused."""
+
+	def setUp(self):
+		super().setUp()
+		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+
+	def assertPlainRefusal(self, sentence, fn, *args, **kwargs):
+		with self.assertRaises(frappe.ValidationError) as caught:
+			fn(*args, **kwargs)
+		self.assertEqual(str(caught.exception), sentence)
+		# HRMS's own msgprint (HTML, record links) never rides along.
+		for entry in frappe.local.message_log:
+			self.assertNotIn("<", str(entry))
+
+	def test_hr_assigns_a_submitted_active_shift_that_check_in_resolves(self):
+		employee = self.fresh("assign")
+		today = frappe.utils.getdate()
+		result = assign_shift(employee, PORTAL_SHIFT_TYPE, str(today), str(frappe.utils.add_days(today, 6)))
+		doc = frappe.get_doc("Shift Assignment", result["name"])
+		self.assertEqual((doc.docstatus, doc.status), (1, "Active"))
+		self.assertEqual(result["start_date"], str(today))
+		window, _upcoming = _shift_windows(employee, frappe.utils.now_datetime())
+		self.assertTrue(window)
+		self.assertEqual(window.shift_type.name, PORTAL_SHIFT_TYPE)
+
+	def test_a_company_argument_is_never_read(self):
+		employee = self.fresh("company")
+		result = assign_shift(employee, PORTAL_SHIFT_TYPE, WRITE_WEEK, company=_ensure_other_company())
+		self.assertEqual(frappe.db.get_value("Shift Assignment", result["name"], "company"), TEST_COMPANY)
+
+	def test_an_overlapping_assign_is_refused_in_plain_words_and_inserts_nothing(self):
+		employee = self.fresh("overlap")
+		seed_assignment(employee, WRITE_WEEK)
+		before = frappe.db.count("Shift Assignment", {"employee": employee})
+		self.assertPlainRefusal(
+			"This person already has a shift on some of those dates. End or change that one first.",
+			assign_shift,
+			employee,
+			PORTAL_SHIFT_TYPE,
+			"2019-07-03",
+		)
+		self.assertEqual(frappe.db.count("Shift Assignment", {"employee": employee}), before)
+
+	def test_assign_refuses_an_unknown_shift_and_an_end_before_the_start(self):
+		employee = self.fresh("bad-assign")
+		self.assertPlainRefusal("Choose a shift.", assign_shift, employee, "_No Such Shift", WRITE_WEEK)
+		self.assertPlainRefusal(
+			"The end date can't be before the shift starts.",
+			assign_shift,
+			employee,
+			PORTAL_SHIFT_TYPE,
+			"2019-07-05",
+			"2019-07-01",
+		)
+		self.assertFalse(frappe.db.count("Shift Assignment", {"employee": employee}))
+
+	def test_end_sets_end_date_on_the_submitted_doc(self):
+		doc = seed_assignment(self.fresh("end"), WRITE_WEEK)
+		result = end_shift_assignment(doc.name, "2019-07-03")
+		self.assertEqual(result["end_date"], "2019-07-03")
+		saved = frappe.db.get_value("Shift Assignment", doc.name, ["end_date", "docstatus"], as_dict=True)
+		self.assertEqual((str(saved.end_date), saved.docstatus), ("2019-07-03", 1))
+
+	def test_end_before_the_start_is_refused(self):
+		doc = seed_assignment(self.fresh("end-early"), WRITE_WEEK)
+		self.assertPlainRefusal(
+			"The end date can't be before the shift starts.", end_shift_assignment, doc.name, "2019-06-30"
+		)
+		self.assertIsNone(frappe.db.get_value("Shift Assignment", doc.name, "end_date"))
+
+	def test_change_ends_the_old_one_the_day_before_and_starts_the_new_one(self):
+		doc = seed_assignment(self.fresh("change"), WRITE_WEEK, "2019-07-31")
+		result = change_shift_assignment(doc.name, "2019-07-04", SECOND_SHIFT_TYPE)
+		self.assertEqual(result["ended"]["end_date"], "2019-07-03")
+		self.assertEqual(result["assigned"]["start_date"], "2019-07-04")
+		# The new one keeps the old end date rather than running open-ended.
+		self.assertEqual(result["assigned"]["end_date"], "2019-07-31")
+		self.assertEqual(result["assigned"]["shift_type"], SECOND_SHIFT_TYPE)
+		self.assertEqual(frappe.db.get_value("Shift Assignment", result["assigned"]["name"], "docstatus"), 1)
+
+	def test_a_failed_change_leaves_the_old_end_date_as_it_was(self):
+		doc = seed_assignment(self.fresh("change-fail"), WRITE_WEEK)
+		with patch("helixhr.api._new_roster_assignment", side_effect=frappe.ValidationError("Refused.")):
+			self.assertPlainRefusal(
+				"Refused.", change_shift_assignment, doc.name, "2019-07-04", SECOND_SHIFT_TYPE
+			)
+		self.assertIsNone(frappe.db.get_value("Shift Assignment", doc.name, "end_date"))
+
+	def test_change_on_the_first_day_or_after_the_end_is_refused(self):
+		doc = seed_assignment(self.fresh("change-edge"), WRITE_WEEK, "2019-07-10")
+		self.assertPlainRefusal(
+			"That is the day this shift starts. Cancel it and assign the new shift instead.",
+			change_shift_assignment,
+			doc.name,
+			WRITE_WEEK,
+			SECOND_SHIFT_TYPE,
+		)
+		self.assertPlainRefusal(
+			"That date is after this shift ends.",
+			change_shift_assignment,
+			doc.name,
+			"2019-07-11",
+			SECOND_SHIFT_TYPE,
+		)
+
+	def test_cancel_succeeds_without_check_ins_and_is_refused_with_one(self):
+		free = seed_assignment(self.fresh("cancel"), WRITE_WEEK, "2019-07-05")
+		self.assertEqual(cancel_shift_assignment(free.name), {"name": free.name, "cancelled": True})
+		self.assertEqual(frappe.db.get_value("Shift Assignment", free.name, "docstatus"), 2)
+
+		employee = self.fresh("cancel-blocked")
+		frappe.db.delete("Employee Checkin", {"employee": employee})
+		held = seed_assignment(employee, WRITE_WEEK, "2019-07-05")
+		frappe.get_doc(
+			{
+				"doctype": "Employee Checkin",
+				"employee": employee,
+				"time": "2019-07-02 10:00:00",
+				"log_type": "IN",
+				"shift": PORTAL_SHIFT_TYPE,
+			}
+		).insert(ignore_permissions=True)
+		self.assertPlainRefusal(
+			"This shift can't be cancelled because check-ins or attendance are already recorded against it. "
+			"End it on a date instead.",
+			cancel_shift_assignment,
+			held.name,
+		)
+		self.assertEqual(frappe.db.get_value("Shift Assignment", held.name, "docstatus"), 1)
+
+	def test_a_cancelled_assignment_is_not_found(self):
+		doc = seed_assignment(self.fresh("gone"), WRITE_WEEK, "2019-07-05")
+		cancel_shift_assignment(doc.name)
+		with self.assertRaises(frappe.DoesNotExistError):
+			end_shift_assignment(doc.name, "2019-07-03")
+
+	def test_employees_and_managers_are_refused_every_write(self):
+		employee = self.fresh("refused", reports_to=self.manager_name)
+		doc = seed_assignment(employee, WRITE_WEEK)
+		for user in (EMPLOYEE_USER, MANAGER_USER):
+			frappe.set_user(user)
+			for call in (
+				lambda: assign_shift(employee, PORTAL_SHIFT_TYPE, "2019-08-01"),
+				lambda: end_shift_assignment(doc.name, "2019-07-03"),
+				lambda: change_shift_assignment(doc.name, "2019-07-04", SECOND_SHIFT_TYPE),
+				lambda: cancel_shift_assignment(doc.name),
+			):
+				with self.assertRaises(frappe.PermissionError):
+					call()
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.count("Shift Assignment", {"employee": employee}), 1)
+		self.assertIsNone(frappe.db.get_value("Shift Assignment", doc.name, "end_date"))
+
+	def test_a_company_scoped_hr_manager_cannot_write_for_another_company(self):
+		theirs = roster_employee("scope-b", company=_ensure_other_company())
+		frappe.db.delete("Shift Assignment", {"employee": theirs})
+		doc = seed_assignment(theirs, WRITE_WEEK)
+		with self.assertRaises(frappe.PermissionError):
+			assign_shift(theirs, PORTAL_SHIFT_TYPE, "2019-08-01")
+		with self.assertRaises(frappe.PermissionError):
+			end_shift_assignment(doc.name, "2019-07-03")
+		with self.assertRaises(frappe.PermissionError):
+			cancel_shift_assignment(doc.name)
