@@ -20,6 +20,7 @@ from helixhr.tests.utils import (
 	MANAGER_USER,
 	PORTAL_SHIFT_TYPE,
 	TEST_COMPANY,
+	ensure_roster_fixtures,
 	ensure_test_gender,
 	ensure_test_shift_type,
 	make_test_employee_and_manager,
@@ -426,3 +427,33 @@ class TestRosterWrites(RosterTestCase):
 			end_shift_assignment(doc.name, "2019-07-03")
 		with self.assertRaises(frappe.PermissionError):
 			cancel_shift_assignment(doc.name)
+
+
+class TestRosterSeed(RosterTestCase):
+	"""U11: what the e2e roster specs rely on, from `ensure_roster_fixtures`
+	(called by `setup_playwright_fixtures`). Run twice: it must be idempotent."""
+
+	def test_the_seed_gives_hr_an_editable_week_with_shifts_in_it(self):
+		ensure_roster_fixtures()
+		seeded = ensure_roster_fixtures()
+		today = frappe.utils.getdate()
+		monday, _sunday = get_week_bounds(today)
+
+		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+		payload = get_roster_week(str(today), mode="hr", search=seeded["colleague"])
+		self.assertTrue(payload["can_edit"])
+		colleague = row_for(payload, seeded["colleague"])
+		self.assertEqual(cell_shifts(colleague), [PORTAL_SHIFT_TYPE] * 7)
+		employee = row_for(
+			get_roster_week(str(today), mode="hr", search=seeded["employee"]), seeded["employee"]
+		)
+		self.assertEqual(cell_shifts(employee), [PORTAL_SHIFT_TYPE] * 7)
+
+		# Next week is free for the assign spec.
+		next_monday = frappe.utils.add_days(monday, 7)
+		assigned = assign_shift(seeded["colleague"], SECOND_SHIFT_TYPE, str(next_monday))
+		self.assertEqual(assigned["start_date"], str(next_monday))
+
+		frappe.set_user(EMPLOYEE_USER)
+		mine = get_roster_week(str(today))
+		self.assertEqual(cell_shifts(mine["rows"][0]), [PORTAL_SHIFT_TYPE] * 7)
