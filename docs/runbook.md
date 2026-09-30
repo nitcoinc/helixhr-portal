@@ -835,6 +835,18 @@ is quiet in production — the job logs it and sends nothing, so the event simpl
 is why it is a FAIL and not a WARN. Neither sender on for an event is a WARN, not a FAIL: a site
 may not want the email at all.
 
+**Disabled in the portal, still sent.** HRMS ships `send_work_anniversary_reminders` **on**, and
+P8-KTD8 made both HRMS checkboxes read-only in Desk. So a site where HR only ever disabled the
+anniversary on Settings > Celebrations kept getting HRMS's stock email, with no Desk control to stop
+it — the portal toggle only governs HelixHR's sender. Fixed by `turn_off_hrms_celebration_senders`
+(patch + `after_install`) and by `save_celebration_reminder` unticking the HRMS box on every save, so
+the portal toggle is the only switch. HRMS sending on its own is now a preflight **FAIL**:
+
+```
+FAIL  Celebration reminders  Work anniversary: HRMS still sends its stock email and its
+      checkbox is read-only in Desk -- run `bench migrate` (turn_off_hrms_celebration_senders)
+```
+
 Save-time refusal *and* preflight, rather than one of them, because preflight is an operator
 command: between HR's save and the next run of it there is a morning's worth of duplicate mail.
 

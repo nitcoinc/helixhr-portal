@@ -39,6 +39,7 @@ def after_install():
 		seed_message_templates,
 		seed_profile_correction_category,
 		seed_request_categories,
+		turn_off_hrms_celebration_senders,
 	)
 
 	report_unsubmitted_approved_leave.execute()
@@ -53,4 +54,5 @@ def after_install():
 	# from it, but keeps the two celebration-related patches in the order
 	# a reader would expect.
 	migrate_celebration_reminders.execute()
+	turn_off_hrms_celebration_senders.execute()
 	frappe.db.commit()  # nosemgrep

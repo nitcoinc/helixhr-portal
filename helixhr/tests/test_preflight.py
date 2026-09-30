@@ -1123,15 +1123,24 @@ class TestPreflightCelebrationReminders(IntegrationTestCase):
 		self.assertEqual(result["status"], WARN)
 		self.assertIn("nobody sends", result["detail"])
 
-	def test_helixhr_only_and_hrms_only_both_pass_and_name_the_sender(self):
+	def test_helixhr_only_passes_and_names_the_sender(self):
 		from helixhr.preflight import PASS
 
-		self._set({"helixhr_birthday_template": self.TEMPLATE, "send_work_anniversary_reminders": 1})
+		self._set({"helixhr_birthday_template": self.TEMPLATE, "helixhr_anniversary_template": self.TEMPLATE})
 		result = self._check()
 
 		self.assertEqual(result["status"], PASS)
 		self.assertIn(f"HelixHR sends '{self.TEMPLATE}'", result["detail"])
-		self.assertIn("HRMS sends its own", result["detail"])
+
+	def test_hrms_sending_on_its_own_fails_because_desk_cannot_untick_it(self):
+		from helixhr.preflight import FAIL
+
+		self._set({"send_work_anniversary_reminders": 1})
+		result = self._check()
+
+		self.assertEqual(result["status"], FAIL)
+		self.assertIn("Work anniversary", result["detail"])
+		self.assertIn("read-only in Desk", result["detail"])
 
 
 class TestPreflightMailAndHRQueue(IntegrationTestCase):
