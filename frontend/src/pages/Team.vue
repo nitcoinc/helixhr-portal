@@ -1,4 +1,5 @@
 <script setup>
+import Avatar from '@/components/Avatar.vue'
 import { ref, computed, watch } from 'vue'
 import { createResource } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
@@ -141,6 +142,7 @@ const dayRows = computed(() =>
           key: `${report.employee}-${leave.name}`,
           employee_name: report.employee_name,
           initials: report.initials,
+          photo_url: report.photo_url,
           label: barLabel(leave),
           waiting: leave.waiting,
         })),
@@ -344,10 +346,13 @@ const quietWeek = computed(() => !noReports.value && !hasLeave.value)
               :data-employee="report.employee_name"
             >
               <div class="flex min-w-0 items-center gap-2">
-                <span
+                <Avatar
                   class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-xs font-bold text-ink-gray-7"
-                  aria-hidden="true"
-                >{{ report.initials }}</span>
+                  :photo-url="report.photo_url"
+                  :initials="report.initials"
+                  :name="report.employee_name"
+                  :size="32"
+                />
                 <span class="min-w-0 truncate text-sm font-medium text-ink-gray-9">
                   {{ report.employee_name }}
                 </span>
@@ -411,10 +416,13 @@ const quietWeek = computed(() => !noReports.value && !hasLeave.value)
                 :key="person.key"
                 class="flex items-center gap-2"
               >
-                <span
+                <Avatar
                   class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-xs font-bold text-ink-gray-7"
-                  aria-hidden="true"
-                >{{ person.initials }}</span>
+                  :photo-url="person.photo_url"
+                  :initials="person.initials"
+                  :name="person.employee_name"
+                  :size="28"
+                />
                 <span class="min-w-0 flex-1 truncate text-sm text-ink-gray-7">
                   {{ person.employee_name }}
                 </span>

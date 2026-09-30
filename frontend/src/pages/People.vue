@@ -1,4 +1,5 @@
 <script setup>
+import Avatar from '@/components/Avatar.vue'
 import { computed, reactive, ref, watch, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { createResource, Dialog, Button, FormControl } from 'frappe-ui'
@@ -997,10 +998,13 @@ async function submitEdit() {
               class="surface-card elev-1 flex w-full min-w-0 items-center gap-3 p-3 text-left"
               @click="openPerson(row)"
             >
-              <span
+              <Avatar
                 class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-sm font-bold text-ink-green-3"
-                aria-hidden="true"
-              >{{ row.initials }}</span>
+                :photo-url="row.photo_url"
+                :initials="row.initials"
+                :name="row.employee_name"
+                :size="40"
+              />
               <span class="min-w-0 flex-1">
                 <span class="block truncate font-medium text-ink-gray-9">{{ row.employee_name }}</span>
                 <span class="block truncate text-sm text-ink-gray-6">

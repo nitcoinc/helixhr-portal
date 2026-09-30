@@ -1,4 +1,5 @@
 <script setup>
+import Avatar from '@/components/Avatar.vue'
 import { computed, ref, watch, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { createResource, Button, FormControl } from 'frappe-ui'
@@ -274,7 +275,12 @@ async function addMember(person) {
     await setMembers.submit({ project: props.project, employees })
     detail.data.members = [
       ...members.value,
-      { employee: person.name, employee_name: person.employee_name, initials: person.initials },
+      {
+        employee: person.name,
+        employee_name: person.employee_name,
+        initials: person.initials,
+        photo_url: person.photo_url,
+      },
     ]
     memberQuery.value = ''
     memberSearch.value = ''
@@ -495,10 +501,13 @@ async function removeMember(member) {
                 :key="member.employee || member.employee_name"
                 class="flex items-center gap-3 py-2"
               >
-                <span
+                <Avatar
                   class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-xs font-bold text-ink-green-3"
-                  aria-hidden="true"
-                >{{ member.initials }}</span>
+                  :photo-url="member.photo_url"
+                  :initials="member.initials"
+                  :name="member.employee_name"
+                  :size="32"
+                />
                 <span class="min-w-0 flex-1 truncate text-sm font-medium text-ink-gray-9">
                   {{ member.employee_name }}
                 </span>
@@ -561,10 +570,13 @@ async function removeMember(member) {
                       :disabled="setMembers.loading"
                       @click="addMember(person)"
                     >
-                      <span
+                      <Avatar
                         class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-xs font-bold text-ink-gray-7"
-                        aria-hidden="true"
-                      >{{ person.initials }}</span>
+                        :photo-url="person.photo_url"
+                        :initials="person.initials"
+                        :name="person.employee_name"
+                        :size="32"
+                      />
                       <span class="min-w-0 flex-1 truncate text-sm text-ink-gray-8">
                         {{ person.employee_name }}
                       </span>

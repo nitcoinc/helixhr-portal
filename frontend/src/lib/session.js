@@ -141,6 +141,13 @@ function apply(boot) {
   else state.status = state.deskUrl ? 'desk-only' : 'not-linked'
 }
 
+/** Plan 2026-09-30-001 U5: Profile changed the caller's own photo, so the
+ * shell avatar follows without another bootstrap. `url` is the versioned
+ * URL `upload_my_photo` returned, or null after `remove_my_photo`. */
+export function setMyPhoto(url) {
+  if (state.employee) state.employee = { ...state.employee, photo_url: url || null }
+}
+
 export async function signOut() {
   // POST, explicitly. Frappe's `logout` is a POST-only whitelisted method and
   // refuses a GET with `PermissionError: Not permitted` -- and `call()` only

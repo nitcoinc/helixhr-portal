@@ -1,11 +1,15 @@
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
-import { createResource, FormControl, Button } from 'frappe-ui'
+import { createResource, FormControl, Button, Dialog } from 'frappe-ui'
+import Avatar from '@/components/Avatar.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import ProfileFields from '@/components/profile/ProfileFields.vue'
 import ProfileTable from '@/components/profile/ProfileTable.vue'
 import CorrectionDialog from '@/components/profile/CorrectionDialog.vue'
+import { uploadMyPhoto } from '@/lib/api'
+import { PHOTO_ACCEPT, PHOTO_MAX_MB, photoRefusal } from '@/lib/profilePhoto'
+import { setMyPhoto } from '@/lib/session'
 
 // Plan 2026-09-29-001 U5. Everything HR holds about the employee, in five
 // addressable tabs, so a wrong date of birth is found here rather than in
@@ -85,6 +89,72 @@ const placeLine = computed(() => {
   const manager = valueOf('job', 'reports_to')
   return [manager ? `Reports to ${manager}` : null, valueOf('job', 'branch')].filter(Boolean).join(' · ')
 })
+
+// ── Photo (plan 2026-09-30-001 U5) ─────────────────────────────────────
+// Only the caller's own: both methods resolve the employee from the session.
+// The server re-checks and re-encodes; `photoRefusal` just saves a doomed
+// upload. A success updates the band and the shell in place.
+const photoUrl = ref(null)
+watch(
+  () => profile.data?.photo_url,
+  (url) => {
+    photoUrl.value = url || null
+  },
+  { immediate: true },
+)
+const photoInput = ref(null)
+const photoBusy = ref(false)
+const photoError = ref('')
+const confirmingRemove = ref(false)
+const removePhoto = createResource({ url: 'helixhr.api.remove_my_photo', method: 'POST' })
+
+// The live region stays mounted so a new sentence is announced; while the
+// remove dialog is open its own alert says it instead.
+const bandError = computed(() => (confirmingRemove.value ? '' : photoError.value))
+
+function setPhoto(url) {
+  photoUrl.value = url || null
+  setMyPhoto(url)
+}
+
+function pickPhoto() {
+  photoError.value = ''
+  photoInput.value?.click()
+}
+
+async function onPhotoChange(event) {
+  const file = event.target.files?.[0] || null
+  // Cleared so picking the same file again after a refusal still fires.
+  event.target.value = ''
+  if (!file) return
+  photoError.value = photoRefusal(file)
+  if (photoError.value) return
+  photoBusy.value = true
+  try {
+    const result = await uploadMyPhoto(file)
+    setPhoto(result?.photo_url)
+  } catch (error) {
+    photoError.value = error?.messages?.[0] || 'Your photo could not be saved. Try again.'
+  } finally {
+    photoBusy.value = false
+  }
+}
+
+function askRemovePhoto() {
+  photoError.value = ''
+  confirmingRemove.value = true
+}
+
+async function doRemovePhoto() {
+  photoError.value = ''
+  try {
+    await removePhoto.submit()
+    setPhoto(null)
+    confirmingRemove.value = false
+  } catch (error) {
+    photoError.value = error?.messages?.[0] || 'Your photo could not be removed. Try again.'
+  }
+}
 
 // ── Corrections ────────────────────────────────────────────────────────
 const correcting = ref(null)
@@ -199,13 +269,15 @@ async function saveChanges() {
           aria-label="Your identity"
           data-testid="profile-identity"
         >
-          <span
+          <Avatar
             class="flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-white/10 font-heading text-xl font-bold text-signal"
-            aria-hidden="true"
-          >
-            {{ initials || '—' }}
-          </span>
-          <div class="min-w-0">
+            :photo-url="photoUrl"
+            :initials="initials || '—'"
+            :name="employeeName"
+            :size="64"
+            data-testid="profile-avatar"
+          />
+          <div class="min-w-0 flex-1">
             <h2 class="type-section font-heading text-white">
               {{ employeeName || '—' }}
             </h2>
@@ -220,6 +292,49 @@ async function saveChanges() {
               class="text-sm text-blue-200"
             >
               {{ placeLine }}
+            </p>
+            <div class="mt-3 flex flex-wrap items-center gap-2">
+              <!-- The input is the real control's engine, not a tab stop:
+                   the labelled button opens it. -->
+              <input
+                ref="photoInput"
+                type="file"
+                class="sr-only"
+                tabindex="-1"
+                aria-hidden="true"
+                :accept="PHOTO_ACCEPT"
+                data-testid="profile-photo-input"
+                @change="onPhotoChange"
+              >
+              <button
+                type="button"
+                class="inline-flex min-h-8 cursor-pointer items-center rounded-md border border-white/25 px-2.5 text-xs font-medium text-blue-100 hover:bg-white/10 hover:text-white disabled:cursor-wait disabled:opacity-60"
+                :disabled="photoBusy || removePhoto.loading"
+                :aria-busy="photoBusy"
+                @click="pickPhoto"
+              >
+                {{ photoBusy ? 'Saving photo…' : photoUrl ? 'Change photo' : 'Add photo' }}
+              </button>
+              <button
+                v-if="photoUrl"
+                type="button"
+                class="inline-flex min-h-8 cursor-pointer items-center rounded-md px-2.5 text-xs font-medium text-blue-100 hover:bg-white/10 hover:text-white disabled:opacity-60"
+                :disabled="photoBusy || removePhoto.loading"
+                @click="askRemovePhoto"
+              >
+                Remove photo
+              </button>
+              <span class="text-xs text-blue-200">
+                PNG or JPEG · up to <span class="tabular">{{ PHOTO_MAX_MB }}</span> MB
+              </span>
+            </div>
+            <p
+              class="text-sm text-signal"
+              :class="{ 'mt-2': bandError }"
+              role="alert"
+              data-testid="profile-photo-error"
+            >
+              {{ bandError }}
             </p>
           </div>
         </section>
@@ -386,5 +501,39 @@ async function saveChanges() {
       :field="correcting"
       :category="correctionCategory"
     />
+    <!-- Removing is confirmed, never a single tap (the withdraw pattern). -->
+    <Dialog
+      v-model="confirmingRemove"
+      :options="{ title: 'Remove your photo?', size: 'sm' }"
+    >
+      <template #body-content>
+        <p class="text-sm text-ink-gray-7">
+          Colleagues will see your initials instead. You can add a photo again at any time.
+        </p>
+        <p
+          v-if="photoError"
+          class="mt-3 text-sm text-ink-red-4"
+          role="alert"
+        >
+          {{ photoError }}
+        </p>
+        <div class="mt-4 flex items-center gap-2">
+          <Button
+            variant="solid"
+            theme="red"
+            :loading="removePhoto.loading"
+            @click="doRemovePhoto"
+          >
+            Remove photo
+          </Button>
+          <Button
+            variant="subtle"
+            @click="confirmingRemove = false"
+          >
+            Keep it
+          </Button>
+        </div>
+      </template>
+    </Dialog>
   </div>
 </template>

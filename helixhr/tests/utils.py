@@ -1502,6 +1502,34 @@ def _ensure_directory_employee(suffix, company, status="Active", **fields):
 	return employee.name
 
 
+def _ensure_directory_photo(employee):
+	"""Plan 2026-09-30-001 U5: the directory colleague has a photo, so
+	`profile-photo.spec.ts` sees an `<img>` for them and initials for the
+	manager, who has none. Written the way `upload_my_photo` writes it: a
+	private File attached to (Employee, image) plus a `db_set`, never a save
+	(KTD3). Idempotent: a colleague who already has one keeps it."""
+	import io
+
+	from PIL import Image
+
+	filters = {"attached_to_doctype": "Employee", "attached_to_name": employee, "attached_to_field": "image"}
+	if frappe.db.exists("File", filters):
+		return employee
+	buffer = io.BytesIO()
+	Image.new("RGB", (64, 64), (20, 110, 90)).save(buffer, "PNG")
+	doc = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": f"{employee}-photo.png",
+			"content": buffer.getvalue(),
+			"is_private": 1,
+			**filters,
+		}
+	).insert(ignore_permissions=True)
+	frappe.db.set_value("Employee", employee, "image", doc.file_url)
+	return employee
+
+
 DASHBOARD_DOCUMENT_TITLE = "Employee Handbook"
 
 
@@ -1551,13 +1579,15 @@ def ensure_directory_fixtures():
 		"department": department,
 		"employee": employee_name,
 		"manager": manager_name,
-		"colleague": _ensure_directory_employee(
-			"COLLEAGUE",
-			company,
-			designation=designation,
-			department=department,
-			company_email=DIRECTORY_COLLEAGUE_EMAIL,
-			reports_to=manager_name,
+		"colleague": _ensure_directory_photo(
+			_ensure_directory_employee(
+				"COLLEAGUE",
+				company,
+				designation=designation,
+				department=department,
+				company_email=DIRECTORY_COLLEAGUE_EMAIL,
+				reports_to=manager_name,
+			)
 		),
 		"left": _ensure_directory_employee("LEFT", company, status="Left"),
 		"inactive": _ensure_directory_employee("INACTIVE", company, status="Inactive"),

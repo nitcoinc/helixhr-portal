@@ -1,4 +1,5 @@
 <script setup>
+import Avatar from '@/components/Avatar.vue'
 import { ref, watch, computed, onMounted, onUnmounted } from 'vue'
 import { createResource, FormControl, Button } from 'frappe-ui'
 import { toPlainLeaveError } from '@/lib/errorMap'
@@ -276,10 +277,13 @@ async function submit() {
         v-else-if="approverName"
         class="mt-2 flex items-center gap-2 text-sm text-ink-gray-7"
       >
-        <span
+        <Avatar
           class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-xs font-bold text-ink-green-3"
-          aria-hidden="true"
-        >{{ approverInitials }}</span>
+          :photo-url="context.data?.approver_photo_url"
+          :initials="approverInitials"
+          :name="approverName"
+          :size="28"
+        />
         Goes to {{ approverName }}
       </p>
     </div>
