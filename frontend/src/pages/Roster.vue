@@ -1,10 +1,11 @@
 <script setup>
 import Avatar from '@/components/Avatar.vue'
-import { ref, computed, watch, onUnmounted } from 'vue'
+import { ref, computed, watch, nextTick, onUnmounted } from 'vue'
 import { createResource, FormControl } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
+import RosterShiftSheet from '@/components/RosterShiftSheet.vue'
 import { session } from '@/lib/session'
 import { addCalendarDays, dateTileParts, formatDateRange, mondayOf, today } from '@/lib/dates'
 import { isEmptyWeek, leaveLabel, rosterModes, shiftHours } from '@/lib/roster'
@@ -131,6 +132,47 @@ const dayRows = computed(() =>
   })),
 )
 
+// --- HR editing (U10) ----------------------------------------------------
+
+// `can_edit` is the server's answer (HR mode plus Shift Assignment create);
+// without it no cell is a button, so an employee has nothing to press.
+const canEdit = computed(() => !!roster.data?.can_edit)
+const sheetOpen = ref(false)
+const selected = ref(null)
+// The `data-cell-key` of the control that opened the sheet, so focus goes
+// back to it -- after the refetch, which re-renders the cell.
+let returnKey = ''
+
+function openCell(row, cell, layout) {
+  returnKey = `${row.employee}|${cell.date}|${layout}`
+  selected.value = { person: { employee: row.employee, employee_name: row.employee_name }, cell }
+  sheetOpen.value = true
+}
+
+function focusReturn() {
+  nextTick(() => {
+    if (!returnKey) return
+    document.querySelector(`[data-cell-key="${CSS.escape(returnKey)}"]`)?.focus()
+  })
+}
+
+// No optimistic edit: the grid is whatever the server says after the write.
+// The refetch keeps the grid mounted (no skeleton), so the cell that opened
+// the sheet is still the element focus returns to.
+const refreshing = ref(false)
+async function onChanged() {
+  refreshing.value = true
+  try {
+    await roster.reload()
+  } finally {
+    refreshing.value = false
+  }
+  focusReturn()
+}
+watch(sheetOpen, (value) => {
+  if (!value) focusReturn()
+})
+
 // --- empty and quiet ----------------------------------------------------
 
 const noRows = computed(() => !!roster.data && rows.value.length === 0)
@@ -224,6 +266,7 @@ const scopeLine = computed(() => {
     <AsyncState
       section="roster"
       :resource="roster"
+      :loading="roster.loading && !refreshing"
       :empty="noRows"
       :empty-title="emptyTitle"
       :empty-body="emptyBody"
@@ -306,10 +349,17 @@ const scopeLine = computed(() => {
                 data-testid="roster-cell"
                 :data-date="cell.date"
               >
-                <div
-                  class="flex h-full min-h-14 flex-col justify-center gap-0.5 rounded px-2 py-1.5 text-left"
-                  :class="isOff(days[index] || {}, row) ? 'bg-surface-gray-3' : 'bg-surface-gray-1'"
-                  :aria-label="cellLabel(row, cell, index)"
+                <component
+                  :is="canEdit ? 'button' : 'div'"
+                  :type="canEdit ? 'button' : undefined"
+                  class="flex h-full min-h-14 w-full flex-col justify-center gap-0.5 rounded px-2 py-1.5 text-left"
+                  :class="[
+                    isOff(days[index] || {}, row) ? 'bg-surface-gray-3' : 'bg-surface-gray-1',
+                    canEdit && 'cursor-pointer hover:ring-1 hover:ring-outline-gray-3',
+                  ]"
+                  :aria-label="cellLabel(row, cell, index) + (canEdit ? (cell.assignment ? '. Edit shift' : '. Assign a shift') : '')"
+                  :data-cell-key="`${row.employee}|${cell.date}|grid`"
+                  @click="canEdit && openCell(row, cell, 'grid')"
                 >
                   <template v-if="cell.shift_type">
                     <span class="truncate text-xs font-medium text-ink-gray-9">{{ cell.shift_type }}</span>
@@ -329,7 +379,7 @@ const scopeLine = computed(() => {
                     v-if="leaveLabel(row, cell.date)"
                     class="truncate rounded bg-surface-green-2 px-1.5 text-xs font-medium text-ink-green-3"
                   >{{ leaveLabel(row, cell.date) }}</span>
-                </div>
+                </component>
               </div>
             </div>
           </div>
@@ -401,6 +451,16 @@ const scopeLine = computed(() => {
                   v-if="leaveLabel(row, day.date)"
                   class="shrink-0 rounded-full bg-surface-green-2 px-2 py-0.5 text-xs font-medium text-ink-green-3"
                 >{{ leaveLabel(row, day.date) }}</span>
+                <button
+                  v-if="canEdit"
+                  type="button"
+                  class="-my-2 inline-flex min-h-11 shrink-0 cursor-pointer items-center text-sm font-medium text-ink-blue-link underline underline-offset-2"
+                  :aria-label="`${cell.assignment ? 'Edit' : 'Assign'} ${row.employee_name}'s shift on ${day.weekday}`"
+                  :data-cell-key="`${row.employee}|${cell.date}|list`"
+                  @click="openCell(row, cell, 'list')"
+                >
+                  {{ cell.assignment ? 'Edit' : 'Assign' }}
+                </button>
               </li>
             </ul>
           </div>
@@ -456,5 +516,15 @@ const scopeLine = computed(() => {
         {{ scopeLine }} Only this week.
       </p>
     </AsyncState>
+
+    <RosterShiftSheet
+      v-if="canEdit"
+      v-model="sheetOpen"
+      :person="selected?.person"
+      :cell="selected?.cell"
+      :shift-types="roster.data?.shift_types || []"
+      :today="roster.data?.today || ''"
+      @changed="onChanged"
+    />
   </div>
 </template>

@@ -1651,6 +1651,15 @@ def ensure_roster_fixtures():
 	return {"employee": employee_name, "colleague": colleague, "hr": hr_employee}
 
 
+@frappe.whitelist()
+def seed_roster_fixtures():
+	"""`ensure_roster_fixtures` over HTTP, for `roster.spec.ts`: called
+	before and after the HR specs so a rerun starts from the same week
+	whatever the last run assigned or ended."""
+	_require_allow_tests()
+	return ensure_roster_fixtures()
+
+
 # P4-U5: celebrations. Home's card reads a *projection* of `date_of_birth`
 # and `date_of_joining` (P4-KTD14), so both the Python suite and
 # `login-dashboard.spec.ts` need people whose dates fall in whatever month

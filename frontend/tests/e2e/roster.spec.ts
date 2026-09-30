@@ -134,3 +134,85 @@ test.describe('phone', () => {
     expect(overflow).toBeLessThanOrEqual(0)
   })
 })
+
+test.describe('hr', () => {
+  test.describe.configure({ mode: 'serial' })
+
+  test.beforeEach(async ({ baseURL }, testInfo) => {
+    test.skip(testInfo.project.name !== 'hr', 'HR edits the roster')
+    await seedRoster(baseURL!)
+  })
+
+  test.afterAll(async ({ baseURL }, testInfo) => {
+    if (testInfo.project.name === 'hr') await seedRoster(baseURL!)
+  })
+
+  async function colleagueNextWeek(page: Page) {
+    await openRoster(page)
+    await page.getByRole('button', { name: 'Everyone' }).click()
+    await page.getByLabel('Search').fill(COLLEAGUE)
+    await page.waitForLoadState('networkidle')
+    await expect(row(page, COLLEAGUE)).toBeVisible()
+    await page.getByRole('button', { name: 'Next week' }).click()
+    await page.waitForLoadState('networkidle')
+    await expect(row(page, COLLEAGUE).getByText(SHIFT)).toHaveCount(0)
+    return row(page, COLLEAGUE)
+  }
+
+  function cellButton(target: ReturnType<typeof row>, index: number) {
+    return target.locator('[data-testid="roster-cell"]').nth(index).getByRole('button')
+  }
+
+  test('assigns next week from the keyboard, then ends it mid-week', async ({ page }) => {
+    const colleague = await colleagueNextWeek(page)
+
+    // Keyboard: focus Monday's cell, open with Enter, set the end date,
+    // submit with Enter from the form.
+    const monday = cellButton(colleague, 0)
+    await monday.focus()
+    await page.keyboard.press('Enter')
+    const sheet = page.getByTestId('roster-sheet')
+    await expect(sheet).toBeVisible()
+    await page.locator('#roster-shift-type').selectOption(SHIFT)
+    const sunday = await colleague.locator('[data-testid="roster-cell"]').nth(6).getAttribute('data-date')
+    await sheet.getByLabel('To (optional)').fill(sunday!)
+    await sheet.getByLabel('To (optional)').press('Enter')
+    await expect(sheet).toBeHidden()
+    await expect(colleague.getByText(SHIFT)).toHaveCount(7)
+    // Focus comes back to the cell it was opened from.
+    await expect(cellButton(colleague, 0)).toBeFocused()
+
+    // End it on Wednesday: Thursday to Sunday clear.
+    await cellButton(colleague, 2).click()
+    await expect(sheet).toBeVisible()
+    await sheet.getByRole('button', { name: 'End it' }).click()
+    await sheet.getByRole('button', { name: 'End shift' }).click()
+    await expect(sheet).toBeHidden()
+    await expect(colleague.getByText(SHIFT)).toHaveCount(3)
+    for (const index of [3, 4, 5, 6]) {
+      await expect(colleague.locator('[data-testid="roster-cell"]').nth(index)).not.toContainText(SHIFT)
+    }
+  })
+
+  test('an overlapping assign shows the plain overlap sentence', async ({ page }) => {
+    const colleague = await colleagueNextWeek(page)
+    // Monday to Wednesday next week...
+    await cellButton(colleague, 0).click()
+    const sheet = page.getByTestId('roster-sheet')
+    const wednesday = await colleague.locator('[data-testid="roster-cell"]').nth(2).getAttribute('data-date')
+    await sheet.getByLabel('To (optional)').fill(wednesday!)
+    await sheet.getByRole('button', { name: 'Assign shift' }).click()
+    await expect(sheet).toBeHidden()
+    await expect(colleague.getByText(SHIFT)).toHaveCount(3)
+
+    // ...then Thursday's cell, moved back to Tuesday: overlaps.
+    await cellButton(colleague, 3).click()
+    await expect(sheet).toBeVisible()
+    const tuesday = await colleague.locator('[data-testid="roster-cell"]').nth(1).getAttribute('data-date')
+    await sheet.getByLabel('From').fill(tuesday!)
+    await sheet.getByRole('button', { name: 'Assign shift' }).click()
+    await expect(sheet.getByRole('alert')).toHaveText(
+      'This person already has a shift on some of those dates. End or change that one first.',
+    )
+  })
+})
