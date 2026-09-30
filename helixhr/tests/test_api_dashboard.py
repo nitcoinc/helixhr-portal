@@ -242,7 +242,7 @@ class TestHelixHRCelebrations(IntegrationTestCase):
 		for row in birthdays:
 			self.assertEqual(
 				set(row),
-				{"employee", "employee_name", "initials", "day", "month", "is_today"},
+				{"employee", "employee_name", "initials", "photo_url", "day", "month", "is_today"},
 			)
 			self.assertNotIn(1990, row.values())
 			self.assertNotIn(self.today.year - 1990, row.values())

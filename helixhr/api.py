@@ -226,6 +226,7 @@ def get_my_profile(**kwargs):
 	return {
 		"employee": employee,
 		"employee_name": info.get("employee_name"),
+		"photo_url": _employee_photo_url(employee),
 		"sections": {name: section(name) for name in PROFILE_SECTION_FIELDS},
 		"failed_sections": failed,
 		"correction_category": PROFILE_CORRECTION_CATEGORY if cint(category_active) else None,
@@ -619,6 +620,9 @@ def get_portal_bootstrap():
 		# service failure (P2-U2 scenario 3).
 		return boot
 
+	# The shell's own avatar (plan 2026-09-30-001 U4). One indexed read.
+	employee["photo_url"] = _employee_photo_url(employee["name"])
+
 	# A leave approver need not be anybody's manager, and a manager's only
 	# pending work may be a timesheet -- gating the Approvals nav item on
 	# direct reports alone hid the entry from both (P2-R11). The count is
@@ -823,6 +827,7 @@ def _get_celebrations(employee, today):
 			anniversary["years"] = today.year - joined.year
 			anniversaries.append(anniversary)
 
+	_with_photo_urls(birthdays + anniversaries)
 	return {
 		"birthdays": _ordered_celebrations(birthdays),
 		"anniversaries": _ordered_celebrations(anniversaries),
@@ -2178,7 +2183,7 @@ def _approval_summaries(employee):
 	# Oldest first: the queue is a backlog, and the person who has waited
 	# longest is the one the manager is holding up (P2-U7 step 7).
 	rows.sort(key=lambda entry: (entry["sent_on"] or "", entry["name"]))
-	return rows, capped
+	return _with_photo_urls(rows), capped
 
 
 def _holds_routed_role(user=None):
@@ -2593,6 +2598,8 @@ def get_leave_form_context():
 		"approver_name": frappe.db.get_value("User", approver, "full_name", cache=True)
 		if approver
 		else None,
+		# The approver is a User; the photo belongs to their Employee.
+		"approver_photo_url": _employee_photo_url(_employee_for_user(approver)[0]),
 	}
 
 
@@ -4790,7 +4797,7 @@ def _recently_decided(employee):
 	decided.sort(key=lambda entry: entry["decided_on"] or "", reverse=True)
 	for entry in decided:
 		entry["age_days"] = _age_in_days(entry["decided_on"], today)
-	return decided[:_DECIDED_LIMIT]
+	return _with_photo_urls(decided[:_DECIDED_LIMIT])
 
 
 @frappe.whitelist()
@@ -5005,6 +5012,7 @@ def _decision_head(doc, employee_name):
 		"employee": doc.employee,
 		"employee_name": employee_name,
 		"initials": _initials(employee_name),
+		"photo_url": _employee_photo_url(doc.employee),
 		# The concurrency token. The screen sends back the value it was
 		# rendered from, and `act_on_approval` refuses anything else
 		# (P2-R25, P2-U7 step 3).
@@ -5576,6 +5584,7 @@ def _request_decision_detail(doc):
 		"employee": doc.employee,
 		"employee_name": employee_name,
 		"initials": _initials(employee_name),
+		"photo_url": _employee_photo_url(doc.employee),
 		"modified": str(doc.modified),
 		# P4-KTD7's tag, carried by a fourth kind for the first time: true
 		# only when the stored route is HR Manager, never for IT Team.
@@ -6997,7 +7006,7 @@ def get_directory(query=None, department=None, start=0, limit=None):
 
 	manager_names = _directory_manager_names(rows)
 	return {
-		"people": [_directory_projection(row, manager_names) for row in rows],
+		"people": _with_photo_urls([_directory_projection(row, manager_names) for row in rows], key="name"),
 		"total": total,
 		"limit": limit,
 		"start": start,
@@ -7086,7 +7095,7 @@ def search_people(query=None, start=0, limit=None):
 	total = _aggregate_count(frappe.get_all("Employee", fields=[{"COUNT": "*"}], **scope_query)[0])
 
 	return {
-		"people": [_people_search_projection(row) for row in rows],
+		"people": _with_photo_urls([_people_search_projection(row) for row in rows], key="name"),
 		"total": total,
 		"limit": limit,
 		"start": start,
@@ -7773,7 +7782,7 @@ def _project_members(project):
 				"initials": _initials(employee_name),
 			}
 		)
-	return members
+	return _with_photo_urls(members)
 
 
 @frappe.whitelist()
@@ -8232,6 +8241,7 @@ def get_my_team_week(week_start=None):
 		}
 		for report in reports
 	]
+	_with_photo_urls(rows)
 
 	# "Who is out today" is about today, and the rows in hand only cover the
 	# week on screen -- so paging to another week says so rather than

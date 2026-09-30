@@ -619,3 +619,60 @@ class TestEmployeePhoto(_PhotoTestCase):
 			self.assertFalse(frappe.get_doc("File", name).is_downloadable())
 		finally:
 			frappe.set_user("Administrator")
+
+
+class TestPhotoInProjections(_PhotoTestCase):
+	"""U4 (R4): every avatar projection carries `photo_url`, batched."""
+
+	def test_the_directory_pays_one_extra_query_not_one_per_row(self):
+		from unittest.mock import patch
+
+		from helixhr import api
+
+		self._as(EMPLOYEE_USER, self._upload)
+
+		def count_queries(photo_urls=api._photo_urls):
+			with patch.object(frappe.db, "sql", wraps=frappe.db.sql) as sql, patch.object(api, "_photo_urls", photo_urls):
+				frappe.set_user(EMPLOYEE_USER)
+				try:
+					people = api.get_directory()["people"]
+				finally:
+					frappe.set_user("Administrator")
+			return sql.call_count, people
+
+		with_photos, people = count_queries()
+		without_photos, _people = count_queries(lambda employees: {})
+		self.assertGreater(len(people), 1)
+		self.assertEqual(with_photos - without_photos, 1)
+
+		by_name = {person["name"]: person for person in people}
+		self.assertIn("v=", by_name[self.employee_name]["photo_url"])
+		self.assertNotIn("/private/files", by_name[self.employee_name]["photo_url"])
+		self.assertIsNone(by_name[self.manager_name]["photo_url"])
+		manager = by_name[self.manager_name]
+		self.assertEqual(manager["initials"], api._initials(manager["employee_name"]))
+
+	def test_profile_and_bootstrap_carry_the_callers_own_photo(self):
+		from helixhr.api import get_my_profile, get_portal_bootstrap
+
+		self.assertIsNone(self._as(EMPLOYEE_USER, get_my_profile)["photo_url"])
+		uploaded = self._as(EMPLOYEE_USER, self._upload)["photo_url"]
+		self.assertEqual(self._as(EMPLOYEE_USER, get_my_profile)["photo_url"], uploaded)
+		self.assertEqual(self._as(EMPLOYEE_USER, get_portal_bootstrap)["employee"]["photo_url"], uploaded)
+
+	def test_an_approval_queue_row_carries_the_requesters_versioned_photo(self):
+		import uuid
+
+		from helixhr.api import create_my_request, get_my_approvals
+
+		uploaded = self._as(EMPLOYEE_USER, self._upload)["photo_url"]
+		name = self._as(
+			EMPLOYEE_USER,
+			lambda: create_my_request(
+				category="HR Letter", subject="Photo in queue", operation_key=str(uuid.uuid4())
+			)["name"],
+		)
+		pending = self._as(self.hr_user, get_my_approvals)["pending"]
+		row = next(row for row in pending if row["name"] == name)
+		self.assertEqual(row["photo_url"], uploaded)
+		self.assertIn("v=", row["photo_url"])
