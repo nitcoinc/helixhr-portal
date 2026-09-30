@@ -560,6 +560,13 @@ RATE_LIMIT_POLICY = {
 	# loads one per avatar.
 	"upload_my_photo": (20, 3600),
 	"remove_my_photo": (20, 3600),
+	# Plan 2026-09-30-001 U7: fans out across up to 50 rows, like `get_my_team_week`.
+	"get_roster_week": (60, 60),
+	# U8: occasional administrative writes, bounded like the config saves above.
+	"assign_shift": (30, 3600),
+	"end_shift_assignment": (30, 3600),
+	"change_shift_assignment": (30, 3600),
+	"cancel_shift_assignment": (30, 3600),
 }
 
 

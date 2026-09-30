@@ -87,6 +87,16 @@ const routes = [
     component: () => import('@/pages/Team.vue'),
   },
   {
+    // Plan 2026-09-30-001 U9. `get_roster_week` is the server's own gate per
+    // mode, so a desk-only HR session keeps the page (its only mode is
+    // "everyone"); an employee asking for more gets AsyncState's
+    // 'forbidden' region.
+    path: '/roster',
+    name: 'Roster',
+    meta: { deskOnly: true },
+    component: () => import('@/pages/Roster.vue'),
+  },
+  {
     path: '/directory',
     name: 'Directory',
     component: () => import('@/pages/Directory.vue'),

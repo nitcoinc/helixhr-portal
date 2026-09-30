@@ -609,6 +609,37 @@ covers the whole site day, which is what makes the Python and Playwright check-i
 any hour. HRMS refuses a Shift Type whose window *plus grace* overlaps itself across midnight, so
 that seeded window has zero grace on both sides.
 
+## Roster: end vs cancel, the nightly Inactive job, and check-ins (plan 2026-09-30-001)
+
+**End, don't cancel.** "End it" sets `end_date` on the submitted Shift Assignment; the record and
+every check-in matched to it stay intact. "Cancel it" cancels the document (docstatus 2) and HRMS
+refuses it once any Employee Checkin or Attendance references the assignment
+(`validate_employee_checkin` / `validate_attendance`). The portal shows that refusal as "This shift
+can't be cancelled because check-ins or attendance are already recorded against it. End it on a
+date instead." Cancel is for an assignment made by mistake, before anyone worked it.
+
+**Stock HR User has no cancel on Shift Assignment.** Only HR Manager (and System Manager) can
+cancel; an HR User gets "You don't have permission to do that." This is accepted on purpose (plan
+Open Questions) -- end-dating covers the real need -- so there is no DocPerm delta for it. If HR
+asks for it, the place is `patches/v1_0/apply_permission_deltas.py`, not a permission bypass.
+
+**A nightly HRMS job flips ended assignments to `Inactive`.**
+`mark_expired_shift_assignments_as_inactive` (daily, `hrms/hooks.py`) sets `status = Inactive` on
+every assignment whose `end_date` is past. Cancel sets `Inactive` too. So `status` cannot tell a
+finished shift from a cancelled one, and a roster that filtered on `status = Active` would show last
+month's weeks empty. `get_roster_week` therefore reads **`docstatus = 1` plus the date range**
+(`start_date <= Sunday`, `end_date` unset or `>= Monday`) and ignores `status`; a past-week test in
+`test_api_roster` pins it. Check-in is different: HRMS resolves a punch only against **Active**
+assignments, which is why the check-in rules above still say "submitted, Active".
+
+**Editing today's shift while someone is checked in.** A punch is matched to a shift window when it
+is recorded (`fetch_shift`). End or change an assignment on today and the punch already made stays
+on the old shift; the next punch is matched against whatever covers *now*, and if nothing does, it
+is stored `offshift` and never becomes Attendance (see "Punches that exist but never become
+Attendance"). The roster sheet warns whenever the edited date is today. Prefer changing from
+tomorrow; if today must change, check the person's punches for the day afterwards and fix the day
+through an Attendance Request if needed.
+
 ## Punch coordinates are erased on a schedule, and the period is unset by default (P3-R28)
 
 `helixhr.tasks.null_stale_checkin_coordinates` runs daily and does nothing at all until an operator

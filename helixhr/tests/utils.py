@@ -646,6 +646,9 @@ def setup_playwright_fixtures():
 	make_test_it_user()
 	ensure_test_it_request(employee_name)
 
+	# Plan 2026-09-30-001 U11: the roster specs (U9/U10).
+	ensure_roster_fixtures()
+
 	frappe.db.commit()  # nosemgrep
 
 
@@ -1593,6 +1596,71 @@ def ensure_directory_fixtures():
 		"inactive": _ensure_directory_employee("INACTIVE", company, status="Inactive"),
 		"other": _ensure_directory_employee("OTHERCO", other_company),
 	}
+
+
+def ensure_roster_fixtures():
+	"""Plan 2026-09-30-001 U11: what the roster specs sign in to find.
+
+	- The fixture employee keeps the open-ended check-in assignment
+	  `assign_test_shift` gives them (it starts 30 days back, so it covers
+	  this week); re-made here only if something removed it.
+	- The directory colleague (a report of the manager fixture, in the HR
+	  fixture's company) gets an assignment for *this week only*, so the
+	  grid has a bounded row and next week is free for the HR assign spec.
+	  Every assignment of theirs is cleared first, so a run that assigned or
+	  ended something leaves nothing for the next run to overlap with.
+	- `hr-manager-employee` (HR Manager, company-scoped, no self-scoping
+	  User Permission) is the identity that edits; `make_test_hr_manager_employee`
+	  already grants it, and `test_api_roster` pins that it can.
+
+	Idempotent. Returns the names by role."""
+	from helixhr.utils import get_week_bounds
+
+	employee_name, _, _, _ = make_test_employee_and_manager()
+	ensure_test_shift_type()
+	monday, sunday = get_week_bounds(frappe.utils.today())
+	covered = frappe.db.exists(
+		"Shift Assignment",
+		{
+			"employee": employee_name,
+			"docstatus": 1,
+			"status": "Active",
+			"start_date": ["<=", str(monday)],
+			"end_date": ["is", "not set"],
+		},
+	)
+	if not covered:
+		assign_test_shift(employee_name)
+
+	colleague = ensure_directory_fixtures()["colleague"]
+	frappe.db.delete("Shift Assignment", {"employee": colleague})
+	doc = frappe.get_doc(
+		{
+			"doctype": "Shift Assignment",
+			"employee": colleague,
+			"shift_type": PORTAL_SHIFT_TYPE,
+			"company": frappe.db.get_value("Employee", colleague, "company"),
+			"start_date": str(monday),
+			"end_date": str(sunday),
+			"status": "Active",
+		}
+	)
+	doc.insert(ignore_permissions=True)
+	doc.submit()
+	hr_employee, _ = make_test_hr_manager_employee()
+	return {"employee": employee_name, "colleague": colleague, "hr": hr_employee}
+
+
+@frappe.whitelist()
+def seed_roster_fixtures():
+	"""`ensure_roster_fixtures` over HTTP, for `roster.spec.ts`: called
+	before and after the HR specs so a rerun starts from the same week
+	whatever the last run assigned or ended. System Manager only (the spec
+	signs in as Administrator): it deletes and resubmits other people's
+	Shift Assignments, which no ordinary fixture login may trigger."""
+	_require_allow_tests()
+	frappe.only_for("System Manager")
+	return ensure_roster_fixtures()
 
 
 # P4-U5: celebrations. Home's card reads a *projection* of `date_of_birth`

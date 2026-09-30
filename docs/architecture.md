@@ -346,6 +346,7 @@ company", fall back to the site's default company for that persona only
 | Holidays | `get_my_holidays` | none | Holiday List, Holiday List Assignment |
 | Team | `get_my_team_week` | none | Employee (`reports_to`), Leave Application, Holiday List |
 | Directory | `get_directory` | none | Employee |
+| Roster | `get_roster_week` (`mode` = `mine` / `team` / `hr`) | HR only: `assign_shift`, `end_shift_assignment`, `change_shift_assignment`, `cancel_shift_assignment` | Employee (`reports_to`, `default_shift`), Shift Assignment, Shift Type, Leave Application, Holiday List |
 | Timesheet | `get_my_week`, `get_my_timesheet_history`, `get_timesheet_week_start`, `get_my_projects` | `save_my_week`, `submit_my_week` | Timesheet + Timesheet Detail, Workflow "Timesheet Approval" |
 | Requests | `get_my_requests`, `get_my_request` | `create_my_request`, `attach_to_my_request`, `mark_my_request_read` | HR Request, File, Notification Log |
 | Documents | `get_my_documents` (`frappe.client.get_list` is scoped by the same hooks) | none | HelixHR Document Link |
@@ -1080,3 +1081,32 @@ pre-filtered when the portal knows the filter, and export happens there --
 the portal never re-implements a report or an export path. Payroll reports
 are deliberately excluded from the curated list; payroll stays a Desk-only
 concern this plan does not touch.
+
+Plan 2026-09-30-001 (U7, U8) widens it once more, for **shifts**, and
+reverses KTD4 of `docs/plans/2026-09-20-002-fix-portal-session-and-hr-controls-plan.md`
+("Shift" means `Employee.default_shift`; dated Shift Assignments stay in Desk).
+That plan's own Open Question anticipated this: "move this person to nights
+from Monday" is a dated change, and `default_shift` cannot express it. The
+roster keeps the same rules as every other HR surface here:
+
+- **HelixHR's own methods over HRMS doctypes, never `hrms.api.roster`.** Its
+  dotted paths are HRMS-internal and its writes assume stock HR DocPerms.
+- **Scope is the server's.** `get_roster_week` returns the caller's own row
+  (`mine`), the caller plus active direct reports (`team`, Team's rule), or
+  every Active employee in `resolve_admin_scope` (`hr`). A mode the caller
+  does not hold is a `PermissionError`, never a silent downgrade; the page
+  offers only the modes the bootstrap flags say it holds (`hasReports`,
+  `canSeePeople`), and `can_edit` is true only in `hr` mode with Shift
+  Assignment `create`.
+- **Writes run the doc lifecycle.** `assign_shift` inserts and submits
+  through HRMS's controller, so its overlap and same-day validation run;
+  `end_shift_assignment` sets `end_date` (`allow_on_submit`) and `save()`s;
+  `change_shift_assignment` ends the current one the day before and assigns
+  the new one in one savepoint (KTD9 -- `shift_type` is not
+  `allow_on_submit`); `cancel_shift_assignment` calls `cancel()`, which HRMS
+  refuses once check-ins or attendance exist. Each write checks
+  `employee_in_admin_scope` and the caller's own DocPerm, has a
+  `RATE_LIMIT_POLICY` entry, and returns one plain sentence on refusal. No
+  `ignore_permissions` on a write, and nothing reaches `frappe.client`.
+- Recurring schedules (Shift Schedule Assignment), swaps and employee
+  shift requests stay out; Desk still owns them.

@@ -724,6 +724,38 @@ The payload never carries a leave `description`, and `status`/`docstatus` are co
   `Waiting for you` pill in the row. The bar already carries the amber tint; a pill the width of
   the row would compete with the bar it sits on.
 
+## Roster · desktop grid, phone day list (plan 2026-09-30-001 U9, U10 — **built**)
+
+Team's shape, for shifts. A mode switcher of pills (`Mine`, `My team`, `Everyone`) shows only the
+modes the session holds, and none at all when there is only one. Week navigation sits outside the
+async region, as on Team. `Everyone` adds a labelled `Search` field (name or employee ID, debounced,
+server-side) and, past 50 people, `1–50 of N` with Previous / Next.
+
+**Desktop**: a `.surface-card` scrolling in its own container, table roles (`row`, `rowheader`,
+`columnheader`, `cell`) so a screen reader moves by person and day, and one labelled cell per day:
+shift name and `HH:MM–HH:MM`, or the person's default shift as a muted `Name (default)` hint, or a
+dash. Weekend and holiday cells take the step-darker tone; leave is a green chip in the cell with
+Team's wording. **Phone**: one card per day with a date tile and each person's shift on a line. A
+week with no shifts says `No shifts are assigned this week.` above the grid; nobody to show is an
+empty state, never a blank grid.
+
+**HR editing** (only when the payload says `can_edit`): every desktop cell is a button, and each
+phone line gets an `Assign` / `Edit` link. Either opens one sheet (the AttendanceRequestSheet
+pattern): an empty cell assigns (native shift select, `From`, `To (optional)`); an assigned cell
+offers `End it` (last day), `Change shift` (new shift from a date) or `Cancel it`, which asks a
+second time (`Yes, cancel it` / `Keep it`). An edit that lands on today shows an alert about
+check-ins already made. Refusals are the server's sentence, inline. The grid refetches after a
+write without dropping to a skeleton, so focus returns to the cell that opened the sheet.
+
+*Deviations, recorded:*
+
+- **No field block.** Team anchors "out today"; a roster has no single fact that outranks the grid,
+  so this is the second recorded exception after Directory.
+- **Holiday pill per person on the phone**, not per week: the roster's payload carries no week-level
+  holiday flag, and each row already has its own list.
+- **No design-system skill pass.** `/ui-ux-pro-max`, `/hallmark` and `/impeccable` were not run
+  interactively for this screen; it reuses Team's layout, tokens and patterns as they stand.
+
 ## Directory · phone sheet, desktop cards (P3-U8 — **built**)
 
 Search first: a labelled field (`Search`, placeholder `Name, role or department`) that queries the

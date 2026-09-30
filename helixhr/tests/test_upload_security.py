@@ -357,6 +357,13 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			# Plan 2026-09-30-001 U2. The photo GET is unlimited on purpose.
 			"upload_my_photo": (20, 3600),
 			"remove_my_photo": (20, 3600),
+			# Plan 2026-09-30-001 U7.
+			"get_roster_week": (60, 60),
+			# U8.
+			"assign_shift": (30, 3600),
+			"end_shift_assignment": (30, 3600),
+			"change_shift_assignment": (30, 3600),
+			"cancel_shift_assignment": (30, 3600),
 		}
 		self.assertEqual(utils.RATE_LIMIT_POLICY, expected)
 		self.assertEqual(preflight.check_rate_limits()["status"], preflight.PASS)

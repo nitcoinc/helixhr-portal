@@ -30,6 +30,10 @@ const NAV = [
   { label: 'Documents', to: '/documents', icon: 'documents' },
   { label: 'Directory', to: '/directory', icon: 'users' },
   { label: 'Team', to: '/team', icon: 'users', reportsOnly: true },
+  // Plan 2026-09-30-001 U9: everyone has a roster row of their own. Not
+  // `primary` -- the tab bar is full. `rosterOnly` hides it from a desk-only
+  // session with no admin scope, which would have no mode to show.
+  { label: 'Roster', to: '/roster', icon: 'timesheet', rosterOnly: true, deskOnly: true },
   { label: 'Approvals', to: '/approvals', icon: 'approvals', managerOnly: true },
   { label: 'Settings', to: '/settings', icon: 'settings', configureOnly: true, deskOnly: true },
   { label: 'Organisation', to: '/organisation', icon: 'organisation', organisationOnly: true, deskOnly: true },
@@ -67,6 +71,7 @@ const navItems = computed(() =>
       (!item.organisationOnly || session.canSeeOrganisation) &&
       (!item.peopleOnly || session.canSeePeople) &&
       (!item.projectsOnly || session.canSeeProjects) &&
+      (!item.rosterOnly || session.status !== 'desk-only' || session.canSeePeople) &&
       (session.status !== 'desk-only' || item.deskOnly),
   ),
 )
