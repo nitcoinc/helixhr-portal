@@ -77,7 +77,6 @@ from helixhr.utils import (
 	SHIFT_TYPE_EDITABLE_FIELDS,
 	TEMPLATE_TOKENS,
 	UPLOAD_MAX_BYTES,
-	_session_company,
 	admin_scope_employee_filters,
 	as_administrator,
 	employee_in_admin_scope,
@@ -85,6 +84,7 @@ from helixhr.utils import (
 	get_week_bounds,
 	is_photo_content,
 	mask_identifier,
+	photo_file_filters,
 	portal_home_page,
 	prepare_profile_photo,
 	project_in_scope,
@@ -92,6 +92,7 @@ from helixhr.utils import (
 	rate_limit_per_user,
 	resolve_admin_scope,
 	resolve_project_scope,
+	session_company,
 	validate_portal_upload,
 )
 
@@ -315,8 +316,9 @@ def _profile_table(employee, table, columns, meta):
 
 _PHOTO_FIELD = "image"
 # `private`: never a shared cache. The URL carries a version token that
-# changes on every replace, so a long max-age cannot show a stale photo (R5).
-_PHOTO_CACHE_CONTROL = "private, max-age=86400"
+# changes on every replace, so a replaced photo is never stale; the short
+# max-age bounds how long a *removed* one can still show from cache (R5).
+_PHOTO_CACHE_CONTROL = "private, max-age=300"
 _PHOTO_UNAVAILABLE = "That photo isn't available."
 
 
@@ -331,11 +333,7 @@ def _my_employee():
 def _photo_file_names(employee):
 	return frappe.get_all(
 		"File",
-		filters={
-			"attached_to_doctype": "Employee",
-			"attached_to_name": employee,
-			"attached_to_field": _PHOTO_FIELD,
-		},
+		filters=photo_file_filters(attached_to_name=employee),
 		pluck="name",
 	)
 
@@ -462,7 +460,7 @@ def _may_see_photo(employee):
 		return True
 	if target.status != "Active":
 		return False
-	company = _session_company(user)
+	company = session_company(user)
 	return bool(company) and company == target.company
 
 
@@ -486,12 +484,7 @@ def get_employee_photo(employee, v=None):
 	image = frappe.db.get_value("Employee", employee, _PHOTO_FIELD)
 	name = image and frappe.db.get_value(
 		"File",
-		{
-			"attached_to_doctype": "Employee",
-			"attached_to_name": employee,
-			"attached_to_field": _PHOTO_FIELD,
-			"file_url": image,
-		},
+		photo_file_filters(attached_to_name=employee, file_url=image),
 		"name",
 	)
 	content = None

@@ -107,7 +107,7 @@ class TestHRRequest(IntegrationTestCase):
 
 	def test_a_left_employee_no_longer_owns_their_old_request(self):
 		"""`request_belongs_to_session` resolves the Employee the same way
-		`_session_company` and `hrms.api.get_current_employee` do --
+		`session_company` and `hrms.api.get_current_employee` do --
 		`status = "Active"`. A user whose Employee is Left or Inactive with
 		their login still enabled used to pass the ownership branch of
 		`events.file_before_insert`."""

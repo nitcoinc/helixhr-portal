@@ -84,6 +84,13 @@ There is no app-level auth code. Three Frappe mechanisms carry it:
    `if_owner` plus `HRRequest.before_insert` resolving `employee` from the
    session.
 
+5. **Profile photo writes (documented `ignore_permissions` exception).**
+   `upload_my_photo` and `remove_my_photo` insert and delete the photo File
+   with `ignore_permissions`, because strict user permissions refuse a File
+   attached to Employee even for its own employee. The scope is carried by
+   the method instead: the Employee is resolved from the session, never from
+   an argument, so the bypass can only ever touch the caller's own photo.
+
 Writes the employee should not be able to make are refused server-side:
 
 - `save_my_week` refuses a week that is not Draft or Sent Back, refuses projects
@@ -122,9 +129,9 @@ is ever given its `/private/files/...` path. Every projection that carries `init
   checks the bytes really start like a PNG or JPEG, then streams them `inline` with their real
   `Content-Type`. It does not use `type="binary"`, which forces an attachment and breaks `<img>`.
   `_force_download_portal_attachment` stays scoped to HR Request and does not touch this response.
-- **Caching.** The header is `Cache-Control: private, max-age=86400`, never `public`. `v` is the
+- **Caching.** The header is `Cache-Control: private, max-age=300`, never `public`. `v` is the
   File's `content_hash`, so a replaced photo has a new URL and the old one is never asked for again.
-  A removed photo has no URL at all.
+  A removed photo has no URL at all, and five minutes bounds how long a cached copy can still show.
 - **Writes.** `upload_my_photo` and `remove_my_photo` resolve the employee from the session, so there
   is no argument that names someone else. Uploads go through `prepare_profile_photo` (PNG/JPEG,
   5 MB, signature check, then re-encoded with orientation applied, EXIF stripped and at most 512 px).

@@ -404,6 +404,30 @@ class TestMyPhoto(_PhotoTestCase):
 		self.assertEqual(self._user_files(EMPLOYEE_USER, file_url), 0)
 		self.assertEqual(frappe.db.count("File", {"file_url": file_url, "attached_to_doctype": "User"}), 0)
 
+	def test_clearing_the_photo_in_desk_sticks(self):
+		"""Review fix: the before_save stash must never write back a photo
+		the save itself cleared -- including when a failed earlier save on
+		the same document object left the stash flag behind."""
+		self._as(EMPLOYEE_USER, self._upload)
+		desk = frappe.get_doc("Employee", self.employee_name)
+		desk.flags.helixhr_photo = desk.image  # stale stash from an aborted save
+		desk.image = None
+		desk.save(ignore_permissions=True)
+
+		self.assertFalse(desk.image)
+		self.assertFalse(frappe.db.get_value("Employee", self.employee_name, "image"))
+
+	def test_replacing_the_photo_in_desk_with_a_plain_url_sticks(self):
+		self._as(EMPLOYEE_USER, self._upload)
+		desk = frappe.get_doc("Employee", self.employee_name)
+		desk.image = "https://example.invalid/me.png"
+		desk.save(ignore_permissions=True)
+
+		self.assertEqual(
+			frappe.db.get_value("Employee", self.employee_name, "image"), "https://example.invalid/me.png"
+		)
+		frappe.db.set_value("Employee", self.employee_name, "image", None)
+
 	def test_replacing_leaves_exactly_one_photo_and_the_old_one_is_gone(self):
 		first = self._as(EMPLOYEE_USER, self._upload, _jpeg(color=(1, 2, 3)))
 		old_url = frappe.db.get_value("Employee", self.employee_name, "image")
@@ -504,8 +528,7 @@ class TestEmployeePhoto(_PhotoTestCase):
 		self.assertEqual(response.content_type, "image/jpeg")
 		self.assertTrue(response.filecontent.startswith(b"\xff\xd8\xff"))
 		cache = frappe.local.response_headers["Cache-Control"]
-		self.assertIn("private", cache)
-		self.assertNotIn("public", cache)
+		self.assertEqual(cache, "private, max-age=300")
 		self.assertEqual(frappe.local.response_headers["X-Content-Type-Options"], "nosniff")
 
 		served = build_response()

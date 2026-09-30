@@ -740,7 +740,7 @@ something is saving Employee outside those hooks. Start with a new doc event or 
 
 **The dev server sends `no-cache` on everything.** `bench start`'s development server overrides
 caching headers, so on the dev bench the browser re-fetches every avatar and DevTools never shows
-`private, max-age=86400`. That does not mean caching is broken. It is pinned by a response-header
+`private, max-age=300`. That does not mean caching is broken. It is pinned by a response-header
 test (`test_api_profile.py`, `test_the_owner_gets_inline_jpeg_bytes_with_a_private_cache`) that
 reads what the method sets. Check it by hand only behind nginx on a production-mode bench.
 

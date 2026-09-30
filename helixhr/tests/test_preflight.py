@@ -973,6 +973,49 @@ class TestPreflightPdfGenerator(IntegrationTestCase):
 		self.assertIn("500", result["detail"])
 
 
+class TestPreflightEmployeePhoto(IntegrationTestCase):
+	"""Plan 2026-09-30-001 R6: the photo hooks are registered, and legacy
+	public Desk photos are surfaced."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.employee = make_test_employee_and_manager()[0]
+
+	def test_the_photo_hooks_pass_when_registered(self):
+		self.assertEqual(preflight.check_employee_photo_hooks()["status"], preflight.PASS)
+
+	def test_a_missing_photo_hook_fails_and_names_it(self):
+		from unittest.mock import patch
+
+		hooks = {"Employee": {"on_update": ["helixhr.events.employee_on_update"]}}
+		with patch.object(preflight.frappe, "get_hooks", return_value=hooks):
+			result = preflight.check_employee_photo_hooks()
+
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("employee_before_save", result["detail"])
+
+	def test_a_public_desk_photo_warns_and_names_the_employee(self):
+		original = frappe.db.get_value("Employee", self.employee, "image")
+		frappe.db.set_value("Employee", self.employee, "image", "/files/legacy.jpg")
+		try:
+			result = preflight.check_public_employee_photos()
+		finally:
+			frappe.db.set_value("Employee", self.employee, "image", original)
+
+		self.assertEqual(result["status"], preflight.WARN)
+		self.assertIn(self.employee, result["detail"])
+
+	def test_a_private_photo_does_not_warn(self):
+		original = frappe.db.get_value("Employee", self.employee, "image")
+		frappe.db.set_value("Employee", self.employee, "image", "/private/files/x.jpg")
+		try:
+			result = preflight.check_public_employee_photos()
+		finally:
+			frappe.db.set_value("Employee", self.employee, "image", original)
+
+		self.assertNotIn(self.employee, result["detail"])
+
+
 class TestPreflightCelebrationReminders(IntegrationTestCase):
 	"""P4-R18 / P4-KTD10: the double-send guard, after the fact.
 

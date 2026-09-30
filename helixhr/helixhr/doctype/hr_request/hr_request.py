@@ -8,7 +8,7 @@ from frappe.model.document import Document
 from frappe.utils import now_datetime
 from hrms.api import get_current_employee
 
-from helixhr.utils import _session_company, resolve_admin_scope
+from helixhr.utils import resolve_admin_scope, session_company
 
 # The first worker claim and terminal outcomes. Both are read off the
 # DocType's own Select options; a status added in Desk that is in neither set
@@ -129,7 +129,7 @@ def get_permission_query_conditions(user=None, doctype=None, **kwargs):
 	if not roles:
 		return f"employee = {frappe.db.escape(employee, percent=False)}"
 	company_employees = frappe.get_all(
-		"Employee", filters={"company": _session_company(user)}, pluck="name"
+		"Employee", filters={"company": session_company(user)}, pluck="name"
 	)
 	if not company_employees:
 		# A worker whose Employee carries no company: their own requests and
@@ -161,7 +161,7 @@ def has_permission(doc, ptype=None, user=None, **kwargs):
 		return frappe.db.get_value("Employee", doc.employee, "company") == scope["company"]
 	return (
 		doc.routed_to_role in roles
-		and frappe.db.get_value("Employee", doc.employee, "company") == _session_company(user)
+		and frappe.db.get_value("Employee", doc.employee, "company") == session_company(user)
 	)
 
 
@@ -180,7 +180,7 @@ def request_belongs_to_session(name):
 	employee = frappe.db.get_value("HR Request", name, "employee")
 	if not employee:
 		return False
-	# `status = "Active"`, the same scope `_session_company` and
+	# `status = "Active"`, the same scope `session_company` and
 	# `hrms.api.get_current_employee` resolve by: a user whose Employee has
 	# been set to Left or Inactive while their login is still enabled must
 	# not keep passing the ownership branch of `events.file_before_insert`.

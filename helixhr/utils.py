@@ -298,7 +298,7 @@ def get_manager_user(employee):
 PORTAL_HOME_PAGE = "helixhr"
 
 
-def _session_company(user):
+def session_company(user):
 	"""Return the active Employee's company for ``user``, if any."""
 	return frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "company")
 
@@ -307,7 +307,7 @@ def _session_company(user):
 # read to -- "HR Manager or System Manager" -- named once so U1's answer and
 # `hr_request.py`'s own `_UNSCOPED_ROLES` describe the same set without one
 # importing the other (that would cycle: `hr_request.py` already imports
-# `_session_company` from this module).
+# `session_company` from this module).
 _ADMIN_UNSCOPED_ROLES = frozenset({"HR Manager", "System Manager"})
 
 
@@ -769,7 +769,15 @@ PHOTO_MAX_SIDE = 512
 # still claim a 50,000 x 50,000 canvas (a decompression bomb). A 48 MP
 # phone camera is comfortably inside this.
 PHOTO_MAX_PIXELS = 64_000_000
-_PHOTO_KIND_MESSAGE = "Your photo must be a PNG or JPEG image."
+PHOTO_KIND_MESSAGE = "Your photo must be a PNG or JPEG image."
+
+
+def photo_file_filters(**extra):
+	"""`File` filters for an Employee photo attachment: (Employee, *, "image").
+	One definition so the doc events and the API cannot disagree on it."""
+	return {"attached_to_doctype": "Employee", "attached_to_field": "image", **extra}
+
+
 _PHOTO_FORMATS = {"PNG": (".png", "image/png"), "JPEG": (".jpg", "image/jpeg")}
 
 
@@ -797,7 +805,7 @@ def prepare_profile_photo(file_name, content):
 	from PIL import Image, ImageFile, ImageOps
 
 	validate_portal_upload(
-		file_name, content, policy=PHOTO_POLICY, max_bytes=PHOTO_MAX_BYTES, kind_message=_PHOTO_KIND_MESSAGE
+		file_name, content, policy=PHOTO_POLICY, max_bytes=PHOTO_MAX_BYTES, kind_message=PHOTO_KIND_MESSAGE
 	)
 	# Frappe's File module turns on LOAD_TRUNCATED_IMAGES process-wide; a
 	# half-uploaded photo must be refused here, not padded with grey.
@@ -831,7 +839,7 @@ def prepare_profile_photo(file_name, content):
 				else:
 					photo.save(out, "PNG", optimize=True)
 	except (Image.DecompressionBombError, Image.DecompressionBombWarning, OSError, ValueError, SyntaxError):
-		frappe.throw(_(_PHOTO_KIND_MESSAGE))
+		frappe.throw(_(PHOTO_KIND_MESSAGE))
 	finally:
 		ImageFile.LOAD_TRUNCATED_IMAGES = load_truncated
 	return out.getvalue(), extension, content_type

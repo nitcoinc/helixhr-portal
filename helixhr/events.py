@@ -5,12 +5,13 @@ from frappe.utils import cint
 
 from helixhr.helixhr.doctype.hr_request.hr_request import request_belongs_to_session
 from helixhr.utils import (
-	_PHOTO_KIND_MESSAGE,
+	PHOTO_KIND_MESSAGE,
 	PHOTO_MAX_BYTES,
 	PHOTO_POLICY,
 	UPLOAD_POLICY,
 	get_manager_user,
 	get_message_template,
+	photo_file_filters,
 	render_tokens,
 	upload_extension,
 	validate_portal_upload,
@@ -625,11 +626,10 @@ def _notify_hr_request_status(doc):
 
 def is_employee_photo_url(file_url):
 	"""Whether `file_url` is a private Employee photo (plan 2026-09-30-001)."""
-	return bool(file_url) and str(file_url).startswith("/private/") and bool(
-		frappe.db.exists(
-			"File",
-			{"file_url": file_url, "attached_to_doctype": "Employee", "attached_to_field": "image"},
-		)
+	return (
+		bool(file_url)
+		and str(file_url).startswith("/private/")
+		and bool(frappe.db.exists("File", photo_file_filters(file_url=file_url)))
 	)
 
 
@@ -644,15 +644,22 @@ def employee_before_save(doc, method=None):
 	So the photo is hidden from that sync: taken out of the document here,
 	before it is written, and put back by `employee_on_update` once the
 	controller's `on_update` (and so `update_user`) has run -- all inside
-	the save's own transaction."""
-	if is_employee_photo_url(doc.image):
-		doc.flags.helixhr_photo = doc.image
+	the save's own transaction.
+
+	The stash is (re)set on every save, so a flag left behind by an aborted
+	earlier save on the same object can never resurrect a photo that this
+	save clears or replaces."""
+	photo = doc.image if is_employee_photo_url(doc.image) else None
+	doc.flags.helixhr_photo = photo
+	if photo:
 		doc.image = None
 
 
 def _restore_photo(doc):
+	"""Put back only what `employee_before_save` took off this save's own
+	doc, and only while nothing in the save set `image` since."""
 	photo = doc.flags.pop("helixhr_photo", None)
-	if photo:
+	if photo and not doc.image:
 		doc.image = photo
 		frappe.db.set_value("Employee", doc.name, "image", photo, update_modified=False)
 
@@ -691,7 +698,7 @@ def file_before_insert(doc, method=None):
 		if not cint(doc.is_private):
 			frappe.throw(_("A profile photo must be private."), frappe.PermissionError)
 		_enforce_upload_policy(
-			doc, policy=PHOTO_POLICY, max_bytes=PHOTO_MAX_BYTES, kind_message=_PHOTO_KIND_MESSAGE
+			doc, policy=PHOTO_POLICY, max_bytes=PHOTO_MAX_BYTES, kind_message=PHOTO_KIND_MESSAGE
 		)
 		return
 
