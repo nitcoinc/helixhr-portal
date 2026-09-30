@@ -90,7 +90,8 @@ work, the queue and its next actions stay together and the leftover height is sm
 P4-U5).** Two cards side by side, one per group — `Birthdays` and `Work anniversaries` — each row the
 directory's own initials monogram, the person's name, and `9 Sep` — with `· 3 years` on an
 anniversary, the one number the card prints, because that is a fact about the job and not about the
-person. Today's rows sort first and carry a small `Today` chip. **No photos and no birth year**: the
+person. Today's rows sort first and carry a small `Today` chip. The avatar is the person's photo when they
+have set one, and the initials monogram otherwise (see *Avatars* below). **No birth year**: the
 server projects `day`, `month`, `is_today` and `years` and nothing else, so there is no date string
 on the wire to reconstruct an age from, and `formatDayMonth` exists for exactly that reason.
 
@@ -734,7 +735,9 @@ row opens a bottom sheet with the same facts and an `Email {first name}` action,
 `No work email published. Ask HR if you need to reach them.`
 
 Work email comes from `company_email` only and the key is absent when it is empty, so a login
-address cannot reach the directory. There are no photos and no phone numbers, by scope.
+address cannot reach the directory. There are no phone numbers, by scope. The monogram becomes the
+colleague's photo when they have set one (plan 2026-09-30-001, reversing P3-R22's "no photos").
+Only same-company colleagues are served it; see *Avatars* below.
 
 *Deviations from the artboard, recorded:*
 
@@ -758,3 +761,21 @@ address cannot reach the directory. There are no photos and no phone numbers, by
 Centered single-column message page, no nav chrome. Three states that used to look like one, each
 with its own words and one next step: an unlinked account gets the site's HR contact, a service
 failure gets Retry and resumes the page that was asked for, an unknown route gets a way Home.
+
+## Avatars (plan 2026-09-30-001 U5 — **built**)
+
+Every initials monogram in the portal is drawn by `components/Avatar.vue`: Profile's identity band
+(64px), the shell (36px), Directory, People, Team, Approvals, Projects, Celebrations and the leave
+approver chip, each at the size it already had. When the row's projection carries a `photo_url`, it
+renders an `<img>` with fixed `width`/`height` (no layout shift), `loading="lazy"`, `object-cover`
+in the same circle, and `alt` set to the person's name. With no photo, or when the image fails to
+load (refused, removed or broken), it shows the monogram, the same markup and colours as before
+photos. A new URL gets a fresh try.
+
+Profile's identity band carries the controls: `Add photo` / `Change photo` and `Remove photo` as
+quiet outline buttons on the field, with `PNG or JPEG · up to 5 MB` beside them. A refused file
+gets one plain sentence in signal yellow under the band, in a live region, and nothing is uploaded.
+While a photo is uploading, the button reads `Saving photo…`. Remove is confirmed in a small dialog
+(`Remove your photo?` / `Keep it`), the same pattern as Withdraw. After a change the shell avatar
+updates without a reload.
+
