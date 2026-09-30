@@ -130,6 +130,13 @@ export function attachToRequestReply(file, { name }) {
   return uploadFile('helixhr.api.attach_to_request_reply', file, { name })
 }
 
+/** Plan 2026-09-30-001 U5: set or replace the signed-in employee's own
+ * photo. The employee comes from the session (`helixhr.api.upload_my_photo`);
+ * resolves to `{ photo_url }`. */
+export function uploadMyPhoto(file) {
+  return uploadFile('helixhr.api.upload_my_photo', file, {})
+}
+
 /**
  * A write that must survive the page unloading immediately after it is
  * sent -- `fetch`'s own `keepalive` flag, which frappe-ui's resourceFetcher

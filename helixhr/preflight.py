@@ -618,6 +618,43 @@ def check_file_settings():
 	)
 
 
+# Plan 2026-09-30-001 R6: the before_save / on_update pair that keeps a
+# private photo out of `User.user_image` on every full Employee save.
+_EMPLOYEE_PHOTO_HOOKS = {
+	"before_save": "helixhr.events.employee_before_save",
+	"on_update": "helixhr.events.employee_on_update",
+}
+
+
+def check_employee_photo_hooks():
+	"""Without both hooks, the next Employee save copies a private photo
+	into `User.user_image` (a second read path) or crashes on a JPEG."""
+	events = frappe.get_hooks("doc_events", {}).get("Employee", {})
+	missing = [
+		f"{event} -> {method}"
+		for event, method in _EMPLOYEE_PHOTO_HOOKS.items()
+		if method not in (events.get(event) or [])
+	]
+	if missing:
+		return _result("Employee photo hooks", FAIL, "missing: " + "; ".join(missing))
+	return _result("Employee photo hooks", PASS, "before_save and on_update registered")
+
+
+def check_public_employee_photos():
+	"""Legacy Desk photos stored public are readable by anyone with the URL.
+	WARN, not FAIL: they predate the portal and need a re-upload, not a
+	blocked deploy."""
+	names = frappe.get_all("Employee", filters={"image": ["like", "/files/%"]}, pluck="name", order_by="name")
+	if names:
+		shown = ", ".join(names[:20]) + (f" (+{len(names) - 20} more)" if len(names) > 20 else "")
+		return _result(
+			"Public Employee photos",
+			WARN,
+			f"{len(names)} Employee(s) with a public /files photo; re-upload as private: {shown}",
+		)
+	return _result("Public Employee photos", PASS, "no Employee photo is a public /files URL")
+
+
 def check_rate_limits():
 	"""P2-U9 step 7: every named per-user write bound is present and no
 	looser than policy.
@@ -1339,6 +1376,8 @@ CHECKS = [
 	check_entra,
 	check_password_policy,
 	check_file_settings,
+	check_employee_photo_hooks,
+	check_public_employee_photos,
 	check_rate_limits,
 	check_site_rate_limit,
 	check_test_mode,

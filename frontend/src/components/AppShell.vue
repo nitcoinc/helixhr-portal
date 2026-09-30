@@ -1,4 +1,5 @@
 <script setup>
+import Avatar from '@/components/Avatar.vue'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { Dialog } from 'frappe-ui'
@@ -147,11 +148,14 @@ onUnmounted(() => {
           :to="identityRoute"
           class="mx-3 flex cursor-pointer items-center gap-3 rounded-lg px-2 py-2 hover:bg-white/10"
         >
-          <span
+          <Avatar
             class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white/15 font-medium text-white"
-          >
-            {{ initials || '—' }}
-          </span>
+            :photo-url="session.employee?.photo_url"
+            :initials="initials || '—'"
+            :name="employeeName"
+            :size="36"
+            data-testid="shell-avatar"
+          />
           <span class="min-w-0">
             <span class="block truncate text-sm font-medium text-white">
               {{ employeeName || 'Loading…' }}

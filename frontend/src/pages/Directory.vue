@@ -1,4 +1,5 @@
 <script setup>
+import Avatar from '@/components/Avatar.vue'
 import { computed, ref, watch, onUnmounted } from 'vue'
 import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
@@ -219,10 +220,10 @@ const emptyBody = computed(() =>
             :key="person.name"
             class="surface-card elev-1 h-full"
           >
-            <!-- The monogram is the server's (`initials`), the same two
-                 letters the Approvals queue draws. No photos here: a face is
-                 personal data the directory does not need to answer "who do I
-                 ask about payroll" (P3-R22). -->
+            <!-- The colleague's photo when they set one, served only to
+                 same-company colleagues by `get_employee_photo` (plan
+                 2026-09-30-001 R3/R4, reversing P3-R22's "no photos"); the
+                 server's monogram (`initials`) otherwise. -->
             <!-- A card is a control only where tapping it does something.
                  At desktop widths the card already shows everything the
                  sheet would, so `openPerson` returns early -- and a page of
@@ -237,10 +238,13 @@ const emptyBody = computed(() =>
               :aria-expanded="!isDesktop ? person.name === openName : undefined"
               @click="openPerson(person)"
             >
-              <span
+              <Avatar
                 class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-sm font-bold text-ink-green-3"
-                aria-hidden="true"
-              >{{ person.initials }}</span>
+                :photo-url="person.photo_url"
+                :initials="person.initials"
+                :name="person.employee_name"
+                :size="40"
+              />
 
               <span class="min-w-0 flex-1">
                 <span class="block truncate font-medium text-ink-gray-9">
@@ -327,10 +331,13 @@ const emptyBody = computed(() =>
           class="space-y-3"
         >
           <div class="flex items-center gap-3">
-            <span
+            <Avatar
               class="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-base font-bold text-ink-green-3"
-              aria-hidden="true"
-            >{{ selected.initials }}</span>
+              :photo-url="selected.photo_url"
+              :initials="selected.initials"
+              :name="selected.employee_name"
+              :size="48"
+            />
             <div class="min-w-0">
               <p class="font-medium text-ink-gray-9">
                 {{ selected.employee_name }}

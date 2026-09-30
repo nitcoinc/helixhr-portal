@@ -722,6 +722,36 @@ ships with P3-U5. Two situations still bite:
 asserts through `get_workflow_name` rather than `frappe.db.exists`, so a fresh install that leaves
 the cache wrong fails in CI rather than in production.
 
+## Profile photos: the `user_image` sync, the dev-server cache, and Desk uploads
+
+**ERPNext copies `Employee.image` into `User.user_image` on every Employee save.**
+`Employee.on_update` calls `update_user`, which sets `user_image` and inserts a second File row that
+attaches the image to the User. Anyone with User read could then download the private photo through
+that row (R6). For a private **JPEG** the save also crashes, because Frappe re-reads the private
+file as text while stripping EXIF, so the whole Employee save fails. HR's `save_person`,
+`update_my_profile` and a Desk edit are all Employee saves.
+
+The guard is in `events.py`. `employee_before_save` takes a portal photo URL out of `doc.image`
+before the write, and `employee_on_update` puts it back with `db_set` after `update_user` has run,
+inside the same transaction. The upload method itself never saves the Employee. If `user_image`
+ever shows a `/private/files/...-photo` path, or a File row attached to User points at a photo,
+something is saving Employee outside those hooks. Start with a new doc event or a script that calls
+`db_update` directly.
+
+**The dev server sends `no-cache` on everything.** `bench start`'s development server overrides
+caching headers, so on the dev bench the browser re-fetches every avatar and DevTools never shows
+`private, max-age=300`. That does not mean caching is broken. It is pinned by a response-header
+test (`test_api_profile.py`, `test_the_owner_gets_inline_jpeg_bytes_with_a_private_cache`) that
+reads what the method sets. Check it by hand only behind nginx on a production-mode bench.
+
+**A photo set in Desk is checked, not re-encoded.** `events.file_before_insert` applies to every
+File attached to (Employee, `image`), whichever path created it. A public one is refused (`A profile
+photo must be private.`), and the PNG/JPEG type, size and signature policy applies. Only the portal's
+`upload_my_photo` re-encodes, though, so a Desk upload keeps its EXIF (including GPS) and its full
+size. Tell HR to have employees set their own photo from Profile, or accept that trade-off for
+Desk-set photos. Photos that were already public before this shipped are not migrated (plan:
+Deferred).
+
 ## HR's half of the attendance approval is in the portal now (P4-U1)
 
 This section used to say the opposite, and the change is the thing to remember: in phase 3 an

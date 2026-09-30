@@ -82,13 +82,17 @@ from helixhr.utils import (
 	employee_in_admin_scope,
 	get_manager_user,
 	get_week_bounds,
+	is_photo_content,
 	mask_identifier,
+	photo_file_filters,
 	portal_home_page,
+	prepare_profile_photo,
 	project_in_scope,
 	project_scope_filters,
 	rate_limit_per_user,
 	resolve_admin_scope,
 	resolve_project_scope,
+	session_company,
 	validate_portal_upload,
 )
 
@@ -223,6 +227,7 @@ def get_my_profile(**kwargs):
 	return {
 		"employee": employee,
 		"employee_name": info.get("employee_name"),
+		"photo_url": _employee_photo_url(employee),
 		"sections": {name: section(name) for name in PROFILE_SECTION_FIELDS},
 		"failed_sections": failed,
 		"correction_category": PROFILE_CORRECTION_CATEGORY if cint(category_active) else None,
@@ -299,6 +304,207 @@ def _profile_table(employee, table, columns, meta):
 		],
 		"rows": rows,
 	}
+
+
+# Profile photo (plan 2026-09-30-001, U2-U4, R1-R6)
+#
+# The photo is a private File attached to (Employee, <id>, "image"). Nobody
+# but its owner can read that Employee under strict user permissions, so
+# Frappe's own `/private/files` check refuses colleagues -- on purpose, and
+# left that way. Colleagues get the bytes through `get_employee_photo`, which
+# applies the Directory's rule itself (KTD1).
+
+_PHOTO_FIELD = "image"
+# `private`: never a shared cache. The URL carries a version token that
+# changes on every replace, so a replaced photo is never stale; the short
+# max-age bounds how long a *removed* one can still show from cache (R5).
+_PHOTO_CACHE_CONTROL = "private, max-age=300"
+_PHOTO_UNAVAILABLE = "That photo isn't available."
+
+
+def _my_employee():
+	"""The caller's Active Employee id, or the portal's standard refusal."""
+	employee = (get_current_employee_info() or {}).get("name")
+	if not employee:
+		frappe.throw(_("Employee not found"), frappe.PermissionError)
+	return employee
+
+
+def _photo_file_names(employee):
+	return frappe.get_all(
+		"File",
+		filters=photo_file_filters(attached_to_name=employee),
+		pluck="name",
+	)
+
+
+def _set_photo_field(employee, file_url):
+	"""KTD3: `db_set` of this one field, never `doc.save()`. A save runs
+	ERPNext's `Employee.update_user`, which copies `image` into
+	`User.user_image` and attaches a second File row to the User -- a read
+	path to a private photo for anyone with User read (R6). Later full saves
+	are covered by `events.employee_before_save`."""
+	frappe.db.set_value("Employee", employee, _PHOTO_FIELD, file_url)
+
+
+def _photo_url(employee, version):
+	"""The URL an `<img>` loads: the serving method, never the file path."""
+	return (
+		"/api/method/helixhr.api.get_employee_photo"
+		f"?employee={quote(employee)}&v={quote(str(version or '')[:12])}"
+	)
+
+
+def _photo_urls(employees):
+	"""`{employee: photo_url}` for each of `employees` that has a photo, in
+	one query however long the list is (U4). A File counts only while it is
+	still the one `Employee.image` names."""
+	ids = list({employee for employee in employees if employee})
+	if not ids:
+		return {}
+	file = frappe.qb.DocType("File")
+	person = frappe.qb.DocType("Employee")
+	rows = (
+		frappe.qb.from_(file)
+		.join(person)
+		.on((person.name == file.attached_to_name) & (person.image == file.file_url))
+		.select(file.attached_to_name, file.content_hash, file.modified)
+		.where(
+			(file.attached_to_doctype == "Employee")
+			& (file.attached_to_field == _PHOTO_FIELD)
+			& (file.attached_to_name.isin(ids))
+		)
+		.run(as_dict=True)
+	)
+	return {
+		row.attached_to_name: _photo_url(row.attached_to_name, row.content_hash or str(row.modified))
+		for row in rows
+	}
+
+
+def _with_photo_urls(rows, key="employee"):
+	"""Add `photo_url` beside `initials` on every row dict, batched."""
+	urls = _photo_urls(row.get(key) for row in rows)
+	for row in rows:
+		row["photo_url"] = urls.get(row.get(key))
+	return rows
+
+
+def _employee_photo_url(employee):
+	return _photo_urls([employee]).get(employee) if employee else None
+
+
+@frappe.whitelist(methods=["POST"])
+def upload_my_photo(**kwargs):
+	"""Set or replace the caller's own photo (R1, R2).
+
+	The employee comes from the session; any argument is ignored, so there
+	is no way to name someone else's record (KTD5). The upload is validated
+	and re-encoded (`utils.prepare_profile_photo`) before anything is
+	stored, then written private, and the previous photo File is deleted so
+	exactly one remains.
+	"""
+	rate_limit_per_user("upload_my_photo")
+	employee = _my_employee()
+
+	upload = (getattr(frappe.request, "files", None) or {}).get("file")
+	if upload is None:
+		frappe.throw(_("No file came through. Pick the file again."))
+	content, extension, _content_type = prepare_profile_photo(
+		os.path.basename(upload.filename or "").strip(), upload.stream.read()
+	)
+
+	previous = _photo_file_names(employee)
+	doc = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": f"{employee}-photo{extension}",
+			"content": content,
+			"attached_to_doctype": "Employee",
+			"attached_to_name": employee,
+			"attached_to_field": _PHOTO_FIELD,
+			"is_private": 1,
+		}
+	)
+	doc.insert(ignore_permissions=True)
+	for name in previous:
+		# File.on_trash keeps the bytes on disk while another row shares them.
+		frappe.delete_doc("File", name, ignore_permissions=True, force=True)
+	_set_photo_field(employee, doc.file_url)
+	return {"photo_url": _photo_url(employee, doc.content_hash)}
+
+
+@frappe.whitelist(methods=["POST"])
+def remove_my_photo(**kwargs):
+	"""Remove the caller's own photo. Removing when there is none is a
+	no-op, not an error."""
+	rate_limit_per_user("remove_my_photo")
+	employee = _my_employee()
+	for name in _photo_file_names(employee):
+		frappe.delete_doc("File", name, ignore_permissions=True, force=True)
+	if frappe.db.get_value("Employee", employee, _PHOTO_FIELD):
+		_set_photo_field(employee, None)
+	return {"photo_url": None}
+
+
+def _may_see_photo(employee):
+	"""R3: the owner; HR within admin scope (any status); an Active
+	colleague in the caller's own company (the Directory rule)."""
+	target = frappe.db.get_value("Employee", employee, ["company", "status", "user_id"], as_dict=True)
+	if not target:
+		return False
+	user = frappe.session.user
+	if target.user_id and target.user_id == user:
+		return True
+	if employee_in_admin_scope(employee, resolve_admin_scope(user)):
+		return True
+	if target.status != "Active":
+		return False
+	company = session_company(user)
+	return bool(company) and company == target.company
+
+
+@frappe.whitelist(methods=["GET"])
+def get_employee_photo(employee, v=None):
+	"""Stream one employee's photo inline to a viewer allowed to see it
+	(KTD1, KTD2, R3, R5).
+
+	Not rate-limited on purpose: a Directory page loads one of these per
+	avatar. `v` is only a cache-busting token and is not read. The File is
+	found by its attachment and must still be the one `Employee.image`
+	names -- never by a path the client sends. A refusal and "no photo" are
+	the same not-found answer with no bytes, so this cannot be used to learn
+	who exists. A photo set in Desk before the portal handled photos may be
+	public and was never re-encoded; it is served only when its bytes really
+	are PNG or JPEG, so an SVG or HTML file can never render inline here.
+	"""
+	if not isinstance(employee, str) or not employee or not _may_see_photo(employee):
+		frappe.throw(_(_PHOTO_UNAVAILABLE), frappe.DoesNotExistError)
+
+	image = frappe.db.get_value("Employee", employee, _PHOTO_FIELD)
+	name = image and frappe.db.get_value(
+		"File",
+		photo_file_filters(attached_to_name=employee, file_url=image),
+		"name",
+	)
+	content = None
+	if name:
+		try:
+			# `encodings=[]`: raw bytes, never a latin-1 decoded string.
+			content = frappe.get_doc("File", name).get_content(encodings=[])
+		except (OSError, frappe.DoesNotExistError):
+			content = None
+	if not isinstance(content, bytes) or not is_photo_content(content):
+		frappe.throw(_(_PHOTO_UNAVAILABLE), frappe.DoesNotExistError)
+
+	is_png = content.startswith(b"\x89PNG")
+	frappe.response.type = "download"
+	frappe.response.display_content_as = "inline"
+	frappe.response.content_type = "image/png" if is_png else "image/jpeg"
+	frappe.response.filename = f"{employee}-photo{'.png' if is_png else '.jpg'}"
+	frappe.response.filecontent = content
+	frappe.local.response_headers["Cache-Control"] = _PHOTO_CACHE_CONTROL
+	frappe.local.response_headers["X-Content-Type-Options"] = "nosniff"
 
 
 # Portal bootstrap and the user's own calendar (P2-U2, P2-R5, P2-R20, P2-R21)
@@ -406,6 +612,9 @@ def get_portal_bootstrap():
 		# saying it plainly is what lets the browser tell this apart from a
 		# service failure (P2-U2 scenario 3).
 		return boot
+
+	# The shell's own avatar (plan 2026-09-30-001 U4). One indexed read.
+	employee["photo_url"] = _employee_photo_url(employee["name"])
 
 	# A leave approver need not be anybody's manager, and a manager's only
 	# pending work may be a timesheet -- gating the Approvals nav item on
@@ -611,6 +820,7 @@ def _get_celebrations(employee, today):
 			anniversary["years"] = today.year - joined.year
 			anniversaries.append(anniversary)
 
+	_with_photo_urls(birthdays + anniversaries)
 	return {
 		"birthdays": _ordered_celebrations(birthdays),
 		"anniversaries": _ordered_celebrations(anniversaries),
@@ -1966,7 +2176,7 @@ def _approval_summaries(employee):
 	# Oldest first: the queue is a backlog, and the person who has waited
 	# longest is the one the manager is holding up (P2-U7 step 7).
 	rows.sort(key=lambda entry: (entry["sent_on"] or "", entry["name"]))
-	return rows, capped
+	return _with_photo_urls(rows), capped
 
 
 def _holds_routed_role(user=None):
@@ -2381,6 +2591,8 @@ def get_leave_form_context():
 		"approver_name": frappe.db.get_value("User", approver, "full_name", cache=True)
 		if approver
 		else None,
+		# The approver is a User; the photo belongs to their Employee.
+		"approver_photo_url": _employee_photo_url(_employee_for_user(approver)[0]),
 	}
 
 
@@ -4578,7 +4790,7 @@ def _recently_decided(employee):
 	decided.sort(key=lambda entry: entry["decided_on"] or "", reverse=True)
 	for entry in decided:
 		entry["age_days"] = _age_in_days(entry["decided_on"], today)
-	return decided[:_DECIDED_LIMIT]
+	return _with_photo_urls(decided[:_DECIDED_LIMIT])
 
 
 @frappe.whitelist()
@@ -4793,6 +5005,7 @@ def _decision_head(doc, employee_name):
 		"employee": doc.employee,
 		"employee_name": employee_name,
 		"initials": _initials(employee_name),
+		"photo_url": _employee_photo_url(doc.employee),
 		# The concurrency token. The screen sends back the value it was
 		# rendered from, and `act_on_approval` refuses anything else
 		# (P2-R25, P2-U7 step 3).
@@ -5364,6 +5577,7 @@ def _request_decision_detail(doc):
 		"employee": doc.employee,
 		"employee_name": employee_name,
 		"initials": _initials(employee_name),
+		"photo_url": _employee_photo_url(doc.employee),
 		"modified": str(doc.modified),
 		# P4-KTD7's tag, carried by a fourth kind for the first time: true
 		# only when the stored route is HR Manager, never for IT Team.
@@ -6785,7 +6999,7 @@ def get_directory(query=None, department=None, start=0, limit=None):
 
 	manager_names = _directory_manager_names(rows)
 	return {
-		"people": [_directory_projection(row, manager_names) for row in rows],
+		"people": _with_photo_urls([_directory_projection(row, manager_names) for row in rows], key="name"),
 		"total": total,
 		"limit": limit,
 		"start": start,
@@ -6874,7 +7088,7 @@ def search_people(query=None, start=0, limit=None):
 	total = _aggregate_count(frappe.get_all("Employee", fields=[{"COUNT": "*"}], **scope_query)[0])
 
 	return {
-		"people": [_people_search_projection(row) for row in rows],
+		"people": _with_photo_urls([_people_search_projection(row) for row in rows], key="name"),
 		"total": total,
 		"limit": limit,
 		"start": start,
@@ -7561,7 +7775,7 @@ def _project_members(project):
 				"initials": _initials(employee_name),
 			}
 		)
-	return members
+	return _with_photo_urls(members)
 
 
 @frappe.whitelist()
@@ -8020,6 +8234,7 @@ def get_my_team_week(week_start=None):
 		}
 		for report in reports
 	]
+	_with_photo_urls(rows)
 
 	# "Who is out today" is about today, and the rows in hand only cover the
 	# week on screen -- so paging to another week says so rather than

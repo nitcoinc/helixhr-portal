@@ -84,6 +84,13 @@ There is no app-level auth code. Three Frappe mechanisms carry it:
    `if_owner` plus `HRRequest.before_insert` resolving `employee` from the
    session.
 
+5. **Profile photo writes (documented `ignore_permissions` exception).**
+   `upload_my_photo` and `remove_my_photo` insert and delete the photo File
+   with `ignore_permissions`, because strict user permissions refuse a File
+   attached to Employee even for its own employee. The scope is carried by
+   the method instead: the Employee is resolved from the session, never from
+   an argument, so the bypass can only ever touch the caller's own photo.
+
 Writes the employee should not be able to make are refused server-side:
 
 - `save_my_week` refuses a week that is not Draft or Sent Back, refuses projects
@@ -103,6 +110,35 @@ Writes the employee should not be able to make are refused server-side:
   two kinds, and the leave one also refuses a non-HR submitter on a request
   that is already with HR.
 - `events.file_before_insert` refuses a public file attached to an HR Request.
+
+### Profile photos: one scoped GET, never the file URL (plan 2026-09-30-001)
+
+An employee's photo is a **private** File attached to (`Employee`, name, `image`). Nobody's browser
+is ever given its `/private/files/...` path. Every projection that carries `initials` also carries
+`photo_url` (`approver_photo_url` in `get_leave_form_context`), and that URL is the whitelisted GET
+`helixhr.api.get_employee_photo?employee=<id>&v=<version>`.
+
+- **Why not `/private/files`.** Frappe serves a private file to anyone who can *read the document it
+  is attached to*. Colleagues have no Employee read (the Directory is a projection, not a
+  permission), so the stock URL would refuse the people who should see the photo. Granting Employee
+  read to make it work would publish the whole record. The method asks the photo's own question
+  instead (`_may_see_photo`): the owner, HR within `resolve_admin_scope`, or an Active colleague in
+  the caller's company, which is the Directory rule. Anyone else gets the same `DoesNotExistError`
+  as "no photo" and no bytes, so a refusal and an absence look the same.
+- **What it serves.** It finds the File by the attachment triple and never by a client path. It
+  checks the bytes really start like a PNG or JPEG, then streams them `inline` with their real
+  `Content-Type`. It does not use `type="binary"`, which forces an attachment and breaks `<img>`.
+  `_force_download_portal_attachment` stays scoped to HR Request and does not touch this response.
+- **Caching.** The header is `Cache-Control: private, max-age=300`, never `public`. `v` is the
+  File's `content_hash`, so a replaced photo has a new URL and the old one is never asked for again.
+  A removed photo has no URL at all, and five minutes bounds how long a cached copy can still show.
+- **Writes.** `upload_my_photo` and `remove_my_photo` resolve the employee from the session, so there
+  is no argument that names someone else. Uploads go through `prepare_profile_photo` (PNG/JPEG,
+  5 MB, signature check, then re-encoded with orientation applied, EXIF stripped and at most 512 px).
+  `Employee.image` is written with `db_set`, never `save()`, so ERPNext's `update_user` never copies
+  it into `User.user_image` (R6; see `docs/runbook.md`).
+- **The browser.** `components/Avatar.vue` draws the `<img>` and falls back to the monogram on
+  `error`. A refusal, a missing photo and a broken URL therefore all render as initials.
 
 ## Leave approval runs the native lifecycle
 

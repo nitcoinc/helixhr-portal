@@ -7,7 +7,7 @@ import frappe
 from frappe import _
 from frappe.model.document import Document
 
-from helixhr.utils import _session_company
+from helixhr.utils import session_company
 
 # P2-R19: a document link is a policy-link catalogue entry, so the only
 # schemes that can ever be right are the two a browser will follow to a
@@ -81,7 +81,7 @@ def get_permission_query_conditions(user=None, **kwargs):
 
 	table = "`tabHelixHR Document Link`"
 	global_only = f"({table}.company is null or {table}.company = '')"
-	company = _session_company(user)
+	company = session_company(user)
 	if not company:
 		return global_only
 	return f"({global_only} or {table}.company = {frappe.db.escape(company)})"
@@ -96,7 +96,7 @@ def has_permission(doc, ptype=None, user=None, **kwargs):
 		return True
 	if not doc.get("company"):
 		return True
-	return doc.get("company") == _session_company(user)
+	return doc.get("company") == session_company(user)
 
 
 def _sees_every_company(user):

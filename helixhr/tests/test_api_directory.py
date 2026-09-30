@@ -18,6 +18,9 @@ ALLOWED_KEYS = {
 	# so the directory's avatar matches every other avatar in the portal
 	# (P3-U9). It publishes nothing the row does not already carry.
 	"initials",
+	# Plan 2026-09-30-001 U4: the serving method's URL (None without a
+	# photo), never the `image` file path -- that stays forbidden below.
+	"photo_url",
 	"designation",
 	"department",
 	"manager",

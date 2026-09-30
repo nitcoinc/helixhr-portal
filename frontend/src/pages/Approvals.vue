@@ -1,4 +1,5 @@
 <script setup>
+import Avatar from '@/components/Avatar.vue'
 import { ref, computed, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { createResource, Button, FormControl } from 'frappe-ui'
@@ -497,10 +498,13 @@ function hrLine(row) {
                 :aria-expanded="row.name === name"
                 @click="row.name === name ? closeDetail() : open(row)"
               >
-                <span
+                <Avatar
                   class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-sm font-bold text-ink-green-3"
-                  aria-hidden="true"
-                >{{ row.initials }}</span>
+                  :photo-url="row.photo_url"
+                  :initials="row.initials"
+                  :name="row.employee_name"
+                  :size="40"
+                />
 
                 <span class="min-w-0 flex-1">
                   <span class="flex min-w-0 items-center gap-2">
@@ -941,10 +945,13 @@ function hrLine(row) {
               :key="row.id"
               class="surface-card elev-1 flex items-center gap-3 p-3"
             >
-              <span
+              <Avatar
                 class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-xs font-bold text-ink-gray-7"
-                aria-hidden="true"
-              >{{ row.initials }}</span>
+                :photo-url="row.photo_url"
+                :initials="row.initials"
+                :name="row.employee_name"
+                :size="32"
+              />
               <p class="min-w-0 flex-1 truncate text-sm text-ink-gray-7">
                 {{ row.employee_name }} · {{ row.label }}
                 · {{ formatDateRange(row.from_date, row.to_date) }}
@@ -987,10 +994,13 @@ function hrLine(row) {
             aria-label="Request detail"
           >
             <div class="flex items-start gap-3">
-              <span
+              <Avatar
                 class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-sm font-bold text-ink-green-3"
-                aria-hidden="true"
-              >{{ selected.initials }}</span>
+                :photo-url="selected.photo_url"
+                :initials="selected.initials"
+                :name="selected.employee_name"
+                :size="40"
+              />
               <div class="min-w-0 flex-1">
                 <h2 class="flex min-w-0 items-center gap-2 font-heading text-lg font-bold text-ink-gray-9">
                   <span class="min-w-0 truncate">{{ selected.employee_name }}</span>

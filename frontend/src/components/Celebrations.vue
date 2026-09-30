@@ -1,4 +1,5 @@
 <script setup>
+import Avatar from '@/components/Avatar.vue'
 import { computed, ref } from 'vue'
 import { formatDayMonth } from '@/lib/dates'
 
@@ -93,10 +94,13 @@ function when(person) {
             :key="`${group.key}:${person.employee}`"
             class="flex items-center gap-3"
           >
-            <span
+            <Avatar
               class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-xs font-bold text-ink-green-3"
-              aria-hidden="true"
-            >{{ person.initials }}</span>
+              :photo-url="person.photo_url"
+              :initials="person.initials"
+              :name="person.employee_name"
+              :size="32"
+            />
 
             <span class="min-w-0 flex-1">
               <span class="block truncate text-sm font-medium text-ink-gray-9">

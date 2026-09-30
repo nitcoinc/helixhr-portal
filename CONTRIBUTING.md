@@ -20,9 +20,15 @@ and the fastest way to a merged change is to fit how it is already built.
 - Never modify Frappe, ERPNext or HRMS core. Extend through fixtures, hooks and
   whitelisted methods.
 - Every server call runs as the signed-in user. Do not use `ignore_permissions`
-  in a request path.
-- Every new read is bounded and added to `RATE_LIMIT_POLICY`. Every new screen
-  renders through `AsyncState`. Every structural change gets a preflight guard.
+  in a request path. Documented exception: `upload_my_photo` / `remove_my_photo`
+  insert and delete the photo File with `ignore_permissions`, because strict
+  user permissions refuse it; the target is always the session's own Employee
+  (see `docs/architecture.md` → Security model).
+- Every new read is bounded and added to `RATE_LIMIT_POLICY`. Documented exception:
+  `get_employee_photo`, because a list page loads many avatars at once. Its
+  refusal is deliberately the same not-found as "no photo", so it cannot be
+  used to probe who exists.
+- Every new screen renders through `AsyncState`. Every structural change gets a preflight guard.
 - No Frappe vocabulary on screen. `docs/design-system.md` has the copy mapping.
 - Tests assert the payload, not the chrome.
 - Python is tabs (ruff). Vue is 2-space, formatted by `yarn lint`. Never run

@@ -5,9 +5,13 @@ from frappe.utils import cint
 
 from helixhr.helixhr.doctype.hr_request.hr_request import request_belongs_to_session
 from helixhr.utils import (
+	PHOTO_KIND_MESSAGE,
+	PHOTO_MAX_BYTES,
+	PHOTO_POLICY,
 	UPLOAD_POLICY,
 	get_manager_user,
 	get_message_template,
+	photo_file_filters,
 	render_tokens,
 	upload_extension,
 	validate_portal_upload,
@@ -182,6 +186,8 @@ def employee_on_update(doc, method=None):
 	points at the old account, which `frappe.client.set_value`,
 	`/api/resource` and `apply_workflow` all honour.
 	"""
+	_restore_photo(doc)
+
 	before = doc.get_doc_before_save()
 	if not before:
 		return
@@ -618,6 +624,46 @@ def _notify_hr_request_status(doc):
 	).insert(ignore_permissions=True)
 
 
+def is_employee_photo_url(file_url):
+	"""Whether `file_url` is a private Employee photo (plan 2026-09-30-001)."""
+	return (
+		bool(file_url)
+		and str(file_url).startswith("/private/")
+		and bool(frappe.db.exists("File", photo_file_filters(file_url=file_url)))
+	)
+
+
+def employee_before_save(doc, method=None):
+	"""R6 / KTD3, the full-save half. Every Employee save (HR's
+	`save_person`, `update_my_profile`, Desk) runs ERPNext's
+	`Employee.update_user`, which copies `image` into `User.user_image` and
+	inserts a File row attaching it to the User -- a second read path to a
+	private photo. For a JPEG that insert also crashes the whole save (Frappe
+	re-reads the private file as text before stripping EXIF).
+
+	So the photo is hidden from that sync: taken out of the document here,
+	before it is written, and put back by `employee_on_update` once the
+	controller's `on_update` (and so `update_user`) has run -- all inside
+	the save's own transaction.
+
+	The stash is (re)set on every save, so a flag left behind by an aborted
+	earlier save on the same object can never resurrect a photo that this
+	save clears or replaces."""
+	photo = doc.image if is_employee_photo_url(doc.image) else None
+	doc.flags.helixhr_photo = photo
+	if photo:
+		doc.image = None
+
+
+def _restore_photo(doc):
+	"""Put back only what `employee_before_save` took off this save's own
+	doc, and only while nothing in the save set `image` since."""
+	photo = doc.flags.pop("helixhr_photo", None)
+	if photo and not doc.image:
+		doc.image = photo
+		frappe.db.set_value("Employee", doc.name, "image", photo, update_modified=False)
+
+
 def file_before_insert(doc, method=None):
 	"""KTD18: Frappe lets a file's owner attach it to any document they
 	can *read* (not necessarily write) -- an employee could otherwise
@@ -646,6 +692,16 @@ def file_before_insert(doc, method=None):
 	means -- is this the caller's own request -- and HR keeps its own write
 	permission as the second branch.
 	"""
+	if doc.attached_to_doctype == "Employee" and doc.attached_to_field == "image":
+		# Plan 2026-09-30-001 U2: a profile photo is private and PNG/JPEG
+		# whichever path created it -- the portal, Desk or a script.
+		if not cint(doc.is_private):
+			frappe.throw(_("A profile photo must be private."), frappe.PermissionError)
+		_enforce_upload_policy(
+			doc, policy=PHOTO_POLICY, max_bytes=PHOTO_MAX_BYTES, kind_message=PHOTO_KIND_MESSAGE
+		)
+		return
+
 	if doc.attached_to_doctype != "HR Request" or not doc.attached_to_name:
 		return
 
@@ -664,7 +720,7 @@ def file_before_insert(doc, method=None):
 	_enforce_upload_policy(doc)
 
 
-def _enforce_upload_policy(doc):
+def _enforce_upload_policy(doc, policy=None, max_bytes=None, kind_message=None):
 	"""P2-U9 step 5. The same type/size/signature policy
 	`helixhr.api.attach_to_my_request` applies, applied again here so that a
 	File inserted by any *other* path -- Desk, a script, a caller that found
@@ -689,12 +745,15 @@ def _enforce_upload_policy(doc):
 		content = content.encode("utf-8", "surrogateescape")
 
 	if isinstance(content, bytes | bytearray):
-		validate_portal_upload(doc.file_name, content)
+		overrides = {"policy": policy, "kind_message": kind_message}
+		if max_bytes:
+			overrides["max_bytes"] = max_bytes
+		validate_portal_upload(doc.file_name, content, **overrides)
 		return
 
-	if upload_extension(doc.file_name) not in UPLOAD_POLICY:
+	if upload_extension(doc.file_name) not in (policy or UPLOAD_POLICY):
 		frappe.throw(
-			_("You can attach a PDF, a PNG or JPEG image, or a Word or Excel document.")
+			_(kind_message or "You can attach a PDF, a PNG or JPEG image, or a Word or Excel document.")
 		)
 
 
