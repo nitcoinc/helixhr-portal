@@ -149,9 +149,16 @@ function openCell(row, cell, layout) {
   sheetOpen.value = true
 }
 
-function focusReturn() {
+// The dialog restores focus itself when it unmounts after its leave
+// transition, and that can land after a refetch re-rendered the cell -- so
+// this waits for the dialog to be gone (bounded, ~1s) before focusing.
+function focusReturn(frames = 60) {
   nextTick(() => {
     if (!returnKey) return
+    if (document.querySelector('[role="dialog"]') && frames > 0) {
+      requestAnimationFrame(() => focusReturn(frames - 1))
+      return
+    }
     document.querySelector(`[data-cell-key="${CSS.escape(returnKey)}"]`)?.focus()
   })
 }
