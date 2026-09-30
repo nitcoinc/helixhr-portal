@@ -354,6 +354,9 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"save_celebration_reminder": (30, 3600),
 			# Plan 2026-09-29-001 U3.
 			"get_my_profile": (60, 60),
+			# Plan 2026-09-30-001 U2. The photo GET is unlimited on purpose.
+			"upload_my_photo": (20, 3600),
+			"remove_my_photo": (20, 3600),
 		}
 		self.assertEqual(utils.RATE_LIMIT_POLICY, expected)
 		self.assertEqual(preflight.check_rate_limits()["status"], preflight.PASS)

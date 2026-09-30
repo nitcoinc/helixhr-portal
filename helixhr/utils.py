@@ -555,6 +555,11 @@ RATE_LIMIT_POLICY = {
 	"save_person": (30, 3600),
 	# P8-U12: an occasional administrative write, like the config saves above.
 	"save_celebration_reminder": (30, 3600),
+	# Plan 2026-09-30-001 U2. Each re-encodes an image, so bounded like the
+	# attachment writes. The photo GET is deliberately not listed: a page
+	# loads one per avatar.
+	"upload_my_photo": (20, 3600),
+	"remove_my_photo": (20, 3600),
 }
 
 

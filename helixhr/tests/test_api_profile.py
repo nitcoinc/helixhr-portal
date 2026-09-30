@@ -2,7 +2,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 
 from helixhr.api import update_my_profile
-from helixhr.tests.utils import EMPLOYEE_USER, make_test_employee_and_manager
+from helixhr.tests.utils import EMPLOYEE_USER, MANAGER_USER, make_test_employee_and_manager
 
 
 class TestUpdateMyProfile(IntegrationTestCase):
@@ -274,3 +274,348 @@ class TestGetMyProfileRegionalField(IntegrationTestCase):
 		pan = next(f for f in profile["sections"]["bank"]["fields"] if f["fieldname"] == "pan_number")
 		self.assertEqual(pan["value"], "••••234F")
 		self.assertNotIn("ABCDE1234F", frappe.as_json(profile))
+
+
+# --- Profile photo (plan 2026-09-30-001, U2 and U3) ------------------------
+
+PHOTO_LEFT_USER = "photo-left@helixhr.test"
+
+
+def _jpeg(size=(40, 30), color=(10, 120, 200)):
+	import io
+
+	from PIL import Image
+
+	buffer = io.BytesIO()
+	Image.new("RGB", size, color).save(buffer, "JPEG")
+	return buffer.getvalue()
+
+
+class _PhotoTestCase(IntegrationTestCase):
+	def setUp(self):
+		from helixhr.tests.test_api_people import OTHER_COMPANY_USER, _ensure_other_company
+		from helixhr.tests.utils import (
+			TEST_COMPANY,
+			ensure_hr_manager_user,
+			make_test_hr_manager_employee,
+			make_test_user,
+			make_test_user_without_employee,
+		)
+
+		frappe.set_user("Administrator")
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		self.hr_employee, self.hr_user = make_test_hr_manager_employee()
+		self.hr_unscoped = ensure_hr_manager_user()
+		self.orphan = make_test_user_without_employee()
+		self.other_user = OTHER_COMPANY_USER
+		self.other_employee = make_test_user(OTHER_COMPANY_USER, _ensure_other_company())
+		self.left_employee = make_test_user(PHOTO_LEFT_USER, TEST_COMPANY)
+		# No rollback between methods on this bench (runbook, U6): start clean.
+		for user in (EMPLOYEE_USER, OTHER_COMPANY_USER, PHOTO_LEFT_USER):
+			self._as(user, self._remove)
+
+	def tearDown(self):
+		frappe.local.request = None
+		frappe.set_user("Administrator")
+
+	def _as(self, user, fn, *args):
+		frappe.set_user(user)
+		try:
+			return fn(*args)
+		finally:
+			frappe.local.request = None
+			frappe.set_user("Administrator")
+
+	def _upload(self, content=None, file_name="me.jpg", **kwargs):
+		from helixhr.api import upload_my_photo
+		from helixhr.tests.test_hr_request import with_uploaded_file
+
+		frappe.local.request = with_uploaded_file(file_name, content or _jpeg())
+		return upload_my_photo(**kwargs)
+
+	def _remove(self):
+		from helixhr.api import remove_my_photo
+
+		return remove_my_photo()
+
+	def _photo_files(self, employee):
+		return frappe.get_all(
+			"File",
+			filters={"attached_to_doctype": "Employee", "attached_to_name": employee, "attached_to_field": "image"},
+			fields=["name", "file_url", "is_private"],
+		)
+
+	def _user_files(self, user, file_url):
+		return frappe.db.count(
+			"File", {"attached_to_doctype": "User", "attached_to_name": user, "file_url": file_url}
+		)
+
+
+class TestMyPhoto(_PhotoTestCase):
+	"""U2 (R1, R6): the caller sets, replaces and removes their own photo."""
+
+	def test_upload_stores_one_private_file_and_never_touches_the_user(self):
+		user_image_before = frappe.db.get_value("User", EMPLOYEE_USER, "user_image")
+
+		result = self._as(EMPLOYEE_USER, self._upload)
+
+		files = self._photo_files(self.employee_name)
+		self.assertEqual(len(files), 1)
+		self.assertEqual(files[0].is_private, 1)
+		self.assertTrue(files[0].file_url.startswith("/private/files/"))
+		self.assertEqual(frappe.db.get_value("Employee", self.employee_name, "image"), files[0].file_url)
+		self.assertIn("helixhr.api.get_employee_photo", result["photo_url"])
+		self.assertIn(f"employee={self.employee_name}", result["photo_url"])
+		self.assertEqual(frappe.db.get_value("User", EMPLOYEE_USER, "user_image"), user_image_before)
+		self.assertEqual(self._user_files(EMPLOYEE_USER, files[0].file_url), 0)
+
+	def test_a_later_full_employee_save_still_keeps_the_photo_off_the_user(self):
+		"""P0 from doc review: `Employee.update_user` copies `image` into
+		`User.user_image` and attaches a File to the User on every save."""
+		from helixhr.api import save_person
+
+		user_image_before = frappe.db.get_value("User", EMPLOYEE_USER, "user_image")
+		self._as(EMPLOYEE_USER, self._upload)
+		file_url = frappe.db.get_value("Employee", self.employee_name, "image")
+
+		self._as(self.hr_unscoped, save_person, self.employee_name)
+		self._as(EMPLOYEE_USER, lambda: update_my_profile(cell_number="+1-555-0190"))
+		# Desk, with versioning on (skipped under in_test otherwise): the
+		# hide-and-restore must not record the photo as removed.
+		frappe.in_test = False
+		try:
+			desk = frappe.get_doc("Employee", self.employee_name)
+			desk.cell_number = "+1-555-0191"
+			desk.save(ignore_permissions=True)
+		finally:
+			frappe.in_test = True
+		self.assertEqual(desk.image, file_url)
+		latest = frappe.get_all(
+			"Version",
+			filters={"ref_doctype": "Employee", "docname": self.employee_name},
+			fields=["data"],
+			order_by="creation desc",
+			limit=1,
+		)
+		self.assertNotIn('"image"', latest[0].data)
+
+		self.assertEqual(frappe.db.get_value("Employee", self.employee_name, "image"), file_url)
+		self.assertEqual(frappe.db.get_value("User", EMPLOYEE_USER, "user_image"), user_image_before)
+		self.assertEqual(self._user_files(EMPLOYEE_USER, file_url), 0)
+		self.assertEqual(frappe.db.count("File", {"file_url": file_url, "attached_to_doctype": "User"}), 0)
+
+	def test_replacing_leaves_exactly_one_photo_and_the_old_one_is_gone(self):
+		first = self._as(EMPLOYEE_USER, self._upload, _jpeg(color=(1, 2, 3)))
+		old_url = frappe.db.get_value("Employee", self.employee_name, "image")
+		second = self._as(EMPLOYEE_USER, self._upload, _jpeg(color=(250, 200, 10)))
+
+		files = self._photo_files(self.employee_name)
+		self.assertEqual(len(files), 1)
+		self.assertNotEqual(files[0].file_url, old_url)
+		self.assertNotEqual(first["photo_url"], second["photo_url"], "a replace changes the URL (R5)")
+		self.assertFalse(frappe.db.exists("File", {"file_url": old_url}))
+
+	def test_remove_clears_the_field_and_a_second_remove_is_a_no_op(self):
+		self._as(EMPLOYEE_USER, self._upload)
+
+		self.assertEqual(self._as(EMPLOYEE_USER, self._remove), {"photo_url": None})
+		self.assertFalse(frappe.db.get_value("Employee", self.employee_name, "image"))
+		self.assertEqual(self._photo_files(self.employee_name), [])
+		self.assertEqual(self._as(EMPLOYEE_USER, self._remove), {"photo_url": None})
+
+	def test_a_forged_employee_argument_is_ignored(self):
+		self._as(EMPLOYEE_USER, lambda: self._upload(employee=self.manager_name))
+
+		self.assertEqual(len(self._photo_files(self.employee_name)), 1)
+		self.assertEqual(self._photo_files(self.manager_name), [])
+
+	def test_a_wrong_type_is_refused_and_nothing_is_stored(self):
+		with self.assertRaises(frappe.ValidationError):
+			self._as(EMPLOYEE_USER, self._upload, b"<svg xmlns='http://www.w3.org/2000/svg'/>", "me.png")
+		self.assertEqual(self._photo_files(self.employee_name), [])
+
+	def test_a_caller_with_no_employee_gets_the_not_linked_refusal(self):
+		with self.assertRaises(frappe.PermissionError):
+			self._as(self.orphan, self._upload)
+		with self.assertRaises(frappe.PermissionError):
+			self._as(self.orphan, self._remove)
+
+	def test_a_public_photo_file_inserted_directly_is_refused(self):
+		import base64
+
+		with self.assertRaises(frappe.PermissionError):
+			frappe.get_doc(
+				{
+					"doctype": "File",
+					"file_name": "desk.jpg",
+					"content": base64.b64encode(_jpeg()).decode(),
+					"decode": 1,
+					"attached_to_doctype": "Employee",
+					"attached_to_name": self.employee_name,
+					"attached_to_field": "image",
+					"is_private": 0,
+				}
+			).insert()
+		self.assertEqual(self._photo_files(self.employee_name), [])
+
+	def test_a_private_non_image_photo_file_inserted_directly_is_refused(self):
+		import base64
+
+		with self.assertRaises(frappe.ValidationError):
+			frappe.get_doc(
+				{
+					"doctype": "File",
+					"file_name": "desk.png",
+					"content": base64.b64encode(b"%PDF-1.4 not an image").decode(),
+					"decode": 1,
+					"attached_to_doctype": "Employee",
+					"attached_to_name": self.employee_name,
+					"attached_to_field": "image",
+					"is_private": 1,
+				}
+			).insert()
+
+
+class TestEmployeePhoto(_PhotoTestCase):
+	"""U3 (R3, R5, KTD1, KTD2, KTD5): who gets the bytes, and how."""
+
+	def _get(self, user, employee):
+		from helixhr.api import get_employee_photo
+
+		frappe.local.response_headers = {}
+		for key in ("type", "filecontent", "filename", "content_type", "display_content_as"):
+			frappe.response.pop(key, None)
+		self._as(user, get_employee_photo, employee)
+		return frappe.response
+
+	def _assert_refused(self, user, employee):
+		with self.assertRaises(frappe.DoesNotExistError):
+			self._get(user, employee)
+		self.assertNotIn("filecontent", frappe.response)
+
+	def test_the_owner_gets_inline_jpeg_bytes_with_a_private_cache(self):
+		from frappe.utils.response import build_response
+
+		self._as(EMPLOYEE_USER, self._upload)
+		response = self._get(EMPLOYEE_USER, self.employee_name)
+
+		self.assertEqual(response.type, "download")
+		self.assertEqual(response.display_content_as, "inline")
+		self.assertEqual(response.content_type, "image/jpeg")
+		self.assertTrue(response.filecontent.startswith(b"\xff\xd8\xff"))
+		cache = frappe.local.response_headers["Cache-Control"]
+		self.assertIn("private", cache)
+		self.assertNotIn("public", cache)
+		self.assertEqual(frappe.local.response_headers["X-Content-Type-Options"], "nosniff")
+
+		served = build_response()
+		self.assertEqual(served.mimetype, "image/jpeg")
+		self.assertTrue(served.headers["Content-Disposition"].startswith("inline"))
+
+	def test_the_portal_attachment_hook_leaves_the_photo_inline(self):
+		"""KTD5: `_force_download_portal_attachment` is scoped to
+		`/private/files`; the photo is served from the method path."""
+		from frappe.utils.response import build_response
+
+		from helixhr import utils
+
+		self._as(EMPLOYEE_USER, self._upload)
+		self._get(EMPLOYEE_USER, self.employee_name)
+		served = build_response()
+
+		class _Request:
+			scheme = "http"
+			path = "/api/method/helixhr.api.get_employee_photo"
+
+		utils.set_security_headers(served, _Request())
+		self.assertTrue(served.headers["Content-Disposition"].startswith("inline"))
+
+	def test_a_same_company_colleague_is_allowed(self):
+		self._as(EMPLOYEE_USER, self._upload)
+		self.assertTrue(self._get(MANAGER_USER, self.employee_name).filecontent)
+
+	def test_another_company_and_no_employee_are_refused(self):
+		self._as(EMPLOYEE_USER, self._upload)
+		self._assert_refused(self.other_user, self.employee_name)
+		self._assert_refused(self.orphan, self.employee_name)
+
+	def test_hr_in_scope_is_allowed_and_hr_out_of_scope_is_refused(self):
+		self._as(EMPLOYEE_USER, self._upload)
+		self._as(self.other_user, self._upload)
+
+		self.assertTrue(self._get(self.hr_user, self.employee_name).filecontent)
+		self._assert_refused(self.hr_user, self.other_employee)
+		self.assertTrue(self._get(self.hr_unscoped, self.other_employee).filecontent)
+
+	def test_a_left_employee_is_hidden_from_colleagues_but_not_from_hr(self):
+		self._as(PHOTO_LEFT_USER, self._upload)
+		frappe.db.set_value("Employee", self.left_employee, "status", "Left")
+		try:
+			self._assert_refused(EMPLOYEE_USER, self.left_employee)
+			self.assertTrue(self._get(self.hr_user, self.left_employee).filecontent)
+		finally:
+			frappe.db.set_value("Employee", self.left_employee, "status", "Active")
+
+	def test_no_photo_is_not_found_and_never_someone_elses(self):
+		self._as(EMPLOYEE_USER, self._upload)
+		self._assert_refused(EMPLOYEE_USER, self.manager_name)
+		self._assert_refused(EMPLOYEE_USER, "HR-EMP-DOES-NOT-EXIST")
+
+	def test_a_legacy_desk_photo_is_served_only_when_it_really_is_an_image(self):
+		"""Open question resolved: a public `/files` photo set in Desk
+		before this feature is served through this method only when its
+		bytes are PNG/JPEG. Anything else (an SVG could carry script) is
+		treated as no photo rather than rendered inline."""
+		import base64
+
+		for label, file_name, content, served in (
+			("jpeg", "legacy.jpg", _jpeg(color=(5, 5, 5)), True),
+			("svg", "legacy.svg", b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>', False),
+		):
+			with self.subTest(label):
+				doc = frappe.get_doc(
+					{
+						"doctype": "File",
+						"file_name": file_name,
+						"content": base64.b64encode(content).decode(),
+						"decode": 1,
+						"attached_to_doctype": "Employee",
+						"attached_to_name": self.manager_name,
+						"is_private": 0,
+					}
+				).insert(ignore_permissions=True)
+				# The shape a pre-portal Desk upload left behind.
+				frappe.db.set_value("File", doc.name, "attached_to_field", "image")
+				frappe.db.set_value("Employee", self.manager_name, "image", doc.file_url)
+				try:
+					if served:
+						self.assertTrue(self._get(EMPLOYEE_USER, self.manager_name).filecontent)
+					else:
+						self._assert_refused(EMPLOYEE_USER, self.manager_name)
+				finally:
+					frappe.db.set_value("Employee", self.manager_name, "image", None)
+					frappe.delete_doc("File", doc.name, ignore_permissions=True, force=True)
+
+	def test_guest_cannot_reach_the_method_and_it_is_not_rate_limited(self):
+		"""Guest by `frappe.guest_methods`, never a nested werkzeug request
+		(runbook, U4). The GET has no RATE_LIMIT_POLICY entry on purpose."""
+		from helixhr import utils
+		from helixhr.api import get_employee_photo, remove_my_photo, upload_my_photo
+
+		self.assertIn(get_employee_photo, frappe.whitelisted)
+		for method in (get_employee_photo, upload_my_photo, remove_my_photo):
+			self.assertNotIn(method, frappe.guest_methods)
+		self.assertNotIn("get_employee_photo", utils.RATE_LIMIT_POLICY)
+
+	def test_frappes_own_private_file_check_still_refuses_a_colleague(self):
+		"""We did not widen Frappe's check: a colleague (not the manager,
+		whose nested User Permission reaches reports) cannot read the File by
+		its `/private/files` URL, while this method serves them the bytes."""
+		self._as(EMPLOYEE_USER, self._upload)
+		name = self._photo_files(self.employee_name)[0].name
+		self.assertTrue(self._get(PHOTO_LEFT_USER, self.employee_name).filecontent)
+		frappe.set_user(PHOTO_LEFT_USER)
+		try:
+			self.assertFalse(frappe.get_doc("File", name).is_downloadable())
+		finally:
+			frappe.set_user("Administrator")

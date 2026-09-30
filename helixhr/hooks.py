@@ -179,7 +179,10 @@ doc_events = {
 	# a DocShare, and `reports_to` is what decides who the approver is -- so
 	# a reassignment that does not move the share leaves the old manager
 	# holding write and submit on a week that is no longer theirs.
+	# Plan 2026-09-30-001 R6: `before_save` hides a private photo from
+	# ERPNext's Employee -> User image sync; `on_update` puts it back.
 	"Employee": {
+		"before_save": "helixhr.events.employee_before_save",
 		"on_update": "helixhr.events.employee_on_update",
 	},
 	# P2-U4 / P2-KTD6. The employee-facing "HR replied" event. A fixture
