@@ -392,8 +392,13 @@ class TestRequestCategories(IntegrationTestCase):
 		frappe.db.set_value("HelixHR Request Category", "Other", "is_active", 0)
 		self.addCleanup(frappe.db.set_value, "HelixHR Request Category", "Other", "is_active", 1)
 
-		names = [row["name"] for row in get_request_categories()]
+		rows = get_request_categories()
+		names = [row["name"] for row in rows]
 		self.assertIn("Facilities", names)
+		sends_to = {row["name"]: row["sends_to"] for row in rows}
+		self.assertEqual(sends_to["Facilities"], "HR")
+		self.assertEqual(sends_to["IT / Asset"], "IT")
+		self.assertNotIn("route_to_role", rows[0])
 		self.assertNotIn("Other", names)
 		frappe.set_user(EMPLOYEE_USER)
 		with self.assertRaises(frappe.ValidationError):

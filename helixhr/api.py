@@ -6051,15 +6051,22 @@ def _request_categories():
 
 @frappe.whitelist()
 def get_request_categories():
-	"""The active request categories the employee may file (P5-R1)."""
+	"""The active request categories the employee may file (P5-R1).
+
+	`sends_to` names who receives the request, for the form's send button:
+	"IT" for a category routed to the IT Team role, "HR" for everything
+	else. The role name itself stays server-side."""
 	rate_limit_per_user("get_request_categories")
-	return frappe.get_all(
+	rows = frappe.get_all(
 		"HelixHR Request Category",
 		filters={"is_active": 1},
-		fields=["name", "category_name", "hint"],
+		fields=["name", "category_name", "hint", "route_to_role"],
 		limit=_REQUEST_CATEGORY_LIMIT,
 		order_by="category_name asc",
 	)
+	for row in rows:
+		row["sends_to"] = "IT" if row.pop("route_to_role") == "IT Team" else "HR"
+	return rows
 
 
 # --- Configuration (P5-U13, P5-KTD3, P5-KTD11, P5-KTD12, P5-KTD15) ---------
