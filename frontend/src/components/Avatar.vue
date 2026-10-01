@@ -16,7 +16,10 @@ const props = defineProps({
   /** Rendered edge in px. Fixed `width`/`height` on the img, so a photo
    * arriving late shifts nothing (no CLS). */
   size: { type: Number, required: true },
-  /** The person's name, for the image's alt text. */
+  /** The image's alt text. Leave it empty (the default) wherever the
+   * person's name is printed next to the avatar: the photo is then
+   * decorative (alt="" + aria-hidden) so a screen reader does not read the
+   * name twice. Pass the name only where the avatar stands alone. */
   name: { type: String, default: '' },
 })
 
@@ -36,6 +39,7 @@ watch(
     v-if="photoUrl && !failed"
     :src="photoUrl"
     :alt="name"
+    :aria-hidden="name ? undefined : 'true'"
     :width="size"
     :height="size"
     loading="lazy"

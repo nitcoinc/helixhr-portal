@@ -281,7 +281,6 @@ async function submit() {
           class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-xs font-bold text-ink-green-3"
           :photo-url="context.data?.approver_photo_url"
           :initials="approverInitials"
-          :name="approverName"
           :size="28"
         />
         Goes to {{ approverName }}

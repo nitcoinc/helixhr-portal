@@ -157,7 +157,6 @@ onUnmounted(() => {
             class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white/15 font-medium text-white"
             :photo-url="session.employee?.photo_url"
             :initials="initials || '—'"
-            :name="employeeName"
             :size="36"
             data-testid="shell-avatar"
           />

@@ -106,8 +106,12 @@ test.describe('employee', () => {
 
     // Seeded by `ensure_directory_fixtures`: the colleague has a photo.
     await search.fill('Directory Colleague')
-    const withPhoto = page.getByRole('img', { name: 'Directory Colleague' }).first()
+    // The name is printed beside the avatar, so the photo is decorative:
+    // alt="" and aria-hidden, never a second announcement of the name.
+    const withPhoto = page.getByTestId('avatar-img').first()
     await expect(withPhoto).toBeVisible()
+    await expect(withPhoto).toHaveAttribute('alt', '')
+    await expect(withPhoto).toHaveAttribute('aria-hidden', 'true')
     await expect(withPhoto).toHaveJSProperty('complete', true)
     expect(await withPhoto.evaluate((img: HTMLImageElement) => img.naturalWidth)).toBeGreaterThan(0)
 
@@ -115,7 +119,7 @@ test.describe('employee', () => {
     await search.fill('Manager')
     await expect(page.getByText('Manager', { exact: true }).first()).toBeVisible()
     await expect(page.getByTestId('avatar-initials').first()).toBeVisible()
-    await expect(page.getByRole('img', { name: 'Manager', exact: true })).toHaveCount(0)
+    await expect(page.getByTestId('avatar-img')).toHaveCount(0)
   })
 
   test('the identity band does not overflow at 375px', async ({ page }) => {
