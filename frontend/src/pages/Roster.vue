@@ -302,10 +302,10 @@ const scopeLine = computed(() => {
               class="grid grid-cols-[11rem_repeat(7,minmax(0,1fr))] gap-1"
               role="row"
             >
-              <span
-                role="columnheader"
-                class="sr-only"
-              >Person</span>
+              <!-- The header keeps its grid cell: an `sr-only` element is
+                   absolutely positioned, so on its own it would drop out of
+                   the grid and shift every day one column left. -->
+              <span role="columnheader"><span class="sr-only">Person</span></span>
               <div
                 v-for="(day, index) in days"
                 :key="day.date"
@@ -368,7 +368,10 @@ const scopeLine = computed(() => {
                   @click="canEdit && openCell(row, cell, 'grid')"
                 >
                   <template v-if="cell.shift_type">
-                    <span class="truncate text-xs font-medium text-ink-gray-9">{{ cell.shift_type }}</span>
+                    <span
+                      class="truncate text-xs font-medium text-ink-gray-9"
+                      :title="cell.shift_type"
+                    >{{ cell.shift_type }}</span>
                     <span class="tabular truncate text-xs text-ink-gray-6">{{ shiftHours(cell) }}</span>
                   </template>
                   <span
@@ -433,13 +436,13 @@ const scopeLine = computed(() => {
                 />
                 <span
                   v-if="mode !== 'mine'"
-                  class="min-w-0 flex-1 truncate text-sm text-ink-gray-7"
+                  class="min-w-16 flex-1 truncate text-sm text-ink-gray-7"
                 >
                   {{ row.employee_name }}
                 </span>
                 <span
                   class="min-w-0 truncate text-sm"
-                  :class="[mode === 'mine' ? 'flex-1' : 'shrink-0', cell.shift_type ? 'font-medium text-ink-gray-9' : 'text-ink-gray-5']"
+                  :class="[mode === 'mine' ? 'flex-1' : 'max-w-[60%]', cell.shift_type ? 'font-medium text-ink-gray-9' : 'text-ink-gray-5']"
                 >
                   <template v-if="cell.shift_type">
                     {{ cell.shift_type }}
