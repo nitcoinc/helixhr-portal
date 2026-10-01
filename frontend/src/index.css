@@ -182,7 +182,8 @@ a,
    two-layer ring: frappe-ui's own `focus-visible` utilities set box-shadow,
    which overrode the halo a single combined ring depended on. */
 .bg-field :focus-visible,
-.bg-field-deep :focus-visible {
+.bg-field-deep :focus-visible,
+.surface-field :focus-visible {
   outline-color: #ffd24a;
 }
 

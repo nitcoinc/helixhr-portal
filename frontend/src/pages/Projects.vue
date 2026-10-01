@@ -505,7 +505,6 @@ async function removeMember(member) {
                   class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-xs font-bold text-ink-green-3"
                   :photo-url="member.photo_url"
                   :initials="member.initials"
-                  :name="member.employee_name"
                   :size="32"
                 />
                 <span class="min-w-0 flex-1 truncate text-sm font-medium text-ink-gray-9">
@@ -574,7 +573,6 @@ async function removeMember(member) {
                         class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-xs font-bold text-ink-gray-7"
                         :photo-url="person.photo_url"
                         :initials="person.initials"
-                        :name="person.employee_name"
                         :size="32"
                       />
                       <span class="min-w-0 flex-1 truncate text-sm text-ink-gray-8">

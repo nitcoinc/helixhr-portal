@@ -403,6 +403,16 @@ local session never did mid-investigation -- only `bench new-site`/`drop-site` o
 already-initialized bench. Lesson: "fresh site" and "fresh bench" are not the same reset, and only
 the latter reproduces a bench-level asset-linking bug.
 
+### Pointing the dev server at a fresh site needs a server reload, not just `bench use`
+
+`localhost:8000` has no site named `localhost`, so `serve_default_site` answers with
+`default_site` -- but `frappe serve` reads it **once at startup**. After `bench use e2e_verify`
+the pages kept coming from `test_site` while the Playwright API contexts (which send
+`Host: $SITE_HOST`) hit the fresh site: a mixed run whose failures were `test_site` drift. Trigger
+the Werkzeug reloader (`touch apps/helixhr/helixhr/__init__.py`) after `bench use`, both ways, and
+confirm which site answers (e.g. an Administrator `frappe.client.get_count` on a seeded doctype)
+before trusting the run.
+
 ### Full local Playwright runs need low parallelism, and a data reset between runs (U11)
 
 `bench start`'s Werkzeug dev server (used both here and in CI) isn't built for the kind of

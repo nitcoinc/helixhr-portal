@@ -273,7 +273,6 @@ async function saveChanges() {
             class="flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-white/10 font-heading text-xl font-bold text-signal"
             :photo-url="photoUrl"
             :initials="initials || '—'"
-            :name="employeeName"
             :size="64"
             data-testid="profile-avatar"
           />

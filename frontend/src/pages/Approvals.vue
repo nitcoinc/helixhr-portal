@@ -502,7 +502,6 @@ function hrLine(row) {
                   class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-sm font-bold text-ink-green-3"
                   :photo-url="row.photo_url"
                   :initials="row.initials"
-                  :name="row.employee_name"
                   :size="40"
                 />
 
@@ -949,7 +948,6 @@ function hrLine(row) {
                 class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-xs font-bold text-ink-gray-7"
                 :photo-url="row.photo_url"
                 :initials="row.initials"
-                :name="row.employee_name"
                 :size="32"
               />
               <p class="min-w-0 flex-1 truncate text-sm text-ink-gray-7">
@@ -998,7 +996,6 @@ function hrLine(row) {
                 class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-sm font-bold text-ink-green-3"
                 :photo-url="selected.photo_url"
                 :initials="selected.initials"
-                :name="selected.employee_name"
                 :size="40"
               />
               <div class="min-w-0 flex-1">

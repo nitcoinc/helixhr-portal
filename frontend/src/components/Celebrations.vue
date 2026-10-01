@@ -98,7 +98,6 @@ function when(person) {
               class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-xs font-bold text-ink-green-3"
               :photo-url="person.photo_url"
               :initials="person.initials"
-              :name="person.employee_name"
               :size="32"
             />
 
