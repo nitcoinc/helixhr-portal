@@ -98,6 +98,12 @@ const uploading = ref(false)
 // so a second press cannot start a second create against the same key or a
 // second upload against the same request.
 const busy = computed(() => create.loading || uploading.value)
+// The send button names who receives the request: IT / Asset goes to the
+// IT Team, every other category to HR (`sends_to` from the server).
+const sendLabel = computed(() => {
+  const option = categoryOptions.value.find((row) => row.name === category.value)
+  return `Send to ${option?.sends_to || 'HR'}`
+})
 const canSend = computed(() => !!category.value && !!subject.value.trim() && !busy.value)
 
 function onFileChange(e) {
@@ -147,7 +153,7 @@ async function submit() {
       // A fresh key is a fresh attempt, so the fields are the employee's
       // again -- nothing the old key wrote can be reused now.
       frozen.value = false
-      error.value = 'That didn’t go through. Press Send to HR again.'
+      error.value = `That didn’t go through. Press ${sendLabel.value} again.`
       return
     }
     if (isAmbiguous(e)) {
@@ -156,7 +162,7 @@ async function submit() {
       frozen.value = true
       error.value =
         'We didn’t hear back, so your request may already have gone through. ' +
-        'Press Send to HR again — it won’t send a second one.'
+        `Press ${sendLabel.value} again — it won’t send a second one.`
       return
     }
     rotateBeforeNextSend.value = true
@@ -288,7 +294,7 @@ async function submit() {
         :loading="busy"
         :disabled="!canSend"
       >
-        Send to HR
+        {{ sendLabel }}
       </Button>
       <Button
         variant="subtle"

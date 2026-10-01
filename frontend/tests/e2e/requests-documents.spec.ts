@@ -152,6 +152,11 @@ test.describe('employee', () => {
 
     // Nothing to send until it has a subject.
     await expect(sheet.getByRole('button', { name: 'Send to HR' })).toBeDisabled()
+
+    // IT / Asset goes to the IT Team, so the button says who receives it.
+    await sheet.getByRole('button', { name: /^IT \/ Asset/ }).click()
+    await expect(sheet.getByRole('button', { name: 'Send to IT' })).toBeDisabled()
+    await expect(sheet.getByRole('button', { name: 'Send to HR' })).toHaveCount(0)
   })
 
   // ── Sending, and landing on the record that was made ──────────────────
