@@ -1,7 +1,7 @@
 import frappe
 from frappe import _
 from frappe.model import no_value_fields
-from frappe.utils import cint
+from frappe.utils import cint, flt
 
 from helixhr.helixhr.doctype.hr_request.hr_request import request_belongs_to_session
 from helixhr.utils import (
@@ -320,7 +320,11 @@ def leave_application_validate(doc, method=None):
 	already applied the incoming change to the in-memory document, so the row
 	is the only evidence of where this application actually is -- and reading
 	it is also what makes a raw `frappe.client.set_value` answerable.
+
+	It also carries the pending-aware balance rule (R1), which runs first
+	because it applies to new rows too.
 	"""
+	_refuse_pending_overdraw(doc)
 	if doc.is_new():
 		return
 	user = frappe.session.user
@@ -337,6 +341,99 @@ def leave_application_validate(doc, method=None):
 			_("This leave request is with HR now, so only HR can decide it."),
 			frappe.PermissionError,
 		)
+
+
+def _fmt_days(value):
+	"""2.0 -> "2", 0.5 -> "0.5": a day count as a person writes it."""
+	return f"{flt(value):g}"
+
+
+def leave_overdraw(employee, leave_type, from_date, to_date, days, exclude=None):
+	"""The pending-aware balance check (R1), shared by the validate rule and
+	the leave preview so the two cannot disagree.
+
+	Returns `{"balance", "pending", "reason"}`; `reason` is one plain
+	sentence when `days` would not fit once the employee's other Open,
+	unsubmitted requests of this type are counted, else None. Returns None
+	for `allow_negative` and LWP types and when no allocation covers
+	`from_date` (HRMS refuses that case itself).
+
+	Pending is summed over the allocation period covering `from_date`, the
+	window HRMS's `get_leave_details` uses -- the request's own dates would
+	find nothing, because HRMS already refuses overlaps. `exclude` keeps a
+	saved request from counting itself.
+	"""
+	from hrms.hr.doctype.leave_application.leave_application import (
+		get_leave_allocation_records,
+		get_leave_balance_on,
+	)
+
+	flags = frappe.db.get_value("Leave Type", leave_type, ["allow_negative", "is_lwp"], as_dict=True)
+	if not flags or flags.allow_negative or flags.is_lwp:
+		return None
+	period = get_leave_allocation_records(employee, from_date, leave_type).get(leave_type)
+	if not period:
+		return None
+
+	filters = {
+		"employee": employee,
+		"leave_type": leave_type,
+		"status": "Open",
+		"docstatus": 0,
+		"from_date": ["<=", period.to_date],
+		"to_date": [">=", period.from_date],
+	}
+	if exclude:
+		filters["name"] = ["!=", exclude]
+	pending = flt(sum(frappe.get_all("Leave Application", filters=filters, pluck="total_leave_days")))
+	balance = flt(
+		get_leave_balance_on(
+			employee,
+			leave_type,
+			from_date,
+			to_date,
+			consider_all_leaves_in_the_allocation_period=True,
+			for_consumption=True,
+		).get("leave_balance_for_consumption")
+	)
+	reason = None
+	if pending and flt(days) > balance - pending:
+		reason = _(
+			"You have {0} days left and {1} already waiting for approval, so {2} more won't fit."
+		).format(_fmt_days(balance), _fmt_days(pending), _fmt_days(days))
+	return {"balance": balance, "pending": pending, "reason": reason}
+
+
+def _refuse_pending_overdraw(doc):
+	"""R1 on R2's triggers only: insert, a date / type / half-day change, or
+	a stored Rejected (sent back) moving to Open. Never on the approver's
+	submit, so a shrunken allocation cannot block Approve -- HRMS's own
+	balance check still applies there.
+
+	Without pending requests HRMS's own check already decides, so this only
+	speaks when pending days are what tip the request over.
+	"""
+	if doc.docstatus != 0 or doc.status != "Open":
+		return
+	if not doc.is_new():
+		stored_status = frappe.db.get_value("Leave Application", doc.name, "status")
+		changed = any(
+			doc.has_value_changed(field) for field in ("from_date", "to_date", "leave_type", "half_day")
+		)
+		if not changed and stored_status != "Rejected":
+			return
+	if not (doc.employee and doc.leave_type and doc.from_date and doc.to_date):
+		return
+	result = leave_overdraw(
+		doc.employee,
+		doc.leave_type,
+		doc.from_date,
+		doc.to_date,
+		doc.total_leave_days,
+		exclude=None if doc.is_new() else doc.name,
+	)
+	if result and result["reason"]:
+		frappe.throw(result["reason"], title=_("Not enough leave"))
 
 
 def _reconcile_timesheet_share(name, employee, keep_user):

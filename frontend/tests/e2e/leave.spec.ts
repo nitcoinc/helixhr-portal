@@ -165,6 +165,40 @@ test.describe('employee', () => {
     await expect(dialog.getByLabel('Half-day date')).toHaveCount(0)
   })
 
+  // ── U1: the preview gates Send on a pending overdraw ──────────────────
+  // The overdraw itself is asserted server-side in test_leave_flow.py; here
+  // the preview response is stubbed so the UI contract (sentence shown,
+  // Send disabled) does not depend on the fixture's live balance.
+  test('an overdraw in the preview disables Send with one sentence', async ({ page }) => {
+    const reason =
+      "You have 3 days left and 2 already waiting for approval, so 2 more won't fit."
+    await page.route('**/api/method/helixhr.api.get_leave_day_count*', async (route) => {
+      await route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          message: {
+            total_leave_days: 2,
+            skipped: [],
+            skipped_label: null,
+            balance: 3,
+            balance_after: 1,
+            pending: 2,
+            max_continuous: null,
+            blocked_reason: reason,
+          },
+        }),
+      })
+    })
+
+    await page.goto('/helixhr/leave')
+    await page.getByRole('button', { name: 'Ask for leave' }).click()
+    const dialog = page.getByRole('dialog')
+    await dialog.getByRole('button', { name: /^Casual/ }).click()
+
+    await expect(dialog.locator('[data-testid="leave-blocked-reason"]')).toHaveText(reason)
+    await expect(dialog.getByRole('button', { name: /^Send/ })).toBeDisabled()
+  })
+
   // ── Scenario 1: the manager's reason, where the decision is ───────────
   test('a sent-back leave quotes the manager and offers Edit and resend', async ({
     page,
