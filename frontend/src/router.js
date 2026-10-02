@@ -179,6 +179,14 @@ const routes = [
     props: true,
   },
   {
+    // Plan 2026-10-02-001 U7. The page is U10's; every method behind it is
+    // the server's own gate, same posture as /settings above.
+    path: '/email-templates',
+    name: 'EmailTemplates',
+    meta: { deskOnly: true },
+    component: () => import('@/pages/EmailTemplates.vue'),
+  },
+  {
     // P5-U15. `get_organisation_view` is the server's own gate -- a caller
     // hitting this route directly with no capability gets AsyncState's
     // 'forbidden' region, not a client-side redirect (same posture as
@@ -300,7 +308,12 @@ router.beforeEach(async (to) => {
   // An HR or System Manager with no Employee record: the pages whose
   // server methods are scoped by role (`meta.deskOnly`), and Home. Every
   // other page reads "my" records and would only fail.
+  // A Notification Manager with no Desk role (plan 2026-10-02-001 U7) has
+  // one page in the portal, so every route lands on Email templates.
   if (session.status === 'desk-only') {
+    if (session.canManageNotifications && !session.deskUrl) {
+      return to.name === 'EmailTemplates' ? true : { name: 'EmailTemplates' }
+    }
     return to.meta.deskOnly ? true : { name: 'Dashboard' }
   }
 

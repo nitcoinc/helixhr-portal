@@ -6,7 +6,11 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, today
 
 from helixhr import preflight
-from helixhr.tests.utils import EMPLOYEE_USER, make_test_employee_and_manager
+from helixhr.tests.utils import (
+	EMPLOYEE_USER,
+	ensure_notification_manager_user,
+	make_test_employee_and_manager,
+)
 
 
 class TestPreflight(IntegrationTestCase):
@@ -136,6 +140,34 @@ class TestPreflight(IntegrationTestCase):
 			result = preflight.check_delivery_manager_role()
 		self.assertEqual(result["status"], preflight.FAIL)
 		self.assertIn("hook", result["detail"])
+
+	def test_notification_manager_role_warns_when_nobody_holds_it(self):
+		"""Plan 2026-10-02-001 U7."""
+		real_get_all = frappe.get_all
+
+		def _no_holders(doctype, *args, **kwargs):
+			if doctype == "Has Role":
+				return []
+			return real_get_all(doctype, *args, **kwargs)
+
+		with patch.object(preflight.frappe, "get_all", side_effect=_no_holders):
+			result = preflight.check_notification_manager_role()
+		self.assertEqual(result["status"], preflight.WARN)
+
+		ensure_notification_manager_user()
+		self.assertEqual(preflight.check_notification_manager_role()["status"], preflight.PASS)
+
+		real_get_value = frappe.db.get_value
+
+		def _desk_role(doctype, filters=None, *args, **kwargs):
+			if doctype == "Role" and filters == preflight.NOTIFICATION_MANAGER:
+				return frappe._dict(desk_access=1, is_custom=0)
+			return real_get_value(doctype, filters, *args, **kwargs)
+
+		with patch.object(preflight.frappe.db, "get_value", side_effect=_desk_role):
+			result = preflight.check_notification_manager_role()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("desk_access", result["detail"])
 
 	def test_no_role_this_app_grants_holds_report_permission_on_timesheet(self):
 		"""P7-U8 / R16: the standing guard, not `check_delivery_manager_role`'s

@@ -86,9 +86,12 @@ website_route_rules = [
 
 fixtures = [
 	{"dt": "Property Setter", "filters": [["module", "=", "HelixHR"]]},
-	# P5-U2 / P7-U1: both are portal roles, so their fixtures pin
-	# desk_access=0 rather than inheriting Frappe's Desk-user default.
-	{"dt": "Role", "filters": [["name", "in", ["IT Team", "HelixHR Delivery Manager"]]]},
+	# P5-U2 / P7-U1 / plan 2026-10-02-001 U7: all portal roles, so their
+	# fixtures pin desk_access=0 rather than inheriting Frappe's Desk-user default.
+	{
+		"dt": "Role",
+		"filters": [["name", "in", ["IT Team", "HelixHR Delivery Manager", "HelixHR Notification Manager"]]],
+	},
 	# Custom DocPerm is deliberately NOT a fixture. Frappe *replaces* a
 	# doctype's standard DocPerm rows with its Custom DocPerm rows rather than
 	# merging them (frappe.permissions.get_valid_perms), so shipping a partial

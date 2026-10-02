@@ -587,6 +587,9 @@ def get_portal_bootstrap():
 		# so the nav item and the server's own gate can never disagree --
 		# same shape as `can_configure` just above.
 		"can_see_organisation": _is_hr(frappe.session.user),
+		# Plan 2026-10-02-001 U7 / KTD12: the Email templates page. A boolean,
+		# never a role list; System Manager may open it too (R14).
+		"can_manage_notifications": _can_manage_notifications(frappe.session.user),
 		# P6-U4: same shape again -- `search_people` and `get_person` are
 		# gated by `resolve_admin_scope`, which grants a scope to exactly
 		# the roles `_is_hr` names, so the nav item and the server's gate
@@ -2312,6 +2315,16 @@ def _holds_routed_role(user=None):
 	other half of P5-R11's "is HR or holds a routed role" gate."""
 	user = user or frappe.session.user
 	return bool(set(frappe.get_roles(user)) & _ROUTED_WORKER_ROLES)
+
+
+NOTIFICATION_MANAGER = "HelixHR Notification Manager"
+
+
+def _can_manage_notifications(user=None):
+	"""Whether the caller owns portal email wording (plan 2026-10-02-001 R14):
+	the Notification Manager or System Manager -- never HR Manager alone."""
+	user = user or frappe.session.user
+	return bool(set(frappe.get_roles(user)) & {NOTIFICATION_MANAGER, "System Manager"})
 
 
 def _initials(full_name):

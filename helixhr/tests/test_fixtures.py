@@ -649,6 +649,22 @@ class TestPermissionDeltas(IntegrationTestCase):
 			rule = _rule(doctype, "HelixHR Delivery Manager")
 			self.assertIsNone(rule, f"HelixHR Delivery Manager must hold nothing on {doctype}")
 
+	def test_notification_manager_is_portal_only_and_owns_message_templates(self):
+		"""Plan 2026-10-02-001 U7 / KTD12: desk_access 0 after migrate; the role
+		writes HelixHR Message Template and HR Manager holds nothing there."""
+		role = frappe.db.get_value(
+			"Role", "HelixHR Notification Manager", ["desk_access", "is_custom"], as_dict=True
+		)
+		self.assertIsNotNone(role)
+		self.assertEqual(frappe.utils.cint(role.desk_access), 0)
+		self.assertEqual(frappe.utils.cint(role.is_custom), 0)
+
+		rule = _rule("HelixHR Message Template", "HelixHR Notification Manager")
+		self.assertIsNotNone(rule)
+		self.assertEqual((rule.read, rule.write, rule.create), (1, 1, 1))
+		self.assertIsNone(_rule("HelixHR Message Template", "HR Manager"))
+		self.assertIsNotNone(_rule("HelixHR Message Template", "System Manager"))
+
 	def test_the_patch_is_idempotent(self):
 		"""It runs once through the patch log, but a re-run by hand (or a
 		restored site) must not double-apply or duplicate a rule."""

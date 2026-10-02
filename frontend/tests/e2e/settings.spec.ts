@@ -170,9 +170,12 @@ test("changing a category's routed role changes where the next request goes", as
   }
 })
 
-test('editing a template and reloading shows the edit', async ({ page }, testInfo) => {
+test('HR can no longer save a template (plan 2026-10-02-001 U7)', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'hr', 'settings is an HR-only screen')
 
+  // R14: wording belongs to the HelixHR Notification Manager now. U10 moves
+  // the editor to its own page and takes this tab out of Settings; until
+  // then HR's save is refused server-side and the form says so.
   const stamp = `Settings e2e ${Date.now()}`
   await page.goto('/helixhr/settings')
   await page.getByTestId('settings-tab-templates').click()
@@ -183,23 +186,9 @@ test('editing a template and reloading shows the edit', async ({ page }, testInf
   await row.getByRole('button', { name: 'Edit' }).click()
   const form = page.getByTestId('settings-template-form')
   await form.getByLabel('Subject').fill(stamp)
-  await form.getByLabel('Use this wording instead of the default').check()
   await form.getByRole('button', { name: 'Save' }).click()
-  await expect(form).toBeHidden()
-
-  await page.reload()
-  await page.getByTestId('settings-tab-templates').click()
-  await page
-    .getByTestId('settings-template-row')
-    .filter({ hasText: 'request_arrival' })
-    .getByRole('button', { name: 'Edit' })
-    .click()
-  await expect(page.getByTestId('settings-template-form').getByLabel('Subject')).toHaveValue(stamp)
-  // Whether the next arrival mail actually renders this wording is proved
-  // server-side (helixhr/tests/test_api_config.py, test_reminders.py) --
-  // firing a real request and inspecting the Email Queue body here would
-  // duplicate that coverage for no new signal, at the cost of a slow,
-  // mail-account-dependent e2e test.
+  await expect(form.getByRole('alert')).toBeVisible()
+  await expect(form.getByLabel('Subject')).toHaveValue(stamp)
 })
 
 test('a rejected save keeps the user input', async ({ page }, testInfo) => {

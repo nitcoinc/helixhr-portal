@@ -209,6 +209,28 @@ def ensure_hr_manager_user():
 	return HR_MANAGER_USER
 
 
+NOTIFICATION_MANAGER_USER = "notification-manager@helixhr.test"
+
+
+def ensure_notification_manager_user():
+	"""A HelixHR Notification Manager login with no Employee record and no
+	other role (plan 2026-10-02-001 U7): the portal's Email templates owner,
+	who must land there rather than on the not-linked page. Idempotent."""
+	if not frappe.db.exists("User", NOTIFICATION_MANAGER_USER):
+		frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": NOTIFICATION_MANAGER_USER,
+				"first_name": "Notification",
+				"last_name": "Manager",
+				"new_password": TEST_PASSWORD,
+				"send_welcome_email": 0,
+				"roles": [{"doctype": "Has Role", "role": "HelixHR Notification Manager"}],
+			}
+		).insert(ignore_permissions=True)
+	return NOTIFICATION_MANAGER_USER
+
+
 def make_test_hr_manager_employee():
 	"""An HR Manager with an Active Employee record, so they can open the
 	portal and work the HR queue (P4-R10, P4-R11, P4-KTD8).
@@ -581,6 +603,8 @@ def setup_playwright_fixtures():
 	make_test_user_without_employee()
 	# The desk-only portal's identity: HR Manager, no Employee record.
 	ensure_hr_manager_user()
+	# Plan 2026-10-02-001 U7: Notification Manager, no Employee record.
+	ensure_notification_manager_user()
 
 	# So leave.spec.ts can apply for leave and see a real, non-error
 	# "Waiting for ..." status rather than hedging on whichever plain

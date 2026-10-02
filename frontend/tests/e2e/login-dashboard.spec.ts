@@ -192,6 +192,31 @@ test.describe('HR Manager with no Employee record', () => {
   })
 })
 
+test.describe('Notification Manager with no Employee record', () => {
+  // Plan 2026-10-02-001 U7: a portal-only role with no Desk lands on Email
+  // templates, never on the not-linked page.
+  test.use({ storageState: { cookies: [], origins: [] } })
+
+  test('lands on Email templates from any route', async ({ page, baseURL }) => {
+    const api = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+    const login = await api.post('/api/method/login', {
+      form: { usr: 'notification-manager@helixhr.test', pwd: PASSWORD },
+    })
+    expect(login.ok()).toBeTruthy()
+    const storageState = await api.storageState()
+    await api.dispose()
+
+    await page.context().addCookies(storageState.cookies)
+    await page.goto('/helixhr')
+    await expect(page).toHaveURL(/\/helixhr\/email-templates$/)
+    await expect(page.getByRole('heading', { name: 'Email templates' })).toBeVisible()
+    await expect(page.getByText('Your account is not set up')).toHaveCount(0)
+
+    await page.goto('/helixhr/leave')
+    await expect(page).toHaveURL(/\/helixhr\/email-templates$/)
+  })
+})
+
 test.describe('dashboard week spine (redesign)', () => {
   test('shows the Monday..Sunday spine and the action queue', async ({ page }, testInfo) => {
     test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')

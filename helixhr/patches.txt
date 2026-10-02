@@ -63,3 +63,5 @@ helixhr.patches.v1_0.seed_profile_correction_category
 helixhr.patches.v1_0.turn_off_hrms_celebration_senders
 # Plan 2026-10-02-001 U4: waiting-since for rows pending before the field existed.
 helixhr.patches.v1_0.backfill_pending_since
+# Plan 2026-10-02-001 U7: HelixHR Notification Manager owns message templates; HR Manager no longer edits them.
+helixhr.patches.v1_0.apply_permission_deltas #2026-10-03 U7 HelixHR Notification Manager permissions

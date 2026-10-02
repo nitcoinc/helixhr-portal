@@ -8,6 +8,7 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, today
 
 from helixhr.api import (
+	get_portal_bootstrap,
 	get_portal_config,
 	save_holiday_list,
 	save_leave_type,
@@ -20,6 +21,7 @@ from helixhr.tests.utils import (
 	HR_MANAGER_EMPLOYEE_USER,
 	ensure_holiday_list_assignment,
 	ensure_leave_allocation,
+	ensure_notification_manager_user,
 	make_test_employee_and_manager,
 	make_test_hr_manager_employee,
 )
@@ -256,20 +258,41 @@ class TestConfigApi(IntegrationTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			save_message_template("request_arrival", subject="hacked")
 
+	def test_save_message_template_refuses_an_hr_manager(self):
+		"""Plan 2026-10-02-001 U7 / R14: HR Manager no longer edits templates."""
+		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+		with self.assertRaises(frappe.PermissionError):
+			save_message_template("request_arrival", subject="hr edit")
+
+	def test_a_notification_manager_bootstrap_opens_templates_not_settings(self):
+		"""U7: no Employee record, no Desk -- the flag the router lands on."""
+		frappe.set_user(ensure_notification_manager_user())
+		boot = get_portal_bootstrap()
+		self.assertTrue(boot["can_manage_notifications"])
+		self.assertFalse(boot["can_configure"])
+		self.assertFalse(boot["can_open_desk"])
+		self.assertIsNone(boot["desk_url"])
+		self.assertFalse(boot["employee"] and boot["employee"].get("name"))
+
+		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+		self.assertFalse(get_portal_bootstrap()["can_manage_notifications"])
+		frappe.set_user("Administrator")
+		self.assertTrue(get_portal_bootstrap()["can_manage_notifications"])
+
 	def test_save_message_template_refuses_an_unknown_key(self):
 		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
 		with self.assertRaises(frappe.ValidationError):
 			save_message_template("not_a_real_template", subject="x")
 
 	def test_a_141_character_subject_is_refused_and_nothing_is_written(self):
-		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+		frappe.set_user(ensure_notification_manager_user())
 		before = frappe.db.get_value("HelixHR Message Template", "request_arrival", "subject")
 		with self.assertRaises(frappe.ValidationError):
 			save_message_template("request_arrival", subject="x" * 141)
 		self.assertEqual(frappe.db.get_value("HelixHR Message Template", "request_arrival", "subject"), before)
 
-	def test_saving_as_an_hr_user_not_administrator_persists_the_value(self):
-		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+	def test_saving_as_a_notification_manager_not_administrator_persists_the_value(self):
+		frappe.set_user(ensure_notification_manager_user())
 		result = save_message_template("request_arrival", subject="A new arrival subject {subject}")
 		self.assertEqual(result["subject"], "A new arrival subject {subject}")
 		frappe.set_user("Administrator")
@@ -373,12 +396,16 @@ class TestConfigApi(IntegrationTestCase):
 
 		frappe.flags.helixhr_enforce_rate_limits = True
 		self.addCleanup(lambda: frappe.flags.pop("helixhr_enforce_rate_limits", None))
+		# U7: templates belong to the Notification Manager now, not HR.
+		notification_manager = ensure_notification_manager_user()
+		reset_rate_limit("save_message_template", notification_manager)
+		frappe.set_user(notification_manager)
 		limit, _seconds = RATE_LIMIT_POLICY["save_message_template"]
 		for _ in range(limit):
 			save_message_template("request_arrival", subject="Rate limit probe")
 		with self.assertRaises(frappe.RateLimitExceededError):
 			save_message_template("request_arrival", subject="One too many")
-		reset_rate_limit("save_message_template", HR_MANAGER_EMPLOYEE_USER)
+		reset_rate_limit("save_message_template", notification_manager)
 
 
 class TestLeaveTypeLimits(IntegrationTestCase):

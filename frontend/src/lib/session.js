@@ -44,6 +44,7 @@ const state = reactive({
    * `helixhr.api.get_portal_config` itself enforces server-side, so the nav
    * item and the server's own gate can never disagree. */
   canConfigure: false,
+  canManageNotifications: false,
   /** P5-U15: gates the Organisation nav item. Mirrors the exact predicate
    * `helixhr.api.get_organisation_view` itself enforces server-side, so the
    * nav item and the server's own gate can never disagree. */
@@ -120,6 +121,7 @@ function apply(boot) {
   state.hasReports = !!boot?.has_reports
   state.canWorkRequests = !!boot?.can_work_requests
   state.canConfigure = !!boot?.can_configure
+  state.canManageNotifications = !!boot?.can_manage_notifications
   state.canSeeOrganisation = !!boot?.can_see_organisation
   state.canSeePeople = !!boot?.can_see_people
   state.canSeeProjects = !!boot?.can_see_projects
@@ -138,7 +140,10 @@ function apply(boot) {
     today: state.today,
   })
   if (employee?.name) state.status = 'ready'
-  else state.status = state.deskUrl ? 'desk-only' : 'not-linked'
+  // Plan 2026-10-02-001 U7: a Notification Manager has no Desk, but the
+  // Email templates page is scoped by role, not by Employee.
+  else if (state.deskUrl || state.canManageNotifications) state.status = 'desk-only'
+  else state.status = 'not-linked'
 }
 
 /** Plan 2026-09-30-001 U5: Profile changed the caller's own photo, so the

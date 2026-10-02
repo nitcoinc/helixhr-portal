@@ -1354,6 +1354,37 @@ def check_curated_reports():
 	return _result("Curated reports", PASS, f"{len(ADMIN_REPORTS)} reports checked")
 
 
+NOTIFICATION_MANAGER = "HelixHR Notification Manager"
+
+
+def check_notification_manager_role():
+	"""Plan 2026-10-02-001 U7: the Notification Manager stays portal-only, and
+	WARNs while no enabled user holds it -- then only System Manager can edit
+	portal email wording, which is a gap rather than a fault."""
+	role = frappe.db.get_value("Role", NOTIFICATION_MANAGER, ["desk_access", "is_custom"], as_dict=True)
+	problems = []
+	if not role:
+		problems.append("Role fixture is missing")
+	else:
+		if cint(role.desk_access):
+			problems.append("desk_access must be 0")
+		if cint(role.is_custom):
+			problems.append("is_custom must be 0")
+	if problems:
+		return _result("Notification Manager role", FAIL, "; ".join(problems) + " -- run bench migrate")
+
+	holders = frappe.get_all(
+		"Has Role", filters={"role": NOTIFICATION_MANAGER, "parenttype": "User"}, pluck="parent"
+	)
+	if not holders or not frappe.db.exists("User", {"name": ("in", holders), "enabled": 1}):
+		return _result(
+			"Notification Manager role",
+			WARN,
+			"no enabled user holds it -- grant it in Desk (User > Roles) so someone owns email templates",
+		)
+	return _result("Notification Manager role", PASS, "portal-only role held by an enabled user")
+
+
 def check_no_timesheet_report_permission():
 	"""P7-U8 / R16: no role this app grants -- every entry in
 	`helixhr/fixtures/role.json`, not just `HelixHR Delivery Manager` --
@@ -1406,6 +1437,7 @@ CHECKS = [
 	check_employee_open_fields,
 	check_it_team_role,
 	check_delivery_manager_role,
+	check_notification_manager_role,
 	check_signup_disabled,
 	check_password_login,
 	check_entra,
