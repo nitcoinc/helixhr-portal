@@ -1283,6 +1283,8 @@ def _get_needs_you(employee, once):
 		"items": shown,
 		"more": max(0, len(items) - len(shown)),
 		"waiting": waiting[:_QUEUE_LIMIT],
+		# The "View all (N)" count for the waiting list, as `more` is for the queue.
+		"waiting_more": max(0, len(waiting) - _QUEUE_LIMIT),
 	}
 
 
@@ -1314,8 +1316,10 @@ def _queue_item(
 # Shown on the screen, versus fetched per source. Fetching limit+1 would only
 # ever prove "at least one more exists"; a bounded window instead makes the
 # "and N more" count exact without a second COUNT query per source, and these
-# tables hold a handful of rows per employee.
-_QUEUE_LIMIT = 8
+# tables hold a handful of rows per employee. Twenty, not eight (R12): Home
+# shows five and scrolls the rest, so an HR backlog stays reachable without
+# flooding the page; "View all (N)" carries the full count.
+_QUEUE_LIMIT = 20
 
 # The rail card's ceiling (P4-U9). Five rows is what fits the rail beside the
 # queue without becoming the taller column; the page behind it is the full

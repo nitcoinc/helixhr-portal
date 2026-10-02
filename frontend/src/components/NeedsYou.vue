@@ -1,9 +1,10 @@
 <script setup>
+import { computed, nextTick, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
 import { formatDate } from '@/lib/dates'
 import { NEEDS_YOU_ICON } from '@/lib/icons'
 
-defineProps({
+const props = defineProps({
   items: { type: Array, default: () => [] },
   // Rows the queue holds but did not show, so a long backlog is disclosed
   // rather than silently truncated.
@@ -13,6 +14,8 @@ defineProps({
   // instead of padding the queue with rows whose only honest action is
   // "wait" (P2-U4, P2-R8, P2-R11).
   waiting: { type: Array, default: () => [] },
+  // Waiting rows past the server's window, for the "View all (N)" count.
+  waitingMore: { type: Number, default: 0 },
   loading: { type: Boolean, default: false },
   // Shown in the empty state so a clear queue still tells you where you
   // stand rather than just going blank -- the direction's named risk.
@@ -37,6 +40,34 @@ function ageLabel(item) {
   return `${Math.floor(days / 30)} months ago`
 }
 
+// R12. Each list shows five rows and scrolls the rest, so an HR backlog
+// cannot push the rest of Home off the screen. Rows differ in height (a
+// reason line, an age tag), so the cap is measured from the fifth row
+// rather than guessed in rem.
+const VISIBLE_ROWS = 5
+const queueList = ref(null)
+const waitingList = ref(null)
+const queueHeight = ref(null)
+const waitingHeight = ref(null)
+const queueTotal = computed(() => props.items.length + props.more)
+const waitingTotal = computed(() => props.waiting.length + props.waitingMore)
+
+function capHeight(el) {
+  const rows = el?.children
+  if (!rows || rows.length <= VISIBLE_ROWS) return null
+  const last = rows[VISIBLE_ROWS - 1]
+  return `${last.offsetTop - rows[0].offsetTop + last.offsetHeight}px`
+}
+
+watch(
+  () => [props.items, props.waiting, props.loading],
+  async () => {
+    await nextTick()
+    queueHeight.value = capHeight(queueList.value)
+    waitingHeight.value = capHeight(waitingList.value)
+  },
+  { immediate: true, flush: 'post' },
+)
 </script>
 
 <template>
@@ -90,9 +121,16 @@ function ageLabel(item) {
       </router-link>
     </div>
 
+    <!-- Past five rows the list is a labelled, focusable scroll region so
+         a keyboard can scroll it too; the inset border marks the cut. -->
     <ul
       v-else
+      ref="queueList"
       class="space-y-2"
+      :class="items.length > VISIBLE_ROWS ? 'scroll-queue' : ''"
+      :style="queueHeight ? { maxHeight: queueHeight } : null"
+      :tabindex="items.length > VISIBLE_ROWS ? 0 : undefined"
+      :aria-label="items.length > VISIBLE_ROWS ? 'Needs you, scrollable' : undefined"
     >
       <!-- The key is the server's own record identity, never the index: the
            queue re-orders as work is done, and an index key reuses the wrong
@@ -155,10 +193,18 @@ function ageLabel(item) {
     </ul>
 
     <p
-      v-if="more > 0"
-      class="mt-2 text-sm text-ink-gray-6"
+      v-if="!loading && queueTotal > VISIBLE_ROWS"
+      class="mt-2 flex flex-wrap items-center justify-between gap-2 text-sm text-ink-gray-6"
     >
-      and <span class="tabular font-medium">{{ more }}</span> more not shown here.
+      <span v-if="more > 0">
+        and <span class="tabular font-medium">{{ more }}</span> more not shown here.
+      </span>
+      <router-link
+        to="/approvals"
+        class="tabular ml-auto inline-flex min-h-11 cursor-pointer items-center font-medium text-blue-700 hover:underline"
+      >
+        View all ({{ queueTotal }})
+      </router-link>
     </p>
 
     <!-- Waiting on others. Same rows, deliberately quieter: no tinted tile,
@@ -170,7 +216,14 @@ function ageLabel(item) {
       <h3 class="label mb-2">
         Waiting on others
       </h3>
-      <ul class="space-y-2">
+      <ul
+        ref="waitingList"
+        class="space-y-2"
+        :class="waiting.length > VISIBLE_ROWS ? 'scroll-queue' : ''"
+        :style="waitingHeight ? { maxHeight: waitingHeight } : null"
+        :tabindex="waiting.length > VISIBLE_ROWS ? 0 : undefined"
+        :aria-label="waiting.length > VISIBLE_ROWS ? 'Waiting on others, scrollable' : undefined"
+      >
         <li
           v-for="item in waiting"
           :key="item.id"
@@ -207,6 +260,24 @@ function ageLabel(item) {
           </router-link>
         </li>
       </ul>
+      <router-link
+        v-if="waitingTotal > VISIBLE_ROWS"
+        to="/requests"
+        class="tabular mt-2 inline-flex min-h-11 cursor-pointer items-center text-sm font-medium text-blue-700 hover:underline"
+      >
+        View all ({{ waitingTotal }})
+      </router-link>
     </div>
   </section>
 </template>
+
+<style scoped>
+/* The scroll affordance: an always-visible scrollbar gutter and a bottom
+   rule, so a cut-off list does not read as the whole list. */
+.scroll-queue {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding-right: 0.25rem;
+  border-bottom: 1px solid var(--outline-gray-2);
+}
+</style>
