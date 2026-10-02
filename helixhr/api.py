@@ -97,6 +97,7 @@ from helixhr.utils import (
 	rate_limit_per_user,
 	resolve_admin_scope,
 	resolve_project_scope,
+	send_notification,
 	session_company,
 	validate_portal_upload,
 )
@@ -5464,6 +5465,9 @@ def act_on_approval(
 			f"{HR_HANDOVER_NOTE_PREFIX} {reason}" if action == "Send to HR" else reason,
 		)
 
+	# U9: leave keeps its reason as a Comment, so the decision email reads it
+	# from here (`events.leave_application_on_submit` / `_on_update`).
+	doc.flags.helixhr_decision_note = reason
 	_APPROVAL_KINDS[doctype]["act"](doc, action)
 	_record_hr_acting_for_approver(doc, action)
 	return {
@@ -6841,23 +6845,21 @@ def reply_to_my_request(name, message, expected_modified=None):
 	doc.add_comment("Comment", message)
 	doc.db_set("status", HR_REQUEST_IN_PROGRESS)
 
-	role = row.routed_to_role
-	recipients = _enabled_users_with_role(role)
-	if recipients:
-		try:
-			frappe.sendmail(
-				recipients=recipients,
-				subject=f"New reply on a {row.category} request: {row.subject}",
-				message=(
-					f"{frappe.utils.escape_html(row.category)} request "
-					f"“{frappe.utils.escape_html(row.subject)}” has a new reply. "
-					f"<a href=\"{frappe.utils.get_url('/helixhr/requests')}\">Open requests</a>."
-				),
-				reference_doctype="HR Request",
-				reference_name=name,
-			)
-		except Exception:
-			frappe.log_error(frappe.get_traceback(), "HelixHR request reply mail failed")
+	# U9: templated through the HelixHR sandbox; `send_notification` never
+	# raises, so a mail failure cannot undo the reply.
+	send_notification(
+		"request_reply",
+		_enabled_users_with_role(row.routed_to_role),
+		{
+			"employee_name": frappe.db.get_value("Employee", employee, "employee_name"),
+			"category": row.category,
+			"subject": row.subject,
+			"reply_excerpt": message[:300],
+			"action_url": frappe.utils.get_url(f"/helixhr/approvals/request/{name}"),
+		},
+		reference_doctype="HR Request",
+		reference_name=name,
+	)
 
 	return {"name": name, "status": doc.status}
 

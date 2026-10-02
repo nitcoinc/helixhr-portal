@@ -1942,6 +1942,44 @@ class TestFourOutcomesAndTheHrQueue(IntegrationTestCase):
 		for name in (request, timesheet, leave):
 			self.assertNotIn(name, mine, msg=name)
 
+	def test_a_full_hr_cycle_mails_one_email_per_event_per_recipient(self):
+		"""Plan 2026-10-02-001 U9 verification: hand all three kinds to HR,
+		HR approves each -- every HR Manager gets one "for HR" mail per
+		record and the employee one decision mail per record; the manager
+		who acted gets none."""
+		request = self._pending_manager_request()
+		timesheet = self._pending_timesheet()
+		leave = self._open_leave()
+		before = set(frappe.get_all("Email Queue", pluck="name"))
+
+		frappe.set_user(MANAGER_USER)
+		for doctype, name in ((DOCTYPE, request), ("Timesheet", timesheet), ("Leave Application", leave)):
+			act_on_approval(doctype, name, "Send to HR", **token(doctype, name))
+		frappe.set_user(self.hr_user)
+		for doctype, name in ((DOCTYPE, request), ("Timesheet", timesheet), ("Leave Application", leave)):
+			act_on_approval(doctype, name, "Approve", **token(doctype, name))
+		frappe.set_user("Administrator")
+
+		rows = set(frappe.get_all("Email Queue", pluck="name")) - before
+		self.addCleanup(frappe.db.delete, "Email Queue", {"name": ["in", list(rows) or [""]]})
+		self.addCleanup(frappe.db.delete, "Email Queue Recipient", {"parent": ["in", list(rows) or [""]]})
+		sent = {}
+		for row in rows:
+			reference = frappe.db.get_value("Email Queue", row, "reference_name")
+			for recipient in frappe.get_all(
+				"Email Queue Recipient", filters={"parent": row}, pluck="recipient"
+			):
+				sent.setdefault((recipient, reference), []).append(row)
+
+		for name in (request, timesheet, leave):
+			self.assertEqual(len(sent.get((self.hr_user, name), [])), 1, msg=name)
+			self.assertEqual(len(sent.get((self.QUEUE_EMPLOYEE_USER, name), [])), 1, msg=name)
+			self.assertEqual(sent.get((MANAGER_USER, name)), None, msg=name)
+		other_hr = {user for user, _ in sent} - {self.QUEUE_EMPLOYEE_USER}
+		for user in other_hr:
+			for name in (request, timesheet, leave):
+				self.assertEqual(len(sent.get((user, name), [])), 1, msg=(user, name))
+
 	def test_hr_sees_their_own_reports_and_hr_work_and_nothing_else(self):
 		"""P4-KTD7, P4-R6. HR Manager holds native read on all three
 		doctypes, so the line-manager half of their queue has to be narrowed

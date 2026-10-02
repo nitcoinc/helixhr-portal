@@ -67,3 +67,6 @@ helixhr.patches.v1_0.backfill_pending_since
 helixhr.patches.v1_0.apply_permission_deltas #2026-10-03 U7 HelixHR Notification Manager permissions
 # Plan 2026-10-02-001 U8: Message Template rows move from {token} to the HelixHR Jinja sandbox; disabled rows (= default) are deleted.
 helixhr.patches.v1_0.migrate_message_templates_to_jinja
+# Plan 2026-10-02-001 U9: HR-queue email fixtures replaced by templated doc-event sends; HRMS leave mail off.
+helixhr.patches.v1_0.retire_hr_email_notifications
+helixhr.patches.v1_0.turn_off_hrms_leave_notification

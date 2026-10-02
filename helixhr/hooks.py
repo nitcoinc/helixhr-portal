@@ -212,7 +212,15 @@ doc_events = {
 		# Attendance Request, filing a leave application is the insert
 		# itself, not a later workflow-state move.
 		"after_insert": "helixhr.events.leave_application_after_insert",
-		"on_change": "helixhr.events.stamp_pending_since",
+		# Plan 2026-10-02-001 U9 / KTD8a: the templated leave emails. Send to
+		# HR is a `db_set`, which runs only `on_change`.
+		"on_update": "helixhr.events.leave_application_on_update",
+		"on_submit": "helixhr.events.leave_application_on_submit",
+		"on_cancel": "helixhr.events.leave_application_on_cancel",
+		"on_change": [
+			"helixhr.events.stamp_pending_since",
+			"helixhr.events.leave_application_on_change",
+		],
 	},
 	# P3-KTD8 / P4-KTD5. Frappe does not enforce a workflow state's
 	# `allow_edit` on the server, so the attendance approval carries its

@@ -784,12 +784,15 @@ class TestRequestApprovalQueue(IntegrationTestCase):
 		)
 
 		self.assertEqual(result["status"], "In Progress")
-		mails = added()
-		self.assertEqual(len(mails), 1)
-		recipients = frappe.get_all(
-			"Email Queue Recipient", filters={"parent": next(iter(mails))}, pluck="recipient"
-		)
-		self.assertIn(self.it_user, recipients)
+		# U9: one templated mail per routed-role holder, so this one is theirs.
+		to_it_user = [
+			row
+			for row in added()
+			if self.it_user
+			in frappe.get_all("Email Queue Recipient", filters={"parent": row}, pluck="recipient")
+		]
+		self.assertEqual(len(to_it_user), 1)
+		self.assertIn("A Dell Latitude", frappe.db.get_value("Email Queue", to_it_user[0], "message"))
 
 	def test_reply_against_a_status_that_isnt_waiting_on_employee_is_refused(self):
 		from helixhr.api import reply_to_my_request

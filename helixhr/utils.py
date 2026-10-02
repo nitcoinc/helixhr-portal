@@ -205,7 +205,7 @@ NOTIFICATION_EVENTS = {
 			"<p>{{ employee_name }} asked for {{ leave_type }}: {{ days }} day(s),"
 			" {{ from_date }} to {{ to_date }}{% if half_day %} (half day){% endif %}.</p>"
 			"{% if reason %}<p>Reason: {{ reason }}</p>{% endif %}"
-			"<p>Balance after approval: {{ balance_after }}</p>"
+			"{% if balance_after %}<p>Balance after approval: {{ balance_after }}</p>{% endif %}"
 		),
 		"action_label": "Review request",
 	},
@@ -237,7 +237,7 @@ NOTIFICATION_EVENTS = {
 			"<p>{{ approver_name }} approved your {{ leave_type }}: {{ days }} day(s),"
 			" {{ from_date }} to {{ to_date }}.</p>"
 			"{% if decision_note %}<p>Note: {{ decision_note }}</p>{% endif %}"
-			"<p>Balance after: {{ balance_after }}</p>"
+			"{% if balance_after %}<p>Balance after: {{ balance_after }}</p>{% endif %}"
 		),
 	},
 	"leave_rejected": {

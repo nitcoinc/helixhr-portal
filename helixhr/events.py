@@ -12,6 +12,7 @@ from helixhr.utils import (
 	get_manager_user,
 	photo_file_filters,
 	render_message,
+	send_notification,
 	upload_extension,
 	validate_portal_upload,
 )
@@ -105,16 +106,17 @@ def leave_application_after_insert(doc, method=None):
 	"""P5-U10: the manager learns a leave request landed, without opening
 	the portal -- the pre-existing gap the routing inventory surfaced.
 
-	An HR-approves leave type skips the manager entirely (P4-R7): the
-	fixture `HelixHR New Leave For HR` already emails HR the moment
-	`apply_for_leave` writes `helixhr_stage = "HR"`, moments after this
-	hook runs, so notifying the manager here too would be a second,
-	wrong recipient for a request that was never theirs to act on. That
-	check reads `Leave Type` directly rather than `doc.helixhr_stage`,
-	because permlevel 1 means the field is not written on `doc` until
-	after this insert returns (KTD4).
+	An HR-approves leave type skips the manager entirely (P4-R7): HR is
+	mailed `leave_for_hr` here instead, so notifying the manager too would
+	be a second, wrong recipient for a request that was never theirs to act
+	on. That check reads `Leave Type` directly rather than
+	`doc.helixhr_stage`, because permlevel 1 means the field is not written
+	on `doc` until after this insert returns (KTD4, plan 2026-10-02-001
+	KTD8a). A Desk insert HR filed already in the HR stage goes to HR too.
 	"""
-	if frappe.db.get_value("Leave Type", doc.leave_type, "helixhr_hr_approves"):
+	hr_approves = frappe.db.get_value("Leave Type", doc.leave_type, "helixhr_hr_approves")
+	_mail_new_leave(doc, to_hr=hr_approves or doc.get("helixhr_stage") == LEAVE_STAGE_HR)
+	if hr_approves:
 		return
 	_notify_manager_of_arrival(
 		"Leave Application",
@@ -122,6 +124,196 @@ def leave_application_after_insert(doc, method=None):
 		_approver_user(doc.employee),
 		_("{0} applied for {1}").format(doc.employee_name or doc.employee, doc.leave_type),
 	)
+
+
+# Plan 2026-10-02-001 U9 / KTD8. Every portal email is sent from a doc
+# event through `utils.send_notification`, so Desk and portal actions mail
+# the same way, once. Recipients come from document fields (the employee's
+# `user_id`, `leave_approver`, the HR Manager role), never `owner`, and
+# nobody is mailed about what they just did themselves. Building the context
+# reads balances and names; a failure there is logged like a send failure
+# and never fails the write (P5-KTD9).
+
+
+def _mail(doc, event_key, recipients, build_context):
+	recipients = [user for user in dict.fromkeys(recipients or ()) if user and user != frappe.session.user]
+	if not recipients:
+		return
+	try:
+		context = build_context()
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), f"HelixHR {event_key} mail failed")
+		return
+	send_notification(event_key, recipients, context, doc.doctype, doc.name)
+
+
+def _portal_url(path):
+	return frappe.utils.get_url(f"/helixhr/{path}")
+
+
+def _decider_name():
+	return frappe.utils.get_fullname(frappe.session.user)
+
+
+def _hr_managers():
+	return _enabled_users_with_role("HR Manager")
+
+
+def _leave_balance_after(doc, subtract_days):
+	"""The balance as text once `doc` is taken, or "" when there is no
+	meaningful one (LWP, negative-allowed, no allocation)."""
+	result = leave_overdraw(doc.employee, doc.leave_type, doc.from_date, doc.to_date, 0)
+	if not result:
+		return ""
+	balance = result["balance"] - (flt(doc.total_leave_days) if subtract_days else 0)
+	return _fmt_days(balance)
+
+
+def _leave_context(doc, **extra):
+	return {
+		"employee_name": doc.employee_name or doc.employee,
+		"leave_type": doc.leave_type,
+		"from_date": formatdate(doc.from_date),
+		"to_date": formatdate(doc.to_date),
+		"days": _fmt_days(doc.total_leave_days),
+		"half_day": bool(cint(doc.half_day)),
+		"reason": (doc.description or "").strip(),
+		**extra,
+	}
+
+
+def _mail_new_leave(doc, to_hr):
+	"""A request waiting for its first decision: HR when it is HR's
+	(KTD8a), else the leave approver. HelixHR is the only sender, since
+	HRMS `send_leave_notification` is off (R21)."""
+	if to_hr:
+		_mail_leave_for_hr(doc)
+		return
+	_mail(
+		doc,
+		"leave_submitted",
+		[doc.leave_approver],
+		lambda: _leave_context(
+			doc,
+			balance_after=_leave_balance_after(doc, subtract_days=True),
+			action_url=_portal_url(f"approvals/leave/{doc.name}"),
+		),
+	)
+
+
+def _mail_leave_for_hr(doc):
+	def context():
+		reports_to = frappe.db.get_value("Employee", doc.employee, "reports_to")
+		return _leave_context(
+			doc,
+			balance_after=_leave_balance_after(doc, subtract_days=True),
+			manager_name=frappe.db.get_value("Employee", reports_to, "employee_name") if reports_to else "",
+			action_url=_portal_url(f"approvals/leave/{doc.name}"),
+		)
+
+	_mail(doc, "leave_for_hr", _hr_managers(), context)
+
+
+def leave_application_on_change(doc, method=None):
+	"""KTD8a: "Send to HR" is a `db_set` of `helixhr_stage`, which runs only
+	`on_change`. An HR-approves type was already routed to HR on insert, so
+	the portal's own post-insert `db_set` of the stage mails nobody again."""
+	before = doc.get_doc_before_save()
+	if not before or doc.get("helixhr_stage") != LEAVE_STAGE_HR:
+		return
+	if before.get("helixhr_stage") == LEAVE_STAGE_HR:
+		return
+	if frappe.db.get_value("Leave Type", doc.leave_type, "helixhr_hr_approves"):
+		return
+	_mail_leave_for_hr(doc)
+
+
+def leave_application_on_update(doc, method=None):
+	"""Send back (Rejected at docstatus 0) tells the employee; a resend
+	(sent back -> Open) is a new request for whoever decides it."""
+	before = doc.get_doc_before_save()
+	if not before or cint(doc.docstatus) != 0 or before.status == doc.status:
+		return
+	if doc.status == "Rejected":
+		_mail(
+			doc,
+			"leave_sent_back",
+			[frappe.db.get_value("Employee", doc.employee, "user_id")],
+			lambda: _leave_context(
+				doc,
+				approver_name=_decider_name(),
+				decision_note=doc.flags.get("helixhr_decision_note") or "",
+				action_url=_portal_url(f"leave/{doc.name}"),
+			),
+		)
+	elif doc.status == "Open" and before.status == "Rejected":
+		hr_approves = frappe.db.get_value("Leave Type", doc.leave_type, "helixhr_hr_approves")
+		_mail_new_leave(doc, to_hr=hr_approves or doc.get("helixhr_stage") == LEAVE_STAGE_HR)
+
+
+def leave_application_on_submit(doc, method=None):
+	"""Approve or (final) Reject, from the portal or Desk. The portal's
+	reason rides `doc.flags.helixhr_decision_note` (leave keeps its reason
+	as a Comment, so there is no field to read)."""
+	event = {"Approved": "leave_approved", "Rejected": "leave_rejected"}.get(doc.status)
+	if not event:
+		return
+	_mail(
+		doc,
+		event,
+		[frappe.db.get_value("Employee", doc.employee, "user_id")],
+		lambda: _leave_context(
+			doc,
+			approver_name=_decider_name(),
+			decision_note=doc.flags.get("helixhr_decision_note") or "",
+			balance_after=_leave_balance_after(doc, subtract_days=False),
+		),
+	)
+
+
+def leave_application_on_cancel(doc, method=None):
+	_mail(
+		doc,
+		"leave_cancelled",
+		[frappe.db.get_value("Employee", doc.employee, "user_id")],
+		lambda: _leave_context(doc, cancelled_by=_decider_name()),
+	)
+
+
+def _mail_timesheet_change(doc, before):
+	"""U9: HR on a move into Pending HR (replaces the retired fixture), the
+	employee on Approved or Sent Back."""
+	state = doc.workflow_state
+	if not before or before.get("workflow_state") == state:
+		return
+
+	def context(**extra):
+		return {
+			"employee_name": doc.employee_name or doc.employee,
+			"week_label": f"{formatdate(doc.start_date)} to {formatdate(doc.end_date)}",
+			"total_hours": _fmt_days(doc.total_hours),
+			**extra,
+		}
+
+	if state == TIMESHEET_PENDING_HR and cint(doc.docstatus) == 0:
+		_mail(
+			doc,
+			"timesheet_for_hr",
+			_hr_managers(),
+			lambda: context(action_url=_portal_url(f"approvals/timesheet/{doc.name}")),
+		)
+	elif state in ("Approved", TIMESHEET_SENT_BACK):
+		sent_back = state == TIMESHEET_SENT_BACK
+		_mail(
+			doc,
+			"timesheet_decided",
+			[frappe.db.get_value("Employee", doc.employee, "user_id")],
+			lambda: context(
+				state="sent back" if sent_back else "approved",
+				approver_name=_decider_name(),
+				decision_note=(doc.get(DECISION_REASON_FIELD) or "").strip() if sent_back else "",
+			),
+		)
 
 
 def timesheet_on_update(doc, method=None):
@@ -162,6 +354,8 @@ def timesheet_on_update(doc, method=None):
 		# the docstatus-2 case were missing until P2-U7: a cancelled week
 		# kept its approver's write+submit share forever.
 		_reconcile_timesheet_share(doc.name, doc.employee, None)
+
+	_mail_timesheet_change(doc, before)
 
 
 def employee_on_update(doc, method=None):
@@ -1127,6 +1321,43 @@ def attendance_request_on_update(doc, method=None):
 	if not before or before.get("workflow_state") == doc.workflow_state:
 		return
 	_notify_attendance_request(doc)
+	_mail_attendance_change(doc)
+
+
+def _mail_attendance_change(doc):
+	"""U9: HR on a move into Pending HR (replaces the retired fixture), the
+	employee on a decision. Called only on a real state change."""
+	state = doc.workflow_state
+	date_range = _request_dates(doc.from_date, doc.to_date)
+	if state == REQUEST_PENDING_HR:
+		_mail(
+			doc,
+			"attendance_for_hr",
+			_hr_managers(),
+			lambda: {
+				"employee_name": doc.employee_name or doc.employee,
+				"date_range": date_range,
+				"reason": doc.reason or "",
+				"action_url": _portal_url(f"approvals/attendance/{doc.name}"),
+			},
+		)
+		return
+	words = {REQUEST_APPROVED: "approved", REQUEST_SENT_BACK: "sent back", REQUEST_REJECTED: "declined"}
+	if state not in words:
+		return
+	_mail(
+		doc,
+		"attendance_decided",
+		[frappe.db.get_value("Employee", doc.employee, "user_id")],
+		lambda: {
+			"date_range": date_range,
+			"state": words[state],
+			"approver_name": _decider_name(),
+			"decision_note": (doc.get(DECISION_REASON_FIELD) or "").strip()
+			if state != REQUEST_APPROVED
+			else "",
+		},
+	)
 
 
 def _notify_attendance_request(doc):
@@ -1312,6 +1543,16 @@ def hr_settings_validate(doc, method=None):
 	# recipient helpers at module level (P4-KTD12), and every doc event in
 	# this file would otherwise carry that import.
 	from helixhr.reminders import EVENTS
+
+	# Plan 2026-10-02-001 R21 / KTD10: HelixHR is the only sender of leave
+	# email; HRMS's own leave mail would be a second, Desk-worded copy.
+	if cint(doc.get("send_leave_notification")):
+		frappe.throw(
+			_(
+				"HelixHR already sends every leave email, so HRMS's 'Send Leave Notification' "
+				"must stay off. Edit the wording on the portal's Email templates page."
+			)
+		)
 
 	for event, spec in EVENTS.items():
 		reminder_enabled = frappe.db.get_value(

@@ -864,15 +864,9 @@ def check_fixtures():
 		("Activity Type", "General"),
 		("Notification", "HelixHR Timesheet Status Changed"),
 		("Notification", "HelixHR Leave Status Changed"),
-		# P4-KTD9 / P4-R12: HR is told a request reached its queue by these
-		# four fixture Notifications and by nothing in code, so a missing one
-		# is a queue nobody is watching. Leave needs two -- Frappe skips
-		# Value Change while `flags.in_insert`, and an HR-approves leave is
-		# *inserted* in the HR stage.
-		("Notification", "HelixHR Leave Sent To HR"),
-		("Notification", "HelixHR New Leave For HR"),
-		("Notification", "HelixHR Timesheet Sent To HR"),
-		("Notification", "HelixHR Attendance Request Sent To HR"),
+		# The four HR-queue email fixtures (P4-KTD9) were retired by plan
+		# 2026-10-02-001 U9; `check_retired_hr_email_notifications` guards
+		# that they stay gone.
 	]
 	missing = [f"{dt} '{name}'" for dt, name in expected if not frappe.db.exists(dt, name)]
 	if missing:
@@ -905,6 +899,40 @@ def check_retired_request_notifications():
 			f"{', '.join(enabled)} still enabled -- run helixhr.patches.v1_0.retire_request_notifications",
 		)
 	return _result("Retired request notifications", PASS, f"{len(retired)} confirmed absent or disabled")
+
+
+def check_retired_hr_email_notifications():
+	"""Plan 2026-10-02-001 U9 / KTD9: HR's "waiting for you" mail is a
+	templated doc-event send now, so any of the four retired fixture email
+	Notifications coming back -- a restored site, a Desk re-create -- is a
+	second, untemplated copy of every one of those emails."""
+	from helixhr.patches.v1_0.retire_hr_email_notifications import RETIRED_NOTIFICATIONS
+
+	present = [name for name in RETIRED_NOTIFICATIONS if frappe.db.exists("Notification", name)]
+	if present:
+		return _result(
+			"Retired HR email notifications",
+			FAIL,
+			f"{', '.join(present)} still present -- run helixhr.patches.v1_0.retire_hr_email_notifications",
+		)
+	return _result(
+		"Retired HR email notifications", PASS, f"{len(RETIRED_NOTIFICATIONS)} confirmed absent"
+	)
+
+
+def check_hrms_leave_notification():
+	"""Plan 2026-10-02-001 R21 / KTD10: HelixHR is the only sender of leave
+	email. `events.hr_settings_validate` refuses re-enabling HRMS's
+	`send_leave_notification`; this is the backstop for routes that skip
+	`validate` (a raw `set_single_value`, a restored site)."""
+	if cint(_hr_setting("send_leave_notification")):
+		return _result(
+			"HRMS leave notification",
+			FAIL,
+			"HR Settings 'Send Leave Notification' is on, so every leave email goes out twice -- "
+			"run helixhr.patches.v1_0.turn_off_hrms_leave_notification",
+		)
+	return _result("HRMS leave notification", PASS, "off; HelixHR sends leave email")
 
 
 def check_hr_request_workflow_state_order():
@@ -1171,17 +1199,11 @@ def check_celebration_reminders():
 
 def check_outgoing_email():
 	"""P4-R18: `frappe.sendmail` throws without a default outgoing Email
-	Account, and the HR-queue Notifications send from *inside* the save that
-	escalates a request (P4-R12) -- so the throw is the save's throw.
-
-	A FAIL, not a WARN. Without the account two actions do not merely go
-	unannounced, they are refused outright: Send to HR on a leave, timesheet
-	or attendance request, and an employee applying for a leave type HR
-	approves (that insert starts in the HR queue and fires the same
-	notification). Both are new user-facing actions rather than existing
-	behaviour degrading, and swallowing the notification error instead would
-	be worse -- HR would silently never be told. The celebration reminders
-	need the same account, and fail quietly in the scheduler log.
+	Account. Since plan 2026-10-02-001 U9 every portal email is a templated
+	doc-event send that logs the failure instead of failing the save, so a
+	missing account no longer refuses any action -- it silently mails
+	nobody: no approver, no HR queue, no employee decision, no celebration
+	reminder. Still a FAIL for that reason.
 	"""
 	account = frappe.db.get_value(
 		"Email Account", {"enable_outgoing": 1, "default_outgoing": 1}, "name"
@@ -1191,9 +1213,8 @@ def check_outgoing_email():
 	return _result(
 		"Outgoing email",
 		FAIL,
-		"no default outgoing Email Account -- Send to HR is refused on every leave, timesheet "
-		"and attendance request, applying for an HR-approves leave type is refused too, and the "
-		"celebration reminders send nothing (Desk: Email Account)",
+		"no default outgoing Email Account -- no portal email is sent: approvers, HR queues, "
+		"employee decisions and celebration reminders all go unannounced (Desk: Email Account)",
 	)
 
 
@@ -1459,6 +1480,8 @@ CHECKS = [
 	check_hr_contact,
 	check_fixtures,
 	check_retired_request_notifications,
+	check_retired_hr_email_notifications,
+	check_hrms_leave_notification,
 	check_hr_request_workflow_state_order,
 	check_request_category_routes,
 	check_profile_correction_category,
