@@ -44,8 +44,9 @@ const NAV = [
   { label: 'Organisation', to: '/organisation', icon: 'organisation', organisationOnly: true, deskOnly: true, group: 'hr' },
   { label: 'Projects', to: '/projects', icon: 'folder', projectsOnly: true, deskOnly: true, group: 'hr' },
   { label: 'Settings', to: '/settings', icon: 'settings', configureOnly: true, deskOnly: true, group: 'admin' },
-  // Slot: plan U10 (Phase 4) adds "Email templates" here, gated on the
-  // boolean `can_manage_notifications` flag (KTD12), once its page exists.
+  // Plan 2026-10-02-001 U10: gated on the boolean `can_manage_notifications`
+  // flag (KTD12), never a role list. HR Manager alone does not see it.
+  { label: 'Email templates', to: '/email-templates', icon: 'notifications', notificationsOnly: true, deskOnly: true, group: 'admin' },
   { label: 'Profile', to: '/profile', icon: 'profile', group: 'bottom' },
 ]
 
@@ -73,6 +74,7 @@ const navItems = computed(() =>
       (!item.managerOnly || isManager.value) &&
       (!item.reportsOnly || session.hasReports) &&
       (!item.configureOnly || session.canConfigure) &&
+      (!item.notificationsOnly || session.canManageNotifications) &&
       (!item.organisationOnly || session.canSeeOrganisation) &&
       (!item.peopleOnly || session.canSeePeople) &&
       (!item.projectsOnly || session.canSeeProjects) &&

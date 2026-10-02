@@ -720,9 +720,13 @@ def _default_context():
 	}
 
 
-def render_message(event_key, context):
+def render_message(event_key, context, source=None):
 	"""Render `event_key` for one send: `{"subject", "content", "html"}`, or
 	`None` when the event is switched off (and not locked).
+
+	`source` (`{"subject", "body"}`) stands in for the saved row -- the
+	Email templates preview and test send (U10) render an unsaved draft. The
+	caller validates it first, so the default fallback below never hides it.
 
 	The saved template is used when there is one; if it fails on real data the
 	default renders instead, the failure goes to the Error Log, and nothing is
@@ -733,9 +737,12 @@ def render_message(event_key, context):
 	event = NOTIFICATION_EVENTS[event_key]
 	locked = bool(event.get("locked"))
 	context = {**_default_context(), **(context or {})}
-	row = frappe.db.get_value(
-		"HelixHR Message Template", event_key, ["subject", "body", "is_enabled"], as_dict=True
-	)
+	if source is not None:
+		row = frappe._dict(subject=source.get("subject"), body=source.get("body"), is_enabled=1)
+	else:
+		row = frappe.db.get_value(
+			"HelixHR Message Template", event_key, ["subject", "body", "is_enabled"], as_dict=True
+		)
 	if row and not row.is_enabled and not locked:
 		return None
 
@@ -1165,6 +1172,12 @@ RATE_LIMIT_POLICY = {
 	"get_portal_config": (60, 60),
 	"save_request_category": (30, 3600),
 	"save_message_template": (30, 3600),
+	# Plan 2026-10-02-001 U10: the Email templates page. Preview renders per
+	# keystroke pause; a test send is real mail, so it gets a tight bound.
+	"get_notification_setup": (60, 60),
+	"preview_message_template": (60, 60),
+	"reset_message_template": (30, 3600),
+	"send_test_message": (5, 600),
 	"save_leave_type": (30, 3600),
 	"save_holiday_list": (30, 3600),
 	"save_shift_type": (30, 3600),

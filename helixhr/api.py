@@ -81,6 +81,7 @@ from helixhr.utils import (
 	PROFILE_USER_LINK_FIELDS,
 	SHIFT_TYPE_EDITABLE_FIELDS,
 	UPLOAD_MAX_BYTES,
+	TemplateRejected,
 	admin_scope_employee_filters,
 	as_administrator,
 	employee_in_admin_scope,
@@ -95,10 +96,13 @@ from helixhr.utils import (
 	project_in_scope,
 	project_scope_filters,
 	rate_limit_per_user,
+	render_message,
 	resolve_admin_scope,
 	resolve_project_scope,
+	sample_context,
 	send_notification,
 	session_company,
+	validate_message_template,
 	validate_portal_upload,
 )
 
@@ -6316,7 +6320,6 @@ def get_request_categories():
 # limit in its own JSON; this is the number the API enforces before it ever
 # reaches the document.
 _TEMPLATE_SUBJECT_MAX = 140
-_SETTINGS_TEMPLATE_EVENTS = ("request_arrival", "request_status_changed")
 
 # The category's own fields (not one of P5-KTD12's borrowed-doctype sets --
 # `HelixHR Request Category` is app-owned, so its whole shape beyond the
@@ -6359,7 +6362,6 @@ def _apply_allowed_fields(doc, fields, allowed, skip_on_update=()):
 # tabs render.
 _SETTINGS_DESK_DOCTYPES = {
 	"categories": "HelixHR Request Category",
-	"templates": "HelixHR Message Template",
 	"leave_types": "Leave Type",
 	"holiday_lists": "Holiday List",
 	"shift_types": "Shift Type",
@@ -6399,14 +6401,6 @@ def get_portal_config():
 			fields=["name", "category_name", "hint", "route_to_role", "sla_days", "is_active"],
 			order_by="category_name asc",
 		),
-		"templates": frappe.get_all(
-			"HelixHR Message Template",
-			fields=["name", "template_key", "subject", "body", "is_enabled"],
-			order_by="template_key asc",
-		),
-		# The legacy Settings "Message text" section edits only the two events
-		# it always had; U10's Email templates page replaces it.
-		"template_tokens": {key: list(event_variables(key)) for key in _SETTINGS_TEMPLATE_EVENTS},
 		"leave_types": frappe.get_all(
 			"Leave Type", fields=["name", *LEAVE_TYPE_EDITABLE_FIELDS], order_by="leave_type_name asc"
 		),
@@ -6448,15 +6442,68 @@ def save_request_category(name, **fields):
 	return {field: doc.get(field) for field in ("name", "category_name", *_CATEGORY_EDITABLE_FIELDS)}
 
 
+# --- Email templates page (plan 2026-10-02-001 U10, R15, R18) --------------
+
+
+def _assert_can_manage_notifications():
+	"""The one gate every Email templates method calls first (R14): the
+	Notification Manager or System Manager. HR Manager alone is refused."""
+	if not _can_manage_notifications():
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+
+
+def _message_event(template_key):
+	if template_key not in NOTIFICATION_EVENTS:
+		frappe.throw(_("Not a valid message."))
+	return NOTIFICATION_EVENTS[template_key]
+
+
+@frappe.whitelist()
+def get_notification_setup():
+	"""Every portal email event with its state (Off / Default / Custom, KTD7),
+	wording, defaults and variable reference -- the whole page in one call."""
+	_assert_can_manage_notifications()
+	rate_limit_per_user("get_notification_setup")
+	saved = {
+		row.template_key: row
+		for row in frappe.get_all(
+			"HelixHR Message Template", fields=["template_key", "subject", "body", "is_enabled"]
+		)
+	}
+	events = []
+	for key, event in NOTIFICATION_EVENTS.items():
+		locked = bool(event.get("locked"))
+		row = saved.get(key)
+		state = "Default" if not row else ("Custom" if row.is_enabled or locked else "Off")
+		events.append(
+			{
+				"key": key,
+				"label": event["label"],
+				"audience": event["audience"],
+				"locked": locked,
+				"state": state,
+				"subject": (row.subject if row else None) or event["subject"],
+				"body": (row.body if row else None) or event["body"],
+				"default_subject": event["subject"],
+				"default_body": event["body"],
+				"variables": [
+					{"name": name, "description": description, "sample": sample}
+					for name, (description, sample) in event_variables(key).items()
+				],
+			}
+		)
+	return {"events": events, "subject_max": _TEMPLATE_SUBJECT_MAX}
+
+
 @frappe.whitelist(methods=["POST"])
 def save_message_template(template_key, subject=None, body=None, is_enabled=None):
 	"""Edit the wording of one message the portal sends (P5-R14). The
 	doctype's own `validate()` holds the template to the HelixHR sandbox's
 	rules (plan 2026-10-02-001 U8, R17): unknown variables, disallowed
 	constructs and templates that fail on sample data are refused there."""
+	_assert_can_manage_notifications()
 	rate_limit_per_user("save_message_template")
-	if template_key not in NOTIFICATION_EVENTS:
-		frappe.throw(_("Not a valid message."))
+	_message_event(template_key)
 
 	if frappe.db.exists("HelixHR Message Template", template_key):
 		doc = frappe.get_doc("HelixHR Message Template", template_key)
@@ -6483,6 +6530,72 @@ def save_message_template(template_key, subject=None, body=None, is_enabled=None
 		"body": doc.body,
 		"is_enabled": cint(doc.is_enabled),
 	}
+
+
+@frappe.whitelist(methods=["POST"])
+def reset_message_template(template_key):
+	"""Back to the default wording: no row is Default (KTD7). The Info
+	comment names the actor (R18a); it is written after the delete because
+	`delete_doc` removes the row's own comments, so its link is not checked
+	-- the next save recreates the row under the same name."""
+	_assert_can_manage_notifications()
+	rate_limit_per_user("reset_message_template")
+	_message_event(template_key)
+	if frappe.db.exists("HelixHR Message Template", template_key):
+		# The Notification Manager has no delete DocPerm on purpose -- Desk
+		# delete stays System Manager's. The guard above is this path's gate.
+		frappe.delete_doc("HelixHR Message Template", template_key, ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "Comment",
+				"comment_type": "Info",
+				"reference_doctype": "HelixHR Message Template",
+				"reference_name": template_key,
+				"content": _("{0} reset this email template to the default").format(frappe.session.user),
+			}
+		).insert(ignore_permissions=True, ignore_links=True)
+	return {"template_key": template_key, "state": "Default"}
+
+
+def _render_draft(template_key, subject, body):
+	"""Validate then render an unsaved draft with the event's sample data.
+	A refusal is the same sentence a save would give (R17)."""
+	event = _message_event(template_key)
+	if event.get("locked"):
+		subject = event["subject"]
+	try:
+		validate_message_template(template_key, subject, body)
+	except TemplateRejected as exc:
+		frappe.throw(str(exc), title=_("Template not valid"))
+	return render_message(template_key, sample_context(template_key), source={"subject": subject, "body": body})
+
+
+@frappe.whitelist(methods=["POST"])
+def preview_message_template(template_key, subject=None, body=None):
+	"""The draft as the email would look, with sample data. The client shows
+	`html` only in a sandboxed iframe (KTD11)."""
+	_assert_can_manage_notifications()
+	rate_limit_per_user("preview_message_template")
+	message = _render_draft(template_key, subject or "", body or "")
+	return {"subject": message["subject"], "html": message["html"]}
+
+
+@frappe.whitelist(methods=["POST"])
+def send_test_message(template_key, subject=None, body=None):
+	"""Send the draft, with sample data, to the caller's own address only --
+	never a recipient the caller names."""
+	_assert_can_manage_notifications()
+	rate_limit_per_user("send_test_message")
+	message = _render_draft(template_key, subject or "", body or "")
+	email = frappe.db.get_value("User", frappe.session.user, "email")
+	if not email:
+		frappe.throw(_("Your account has no email address to send the test to."))
+	frappe.sendmail(
+		recipients=[email],
+		subject=_("[Test] {0}").format(message["subject"]),
+		message=message["html"],
+	)
+	return {"sent_to": email}
 
 
 @frappe.whitelist(methods=["POST"])

@@ -170,44 +170,13 @@ test("changing a category's routed role changes where the next request goes", as
   }
 })
 
-test('HR can no longer save a template (plan 2026-10-02-001 U7)', async ({ page }, testInfo) => {
+test('message text left Settings for the Email templates page (plan 2026-10-02-001 U10)', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'hr', 'settings is an HR-only screen')
 
-  // R14: wording belongs to the HelixHR Notification Manager now. U10 moves
-  // the editor to its own page and takes this tab out of Settings; until
-  // then HR's save is refused server-side and the form says so.
-  const stamp = `Settings e2e ${Date.now()}`
+  // R14: wording belongs to the HelixHR Notification Manager, on its own page.
   await page.goto('/helixhr/settings')
-  await page.getByTestId('settings-tab-templates').click()
-
-  const row = page
-    .getByTestId('settings-template-row')
-    .filter({ hasText: 'request_arrival' })
-  await row.getByRole('button', { name: 'Edit' }).click()
-  const form = page.getByTestId('settings-template-form')
-  await form.getByLabel('Subject').fill(stamp)
-  await form.getByRole('button', { name: 'Save' }).click()
-  await expect(form.getByRole('alert')).toBeVisible()
-  await expect(form.getByLabel('Subject')).toHaveValue(stamp)
-})
-
-test('a rejected save keeps the user input', async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== 'hr', 'settings is an HR-only screen')
-
-  await page.goto('/helixhr/settings')
-  await page.getByTestId('settings-tab-templates').click()
-  const row = page
-    .getByTestId('settings-template-row')
-    .filter({ hasText: 'request_status_changed' })
-  await row.getByRole('button', { name: 'Edit' }).click()
-
-  const form = page.getByTestId('settings-template-form')
-  const tooLong = 'x'.repeat(141)
-  await form.getByLabel('Subject').fill(tooLong)
-  await form.getByRole('button', { name: 'Save' }).click()
-
-  await expect(form.getByRole('alert')).toBeVisible()
-  await expect(form.getByLabel('Subject')).toHaveValue(tooLong)
+  await expect(page.getByTestId('settings-tab-categories')).toBeVisible()
+  await expect(page.getByTestId('settings-tab-templates')).toHaveCount(0)
 })
 
 test('P8-U12: HR authors the celebration email and switches to a selected audience', async ({ page }, testInfo) => {

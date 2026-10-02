@@ -172,7 +172,7 @@ const routes = [
     // the portal) rather than only via in-page tabs. `get_portal_config` is
     // the server's own gate -- an employee hitting this route directly gets
     // AsyncState's 'forbidden' region, not a client-side redirect.
-    path: '/settings/:section(categories|templates|leave-types|holiday-lists|shift-types|celebrations)',
+    path: '/settings/:section(categories|leave-types|holiday-lists|shift-types|celebrations)',
     name: 'SettingsSection',
     meta: { deskOnly: true },
     component: () => import('@/pages/Settings.vue'),
@@ -183,7 +183,7 @@ const routes = [
     // the server's own gate, same posture as /settings above.
     path: '/email-templates',
     name: 'EmailTemplates',
-    meta: { deskOnly: true },
+    meta: { deskOnly: true, notificationsOnly: true },
     component: () => import('@/pages/EmailTemplates.vue'),
   },
   {
@@ -297,6 +297,13 @@ router.beforeEach(async (to) => {
   if (to.name === 'NotFound') return true
 
   await ensureBootstrap()
+
+  // Plan 2026-10-02-001 U10: a caller without `can_manage_notifications`
+  // (an HR Manager, say) is sent Home rather than shown a refusal. The
+  // server's guard is still the real gate.
+  if (to.meta.notificationsOnly && !session.canManageNotifications && session.status !== 'unavailable') {
+    return { name: 'Dashboard' }
+  }
 
   if (session.status === 'ready') {
     // Reaching a state page with a healthy session (a stale bookmark, or a

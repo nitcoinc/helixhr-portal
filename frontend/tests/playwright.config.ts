@@ -64,7 +64,10 @@ export default defineConfig({
       // integration fixture, `make_test_delivery_manager_employee`), so that
       // branch is covered there, not here.
       // U15: navigation.spec.ts for the grouped rail as HR sees it.
-      testMatch: /(approvals|settings|organisation|people|reports|projects|roster|navigation)\.spec\.ts/,
+      // Plan 2026-10-02-001 U10: email-templates.spec.ts -- HR is the refused
+      // hat; the Notification Manager signs in inside the spec itself, the
+      // same way login-dashboard.spec.ts does, since it has no Employee.
+      testMatch: /(approvals|settings|organisation|people|reports|projects|roster|navigation|email-templates)\.spec\.ts/,
     },
     // P5-U11. The routed-worker identity: `IT Team`, portal-only
     // (desk_access: 0), which never reaches Desk and works only the requests
