@@ -8,6 +8,7 @@ import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
 import { attachToRequestReply } from '@/lib/api'
+import CorrectionReview from '@/components/approvals/CorrectionReview.vue'
 import { session } from '@/lib/session'
 import { formatDate, formatDateRange, formatDateTime } from '@/lib/dates'
 import { toPlainLeaveError } from '@/lib/errorMap'
@@ -929,6 +930,14 @@ function hrLine(row) {
                       <p class="text-sm text-ink-gray-6">
                         {{ selected.category }}
                       </p>
+                      <CorrectionReview
+                        v-if="selected.correction"
+                        :key="selected.name"
+                        :request="selected.name"
+                        :correction="selected.correction"
+                        :attachments="selected.attachments"
+                        :can-reveal="actions.length > 0"
+                      />
                       <ul
                         v-if="selected.thread?.length"
                         class="mt-2 space-y-2"
@@ -1430,6 +1439,14 @@ function hrLine(row) {
               <p class="text-sm text-ink-gray-6">
                 {{ selected.category }}
               </p>
+              <CorrectionReview
+                v-if="selected.correction"
+                :key="selected.name"
+                :request="selected.name"
+                :correction="selected.correction"
+                :attachments="selected.attachments"
+                :can-reveal="actions.length > 0"
+              />
               <ul
                 v-if="selected.thread?.length"
                 class="mt-2 space-y-2"

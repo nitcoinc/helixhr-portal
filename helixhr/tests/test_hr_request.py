@@ -1428,6 +1428,36 @@ class TestProfileCorrection(IntegrationTestCase):
 
 	# --- no plaintext anywhere ---------------------------------------------
 
+	def test_queue_detail_and_own_request_carry_the_masked_copies(self):
+		# U14: what the HR view and the employee's request show.
+		from helixhr.api import get_approval_detail, get_my_approvals, get_my_request
+
+		name = self._file()["name"]
+		frappe.set_user(self.hr_user)
+		try:
+			row = next(r for r in get_my_approvals()["pending"] if r["name"] == name)
+			detail = get_approval_detail("request", name)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(row["correction_proposed_masked"], "••••1098")
+		self.assertEqual(
+			detail["correction"],
+			{
+				"field": "bank_ac_no",
+				"label": "bank account number",
+				"current_masked": "••••3333",
+				"proposed_masked": "••••1098",
+			},
+		)
+		self.assertEqual([a["file_name"] for a in detail["attachments"]], ["bank-letter.pdf"])
+		frappe.set_user(EMPLOYEE_USER)
+		try:
+			own = get_my_request(name)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(own["correction_proposed_masked"], "••••1098")
+		self.assertNotIn(self.NEW_ACCOUNT, frappe.as_json(own))
+
 	def test_plaintext_never_reaches_versions_queues_or_list_reads(self):
 		from helixhr.api import get_approval_detail, get_my_approvals
 

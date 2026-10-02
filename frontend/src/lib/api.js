@@ -130,6 +130,12 @@ export function attachToRequestReply(file, { name }) {
   return uploadFile('helixhr.api.attach_to_request_reply', file, { name })
 }
 
+/** Plan 2026-10-02-001 U14: file a profile correction with its proof in one
+ * multipart call, so the request and the proof commit together (U13). */
+export function createCorrectionRequest(file, params) {
+  return uploadFile('helixhr.api.create_my_request', file, params)
+}
+
 /** Plan 2026-09-30-001 U5: set or replace the signed-in employee's own
  * photo. The employee comes from the session (`helixhr.api.upload_my_photo`);
  * resolves to `{ photo_url }`. */

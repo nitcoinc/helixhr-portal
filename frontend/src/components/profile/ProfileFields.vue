@@ -45,7 +45,12 @@ function isExpired(field) {
 }
 
 function correct(field) {
-  emit('correct', { label: field.label, display: display(field), masked: field.masked })
+  emit('correct', {
+    label: field.label,
+    display: display(field),
+    masked: field.masked,
+    fieldname: field.fieldname,
+  })
 }
 </script>
 

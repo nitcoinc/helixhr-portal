@@ -2204,6 +2204,10 @@ def _hr_request_summaries(employee, today):
 			"creation",
 			"modified",
 			"hr_note",
+			# Plan 2026-10-02-001 U14 / R28: the masked copy only -- the
+			# Password fields are never read into a queue.
+			"correction_field",
+			"correction_proposed_masked",
 		],
 		order_by="creation asc",
 		limit=_QUEUE_FETCH,
@@ -2237,6 +2241,8 @@ def _hr_request_summaries(employee, today):
 			picked_up_by=row.picked_up_by,
 			for_hr=(row.routed_to_role == "HR Manager"),
 			hr_note=row.hr_note,
+			correction_field=row.correction_field,
+			correction_proposed_masked=row.correction_proposed_masked,
 		)
 		for row in rows
 	]
@@ -5874,6 +5880,32 @@ def _request_decision_detail(doc):
 		"sent_on": str(doc.creation) if doc.creation else None,
 		"age_days": _age_in_days(doc.creation, _as_date(user_today())),
 		"thread": _request_thread(doc),
+		"correction": _correction_summary(doc),
+		# U14: the files on the request -- for a correction, the proof HR
+		# checks before Done. Private; File's own read check gates download.
+		"attachments": [
+			_attachment(row)
+			for row in frappe.get_all(
+				"File",
+				filters={"attached_to_doctype": "HR Request", "attached_to_name": doc.name},
+				fields=["name", "file_name", "file_url", "file_size", "is_private"],
+				order_by="creation asc",
+			)
+		],
+	}
+
+
+def _correction_summary(doc):
+	"""What a correction proposes, masked only (plan 2026-10-02-001 U14, R28).
+	None for an ordinary request. The full value is `reveal_correction_value`'s
+	alone, so neither Password field is read here."""
+	if not doc.get("correction_field"):
+		return None
+	return {
+		"field": doc.correction_field,
+		"label": PROFILE_CORRECTABLE_FIELDS.get(doc.correction_field, doc.correction_field),
+		"current_masked": doc.correction_current_masked,
+		"proposed_masked": doc.correction_proposed_masked,
 	}
 
 
@@ -6115,7 +6147,10 @@ def get_my_request(name):
 
 def _request_detail(name, employee):
 	row = frappe.db.get_value(
-		"HR Request", name, [*_REQUEST_FIELDS, "details", "employee"], as_dict=True
+		"HR Request",
+		name,
+		[*_REQUEST_FIELDS, "details", "employee", "correction_field", "correction_proposed_masked"],
+		as_dict=True,
 	)
 	if not row:
 		frappe.throw(_("That request no longer exists."), frappe.DoesNotExistError)

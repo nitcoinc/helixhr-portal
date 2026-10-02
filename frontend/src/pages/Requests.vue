@@ -11,6 +11,7 @@ import { attachToRequest, keepaliveRequest } from '@/lib/api'
 import { formatDate, formatDateTime } from '@/lib/dates'
 import { currentUnread, setUnread, unreadCount } from '@/lib/unread'
 import { useIsDesktop } from '@/lib/useIsDesktop'
+import { CORRECTABLE_FIELDS, spokenValue } from '@/lib/profileCorrection'
 
 // P2-U8 / KTD5. `/requests` and `/requests/:name` are the same component: the
 // selected record is a route parameter, so refresh and browser Back land on
@@ -558,6 +559,19 @@ const timeline = computed(() => {
                 class="mt-1 text-sm text-ink-gray-5"
               >
                 You sent this with no extra details.
+              </p>
+              <!-- Plan 2026-10-02-001 U14: a structured correction's new value,
+                   masked and read-only -- the full value never comes back. -->
+              <p
+                v-if="selected.correction_field"
+                class="mt-2 text-sm text-ink-gray-7"
+                data-testid="request-correction"
+              >
+                New {{ CORRECTABLE_FIELDS[selected.correction_field] || selected.correction_field }}:
+                <span
+                  class="tabular text-ink-gray-9"
+                  :aria-label="spokenValue(selected.correction_proposed_masked || '')"
+                >{{ selected.correction_proposed_masked }}</span>
               </p>
 
               <ul
