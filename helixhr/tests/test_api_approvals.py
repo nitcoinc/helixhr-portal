@@ -419,6 +419,23 @@ class TestApprovalQueueAndEvidence(IntegrationTestCase):
 		self.assertEqual(detail["state"], "Open")
 		self.assertEqual(detail["employee_name"], frappe.db.get_value("Employee", self.employee_name, "employee_name"))
 
+	def test_the_queue_filters_by_kind_and_counts_every_kind(self):
+		"""U6 / R13: `kind` narrows the page; `counts` is the whole queue."""
+		leave = self._pending_leave()
+		timesheet = self._pending_timesheet()
+
+		frappe.set_user(MANAGER_USER)
+		result = get_my_approvals(kind="timesheet")
+		names = [row["name"] for row in result["pending"]]
+		self.assertIn(timesheet, names)
+		self.assertNotIn(leave.name, names)
+		kinds = {row["name"]: row["count"] for row in result["counts"]["kinds"]}
+		self.assertEqual(list(kinds), ["leave", "timesheet", "attendance", "request"])
+		self.assertEqual(result["total"], kinds["timesheet"])
+		self.assertGreaterEqual(kinds["leave"], 1)
+		with self.assertRaises(frappe.ValidationError):
+			get_my_approvals(kind="nonsense")
+
 	def test_the_queue_mixes_both_kinds_oldest_first_and_excludes_the_managers_own_week(self):
 		leave = self._pending_leave()
 		timesheet = self._pending_timesheet()

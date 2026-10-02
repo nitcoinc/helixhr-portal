@@ -27,11 +27,24 @@ const router = useRouter()
 // session-scoped read where the page used to send its own
 // `frappe.client.get_list` with `limit_page_length: 0`.
 const pageLimit = ref(20)
+// U6 / R13. The category chip is in the URL query so a link reproduces the
+// view. `type`, not `category`: `?category=` already prefills the new-request
+// form (Profile's correction link), and one key cannot mean both.
+const categoryFilter = computed(() => route.query.type || '')
 const requests = createResource({
   url: 'helixhr.api.get_my_requests',
-  makeParams: () => ({ limit: pageLimit.value }),
+  makeParams: () => ({ limit: pageLimit.value, category: categoryFilter.value || undefined }),
   auto: true,
 })
+watch(categoryFilter, () => {
+  pageLimit.value = 20
+  requests.reload()
+})
+const categoryChips = computed(() => requests.data?.counts?.categories || [])
+
+function filterByCategory(category) {
+  router.push({ name: route.name, params: route.params, query: { ...route.query, type: category || undefined } })
+}
 
 const rows = computed(() => requests.data?.requests || [])
 const total = computed(() => requests.data?.total || 0)
@@ -115,7 +128,7 @@ watch(
 const selected = computed(() => (props.name ? detail.data : null))
 
 function closeDetail() {
-  router.push({ name: 'Requests' })
+  router.push({ name: 'Requests', query: categoryFilter.value ? { type: categoryFilter.value } : {} })
 }
 
 async function submitReply() {
@@ -271,6 +284,45 @@ const timeline = computed(() => {
         v-show="!name || isDesktop"
         class="min-w-0 lg:flex-1"
       >
+        <!-- U6 / R13. Category chips, counted over your own requests only;
+             an inactive category you used before still has one. -->
+        <div
+          v-if="categoryChips.length > 1 || categoryFilter"
+          class="mb-4 flex flex-wrap items-center gap-2"
+          role="group"
+          aria-label="Filter requests by category"
+          data-testid="request-category-chips"
+        >
+          <button
+            type="button"
+            class="min-h-11 rounded-full border px-4 text-sm font-medium"
+            :class="
+              !categoryFilter
+                ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
+                : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
+            "
+            :aria-pressed="!categoryFilter"
+            @click="filterByCategory()"
+          >
+            All
+          </button>
+          <button
+            v-for="chip in categoryChips"
+            :key="chip.name"
+            type="button"
+            class="min-h-11 rounded-full border px-4 text-sm font-medium"
+            :class="
+              categoryFilter === chip.name
+                ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
+                : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
+            "
+            :aria-pressed="categoryFilter === chip.name"
+            @click="filterByCategory(chip.name)"
+          >
+            {{ chip.name }}
+            <span class="tabular text-ink-gray-5">{{ chip.count }}</span>
+          </button>
+        </div>
         <AsyncState
           section="requests-list"
           :resource="requests"
@@ -333,7 +385,7 @@ const timeline = computed(() => {
                     <router-link
                       class="-my-2 inline-flex min-h-11 items-center font-medium text-ink-gray-9 after:absolute after:inset-0 after:content-['']"
                       :class="row.unread ? 'font-semibold' : ''"
-                      :to="{ name: 'RequestDetail', params: { name: row.name } }"
+                      :to="{ name: 'RequestDetail', params: { name: row.name }, query: categoryFilter ? { type: categoryFilter } : {} }"
                     >
                       {{ row.subject }}
                     </router-link>

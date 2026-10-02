@@ -159,6 +159,42 @@ test.describe('employee', () => {
     await expect(sheet.getByRole('button', { name: 'Send to HR' })).toHaveCount(0)
   })
 
+  // ── U6 / R13: a category chip in the URL reproduces the view ─────────
+  test('a URL-encoded category filters the list and the chip counts it', async ({
+    page,
+    baseURL,
+  }) => {
+    const api = await admin(baseURL!)
+    const employeeApi = await asEmployee(baseURL!)
+    const stamp = Date.now()
+    const names: string[] = []
+
+    try {
+      names.push(await seedRequest(employeeApi, `U6 asset ${stamp}`, { category: 'IT / Asset' }))
+      names.push(await seedRequest(employeeApi, `U6 letter ${stamp}`))
+
+      // P5-KTD2: the category's name is the record name, slash and all.
+      await page.goto(`/helixhr/requests?type=${encodeURIComponent('IT / Asset')}`)
+      const chips = page.getByRole('group', { name: 'Filter requests by category' })
+      const chip = chips.getByRole('button', { name: /^IT \/ Asset \d+$/ })
+      await expect(chip).toHaveAttribute('aria-pressed', 'true')
+
+      const rows = page.locator('[data-testid="request-row"]')
+      await expect(rows.filter({ hasText: `U6 asset ${stamp}` })).toHaveCount(1)
+      await expect(rows.filter({ hasText: `U6 letter ${stamp}` })).toHaveCount(0)
+      const count = Number((await chip.innerText()).match(/(\d+)$/)![1])
+      await expect(rows).toHaveCount(Math.min(count, 20))
+
+      await chips.getByRole('button', { name: 'All', exact: true }).click()
+      await expect(page).not.toHaveURL(/type=/)
+      await expect(rows.filter({ hasText: `U6 letter ${stamp}` })).toHaveCount(1)
+    } finally {
+      for (const name of names) await removeRequest(api, name)
+      await employeeApi.dispose()
+      await api.dispose()
+    }
+  })
+
   // ── Sending, and landing on the record that was made ──────────────────
   test('sending a request opens that request, with its timeline', async ({ page, baseURL }) => {
     const api = await admin(baseURL!)

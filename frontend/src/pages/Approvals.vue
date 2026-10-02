@@ -1,7 +1,7 @@
 <script setup>
 import Avatar from '@/components/Avatar.vue'
 import { ref, computed, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { createResource, Button, FormControl } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
@@ -23,6 +23,7 @@ const props = defineProps({
   name: { type: String, default: '' },
 })
 
+const route = useRoute()
 const router = useRouter()
 
 // P2-U7 step 1 / P2-R27. One session-scoped read, replacing the two the page
@@ -32,10 +33,36 @@ const router = useRouter()
 // read whose only limit was whatever Frappe happened to allow, and which did
 // not even exclude the manager's own week. The server now decides what is in
 // this queue, using the same rules that decide who may act on it.
+// U6 / R13. The chip lives in the URL query, so a link reproduces the view;
+// the server filters and counts, the browser only says which chip is on.
+const kindFilter = computed(() => route.query.kind || '')
+const categoryFilter = computed(() => route.query.category || '')
 const queue = createResource({
   url: 'helixhr.api.get_my_approvals',
+  makeParams: () => ({
+    kind: kindFilter.value || undefined,
+    category: categoryFilter.value || undefined,
+  }),
   auto: true,
 })
+watch([kindFilter, categoryFilter], () => queue.reload())
+
+const KIND_CHIP_LABEL = {
+  leave: 'Leave',
+  timesheet: 'Timesheets',
+  attendance: 'Attendance',
+  request: 'Requests',
+}
+const kindChips = computed(() =>
+  (queue.data?.counts?.kinds || []).filter((chip) => chip.count || chip.name === kindFilter.value),
+)
+const categoryChips = computed(() => queue.data?.counts?.categories || [])
+
+/** Turn one chip on (or the All chip, with neither value), keeping any open
+ * detail where it is. */
+function filterQueue(kind, category) {
+  router.push({ name: route.name, params: route.params, query: { kind: kind || undefined, category: category || undefined } })
+}
 
 const pending = computed(() => queue.data?.pending || [])
 const decided = computed(() => queue.data?.decided || [])
@@ -80,11 +107,15 @@ const detail = createResource({
 const selected = computed(() => (props.name ? detail.data : null))
 
 function open(row) {
-  router.push({ name: 'ApprovalDetail', params: { kind: row.kind, name: row.name } })
+  router.push({
+    name: 'ApprovalDetail',
+    params: { kind: row.kind, name: row.name },
+    query: route.query,
+  })
 }
 
 function closeDetail() {
-  router.push({ name: 'Approvals' })
+  router.push({ name: 'Approvals', query: route.query })
 }
 
 const isDesktop = useIsDesktop()
@@ -470,6 +501,70 @@ function hrLine(row) {
         picked up by you
       </span>
     </p>
+
+    <!-- U6 / R13. Kind chips, then -- for requests -- category chips. Same
+         chip shape as the Directory's department filter. -->
+    <div
+      v-if="kindChips.length > 1 || kindFilter || categoryFilter"
+      class="mb-4 flex flex-wrap items-center gap-2"
+      role="group"
+      aria-label="Filter approvals by kind"
+      data-testid="approval-kind-chips"
+    >
+      <button
+        type="button"
+        class="min-h-11 rounded-full border px-4 text-sm font-medium"
+        :class="
+          !kindFilter && !categoryFilter
+            ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
+            : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
+        "
+        :aria-pressed="!kindFilter && !categoryFilter"
+        @click="filterQueue()"
+      >
+        All
+      </button>
+      <button
+        v-for="chip in kindChips"
+        :key="chip.name"
+        type="button"
+        class="min-h-11 rounded-full border px-4 text-sm font-medium"
+        :class="
+          kindFilter === chip.name
+            ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
+            : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
+        "
+        :aria-pressed="kindFilter === chip.name"
+        @click="filterQueue(chip.name)"
+      >
+        {{ KIND_CHIP_LABEL[chip.name] }}
+        <span class="tabular text-ink-gray-5">{{ chip.count }}</span>
+      </button>
+    </div>
+    <div
+      v-if="(kindFilter === 'request' || categoryFilter) && categoryChips.length"
+      class="mb-4 flex flex-wrap items-center gap-2"
+      role="group"
+      aria-label="Filter requests by category"
+      data-testid="approval-category-chips"
+    >
+      <button
+        v-for="chip in categoryChips"
+        :key="chip.name"
+        type="button"
+        class="min-h-11 rounded-full border px-4 text-sm font-medium"
+        :class="
+          categoryFilter === chip.name
+            ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
+            : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
+        "
+        :aria-pressed="categoryFilter === chip.name"
+        @click="filterQueue('request', chip.name)"
+      >
+        {{ chip.name }}
+        <span class="tabular text-ink-gray-5">{{ chip.count }}</span>
+      </button>
+    </div>
 
     <div class="lg:flex lg:items-start lg:gap-6">
       <!-- The queue. One list, leave and timesheets together: they are the

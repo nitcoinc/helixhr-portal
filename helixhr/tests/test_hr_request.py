@@ -406,6 +406,40 @@ class TestRequestCategories(IntegrationTestCase):
 				category="Other", subject="Inactive category", operation_key=str(uuid.uuid4())
 			)
 
+	def test_my_requests_filter_by_category_counts_only_mine_and_keep_inactive_ones(self):
+		"""U6 / R13: chips count the caller's own requests only; an inactive
+		category with past requests still gets a chip and still filters; an
+		unknown one is refused; a bigger page keeps the filter."""
+		from helixhr.api import create_my_request, get_my_requests
+		from helixhr.tests.utils import EMPLOYEE_USER, MANAGER_USER
+
+		frappe.set_user(EMPLOYEE_USER)
+		for _ in range(2):
+			create_my_request(category="Other", subject="Filter me", operation_key=str(uuid.uuid4()))
+		frappe.set_user(MANAGER_USER)
+		create_my_request(category="Other", subject="Not yours", operation_key=str(uuid.uuid4()))
+		frappe.set_user("Administrator")
+		frappe.db.set_value("HelixHR Request Category", "Other", "is_active", 0)
+		self.addCleanup(frappe.db.set_value, "HelixHR Request Category", "Other", "is_active", 1)
+
+		frappe.set_user(EMPLOYEE_USER)
+		mine = frappe.db.count(
+			"HR Request",
+			{"employee": frappe.db.get_value("Employee", {"user_id": EMPLOYEE_USER}), "category": "Other"},
+		)
+		chips = {row["name"]: row["count"] for row in get_my_requests()["counts"]["categories"]}
+		self.assertEqual(chips["Other"], mine)
+
+		result = get_my_requests(limit=1, category="Other")
+		self.assertEqual(result["total"], mine)
+		self.assertEqual(len(result["requests"]), 1)
+		more = get_my_requests(limit=40, category="Other")
+		self.assertEqual(len(more["requests"]), min(mine, 40))
+		self.assertTrue(all(row["category"] == "Other" for row in more["requests"]))
+
+		with self.assertRaisesRegex(frappe.ValidationError, "no request category called"):
+			get_my_requests(category="No Such Category")
+
 	def test_a_category_cannot_route_requests_to_a_broad_role(self):
 		category = frappe.get_doc(
 			{
@@ -655,6 +689,26 @@ class TestRequestApprovalQueue(IntegrationTestCase):
 			return rows
 
 		return added
+
+	def test_the_queue_filters_to_a_category_and_the_total_matches_its_chip(self):
+		"""U6 / R13: a worker filters to `IT / Asset`; `counts` stays the whole
+		queue and the filtered total equals the chip's count."""
+		from helixhr.api import get_my_approvals
+
+		name = self._file()
+		frappe.set_user(self.it_user)
+		result = get_my_approvals(category="IT / Asset")
+		self.assertIn(name, [row["name"] for row in result["pending"]])
+		self.assertTrue(all(row["category"] == "IT / Asset" for row in result["pending"]))
+		chips = {row["name"]: row["count"] for row in result["counts"]["categories"]}
+		self.assertEqual(result["total"], chips["IT / Asset"])
+		kinds = {row["name"]: row["count"] for row in result["counts"]["kinds"]}
+		self.assertEqual(kinds["request"], sum(chips.values()))
+
+		with self.assertRaisesRegex(frappe.ValidationError, "no request category called"):
+			get_my_approvals(category="No Such Category")
+		with self.assertRaisesRegex(frappe.ValidationError, "no approval kind called"):
+			get_my_approvals(kind="expense")
 
 	def test_get_approval_detail_actions_match_get_transitions_and_others_are_refused(self):
 		from helixhr.api import act_on_approval, get_approval_detail

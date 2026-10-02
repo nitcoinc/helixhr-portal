@@ -4639,22 +4639,67 @@ _DECIDED_LIMIT = 5
 _LEAVE_PENDING_HR = "Pending HR"
 
 
+# U6 / R13. The kinds a queue row can be, in the order the chips render.
+_APPROVAL_FILTER_KINDS = ("leave", "timesheet", "attendance", "request")
+
+
+def _valid_request_category(category):
+	"""The category filter, refused unless it names a category record --
+	active or not, because an inactive category still has past requests a
+	chip has to reach (R13). Returns None when no filter was asked for."""
+	if not category:
+		return None
+	if not isinstance(category, str) or not frappe.db.exists("HelixHR Request Category", category):
+		frappe.throw(_("There is no request category called {0}.").format(category))
+	return category
+
+
+def _count_by(values):
+	"""[{name, count}] for each distinct non-empty value, by name."""
+	counts = {}
+	for value in values:
+		if value:
+			counts[value] = counts.get(value, 0) + 1
+	return [{"name": name, "count": counts[name]} for name in sorted(counts)]
+
+
 @frappe.whitelist()
-def get_my_approvals():
+def get_my_approvals(kind=None, category=None):
 	"""The manager's queue: everything waiting on them, oldest first, plus
 	the handful of decisions they made this week (P2-U7 step 1).
 
 	Summary only. The evidence -- timesheet rows and day totals, a leave's
 	reason -- costs a document read per item, so it is loaded by
 	`get_approval_detail` for the one item actually selected (P2-R22).
+
+	U6 / R13: `kind` and `category` narrow the page; `counts` is always the
+	caller's whole queue, so every chip says what choosing it would show.
+	A category implies kind "request" -- only requests have one.
 	"""
 	rate_limit_per_user("get_my_approvals")
+	if kind and kind not in _APPROVAL_FILTER_KINDS:
+		frappe.throw(_("There is no approval kind called {0}.").format(kind))
+	category = _valid_request_category(category)
+	if category:
+		kind = "request"
 	employee = get_current_employee()
 	pending, capped = _approval_summaries(employee)
+	counts = {
+		"kinds": [
+			{"name": name, "count": sum(1 for row in pending if row["kind"] == name)}
+			for name in _APPROVAL_FILTER_KINDS
+		],
+		"categories": _count_by(row.get("category") for row in pending if row["kind"] == "request"),
+	}
+	if kind:
+		pending = [row for row in pending if row["kind"] == kind]
+	if category:
+		pending = [row for row in pending if row.get("category") == category]
 	return {
 		"today": user_today(),
 		"pending": pending[:_APPROVAL_PAGE],
 		"total": len(pending),
+		"counts": counts,
 		# `total` is what came back, and every kind's read is bounded, so on a
 		# very large backlog it is a floor and not a count. The flag is what
 		# lets the screen say "50+" rather than lie about 50; a real COUNT per
@@ -5943,8 +5988,9 @@ _SUBJECT_MAX = 140
 _DETAILS_MAX = 5000
 
 
-def _requests_summary(employee, limit=None):
-	"""A bounded page of `employee`'s requests, newest first.
+def _requests_summary(employee, limit=None, category=None):
+	"""A bounded page of `employee`'s requests, newest first, optionally of
+	one category (U6 / R13; `counts` is per category across all of them).
 
 	Carries what the list actually renders and nothing else: the lifecycle
 	dates, HR's reply, how many files are on it, and whether there is an
@@ -5952,10 +5998,12 @@ def _requests_summary(employee, limit=None):
 	you" rather than a status word (P2-R13).
 	"""
 	limit = min(max(cint(limit) or _REQUEST_PAGE, 1), _REQUEST_MAX_PAGE)
+	category = _valid_request_category(category)
+	filters = {"employee": employee, **({"category": category} if category else {})}
 
 	rows = frappe.get_all(
 		"HR Request",
-		filters={"employee": employee},
+		filters=filters,
 		fields=list(_REQUEST_FIELDS),
 		order_by="creation desc",
 		limit=limit,
@@ -5973,15 +6021,22 @@ def _requests_summary(employee, limit=None):
 			}
 			for row in rows
 		],
-		"total": frappe.db.count("HR Request", {"employee": employee}),
+		"total": frappe.db.count("HR Request", filters),
+		# One column over one employee's requests -- small, and the same
+		# flat-read reasoning as `_attachment_counts`.
+		"counts": {
+			"categories": _count_by(
+				frappe.get_all("HR Request", filters={"employee": employee}, pluck="category")
+			)
+		},
 		"limit": limit,
 		"today": user_today(),
 	}
 
 
 @frappe.whitelist()
-def get_my_requests(limit=None):
-	return _requests_summary(get_current_employee(), limit)
+def get_my_requests(limit=None, category=None):
+	return _requests_summary(get_current_employee(), limit, category)
 
 
 @frappe.whitelist()
