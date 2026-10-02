@@ -1114,6 +1114,7 @@ RATE_LIMIT_POLICY = {
 	"update_my_profile": (20, 60),
 	"save_my_week": (30, 60),
 	"act_on_approval": (30, 60),
+	"get_overdue_approvals": (60, 60),
 	"apply_for_leave": (20, 3600),
 	"withdraw_my_leave": (20, 3600),
 	"create_my_request": (10, 3600),

@@ -500,9 +500,10 @@ def _public(item):
 	return {key: item[key] for key in ("kind", "title", "employee_name", "age_days", "url")}
 
 
-def _summary_owners(items, hr_user):
+def _summary_owners(items, hr_user, project=None):
 	"""`hr_overdue_summary`'s `owners`, narrowed to `hr_user`'s admin scope
-	(P6-R6). Items with nobody active to act go under their owner's name,
+	(P6-R6). U12's Overdue tab reads the same groups with a wider `project`
+	(row fields), so the tab's counts and the summary's always agree. Items with nobody active to act go under their owner's name,
 	flagged `inactive` (R24). The HR user's own group is marked "(you)" in
 	its name rather than by a new key, so saved templates keep rendering."""
 	from helixhr.utils import admin_scope_employee_filters, resolve_admin_scope
@@ -528,7 +529,7 @@ def _summary_owners(items, hr_user):
 		)
 		if hr_user in item["owners"] and item["owner_name"] != _HR_ROLE:
 			group["owner_name"] = f"{item['owner_name']} (you)"
-		group["items"].append(_public(item))
+		group["items"].append((project or _public)(item))
 	return list(groups.values())
 
 

@@ -64,6 +64,20 @@ function filterQueue(kind, category) {
   router.push({ name: route.name, params: route.params, query: { kind: kind || undefined, category: category || undefined } })
 }
 
+// U12 / R26. HR-only Overdue tab, in the URL like the chips. The server
+// refuses anyone else; `canConfigure` mirrors that gate (`_is_hr`).
+const VIEW_TABS = [
+  { name: 'queue', label: 'Queue' },
+  { name: 'overdue', label: 'Overdue' },
+]
+const OVERDUE_VISIBLE_ROWS = 5
+const view = computed(() => (session.canConfigure && route.query.view === 'overdue' ? 'overdue' : 'queue'))
+const overdue = createResource({ url: 'helixhr.api.get_overdue_approvals' })
+watch(view, (value) => value === 'overdue' && overdue.fetch(), { immediate: true })
+function showView(name) {
+  router.push({ path: '/approvals', query: name === 'overdue' ? { view: 'overdue' } : {} })
+}
+
 const pending = computed(() => queue.data?.pending || [])
 const decided = computed(() => queue.data?.decided || [])
 const overflow = computed(() => Math.max(0, (queue.data?.total || 0) - pending.value.length))
@@ -476,7 +490,95 @@ function hrLine(row) {
       </template>
     </PageHeader>
 
-    <p class="mb-4 text-sm text-ink-gray-5">
+    <!-- U12 / R26. HR's Overdue tab: who is sitting on what, past R25's
+         threshold, within HR's admin scope. Same collector as the daily HR
+         summary (U11). The tab lives in the URL query like the chips. -->
+    <div
+      v-if="session.canConfigure"
+      class="mb-4 flex gap-2 border-b border-outline-gray-2"
+      role="tablist"
+      aria-label="Approvals views"
+    >
+      <button
+        v-for="tab in VIEW_TABS"
+        :key="tab.name"
+        type="button"
+        role="tab"
+        class="-mb-px min-h-11 border-b-2 px-3 text-sm font-medium"
+        :class="
+          view === tab.name
+            ? 'border-ink-gray-9 text-ink-gray-9'
+            : 'border-transparent text-ink-gray-6 hover:text-ink-gray-9'
+        "
+        :aria-selected="view === tab.name"
+        @click="showView(tab.name)"
+      >
+        {{ tab.label }}
+      </button>
+    </div>
+
+    <section
+      v-if="view === 'overdue'"
+      data-testid="overdue-tab"
+    >
+      <AsyncState
+        section="approvals-overdue"
+        :resource="overdue"
+        :empty="!overdue.data?.count"
+        empty-title="Nothing overdue"
+        empty-body="Approvals and requests waiting past their deadline appear here, grouped by who owes the decision."
+        :skeleton-rows="3"
+      >
+        <div class="space-y-6">
+          <section
+            v-for="group in overdue.data.groups"
+            :key="group.owner_name + group.inactive"
+            data-testid="overdue-group"
+          >
+            <h2 class="label mb-2">
+              {{ group.owner_name }}
+              <span class="tabular text-ink-gray-5">{{ group.items.length }}</span>
+              <span
+                v-if="group.inactive"
+                class="ml-1 text-ink-amber-3"
+              >No active owner</span>
+            </h2>
+            <ul
+              class="space-y-2"
+              :class="group.items.length > OVERDUE_VISIBLE_ROWS ? 'scroll-queue max-h-[19.5rem]' : ''"
+              :tabindex="group.items.length > OVERDUE_VISIBLE_ROWS ? 0 : undefined"
+              :aria-label="group.items.length > OVERDUE_VISIBLE_ROWS ? `${group.owner_name}, scrollable` : undefined"
+            >
+              <li
+                v-for="item in group.items"
+                :key="item.route_kind + item.name"
+                data-testid="overdue-row"
+                :data-overdue-name="item.name"
+              >
+                <router-link
+                  :to="`/approvals/${item.route_kind}/${item.name}`"
+                  class="surface-card elev-1 flex h-14 min-w-0 items-center gap-3 px-3 hover:bg-surface-gray-2"
+                >
+                  <span class="min-w-0 flex-1">
+                    <span class="block truncate text-sm font-medium text-ink-gray-9">{{ item.employee_name }} · {{ item.title }}</span>
+                    <span class="block truncate text-xs text-ink-gray-5">{{ item.kind }}</span>
+                  </span>
+                  <span class="tabular shrink-0 text-right text-sm text-ink-gray-9">
+                    {{ item.age_days }} days
+                    <span class="block text-xs text-ink-gray-5">limit {{ item.threshold_days }}</span>
+                  </span>
+                </router-link>
+              </li>
+            </ul>
+          </section>
+        </div>
+      </AsyncState>
+    </section>
+
+    <p
+      v-if="view === 'queue'"
+      class="mb-4 text-sm text-ink-gray-5"
+    >
       <template v-if="hasHrWork">
         Oldest first. Your own team, plus anything marked HR.
       </template>
@@ -488,7 +590,7 @@ function hrLine(row) {
     <!-- P5-R12: requests split into what nobody has claimed and what the
          viewer already has, counted separately from the rest of the queue. -->
     <p
-      v-if="requestRows.length"
+      v-if="view === 'queue' && requestRows.length"
       class="mb-4 flex flex-wrap gap-x-4 gap-y-1 text-sm text-ink-gray-5"
       data-testid="request-claim-counts"
     >
@@ -505,7 +607,7 @@ function hrLine(row) {
     <!-- U6 / R13. Kind chips, then -- for requests -- category chips. Same
          chip shape as the Directory's department filter. -->
     <div
-      v-if="kindChips.length > 1 || kindFilter || categoryFilter"
+      v-if="view === 'queue' && (kindChips.length > 1 || kindFilter || categoryFilter)"
       class="mb-4 flex flex-wrap items-center gap-2"
       role="group"
       aria-label="Filter approvals by kind"
@@ -542,7 +644,7 @@ function hrLine(row) {
       </button>
     </div>
     <div
-      v-if="(kindFilter === 'request' || categoryFilter) && categoryChips.length"
+      v-if="view === 'queue' && (kindFilter === 'request' || categoryFilter) && categoryChips.length"
       class="mb-4 flex flex-wrap items-center gap-2"
       role="group"
       aria-label="Filter requests by category"
@@ -566,7 +668,10 @@ function hrLine(row) {
       </button>
     </div>
 
-    <div class="lg:flex lg:items-start lg:gap-6">
+    <div
+      v-if="view === 'queue'"
+      class="lg:flex lg:items-start lg:gap-6"
+    >
       <!-- The queue. One list, leave and timesheets together: they are the
            same job -- somebody is waiting on a decision -- and splitting them
            into two sections made a manager check two places to find out
@@ -1524,3 +1629,14 @@ function hrLine(row) {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* Same scroll affordance as Home's queues (NeedsYou.vue): five 3.5rem rows
+   plus gaps, an always-visible gutter and a bottom rule. */
+.scroll-queue {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding-right: 0.25rem;
+  border-bottom: 1px solid var(--outline-gray-2);
+}
+</style>

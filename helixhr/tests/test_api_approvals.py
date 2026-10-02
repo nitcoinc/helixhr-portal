@@ -13,6 +13,7 @@ from helixhr.api import (
 	create_my_attendance_request,
 	get_approval_detail,
 	get_my_approvals,
+	get_overdue_approvals,
 	get_portal_bootstrap,
 	is_overdue,
 	save_my_week,
@@ -2255,3 +2256,87 @@ class TestHrSeesStalledManagerLeave(IntegrationTestCase):
 		frappe.set_user(self.hr_user)
 		with self.assertRaises(frappe.ValidationError):
 			act_on_approval("Leave Application", leave, "Approve", **stale)
+
+
+class TestHrOverdueTab(IntegrationTestCase):
+	"""Plan 2026-10-02-001 U12 (R26). HR's Overdue tab reads U11's collector
+	through the HR summary's scoped grouping. The timesheet is a raw insert:
+	the collector reads columns only."""
+
+	OTHER_CO_EMPLOYEE = "u12-other-company@helixhr.test"
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.employee, _, self.manager, _ = make_test_employee_and_manager()
+		self.company = frappe.db.get_value("Employee", self.employee, "company")
+		self.hr_employee, self.hr_user = make_test_hr_manager_employee()
+		frappe.local.conf["helixhr_approval_overdue_days"] = 2
+		self.addCleanup(frappe.local.conf.pop, "helixhr_approval_overdue_days", None)
+
+	def _timesheet(self, age_days, employee=None):
+		doc = frappe.get_doc(
+			{
+				"doctype": "Timesheet",
+				"employee": employee or self.employee,
+				"employee_name": "U12 Overdue Fixture",
+				"company": self.company,
+				"start_date": add_days(today(), -7),
+				"end_date": add_days(today(), -1),
+				"workflow_state": "Pending Approval",
+				PENDING_SINCE_FIELD: add_to_date(now_datetime(), days=-age_days),
+			}
+		)
+		doc.set_new_name()
+		doc.db_insert()
+		self.addCleanup(frappe.db.delete, "Timesheet", {"name": doc.name})
+		return doc.name
+
+	def _rows(self):
+		frappe.set_user(self.hr_user)
+		result = get_overdue_approvals()
+		return result, {
+			row["name"]: (group, row) for group in result["groups"] for row in group["items"]
+		}
+
+	def test_hr_sees_a_managers_overdue_timesheet_with_its_age(self):
+		name = self._timesheet(4)
+		_, rows = self._rows()
+		group, row = rows[name]
+		self.assertEqual(row["age_days"], 4)
+		self.assertEqual(row["threshold_days"], 2)
+		self.assertEqual(row["route_kind"], "timesheet")
+		self.assertEqual(group["owner_name"], frappe.db.get_value("Employee", self.manager, "employee_name"))
+
+	def test_a_timesheet_within_the_threshold_is_not_listed(self):
+		name = self._timesheet(1)
+		self.assertNotIn(name, self._rows()[1])
+
+	def test_an_item_outside_admin_scope_is_hidden(self):
+		other = make_test_user(self.OTHER_CO_EMPLOYEE, ensure_baseline_company())
+		frappe.set_user("Administrator")
+		name = self._timesheet(4, employee=other)
+		self.assertNotIn(name, self._rows()[1])
+
+	def test_a_non_hr_user_is_refused(self):
+		frappe.set_user(EMPLOYEE_USER)
+		self.assertRaises(frappe.PermissionError, get_overdue_approvals)
+
+	def test_nothing_overdue_is_an_empty_tab(self):
+		from unittest.mock import patch
+
+		from helixhr import reminders
+
+		frappe.set_user(self.hr_user)
+		with patch.object(reminders, "collect_overdue", return_value=[]):
+			self.assertEqual(get_overdue_approvals(), {"groups": [], "count": 0})
+
+	def test_the_tabs_counts_equal_the_hr_summarys(self):
+		from helixhr import reminders
+
+		self._timesheet(4)
+		result, _ = self._rows()
+		summary = reminders._summary_owners(reminders.collect_overdue(), self.hr_user)
+		self.assertEqual(
+			[(g["owner_name"], len(g["items"])) for g in result["groups"]],
+			[(g["owner_name"], len(g["items"])) for g in summary],
+		)

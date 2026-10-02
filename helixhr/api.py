@@ -5000,6 +5000,43 @@ def _recently_decided(employee):
 	return _with_photo_urls(decided[:_DECIDED_LIMIT])
 
 
+_OVERDUE_ROUTE_KIND = {
+	"Leave Application": "leave",
+	"Timesheet": "timesheet",
+	"Attendance Request": "attendance",
+	"HR Request": "request",
+}
+
+
+@frappe.whitelist()
+def get_overdue_approvals():
+	"""U12 / R26. HR's Overdue tab: who is sitting on what, how long, and
+	against which threshold, within the caller's admin scope (P6-R6).
+
+	Same collector and grouping as the daily HR summary (U11), so the tab
+	and the email never disagree. Owner groups come oldest item first; rows
+	inside a group are oldest first."""
+	rate_limit_per_user("get_overdue_approvals")
+	if not _is_hr():
+		frappe.throw(_("Only HR can see overdue approvals."), frappe.PermissionError)
+	from helixhr.reminders import _summary_owners, collect_overdue
+
+	def row(item):
+		return {
+			"kind": item["kind"],
+			"route_kind": _OVERDUE_ROUTE_KIND[item["doctype"]],
+			"name": item["name"],
+			"title": item["title"],
+			"employee_name": item["employee_name"],
+			"age_days": item["age_days"],
+			"threshold_days": item["threshold_days"],
+		}
+
+	today = getdate(user_today())
+	groups = _summary_owners(collect_overdue(today), frappe.session.user, project=row)
+	return {"groups": groups, "count": sum(len(group["items"]) for group in groups)}
+
+
 @frappe.whitelist()
 def get_approval_detail(kind, name):
 	"""The evidence for one decision, loaded only when it is selected

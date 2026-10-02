@@ -355,6 +355,72 @@ test('HR decides a manager-stage leave the approver has sat on, tagged with why'
 })
 
 /**
+ * Plan 2026-10-02-001 U12 / R26. HR's Overdue tab lists a seeded late leave
+ * under the approver who owes it, with its age and the threshold.
+ */
+test('HR sees an overdue item on the Overdue tab, grouped under its approver', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'this is the HR capability shape')
+  test.setTimeout(60000)
+
+  const baseURL = process.env.BASE_URL || 'http://localhost:8080'
+  const admin = await adminContext(baseURL)
+  const employee = await getValue(admin, 'Employee', { user_id: EMPLOYEE }, 'name')
+  const date = futureWeekday()
+  const inserted = await admin.post('/api/method/frappe.client.insert', {
+    data: {
+      doc: JSON.stringify({
+        doctype: 'Leave Application',
+        employee,
+        leave_type: 'Casual Leave',
+        from_date: date,
+        to_date: date,
+        description: 'u12 overdue',
+        leave_approver: 'manager@helixhr.test',
+      }),
+    },
+  })
+  expect(inserted.ok(), await inserted.text()).toBeTruthy()
+  const name = (await inserted.json()).message.name
+  await admin.post('/api/method/frappe.client.set_value', {
+    form: {
+      doctype: 'Leave Application',
+      name,
+      fieldname: 'helixhr_pending_since',
+      value: `${addDays(new Date().toISOString().slice(0, 10), -5)} 09:00:00`,
+    },
+  })
+
+  try {
+    await page.goto('/helixhr/approvals')
+    await page.getByRole('tab', { name: 'Overdue', exact: true }).click()
+    await expect(page).toHaveURL(/view=overdue/)
+    const row = page.getByTestId('overdue-tab').locator(`[data-overdue-name="${name}"]`)
+    await expect(row).toBeVisible({ timeout: 15000 })
+    // Seeded five UTC days back; the site counts in its own time zone, which
+    // may already be a day ahead.
+    await expect(row).toContainText(/[56] days/)
+    await expect(row).toContainText('limit 2')
+    await expect(row.locator('xpath=ancestor::section[@data-testid="overdue-group"]/h2')).toContainText(
+      'Manager',
+    )
+  } finally {
+    await admin.post('/api/method/frappe.client.delete', { form: { doctype: 'Leave Application', name } })
+    await admin.dispose()
+  }
+})
+
+test('an employee has no Overdue tab, even by URL', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'employee', 'this is the non-HR capability shape')
+
+  await page.goto('/helixhr/approvals?view=overdue')
+  await expect(page.getByRole('heading', { name: 'Approvals' })).toBeVisible()
+  await expect(page.getByRole('tab', { name: 'Overdue', exact: true })).toHaveCount(0)
+  await expect(page.getByTestId('overdue-tab')).toHaveCount(0)
+})
+
+/**
  * P5-U11. The routed-worker capability shape, under the fourth identity
  * (`it-team@helixhr.test`, seeded by `make_test_it_user` -- P5-U2). Runs
  * against the single `IT / Asset` request `ensure_test_it_request` seeds:
