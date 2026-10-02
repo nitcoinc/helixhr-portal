@@ -1323,3 +1323,45 @@ def hr_settings_validate(doc, method=None):
 					"HR Settings > Reminders, or disable it on Settings > Celebrations in the portal."
 				).format(spec["label"].lower(), spec["hrms_label"])
 			)
+
+
+# Plan 2026-10-02-001 U4 / KTD13. When a request last entered a pending stage
+# or state -- what the overdue predicate (`api.is_overdue`) counts from.
+# `modified` cannot serve: Desk saves and HRMS's own in-flight writes bump it.
+PENDING_SINCE_FIELD = "helixhr_pending_since"
+
+
+def _pending_key(doc):
+	"""Which pending stage or state this record is in, or None when nobody
+	owes it a decision. A change of key is a fresh wait; the same key is not."""
+	if cint(doc.docstatus) != 0:
+		return None
+	if doc.doctype == "Leave Application":
+		if doc.status != "Open":
+			return None
+		return doc.get("helixhr_stage") or "Manager"
+	if doc.doctype == "Timesheet":
+		return doc.workflow_state if doc.workflow_state in (PENDING_STATE, TIMESHEET_PENDING_HR) else None
+	if doc.workflow_state in (REQUEST_PENDING_MANAGER, REQUEST_PENDING_HR):
+		return doc.workflow_state
+	return None
+
+
+def stamp_pending_since(doc, method=None):
+	"""`on_change` for Leave Application, Timesheet and Attendance Request.
+
+	`on_change` rather than `on_update`, because `db_set` runs it too, and the
+	leave stage moves (Send to HR, an HR-approved Leave Type) are `db_set`
+	writes; `db_set` also loads the stored row as `doc_before_save`. Written
+	with `frappe.db.set_value` and `update_modified=False`, so it neither
+	recurses into this hook nor moves the concurrency token.
+	"""
+	key = _pending_key(doc)
+	if key is None:
+		return
+	before = doc.get_doc_before_save()
+	if before and _pending_key(before) == key and doc.get(PENDING_SINCE_FIELD):
+		return
+	now = frappe.utils.now_datetime()
+	frappe.db.set_value(doc.doctype, doc.name, PENDING_SINCE_FIELD, now, update_modified=False)
+	doc.set(PENDING_SINCE_FIELD, now)

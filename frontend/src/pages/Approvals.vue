@@ -416,9 +416,16 @@ function requestedDayLabel(day) {
  * thing distinguishing HR's work from a manager's own. Both halves are
  * optional: a request of an HR-approves leave type reached HR with nobody
  * sending it (P4-R7). */
+// U4 / R10: why a manager-stage leave is in HR's queue at all.
+const HR_REASON_LABEL = {
+  approver_away: 'Approver on leave',
+  overdue: 'Overdue with approver',
+}
+
 function hrLine(row) {
   if (!row?.for_hr) return ''
   const parts = []
+  if (HR_REASON_LABEL[row.hr_reason]) parts.push(HR_REASON_LABEL[row.hr_reason])
   if (row.sent_to_hr_by) parts.push(`Sent by ${row.sent_to_hr_by}`)
   if (row.hr_note) parts.push(`“${row.hr_note}”`)
   return parts.join(' · ')

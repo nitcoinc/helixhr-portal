@@ -43,6 +43,7 @@ from helixhr.events import (
 	HR_REQUEST_OPEN,
 	HR_REQUEST_WAITING_ON_EMPLOYEE,
 	LEAVE_STAGE_HR,
+	PENDING_SINCE_FIELD,
 	PENDING_STATE,
 	REQUEST_APPROVED,
 	REQUEST_DRAFT,
@@ -1476,6 +1477,9 @@ def _summary_row(
 		"for_hr": False,
 		"sent_to_hr_by": None,
 		"hr_note": None,
+		# U4 / R10: why HR sees a manager-stage leave -- "approver_away" or
+		# "overdue" -- and None for everything else.
+		"hr_reason": None,
 	}
 	row.update(extra)
 	return row
@@ -1929,7 +1933,116 @@ def _hr_leave_summaries(employee, today):
 			hr_note=senders[row.name]["note"],
 		)
 		for row in rows
-	]
+	] + _hr_stalled_leave_summaries(employee, today, employee_filter)
+
+
+# Plan 2026-10-02-001 R25 / KTD13. Calendar days, the default the plan chose;
+# working days is the recorded upgrade path.
+APPROVAL_OVERDUE_DAYS_DEFAULT = 2
+
+
+def approval_overdue_days():
+	"""R25's threshold for leave, timesheets and attendance requests: site
+	config `helixhr_approval_overdue_days`, default 2 calendar days."""
+	return max(0, cint(frappe.conf.get("helixhr_approval_overdue_days", APPROVAL_OVERDUE_DAYS_DEFAULT)))
+
+
+def is_overdue(pending_since, today, threshold=None):
+	"""The one overdue predicate (U4; U11 and U12 reuse it): pending for
+	longer than the threshold, counted from `helixhr_pending_since`."""
+	if not pending_since:
+		return False
+	if threshold is None:
+		threshold = approval_overdue_days()
+	return _age_in_days(pending_since, today) > threshold
+
+
+def _approvers_away(users, today):
+	"""Which of these approver users are on approved, submitted leave today
+	(half days included) -- KTD4's "away"."""
+	if not users:
+		return set()
+	employees = {
+		row.name: row.user_id
+		for row in frappe.get_all(
+			"Employee", filters={"user_id": ["in", list(users)]}, fields=["name", "user_id"]
+		)
+	}
+	if not employees:
+		return set()
+	on_leave = frappe.get_all(
+		"Leave Application",
+		filters={
+			"employee": ["in", list(employees)],
+			"docstatus": 1,
+			"status": "Approved",
+			"from_date": ["<=", today],
+			"to_date": [">=", today],
+		},
+		pluck="employee",
+	)
+	return {employees[name] for name in on_leave}
+
+
+def _hr_stalled_leave_summaries(employee, today, employee_filter):
+	"""Manager-stage leave HR may decide because the approver is away or the
+	request is overdue (R10, KTD4). Admin-scoped by `employee_filter`, never
+	narrowed by `_line_manager_filter`: these are other managers' reports.
+	The caller's own approvals are already in their line-manager half."""
+	rows = frappe.get_all(
+		"Leave Application",
+		filters={
+			"status": "Open",
+			"docstatus": 0,
+			"helixhr_stage": ["in", ["", None, _LEAVE_STAGE_MANAGER]],
+			"employee": employee_filter,
+			"leave_approver": ["not in", ["", frappe.session.user]],
+		},
+		fields=[
+			"name",
+			"employee",
+			"employee_name",
+			"leave_type",
+			"from_date",
+			"to_date",
+			"total_leave_days",
+			"status",
+			"creation",
+			"leave_approver",
+			PENDING_SINCE_FIELD,
+		],
+		order_by="creation asc",
+		limit=_QUEUE_FETCH,
+	)
+	away = _approvers_away({row.leave_approver for row in rows}, today)
+	threshold = approval_overdue_days()
+	stalled = []
+	for row in rows:
+		if row.leave_approver in away:
+			reason = "approver_away"
+		elif is_overdue(row.get(PENDING_SINCE_FIELD), today, threshold):
+			reason = "overdue"
+		else:
+			continue
+		stalled.append(
+			_summary_row(
+				"leave",
+				"Leave Application",
+				row.name,
+				row.employee,
+				row.employee_name,
+				row.from_date,
+				row.to_date,
+				row.creation,
+				row.status,
+				today,
+				leave_type=row.leave_type,
+				total_days=flt(row.total_leave_days),
+				for_hr=True,
+				hr_reason=reason,
+			)
+		)
+	return stalled
 
 
 def _hr_timesheet_summaries(employee, today):
@@ -5289,11 +5402,41 @@ def act_on_approval(
 		)
 
 	_APPROVAL_KINDS[doctype]["act"](doc, action)
+	_record_hr_acting_for_approver(doc, action)
 	return {
 		"name": doc.name,
 		"action": action,
 		"state": doc.get(_APPROVAL_KINDS[doctype]["state_field"]),
 	}
+
+
+def _record_hr_acting_for_approver(doc, action):
+	"""U4 / R11: HR decided a manager-stage leave in the approver's place.
+	The timeline says so, and the approver gets a bell row. Runs after the
+	decision, so a refused action leaves neither behind."""
+	if doc.doctype != "Leave Application" or action == "Send to HR":
+		return
+	user = frappe.session.user
+	approver = doc.leave_approver
+	if not approver or approver == user or not _is_hr(user):
+		return
+	if (frappe.db.get_value("Leave Application", doc.name, "helixhr_stage") or _LEAVE_STAGE_MANAGER) != (
+		_LEAVE_STAGE_MANAGER
+	):
+		return
+	approver_name = frappe.utils.get_fullname(approver)
+	doc.add_comment("Comment", _("Decided by HR for {0}.").format(approver_name))
+	frappe.get_doc(
+		{
+			"doctype": "Notification Log",
+			"for_user": approver,
+			"from_user": user,
+			"type": "Alert",
+			"document_type": doc.doctype,
+			"document_name": doc.name,
+			"subject": _("HR decided {0}'s leave request for you: {1}.").format(doc.employee_name, action),
+		}
+	).insert(ignore_permissions=True)
 
 
 def _act_through_workflow(doc, action):

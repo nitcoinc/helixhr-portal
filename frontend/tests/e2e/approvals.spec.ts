@@ -286,6 +286,74 @@ test('HR works what a manager handed over, tagged and with the note, and has no 
   await admin.dispose()
 })
 
+/** A weekday far enough ahead that no other spec books it. */
+function futureWeekday(): string {
+  const now = new Date()
+  const day = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 200 + (now.getUTCDate() % 30)))
+  while (day.getUTCDay() === 0 || day.getUTCDay() === 6) day.setUTCDate(day.getUTCDate() + 1)
+  return day.toISOString().slice(0, 10)
+}
+
+test('HR decides a manager-stage leave the approver has sat on, tagged with why', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'this is the HR capability shape')
+  test.setTimeout(90000)
+
+  // Plan 2026-10-02-001 U4. Seeded overdue rather than approver-away: an
+  // away approver needs a submitted leave covering today, and that submit
+  // fails whenever today is a holiday. The away branch is covered in
+  // test_api_approvals.TestHrSeesStalledManagerLeave.
+  const baseURL = process.env.BASE_URL || 'http://localhost:8080'
+  const admin = await adminContext(baseURL)
+  const employee = await getValue(admin, 'Employee', { user_id: EMPLOYEE }, 'name')
+  const date = futureWeekday()
+  const inserted = await admin.post('/api/method/frappe.client.insert', {
+    data: {
+      doc: JSON.stringify({
+        doctype: 'Leave Application',
+        employee,
+        leave_type: 'Casual Leave',
+        from_date: date,
+        to_date: date,
+        description: 'u4 overdue',
+        leave_approver: 'manager@helixhr.test',
+      }),
+    },
+  })
+  expect(inserted.ok(), await inserted.text()).toBeTruthy()
+  const name = (await inserted.json()).message.name
+  await admin.post('/api/method/frappe.client.set_value', {
+    form: {
+      doctype: 'Leave Application',
+      name,
+      fieldname: 'helixhr_pending_since',
+      value: `${addDays(new Date().toISOString().slice(0, 10), -5)} 09:00:00`,
+    },
+  })
+
+  try {
+    await page.goto('/helixhr/approvals')
+    const row = page.getByTestId('approvals-queue').locator(`[data-approval-name="${name}"]`)
+    await expect(row).toBeVisible({ timeout: 15000 })
+    await expect(row.getByTestId('hr-chip')).toBeVisible()
+    await expect(row).toContainText('Overdue with approver')
+
+    await row.click()
+    const panel = page.getByTestId('approval-detail')
+    await panel.getByRole('button', { name: /^Approve/ }).click()
+    await expect
+      .poll(async () => getValue(admin, 'Leave Application', { name }, 'docstatus'), { timeout: 15000 })
+      .toBe(1)
+  } finally {
+    if ((await getValue(admin, 'Leave Application', { name }, 'docstatus')) === 1) {
+      await admin.post('/api/method/frappe.client.cancel', { form: { doctype: 'Leave Application', name } })
+    }
+    await admin.post('/api/method/frappe.client.delete', { form: { doctype: 'Leave Application', name } })
+    await admin.dispose()
+  }
+})
+
 /**
  * P5-U11. The routed-worker capability shape, under the fourth identity
  * (`it-team@helixhr.test`, seeded by `make_test_it_user` -- P5-U2). Runs

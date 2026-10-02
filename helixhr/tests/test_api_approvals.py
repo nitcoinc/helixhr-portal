@@ -4,20 +4,23 @@ import json
 import frappe
 from frappe.model.workflow import apply_workflow
 from frappe.tests import IntegrationTestCase
-from frappe.utils import add_days, today
+from frappe.utils import add_days, add_to_date, getdate, now_datetime, today
 
 from helixhr.api import (
 	_allowed_actions,
 	act_on_approval,
+	approval_overdue_days,
 	create_my_attendance_request,
 	get_approval_detail,
 	get_my_approvals,
 	get_portal_bootstrap,
+	is_overdue,
 	save_my_week,
 	send_my_attendance_request,
 )
 from helixhr.events import (
 	DECISION_REASON_FIELD,
+	PENDING_SINCE_FIELD,
 	REQUEST_PENDING_HR,
 	REQUEST_PENDING_MANAGER,
 	REQUEST_REJECTED,
@@ -27,6 +30,7 @@ from helixhr.tests.utils import (
 	MANAGER_USER,
 	OTHER_MANAGER_USER,
 	clear_open_leave,
+	ensure_baseline_company,
 	ensure_holiday_list_assignment,
 	ensure_holiday_list_assignment_from,
 	ensure_hr_manager_user,
@@ -1975,3 +1979,223 @@ class TestFourOutcomesAndTheHrQueue(IntegrationTestCase):
 		self.assertEqual(self._queue(), {})
 		self.assertFalse(boot["has_reports"])
 		self.assertTrue(boot["can_approve"])
+
+
+class TestHrSeesStalledManagerLeave(IntegrationTestCase):
+	"""Plan 2026-10-02-001 U4 (R10, R11, R25, KTD4, KTD13). Manager-stage
+	leave reaches HR's queue when the approver is away or the request is
+	overdue, and HR's decision is recorded as made for the approver."""
+
+	EMPLOYEE = "u4-stalled-employee@helixhr.test"
+	OTHER_CO_EMPLOYEE = "u4-other-company@helixhr.test"
+
+	@classmethod
+	def setUpClass(cls):
+		super().setUpClass()
+		ensure_test_email_account()
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_, _, self.manager_name, _ = make_test_employee_and_manager()
+		self.company = frappe.db.get_value("Employee", self.manager_name, "company")
+		ensure_holiday_list_assignment(self.company)
+		self.hr_employee, self.hr_user = make_test_hr_manager_employee()
+		self.employee = make_test_user(self.EMPLOYEE, self.company, reports_to=self.manager_name)
+		frappe.db.set_value("Employee", self.employee, "leave_approver", MANAGER_USER)
+		ensure_leave_approver_role(MANAGER_USER)
+		digest = int(hashlib.md5(self.id().encode()).hexdigest(), 16)
+		self.leave_date = add_days(today(), 20 + (digest % 60))
+		frappe.local.conf["helixhr_approval_overdue_days"] = 2
+		self.addCleanup(frappe.local.conf.pop, "helixhr_approval_overdue_days", None)
+		# The away check is "approved leave covering today": anything a past
+		# run left on the manager would decide these tests for them.
+		self._clear_manager_leave_today()
+
+	def _clear_manager_leave_today(self):
+		frappe.db.delete(
+			"Leave Application",
+			{
+				"employee": self.manager_name,
+				"from_date": ["<=", today()],
+				"to_date": [">=", today()],
+			},
+		)
+
+	def _manager_on_leave_today(self, docstatus=1, status="Approved"):
+		"""A raw row: the away check reads only these columns, and a real
+		submit would fail whenever today is a holiday."""
+		doc = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": self.manager_name,
+				"leave_type": "Casual Leave",
+				"from_date": today(),
+				"to_date": today(),
+				"half_day": 1,
+				"half_day_date": today(),
+				"status": status,
+				"company": self.company,
+				"posting_date": today(),
+			}
+		)
+		doc.set_new_name()
+		doc.docstatus = docstatus
+		doc.db_insert()
+		self.addCleanup(frappe.db.delete, "Leave Application", {"name": doc.name})
+		return doc.name
+
+	def _open_leave(self):
+		ensure_leave_allocation(self.employee, "Casual Leave", 30)
+		for existing in frappe.get_all(
+			"Leave Application",
+			filters={"employee": self.employee, "from_date": str(self.leave_date)},
+			pluck="name",
+		):
+			frappe.delete_doc("Leave Application", existing, force=True, ignore_permissions=True)
+		frappe.set_user(self.EMPLOYEE)
+		doc = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": self.employee,
+				"leave_type": "Casual Leave",
+				"from_date": str(self.leave_date),
+				"to_date": str(self.leave_date),
+				"description": "u4",
+				"leave_approver": MANAGER_USER,
+			}
+		)
+		doc.insert()
+		frappe.set_user("Administrator")
+		self.addCleanup(self._remove_leave, doc.name)
+		return doc.name
+
+	def _remove_leave(self, name):
+		frappe.set_user("Administrator")
+		if not frappe.db.exists("Leave Application", name):
+			return
+		doc = frappe.get_doc("Leave Application", name)
+		if doc.docstatus == 1:
+			doc.cancel()
+		frappe.delete_doc("Leave Application", name, force=True, ignore_permissions=True)
+
+	def _hr_queue(self):
+		frappe.set_user(self.hr_user)
+		return {row["name"]: row for row in get_my_approvals()["pending"]}
+
+	def _age(self, name, days):
+		frappe.db.set_value(
+			"Leave Application",
+			name,
+			PENDING_SINCE_FIELD,
+			add_to_date(now_datetime(), days=-days),
+			update_modified=False,
+		)
+
+	# --- the predicate -------------------------------------------------------
+
+	def test_overdue_is_strictly_longer_than_the_threshold(self):
+		day = getdate(today())
+		self.assertTrue(is_overdue(add_days(day, -3), day, 2))
+		self.assertFalse(is_overdue(add_days(day, -2), day, 2))
+		self.assertFalse(is_overdue(None, day, 2))
+		self.assertEqual(approval_overdue_days(), 2)
+
+	# --- the slice -------------------------------------------------------------
+
+	def test_an_away_approvers_request_is_listed_for_hr(self):
+		leave = self._open_leave()
+		frappe.set_user("Administrator")
+		self._manager_on_leave_today()
+
+		row = self._hr_queue().get(leave)
+		self.assertIsNotNone(row)
+		self.assertEqual(row["hr_reason"], "approver_away")
+		self.assertTrue(row["for_hr"])
+
+	def test_an_open_unapproved_leave_does_not_make_the_approver_away(self):
+		leave = self._open_leave()
+		frappe.set_user("Administrator")
+		self._manager_on_leave_today(docstatus=0, status="Open")
+
+		self.assertNotIn(leave, self._hr_queue())
+
+	def test_a_request_pending_past_the_threshold_is_listed_as_overdue(self):
+		leave = self._open_leave()
+		self._age(leave, 3)
+
+		row = self._hr_queue().get(leave)
+		self.assertIsNotNone(row)
+		self.assertEqual(row["hr_reason"], "overdue")
+
+	def test_a_fresh_request_with_a_present_approver_is_not_listed(self):
+		leave = self._open_leave()
+		self.assertNotIn(leave, self._hr_queue())
+
+	def test_an_employee_outside_hrs_admin_scope_is_not_listed(self):
+		leave = self._open_leave()
+		self._age(leave, 3)
+		frappe.db.set_value(
+			"Leave Application", leave, "employee", self._other_company_employee(), update_modified=False
+		)
+		self.assertNotIn(leave, self._hr_queue())
+
+	def _other_company_employee(self):
+		return make_test_user(self.OTHER_CO_EMPLOYEE, ensure_baseline_company())
+
+	# --- waiting-since ---------------------------------------------------------
+
+	def test_insert_stamps_pending_since_and_an_unrelated_save_keeps_it(self):
+		leave = self._open_leave()
+		self._age(leave, 3)
+		stamped = frappe.db.get_value("Leave Application", leave, PENDING_SINCE_FIELD)
+
+		doc = frappe.get_doc("Leave Application", leave)
+		doc.description = "edited in Desk"
+		doc.save()
+		self.assertEqual(frappe.db.get_value("Leave Application", leave, PENDING_SINCE_FIELD), stamped)
+
+	def test_send_to_hr_resets_pending_since(self):
+		leave = self._open_leave()
+		self._age(leave, 3)
+		stamped = frappe.db.get_value("Leave Application", leave, PENDING_SINCE_FIELD)
+
+		frappe.set_user(MANAGER_USER)
+		act_on_approval("Leave Application", leave, "Send to HR", **token("Leave Application", leave))
+		self.assertGreater(frappe.db.get_value("Leave Application", leave, PENDING_SINCE_FIELD), stamped)
+
+	# --- HR decides --------------------------------------------------------------
+
+	def test_hr_approves_for_the_away_approver(self):
+		leave = self._open_leave()
+		frappe.set_user("Administrator")
+		self._manager_on_leave_today()
+
+		frappe.set_user(self.hr_user)
+		act_on_approval("Leave Application", leave, "Approve", **token("Leave Application", leave))
+
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("Leave Application", leave, "docstatus"), 1)
+		comments = frappe.get_all(
+			"Comment",
+			filters={"reference_doctype": "Leave Application", "reference_name": leave},
+			pluck="content",
+		)
+		self.assertTrue(any("Decided by HR for" in (text or "") for text in comments), comments)
+		self.assertTrue(
+			frappe.db.exists(
+				"Notification Log",
+				{"for_user": MANAGER_USER, "document_type": "Leave Application", "document_name": leave},
+			)
+		)
+
+	def test_hr_acting_on_a_row_the_manager_already_decided_is_refused(self):
+		leave = self._open_leave()
+		self._age(leave, 3)
+		stale = token("Leave Application", leave)
+
+		frappe.set_user(MANAGER_USER)
+		act_on_approval("Leave Application", leave, "Approve", **token("Leave Application", leave))
+
+		frappe.set_user(self.hr_user)
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval("Leave Application", leave, "Approve", **stale)

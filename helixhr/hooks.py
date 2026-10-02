@@ -171,6 +171,8 @@ doc_events = {
 	"Timesheet": {
 		"on_update": "helixhr.events.timesheet_on_update",
 		"before_submit": "helixhr.events.timesheet_before_submit",
+		# Plan 2026-10-02-001 U4: `helixhr_pending_since`, on save and db_set.
+		"on_change": "helixhr.events.stamp_pending_since",
 	},
 	"File": {
 		"before_insert": "helixhr.events.file_before_insert",
@@ -207,6 +209,7 @@ doc_events = {
 		# Attendance Request, filing a leave application is the insert
 		# itself, not a later workflow-state move.
 		"after_insert": "helixhr.events.leave_application_after_insert",
+		"on_change": "helixhr.events.stamp_pending_since",
 	},
 	# P3-KTD8 / P4-KTD5. Frappe does not enforce a workflow state's
 	# `allow_edit` on the server, so the attendance approval carries its
@@ -226,6 +229,7 @@ doc_events = {
 		"on_update": "helixhr.events.attendance_request_on_update",
 		"before_submit": "helixhr.events.attendance_request_before_submit",
 		"on_trash": "helixhr.events.attendance_request_on_trash",
+		"on_change": "helixhr.events.stamp_pending_since",
 	},
 }
 
