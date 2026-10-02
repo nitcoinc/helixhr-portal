@@ -63,7 +63,8 @@ export default defineConfig({
       // for the HelixHR Delivery Manager's "assigned" branch (only a Python
       // integration fixture, `make_test_delivery_manager_employee`), so that
       // branch is covered there, not here.
-      testMatch: /(approvals|settings|organisation|people|reports|projects|roster)\.spec\.ts/,
+      // U15: navigation.spec.ts for the grouped rail as HR sees it.
+      testMatch: /(approvals|settings|organisation|people|reports|projects|roster|navigation)\.spec\.ts/,
     },
     // P5-U11. The routed-worker identity: `IT Team`, portal-only
     // (desk_access: 0), which never reaches Desk and works only the requests

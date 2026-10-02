@@ -378,3 +378,92 @@ test.describe('a dead session and a refused action are different things', () => 
     await expect(page).not.toHaveURL(/\/login/)
   })
 })
+
+// Plan 2026-10-02-001 U15 (R8, R9): the rail is sectioned, admin sections
+// collapse, and the More sheet carries the same headings.
+test.describe('grouped navigation (U15)', () => {
+  const rail = (page) => page.locator('aside nav[aria-label="Main"]')
+
+  test('an employee sees no HR or Admin section', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/helixhr')
+    await expect(rail(page).getByRole('heading', { name: 'My work' })).toBeVisible()
+    await expect(rail(page).getByRole('heading', { name: 'Pay & policies' })).toBeVisible()
+    await expect(rail(page).getByRole('button', { name: 'HR' })).toHaveCount(0)
+    await expect(rail(page).getByRole('button', { name: 'Admin' })).toHaveCount(0)
+  })
+
+  test('HR collapses its section by keyboard, it survives a reload, and its route opens it', async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== 'hr', 'hr-only scenario')
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/helixhr')
+    await page.evaluate(() => localStorage.setItem('helixhr.nav.collapsed', '[]'))
+    await page.reload()
+
+    const toggle = rail(page).getByRole('button', { name: 'HR' })
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    await expect(rail(page).getByRole('link', { name: 'People' })).toBeVisible()
+
+    await toggle.focus()
+    await page.keyboard.press('Enter')
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    await expect(rail(page).getByRole('link', { name: 'People' })).toHaveCount(0)
+
+    await page.reload()
+    await expect(rail(page).getByRole('button', { name: 'HR' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    )
+
+    // Landing on a route inside a collapsed section opens it for that view
+    // only; the remembered state is untouched.
+    await page.goto('/helixhr/people')
+    await expect(rail(page).getByRole('button', { name: 'HR' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    )
+    await expect(rail(page).getByRole('link', { name: 'People' })).toHaveAttribute(
+      'aria-current',
+      'page',
+    )
+    expect(await page.evaluate(() => localStorage.getItem('helixhr.nav.collapsed'))).toBe('["hr"]')
+    await page.evaluate(() => localStorage.removeItem('helixhr.nav.collapsed'))
+  })
+
+  test('the rail fits an HR user at 800px without scrolling', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'hr', 'hr-only scenario')
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.goto('/helixhr')
+    await page.evaluate(() => localStorage.removeItem('helixhr.nav.collapsed'))
+    await page.reload()
+    // First visit: the admin sections start collapsed, every heading shows.
+    await expect(rail(page).getByRole('button', { name: 'HR' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    )
+    await expect(rail(page).getByRole('button', { name: 'Admin' })).toBeVisible()
+    const overflow = await rail(page).evaluate((node) => node.scrollHeight - node.clientHeight)
+    expect(overflow).toBeLessThanOrEqual(0)
+  })
+
+  test('the More sheet shows the same headings and the tab bar is unchanged', async ({
+    page,
+  }, testInfo) => {
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/helixhr')
+    const tabs = page.locator('div > nav[aria-label="Main"]').getByRole('link')
+    await expect(tabs).toHaveText(['Home', 'Leave', 'Timesheet', 'Requests'])
+
+    await page.getByRole('button', { name: 'More' }).click()
+    const dialog = page.getByRole('dialog')
+    for (const heading of ['My work', 'Pay & policies', 'People & team']) {
+      await expect(dialog.getByRole('heading', { name: heading })).toBeVisible()
+    }
+    await expect(dialog.getByRole('button', { name: 'My work' })).toHaveCount(0)
+    await expect(dialog.getByRole('link', { name: 'Attendance' })).toBeVisible()
+  })
+})

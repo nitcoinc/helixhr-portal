@@ -17,6 +17,9 @@ test.describe('hr', () => {
 
   test('an HR identity searches, opens a colleague, and the URL survives a reload', async ({ page }) => {
     await page.goto('/helixhr/')
+    // U15: the HR section starts collapsed on a first visit.
+    const hrSection = page.getByRole('button', { name: 'HR', exact: true })
+    if ((await hrSection.getAttribute('aria-expanded')) === 'false') await hrSection.click()
     await expect(page.getByRole('link', { name: 'People' })).toBeVisible()
 
     await page.goto('/helixhr/people')
