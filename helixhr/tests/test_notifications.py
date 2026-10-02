@@ -747,3 +747,338 @@ class TestNotificationTemplateEscaping(IntegrationTestCase):
 
 		self.assertIn("&lt;script&gt;", rendered)
 		self.assertNotIn("<script>", rendered)
+
+
+# --- Plan 2026-10-02-001 U8: the HelixHR template sandbox --------------------
+
+_MT = "HelixHR Message Template"
+
+
+def _sandbox_render(source, context=None, autoescape=True):
+	"""Render through the bare environment -- no shape check, no context
+	filtering -- to prove the *environment itself* isolates, independent of
+	the save-time validation layered on top of it."""
+	from helixhr.utils import _run, _template_envs
+
+	body_env, subject_env = _template_envs()
+	env = body_env if autoescape else subject_env
+	return _run(env.from_string(source), context or {})
+
+
+def _put_row(template_key, subject, body, is_enabled=1, validate=False):
+	"""A template row for one test, removed afterwards. `validate=False`
+	writes it raw (a legacy or hand-imported row the new rules would refuse)."""
+	frappe.set_user("Administrator")
+	if frappe.db.exists(_MT, template_key):
+		frappe.delete_doc(_MT, template_key, force=True, ignore_permissions=True)
+	doc = frappe.get_doc(
+		{
+			"doctype": _MT,
+			"template_key": template_key,
+			"subject": subject,
+			"body": body,
+			"is_enabled": is_enabled,
+		}
+	)
+	if validate:
+		doc.insert(ignore_permissions=True)
+	else:
+		doc.name = template_key
+		doc.db_insert()
+	return doc
+
+
+class TestTemplateSandbox(IntegrationTestCase):
+	"""KTD6 is load-bearing: if any of these renders, stop before a template ships."""
+
+	def _assert_blocked(self, source, context=None):
+		from jinja2.exceptions import SecurityError, TemplateError, UndefinedError
+
+		# TypeError: `{% include %}` with no loader configured at all.
+		with self.assertRaises((SecurityError, UndefinedError, TemplateError, TypeError), msg=source):
+			_sandbox_render(source, context)
+
+	def test_frappe_doc_and_translation_are_not_reachable(self):
+		for source in (
+			"{{ frappe.db.get_value('User', 'Administrator', 'name') }}",
+			"{{ frappe.get_all('User') }}",
+			"{{ frappe.db.sql('select 1') }}",
+			"{{ frappe.get_doc('User', 'Administrator') }}",
+			"{{ frappe.session.user }}",
+			"{{ doc }}",
+			"{{ doc.name }}",
+			"{{ _('x') }}",
+		):
+			self._assert_blocked(source)
+
+	def test_jinja_default_globals_are_gone(self):
+		for source in (
+			"{{ range(10) }}",
+			"{{ range(10**9)|list }}",
+			"{{ cycler(1, 2) }}",
+			"{{ joiner() }}",
+			"{{ namespace(a=1) }}",
+			"{{ lipsum() }}",
+			"{{ dict(a=1) }}",
+			"{{ cycler }}",
+		):
+			self._assert_blocked(source)
+
+	def test_dunder_attribute_access_raises(self):
+		for source in (
+			"{{ ''.__class__ }}",
+			"{{ ''.__class__.__mro__ }}",
+			"{{ x.__class__.__base__.__subclasses__() }}",
+			"{{ x.__init__.__globals__ }}",
+			"{{ x|attr('__class__') }}",
+		):
+			self._assert_blocked(source, {"x": "plain"})
+
+	def test_memory_bombs_raise(self):
+		for source in ("{{ 'a' * 100000000 }}", "{{ 9 ** 9 ** 9 }}", "{{ ''|center(1000000000) }}"):
+			self._assert_blocked(source)
+
+	def test_an_undefined_variable_raises_instead_of_rendering_empty_or_literal(self):
+		self._assert_blocked("Hi {{ nobody }}")
+
+	def test_a_one_line_path_like_string_is_text_not_a_file(self):
+		self.assertEqual(_sandbox_render("Report.html", autoescape=False), "Report.html")
+		self.assertEqual(
+			_sandbox_render("templates/emails/helixhr_layout.html"), "templates/emails/helixhr_layout.html"
+		)
+
+	def test_include_and_extends_cannot_reach_a_file(self):
+		self._assert_blocked("{% include 'templates/emails/helixhr_layout.html' %}")
+		self._assert_blocked("{% extends 'templates/emails/helixhr_layout.html' %}")
+
+
+class TestTemplateValidation(IntegrationTestCase):
+	"""R17: what save refuses, and that the refusal names the problem."""
+
+	def _refused(self, body, event="leave_approved", subject="Leave"):
+		from helixhr.utils import TemplateRejected, validate_message_template
+
+		with self.assertRaises(TemplateRejected) as caught:
+			validate_message_template(event, subject, body)
+		return str(caught.exception)
+
+	def test_frappe_session_user_is_refused(self):
+		self.assertIn("frappe", self._refused("{{ frappe.session.user }}"))
+
+	def test_a_misspelled_variable_is_refused_by_name(self):
+		self.assertIn("employe_name", self._refused("Hi {{ employe_name }}", event="leave_submitted"))
+
+	def test_a_syntax_error_names_its_line(self):
+		self.assertIn("line 3", self._refused("<p>a</p>\n<p>b</p>\n{% if leave_type %}"))
+
+	def test_an_error_against_sample_data_names_its_line(self):
+		self.assertIn("line 2", self._refused("ok\n{{ items[7].title }}", event="approval_overdue_digest"))
+
+	def test_constructs_outside_the_allowed_shape_are_refused(self):
+		for body in (
+			"{{ leave_type.upper() }}",
+			"{% set x = leave_type %}{{ x }}",
+			"{% macro m() %}x{% endmacro %}",
+			"{% include 'x.html' %}",
+			"{% import 'x.html' as y %}",
+			"{% filter upper %}x{% endfilter %}",
+			"{% for c in 'abc' %}{{ c }}{% endfor %}",
+			"{{ leave_type|center(1000000) }}",
+			"{{ leave_type|replace('a', 'bb') }}",
+			"{{ leave_type|attr('__class__') }}",
+		):
+			with self.subTest(body=body):
+				self._refused(body)
+
+	def test_recursive_and_deeply_nested_loops_are_refused(self):
+		self._refused(
+			"{% for i in items recursive %}{{ loop(items) }}{% endfor %}", event="approval_overdue_digest"
+		)
+		self._refused(
+			"{% for a in items %}{% for b in items %}{% for c in items %}{% for d in items %}"
+			"{% endfor %}{% endfor %}{% endfor %}{% endfor %}",
+			event="approval_overdue_digest",
+		)
+
+	def test_loops_over_the_events_own_lists_are_allowed(self):
+		from helixhr.utils import validate_message_template
+
+		validate_message_template(
+			"hr_overdue_summary",
+			"{{ count }} overdue",
+			"{% for o in owners %}{{ o.owner_name }}{% for i in o.items %}{{ i.title }} {{ loop.index }}"
+			"{% endfor %}{% endfor %}",
+		)
+
+	def test_every_registry_default_validates_and_renders_with_sample_data(self):
+		from helixhr.utils import (
+			NOTIFICATION_EVENTS,
+			render_message,
+			sample_context,
+			validate_message_template,
+		)
+
+		for event_key, event in NOTIFICATION_EVENTS.items():
+			with self.subTest(event=event_key):
+				validate_message_template(event_key, event["subject"], event["body"])
+				message = render_message(event_key, sample_context(event_key))
+				self.assertTrue(message["subject"])
+				self.assertNotIn("{{", message["html"])
+				self.assertIn(message["content"], message["html"])
+
+
+class TestRenderMessage(IntegrationTestCase):
+	def setUp(self):
+		frappe.set_user("Administrator")
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		frappe.db.delete(_MT, {"template_key": ["in", self._keys]})
+
+	_keys = ("leave_approved", "approval_overdue_digest", "bank_change_requested", "leave_rejected")
+
+	def _ctx(self, event_key, **overrides):
+		from helixhr.utils import sample_context
+
+		return {**sample_context(event_key), **overrides}
+
+	def test_variables_render_and_an_empty_if_block_is_omitted(self):
+		from helixhr.utils import render_message
+
+		message = render_message(
+			"leave_approved", self._ctx("leave_approved", recipient_first_name="Priya", decision_note=None)
+		)
+		self.assertIn("Hi Priya,", message["content"])
+		self.assertNotIn("Note:", message["content"])
+		self.assertNotIn("None", message["content"])
+
+	def test_values_are_escaped_in_the_body_and_plain_in_the_subject(self):
+		from helixhr.utils import render_message
+
+		message = render_message(
+			"leave_approved",
+			self._ctx(
+				"leave_approved", decision_note="<script>alert(1)</script>", leave_type="Sick & Family"
+			),
+		)
+		self.assertIn("&lt;script&gt;", message["html"])
+		self.assertNotIn("<script>", message["html"])
+		self.assertEqual(message["subject"], "Your Sick & Family was approved")
+		self.assertIn("Sick &amp; Family", message["content"])
+		self.assertNotIn("&amp;amp;", message["html"])
+
+	def test_nested_list_values_are_escaped(self):
+		from helixhr.utils import render_message
+
+		item = {"kind": "Request", "title": "<a href=x>", "employee_name": "<b>", "age_days": 3, "url": "u"}
+		digest = render_message("approval_overdue_digest", {"items": [item], "count": 1})
+		self.assertIn("&lt;a href=x&gt;", digest["content"])
+		self.assertNotIn("<a href=x>", digest["content"])
+		summary = render_message(
+			"hr_overdue_summary",
+			{"owners": [{"owner_name": "<i>M</i>", "inactive": True, "items": [item]}], "count": 1},
+		)
+		self.assertIn("&lt;a href=x&gt;", summary["content"])
+		self.assertIn("&lt;i&gt;M&lt;/i&gt;", summary["content"])
+		self.assertNotIn("<a href=x>", summary["content"])
+
+	def test_a_path_like_saved_subject_renders_as_text(self):
+		from helixhr.utils import render_message
+
+		_put_row("leave_rejected", "Report.html", "<p>x</p>", validate=True)
+		self.assertEqual(
+			render_message("leave_rejected", self._ctx("leave_rejected"))["subject"], "Report.html"
+		)
+
+	def test_a_document_never_reaches_the_template(self):
+		from helixhr.utils import render_message
+
+		with self.assertRaises(TypeError):
+			render_message("leave_approved", {"leave_type": frappe.get_doc("User", "Administrator")})
+
+	def test_off_sends_nothing_for_an_unlocked_event(self):
+		from helixhr.utils import render_message
+
+		_put_row("leave_approved", "x", "y", is_enabled=0, validate=True)
+		self.assertIsNone(render_message("leave_approved", self._ctx("leave_approved")))
+
+	def test_a_template_failing_on_real_data_falls_back_and_logs_quietly(self):
+		from helixhr.utils import NOTIFICATION_EVENTS, render_message
+
+		_put_row(
+			"approval_overdue_digest",
+			"Overdue: {{ items[0].title }}",
+			"<p>{{ items[0].title }}</p>",
+			validate=True,
+		)
+		before = frappe.db.count("Error Log")
+		frappe.clear_messages()
+		message = render_message("approval_overdue_digest", {"items": [], "count": 0})
+		self.assertEqual(message["subject"], "0 approval(s) waiting on you")
+		self.assertNotEqual(NOTIFICATION_EVENTS["approval_overdue_digest"]["subject"], message["subject"])
+		self.assertEqual(frappe.db.count("Error Log"), before + 1)
+		self.assertEqual(frappe.get_message_log(), [])
+
+	def test_a_locked_events_core_sentence_renders_with_a_blank_extra_paragraph(self):
+		from helixhr.utils import render_message
+
+		ctx = self._ctx("bank_change_requested", masked_new_value="••••9876")
+		self.assertIn("••••9876", render_message("bank_change_requested", ctx)["html"])
+
+		_put_row("bank_change_requested", "Ignored subject", "<p>Call HR on 1234.</p>", validate=True)
+		message = render_message("bank_change_requested", ctx)
+		self.assertIn("••••9876", message["html"])
+		self.assertIn("Call HR on 1234.", message["html"])
+		self.assertTrue(message["subject"].startswith("Security notice"))
+
+	def test_off_is_refused_for_a_locked_event(self):
+		with self.assertRaises(frappe.ValidationError):
+			_put_row("bank_change_requested", "x", "", is_enabled=0, validate=True)
+
+	def test_a_save_writes_a_version_and_an_actor_comment(self):
+		doc = _put_row("leave_approved", "Approved", "<p>{{ leave_type }}</p>", validate=True)
+		doc.subject = "Approved: {{ leave_type }}"
+		# Frappe skips Versions under test unless asked; production saves keep them.
+		doc.save(ignore_permissions=True, ignore_version=False)
+		self.assertTrue(frappe.db.exists("Version", {"ref_doctype": _MT, "docname": doc.name}))
+		comments = frappe.get_all(
+			"Comment",
+			filters={"reference_doctype": _MT, "reference_name": doc.name, "comment_type": "Info"},
+			pluck="content",
+		)
+		self.assertTrue(any("Administrator" in comment for comment in comments))
+
+
+class TestMigrateMessageTemplatesToJinja(IntegrationTestCase):
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self._saved = frappe.get_all(_MT, fields=["*"])
+		frappe.db.delete(_MT)
+
+	def tearDown(self):
+		frappe.db.delete(_MT)
+		for row in self._saved:
+			frappe.get_doc({"doctype": _MT, **row}).db_insert()
+
+	def test_tokens_convert_literals_stay_literal_and_disabled_rows_go(self):
+		from helixhr.patches.v1_0.migrate_message_templates_to_jinja import execute
+		from helixhr.utils import render_message, validate_message_template
+
+		_put_row(
+			"request_arrival", "Request {category} arrived", "Use {{ braces }} for {subject}: {portal_url}"
+		)
+		_put_row("request_status_changed", "Old {state}", "{reason}", is_enabled=0)
+
+		execute()
+		execute()  # idempotent
+
+		row = frappe.db.get_value(_MT, "request_arrival", ["subject", "body"], as_dict=True)
+		self.assertEqual(row.subject, "Request {{ category }} arrived")
+		validate_message_template("request_arrival", row.subject, row.body)
+		message = render_message(
+			"request_arrival",
+			{"category": "IT", "subject": "Laptop", "action_url": "https://x/helixhr/requests"},
+		)
+		self.assertEqual(message["subject"], "Request IT arrived")
+		self.assertIn("Use {{ braces }} for Laptop: https://x/helixhr/requests", message["content"])
+		self.assertFalse(frappe.db.exists(_MT, "request_status_changed"))

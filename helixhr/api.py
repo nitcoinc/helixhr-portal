@@ -70,6 +70,7 @@ from helixhr.utils import (
 	ADMIN_REPORTS,
 	HOLIDAY_LIST_EDITABLE_FIELDS,
 	LEAVE_TYPE_EDITABLE_FIELDS,
+	NOTIFICATION_EVENTS,
 	PERSON_EDITABLE_FIELDS,
 	PROFILE_CORRECTION_CATEGORY,
 	PROFILE_EDITABLE_FIELDS,
@@ -79,11 +80,11 @@ from helixhr.utils import (
 	PROFILE_SECTION_TABLES,
 	PROFILE_USER_LINK_FIELDS,
 	SHIFT_TYPE_EDITABLE_FIELDS,
-	TEMPLATE_TOKENS,
 	UPLOAD_MAX_BYTES,
 	admin_scope_employee_filters,
 	as_administrator,
 	employee_in_admin_scope,
+	event_variables,
 	get_manager_user,
 	get_week_bounds,
 	is_photo_content,
@@ -6311,6 +6312,7 @@ def get_request_categories():
 # limit in its own JSON; this is the number the API enforces before it ever
 # reaches the document.
 _TEMPLATE_SUBJECT_MAX = 140
+_SETTINGS_TEMPLATE_EVENTS = ("request_arrival", "request_status_changed")
 
 # The category's own fields (not one of P5-KTD12's borrowed-doctype sets --
 # `HelixHR Request Category` is app-owned, so its whole shape beyond the
@@ -6398,7 +6400,9 @@ def get_portal_config():
 			fields=["name", "template_key", "subject", "body", "is_enabled"],
 			order_by="template_key asc",
 		),
-		"template_tokens": TEMPLATE_TOKENS,
+		# The legacy Settings "Message text" section edits only the two events
+		# it always had; U10's Email templates page replaces it.
+		"template_tokens": {key: list(event_variables(key)) for key in _SETTINGS_TEMPLATE_EVENTS},
 		"leave_types": frappe.get_all(
 			"Leave Type", fields=["name", *LEAVE_TYPE_EDITABLE_FIELDS], order_by="leave_type_name asc"
 		),
@@ -6442,12 +6446,12 @@ def save_request_category(name, **fields):
 
 @frappe.whitelist(methods=["POST"])
 def save_message_template(template_key, subject=None, body=None, is_enabled=None):
-	"""Edit the wording of one message the portal sends (P5-R14). The body
-	is stored as-is and rendered later by `helixhr.utils.render_tokens` --
-	plain substitution, never Jinja (P5-R15, P5-KTD11) -- so nothing here
-	ever executes what HR types."""
+	"""Edit the wording of one message the portal sends (P5-R14). The
+	doctype's own `validate()` holds the template to the HelixHR sandbox's
+	rules (plan 2026-10-02-001 U8, R17): unknown variables, disallowed
+	constructs and templates that fail on sample data are refused there."""
 	rate_limit_per_user("save_message_template")
-	if template_key not in TEMPLATE_TOKENS:
+	if template_key not in NOTIFICATION_EVENTS:
 		frappe.throw(_("Not a valid message."))
 
 	if frappe.db.exists("HelixHR Message Template", template_key):

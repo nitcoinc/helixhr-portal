@@ -21,12 +21,14 @@ const rows = computed(() =>
       tokens: props.templateTokens[templateKey],
       subject: saved?.subject || '',
       body: saved?.body || '',
-      is_enabled: saved ? !!saved.is_enabled : false,
+      saved: !!saved,
+      // U8 / KTD7: no row is the default; a row with is_enabled 0 is Off.
+      is_enabled: saved ? !!saved.is_enabled : true,
     }
   }),
 )
 
-const form = reactive({ template_key: '', subject: '', body: '', is_enabled: false })
+const form = reactive({ template_key: '', subject: '', body: '', is_enabled: true })
 const editing = ref('')
 const formError = ref('')
 
@@ -66,8 +68,8 @@ async function submit() {
       Message text
     </h2>
     <p class="text-sm text-ink-gray-6">
-      Plain text only -- a token like <code>{category}</code> is filled in when the message is
-      sent. Nothing typed here is ever run as code.
+      A variable like <code v-pre>{{ category }}</code> is filled in when the message is sent.
+      Templates can use only this message's own variables -- never other records.
     </p>
 
     <div class="space-y-3">
@@ -83,7 +85,7 @@ async function submit() {
               {{ row.template_key }}
             </p>
             <p class="text-sm text-ink-gray-6">
-              {{ row.is_enabled ? 'Using this wording' : 'Using the default wording' }}
+              {{ !row.saved ? 'Using the default wording' : row.is_enabled ? 'Using this wording' : 'Switched off' }}
             </p>
           </div>
           <Button
@@ -105,7 +107,8 @@ async function submit() {
               v-for="token in row.tokens"
               :key="token"
               class="ml-1 rounded bg-surface-gray-2 px-1.5 py-0.5"
-            >{{ '{' + token + '}' }}</code>
+              v-text="`{{ ${token} }}`"
+            />
           </p>
           <FormControl
             v-model="form.subject"
@@ -120,7 +123,7 @@ async function submit() {
           <FormControl
             v-model="form.is_enabled"
             type="checkbox"
-            label="Use this wording instead of the default"
+            label="Send this message (unticked switches it off)"
           />
           <p
             v-if="formError"

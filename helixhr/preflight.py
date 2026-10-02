@@ -1244,28 +1244,34 @@ def check_hr_manager_self_scope():
 
 
 def check_template_tokens():
-	"""P5-U13 / P5-KTD11: every token `helixhr.utils.TEMPLATE_TOKENS` promises
-	for a message key is one its caller actually supplies to `render_tokens`.
-
-	This can only be verified by rendering, not by reading source, so it
-	sends each seeded template through its real caller with a sentinel
-	request and asserts every documented token was substituted -- a token
-	the plan promises but the code forgot to pass would otherwise render as
-	itself (a literal `{token}`) forever, silently.
-	"""
-	from helixhr.utils import TEMPLATE_TOKENS, render_tokens
+	"""Plan 2026-10-02-001 U8: every event's default renders against its
+	sample data in the HelixHR sandbox, and every saved template still passes
+	save-time validation -- a row that would now be refused (a migrated
+	legacy row, a Desk import) would otherwise fall back to the default on
+	every send, silently but for the Error Log."""
+	from helixhr.utils import (
+		NOTIFICATION_EVENTS,
+		TemplateRejected,
+		render_message,
+		sample_context,
+		validate_message_template,
+	)
 
 	problems = []
-	for template_key, tokens in TEMPLATE_TOKENS.items():
-		probe = {token: f"__probe_{token}__" for token in tokens}
-		body = " ".join(f"{{{token}}}" for token in tokens)
-		rendered = render_tokens(body, probe)
-		missing = [token for token in tokens if probe[token] not in rendered]
-		if missing:
-			problems.append(f"{template_key}: {', '.join(missing)} never substituted")
+	for event_key, event in NOTIFICATION_EVENTS.items():
+		try:
+			validate_message_template(event_key, event["subject"], event["body"])
+			render_message(event_key, sample_context(event_key))
+		except Exception as exc:
+			problems.append(f"{event_key} default: {exc}")
+	for row in frappe.get_all("HelixHR Message Template", fields=["template_key", "subject", "body"]):
+		try:
+			validate_message_template(row.template_key, row.subject, row.body)
+		except TemplateRejected as exc:
+			problems.append(f"{row.template_key}: {exc}")
 	if problems:
 		return _result("Message template tokens", FAIL, "; ".join(problems))
-	return _result("Message template tokens", PASS, f"{len(TEMPLATE_TOKENS)} templates checked")
+	return _result("Message template tokens", PASS, f"{len(NOTIFICATION_EVENTS)} events checked")
 
 
 def check_configuration_field_sets():

@@ -10,9 +10,8 @@ from helixhr.utils import (
 	PHOTO_POLICY,
 	UPLOAD_POLICY,
 	get_manager_user,
-	get_message_template,
 	photo_file_filters,
-	render_tokens,
+	render_message,
 	upload_extension,
 	validate_portal_upload,
 )
@@ -675,26 +674,25 @@ def hr_request_after_insert(doc, method=None):
 			"HelixHR request routing",
 		)
 		return
-	tokens = {
-		"category": frappe.utils.escape_html(doc.category),
-		"subject": frappe.utils.escape_html(doc.subject),
-		"portal_url": frappe.utils.get_url("/helixhr/requests"),
-	}
-	template = get_message_template("request_arrival")
-	if template:
-		subject = render_tokens(template.subject, tokens)
-		message = render_tokens(template.body, tokens)
-	else:
-		subject = f"New {doc.category} request: {doc.subject}"
-		message = (
-			f"A new {tokens['category']} request, “{tokens['subject']}”, "
-			f"is waiting for you. <a href=\"{tokens['portal_url']}\">Open requests</a>."
-		)
+	# Plan 2026-10-02-001 U8: rendered by the HelixHR sandbox, which escapes
+	# every value itself -- pass raw text, never pre-escaped. Inside the try:
+	# nothing about the mail may fail the filing.
 	try:
+		message = render_message(
+			"request_arrival",
+			{
+				"employee_name": frappe.db.get_value("Employee", doc.employee, "employee_name"),
+				"category": doc.category,
+				"subject": doc.subject,
+				"action_url": frappe.utils.get_url("/helixhr/requests"),
+			},
+		)
+		if message is None:
+			return
 		frappe.sendmail(
 			recipients=users,
-			subject=subject,
-			message=message,
+			subject=message["subject"],
+			message=message["html"],
 			reference_doctype="HR Request",
 			reference_name=doc.name,
 		)
@@ -773,15 +771,18 @@ def _notify_hr_request_status(doc):
 		HR_REQUEST_DONE: "is done",
 		HR_REQUEST_REJECTED: "was declined",
 	}[doc.status]
-	tokens = {
-		"category": frappe.utils.escape_html(doc.category),
-		"subject": frappe.utils.escape_html(doc.subject),
-		"state": state,
-		"reason": frappe.utils.escape_html(reason) if reason else "",
-	}
-	template = get_message_template("request_status_changed")
-	subject = render_tokens(template.subject, tokens) if template else f"Your request {state}: {doc.subject}"
-	description = render_tokens(template.body, tokens) if template else (tokens["reason"] or None)
+	message = render_message(
+		"request_status_changed",
+		{"category": doc.category, "subject": doc.subject, "state": state, "reason": reason},
+	)
+	if message:
+		# A bell row, not an email: the inner content without the layout, and
+		# the plain-text subject escaped for the HTML the bell renders.
+		subject = frappe.utils.escape_html(message["subject"])
+		description = message["content"] or None
+	else:
+		subject = f"Your request {state}: {frappe.utils.escape_html(doc.subject)}"
+		description = frappe.utils.escape_html(reason) if reason else None
 	frappe.get_doc(
 		{
 			"doctype": "Notification Log",

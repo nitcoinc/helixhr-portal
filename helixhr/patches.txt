@@ -65,3 +65,5 @@ helixhr.patches.v1_0.turn_off_hrms_celebration_senders
 helixhr.patches.v1_0.backfill_pending_since
 # Plan 2026-10-02-001 U7: HelixHR Notification Manager owns message templates; HR Manager no longer edits them.
 helixhr.patches.v1_0.apply_permission_deltas #2026-10-03 U7 HelixHR Notification Manager permissions
+# Plan 2026-10-02-001 U8: Message Template rows move from {token} to the HelixHR Jinja sandbox; disabled rows (= default) are deleted.
+helixhr.patches.v1_0.migrate_message_templates_to_jinja

@@ -32,6 +32,7 @@ def after_install():
 	from helixhr.patches.v1_0 import (
 		apply_permission_deltas,
 		migrate_celebration_reminders,
+		migrate_message_templates_to_jinja,
 		report_unsubmitted_approved_leave,
 		retire_request_notifications,
 		route_it_asset_requests,
@@ -45,6 +46,8 @@ def after_install():
 	report_unsubmitted_approved_leave.execute()
 	seed_celebration_templates.execute()
 	seed_message_templates.execute()
+	# U8: the seed still writes the legacy {token} wording; convert it.
+	migrate_message_templates_to_jinja.execute()
 	seed_request_categories.execute()
 	seed_profile_correction_category.execute()
 	route_it_asset_requests.execute()

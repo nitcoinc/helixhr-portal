@@ -141,45 +141,662 @@ def mask_identifier(value):
 	return "••••" if len(text) <= 4 else f"••••{text[-4:]}"
 
 
-# --- HR-editable message templates (P5-U13, P5-KTD11) ----------------------
+# --- Portal email events and the HelixHR template sandbox (plan 2026-10-02-001 U8) ---
+#
+# KTD6: `frappe.render_template(restrict_globals=True)` is not a sandbox -- its
+# safe globals still read any record, it prints unknown names literally
+# (`DebugUndefined`), and `guess_is_path` loads a one-line `*.html` string as
+# a file. Every editable email therefore renders through the environment
+# below: jinja2's `ImmutableSandboxedEnvironment` (jinja2 ships with Frappe),
+# empty globals, `StrictUndefined`, no loader, `from_string` only, and a
+# context holding nothing but the event's declared variables as plain values.
+#
+# KTD7: event definitions live here; a `HelixHR Message Template` row exists
+# only for a customised (`is_enabled=1`) or switched-off (`is_enabled=0`)
+# event. No row means the default below. Locked events ignore Off, keep their
+# developer-owned subject and core sentence, and use the row's body only as an
+# optional extra paragraph.
 
-# The documented token contract per `template_key`. `render_tokens` supplies
-# exactly these, `preflight.check_template_tokens` asserts every key here is
-# actually rendered by its caller, and `docs/deployment.md` quotes the same
-# table -- so an undocumented token can never silently render as itself.
-TEMPLATE_TOKENS = {
-	"request_arrival": ("category", "subject", "portal_url"),
-	"request_status_changed": ("category", "subject", "state", "reason"),
+SHARED_TEMPLATE_VARIABLES = {
+	"company": ("Your company's name", "HelixHR Demo Ltd"),
+	"portal_url": ("Link to the portal", "https://hr.example.com/helixhr"),
+	"logo_url": ("Company logo address (may be empty)", "https://hr.example.com/files/logo.png"),
+	"recipient_first_name": ("First name of the person receiving the email", "Priya"),
 }
 
+_LEAVE_VARIABLES = {
+	"employee_name": ("Who asked for the leave", "Arjun Rao"),
+	"leave_type": ("Leave type", "Casual Leave"),
+	"from_date": ("First day", "12-10-2026"),
+	"to_date": ("Last day", "14-10-2026"),
+	"days": ("Number of days", 3),
+	"half_day": ("Whether it is a half day", False),
+	"reason": ("The employee's reason (may be empty)", "Family function"),
+	"balance_after": ("Balance left if approved", 9),
+	"action_url": ("Link to open the request", "https://hr.example.com/helixhr/approvals"),
+}
+_DECISION = {
+	"approver_name": ("Who decided", "Meera Shah"),
+	"decision_note": ("The approver's note (may be empty)", "Enjoy the break"),
+}
+_DATES = {key: _LEAVE_VARIABLES[key] for key in ("leave_type", "from_date", "to_date")}
+_SAMPLE_ITEMS = [
+	{
+		"kind": "Leave",
+		"title": "Casual Leave, 12-10-2026",
+		"employee_name": "Arjun Rao",
+		"age_days": 3,
+		"url": "https://hr.example.com/helixhr/approvals",
+	},
+]
 
-def render_tokens(text, tokens):
-	"""Plain `{token}` substitution over a fixed map -- never Jinja, never
-	`frappe.render_template` (P5-KTD11). HR's body is data, not code: a
-	template containing `{{ frappe.get_doc(...) }}` must come back as that
-	literal string, executing nothing.
+# Event key -> label, audience, variables {name: (description, sample)},
+# default subject and body, optional action label, locked flag and (locked
+# only) the developer-owned core sentence. The appendix of the plan is the
+# catalog; U9/U11/U13 wire the sends.
+NOTIFICATION_EVENTS = {
+	"leave_submitted": {
+		"label": "New leave request",
+		"audience": "Approver",
+		"variables": _LEAVE_VARIABLES,
+		"subject": "Leave request from {{ employee_name }}: {{ leave_type }}",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>{{ employee_name }} asked for {{ leave_type }}: {{ days }} day(s),"
+			" {{ from_date }} to {{ to_date }}{% if half_day %} (half day){% endif %}.</p>"
+			"{% if reason %}<p>Reason: {{ reason }}</p>{% endif %}"
+			"<p>Balance after approval: {{ balance_after }}</p>"
+		),
+		"action_label": "Review request",
+	},
+	"leave_for_hr": {
+		"label": "Leave waiting for HR",
+		"audience": "HR",
+		"variables": {**_LEAVE_VARIABLES, "manager_name": ("The employee's manager", "Meera Shah")},
+		"subject": "Leave for HR: {{ employee_name }}, {{ leave_type }}",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>{{ employee_name }}'s {{ leave_type }} ({{ days }} day(s), {{ from_date }} to {{ to_date }})"
+			" is waiting for HR.{% if manager_name %} Manager: {{ manager_name }}.{% endif %}</p>"
+			"{% if reason %}<p>Reason: {{ reason }}</p>{% endif %}"
+		),
+		"action_label": "Review request",
+	},
+	"leave_approved": {
+		"label": "Leave approved",
+		"audience": "Employee",
+		"variables": {
+			**_DATES,
+			"days": _LEAVE_VARIABLES["days"],
+			**_DECISION,
+			"balance_after": _LEAVE_VARIABLES["balance_after"],
+		},
+		"subject": "Your {{ leave_type }} was approved",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>{{ approver_name }} approved your {{ leave_type }}: {{ days }} day(s),"
+			" {{ from_date }} to {{ to_date }}.</p>"
+			"{% if decision_note %}<p>Note: {{ decision_note }}</p>{% endif %}"
+			"<p>Balance after: {{ balance_after }}</p>"
+		),
+	},
+	"leave_rejected": {
+		"label": "Leave declined",
+		"audience": "Employee",
+		"variables": {**_DATES, **_DECISION},
+		"subject": "Your {{ leave_type }} was declined",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>{{ approver_name }} declined your {{ leave_type }} for {{ from_date }} to {{ to_date }}.</p>"
+			"{% if decision_note %}<p>Note: {{ decision_note }}</p>{% endif %}"
+		),
+	},
+	"leave_sent_back": {
+		"label": "Leave sent back",
+		"audience": "Employee",
+		"variables": {**_DATES, **_DECISION, "action_url": _LEAVE_VARIABLES["action_url"]},
+		"subject": "Your {{ leave_type }} needs a change",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>{{ approver_name }} sent back your {{ leave_type }} for {{ from_date }} to {{ to_date }}.</p>"
+			"{% if decision_note %}<p>Note: {{ decision_note }}</p>{% endif %}"
+		),
+		"action_label": "Open request",
+	},
+	"leave_cancelled": {
+		"label": "Leave cancelled",
+		"audience": "Employee",
+		"variables": {
+			**_DATES,
+			"days": _LEAVE_VARIABLES["days"],
+			"cancelled_by": ("Who cancelled it", "Meera Shah"),
+		},
+		"subject": "Your {{ leave_type }} was cancelled",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>{{ cancelled_by }} cancelled your {{ leave_type }}: {{ days }} day(s),"
+			" {{ from_date }} to {{ to_date }}.</p>"
+		),
+	},
+	"timesheet_for_hr": {
+		"label": "Timesheet waiting for HR",
+		"audience": "HR",
+		"variables": {
+			"employee_name": _LEAVE_VARIABLES["employee_name"],
+			"week_label": ("The week", "5 to 11 Oct 2026"),
+			"total_hours": ("Hours on the timesheet", 40),
+			"action_url": _LEAVE_VARIABLES["action_url"],
+		},
+		"subject": "Timesheet for HR: {{ employee_name }}, {{ week_label }}",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>{{ employee_name }}'s timesheet for {{ week_label }} ({{ total_hours }} hours) is waiting for HR.</p>"
+		),
+		"action_label": "Review timesheet",
+	},
+	"timesheet_decided": {
+		"label": "Timesheet decided",
+		"audience": "Employee",
+		"variables": {
+			"week_label": ("The week", "5 to 11 Oct 2026"),
+			"total_hours": ("Hours on the timesheet", 40),
+			"state": ("What happened to it", "approved"),
+			**_DECISION,
+		},
+		"subject": "Your timesheet for {{ week_label }} was {{ state }}",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>{{ approver_name }} {{ state }} your timesheet for {{ week_label }} ({{ total_hours }} hours).</p>"
+			"{% if decision_note %}<p>Note: {{ decision_note }}</p>{% endif %}"
+		),
+	},
+	"attendance_for_hr": {
+		"label": "Attendance request waiting for HR",
+		"audience": "HR",
+		"variables": {
+			"employee_name": _LEAVE_VARIABLES["employee_name"],
+			"date_range": ("The dates", "12-10-2026 to 13-10-2026"),
+			"reason": ("The employee's reason (may be empty)", "On a client visit"),
+			"action_url": _LEAVE_VARIABLES["action_url"],
+		},
+		"subject": "Attendance request for HR: {{ employee_name }}, {{ date_range }}",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>{{ employee_name }}'s attendance request for {{ date_range }} is waiting for HR.</p>"
+			"{% if reason %}<p>Reason: {{ reason }}</p>{% endif %}"
+		),
+		"action_label": "Review request",
+	},
+	"attendance_decided": {
+		"label": "Attendance request decided",
+		"audience": "Employee",
+		"variables": {
+			"date_range": ("The dates", "12-10-2026 to 13-10-2026"),
+			"state": ("What happened to it", "approved"),
+			**_DECISION,
+		},
+		"subject": "Your attendance request for {{ date_range }} was {{ state }}",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>{{ approver_name }} {{ state }} your attendance request for {{ date_range }}.</p>"
+			"{% if decision_note %}<p>Note: {{ decision_note }}</p>{% endif %}"
+		),
+	},
+	"request_arrival": {
+		"label": "New request",
+		"audience": "Route role",
+		"variables": {
+			"employee_name": _LEAVE_VARIABLES["employee_name"],
+			"category": ("Request category", "IT / Asset"),
+			"subject": ("The request's subject", "Laptop replacement"),
+			"action_url": ("Link to the requests queue", "https://hr.example.com/helixhr/requests"),
+		},
+		"subject": "New {{ category }} request: {{ subject }}",
+		"body": "<p>A new {{ category }} request, “{{ subject }}”, is waiting for you.</p>",
+		"action_label": "Open requests",
+	},
+	"request_status_changed": {
+		"label": "Request status changed",
+		"audience": "Employee",
+		"variables": {
+			"category": ("Request category", "IT / Asset"),
+			"subject": ("The request's subject", "Laptop replacement"),
+			"state": ("What happened to it", "is done"),
+			"reason": ("HR's reason (may be empty)", "Replaced under warranty"),
+		},
+		"subject": "Your request {{ state }}: {{ subject }}",
+		"body": "{% if reason %}{{ reason }}{% endif %}",
+	},
+	"request_reply": {
+		"label": "Reply on a request",
+		"audience": "Route role",
+		"variables": {
+			"employee_name": _LEAVE_VARIABLES["employee_name"],
+			"category": ("Request category", "IT / Asset"),
+			"subject": ("The request's subject", "Laptop replacement"),
+			"reply_excerpt": ("The start of the reply", "Thanks, the old one is in the drawer."),
+			"action_url": ("Link to the request", "https://hr.example.com/helixhr/requests"),
+		},
+		"subject": "{{ employee_name }} replied: {{ subject }}",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>{{ employee_name }} replied on their {{ category }} request “{{ subject }}”:</p>"
+			"<blockquote>{{ reply_excerpt }}</blockquote>"
+		),
+		"action_label": "Open request",
+	},
+	"approval_overdue_digest": {
+		"label": "Overdue approvals digest",
+		"audience": "Approver",
+		"variables": {
+			"items": ("Overdue items: kind, title, employee_name, age_days, url", _SAMPLE_ITEMS),
+			"count": ("How many items are overdue", 1),
+		},
+		"subject": "{{ count }} approval(s) waiting on you",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>These are waiting on you longer than they should:</p><ul>"
+			'{% for item in items %}<li>{{ item.kind }}: <a href="{{ item.url }}">{{ item.title }}</a>'
+			" ({{ item.employee_name }}, {{ item.age_days }} day(s))</li>{% endfor %}</ul>"
+		),
+	},
+	"hr_overdue_summary": {
+		"label": "Overdue summary for HR",
+		"audience": "HR",
+		"variables": {
+			"owners": (
+				"Approvers with overdue items: owner_name, inactive, items",
+				[{"owner_name": "Meera Shah", "inactive": False, "items": _SAMPLE_ITEMS}],
+			),
+			"count": ("How many items are overdue", 1),
+		},
+		"subject": "{{ count }} overdue approval(s) across the company",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"{% for owner in owners %}<p><strong>{{ owner.owner_name }}</strong>"
+			"{% if owner.inactive %} (inactive){% endif %}</p><ul>"
+			"{% for item in owner.items %}<li>{{ item.kind }}: {{ item.title }}"
+			" ({{ item.age_days }} day(s))</li>{% endfor %}</ul>{% endfor %}"
+		),
+	},
+	"bank_change_requested": {
+		"label": "Bank detail change requested",
+		"audience": "Security",
+		"locked": True,
+		"variables": {
+			"field_label": ("Which detail", "Bank account number"),
+			"masked_new_value": ("The new value, masked", "••••1234"),
+			"requested_on": ("When it was requested", "12-10-2026 10:30"),
+		},
+		"subject": "Security notice: a change to your {{ field_label }} was requested",
+		"core": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>On {{ requested_on }} someone asked to change your {{ field_label }} to {{ masked_new_value }}."
+			" If this was not you, contact HR immediately.</p>"
+		),
+		"body": "",
+	},
+	"bank_change_applied": {
+		"label": "Bank detail change applied",
+		"audience": "Security",
+		"locked": True,
+		"variables": {
+			"field_label": ("Which detail", "Bank account number"),
+			"masked_new_value": ("The new value, masked", "••••1234"),
+			"applied_by": ("Who applied it", "Meera Shah"),
+			"applied_on": ("When it was applied", "13-10-2026 09:00"),
+		},
+		"subject": "Security notice: your {{ field_label }} was changed",
+		"core": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>On {{ applied_on }} {{ applied_by }} changed your {{ field_label }} to {{ masked_new_value }}."
+			" If you did not ask for this, contact HR immediately.</p>"
+		),
+		"body": "",
+	},
+}
 
-	An unknown `{token}` in the text is left alone rather than rendered empty
-	or raising -- a typo in HR's own edit should not blank the sentence around
-	it or break the send.
-	"""
-	rendered = text or ""
-	for token, value in tokens.items():
-		rendered = rendered.replace("{" + token + "}", "" if value is None else str(value))
-	return rendered
-
-
-def get_message_template(template_key):
-	"""The enabled `HelixHR Message Template` for `template_key`, or `None`.
-
-	Callers fall back to their own hardcoded wording when this is `None` --
-	a fresh install with the seed patch not yet run, or a template HR has
-	turned off, must keep sending the request notification it always sent.
-	"""
-	name = frappe.db.get_value(
-		"HelixHR Message Template", {"template_key": template_key, "is_enabled": 1}, ["subject", "body"], as_dict=True
+# Hard caps on what a template may cost, enforced on every compile and render:
+# the Notification Manager edits these, and a template is not allowed to
+# become a CPU or memory bomb through nested loops, repetition or padding.
+_TEMPLATE_OUTPUT_MAX = 200_000
+_TEMPLATE_LOOP_DEPTH_MAX = 3
+_TEMPLATE_REPEAT_MAX = 100
+# Only filters that cannot grow output much beyond their input. Notably
+# absent: center/indent/wordwrap/format (padding to any width), replace
+# (exponential when chained), safe/xmlattr/attr, and anything callable.
+_TEMPLATE_FILTERS = frozenset(
+	(
+		"abs", "capitalize", "count", "d", "default", "e", "escape", "first", "float", "int",
+		"join", "last", "length", "lower", "max", "min", "round", "sort", "string", "striptags",
+		"sum", "title", "trim", "truncate", "unique", "upper", "urlencode", "wordcount",
 	)
-	return name
+)  # fmt: skip
+
+
+class TemplateRejected(Exception):
+	"""A template that may not be saved or rendered; the message names why."""
+
+
+def _template_envs():
+	"""The (body, subject) sandbox environments, built once per process.
+
+	Body: autoescape on. Subject: plain text (an email header, never HTML).
+	Neither has a loader, so `{% include %}`/`{% extends %}`/`{% import %}`
+	cannot reach a file, and both start with *empty* globals -- no `range`,
+	`cycler`, `joiner`, `namespace`, `lipsum` or `dict`, let alone `frappe`.
+	"""
+	envs = getattr(_template_envs, "cached", None)
+	if envs:
+		return envs
+	from jinja2 import StrictUndefined
+	from jinja2.exceptions import SecurityError
+	from jinja2.sandbox import ImmutableSandboxedEnvironment
+
+	class _Env(ImmutableSandboxedEnvironment):
+		intercepted_binops = frozenset(("*", "**"))
+
+		def getattr(self, obj, attribute):
+			# Context dicts are data: `owner.items` is the key, never the
+			# `dict.items` method, and no dict method is reachable at all.
+			if isinstance(obj, dict):
+				if attribute in obj:
+					return obj[attribute]
+				return self.undefined(obj=obj, name=attribute)
+			return super().getattr(obj, attribute)
+
+		def call_binop(self, context, operator, left, right):
+			if operator == "**":
+				raise SecurityError("'**' is not allowed in a message template")
+			if isinstance(left, int | float) and isinstance(right, int | float):
+				return left * right
+			if max(abs(left) if isinstance(left, int) else 0, abs(right) if isinstance(right, int) else 0) > (
+				_TEMPLATE_REPEAT_MAX
+			):
+				raise SecurityError("repetition is limited in a message template")
+			return left * right
+
+	def build(autoescape):
+		# `finalize`: an empty variable prints nothing, never "None".
+		env = _Env(
+			undefined=StrictUndefined,
+			autoescape=autoescape,
+			loader=None,
+			finalize=lambda value: "" if value is None else value,
+		)
+		env.globals.clear()
+		env.filters = {name: env.filters[name] for name in _TEMPLATE_FILTERS}
+		return env
+
+	_template_envs.cached = (build(True), build(False))
+	return _template_envs.cached
+
+
+def event_variables(event_key):
+	"""Every variable `event_key`'s template may name: the shared four first."""
+	return {**SHARED_TEMPLATE_VARIABLES, **NOTIFICATION_EVENTS[event_key]["variables"]}
+
+
+def sample_context(event_key):
+	return {name: sample for name, (_description, sample) in event_variables(event_key).items()}
+
+
+def _plain(value):
+	"""A context value as plain data: str/number/bool/None, lists and dicts of
+	those. Dates and Decimals become strings; anything else -- a Document, an
+	object with methods -- is refused so a template can never reach a record."""
+	if value is None or isinstance(value, bool | int | float | str):
+		return value
+	if isinstance(value, list | tuple):
+		return [_plain(item) for item in value]
+	if type(value) is dict or isinstance(value, frappe._dict):
+		return {str(key): _plain(item) for key, item in value.items()}
+	import datetime
+	import decimal
+
+	if isinstance(value, datetime.date | datetime.time | decimal.Decimal):
+		return str(value)
+	raise TypeError(f"{type(value).__name__} is not allowed in a message template context")
+
+
+def _escape_values(value):
+	"""Recursively HTML-escape every string (body context), as `Markup` so
+	autoescape does not escape it twice and `|e` is a no-op."""
+	from markupsafe import escape
+
+	if isinstance(value, str):
+		return escape(value)
+	if isinstance(value, list):
+		return [_escape_values(item) for item in value]
+	if isinstance(value, dict):
+		return {key: _escape_values(item) for key, item in value.items()}
+	return value
+
+
+def _subject_values(value):
+	"""Subject context: raw text with line breaks removed (a header)."""
+	if isinstance(value, str):
+		return " ".join(value.splitlines())
+	if isinstance(value, list):
+		return [_subject_values(item) for item in value]
+	if isinstance(value, dict):
+		return {key: _subject_values(item) for key, item in value.items()}
+	return value
+
+
+def _build_context(event_key, context, for_subject):
+	declared = event_variables(event_key)
+	plain = {name: _plain((context or {}).get(name)) for name in declared}
+	if for_subject:
+		return _subject_values(plain)
+	return _escape_values(plain)
+
+
+def _check_template_shape(env, source):
+	"""Parse `source` and refuse every construct this engine does not need:
+	function/method calls, macros, `set`, includes/imports/extends, filter
+	blocks, recursive loops, loops over anything but a context value, and
+	loops nested deeper than `_TEMPLATE_LOOP_DEPTH_MAX`. Returns the AST."""
+	from jinja2 import nodes
+
+	ast = env.parse(source)
+	allowed_statements = (nodes.Output, nodes.If, nodes.For)
+
+	def walk(node, depth):
+		if isinstance(node, nodes.Stmt) and not isinstance(node, allowed_statements):
+			raise TemplateRejected(
+				_("Line {0}: only {{% if %}} and {{% for %}} blocks are allowed.").format(node.lineno)
+			)
+		if isinstance(node, nodes.Call):
+			raise TemplateRejected(_("Line {0}: calling functions is not allowed.").format(node.lineno))
+		if isinstance(node, nodes.Filter) and node.name not in _TEMPLATE_FILTERS:
+			raise TemplateRejected(
+				_("Line {0}: the filter “{1}” is not allowed.").format(node.lineno, node.name)
+			)
+		if isinstance(node, nodes.For):
+			iterable = node.iter
+			while isinstance(iterable, nodes.Getattr | nodes.Getitem):
+				iterable = iterable.node
+			if node.recursive or not isinstance(iterable, nodes.Name):
+				raise TemplateRejected(
+					_("Line {0}: a loop can only go over one of this message's lists.").format(node.lineno)
+				)
+			depth += 1
+			if depth > _TEMPLATE_LOOP_DEPTH_MAX:
+				raise TemplateRejected(_("Line {0}: loops are nested too deeply.").format(node.lineno))
+		for child in node.iter_child_nodes():
+			walk(child, depth)
+
+	walk(ast, 0)
+	return ast
+
+
+def _compile(env, source):
+	_check_template_shape(env, source)
+	return env.from_string(source)
+
+
+def _run(template, context):
+	"""Render with an output cap, so a loop cannot produce an unbounded email."""
+	out, size = [], 0
+	for chunk in template.generate(context):
+		size += len(chunk)
+		if size > _TEMPLATE_OUTPUT_MAX:
+			raise TemplateRejected(_("This message is too long."))
+		out.append(chunk)
+	return "".join(out)
+
+
+def _error_line(exc):
+	import traceback
+
+	lineno = getattr(exc, "lineno", None)
+	if lineno:
+		return lineno
+	for frame in reversed(traceback.extract_tb(exc.__traceback__)):
+		if frame.filename == "<template>":
+			return frame.lineno
+	return None
+
+
+def validate_message_template(event_key, subject, body):
+	"""Refuse a template that may not be saved (R17): an unknown event, a
+	construct outside the allowed shape, a syntax error (with its line), a
+	variable outside the event's list (named), or one that errors against the
+	event's sample data (with its line). Raises `TemplateRejected`."""
+	from jinja2 import TemplateSyntaxError, meta
+
+	if event_key not in NOTIFICATION_EVENTS:
+		raise TemplateRejected(_("Not a valid message."))
+	declared = set(event_variables(event_key))
+	body_env, subject_env = _template_envs()
+	samples = sample_context(event_key)
+	for label, env, source, for_subject in (
+		(_("Subject"), subject_env, subject, True),
+		(_("Body"), body_env, body, False),
+	):
+		if not source:
+			continue
+		try:
+			ast = _check_template_shape(env, source)
+		except TemplateSyntaxError as exc:
+			raise TemplateRejected(_("{0}, line {1}: {2}").format(label, exc.lineno, exc.message)) from exc
+		except TemplateRejected as exc:
+			raise TemplateRejected(f"{label}: {exc}") from exc
+		unknown = sorted(meta.find_undeclared_variables(ast) - declared)
+		if unknown:
+			raise TemplateRejected(
+				_("{0}: “{1}” is not a variable this message has.").format(label, ", ".join(unknown))
+			)
+		try:
+			_run(env.from_string(source), _build_context(event_key, samples, for_subject))
+		except Exception as exc:
+			raise TemplateRejected(
+				_("{0}, line {1}: {2}").format(label, _error_line(exc) or "?", exc)
+			) from exc
+
+
+_LAYOUT_PATH = ("templates", "emails", "helixhr_layout.html")
+
+
+def _layout_template():
+	"""The developer-owned branded layout (R19), compiled once by the same
+	sandbox (autoescape on) so nothing it prints escapes unescaped."""
+	cached = getattr(_layout_template, "cached", None)
+	if cached is None:
+		with open(frappe.get_app_path("helixhr", *_LAYOUT_PATH), encoding="utf-8") as handle:
+			cached = _template_envs()[0].from_string(handle.read())
+		_layout_template.cached = cached
+	return cached
+
+
+def _default_context():
+	company = frappe.defaults.get_global_default("company") or ""
+	logo = frappe.db.get_value("Company", company, "company_logo") if company else None
+	return {
+		"company": company,
+		"portal_url": frappe.utils.get_url("/helixhr"),
+		"logo_url": frappe.utils.get_url(logo) if logo else "",
+	}
+
+
+def render_message(event_key, context):
+	"""Render `event_key` for one send: `{"subject", "content", "html"}`, or
+	`None` when the event is switched off (and not locked).
+
+	The saved template is used when there is one; if it fails on real data the
+	default renders instead, the failure goes to the Error Log, and nothing is
+	left in `message_log` for the user whose action triggered the send (R17).
+	`html` is `content` wrapped in the branded layout."""
+	from markupsafe import Markup
+
+	event = NOTIFICATION_EVENTS[event_key]
+	locked = bool(event.get("locked"))
+	context = {**_default_context(), **(context or {})}
+	row = frappe.db.get_value(
+		"HelixHR Message Template", event_key, ["subject", "body", "is_enabled"], as_dict=True
+	)
+	if row and not row.is_enabled and not locked:
+		return None
+
+	body_env, subject_env = _template_envs()
+	body_ctx = _build_context(event_key, context, for_subject=False)
+	subject_ctx = _build_context(event_key, context, for_subject=True)
+
+	def render(subject_source, body_source):
+		return (
+			" ".join(_run(_compile(subject_env, subject_source), subject_ctx).split()),
+			_run(_compile(body_env, body_source), body_ctx) if body_source else "",
+		)
+
+	subject, content = None, None
+	if row and row.is_enabled:
+		messages = len(frappe.local.message_log or [])
+		try:
+			subject, content = render(event["subject"] if locked else row.subject, row.body or "")
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), f"HelixHR message template {event_key} failed")
+			while len(frappe.local.message_log or []) > messages:
+				frappe.clear_last_message()
+			subject = None
+	if subject is None:
+		subject, content = render(event["subject"], "" if locked else event["body"])
+
+	core = Markup(_run(_compile(body_env, event["core"]), body_ctx)) if locked else None
+	action_url = context.get("action_url")
+	html = _run(
+		_layout_template(),
+		{
+			"subject": subject,
+			"core": core,
+			"content": Markup(content),
+			"action_url": action_url,
+			"action_label": event.get("action_label") or _("Open HelixHR"),
+			**{name: body_ctx[name] for name in ("company", "logo_url", "portal_url")},
+		},
+	)
+	return {"subject": subject, "content": content, "html": html}
+
+
+def send_notification(event_key, recipients, context, reference_doctype=None, reference_name=None):
+	"""Render and queue `event_key` to each recipient (KTD8). One mail per
+	recipient so `recipient_first_name` is theirs. Never raises: a mail
+	failure must not fail the write that triggered it (P5-KTD9)."""
+	for recipient in recipients or ():
+		try:
+			first_name = frappe.db.get_value("User", recipient, "first_name")
+			message = render_message(event_key, {"recipient_first_name": first_name, **(context or {})})
+			if message is None:
+				return
+			frappe.sendmail(
+				recipients=[recipient],
+				subject=message["subject"],
+				message=message["html"],
+				reference_doctype=reference_doctype,
+				reference_name=reference_name,
+			)
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), f"HelixHR {event_key} mail failed")
 
 
 # The named, deliberately short field sets P5-KTD12 hands to the portal's

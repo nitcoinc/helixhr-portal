@@ -25,30 +25,6 @@ from helixhr.tests.utils import (
 	make_test_employee_and_manager,
 	make_test_hr_manager_employee,
 )
-from helixhr.utils import TEMPLATE_TOKENS, render_tokens
-
-
-class TestRenderTokens(IntegrationTestCase):
-	def test_a_jinja_looking_body_renders_as_literal_text(self):
-		"""P5-KTD11: the security test this design exists for."""
-		body = "Hello {name}, {{ frappe.get_doc('User', 'Administrator').delete() }}"
-		rendered = render_tokens(body, {"name": "Priya"})
-		self.assertEqual(
-			rendered, "Hello Priya, {{ frappe.get_doc('User', 'Administrator').delete() }}"
-		)
-
-	def test_an_unknown_token_is_left_alone(self):
-		self.assertEqual(render_tokens("Hi {name}, see {mystery}", {"name": "Priya"}), "Hi Priya, see {mystery}")
-
-	def test_every_declared_token_is_actually_supplied_by_its_callers(self):
-		"""Guarded by preflight too (`check_template_tokens`); this is the
-		same assertion run directly against the fixed map."""
-		for tokens in TEMPLATE_TOKENS.values():
-			probe = {token: f"__{token}__" for token in tokens}
-			body = " ".join(f"{{{token}}}" for token in tokens)
-			rendered = render_tokens(body, probe)
-			for token in tokens:
-				self.assertIn(probe[token], rendered)
 
 
 class TestMessageTemplateSeed(IntegrationTestCase):
@@ -487,3 +463,42 @@ class TestLeaveTypeLimits(IntegrationTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			save_leave_type(leave_type, allow_negative=1)
 		self.assertEqual(frappe.db.get_value("Leave Type", leave_type, "allow_negative"), 0)
+
+
+class TestSaveMessageTemplateValidation(IntegrationTestCase):
+	"""Plan 2026-10-02-001 U8 / R17: the API refuses what the sandbox refuses,
+	through the doctype's own validate, and nothing is written."""
+
+	def setUp(self):
+		frappe.set_user(ensure_notification_manager_user())
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def test_an_unknown_variable_is_refused_by_name(self):
+		before = frappe.db.get_value("HelixHR Message Template", "request_arrival", "body")
+		with self.assertRaises(frappe.ValidationError) as caught:
+			save_message_template("request_arrival", subject="New request", body="Hi {{ employe_name }}")
+		self.assertIn("employe_name", str(caught.exception))
+		self.assertEqual(frappe.db.get_value("HelixHR Message Template", "request_arrival", "body"), before)
+
+	def test_frappe_globals_are_refused(self):
+		with self.assertRaises(frappe.ValidationError) as caught:
+			save_message_template("request_arrival", subject="x", body="{{ frappe.session.user }}")
+		self.assertIn("frappe", str(caught.exception))
+
+	def test_a_syntax_error_is_refused_with_its_line(self):
+		with self.assertRaises(frappe.ValidationError) as caught:
+			save_message_template(
+				"request_arrival", subject="x", body="<p>ok</p>\n{% if category %}never closed"
+			)
+		self.assertIn("line 2", str(caught.exception))
+
+	def test_a_valid_template_saves(self):
+		result = save_message_template(
+			"request_arrival",
+			subject="{{ category }}: {{ subject }}",
+			body="<p>{{ employee_name }}</p>",
+			is_enabled=1,
+		)
+		self.assertEqual(result["subject"], "{{ category }}: {{ subject }}")
