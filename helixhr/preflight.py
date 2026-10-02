@@ -1218,6 +1218,21 @@ def check_outgoing_email():
 	)
 
 
+def check_overdue_digests():
+	"""Plan 2026-10-02-001 U11: the threshold the overdue digests use, and a
+	WARN when the scheduler is off -- the digests then never go out."""
+	from frappe.utils.scheduler import is_scheduler_disabled
+
+	from helixhr.api import approval_overdue_days
+
+	threshold = f"overdue after {approval_overdue_days()} day(s) (helixhr_approval_overdue_days)"
+	if is_scheduler_disabled(verbose=False):
+		return _result(
+			"Overdue digests", WARN, f"scheduler disabled -- no overdue digest is sent; {threshold}"
+		)
+	return _result("Overdue digests", PASS, threshold)
+
+
 def check_hr_manager_self_scope():
 	"""P4-R11: an HR Manager with a User Permission on their own Employee
 	record has no HR queue at all.
@@ -1491,6 +1506,7 @@ CHECKS = [
 	check_holiday_list_coverage,
 	check_celebration_reminders,
 	check_outgoing_email,
+	check_overdue_digests,
 	check_hr_manager_self_scope,
 	check_template_tokens,
 	check_configuration_field_sets,

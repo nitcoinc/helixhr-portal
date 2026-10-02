@@ -60,13 +60,15 @@ the exclusion, another for the shared-day email -- and this job uses one).
 
 import frappe
 from erpnext.setup.doctype.employee.employee import get_employee_emails
-from frappe.utils import comma_sep, format_date, get_url, getdate
+from frappe.utils import cint, comma_sep, format_date, get_url, getdate
 from hrms.controllers.employee_reminders import (
 	get_all_employee_emails,
 	get_employee_email,
 	get_employees_having_an_event_today,
 	get_sender_email,
 )
+
+from helixhr.events import PENDING_SINCE_FIELD as PENDING_SINCE
 
 # One row per event: the words HR reads on the celebrations settings tab,
 # and the HRMS checkbox that would send the stock email for the same event.
@@ -320,3 +322,265 @@ def _logo_url(company):
 
 def _date_format():
 	return frappe.db.get_single_value("System Settings", "date_format") or "yyyy-mm-dd"
+
+
+# --- overdue digests (plan 2026-10-02-001 U11, R23..R25, KTD13) -------------
+
+# KTD13's rerun guard: one dated key per site day, kept through `clear-cache`
+# and `bench migrate` by `hooks.persistent_cache_keys`, and expiring on its
+# own a day and a half later so the store never accumulates them.
+OVERDUE_GUARD_PREFIX = "helixhr-overdue-digest|"
+OVERDUE_GUARD_SECONDS = 36 * 60 * 60
+OVERDUE_ERROR_TITLE = "HelixHR overdue digests"
+_HR_ROLE = "HR Manager"
+_KIND_LABELS = {
+	"leave": "Leave",
+	"timesheet": "Timesheet",
+	"attendance": "Attendance request",
+	"request": "Request",
+}
+
+
+def send_overdue_digests():
+	"""Daily (`hooks.scheduler_events`). One `approval_overdue_digest` per
+	late approver (R23) and one `hr_overdue_summary` per HR Manager (R24).
+
+	A same-day rerun sends nothing (the dated guard key). Switching either
+	event Off in Email templates is the off switch: `send_notification`
+	renders nothing for it. Failure is isolated per recipient and logged.
+	"""
+	from helixhr.utils import send_notification
+
+	today = getdate()
+	guard = f"{OVERDUE_GUARD_PREFIX}{today}"
+	if frappe.cache.get_value(guard):
+		return {"skipped": True}
+
+	items = collect_overdue(today)
+	hr_users = _active_hr_managers()
+	digests = summaries = 0
+
+	by_owner = {}
+	for item in items:
+		for user in item["owners"]:
+			by_owner.setdefault(user, []).append(item)
+	for user, owned in by_owner.items():
+		# An HR Manager reads their own items in the summary, marked (U11).
+		if user in hr_users:
+			continue
+		try:
+			send_notification(
+				"approval_overdue_digest",
+				[user],
+				{"items": [_public(item) for item in owned], "count": len(owned)},
+			)
+			digests += 1
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), OVERDUE_ERROR_TITLE)
+
+	for user in hr_users:
+		try:
+			owners = _summary_owners(items, user)
+			if not owners:
+				continue
+			send_notification(
+				"hr_overdue_summary",
+				[user],
+				{"owners": owners, "count": sum(len(owner["items"]) for owner in owners)},
+			)
+			summaries += 1
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), OVERDUE_ERROR_TITLE)
+
+	frappe.cache.set_value(guard, 1, expires_in_sec=OVERDUE_GUARD_SECONDS)
+	return {"items": len(items), "digests": digests, "summaries": summaries}
+
+
+def collect_overdue(today=None):
+	"""Every overdue item on the site, oldest first, each with the users who
+	owe it a decision (`owners`, active and mailable only) and the name the
+	HR summary groups it under. Shared with U12's Overdue tab so the email
+	and the tab never disagree. Thresholds are R25's, through `is_overdue`."""
+	from helixhr.api import approval_overdue_days, is_overdue
+
+	today = getdate(today)
+	threshold = approval_overdue_days()
+	items = []
+	hr_users = None
+
+	def hr_owned():
+		nonlocal hr_users
+		if hr_users is None:
+			hr_users = _active_hr_managers()
+		return list(hr_users), _HR_ROLE
+
+	def add(kind, doctype, row, title, since, owners, owner_name, threshold_days, path):
+		items.append(
+			{
+				"kind": _KIND_LABELS[kind],
+				"doctype": doctype,
+				"name": row.name,
+				"title": title,
+				"employee": row.employee,
+				"employee_name": row.employee_name or row.employee,
+				"age_days": (today - getdate(since)).days,
+				"threshold_days": threshold_days,
+				"url": get_url(f"/helixhr/approvals/{path}/{row.name}"),
+				"owners": owners,
+				"owner_name": owner_name,
+			}
+		)
+
+	for row in frappe.get_all(
+		"Leave Application",
+		filters={"status": "Open", "docstatus": 0},
+		fields=["name", "employee", "employee_name", "leave_type", "from_date", "leave_approver",
+			"helixhr_stage", PENDING_SINCE],
+		order_by=f"{PENDING_SINCE} asc",
+	):
+		if not is_overdue(row.get(PENDING_SINCE), today, threshold):
+			continue
+		if row.helixhr_stage == "HR":
+			owners, owner_name = hr_owned()
+		else:
+			owners, owner_name = _user_owner(row.leave_approver)
+		title = f"{row.leave_type}, {format_date(row.from_date, _date_format())}"
+		add("leave", "Leave Application", row, title, row.get(PENDING_SINCE), owners, owner_name, threshold, "leave")
+
+	for doctype, kind, path, manager_state, hr_state, date_field in (
+		("Timesheet", "timesheet", "timesheet", "Pending Approval", "Pending HR", "start_date"),
+		("Attendance Request", "attendance", "attendance", "Pending Manager", "Pending HR", "from_date"),
+	):
+		for row in frappe.get_all(
+			doctype,
+			filters={"docstatus": 0, "workflow_state": ["in", (manager_state, hr_state)]},
+			fields=["name", "employee", "employee_name", "workflow_state", date_field, PENDING_SINCE],
+			order_by=f"{PENDING_SINCE} asc",
+		):
+			if not is_overdue(row.get(PENDING_SINCE), today, threshold):
+				continue
+			if row.workflow_state == hr_state:
+				owners, owner_name = hr_owned()
+			else:
+				owners, owner_name = _manager_owner(row.employee)
+			title = f"{_KIND_LABELS[kind]}, {format_date(row.get(date_field), _date_format())}"
+			add(kind, doctype, row, title, row.get(PENDING_SINCE), owners, owner_name, threshold, path)
+
+	# R25: HR Requests count from `creation` against the category's SLA; 0 is
+	# no SLA, and "Waiting on Employee" is the employee's turn, never late.
+	slas = {
+		row.name: cint(row.sla_days)
+		for row in frappe.get_all("HelixHR Request Category", fields=["name", "sla_days"])
+	}
+	for row in frappe.get_all(
+		"HR Request",
+		filters={"status": ["in", ("Open", "In Progress")]},
+		fields=["name", "employee", "category", "subject", "routed_to_role", "picked_up_by", "creation"],
+		order_by="creation asc",
+	):
+		sla = slas.get(row.category, 0)
+		if sla <= 0 or not is_overdue(row.creation, today, sla):
+			continue
+		row.employee_name = frappe.db.get_value("Employee", row.employee, "employee_name")
+		if row.picked_up_by:
+			owners, owner_name = _user_owner(row.picked_up_by)
+		elif row.routed_to_role == _HR_ROLE:
+			owners, owner_name = hr_owned()
+		else:
+			owners = _mailable(_role_holders(row.routed_to_role))
+			owner_name = row.routed_to_role or "No owner"
+		add("request", "HR Request", row, row.subject, row.creation, owners, owner_name, sla, "request")
+
+	items.sort(key=lambda item: -item["age_days"])
+	return items
+
+
+def _public(item):
+	"""The template's documented item fields (`approval_overdue_digest`)."""
+	return {key: item[key] for key in ("kind", "title", "employee_name", "age_days", "url")}
+
+
+def _summary_owners(items, hr_user):
+	"""`hr_overdue_summary`'s `owners`, narrowed to `hr_user`'s admin scope
+	(P6-R6). Items with nobody active to act go under their owner's name,
+	flagged `inactive` (R24). The HR user's own group is marked "(you)" in
+	its name rather than by a new key, so saved templates keep rendering."""
+	from helixhr.utils import admin_scope_employee_filters, resolve_admin_scope
+
+	filters = admin_scope_employee_filters(resolve_admin_scope(hr_user))
+	if filters is None:
+		return []
+	in_scope = None
+	if filters:
+		employees = {item["employee"] for item in items}
+		in_scope = set(
+			frappe.get_all("Employee", filters={**filters, "name": ["in", list(employees)]}, pluck="name")
+		) if employees else set()
+
+	groups = {}
+	for item in items:
+		if in_scope is not None and item["employee"] not in in_scope:
+			continue
+		inactive = not item["owners"]
+		group = groups.setdefault(
+			(item["owner_name"], inactive),
+			{"owner_name": item["owner_name"], "inactive": inactive, "items": []},
+		)
+		if hr_user in item["owners"] and item["owner_name"] != _HR_ROLE:
+			group["owner_name"] = f"{item['owner_name']} (you)"
+		group["items"].append(_public(item))
+	return list(groups.values())
+
+
+def _user_owner(user):
+	"""`([user], name)` while the user can be mailed and is still with the
+	company, else `([], name)` -- the HR summary's "no active owner"."""
+	if not user:
+		return [], "No approver"
+	name = frappe.utils.get_fullname(user)
+	status = frappe.db.get_value("Employee", {"user_id": user}, "status")
+	if status and status != "Active":
+		return [], name
+	return _mailable([user]), name
+
+
+def _manager_owner(employee):
+	"""The timesheet / attendance approver: the employee's `reports_to`, the
+	same person `events._approver_user` resolves, kept by name even when
+	inactive so HR can see whose queue it is stuck in."""
+	reports_to = frappe.db.get_value("Employee", employee, "reports_to")
+	if not reports_to:
+		return [], "No approver"
+	manager = frappe.db.get_value(
+		"Employee", reports_to, ["user_id", "status", "employee_name"], as_dict=True
+	)
+	if not manager or not manager.user_id:
+		return [], (manager and manager.employee_name) or reports_to
+	if manager.status != "Active":
+		return [], manager.employee_name
+	return _mailable([manager.user_id]), manager.employee_name
+
+
+def _mailable(users):
+	"""Enabled users with an email address -- anyone else cannot receive a
+	digest, so their items surface in the HR summary instead."""
+	users = [user for user in users if user]
+	if not users:
+		return []
+	return frappe.get_all(
+		"User",
+		filters={"name": ["in", users], "enabled": 1, "email": ["is", "set"]},
+		pluck="name",
+		order_by="name asc",
+	)
+
+
+def _role_holders(role):
+	if not role:
+		return []
+	return frappe.get_all("Has Role", filters={"role": role, "parenttype": "User"}, pluck="parent")
+
+
+def _active_hr_managers():
+	"""Who receives `hr_overdue_summary` (R24)."""
+	return [user for user in _mailable(_role_holders(_HR_ROLE)) if user != "Administrator"]

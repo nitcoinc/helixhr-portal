@@ -18,14 +18,22 @@ are deleted on purpose in `tearDown`.
 
 import email
 from datetime import date
+from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
-from frappe.utils import getdate
+from frappe.utils import add_days, add_to_date, getdate, now_datetime, today
 
 from helixhr import reminders
+from helixhr.events import PENDING_SINCE_FIELD as PENDING_SINCE
 from helixhr.reminders import EVENTS, send_celebration_reminders
-from helixhr.tests.utils import ensure_test_email_account, make_celebration_employee
+from helixhr.tests.utils import (
+	HR_MANAGER_USER,
+	ensure_hr_manager_user,
+	ensure_test_email_account,
+	make_celebration_employee,
+	make_test_employee_and_manager,
+)
 
 COMPANY_A = "_Test Reminders Co A"
 COMPANY_B = "_Test Reminders Co B"
@@ -716,6 +724,197 @@ class TestCelebrationTemplateSeed(IntegrationTestCase):
 				)
 				self.assertIn("Ada Lovelace", rendered["message"])
 				self.assertTrue(rendered["subject"].strip())
+
+
+class TestOverdueDigests(IntegrationTestCase):
+	"""Plan 2026-10-02-001 U11 (R23..R25, KTD13). Leave rows are raw inserts:
+	the collector reads columns only, and a real submit depends on the day.
+	The queue is a delta per recipient, as above -- `sendmail` commits."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		ensure_test_email_account()
+		self.employee, _, self.manager, self.manager_user = make_test_employee_and_manager()
+		self.hr_user = ensure_hr_manager_user()
+		self.company = frappe.db.get_value("Employee", self.employee, "company")
+		frappe.local.conf["helixhr_approval_overdue_days"] = 2
+		self.addCleanup(frappe.local.conf.pop, "helixhr_approval_overdue_days", None)
+		self.guard = f"{reminders.OVERDUE_GUARD_PREFIX}{getdate()}"
+		frappe.cache.delete_value(self.guard)
+		self.addCleanup(frappe.cache.delete_value, self.guard)
+		frappe.db.delete("HelixHR Message Template", {"name": ["in", ["approval_overdue_digest", "hr_overdue_summary"]]})
+		self.since = now_datetime()
+
+	def _leave(self, age_days, offset):
+		doc = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": self.employee,
+				"employee_name": "Overdue Fixture",
+				"leave_type": "Casual Leave",
+				"from_date": add_days(today(), 200 + offset),
+				"to_date": add_days(today(), 200 + offset),
+				"status": "Open",
+				"company": self.company,
+				"posting_date": today(),
+				"leave_approver": self.manager_user,
+				PENDING_SINCE: add_to_date(now_datetime(), days=-age_days),
+			}
+		)
+		doc.set_new_name()
+		doc.db_insert()
+		self.addCleanup(frappe.db.delete, "Leave Application", {"name": doc.name})
+		return doc.name
+
+	def _mail_to(self, user):
+		return frappe.get_all(
+			"Email Queue",
+			filters={"creation": [">=", self.since], "name": ["in", frappe.get_all(
+				"Email Queue Recipient", filters={"recipient": user}, pluck="parent")]},
+			fields=["name", "message"],
+		)
+
+	def _mine(self, items):
+		return [item for item in items if item["employee"] == self.employee]
+
+	def test_one_digest_lists_every_item_the_approver_is_late_on(self):
+		names = [self._leave(3, 0), self._leave(5, 1)]
+		self._leave(1, 2)  # within the threshold
+		send = mock_send()
+		with send:
+			reminders.send_overdue_digests()
+		digests = [c for c in send.calls if c[0] == "approval_overdue_digest" and c[1] == [self.manager_user]]
+		self.assertEqual(len(digests), 1)
+		urls = [item["url"] for item in digests[0][2]["items"]]
+		for name in names:
+			self.assertTrue(any(url.endswith(name) for url in urls))
+
+	def test_the_digest_reaches_the_mail_queue_once_even_after_clear_cache(self):
+		self._leave(3, 0)
+		reminders.send_overdue_digests()
+		self.assertEqual(len(self._mail_to(self.manager_user)), 1)
+		frappe.clear_cache()
+		self.assertEqual(reminders.send_overdue_digests(), {"skipped": True})
+		self.assertEqual(len(self._mail_to(self.manager_user)), 1)
+		for row in self._mail_to(self.manager_user) + self._mail_to(self.hr_user):
+			frappe.delete_doc("Email Queue", row.name, force=True, ignore_permissions=True)
+
+	def test_the_next_day_sends_again(self):
+		self._leave(3, 0)
+		reminders.send_overdue_digests()
+		frappe.cache.delete_value(self.guard)  # the key a new day would not find
+		send = mock_send()
+		with send:
+			reminders.send_overdue_digests()
+		self.assertTrue(any(c[1] == [self.manager_user] for c in send.calls))
+		for row in self._mail_to(self.manager_user) + self._mail_to(self.hr_user):
+			frappe.delete_doc("Email Queue", row.name, force=True, ignore_permissions=True)
+
+	def test_nothing_overdue_sends_nothing(self):
+		send = mock_send()
+		with send, patch.object(reminders, "collect_overdue", return_value=[]):
+			reminders.send_overdue_digests()
+		self.assertEqual(send.calls, [])
+
+	def test_an_event_switched_off_sends_no_mail(self):
+		self._leave(3, 0)
+		for key in ("approval_overdue_digest", "hr_overdue_summary"):
+			frappe.get_doc(
+				{"doctype": "HelixHR Message Template", "template_key": key, "name": key,
+				 "subject": "x", "body": "x", "is_enabled": 0}
+			).db_insert()
+		reminders.send_overdue_digests()
+		self.assertEqual(self._mail_to(self.manager_user), [])
+		self.assertEqual(self._mail_to(self.hr_user), [])
+
+	def test_an_approver_without_email_goes_to_the_hr_summary(self):
+		name = self._leave(3, 0)
+		email_before = frappe.db.get_value("User", self.manager_user, "email")
+		frappe.db.set_value("User", self.manager_user, "email", "")
+		self.addCleanup(frappe.db.set_value, "User", self.manager_user, "email", email_before)
+		self._assert_no_active_owner(name)
+
+	def test_a_disabled_approver_goes_to_the_hr_summary(self):
+		name = self._leave(3, 0)
+		frappe.db.set_value("User", self.manager_user, "enabled", 0)
+		self.addCleanup(frappe.db.set_value, "User", self.manager_user, "enabled", 1)
+		self._assert_no_active_owner(name)
+
+	def _assert_no_active_owner(self, name):
+		item = next(i for i in reminders.collect_overdue() if i["name"] == name)
+		self.assertEqual(item["owners"], [])
+		send = mock_send()
+		with send:
+			reminders.send_overdue_digests()
+		self.assertFalse(any(c[1] == [self.manager_user] for c in send.calls))
+		summary = next(c for c in send.calls if c[0] == "hr_overdue_summary" and c[1] == [self.hr_user])
+		group = next(o for o in summary[2]["owners"] if any(i["url"].endswith(name) for i in o["items"]))
+		self.assertTrue(group["inactive"])
+
+	def test_the_hr_summary_is_narrowed_to_admin_scope(self):
+		name = self._leave(3, 0)
+		items = reminders.collect_overdue()
+		with patch("helixhr.utils.resolve_admin_scope", return_value={"kind": "company", "company": "_No Such Co"}):
+			self.assertEqual(reminders._summary_owners(items, self.hr_user), [])
+		with patch("helixhr.utils.resolve_admin_scope", return_value={"kind": "company", "company": self.company}):
+			owners = reminders._summary_owners(items, self.hr_user)
+		self.assertTrue(any(i["url"].endswith(name) for o in owners for i in o["items"]))
+
+	def test_an_hr_request_without_sla_or_waiting_on_the_employee_is_never_overdue(self):
+		old = add_to_date(now_datetime(), days=-30)
+		rows = [
+			frappe._dict(name="R1", category="no-sla", status="Open", creation=old),
+			frappe._dict(name="R2", category="sla", status="Waiting on Employee", creation=old),
+		]
+
+		def get_all(doctype, **kwargs):
+			if doctype == "HelixHR Request Category":
+				return [frappe._dict(name="no-sla", sla_days=0), frappe._dict(name="sla", sla_days=1)]
+			if doctype == "HR Request":
+				statuses = kwargs["filters"]["status"][1]
+				return [frappe._dict(r, employee=self.employee, subject="s", routed_to_role="HR Manager",
+					picked_up_by=None) for r in rows if r.status in statuses]
+			return []
+
+		with patch.object(reminders.frappe, "get_all", side_effect=get_all):
+			self.assertEqual(reminders.collect_overdue(), [])
+
+	def test_one_failing_approver_leaves_the_others_their_mail(self):
+		self._leave(3, 0)
+		before = frappe.db.count("Error Log", {"method": reminders.OVERDUE_ERROR_TITLE})
+		calls = []
+
+		def boom(event, recipients, context, *args, **kwargs):
+			calls.append((event, recipients))
+			if recipients == [self.manager_user]:
+				raise RuntimeError("boom")
+
+		with patch("helixhr.utils.send_notification", side_effect=boom):
+			reminders.send_overdue_digests()
+		self.assertIn(("hr_overdue_summary", [self.hr_user]), calls)
+		self.assertGreater(frappe.db.count("Error Log", {"method": reminders.OVERDUE_ERROR_TITLE}), before)
+
+	def test_the_job_and_its_guard_are_registered(self):
+		self.assertIn("helixhr.reminders.send_overdue_digests", frappe.get_hooks("scheduler_events")["daily"])
+		self.assertIn(f"{reminders.OVERDUE_GUARD_PREFIX}*", frappe.get_hooks("persistent_cache_keys"))
+
+
+class mock_send:
+	"""Records `send_notification` calls instead of queueing mail."""
+
+	def __init__(self):
+		self.calls = []
+		self._patch = patch(
+			"helixhr.utils.send_notification",
+			side_effect=lambda event, recipients, context, *a, **k: self.calls.append((event, recipients, context)),
+		)
+
+	def __enter__(self):
+		self._patch.__enter__()
+		return self
+
+	def __exit__(self, *exc):
+		return self._patch.__exit__(*exc)
 
 
 def _read(message):

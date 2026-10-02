@@ -372,10 +372,15 @@ has_permission = {
 # replacing it -- Frappe merges scheduler hooks across apps and offers no
 # removal, so having both senders on for one event is the thing
 # `events.hr_settings_validate` and preflight guard against.
+# Plan 2026-10-02-001 U11 / KTD13: the overdue digest's dated rerun guard
+# must survive `clear-cache` and `bench migrate`; it expires on its own.
+persistent_cache_keys = ["helixhr-overdue-digest|*"]
+
 scheduler_events = {
 	"daily": [
 		"helixhr.tasks.null_stale_checkin_coordinates",
 		"helixhr.reminders.send_celebration_reminders",
+		"helixhr.reminders.send_overdue_digests",
 	],
 	# Off by default -- helixhr.telemetry.send_ping is a no-op until an
 	# operator sets both helixhr_telemetry_enabled and helixhr_telemetry_url
