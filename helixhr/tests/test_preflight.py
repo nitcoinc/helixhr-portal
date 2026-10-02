@@ -1,4 +1,5 @@
 from types import MappingProxyType, SimpleNamespace
+from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
@@ -371,6 +372,33 @@ class TestPreflightP2U1(IntegrationTestCase):
 			"prevent_self_leave_approval", 1, preflight.check_self_leave_approval_blocked
 		)
 		self.assertEqual(result["status"], preflight.PASS)
+
+	def test_hrms_backdated_restriction_on_fails_beside_the_grace_rule(self):
+		result = self._with_hr_setting(
+			"restrict_backdated_leave_application", 1, preflight.check_backdated_leave_grace
+		)
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("restrict_backdated_leave_application", result["detail"])
+
+	def test_a_missing_backdated_exempt_role_fails(self):
+		with patch.dict(frappe.conf, {"helixhr_backdated_leave_exempt_role": "No Such Role"}):
+			result = self._with_hr_setting(
+				"restrict_backdated_leave_application", 0, preflight.check_backdated_leave_grace
+			)
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("No Such Role", result["detail"])
+
+	def test_backdated_grace_passes_and_shows_the_effective_days(self):
+		with patch.dict(
+			frappe.conf,
+			{"helixhr_backdated_leave_grace_days": 2, "helixhr_backdated_leave_exempt_role": "HR User"},
+		):
+			result = self._with_hr_setting(
+				"restrict_backdated_leave_application", 0, preflight.check_backdated_leave_grace
+			)
+		self.assertEqual(result["status"], preflight.PASS)
+		self.assertIn("2 working days", result["detail"])
+		self.assertIn("HR User", result["detail"])
 
 	def test_a_legacy_approved_but_unsubmitted_leave_is_counted_as_a_warning(self):
 		from helixhr.tests.utils import ensure_leave_allocation

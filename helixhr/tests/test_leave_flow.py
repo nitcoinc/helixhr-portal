@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, getdate, today
@@ -14,6 +16,7 @@ from helixhr.api import (
 	get_my_leave_detail,
 	withdraw_my_leave,
 )
+from helixhr.events import backdated_grace_days, backdated_leave_earliest, backdated_leave_reason
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	MANAGER_USER,
@@ -1069,3 +1072,123 @@ class TestPendingAwareBalance(IntegrationTestCase):
 		result = get_leave_day_count(leave_type, add_days(today(), 140), add_days(today(), 142))
 		self.assertEqual(result["max_continuous"], 2)
 		self.assertEqual(result["blocked_reason"], f"{leave_type} allows at most 2 days in one request.")
+
+
+class TestBackdatedGrace(IntegrationTestCase):
+	"""U3 (R6): an employee may start leave up to N working days back; HR
+	Manager and the configured exempt role are unlimited; the rule runs on
+	insert and on a start-date change, never on approver submit.
+
+	Dates: offsets -1 to -12, the only past window any leave suite books;
+	setUp clears it (cancelling anything approved) because nothing rolls
+	back between methods here. `_holiday_dates` is patched where the walk's
+	answer must not depend on which weekday the suite runs.
+	"""
+
+	def setUp(self):
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		frappe.db.set_value("Employee", self.employee_name, "leave_approver", MANAGER_USER)
+		ensure_leave_approver_role(MANAGER_USER)
+		self.company = frappe.db.get_value("Employee", self.employee_name, "company")
+		ensure_holiday_list_assignment(self.company)
+		ensure_leave_allocation(self.employee_name, "Casual Leave", 30)
+		clear_open_leave(self.employee_name)
+		for name in frappe.get_all(
+			"Leave Application",
+			filters={
+				"employee": self.employee_name,
+				"from_date": ["<=", add_days(today(), -1)],
+				"to_date": [">=", add_days(today(), -12)],
+				"docstatus": ["<", 2],
+			},
+			pluck="name",
+		):
+			doc = frappe.get_doc("Leave Application", name)
+			if doc.docstatus == 1:
+				doc.cancel()
+			frappe.delete_doc("Leave Application", name, force=True, ignore_permissions=True)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _conf(self, **values):
+		return patch.dict(frappe.conf, {f"helixhr_backdated_leave_{k}": v for k, v in values.items()})
+
+	def _apply(self, offset):
+		day = add_days(today(), offset)
+		return apply_for_leave(leave_type="Casual Leave", from_date=day, to_date=day)
+
+	# --- the working-day walk ------------------------------------------------
+
+	def test_a_weekend_is_not_counted_so_friday_is_within_one_day_of_monday(self):
+		monday = getdate("2026-09-28")
+		weekend = {"2026-09-26", "2026-09-27"}
+		frappe.set_user(EMPLOYEE_USER)
+		with self._conf(grace_days=1), patch("helixhr.api._holiday_dates", return_value=weekend):
+			self.assertEqual(backdated_leave_earliest(self.employee_name, monday), getdate("2026-09-25"))
+			self.assertIsNone(backdated_leave_reason(self.employee_name, "2026-09-25", monday))
+			reason = backdated_leave_reason(self.employee_name, "2026-09-24", monday)
+		self.assertIn("Leave can start no earlier than", reason)
+		self.assertIn("ask HR", reason)
+
+	def test_no_holiday_list_counts_calendar_days(self):
+		monday = getdate("2026-09-28")
+		frappe.set_user(EMPLOYEE_USER)
+		with self._conf(grace_days=1), patch("helixhr.api._holiday_dates", return_value=None):
+			self.assertEqual(backdated_leave_earliest(self.employee_name, monday), getdate("2026-09-27"))
+			self.assertIsNone(backdated_leave_reason(self.employee_name, "2026-09-27", monday))
+			self.assertTrue(backdated_leave_reason(self.employee_name, "2026-09-26", monday))
+
+	def test_grace_defaults_to_one_day(self):
+		with patch.dict(frappe.conf):
+			frappe.conf.pop("helixhr_backdated_leave_grace_days", None)
+			self.assertEqual(backdated_grace_days(), 1)
+
+	# --- insert, edit, approve -----------------------------------------------
+
+	def test_yesterday_is_accepted_and_two_days_ago_is_refused(self):
+		frappe.set_user(EMPLOYEE_USER)
+		with self._conf(grace_days=1), patch("helixhr.api._holiday_dates", return_value=None):
+			self.assertTrue(self._apply(-1)["name"])
+			with self.assertRaises(frappe.ValidationError) as caught:
+				self._apply(-3)
+		self.assertIn("Leave can start no earlier than", str(caught.exception))
+
+	def test_an_exempt_role_files_ten_days_back(self):
+		frappe.set_user(EMPLOYEE_USER)
+		with self._conf(grace_days=1, exempt_role="Employee"):
+			self.assertTrue(self._apply(-10)["name"])
+
+	def test_an_unrelated_edit_on_an_old_open_request_does_not_trigger_the_rule(self):
+		frappe.set_user(EMPLOYEE_USER)
+		with self._conf(grace_days=30):
+			name = self._apply(-8)["name"]
+		with self._conf(grace_days=1):
+			doc = frappe.get_doc("Leave Application", name)
+			doc.description = "Edited later"
+			doc.save()
+			doc.reload()
+			doc.from_date = doc.to_date = add_days(today(), -9)
+			with self.assertRaises(frappe.ValidationError):
+				doc.save()
+
+	def test_an_approver_submits_a_request_after_the_grace_window_passed(self):
+		frappe.set_user(EMPLOYEE_USER)
+		with self._conf(grace_days=30):
+			name = self._apply(-6)["name"]
+		with self._conf(grace_days=1):
+			frappe.set_user(MANAGER_USER)
+			doc = frappe.get_doc("Leave Application", name)
+			_assert_may_act_on(doc)
+			_act_on_leave_application(doc, "Approve")
+		self.assertEqual(frappe.db.get_value("Leave Application", name, "docstatus"), 1)
+
+	# --- the preview ---------------------------------------------------------
+
+	def test_the_preview_blocks_a_too_old_start_with_the_grace_sentence(self):
+		frappe.set_user(EMPLOYEE_USER)
+		day = add_days(today(), -5)
+		with self._conf(grace_days=1), patch("helixhr.api._holiday_dates", return_value=None):
+			result = get_leave_day_count("Casual Leave", day, day)
+		self.assertEqual(result["earliest_start"], str(add_days(today(), -1)))
+		self.assertIn("Leave can start no earlier than", result["blocked_reason"])

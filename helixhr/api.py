@@ -56,6 +56,8 @@ from helixhr.events import (
 	_approver_user,
 	_enabled_users_with_role,
 	_is_hr,
+	backdated_leave_earliest,
+	backdated_leave_reason,
 	leave_overdraw,
 )
 
@@ -2647,8 +2649,10 @@ def get_leave_day_count(leave_type, from_date, to_date, half_day=0, half_day_dat
 	It is an *advisory gate*: HRMS and the validate rule
 	(`events.leave_application_validate`) decide. `blocked_reason` is the
 	one sentence the browser shows beside a disabled Send when the request
-	would overdraw once pending requests are counted (R1) or exceed the
-	type's consecutive-days limit; a refusal on insert still wins over
+	would start earlier than the backdated grace rule allows (R6), overdraw
+	once pending requests are counted (R1) or exceed the type's
+	consecutive-days limit; `earliest_start` is that grace date (None when
+	the caller is exempt). A refusal on insert still wins over
 	anything shown here.
 	"""
 	from hrms.hr.doctype.leave_application.leave_application import (
@@ -2685,7 +2689,8 @@ def get_leave_day_count(leave_type, from_date, to_date, half_day=0, half_day_dat
 	overdraw = leave_overdraw(employee, leave_type, start, end, days)
 	pending = overdraw["pending"] if overdraw else 0.0
 	max_continuous = cint(frappe.db.get_value("Leave Type", leave_type, "max_continuous_days_allowed"))
-	blocked_reason = overdraw["reason"] if overdraw else None
+	earliest = backdated_leave_earliest(employee)
+	blocked_reason = backdated_leave_reason(employee, start) or (overdraw["reason"] if overdraw else None)
 	if not blocked_reason and max_continuous and days > max_continuous:
 		blocked_reason = _("{0} allows at most {1} days in one request.").format(leave_type, max_continuous)
 	return {
@@ -2696,6 +2701,7 @@ def get_leave_day_count(leave_type, from_date, to_date, half_day=0, half_day_dat
 		"balance_after": balance - days,
 		"pending": pending,
 		"max_continuous": max_continuous or None,
+		"earliest_start": str(earliest) if earliest else None,
 		"blocked_reason": blocked_reason,
 	}
 

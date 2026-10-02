@@ -1,7 +1,7 @@
 import frappe
 from frappe import _
 from frappe.model import no_value_fields
-from frappe.utils import cint, flt
+from frappe.utils import add_days, cint, flt, formatdate, getdate
 
 from helixhr.helixhr.doctype.hr_request.hr_request import request_belongs_to_session
 from helixhr.utils import (
@@ -322,9 +322,10 @@ def leave_application_validate(doc, method=None):
 	it is also what makes a raw `frappe.client.set_value` answerable.
 
 	It also carries the pending-aware balance rule (R1), which runs first
-	because it applies to new rows too.
+	because it applies to new rows too, and the backdated grace rule (R6).
 	"""
 	_refuse_pending_overdraw(doc)
+	_refuse_backdated_past_grace(doc)
 	if doc.is_new():
 		return
 	user = frappe.session.user
@@ -434,6 +435,80 @@ def _refuse_pending_overdraw(doc):
 	)
 	if result and result["reason"]:
 		frappe.throw(result["reason"], title=_("Not enough leave"))
+
+
+# R6: how far back an employee may start leave, in working days. Site config,
+# not a Single (P5-KTD3); preflight shows the effective value.
+BACKDATED_GRACE_DAYS_KEY = "helixhr_backdated_leave_grace_days"
+BACKDATED_EXEMPT_ROLE_KEY = "helixhr_backdated_leave_exempt_role"
+
+
+def backdated_grace_days():
+	"""N from site config, default 1; a negative value reads as 0."""
+	value = frappe.conf.get(BACKDATED_GRACE_DAYS_KEY)
+	return max(cint(1 if value is None else value), 0)
+
+
+def _backdated_exempt(user=None):
+	"""HR Manager and the configured exempt role are unlimited (R6).
+	Administrator too: it is not a person filing their own leave."""
+	user = user or frappe.session.user
+	if user == "Administrator":
+		return True
+	exempt = {"HR Manager"}
+	extra = (frappe.conf.get(BACKDATED_EXEMPT_ROLE_KEY) or "").strip()
+	if extra:
+		exempt.add(extra)
+	return bool(exempt & set(frappe.get_roles(user)))
+
+
+def backdated_leave_earliest(employee, as_of=None):
+	"""The earliest start date the grace rule allows for `employee`, or None
+	when the session user is exempt. Shared by the validate rule and the
+	leave preview so the two cannot disagree.
+
+	Walks back N working days from `as_of` (default `getdate()`, the system
+	timezone's today), skipping the employee's holiday-list dates. With no
+	resolvable holiday list `_holiday_dates` answers None and the walk counts
+	calendar days instead -- stricter, never looser.
+	"""
+	if _backdated_exempt():
+		return None
+	from helixhr.api import _holiday_dates
+
+	today = getdate(as_of)
+	grace = backdated_grace_days()
+	# Generous window: a long holiday run still resolves in one lookup.
+	holidays = _holiday_dates(employee, add_days(today, -(grace * 3 + 31)), today) or set()
+	day, counted = today, 0
+	while counted < grace:
+		day = getdate(add_days(day, -1))
+		if str(day) not in holidays:
+			counted += 1
+	return day
+
+
+def backdated_leave_reason(employee, from_date, as_of=None):
+	"""The grace sentence when `from_date` is earlier than allowed, else None."""
+	earliest = backdated_leave_earliest(employee, as_of)
+	if earliest is None or getdate(from_date) >= earliest:
+		return None
+	return _("Leave can start no earlier than {0}. For older dates, ask HR.").format(formatdate(earliest))
+
+
+def _refuse_backdated_past_grace(doc):
+	"""R6 on insert and on a start-date change only. Never on approver
+	submit or any other edit, so a late approval of a request filed within
+	grace is never blocked -- unlike HRMS's
+	`restrict_backdated_leave_application`, which checks the session user on
+	every validate (KTD3)."""
+	if doc.docstatus != 0 or not (doc.employee and doc.from_date):
+		return
+	if not doc.is_new() and not doc.has_value_changed("from_date"):
+		return
+	reason = backdated_leave_reason(doc.employee, doc.from_date)
+	if reason:
+		frappe.throw(reason, title=_("Too far in the past"))
 
 
 def _reconcile_timesheet_share(name, employee, keep_user):

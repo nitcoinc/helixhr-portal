@@ -256,6 +256,34 @@ def check_self_leave_approval_blocked():
 	)
 
 
+def check_backdated_leave_grace():
+	"""R7: the HelixHR grace rule (R6) replaces HRMS's
+	`restrict_backdated_leave_application`, which checks the session user on
+	every validate and so would block an approver submitting a late request.
+	Both on at once is a FAIL, as is an exempt role that does not exist. The
+	PASS detail shows the effective N."""
+	from helixhr.events import BACKDATED_EXEMPT_ROLE_KEY, backdated_grace_days
+
+	problems = []
+	if frappe.utils.cint(_hr_setting("restrict_backdated_leave_application")):
+		problems.append(
+			"HR Settings restrict_backdated_leave_application is on -- it would block approvers"
+			" submitting late requests; turn it off, the HelixHR grace rule covers backdating"
+		)
+	role = (frappe.conf.get(BACKDATED_EXEMPT_ROLE_KEY) or "").strip()
+	if role and not frappe.db.exists("Role", role):
+		problems.append(f"{BACKDATED_EXEMPT_ROLE_KEY} names a role that does not exist: {role}")
+	if problems:
+		return _result("Backdated leave grace", FAIL, "; ".join(problems))
+	grace = backdated_grace_days()
+	exempt = "HR Manager" + (f" and {role}" if role else "")
+	return _result(
+		"Backdated leave grace",
+		PASS,
+		f"leave may start up to {grace} working day{'' if grace == 1 else 's'} back; {exempt} unlimited",
+	)
+
+
 def check_unsubmitted_approved_leave():
 	"""P2-R10 / P2-U1 step 4: rows the pre-P2-U1 portal marked Approved
 	without submitting. They consumed no balance and wrote no ledger entry,
@@ -1371,6 +1399,7 @@ CHECKS = [
 	check_custom_docperm_coverage,
 	check_leave_approver_mandatory,
 	check_self_leave_approval_blocked,
+	check_backdated_leave_grace,
 	check_unsubmitted_approved_leave,
 	check_document_link_urls,
 	check_portal_landing,
