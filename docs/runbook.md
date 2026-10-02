@@ -357,6 +357,52 @@ counts calendar days instead. "Today" is `getdate()` in the system timezone.
 - **Sent back with wrong dates, now past grace:** the employee cannot move the start further
   back. They withdraw the request and ask HR, who files it in Desk (HR Manager is exempt).
 
+## Notifications, overdue and corrections: operator notes (plan 2026-10-02-001)
+
+**Site config keys** (all optional, all reported by preflight):
+
+| Key | Default | Set with |
+|---|---|---|
+| `helixhr_backdated_leave_grace_days` | `1` | `bench --site <site> set-config -p helixhr_backdated_leave_grace_days 2` |
+| `helixhr_backdated_leave_exempt_role` | unset | `bench --site <site> set-config helixhr_backdated_leave_exempt_role "<Role>"` (role must exist) |
+| `helixhr_approval_overdue_days` | `2` (calendar days) | `bench --site <site> set-config -p helixhr_approval_overdue_days 3` |
+
+**Must stay off in HR Settings:** `send_leave_notification` (HRMS's own leave mail;
+duplicates HelixHR's; install turns it off and HR Settings refuses re-enabling it) and
+`restrict_backdated_leave_application` (blocks approvers; see *Backdated leave* above).
+Preflight FAILs on either.
+
+**Retired notifications.** The four HR-queue email fixture `Notification`s are deleted by
+patch `retire_hr_email_notifications`; their mail now comes from templates. Fixture sync never
+deletes, so a site restored from an old backup can have them back: preflight "Retired HR email
+notifications" FAILs and names them -- run `bench --site <site> migrate`, or delete them in
+Desk. Bell fixtures are not retired.
+
+**Granting the Notification Manager role.** Desk → User → Roles → `HelixHR Notification
+Manager`. Portal-only (no Desk). The user sees Admin → Email templates (`/email-templates`);
+a user with no Employee record lands there. System Manager also qualifies. Preflight WARNs
+when no enabled user holds the role. HR Manager no longer edits templates.
+
+**A template email came out in default wording.** The saved template failed to render at
+send time (e.g. a variable removed from the event). The send fell back to the default and
+logged it: Desk → Error Log, title mentions the event key. Open the template, Save: the
+validation names the unknown variable and line. Reset restores the default (an Info comment
+records it).
+
+**No overdue digest arrived.** Check in order: scheduler on (`bench --site <site>
+scheduler status`; preflight "Overdue digests" WARNs when off); a default outgoing Email
+Account; the item is really past `helixhr_approval_overdue_days` counted from
+`helixhr_pending_since`, not from creation; the digest event not switched Off on the Email
+templates page. The run sets a dated guard key **after** sending, kept through
+`clear-cache` and expiring after 36 h, so a same-day manual rerun sends nothing by design.
+
+**Bank-detail corrections** can be filed only from the portal (`create_my_request` passes the
+double entry and proof as flags); a Desk-created HR Request with a correction field is
+refused. HR applies by moving the request to Done in the portal; a Done refusal (stale
+current value, or a `personal_email` change in the last 72 h) shows inline. Every Reveal is a
+comment on the request. Open decision: the Employee's own Version log shows the changed bank
+field after Done.
+
 ## Employee gets locked/HR-only fields from more than one place (U5 follow-up)
 
 `helixhr/fixtures/property_setter.json`'s permlevel pass only queried the `DocField` doctype,
