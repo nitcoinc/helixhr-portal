@@ -26,6 +26,18 @@ PROFILE_EDITABLE_FIELDS = (
 	"relation",
 )
 
+# Plan 2026-10-02-001 U13 / KTD14: the HR-locked Employee fields an employee
+# may *propose* a new value for through a "Profile correction" request, with
+# the plain-language label the notices and refusals use. Bank details only;
+# each further field is an HR policy call, not an implementation choice.
+PROFILE_CORRECTABLE_FIELDS = {
+	"bank_name": "bank name",
+	"bank_ac_no": "bank account number",
+	"iban": "IBAN",
+}
+# R30: Done on a correction is refused this long after a personal email change.
+CORRECTION_EMAIL_HOLD_HOURS = 72
+
 
 # --- The employee's own profile (plan 2026-09-29-001, U3) -----------------
 #
@@ -1202,6 +1214,9 @@ RATE_LIMIT_POLICY = {
 	"end_shift_assignment": (30, 3600),
 	"change_shift_assignment": (30, 3600),
 	"cancel_shift_assignment": (30, 3600),
+	# Plan 2026-10-02-001 U13: shows a full bank detail and writes an audit
+	# comment each time, so it is bounded tightly.
+	"reveal_correction_value": (20, 3600),
 }
 
 

@@ -72,6 +72,7 @@ from helixhr.utils import (
 	LEAVE_TYPE_EDITABLE_FIELDS,
 	NOTIFICATION_EVENTS,
 	PERSON_EDITABLE_FIELDS,
+	PROFILE_CORRECTABLE_FIELDS,
 	PROFILE_CORRECTION_CATEGORY,
 	PROFILE_EDITABLE_FIELDS,
 	PROFILE_LABELS,
@@ -6231,7 +6232,15 @@ def mark_my_request_read(name):
 
 
 @frappe.whitelist(methods=["POST"])
-def create_my_request(category, subject, details=None, operation_key=None):
+def create_my_request(
+	category,
+	subject,
+	details=None,
+	operation_key=None,
+	correction_field=None,
+	correction_value=None,
+	correction_confirm=None,
+):
 	"""Create this employee's HR Request, once, whatever the network does
 	(P2-R18, P2-R25, P2-AE7).
 
@@ -6253,6 +6262,13 @@ def create_my_request(category, subject, details=None, operation_key=None):
 	caller inputs, and category is checked against the DocType's own options
 	-- `frappe.client.insert` with a browser-built document, which this
 	replaces, offered every one of them as a parameter.
+
+	Plan 2026-10-02-001 U13: with `correction_field`, this files a profile
+	correction. The value is typed twice (`correction_value`,
+	`correction_confirm`) and the proof is the multipart `file` of this same
+	call, so the request and its proof commit together. Every rule lives in
+	`events.hr_request_validate`; this only hands the inputs over. The
+	response never echoes the value.
 	"""
 	rate_limit_per_user("create_my_request")
 	employee = get_current_employee()
@@ -6286,6 +6302,16 @@ def create_my_request(category, subject, details=None, operation_key=None):
 			"client_operation_key": key,
 		}
 	)
+	if correction_field:
+		doc.correction_field = correction_field
+		doc.correction_proposed = correction_value
+		doc.flags.correction_confirm = correction_confirm
+		upload = (getattr(frappe.request, "files", None) or {}).get("file")
+		if upload is not None:
+			doc.flags.correction_proof = (
+				os.path.basename(upload.filename or "").strip(),
+				upload.stream.read(),
+			)
 	try:
 		# Role Employee has no `create` on this DocType by design: the
 		# allow-list above *is* the create rule, and it is stricter than a
@@ -6301,6 +6327,42 @@ def create_my_request(category, subject, details=None, operation_key=None):
 		return {**_request_detail(won, employee), "created": False}
 
 	return {**_request_detail(doc.name, employee), "created": True}
+
+
+@frappe.whitelist(methods=["POST"])
+def reveal_correction_value(name):
+	"""The full proposed value of an open correction, for the HR user handling
+	it (plan 2026-10-02-001 R28, KTD15).
+
+	The same authorization a decision on the record gets (`_assert_may_act_on`:
+	not the requester, in HR's admin scope), narrowed to HR and, once picked
+	up, to the user who picked it up. Closed requests have nothing left to
+	reveal. Every reveal leaves an Info comment naming who looked.
+	"""
+	from frappe.utils.password import get_decrypted_password
+
+	rate_limit_per_user("reveal_correction_value")
+	if not frappe.db.exists("HR Request", name):
+		frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
+	doc = frappe.get_doc("HR Request", name)
+	if not _is_hr() or doc.routed_to_role != "HR Manager":
+		frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
+	_assert_may_act_on(doc)
+	if doc.picked_up_by and doc.picked_up_by != frappe.session.user:
+		frappe.throw(_("Only the person handling this request can see the full value."), frappe.PermissionError)
+	if not doc.correction_field or doc.status in ("Done", "Rejected"):
+		frappe.throw(_("There is no value to show on this request."))
+	value = get_decrypted_password("HR Request", name, "correction_proposed", raise_exception=False)
+	if not value:
+		frappe.throw(_("There is no value to show on this request."))
+	doc.add_comment(
+		"Info",
+		_("Proposed {0} revealed by {1}").format(
+			PROFILE_CORRECTABLE_FIELDS[doc.correction_field],
+			frappe.utils.get_fullname(frappe.session.user),
+		),
+	)
+	return {"name": name, "field": doc.correction_field, "value": value}
 
 
 def _request_for_key(key, employee):

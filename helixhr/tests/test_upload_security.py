@@ -349,6 +349,8 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"preview_message_template": (60, 60),
 			"reset_message_template": (30, 3600),
 			"send_test_message": (5, 600),
+			# Plan 2026-10-02-001 U13.
+			"reveal_correction_value": (20, 3600),
 			"save_leave_type": (30, 3600),
 			"save_holiday_list": (30, 3600),
 			"save_shift_type": (30, 3600),
