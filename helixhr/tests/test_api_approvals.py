@@ -26,6 +26,7 @@ from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	MANAGER_USER,
 	OTHER_MANAGER_USER,
+	clear_open_leave,
 	ensure_holiday_list_assignment,
 	ensure_holiday_list_assignment_from,
 	ensure_hr_manager_user,
@@ -657,6 +658,8 @@ class TestLeaveApprovalIsNative(IntegrationTestCase):
 		methods = sorted(name for name in dir(self) if name.startswith("test_"))
 		self.leave_date = add_days(today(), 96 + 2 * methods.index(self.id().split(".")[-1]))
 		self._clear_leave_on(self.leave_date)
+		# U1 counts Open requests against the balance; earlier methods' stay.
+		clear_open_leave(self.employee_name)
 
 	def tearDown(self):
 		frappe.set_user("Administrator")

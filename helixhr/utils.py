@@ -189,6 +189,10 @@ def get_message_template(template_key):
 LEAVE_TYPE_EDITABLE_FIELDS = (
 	"leave_type_name",
 	"max_leaves_allowed",
+	# U2 / KTD2: the limit HRMS actually enforces on one request, and its
+	# overdraw switch. Widens P5-KTD12's list on purpose.
+	"max_continuous_days_allowed",
+	"allow_negative",
 	"is_carry_forward",
 	"is_lwp",
 	"helixhr_hr_approves",

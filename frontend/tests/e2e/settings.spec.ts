@@ -65,7 +65,7 @@ test('an HR identity reaches Settings; an employee has no nav entry and the serv
   await expect(page.getByText("You don't have access to this")).toBeVisible()
 })
 
-test('creating a usable leave type touches no more than the five named fields', async ({ page }, testInfo) => {
+test('creating a usable leave type touches no more than the seven named fields', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'hr', 'settings is an HR-only screen')
 
   await page.goto('/helixhr/settings')
@@ -74,10 +74,29 @@ test('creating a usable leave type touches no more than the five named fields', 
 
   const form = page.getByTestId('settings-leave-type-form')
   await expect(form).toBeVisible()
-  // P5-KTD12: exactly the named set -- name, maximum days, carry-forward,
-  // LWP, HR-approves. Counting inputs is what catches a "just one more
-  // field for convenience" regression that a screenshot would not.
-  await expect(form.locator('input, textarea, select')).toHaveCount(5)
+  // P5-KTD12: exactly the named set -- name, per-period allocation,
+  // longest single request (U2), allow-negative (U2), carry-forward, LWP,
+  // HR-approves. Counting inputs is what catches a "just one more field for
+  // convenience" regression that a screenshot would not.
+  await expect(form.locator('input, textarea, select')).toHaveCount(7)
+})
+
+test('U2: the longest-single-request limit saves and shows on the row', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'settings is an HR-only screen')
+
+  const name = `E2E U2 limit ${Date.now()}`
+  await page.goto('/helixhr/settings')
+  await page.getByTestId('settings-tab-leave-types').click()
+  await page.getByRole('button', { name: 'New leave type' }).click()
+
+  const form = page.getByTestId('settings-leave-type-form')
+  await form.getByLabel('Name').fill(name)
+  await form.getByLabel('Longest single request, in days').fill('3')
+  await page.getByRole('dialog').getByRole('button', { name: 'Save' }).click()
+  await expect(page.getByRole('dialog')).toBeHidden()
+
+  const row = page.getByTestId('settings-leave-type-row').filter({ hasText: name })
+  await expect(row).toContainText('at most 3 in one request')
 })
 
 test('P8-U5: the leave type editor is a dialog, titled with the row being edited, closed by Escape', async ({

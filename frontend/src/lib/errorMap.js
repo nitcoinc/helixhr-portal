@@ -31,6 +31,12 @@ const PATTERNS = [
     test: /there is no leave period/i,
     message: () => 'There is no leave calendar set up for these dates. Ask HR.',
   },
+  // U2 / R5: HRMS's max_continuous_days_allowed refusal links the leave type
+  // and may append "Reference: ..." links to the chained requests.
+  {
+    test: /leave of type .*? cannot be longer than\s*(\d+(?:\.\d+)?)/i,
+    message: (m) => `This leave type allows at most ${Number(m[1])} days in one request.`,
+  },
   {
     test: /total leave days is 0/i,
     message: () => 'This request has zero days. Check your start and end dates.',

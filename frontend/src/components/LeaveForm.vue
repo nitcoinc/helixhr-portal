@@ -126,6 +126,12 @@ const apply = createResource({
 
 const missingApprover = computed(() => !!context.data && !approver.value)
 
+/** The preview's one-sentence refusal (pending overdraw or the type's
+ * consecutive-days limit). Advisory: the server refuses the insert anyway. */
+const blockedReason = computed(() =>
+  preview.loading ? '' : preview.data?.blocked_reason || '',
+)
+
 /** Send is off until the request is describable: a type, both dates, and
  * somebody to send it to. A missing approver is the one that matters --
  * without this the form created a draft that HR Settings then refused, and
@@ -137,6 +143,7 @@ const canSubmit = computed(
     !!fromDate.value &&
     !!toDate.value &&
     !missingApprover.value &&
+    !blockedReason.value &&
     !apply.loading,
 )
 
@@ -318,6 +325,17 @@ async function submit() {
       role="alert"
     >
       {{ error }}
+    </p>
+
+    <!-- Always mounted so the live region announces the sentence when it
+         appears; sr-only while empty so it takes no space. -->
+    <p
+      class="text-sm text-ink-red-4"
+      :class="{ 'sr-only': !blockedReason }"
+      aria-live="polite"
+      data-testid="leave-blocked-reason"
+    >
+      {{ blockedReason }}
     </p>
 
     <div

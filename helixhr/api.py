@@ -56,6 +56,9 @@ from helixhr.events import (
 	_approver_user,
 	_enabled_users_with_role,
 	_is_hr,
+	backdated_leave_earliest,
+	backdated_leave_reason,
+	leave_overdraw,
 )
 
 # The routed roles that are *not* already unscoped HR access (P5-U5's own
@@ -2643,9 +2646,14 @@ def get_leave_day_count(leave_type, from_date, to_date, half_day=0, half_day_dat
 	`include_holiday` rule, and the first time the two disagreed the
 	employee would see one number and get another.
 
-	It is a *preview*, never a gate. The browser shows what comes back and
-	still sends the request; whether the leave is allowed is decided by
-	HRMS on insert, and a refusal there wins over anything shown here.
+	It is an *advisory gate*: HRMS and the validate rule
+	(`events.leave_application_validate`) decide. `blocked_reason` is the
+	one sentence the browser shows beside a disabled Send when the request
+	would start earlier than the backdated grace rule allows (R6), overdraw
+	once pending requests are counted (R1) or exceed the type's
+	consecutive-days limit; `earliest_start` is that grace date (None when
+	the caller is exempt). A refusal on insert still wins over
+	anything shown here.
 	"""
 	from hrms.hr.doctype.leave_application.leave_application import (
 		get_leave_balance_on,
@@ -2678,12 +2686,23 @@ def get_leave_day_count(leave_type, from_date, to_date, half_day=0, half_day_dat
 		skipped = sorted(holidays)
 
 	balance = flt(get_leave_balance_on(employee, leave_type, end))
+	overdraw = leave_overdraw(employee, leave_type, start, end, days)
+	pending = overdraw["pending"] if overdraw else 0.0
+	max_continuous = cint(frappe.db.get_value("Leave Type", leave_type, "max_continuous_days_allowed"))
+	earliest = backdated_leave_earliest(employee)
+	blocked_reason = backdated_leave_reason(employee, start) or (overdraw["reason"] if overdraw else None)
+	if not blocked_reason and max_continuous and days > max_continuous:
+		blocked_reason = _("{0} allows at most {1} days in one request.").format(leave_type, max_continuous)
 	return {
 		"total_leave_days": days,
 		"skipped": skipped,
 		"skipped_label": _skipped_label(skipped),
 		"balance": balance,
 		"balance_after": balance - days,
+		"pending": pending,
+		"max_continuous": max_continuous or None,
+		"earliest_start": str(earliest) if earliest else None,
+		"blocked_reason": blocked_reason,
 	}
 
 
@@ -6245,8 +6264,8 @@ def save_message_template(template_key, subject=None, body=None, is_enabled=None
 
 @frappe.whitelist(methods=["POST"])
 def save_leave_type(name, **fields):
-	"""Create or update a leave type through the five-field set P5-KTD12
-	names -- HRMS's own `validate()` still runs on `doc.save()` (P5-KTD15),
+	"""Create or update a leave type through the field set P5-KTD12
+	names (widened by U2) -- HRMS's own `validate()` still runs on `doc.save()` (P5-KTD15),
 	so a value HRMS itself would reject is rejected here too."""
 	rate_limit_per_user("save_leave_type")
 	name = (name or "").strip()

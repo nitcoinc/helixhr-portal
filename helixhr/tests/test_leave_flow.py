@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, getdate, today
@@ -14,9 +16,11 @@ from helixhr.api import (
 	get_my_leave_detail,
 	withdraw_my_leave,
 )
+from helixhr.events import backdated_grace_days, backdated_leave_earliest, backdated_leave_reason
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	MANAGER_USER,
+	clear_open_leave,
 	ensure_holiday_list_assignment,
 	ensure_hr_manager_user,
 	ensure_leave_allocation,
@@ -183,6 +187,7 @@ class TestPortalLeaveApi(IntegrationTestCase):
 		self.company = frappe.db.get_value("Employee", self.employee_name, "company")
 		ensure_holiday_list_assignment(self.company)
 		ensure_leave_allocation(self.employee_name, "Casual Leave", 30)
+		clear_open_leave(self.employee_name)
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
@@ -613,6 +618,7 @@ class TestLeaveStageAndOutcomes(IntegrationTestCase):
 		ensure_holiday_list_assignment(self.company)
 		ensure_leave_allocation(self.employee_name, "Casual Leave", 30)
 		self.hr_user = ensure_hr_manager_user()
+		clear_open_leave(self.employee_name)
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
@@ -913,3 +919,276 @@ class TestLeaveStageAndOutcomes(IntegrationTestCase):
 
 		withdraw_my_leave(mine["name"])
 		self.assertFalse(frappe.db.exists("Leave Application", mine["name"]))
+
+
+class TestPendingAwareBalance(IntegrationTestCase):
+	"""U1 (R1-R3). A request is refused when it does not fit the balance once
+	the employee's other Open, unsubmitted requests of that type are counted.
+
+	Each test uses its own Leave Type with `include_holiday` on, so every
+	calendar day counts as one day and no other suite's balance leaks in.
+	Dates: offsets 130-290, unique per test (HRMS refuses overlaps across
+	types) and clear of the other leave suites.
+	"""
+
+	def setUp(self):
+		self.employee_name, _, _, _ = make_test_employee_and_manager()
+		frappe.db.set_value("Employee", self.employee_name, "leave_approver", "Administrator")
+		ensure_holiday_list_assignment(frappe.db.get_value("Employee", self.employee_name, "company"))
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _type(self, suffix, leaves, **flags):
+		frappe.set_user("Administrator")
+		name = f"_Test U1 {suffix}"
+		if not frappe.db.exists("Leave Type", name):
+			frappe.get_doc(
+				{"doctype": "Leave Type", "leave_type_name": name, "include_holiday": 1, **flags}
+			).insert(ignore_permissions=True)
+		for row in frappe.get_all(
+			"Leave Application", filters={"employee": self.employee_name, "leave_type": name}, pluck="name"
+		):
+			doc = frappe.get_doc("Leave Application", row)
+			if doc.docstatus == 1:
+				doc.cancel()
+			frappe.delete_doc("Leave Application", row, force=True, ignore_permissions=True)
+		if leaves:
+			ensure_leave_allocation(self.employee_name, name, leaves)
+		return name
+
+	def _apply(self, leave_type, offset, days=1, **extra):
+		frappe.set_user(EMPLOYEE_USER)
+		doc = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": self.employee_name,
+				"leave_type": leave_type,
+				"from_date": add_days(today(), offset),
+				"to_date": add_days(today(), offset + days - 1),
+				"leave_approver": "Administrator",
+				**extra,
+			}
+		).insert()
+		frappe.set_user("Administrator")
+		return doc
+
+	def test_two_pending_requests_that_together_overdraw_are_refused(self):
+		leave_type = self._type("Overdraw", 3)
+		self._apply(leave_type, 130, days=2)
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self._apply(leave_type, 133, days=2)
+		self.assertIn("2 already waiting for approval", str(caught.exception))
+		self.assertIn("3 days left", str(caught.exception))
+
+	def test_a_request_that_fits_beside_the_pending_one_is_accepted(self):
+		leave_type = self._type("Fits", 3)
+		self._apply(leave_type, 136, days=2)
+		self.assertEqual(self._apply(leave_type, 139, days=1).status, "Open")
+
+	def test_half_days_count_as_half_against_the_balance(self):
+		leave_type = self._type("Half", 0.5)
+		first = self._apply(leave_type, 142, half_day=1, half_day_date=add_days(today(), 142))
+		self.assertEqual(first.total_leave_days, 0.5)
+		with self.assertRaises(frappe.ValidationError):
+			self._apply(leave_type, 144, half_day=1, half_day_date=add_days(today(), 144))
+
+	def test_allow_negative_and_lwp_types_are_never_refused_by_this_rule(self):
+		# HRMS refuses an allocation on an LWP type, so that one has none.
+		for suffix, leaves, flags, offset in (
+			("Negative", 1, {"allow_negative": 1}, 146),
+			("LWP", 0, {"is_lwp": 1}, 150),
+		):
+			leave_type = self._type(suffix, leaves, **flags)
+			self._apply(leave_type, offset)
+			self.assertEqual(self._apply(leave_type, offset + 2).status, "Open")
+
+	def _overdrawn_pair(self, suffix, offset):
+		"""Open A (2 days) and Open B whose stored total is bumped to 2, so A
+		no longer fits beside B -- the state a shrunken allocation leaves."""
+		leave_type = self._type(suffix, 3)
+		a = self._apply(leave_type, offset, days=2)
+		b = self._apply(leave_type, offset + 3, days=1)
+		frappe.db.set_value("Leave Application", b.name, "total_leave_days", 2)
+		return a
+
+	def test_the_approvers_submit_is_not_gated_by_the_pending_rule(self):
+		a = self._overdrawn_pair("Submit", 155)
+		doc = frappe.get_doc("Leave Application", a.name)
+		doc.status = "Approved"
+		doc.submit()
+		self.assertEqual(doc.docstatus, 1)
+
+	def test_a_request_does_not_count_itself_on_an_unrelated_edit(self):
+		a = self._overdrawn_pair("Self", 161)
+		frappe.set_user(EMPLOYEE_USER)
+		doc = frappe.get_doc("Leave Application", a.name)
+		doc.description = "Updated reason"
+		doc.save()
+		self.assertEqual(doc.description, "Updated reason")
+
+	def test_a_date_change_reruns_the_rule(self):
+		a = self._overdrawn_pair("Dates", 167)
+		frappe.set_user(EMPLOYEE_USER)
+		doc = frappe.get_doc("Leave Application", a.name)
+		doc.from_date, doc.to_date = add_days(today(), 172), add_days(today(), 173)
+		with self.assertRaises(frappe.ValidationError):
+			doc.save()
+
+	def test_a_sent_back_request_resent_into_an_overdraw_is_refused(self):
+		leave_type = self._type("Resend", 3)
+		a = self._apply(leave_type, 176, days=2)
+		sent_back = frappe.get_doc("Leave Application", a.name)
+		sent_back.status = "Rejected"
+		sent_back.save()
+		self._apply(leave_type, 179, days=2)
+
+		resent = frappe.get_doc("Leave Application", a.name)
+		resent.status = "Open"
+		with self.assertRaises(frappe.ValidationError):
+			resent.save()
+
+	def test_pending_counts_across_the_whole_allocation_period(self):
+		leave_type = self._type("Period", 3)
+		self._apply(leave_type, 200, days=2)
+		with self.assertRaises(frappe.ValidationError):
+			self._apply(leave_type, 290, days=2)
+
+	def test_the_preview_reports_pending_and_the_blocked_reason(self):
+		leave_type = self._type("Preview", 3)
+		self._apply(leave_type, 185, days=2)
+		frappe.set_user(EMPLOYEE_USER)
+		start, end = add_days(today(), 188), add_days(today(), 189)
+		result = get_leave_day_count(leave_type, start, end)
+		self.assertEqual(result["pending"], 2)
+		self.assertIn("2 already waiting for approval", result["blocked_reason"])
+
+		self.assertIsNone(get_leave_day_count(leave_type, start, start)["blocked_reason"])
+
+	def test_the_preview_names_the_consecutive_days_limit(self):
+		leave_type = self._type("Limit", 10)
+		frappe.db.set_value("Leave Type", leave_type, "max_continuous_days_allowed", 2)
+		frappe.set_user(EMPLOYEE_USER)
+		result = get_leave_day_count(leave_type, add_days(today(), 140), add_days(today(), 142))
+		self.assertEqual(result["max_continuous"], 2)
+		self.assertEqual(result["blocked_reason"], f"{leave_type} allows at most 2 days in one request.")
+
+
+class TestBackdatedGrace(IntegrationTestCase):
+	"""U3 (R6): an employee may start leave up to N working days back; HR
+	Manager and the configured exempt role are unlimited; the rule runs on
+	insert and on a start-date change, never on approver submit.
+
+	Dates: offsets -1 to -12, the only past window any leave suite books;
+	setUp clears it (cancelling anything approved) because nothing rolls
+	back between methods here. `_holiday_dates` is patched where the walk's
+	answer must not depend on which weekday the suite runs.
+	"""
+
+	def setUp(self):
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		frappe.db.set_value("Employee", self.employee_name, "leave_approver", MANAGER_USER)
+		ensure_leave_approver_role(MANAGER_USER)
+		self.company = frappe.db.get_value("Employee", self.employee_name, "company")
+		ensure_holiday_list_assignment(self.company)
+		ensure_leave_allocation(self.employee_name, "Casual Leave", 30)
+		clear_open_leave(self.employee_name)
+		for name in frappe.get_all(
+			"Leave Application",
+			filters={
+				"employee": self.employee_name,
+				"from_date": ["<=", add_days(today(), -1)],
+				"to_date": [">=", add_days(today(), -12)],
+				"docstatus": ["<", 2],
+			},
+			pluck="name",
+		):
+			doc = frappe.get_doc("Leave Application", name)
+			if doc.docstatus == 1:
+				doc.cancel()
+			frappe.delete_doc("Leave Application", name, force=True, ignore_permissions=True)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _conf(self, **values):
+		return patch.dict(frappe.conf, {f"helixhr_backdated_leave_{k}": v for k, v in values.items()})
+
+	def _apply(self, offset):
+		day = add_days(today(), offset)
+		return apply_for_leave(leave_type="Casual Leave", from_date=day, to_date=day)
+
+	# --- the working-day walk ------------------------------------------------
+
+	def test_a_weekend_is_not_counted_so_friday_is_within_one_day_of_monday(self):
+		monday = getdate("2026-09-28")
+		weekend = {"2026-09-26", "2026-09-27"}
+		frappe.set_user(EMPLOYEE_USER)
+		with self._conf(grace_days=1), patch("helixhr.api._holiday_dates", return_value=weekend):
+			self.assertEqual(backdated_leave_earliest(self.employee_name, monday), getdate("2026-09-25"))
+			self.assertIsNone(backdated_leave_reason(self.employee_name, "2026-09-25", monday))
+			reason = backdated_leave_reason(self.employee_name, "2026-09-24", monday)
+		self.assertIn("Leave can start no earlier than", reason)
+		self.assertIn("ask HR", reason)
+
+	def test_no_holiday_list_counts_calendar_days(self):
+		monday = getdate("2026-09-28")
+		frappe.set_user(EMPLOYEE_USER)
+		with self._conf(grace_days=1), patch("helixhr.api._holiday_dates", return_value=None):
+			self.assertEqual(backdated_leave_earliest(self.employee_name, monday), getdate("2026-09-27"))
+			self.assertIsNone(backdated_leave_reason(self.employee_name, "2026-09-27", monday))
+			self.assertTrue(backdated_leave_reason(self.employee_name, "2026-09-26", monday))
+
+	def test_grace_defaults_to_one_day(self):
+		with patch.dict(frappe.conf):
+			frappe.conf.pop("helixhr_backdated_leave_grace_days", None)
+			self.assertEqual(backdated_grace_days(), 1)
+
+	# --- insert, edit, approve -----------------------------------------------
+
+	def test_yesterday_is_accepted_and_two_days_ago_is_refused(self):
+		frappe.set_user(EMPLOYEE_USER)
+		with self._conf(grace_days=1), patch("helixhr.api._holiday_dates", return_value=None):
+			self.assertTrue(self._apply(-1)["name"])
+			with self.assertRaises(frappe.ValidationError) as caught:
+				self._apply(-3)
+		self.assertIn("Leave can start no earlier than", str(caught.exception))
+
+	def test_an_exempt_role_files_ten_days_back(self):
+		frappe.set_user(EMPLOYEE_USER)
+		with self._conf(grace_days=1, exempt_role="Employee"):
+			self.assertTrue(self._apply(-10)["name"])
+
+	def test_an_unrelated_edit_on_an_old_open_request_does_not_trigger_the_rule(self):
+		frappe.set_user(EMPLOYEE_USER)
+		with self._conf(grace_days=30):
+			name = self._apply(-8)["name"]
+		with self._conf(grace_days=1):
+			doc = frappe.get_doc("Leave Application", name)
+			doc.description = "Edited later"
+			doc.save()
+			doc.reload()
+			doc.from_date = doc.to_date = add_days(today(), -9)
+			with self.assertRaises(frappe.ValidationError):
+				doc.save()
+
+	def test_an_approver_submits_a_request_after_the_grace_window_passed(self):
+		frappe.set_user(EMPLOYEE_USER)
+		with self._conf(grace_days=30):
+			name = self._apply(-6)["name"]
+		with self._conf(grace_days=1):
+			frappe.set_user(MANAGER_USER)
+			doc = frappe.get_doc("Leave Application", name)
+			_assert_may_act_on(doc)
+			_act_on_leave_application(doc, "Approve")
+		self.assertEqual(frappe.db.get_value("Leave Application", name, "docstatus"), 1)
+
+	# --- the preview ---------------------------------------------------------
+
+	def test_the_preview_blocks_a_too_old_start_with_the_grace_sentence(self):
+		frappe.set_user(EMPLOYEE_USER)
+		day = add_days(today(), -5)
+		with self._conf(grace_days=1), patch("helixhr.api._holiday_dates", return_value=None):
+			result = get_leave_day_count("Casual Leave", day, day)
+		self.assertEqual(result["earliest_start"], str(add_days(today(), -1)))
+		self.assertIn("Leave can start no earlier than", result["blocked_reason"])

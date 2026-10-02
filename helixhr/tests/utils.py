@@ -694,6 +694,21 @@ def ensure_leave_approver_role(user):
 		user_doc.save(ignore_permissions=True)
 
 
+def clear_open_leave(employee, leave_type="Casual Leave"):
+	"""Delete this employee's Open, unsubmitted requests of one type.
+
+	U1's pending-aware rule counts them against the balance, and this run's
+	earlier methods leave theirs behind (no per-method rollback here), so a
+	suite booking several one-day requests would otherwise overdraw itself.
+	"""
+	for name in frappe.get_all(
+		"Leave Application",
+		filters={"employee": employee, "leave_type": leave_type, "status": "Open", "docstatus": 0},
+		pluck="name",
+	):
+		frappe.delete_doc("Leave Application", name, force=True, ignore_permissions=True)
+
+
 def ensure_leave_allocation(employee, leave_type, leaves):
 	"""A submitted Leave Allocation covering this year and the next -- Leave
 	Application only counts an allocation toward balance once it's

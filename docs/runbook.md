@@ -336,6 +336,27 @@ while writing `test_leave_flow.py` and `LeaveForm.vue`:
   copied the standard rows in through `frappe.permissions.add_permission`. Apply deltas in a
   patch on top of `setup_custom_perms` instead (P2-U1).
 
+## Backdated leave: the HelixHR grace rule, not HRMS's restriction (plan 2026-10-02-001 U3)
+
+An employee may start leave up to N **working** days in the past (holiday-list dates are
+skipped, so "sick Friday, applied Monday" fits N=1). With no resolvable holiday list the walk
+counts calendar days instead. "Today" is `getdate()` in the system timezone.
+
+- Site config, not a Single: `helixhr_backdated_leave_grace_days` (default `1`) and
+  `helixhr_backdated_leave_exempt_role` (optional). HR Manager and that role are unlimited.
+  `bench --site <site> set-config -p helixhr_backdated_leave_grace_days 2`.
+- The rule (`events._refuse_backdated_past_grace`) runs on insert and on a From-date change
+  only. An approver submitting a late request, or any other edit, is never blocked.
+- Keep HR Settings `restrict_backdated_leave_application` **off**. HRMS checks the session
+  user on every validate, approver submit included, so it would stop managers approving late
+  requests. Preflight "Backdated leave grace" FAILs when it is on, and when the exempt role
+  does not exist; its PASS line shows the effective N.
+- The preview (`get_leave_day_count`) returns `earliest_start` and the same sentence, so Send
+  is disabled before the insert would refuse: "Leave can start no earlier than {date}. For
+  older dates, ask HR."
+- **Sent back with wrong dates, now past grace:** the employee cannot move the start further
+  back. They withdraw the request and ask HR, who files it in Desk (HR Manager is exempt).
+
 ## Employee gets locked/HR-only fields from more than one place (U5 follow-up)
 
 `helixhr/fixtures/property_setter.json`'s permlevel pass only queried the `DocField` doctype,
