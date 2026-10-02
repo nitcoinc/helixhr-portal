@@ -95,6 +95,23 @@ describe('toPlainLeaveError', () => {
 
 // P2-U5. The two messages the leave lifecycle added, plus the promise that
 // the portal's own plain refusals survive the map untouched.
+describe('U2 consecutive-days refusal', () => {
+  it('turns the linked HRMS sentence and its references into one plain line', () => {
+    const raw =
+      'Leave of type <a href="/app/leave-type/Casual Leave">Casual Leave</a> cannot be longer than 3.' +
+      '<br><br>Reference: <a href="/app/leave-application/HR-LAP-1">HR-LAP-1</a>'
+    expect(toPlainLeaveError({ messages: [raw] })).toBe(
+      'This leave type allows at most 3 days in one request.',
+    )
+  })
+
+  it('keeps a fractional limit as written', () => {
+    expect(
+      toPlainLeaveError({ messages: ['Leave of type Sick cannot be longer than 2.5.'] }),
+    ).toBe('This leave type allows at most 2.5 days in one request.')
+  })
+})
+
 describe('P2-U5 leave lifecycle messages', () => {
   it('names the next step when no approver is set', () => {
     expect(

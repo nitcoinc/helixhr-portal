@@ -6258,8 +6258,8 @@ def save_message_template(template_key, subject=None, body=None, is_enabled=None
 
 @frappe.whitelist(methods=["POST"])
 def save_leave_type(name, **fields):
-	"""Create or update a leave type through the five-field set P5-KTD12
-	names -- HRMS's own `validate()` still runs on `doc.save()` (P5-KTD15),
+	"""Create or update a leave type through the field set P5-KTD12
+	names (widened by U2) -- HRMS's own `validate()` still runs on `doc.save()` (P5-KTD15),
 	so a value HRMS itself would reject is rejected here too."""
 	rate_limit_per_user("save_leave_type")
 	name = (name or "").strip()

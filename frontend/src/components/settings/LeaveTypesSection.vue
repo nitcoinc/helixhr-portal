@@ -2,8 +2,10 @@
 import { computed, reactive, ref } from 'vue'
 import { createResource, Dialog, FormControl, Button } from 'frappe-ui'
 
-// P5-KTD12: exactly the five fields `LEAVE_TYPE_EDITABLE_FIELDS` names in
-// helixhr/utils.py -- not the thirty HRMS ships on this form.
+// P5-KTD12: exactly the fields `LEAVE_TYPE_EDITABLE_FIELDS` names in
+// helixhr/utils.py -- not the thirty HRMS ships on this form. U2 added the
+// two HRMS actually enforces per request: the consecutive-days limit and
+// allow_negative.
 const props = defineProps({
   leaveTypes: { type: Array, required: true },
 })
@@ -13,6 +15,8 @@ const editing = ref(null)
 const form = reactive({
   leave_type_name: '',
   max_leaves_allowed: 0,
+  max_continuous_days_allowed: 0,
+  allow_negative: false,
   is_carry_forward: false,
   is_lwp: false,
   helixhr_hr_approves: false,
@@ -40,6 +44,8 @@ function startCreate() {
   Object.assign(form, {
     leave_type_name: '',
     max_leaves_allowed: 0,
+    max_continuous_days_allowed: 0,
+    allow_negative: false,
     is_carry_forward: false,
     is_lwp: false,
     helixhr_hr_approves: false,
@@ -52,6 +58,8 @@ function startEdit(row) {
   Object.assign(form, {
     leave_type_name: row.leave_type_name,
     max_leaves_allowed: row.max_leaves_allowed || 0,
+    max_continuous_days_allowed: row.max_continuous_days_allowed || 0,
+    allow_negative: !!row.allow_negative,
     is_carry_forward: !!row.is_carry_forward,
     is_lwp: !!row.is_lwp,
     helixhr_hr_approves: !!row.helixhr_hr_approves,
@@ -74,6 +82,8 @@ async function submit() {
       name: isNew ? form.leave_type_name : editing.value,
       leave_type_name: form.leave_type_name,
       max_leaves_allowed: form.max_leaves_allowed,
+      max_continuous_days_allowed: form.max_continuous_days_allowed,
+      allow_negative: form.allow_negative ? 1 : 0,
       is_carry_forward: form.is_carry_forward ? 1 : 0,
       is_lwp: form.is_lwp ? 1 : 0,
       helixhr_hr_approves: form.helixhr_hr_approves ? 1 : 0,
@@ -112,7 +122,10 @@ async function submit() {
             {{ row.leave_type_name }}
           </p>
           <p class="truncate text-sm text-ink-gray-6">
-            Up to {{ row.max_leaves_allowed || 0 }} days
+            Up to {{ row.max_leaves_allowed || 0 }} days per period
+            <template v-if="row.max_continuous_days_allowed">
+              · at most {{ row.max_continuous_days_allowed }} in one request
+            </template>
           </p>
         </div>
         <Button
@@ -147,7 +160,13 @@ async function submit() {
           <FormControl
             v-model="form.max_leaves_allowed"
             type="number"
-            label="Maximum days allowed"
+            label="Most days allocated per leave period"
+          />
+          <FormControl
+            v-model="form.max_continuous_days_allowed"
+            type="number"
+            label="Longest single request, in days"
+            description="0 = no limit."
           />
 
           <!-- P8-U5: grouped under one subheading, each label shortened to
@@ -164,6 +183,12 @@ async function submit() {
               type="checkbox"
               label="Carry forward"
               description="Unused days roll into the next leave period instead of expiring."
+            />
+            <FormControl
+              v-model="form.allow_negative"
+              type="checkbox"
+              label="Allow balance to go below zero"
+              description="A request larger than the balance is sent with a warning instead of refused."
             />
             <FormControl
               v-model="form.is_lwp"

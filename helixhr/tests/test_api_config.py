@@ -18,6 +18,8 @@ from helixhr.api import (
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	HR_MANAGER_EMPLOYEE_USER,
+	ensure_holiday_list_assignment,
+	ensure_leave_allocation,
 	make_test_employee_and_manager,
 	make_test_hr_manager_employee,
 )
@@ -165,7 +167,15 @@ class TestConfigApi(IntegrationTestCase):
 		leave_type = config["leave_types"][0]
 		self.assertEqual(
 			set(leave_type) - {"name"},
-			{"leave_type_name", "max_leaves_allowed", "is_carry_forward", "is_lwp", "helixhr_hr_approves"},
+			{
+				"leave_type_name",
+				"max_leaves_allowed",
+				"max_continuous_days_allowed",
+				"allow_negative",
+				"is_carry_forward",
+				"is_lwp",
+				"helixhr_hr_approves",
+			},
 		)
 
 	# --- P8-U6: a Desk list-view link per section ---------------------------
@@ -369,3 +379,84 @@ class TestConfigApi(IntegrationTestCase):
 		with self.assertRaises(frappe.RateLimitExceededError):
 			save_message_template("request_arrival", subject="One too many")
 		reset_rate_limit("save_message_template", HR_MANAGER_EMPLOYEE_USER)
+
+
+class TestLeaveTypeLimits(IntegrationTestCase):
+	"""U2 (R4): the two fields HRMS really enforces, saved from the portal."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.employee_name, _, _, _ = make_test_employee_and_manager()
+		make_test_hr_manager_employee()
+		frappe.db.set_value("Employee", self.employee_name, "leave_approver", "Administrator")
+		ensure_holiday_list_assignment(frappe.db.get_value("Employee", self.employee_name, "company"))
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _type(self, suffix, leaves):
+		name = f"_Test U2 {suffix}"
+		if not frappe.db.exists("Leave Type", name):
+			frappe.get_doc(
+				{"doctype": "Leave Type", "leave_type_name": name, "include_holiday": 1}
+			).insert(ignore_permissions=True)
+		for row in frappe.get_all(
+			"Leave Application", filters={"employee": self.employee_name, "leave_type": name}, pluck="name"
+		):
+			frappe.delete_doc("Leave Application", row, force=True, ignore_permissions=True)
+		ensure_leave_allocation(self.employee_name, name, leaves)
+		return name
+
+	def _apply(self, leave_type, offset, days):
+		frappe.set_user(EMPLOYEE_USER)
+		try:
+			return frappe.get_doc(
+				{
+					"doctype": "Leave Application",
+					"employee": self.employee_name,
+					"leave_type": leave_type,
+					"from_date": add_days(today(), offset),
+					"to_date": add_days(today(), offset + days - 1),
+					"leave_approver": "Administrator",
+				}
+			).insert()
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_a_saved_consecutive_limit_refuses_a_longer_request(self):
+		leave_type = self._type("Limit", 10)
+		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+		saved = save_leave_type(leave_type, max_continuous_days_allowed=3)
+		self.assertEqual(saved["max_continuous_days_allowed"], 3)
+
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self._apply(leave_type, 160, days=4)
+		# The HRMS sentence U2's errorMap pattern maps to the plain one.
+		self.assertIn("cannot be longer than 3", str(caught.exception))
+		self.assertEqual(self._apply(leave_type, 170, days=3).status, "Open")
+
+	def test_allow_negative_saved_on_turns_an_overdraw_into_a_warning(self):
+		leave_type = self._type("Negative", 1)
+		with self.assertRaises(frappe.ValidationError):
+			self._apply(leave_type, 175, days=3)
+
+		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+		save_leave_type(leave_type, allow_negative=1)
+		frappe.clear_messages()
+		doc = self._apply(leave_type, 175, days=3)
+		self.assertEqual(doc.total_leave_days, 3)
+		self.assertTrue(any("Warning" in str(m) for m in frappe.get_message_log()))
+
+	def test_an_unknown_field_is_still_dropped_beside_the_new_ones(self):
+		leave_type = self._type("Allowlist", 1)
+		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+		save_leave_type(leave_type, max_continuous_days_allowed=5, is_optional_leave=1)
+		self.assertEqual(frappe.db.get_value("Leave Type", leave_type, "max_continuous_days_allowed"), 5)
+		self.assertEqual(frappe.db.get_value("Leave Type", leave_type, "is_optional_leave"), 0)
+
+	def test_a_non_hr_caller_cannot_save_the_new_fields(self):
+		leave_type = self._type("Perm", 1)
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.PermissionError):
+			save_leave_type(leave_type, allow_negative=1)
+		self.assertEqual(frappe.db.get_value("Leave Type", leave_type, "allow_negative"), 0)
