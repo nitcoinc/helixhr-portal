@@ -5474,7 +5474,7 @@ def _record_hr_acting_for_approver(doc, action):
 	):
 		return
 	approver_name = frappe.utils.get_fullname(approver)
-	doc.add_comment("Comment", _("Decided by HR for {0}.").format(approver_name))
+	doc.add_comment("Info", _("Decided by HR for {0}.").format(approver_name))
 	frappe.get_doc(
 		{
 			"doctype": "Notification Log",

@@ -2194,7 +2194,8 @@ class TestHrSeesStalledManagerLeave(IntegrationTestCase):
 		self.assertEqual(frappe.db.get_value("Leave Application", leave, "docstatus"), 1)
 		comments = frappe.get_all(
 			"Comment",
-			filters={"reference_doctype": "Leave Application", "reference_name": leave},
+			# Info, not Comment: a Comment would be read back as the approver's reason.
+			filters={"reference_doctype": "Leave Application", "reference_name": leave, "comment_type": "Info"},
 			pluck="content",
 		)
 		self.assertTrue(any("Decided by HR for" in (text or "") for text in comments), comments)
