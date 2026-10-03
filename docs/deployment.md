@@ -303,28 +303,32 @@ recent requests, shift, holiday list, manager, joining date and status. It
 writes nothing, and a field above Employee permlevel 0 — salary, bank
 details, tax — never reaches this projection.
 
-`/reports` hands HR a short, deliberately curated list of Frappe's own
-reports, pre-filtered to a person when opened from their page — never a
-report the portal re-implements, and never an export the portal performs
-itself. The list is `helixhr.utils.ADMIN_REPORTS`, a **named constant** in
-the same style as the `*_EDITABLE_FIELDS` sets above:
+`/reports` runs a curated catalog of reports in the portal and exports them
+as CSV, Excel or PDF (plan 2026-10-04-001). The catalog is `CATALOG` in
+`helixhr/reports.py`; adding a report is a release. Who may run or export
+each one is the **Report access** matrix in Settings (`HelixHR Report
+Access`, one row per report key; no row means deny), on top of HR Manager,
+System Manager and `HelixHR Report Manager`, which see every report in their
+company scope. Wrapped HRMS reports run their own module as Administrator,
+only after the portal's access check, with company forced. Payroll and the
+money-bearing Timesheet reports are excluded; `check_curated_reports` FAILs
+when a wrapped report is missing, disabled, not a standard Script Report, or
+deny-listed, and WARNs when one has `prepared_report` on. Desk access to the
+same reports is unchanged: Frappe's Report roles still govern it.
 
-```
-Employee Leave Balance, Employee Leave Balance Summary,
-Monthly Attendance Sheet, Shift Attendance, Leave Ledger,
-Employee Information, Employee Exits
-```
+**Background exports need workers.** An export over the inline cap is queued
+on the `long` RQ queue and written by a worker; with no worker on `long` it
+sits **Queued** forever (see the runbook). Production must run
+`bench worker` (or the `queue-long` container) and the scheduler, which also
+expires export files after 7 days. PDF exports need wkhtmltopdf with patched
+Qt (`check_pdf_generator`). The Employee hours utilization report needs
+**HR Settings → Standard Working Hours** set, or HRMS refuses to run it.
 
-Payroll reports are excluded on purpose — this list does not route HR into
-payroll, and adding one here is a deliberate scope decision, not a
-convenience. `preflight.py`'s `check_curated_reports` FAILs when a name here
-is no longer installed on the site, or is no longer readable as a report by
-HR Manager or System Manager — both are the loud version of a link that
-would otherwise just go dead. A Desk link (in the person view, and behind
-every report entry) is offered only to a caller who can actually reach
-Desk — a System User holding a role with `desk_access` — never merely
-because they hold an HR role; the two are correlated on this bench today but
-`can_open_desk` does not assume they stay that way.
+A Desk link (in the person view, and behind every wrapped report) is offered
+only to a caller who can actually reach Desk — a System User holding a role
+with `desk_access` — never merely because they hold an HR role; the two are
+correlated on this bench today but `can_open_desk` does not assume they stay
+that way.
 
 ### An anonymous install ping, off until an operator turns it on
 
