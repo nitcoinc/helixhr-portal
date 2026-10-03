@@ -24,7 +24,13 @@
   "picked_up_on",
   "replied_on",
   "closed_on",
-  "client_operation_key"
+  "client_operation_key",
+  "section_break_correction",
+  "correction_field",
+  "correction_current_masked",
+  "correction_proposed_masked",
+  "correction_current",
+  "correction_proposed"
  ],
  "fields": [
   {
@@ -155,12 +161,61 @@
    "read_only": 1,
    "set_only_once": 1,
    "unique": 1
+  },
+  {
+   "depends_on": "correction_field",
+   "fieldname": "section_break_correction",
+   "fieldtype": "Section Break",
+   "label": "Correction"
+  },
+  {
+   "fieldname": "correction_field",
+   "fieldtype": "Select",
+   "label": "Field to correct",
+   "no_copy": 1,
+   "options": "\nbank_name\nbank_ac_no\niban",
+   "read_only": 1,
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "correction_current_masked",
+   "fieldtype": "Data",
+   "label": "Current value",
+   "no_copy": 1,
+   "read_only": 1,
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "correction_proposed_masked",
+   "fieldtype": "Data",
+   "label": "Proposed value",
+   "no_copy": 1,
+   "read_only": 1,
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "correction_current",
+   "fieldtype": "Password",
+   "hidden": 1,
+   "label": "Current value (encrypted)",
+   "no_copy": 1,
+   "read_only": 1,
+   "set_only_once": 1
+  },
+  {
+   "fieldname": "correction_proposed",
+   "fieldtype": "Password",
+   "hidden": 1,
+   "label": "Proposed value (encrypted)",
+   "no_copy": 1,
+   "read_only": 1,
+   "set_only_once": 1
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-09-05 12:00:00.000000",
+ "modified": "2026-10-03 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "HelixHR",
  "name": "HR Request",

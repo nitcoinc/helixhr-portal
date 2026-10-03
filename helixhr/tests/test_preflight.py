@@ -6,7 +6,11 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, today
 
 from helixhr import preflight
-from helixhr.tests.utils import EMPLOYEE_USER, make_test_employee_and_manager
+from helixhr.tests.utils import (
+	EMPLOYEE_USER,
+	ensure_notification_manager_user,
+	make_test_employee_and_manager,
+)
 
 
 class TestPreflight(IntegrationTestCase):
@@ -137,6 +141,34 @@ class TestPreflight(IntegrationTestCase):
 		self.assertEqual(result["status"], preflight.FAIL)
 		self.assertIn("hook", result["detail"])
 
+	def test_notification_manager_role_warns_when_nobody_holds_it(self):
+		"""Plan 2026-10-02-001 U7."""
+		real_get_all = frappe.get_all
+
+		def _no_holders(doctype, *args, **kwargs):
+			if doctype == "Has Role":
+				return []
+			return real_get_all(doctype, *args, **kwargs)
+
+		with patch.object(preflight.frappe, "get_all", side_effect=_no_holders):
+			result = preflight.check_notification_manager_role()
+		self.assertEqual(result["status"], preflight.WARN)
+
+		ensure_notification_manager_user()
+		self.assertEqual(preflight.check_notification_manager_role()["status"], preflight.PASS)
+
+		real_get_value = frappe.db.get_value
+
+		def _desk_role(doctype, filters=None, *args, **kwargs):
+			if doctype == "Role" and filters == preflight.NOTIFICATION_MANAGER:
+				return frappe._dict(desk_access=1, is_custom=0)
+			return real_get_value(doctype, filters, *args, **kwargs)
+
+		with patch.object(preflight.frappe.db, "get_value", side_effect=_desk_role):
+			result = preflight.check_notification_manager_role()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("desk_access", result["detail"])
+
 	def test_no_role_this_app_grants_holds_report_permission_on_timesheet(self):
 		"""P7-U8 / R16: the standing guard, not `check_delivery_manager_role`'s
 		own narrower one -- grant `report` on Timesheet to `IT Team` (a role
@@ -215,13 +247,6 @@ class TestPreflight(IntegrationTestCase):
 			("Workflow State", "Sent Back"),
 			("Workflow Action Master", "Send Back"),
 			("Workflow Action Master", "Send to HR"),
-			# P4-U3 / P4-KTD9: HR is told a request reached its queue by
-			# these four and by nothing in code, so a missing one is a queue
-			# nobody is watching.
-			("Notification", "HelixHR Leave Sent To HR"),
-			("Notification", "HelixHR New Leave For HR"),
-			("Notification", "HelixHR Timesheet Sent To HR"),
-			("Notification", "HelixHR Attendance Request Sent To HR"),
 		):
 
 			def _exists(doctype, name=None, *args, _absent=absent, **kwargs):
@@ -253,6 +278,37 @@ class TestPreflight(IntegrationTestCase):
 				self.assertIn(name, result["detail"])
 			finally:
 				frappe.db.set_value("Notification", name, "enabled", original)
+
+	def test_retired_hr_email_notifications_are_gone_and_fail_when_re_created(self):
+		"""Plan 2026-10-02-001 U9: the four HR-queue email fixtures are gone
+		after migrate, and one coming back is a FAIL naming it."""
+		from helixhr.patches.v1_0.retire_hr_email_notifications import RETIRED_NOTIFICATIONS
+
+		for name in RETIRED_NOTIFICATIONS:
+			self.assertFalse(frappe.db.exists("Notification", name), msg=name)
+		self.assertEqual(preflight.check_retired_hr_email_notifications()["status"], preflight.PASS)
+
+		real_exists = frappe.db.exists
+
+		def _exists(doctype, name=None, *args, **kwargs):
+			if (doctype, name) == ("Notification", RETIRED_NOTIFICATIONS[0]):
+				return name
+			return real_exists(doctype, name, *args, **kwargs)
+
+		with patch.object(frappe.db, "exists", side_effect=_exists):
+			result = preflight.check_retired_hr_email_notifications()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn(RETIRED_NOTIFICATIONS[0], result["detail"])
+
+	def test_hrms_leave_notification_fails_when_on(self):
+		"""Plan 2026-10-02-001 R21: HRMS's own leave mail is off after
+		migrate, and a raw re-enable (which skips `validate`) is a FAIL."""
+		self.assertEqual(preflight.check_hrms_leave_notification()["status"], preflight.PASS)
+		frappe.db.set_single_value("HR Settings", "send_leave_notification", 1)
+		try:
+			self.assertEqual(preflight.check_hrms_leave_notification()["status"], preflight.FAIL)
+		finally:
+			frappe.db.set_single_value("HR Settings", "send_leave_notification", 0)
 
 	def test_hr_request_workflow_state_order_fails_when_open_is_not_first(self):
 		"""P5-KTD4: `Open` not being `states[0]` throws on every insert, not
@@ -1186,11 +1242,9 @@ class TestPreflightMailAndHRQueue(IntegrationTestCase):
 		self.assertIn(account, result["detail"])
 
 	def test_a_site_with_no_default_outgoing_account_fails(self):
-		"""FAIL, not WARN: the HR-queue notifications send from inside the
-		save that escalates a request, so with no account Send to HR is
-		refused outright, and so is applying for an HR-approves leave type.
-		The detail has to name both refusals, not just the missing account.
-		"""
+		"""FAIL, not WARN: since plan 2026-10-02-001 U9 a send failure is
+		logged rather than refusing the save, so with no account every
+		portal email silently goes nowhere. The detail says so."""
 		from unittest.mock import patch
 
 		from helixhr.preflight import FAIL, check_outgoing_email
@@ -1200,8 +1254,7 @@ class TestPreflightMailAndHRQueue(IntegrationTestCase):
 
 		self.assertEqual(result["status"], FAIL)
 		self.assertIn("Email Account", result["detail"])
-		self.assertIn("Send to HR", result["detail"])
-		self.assertIn("HR-approves leave type", result["detail"])
+		self.assertIn("no portal email is sent", result["detail"])
 
 	def test_an_hr_manager_scoped_to_their_own_employee_is_named(self):
 		"""P4-R11 carry-forward: a User Permission on Employee beats HR

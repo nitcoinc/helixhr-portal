@@ -32,7 +32,9 @@ def after_install():
 	from helixhr.patches.v1_0 import (
 		apply_permission_deltas,
 		migrate_celebration_reminders,
+		migrate_message_templates_to_jinja,
 		report_unsubmitted_approved_leave,
+		retire_hr_email_notifications,
 		retire_request_notifications,
 		route_it_asset_requests,
 		seed_celebration_templates,
@@ -40,19 +42,24 @@ def after_install():
 		seed_profile_correction_category,
 		seed_request_categories,
 		turn_off_hrms_celebration_senders,
+		turn_off_hrms_leave_notification,
 	)
 
 	report_unsubmitted_approved_leave.execute()
 	seed_celebration_templates.execute()
 	seed_message_templates.execute()
+	# U8: the seed still writes the legacy {token} wording; convert it.
+	migrate_message_templates_to_jinja.execute()
 	seed_request_categories.execute()
 	seed_profile_correction_category.execute()
 	route_it_asset_requests.execute()
 	retire_request_notifications.execute()
+	retire_hr_email_notifications.execute()
 	apply_permission_deltas.execute()
 	# P8-U10: after seed_celebration_templates, not before -- reads nothing
 	# from it, but keeps the two celebration-related patches in the order
 	# a reader would expect.
 	migrate_celebration_reminders.execute()
 	turn_off_hrms_celebration_senders.execute()
+	turn_off_hrms_leave_notification.execute()
 	frappe.db.commit()  # nosemgrep

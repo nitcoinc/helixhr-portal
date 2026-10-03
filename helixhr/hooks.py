@@ -86,9 +86,12 @@ website_route_rules = [
 
 fixtures = [
 	{"dt": "Property Setter", "filters": [["module", "=", "HelixHR"]]},
-	# P5-U2 / P7-U1: both are portal roles, so their fixtures pin
-	# desk_access=0 rather than inheriting Frappe's Desk-user default.
-	{"dt": "Role", "filters": [["name", "in", ["IT Team", "HelixHR Delivery Manager"]]]},
+	# P5-U2 / P7-U1 / plan 2026-10-02-001 U7: all portal roles, so their
+	# fixtures pin desk_access=0 rather than inheriting Frappe's Desk-user default.
+	{
+		"dt": "Role",
+		"filters": [["name", "in", ["IT Team", "HelixHR Delivery Manager", "HelixHR Notification Manager"]]],
+	},
 	# Custom DocPerm is deliberately NOT a fixture. Frappe *replaces* a
 	# doctype's standard DocPerm rows with its Custom DocPerm rows rather than
 	# merging them (frappe.permissions.get_valid_perms), so shipping a partial
@@ -171,6 +174,8 @@ doc_events = {
 	"Timesheet": {
 		"on_update": "helixhr.events.timesheet_on_update",
 		"before_submit": "helixhr.events.timesheet_before_submit",
+		# Plan 2026-10-02-001 U4: `helixhr_pending_since`, on save and db_set.
+		"on_change": "helixhr.events.stamp_pending_since",
 	},
 	"File": {
 		"before_insert": "helixhr.events.file_before_insert",
@@ -207,6 +212,15 @@ doc_events = {
 		# Attendance Request, filing a leave application is the insert
 		# itself, not a later workflow-state move.
 		"after_insert": "helixhr.events.leave_application_after_insert",
+		# Plan 2026-10-02-001 U9 / KTD8a: the templated leave emails. Send to
+		# HR is a `db_set`, which runs only `on_change`.
+		"on_update": "helixhr.events.leave_application_on_update",
+		"on_submit": "helixhr.events.leave_application_on_submit",
+		"on_cancel": "helixhr.events.leave_application_on_cancel",
+		"on_change": [
+			"helixhr.events.stamp_pending_since",
+			"helixhr.events.leave_application_on_change",
+		],
 	},
 	# P3-KTD8 / P4-KTD5. Frappe does not enforce a workflow state's
 	# `allow_edit` on the server, so the attendance approval carries its
@@ -226,6 +240,7 @@ doc_events = {
 		"on_update": "helixhr.events.attendance_request_on_update",
 		"before_submit": "helixhr.events.attendance_request_before_submit",
 		"on_trash": "helixhr.events.attendance_request_on_trash",
+		"on_change": "helixhr.events.stamp_pending_since",
 	},
 }
 
@@ -357,10 +372,15 @@ has_permission = {
 # replacing it -- Frappe merges scheduler hooks across apps and offers no
 # removal, so having both senders on for one event is the thing
 # `events.hr_settings_validate` and preflight guard against.
+# Plan 2026-10-02-001 U11 / KTD13: the overdue digest's dated rerun guard
+# must survive `clear-cache` and `bench migrate`; it expires on its own.
+persistent_cache_keys = ["helixhr-overdue-digest|*"]
+
 scheduler_events = {
 	"daily": [
 		"helixhr.tasks.null_stale_checkin_coordinates",
 		"helixhr.reminders.send_celebration_reminders",
+		"helixhr.reminders.send_overdue_digests",
 	],
 	# Off by default -- helixhr.telemetry.send_ping is a no-op until an
 	# operator sets both helixhr_telemetry_enabled and helixhr_telemetry_url

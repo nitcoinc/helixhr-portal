@@ -406,6 +406,40 @@ class TestRequestCategories(IntegrationTestCase):
 				category="Other", subject="Inactive category", operation_key=str(uuid.uuid4())
 			)
 
+	def test_my_requests_filter_by_category_counts_only_mine_and_keep_inactive_ones(self):
+		"""U6 / R13: chips count the caller's own requests only; an inactive
+		category with past requests still gets a chip and still filters; an
+		unknown one is refused; a bigger page keeps the filter."""
+		from helixhr.api import create_my_request, get_my_requests
+		from helixhr.tests.utils import EMPLOYEE_USER, MANAGER_USER
+
+		frappe.set_user(EMPLOYEE_USER)
+		for _ in range(2):
+			create_my_request(category="Other", subject="Filter me", operation_key=str(uuid.uuid4()))
+		frappe.set_user(MANAGER_USER)
+		create_my_request(category="Other", subject="Not yours", operation_key=str(uuid.uuid4()))
+		frappe.set_user("Administrator")
+		frappe.db.set_value("HelixHR Request Category", "Other", "is_active", 0)
+		self.addCleanup(frappe.db.set_value, "HelixHR Request Category", "Other", "is_active", 1)
+
+		frappe.set_user(EMPLOYEE_USER)
+		mine = frappe.db.count(
+			"HR Request",
+			{"employee": frappe.db.get_value("Employee", {"user_id": EMPLOYEE_USER}), "category": "Other"},
+		)
+		chips = {row["name"]: row["count"] for row in get_my_requests()["counts"]["categories"]}
+		self.assertEqual(chips["Other"], mine)
+
+		result = get_my_requests(limit=1, category="Other")
+		self.assertEqual(result["total"], mine)
+		self.assertEqual(len(result["requests"]), 1)
+		more = get_my_requests(limit=40, category="Other")
+		self.assertEqual(len(more["requests"]), min(mine, 40))
+		self.assertTrue(all(row["category"] == "Other" for row in more["requests"]))
+
+		with self.assertRaisesRegex(frappe.ValidationError, "no request category called"):
+			get_my_requests(category="No Such Category")
+
 	def test_a_category_cannot_route_requests_to_a_broad_role(self):
 		category = frappe.get_doc(
 			{
@@ -656,6 +690,26 @@ class TestRequestApprovalQueue(IntegrationTestCase):
 
 		return added
 
+	def test_the_queue_filters_to_a_category_and_the_total_matches_its_chip(self):
+		"""U6 / R13: a worker filters to `IT / Asset`; `counts` stays the whole
+		queue and the filtered total equals the chip's count."""
+		from helixhr.api import get_my_approvals
+
+		name = self._file()
+		frappe.set_user(self.it_user)
+		result = get_my_approvals(category="IT / Asset")
+		self.assertIn(name, [row["name"] for row in result["pending"]])
+		self.assertTrue(all(row["category"] == "IT / Asset" for row in result["pending"]))
+		chips = {row["name"]: row["count"] for row in result["counts"]["categories"]}
+		self.assertEqual(result["total"], chips["IT / Asset"])
+		kinds = {row["name"]: row["count"] for row in result["counts"]["kinds"]}
+		self.assertEqual(kinds["request"], sum(chips.values()))
+
+		with self.assertRaisesRegex(frappe.ValidationError, "no request category called"):
+			get_my_approvals(category="No Such Category")
+		with self.assertRaisesRegex(frappe.ValidationError, "no approval kind called"):
+			get_my_approvals(kind="expense")
+
 	def test_get_approval_detail_actions_match_get_transitions_and_others_are_refused(self):
 		from helixhr.api import act_on_approval, get_approval_detail
 
@@ -730,12 +784,15 @@ class TestRequestApprovalQueue(IntegrationTestCase):
 		)
 
 		self.assertEqual(result["status"], "In Progress")
-		mails = added()
-		self.assertEqual(len(mails), 1)
-		recipients = frappe.get_all(
-			"Email Queue Recipient", filters={"parent": next(iter(mails))}, pluck="recipient"
-		)
-		self.assertIn(self.it_user, recipients)
+		# U9: one templated mail per routed-role holder, so this one is theirs.
+		to_it_user = [
+			row
+			for row in added()
+			if self.it_user
+			in frappe.get_all("Email Queue Recipient", filters={"parent": row}, pluck="recipient")
+		]
+		self.assertEqual(len(to_it_user), 1)
+		self.assertIn("A Dell Latitude", frappe.db.get_value("Email Queue", to_it_user[0], "message"))
 
 	def test_reply_against_a_status_that_isnt_waiting_on_employee_is_refused(self):
 		from helixhr.api import reply_to_my_request
@@ -1095,3 +1152,329 @@ class TestRequestDetailAndScope(IntegrationTestCase):
 
 		# Bounded whatever the caller asks for.
 		self.assertLessEqual(len(get_my_requests(limit=10_000)["requests"]), 100)
+
+
+class TestProfileCorrection(IntegrationTestCase):
+	"""Plan 2026-10-02-001 U13: a bank-detail correction is filed with double
+	entry and proof, held encrypted and write-once, applied to Employee only
+	by HR on Done, and purged when closed. Security tests first."""
+
+	NEW_ACCOUNT = "987654321098"
+
+	def setUp(self):
+		from helixhr.patches.v1_0 import seed_profile_correction_category
+		from helixhr.utils import PROFILE_CORRECTION_CATEGORY
+
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		self.it_employee, self.it_user = make_test_it_user()
+		self.hr_user = make_test_hr_manager_employee()[1]
+		ensure_test_email_account()
+		seed_profile_correction_category.execute()
+		frappe.db.set_value(
+			"HelixHR Request Category",
+			PROFILE_CORRECTION_CATEGORY,
+			{"is_active": 1, "route_to_role": "HR Manager"},
+		)
+		self.category = PROFILE_CORRECTION_CATEGORY
+		frappe.db.set_value(
+			"Employee",
+			self.employee_name,
+			{
+				"bank_ac_no": "111122223333",
+				"company_email": "employee-company@helixhr.test",
+				"personal_email": "employee-personal@helixhr.test",
+			},
+		)
+		# A personal email set by an earlier test leaves a Version inside the
+		# 72-hour window; the hold tests create their own.
+		frappe.db.delete("Version", {"ref_doctype": "Employee", "docname": self.employee_name})
+		self.addCleanup(setattr, frappe.local, "request", None)
+		self._mail_before = set(frappe.get_all("Email Queue", pluck="name"))
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		for row in set(frappe.get_all("Email Queue", pluck="name")) - self._mail_before:
+			frappe.db.delete("Email Queue Recipient", {"parent": row})
+			frappe.db.delete("Email Queue", {"name": row})
+
+	def _file(self, field="bank_ac_no", value=NEW_ACCOUNT, confirm=None, proof=True, category=None):
+		from helixhr.api import create_my_request
+
+		frappe.local.request = with_uploaded_file("bank-letter.pdf") if proof else _Request({})
+		frappe.set_user(EMPLOYEE_USER)
+		try:
+			created = create_my_request(
+				category=category or self.category,
+				subject="Update my bank account",
+				operation_key=str(uuid.uuid4()),
+				correction_field=field,
+				correction_value=value,
+				correction_confirm=value if confirm is None else confirm,
+			)
+		finally:
+			frappe.set_user("Administrator")
+		return created
+
+	def _secret(self, name, field="correction_proposed"):
+		from frappe.utils.password import get_decrypted_password
+
+		return get_decrypted_password("HR Request", name, field, raise_exception=False)
+
+	def _move(self, name, action, user=None):
+		frappe.set_user(user or self.hr_user)
+		try:
+			return apply_workflow(frappe.get_doc("HR Request", name), action)
+		finally:
+			frappe.set_user("Administrator")
+
+	def _mails_to(self, address):
+		new = set(frappe.get_all("Email Queue", pluck="name")) - self._mail_before
+		return frappe.get_all(
+			"Email Queue Recipient", filters={"parent": ["in", list(new) or [""]], "recipient": address}, pluck="parent"
+		)
+
+	# --- filing ------------------------------------------------------------
+
+	def test_filing_stores_the_values_encrypted_with_masked_copies_proof_and_two_notices(self):
+		created = self._file()
+		self.assertNotIn(self.NEW_ACCOUNT, frappe.as_json(created))
+		row = frappe.db.get_value("HR Request", created["name"], ["*"], as_dict=True)
+		self.assertEqual(row.correction_proposed, "*" * len(self.NEW_ACCOUNT))
+		self.assertEqual(row.correction_current, "*" * len("111122223333"))
+		self.assertEqual(row.correction_proposed_masked, "••••1098")
+		self.assertEqual(row.correction_current_masked, "••••3333")
+		self.assertEqual(self._secret(created["name"]), self.NEW_ACCOUNT)
+		self.assertEqual(self._secret(created["name"], "correction_current"), "111122223333")
+		self.assertTrue(
+			frappe.db.exists(
+				"File", {"attached_to_doctype": "HR Request", "attached_to_name": created["name"], "is_private": 1}
+			)
+		)
+		self.assertTrue(self._mails_to("employee-company@helixhr.test"))
+		self.assertTrue(self._mails_to("employee-personal@helixhr.test"))
+
+	def test_a_field_outside_the_allowlist_is_refused(self):
+		with self.assertRaises(frappe.ValidationError):
+			self._file(field="date_of_birth", value="2000-01-01")
+		with self.assertRaises(frappe.ValidationError):
+			self._file(field="ctc", value="1")
+
+	def test_mismatched_double_entry_is_refused_without_echoing_the_value(self):
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self._file(confirm="987654321099")
+		self.assertNotIn(self.NEW_ACCOUNT, str(caught.exception))
+		self.assertNotIn("987654321099", str(caught.exception))
+
+	def test_a_correction_without_proof_is_refused(self):
+		with self.assertRaises(frappe.ValidationError):
+			self._file(proof=False)
+
+	def test_a_correction_under_another_category_is_refused(self):
+		with self.assertRaises(frappe.ValidationError):
+			self._file(category="HR Letter")
+
+	def test_a_generic_insert_cannot_file_a_correction(self):
+		"""Desk and /api/resource cannot pass the double entry or the proof,
+		even with permission checks out of the way."""
+		frappe.set_user(EMPLOYEE_USER)
+		doc = frappe.get_doc(
+			{
+				"doctype": "HR Request",
+				"category": self.category,
+				"subject": "Desk correction",
+				"correction_field": "bank_ac_no",
+				"correction_proposed": self.NEW_ACCOUNT,
+			}
+		)
+		with self.assertRaises(frappe.ValidationError):
+			doc.insert(ignore_permissions=True)
+
+	# --- write-once --------------------------------------------------------
+
+	def test_correction_fields_cannot_change_after_filing_by_anyone(self):
+		name = self._file()["name"]
+		for field, value in (
+			("correction_proposed", "555566667777"),
+			("correction_proposed_masked", "••••7777"),
+			("correction_field", "iban"),
+		):
+			with self.assertRaises(frappe.PermissionError):
+				frappe.client.set_value("HR Request", name, field, value)
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.PermissionError):
+			frappe.client.set_value("HR Request", name, "correction_proposed", "555566667777")
+		frappe.set_user("Administrator")
+		self.assertEqual(self._secret(name), self.NEW_ACCOUNT)
+
+	def test_the_category_cannot_be_rerouted(self):
+		category = frappe.get_doc("HelixHR Request Category", self.category)
+		category.route_to_role = "IT Team"
+		with self.assertRaises(frappe.ValidationError):
+			category.save()
+
+	# --- reveal ------------------------------------------------------------
+
+	def test_reveal_is_hr_only_and_writes_a_comment(self):
+		from helixhr.api import reveal_correction_value
+
+		name = self._file()["name"]
+		for user in (EMPLOYEE_USER, self.it_user, MANAGER_USER):
+			frappe.set_user(user)
+			with self.assertRaises(frappe.PermissionError):
+				reveal_correction_value(name)
+		frappe.set_user(self.hr_user)
+		self.assertEqual(reveal_correction_value(name)["value"], self.NEW_ACCOUNT)
+		frappe.set_user("Administrator")
+		comments = frappe.get_all(
+			"Comment",
+			filters={"reference_doctype": "HR Request", "reference_name": name, "comment_type": "Info"},
+			pluck="content",
+		)
+		self.assertTrue(any("revealed by" in c for c in comments))
+		self.assertFalse(any(self.NEW_ACCOUNT in c for c in comments))
+
+	# --- apply on Done -----------------------------------------------------
+
+	def test_done_applies_once_purges_and_sends_the_applied_notice(self):
+		from helixhr.api import reveal_correction_value
+
+		name = self._file()["name"]
+		self._move(name, "Pick up")
+		self._mail_before = set(frappe.get_all("Email Queue", pluck="name"))
+		self._move(name, "Done")
+		self.assertEqual(frappe.db.get_value("Employee", self.employee_name, "bank_ac_no"), self.NEW_ACCOUNT)
+		self.assertIsNone(self._secret(name))
+		self.assertIsNone(self._secret(name, "correction_current"))
+		self.assertEqual(frappe.db.get_value("HR Request", name, "correction_proposed_masked"), "••••1098")
+		self.assertTrue(self._mails_to("employee-company@helixhr.test"))
+		self.assertTrue(self._mails_to("employee-personal@helixhr.test"))
+		frappe.set_user(self.hr_user)
+		with self.assertRaises(frappe.ValidationError):
+			reveal_correction_value(name)
+		frappe.set_user("Administrator")
+		# Applying twice is impossible: Done has no outgoing edge, and the
+		# value it would need is gone.
+		with self.assertRaises(frappe.ValidationError):
+			self._move(name, "Done")
+
+	def test_rejected_purges_and_applies_nothing(self):
+		name = self._file()["name"]
+		self._move(name, "Reject")
+		self.assertIsNone(self._secret(name))
+		self.assertIsNone(self._secret(name, "correction_current"))
+		self.assertEqual(frappe.db.get_value("Employee", self.employee_name, "bank_ac_no"), "111122223333")
+
+	def test_a_changed_field_since_filing_refuses_done(self):
+		name = self._file()["name"]
+		self._move(name, "Pick up")
+		# Same last four digits: the check is on the full value.
+		frappe.db.set_value("Employee", self.employee_name, "bank_ac_no", "999922223333")
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self._move(name, "Done")
+		self.assertIn("changed since", str(caught.exception))
+		self.assertEqual(frappe.db.get_value("HR Request", name, "status"), "In Progress")
+		self.assertEqual(self._secret(name), self.NEW_ACCOUNT)
+
+	def test_an_unrelated_employee_save_does_not_block_the_apply(self):
+		name = self._file()["name"]
+		self._move(name, "Pick up")
+		employee = frappe.get_doc("Employee", self.employee_name)
+		employee.cell_number = "+15550001111"
+		employee.save(ignore_version=False)
+		self._move(name, "Done")
+		self.assertEqual(frappe.db.get_value("Employee", self.employee_name, "bank_ac_no"), self.NEW_ACCOUNT)
+
+	def test_a_recent_personal_email_change_holds_done(self):
+		name = self._file()["name"]
+		self._move(name, "Pick up")
+		employee = frappe.get_doc("Employee", self.employee_name)
+		employee.personal_email = "employee-new-personal@helixhr.test"
+		# Frappe skips Version rows under test unless asked; the hold reads them.
+		employee.save(ignore_version=False)
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self._move(name, "Done")
+		self.assertIn("72 hours", str(caught.exception))
+		self.assertEqual(frappe.db.get_value("HR Request", name, "status"), "In Progress")
+		self.assertEqual(frappe.db.get_value("Employee", self.employee_name, "bank_ac_no"), "111122223333")
+
+	def test_an_it_team_user_cannot_mark_it_done(self):
+		name = self._file()["name"]
+		self._move(name, "Pick up")
+		with self.assertRaises((frappe.PermissionError, frappe.ValidationError)):
+			self._move(name, "Done", user=self.it_user)
+		self.assertEqual(frappe.db.get_value("Employee", self.employee_name, "bank_ac_no"), "111122223333")
+
+	def test_an_employee_save_failure_leaves_the_request_open_and_nothing_written(self):
+		from unittest.mock import patch
+
+		from erpnext.setup.doctype.employee.employee import Employee
+
+		name = self._file()["name"]
+		self._move(name, "Pick up")
+
+		def fail(self_):
+			frappe.throw(f"bad account {self_.bank_ac_no}")
+
+		with patch.object(Employee, "validate", fail):
+			with self.assertRaises(frappe.ValidationError) as caught:
+				self._move(name, "Done")
+		self.assertNotIn(self.NEW_ACCOUNT, str(caught.exception))
+		self.assertFalse(
+			any(self.NEW_ACCOUNT in str(m) for m in (frappe.local.message_log or []))
+		)
+		self.assertEqual(frappe.db.get_value("HR Request", name, "status"), "In Progress")
+		self.assertEqual(frappe.db.get_value("Employee", self.employee_name, "bank_ac_no"), "111122223333")
+		self.assertEqual(self._secret(name), self.NEW_ACCOUNT)
+
+	# --- no plaintext anywhere ---------------------------------------------
+
+	def test_queue_detail_and_own_request_carry_the_masked_copies(self):
+		# U14: what the HR view and the employee's request show.
+		from helixhr.api import get_approval_detail, get_my_approvals, get_my_request
+
+		name = self._file()["name"]
+		frappe.set_user(self.hr_user)
+		try:
+			row = next(r for r in get_my_approvals()["pending"] if r["name"] == name)
+			detail = get_approval_detail("request", name)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(row["correction_proposed_masked"], "••••1098")
+		self.assertEqual(
+			detail["correction"],
+			{
+				"field": "bank_ac_no",
+				"label": "bank account number",
+				"current_masked": "••••3333",
+				"proposed_masked": "••••1098",
+			},
+		)
+		self.assertEqual([a["file_name"] for a in detail["attachments"]], ["bank-letter.pdf"])
+		frappe.set_user(EMPLOYEE_USER)
+		try:
+			own = get_my_request(name)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(own["correction_proposed_masked"], "••••1098")
+		self.assertNotIn(self.NEW_ACCOUNT, frappe.as_json(own))
+
+	def test_plaintext_never_reaches_versions_queues_or_list_reads(self):
+		from helixhr.api import get_approval_detail, get_my_approvals
+
+		name = self._file()["name"]
+		self._move(name, "Pick up")
+		frappe.set_user(self.hr_user)
+		seen = [
+			frappe.as_json(get_my_approvals()),
+			frappe.as_json(get_approval_detail("request", name)),
+			frappe.as_json(frappe.get_list("HR Request", fields=["*"], filters={"name": name})),
+			frappe.as_json(frappe.get_doc("HR Request", name).as_dict()),
+		]
+		frappe.set_user("Administrator")
+		self._move(name, "Done")
+		seen += frappe.get_all(
+			"Version", filters={"ref_doctype": "HR Request", "docname": name}, pluck="data"
+		)
+		for text in seen:
+			self.assertNotIn(self.NEW_ACCOUNT, text)
+			self.assertNotIn("111122223333", text)

@@ -8,45 +8,27 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, today
 
 from helixhr.api import (
+	get_notification_setup,
+	get_portal_bootstrap,
 	get_portal_config,
+	preview_message_template,
+	reset_message_template,
 	save_holiday_list,
 	save_leave_type,
 	save_message_template,
 	save_request_category,
 	save_shift_type,
+	send_test_message,
 )
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	HR_MANAGER_EMPLOYEE_USER,
 	ensure_holiday_list_assignment,
 	ensure_leave_allocation,
+	ensure_notification_manager_user,
 	make_test_employee_and_manager,
 	make_test_hr_manager_employee,
 )
-from helixhr.utils import TEMPLATE_TOKENS, render_tokens
-
-
-class TestRenderTokens(IntegrationTestCase):
-	def test_a_jinja_looking_body_renders_as_literal_text(self):
-		"""P5-KTD11: the security test this design exists for."""
-		body = "Hello {name}, {{ frappe.get_doc('User', 'Administrator').delete() }}"
-		rendered = render_tokens(body, {"name": "Priya"})
-		self.assertEqual(
-			rendered, "Hello Priya, {{ frappe.get_doc('User', 'Administrator').delete() }}"
-		)
-
-	def test_an_unknown_token_is_left_alone(self):
-		self.assertEqual(render_tokens("Hi {name}, see {mystery}", {"name": "Priya"}), "Hi Priya, see {mystery}")
-
-	def test_every_declared_token_is_actually_supplied_by_its_callers(self):
-		"""Guarded by preflight too (`check_template_tokens`); this is the
-		same assertion run directly against the fixed map."""
-		for tokens in TEMPLATE_TOKENS.values():
-			probe = {token: f"__{token}__" for token in tokens}
-			body = " ".join(f"{{{token}}}" for token in tokens)
-			rendered = render_tokens(body, probe)
-			for token in tokens:
-				self.assertIn(probe[token], rendered)
 
 
 class TestMessageTemplateSeed(IntegrationTestCase):
@@ -162,7 +144,8 @@ class TestConfigApi(IntegrationTestCase):
 		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
 		config = get_portal_config()
 		self.assertIn("categories", config)
-		self.assertIn("templates", config)
+		# Plan 2026-10-02-001 U10: message wording left Settings.
+		self.assertNotIn("templates", config)
 		self.assertIn("leave_types", config)
 		leave_type = config["leave_types"][0]
 		self.assertEqual(
@@ -187,10 +170,9 @@ class TestConfigApi(IntegrationTestCase):
 		desk_urls = get_portal_config()["desk_urls"]
 		self.assertEqual(
 			set(desk_urls),
-			{"categories", "templates", "leave_types", "holiday_lists", "shift_types", "celebrations"},
+			{"categories", "leave_types", "holiday_lists", "shift_types", "celebrations"},
 		)
 		self.assertEqual(desk_urls["categories"], get_url_to_list("HelixHR Request Category"))
-		self.assertEqual(desk_urls["templates"], get_url_to_list("HelixHR Message Template"))
 		self.assertEqual(desk_urls["leave_types"], get_url_to_list("Leave Type"))
 		self.assertEqual(desk_urls["holiday_lists"], get_url_to_list("Holiday List"))
 		self.assertEqual(desk_urls["shift_types"], get_url_to_list("Shift Type"))
@@ -256,20 +238,41 @@ class TestConfigApi(IntegrationTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			save_message_template("request_arrival", subject="hacked")
 
-	def test_save_message_template_refuses_an_unknown_key(self):
+	def test_save_message_template_refuses_an_hr_manager(self):
+		"""Plan 2026-10-02-001 U7 / R14: HR Manager no longer edits templates."""
 		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+		with self.assertRaises(frappe.PermissionError):
+			save_message_template("request_arrival", subject="hr edit")
+
+	def test_a_notification_manager_bootstrap_opens_templates_not_settings(self):
+		"""U7: no Employee record, no Desk -- the flag the router lands on."""
+		frappe.set_user(ensure_notification_manager_user())
+		boot = get_portal_bootstrap()
+		self.assertTrue(boot["can_manage_notifications"])
+		self.assertFalse(boot["can_configure"])
+		self.assertFalse(boot["can_open_desk"])
+		self.assertIsNone(boot["desk_url"])
+		self.assertFalse(boot["employee"] and boot["employee"].get("name"))
+
+		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+		self.assertFalse(get_portal_bootstrap()["can_manage_notifications"])
+		frappe.set_user("Administrator")
+		self.assertTrue(get_portal_bootstrap()["can_manage_notifications"])
+
+	def test_save_message_template_refuses_an_unknown_key(self):
+		frappe.set_user(ensure_notification_manager_user())
 		with self.assertRaises(frappe.ValidationError):
 			save_message_template("not_a_real_template", subject="x")
 
 	def test_a_141_character_subject_is_refused_and_nothing_is_written(self):
-		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+		frappe.set_user(ensure_notification_manager_user())
 		before = frappe.db.get_value("HelixHR Message Template", "request_arrival", "subject")
 		with self.assertRaises(frappe.ValidationError):
 			save_message_template("request_arrival", subject="x" * 141)
 		self.assertEqual(frappe.db.get_value("HelixHR Message Template", "request_arrival", "subject"), before)
 
-	def test_saving_as_an_hr_user_not_administrator_persists_the_value(self):
-		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+	def test_saving_as_a_notification_manager_not_administrator_persists_the_value(self):
+		frappe.set_user(ensure_notification_manager_user())
 		result = save_message_template("request_arrival", subject="A new arrival subject {subject}")
 		self.assertEqual(result["subject"], "A new arrival subject {subject}")
 		frappe.set_user("Administrator")
@@ -373,12 +376,16 @@ class TestConfigApi(IntegrationTestCase):
 
 		frappe.flags.helixhr_enforce_rate_limits = True
 		self.addCleanup(lambda: frappe.flags.pop("helixhr_enforce_rate_limits", None))
+		# U7: templates belong to the Notification Manager now, not HR.
+		notification_manager = ensure_notification_manager_user()
+		reset_rate_limit("save_message_template", notification_manager)
+		frappe.set_user(notification_manager)
 		limit, _seconds = RATE_LIMIT_POLICY["save_message_template"]
 		for _ in range(limit):
 			save_message_template("request_arrival", subject="Rate limit probe")
 		with self.assertRaises(frappe.RateLimitExceededError):
 			save_message_template("request_arrival", subject="One too many")
-		reset_rate_limit("save_message_template", HR_MANAGER_EMPLOYEE_USER)
+		reset_rate_limit("save_message_template", notification_manager)
 
 
 class TestLeaveTypeLimits(IntegrationTestCase):
@@ -460,3 +467,144 @@ class TestLeaveTypeLimits(IntegrationTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			save_leave_type(leave_type, allow_negative=1)
 		self.assertEqual(frappe.db.get_value("Leave Type", leave_type, "allow_negative"), 0)
+
+
+class TestSaveMessageTemplateValidation(IntegrationTestCase):
+	"""Plan 2026-10-02-001 U8 / R17: the API refuses what the sandbox refuses,
+	through the doctype's own validate, and nothing is written."""
+
+	def setUp(self):
+		frappe.set_user(ensure_notification_manager_user())
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def test_an_unknown_variable_is_refused_by_name(self):
+		before = frappe.db.get_value("HelixHR Message Template", "request_arrival", "body")
+		with self.assertRaises(frappe.ValidationError) as caught:
+			save_message_template("request_arrival", subject="New request", body="Hi {{ employe_name }}")
+		self.assertIn("employe_name", str(caught.exception))
+		self.assertEqual(frappe.db.get_value("HelixHR Message Template", "request_arrival", "body"), before)
+
+	def test_frappe_globals_are_refused(self):
+		with self.assertRaises(frappe.ValidationError) as caught:
+			save_message_template("request_arrival", subject="x", body="{{ frappe.session.user }}")
+		self.assertIn("frappe", str(caught.exception))
+
+	def test_a_syntax_error_is_refused_with_its_line(self):
+		with self.assertRaises(frappe.ValidationError) as caught:
+			save_message_template(
+				"request_arrival", subject="x", body="<p>ok</p>\n{% if category %}never closed"
+			)
+		self.assertIn("line 2", str(caught.exception))
+
+	def test_a_valid_template_saves(self):
+		result = save_message_template(
+			"request_arrival",
+			subject="{{ category }}: {{ subject }}",
+			body="<p>{{ employee_name }}</p>",
+			is_enabled=1,
+		)
+		self.assertEqual(result["subject"], "{{ category }}: {{ subject }}")
+
+
+class TestNotificationSetupApi(IntegrationTestCase):
+	"""Plan 2026-10-02-001 U10: the Email templates page's methods, each behind
+	`_assert_can_manage_notifications`."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		make_test_employee_and_manager()
+		make_test_hr_manager_employee()
+		frappe.delete_doc_if_exists("HelixHR Message Template", "leave_approved", force=True)
+		frappe.set_user(ensure_notification_manager_user())
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def test_every_setup_method_refuses_an_employee_and_an_hr_manager(self):
+		calls = (
+			lambda: get_notification_setup(),
+			lambda: save_message_template("leave_approved", subject="x", body="<p>x</p>"),
+			lambda: reset_message_template("leave_approved"),
+			lambda: preview_message_template("leave_approved", subject="x", body="<p>x</p>"),
+			lambda: send_test_message("leave_approved", subject="x", body="<p>x</p>"),
+		)
+		for user in (EMPLOYEE_USER, HR_MANAGER_EMPLOYEE_USER):
+			frappe.set_user(user)
+			for call in calls:
+				with self.subTest(user=user), self.assertRaises(frappe.PermissionError):
+					call()
+
+	def test_setup_lists_every_event_with_state_and_variables(self):
+		from helixhr.utils import NOTIFICATION_EVENTS
+
+		events = {event["key"]: event for event in get_notification_setup()["events"]}
+		self.assertEqual(set(events), set(NOTIFICATION_EVENTS))
+		approved = events["leave_approved"]
+		self.assertEqual(approved["state"], "Default")
+		self.assertEqual(approved["audience"], "Employee")
+		names = {variable["name"]: variable for variable in approved["variables"]}
+		self.assertIn("approver_name", names)
+		self.assertIn("recipient_first_name", names)
+		self.assertTrue(names["approver_name"]["description"])
+		self.assertTrue(events["bank_change_applied"]["locked"])
+
+	def test_save_then_reset_moves_custom_to_default_with_an_info_comment(self):
+		save_message_template(
+			"leave_approved", subject="Approved: {{ leave_type }}", body="<p>Yes {{ days }}</p>", is_enabled=1
+		)
+		events = {event["key"]: event for event in get_notification_setup()["events"]}
+		self.assertEqual(events["leave_approved"]["state"], "Custom")
+		self.assertEqual(events["leave_approved"]["subject"], "Approved: {{ leave_type }}")
+
+		reset_message_template("leave_approved")
+		self.assertFalse(frappe.db.exists("HelixHR Message Template", "leave_approved"))
+		events = {event["key"]: event for event in get_notification_setup()["events"]}
+		self.assertEqual(events["leave_approved"]["state"], "Default")
+		self.assertTrue(
+			frappe.db.exists(
+				"Comment",
+				{
+					"comment_type": "Info",
+					"reference_doctype": "HelixHR Message Template",
+					"reference_name": "leave_approved",
+					"content": ("like", "%reset this email template%"),
+				},
+			)
+		)
+
+	def test_preview_renders_samples_in_the_layout_and_refuses_an_unknown_variable(self):
+		result = preview_message_template(
+			"leave_approved", subject="Hi {{ recipient_first_name }}", body="<p>{{ approver_name }}</p>"
+		)
+		self.assertEqual(result["subject"], "Hi Priya")
+		self.assertIn("Meera Shah", result["html"])
+		with self.assertRaises(frappe.ValidationError) as caught:
+			preview_message_template("leave_approved", subject="x", body="{{ aprover_name }}")
+		self.assertIn("aprover_name", str(caught.exception))
+
+	def test_a_test_send_goes_only_to_the_caller(self):
+		from unittest.mock import patch
+
+		with patch("frappe.sendmail") as sendmail:
+			result = send_test_message(
+				"leave_approved", subject="{{ leave_type }}", body="<p>{{ days }}</p>"
+			)
+		self.assertEqual(sendmail.call_args.kwargs["recipients"], [frappe.session.user])
+		self.assertEqual(result["sent_to"], frappe.session.user)
+
+	def test_a_burst_of_test_sends_is_rate_limited(self):
+		from unittest.mock import patch
+
+		from helixhr.utils import _rate_limit_key
+
+		frappe.cache.delete(_rate_limit_key("send_test_message", frappe.session.user))
+		frappe.flags.helixhr_enforce_rate_limits = True
+		try:
+			with patch("frappe.sendmail"), self.assertRaises(frappe.RateLimitExceededError):
+				for _attempt in range(10):
+					send_test_message("leave_approved", subject="x", body="<p>x</p>")
+		finally:
+			frappe.flags.helixhr_enforce_rate_limits = False
+			frappe.cache.delete(_rate_limit_key("send_test_message", frappe.session.user))

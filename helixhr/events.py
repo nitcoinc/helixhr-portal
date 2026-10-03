@@ -5,14 +5,18 @@ from frappe.utils import add_days, cint, flt, formatdate, getdate
 
 from helixhr.helixhr.doctype.hr_request.hr_request import request_belongs_to_session
 from helixhr.utils import (
+	CORRECTION_EMAIL_HOLD_HOURS,
 	PHOTO_KIND_MESSAGE,
 	PHOTO_MAX_BYTES,
 	PHOTO_POLICY,
+	PROFILE_CORRECTABLE_FIELDS,
+	PROFILE_CORRECTION_CATEGORY,
 	UPLOAD_POLICY,
 	get_manager_user,
-	get_message_template,
+	mask_identifier,
 	photo_file_filters,
-	render_tokens,
+	render_message,
+	send_notification,
 	upload_extension,
 	validate_portal_upload,
 )
@@ -106,16 +110,17 @@ def leave_application_after_insert(doc, method=None):
 	"""P5-U10: the manager learns a leave request landed, without opening
 	the portal -- the pre-existing gap the routing inventory surfaced.
 
-	An HR-approves leave type skips the manager entirely (P4-R7): the
-	fixture `HelixHR New Leave For HR` already emails HR the moment
-	`apply_for_leave` writes `helixhr_stage = "HR"`, moments after this
-	hook runs, so notifying the manager here too would be a second,
-	wrong recipient for a request that was never theirs to act on. That
-	check reads `Leave Type` directly rather than `doc.helixhr_stage`,
-	because permlevel 1 means the field is not written on `doc` until
-	after this insert returns (KTD4).
+	An HR-approves leave type skips the manager entirely (P4-R7): HR is
+	mailed `leave_for_hr` here instead, so notifying the manager too would
+	be a second, wrong recipient for a request that was never theirs to act
+	on. That check reads `Leave Type` directly rather than
+	`doc.helixhr_stage`, because permlevel 1 means the field is not written
+	on `doc` until after this insert returns (KTD4, plan 2026-10-02-001
+	KTD8a). A Desk insert HR filed already in the HR stage goes to HR too.
 	"""
-	if frappe.db.get_value("Leave Type", doc.leave_type, "helixhr_hr_approves"):
+	hr_approves = frappe.db.get_value("Leave Type", doc.leave_type, "helixhr_hr_approves")
+	_mail_new_leave(doc, to_hr=hr_approves or doc.get("helixhr_stage") == LEAVE_STAGE_HR)
+	if hr_approves:
 		return
 	_notify_manager_of_arrival(
 		"Leave Application",
@@ -123,6 +128,196 @@ def leave_application_after_insert(doc, method=None):
 		_approver_user(doc.employee),
 		_("{0} applied for {1}").format(doc.employee_name or doc.employee, doc.leave_type),
 	)
+
+
+# Plan 2026-10-02-001 U9 / KTD8. Every portal email is sent from a doc
+# event through `utils.send_notification`, so Desk and portal actions mail
+# the same way, once. Recipients come from document fields (the employee's
+# `user_id`, `leave_approver`, the HR Manager role), never `owner`, and
+# nobody is mailed about what they just did themselves. Building the context
+# reads balances and names; a failure there is logged like a send failure
+# and never fails the write (P5-KTD9).
+
+
+def _mail(doc, event_key, recipients, build_context):
+	recipients = [user for user in dict.fromkeys(recipients or ()) if user and user != frappe.session.user]
+	if not recipients:
+		return
+	try:
+		context = build_context()
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), f"HelixHR {event_key} mail failed")
+		return
+	send_notification(event_key, recipients, context, doc.doctype, doc.name)
+
+
+def _portal_url(path):
+	return frappe.utils.get_url(f"/helixhr/{path}")
+
+
+def _decider_name():
+	return frappe.utils.get_fullname(frappe.session.user)
+
+
+def _hr_managers():
+	return _enabled_users_with_role("HR Manager")
+
+
+def _leave_balance_after(doc, subtract_days):
+	"""The balance as text once `doc` is taken, or "" when there is no
+	meaningful one (LWP, negative-allowed, no allocation)."""
+	result = leave_overdraw(doc.employee, doc.leave_type, doc.from_date, doc.to_date, 0)
+	if not result:
+		return ""
+	balance = result["balance"] - (flt(doc.total_leave_days) if subtract_days else 0)
+	return _fmt_days(balance)
+
+
+def _leave_context(doc, **extra):
+	return {
+		"employee_name": doc.employee_name or doc.employee,
+		"leave_type": doc.leave_type,
+		"from_date": formatdate(doc.from_date),
+		"to_date": formatdate(doc.to_date),
+		"days": _fmt_days(doc.total_leave_days),
+		"half_day": bool(cint(doc.half_day)),
+		"reason": (doc.description or "").strip(),
+		**extra,
+	}
+
+
+def _mail_new_leave(doc, to_hr):
+	"""A request waiting for its first decision: HR when it is HR's
+	(KTD8a), else the leave approver. HelixHR is the only sender, since
+	HRMS `send_leave_notification` is off (R21)."""
+	if to_hr:
+		_mail_leave_for_hr(doc)
+		return
+	_mail(
+		doc,
+		"leave_submitted",
+		[doc.leave_approver],
+		lambda: _leave_context(
+			doc,
+			balance_after=_leave_balance_after(doc, subtract_days=True),
+			action_url=_portal_url(f"approvals/leave/{doc.name}"),
+		),
+	)
+
+
+def _mail_leave_for_hr(doc):
+	def context():
+		reports_to = frappe.db.get_value("Employee", doc.employee, "reports_to")
+		return _leave_context(
+			doc,
+			balance_after=_leave_balance_after(doc, subtract_days=True),
+			manager_name=frappe.db.get_value("Employee", reports_to, "employee_name") if reports_to else "",
+			action_url=_portal_url(f"approvals/leave/{doc.name}"),
+		)
+
+	_mail(doc, "leave_for_hr", _hr_managers(), context)
+
+
+def leave_application_on_change(doc, method=None):
+	"""KTD8a: "Send to HR" is a `db_set` of `helixhr_stage`, which runs only
+	`on_change`. An HR-approves type was already routed to HR on insert, so
+	the portal's own post-insert `db_set` of the stage mails nobody again."""
+	before = doc.get_doc_before_save()
+	if not before or doc.get("helixhr_stage") != LEAVE_STAGE_HR:
+		return
+	if before.get("helixhr_stage") == LEAVE_STAGE_HR:
+		return
+	if frappe.db.get_value("Leave Type", doc.leave_type, "helixhr_hr_approves"):
+		return
+	_mail_leave_for_hr(doc)
+
+
+def leave_application_on_update(doc, method=None):
+	"""Send back (Rejected at docstatus 0) tells the employee; a resend
+	(sent back -> Open) is a new request for whoever decides it."""
+	before = doc.get_doc_before_save()
+	if not before or cint(doc.docstatus) != 0 or before.status == doc.status:
+		return
+	if doc.status == "Rejected":
+		_mail(
+			doc,
+			"leave_sent_back",
+			[frappe.db.get_value("Employee", doc.employee, "user_id")],
+			lambda: _leave_context(
+				doc,
+				approver_name=_decider_name(),
+				decision_note=doc.flags.get("helixhr_decision_note") or "",
+				action_url=_portal_url(f"leave/{doc.name}"),
+			),
+		)
+	elif doc.status == "Open" and before.status == "Rejected":
+		hr_approves = frappe.db.get_value("Leave Type", doc.leave_type, "helixhr_hr_approves")
+		_mail_new_leave(doc, to_hr=hr_approves or doc.get("helixhr_stage") == LEAVE_STAGE_HR)
+
+
+def leave_application_on_submit(doc, method=None):
+	"""Approve or (final) Reject, from the portal or Desk. The portal's
+	reason rides `doc.flags.helixhr_decision_note` (leave keeps its reason
+	as a Comment, so there is no field to read)."""
+	event = {"Approved": "leave_approved", "Rejected": "leave_rejected"}.get(doc.status)
+	if not event:
+		return
+	_mail(
+		doc,
+		event,
+		[frappe.db.get_value("Employee", doc.employee, "user_id")],
+		lambda: _leave_context(
+			doc,
+			approver_name=_decider_name(),
+			decision_note=doc.flags.get("helixhr_decision_note") or "",
+			balance_after=_leave_balance_after(doc, subtract_days=False),
+		),
+	)
+
+
+def leave_application_on_cancel(doc, method=None):
+	_mail(
+		doc,
+		"leave_cancelled",
+		[frappe.db.get_value("Employee", doc.employee, "user_id")],
+		lambda: _leave_context(doc, cancelled_by=_decider_name()),
+	)
+
+
+def _mail_timesheet_change(doc, before):
+	"""U9: HR on a move into Pending HR (replaces the retired fixture), the
+	employee on Approved or Sent Back."""
+	state = doc.workflow_state
+	if not before or before.get("workflow_state") == state:
+		return
+
+	def context(**extra):
+		return {
+			"employee_name": doc.employee_name or doc.employee,
+			"week_label": f"{formatdate(doc.start_date)} to {formatdate(doc.end_date)}",
+			"total_hours": _fmt_days(doc.total_hours),
+			**extra,
+		}
+
+	if state == TIMESHEET_PENDING_HR and cint(doc.docstatus) == 0:
+		_mail(
+			doc,
+			"timesheet_for_hr",
+			_hr_managers(),
+			lambda: context(action_url=_portal_url(f"approvals/timesheet/{doc.name}")),
+		)
+	elif state in ("Approved", TIMESHEET_SENT_BACK):
+		sent_back = state == TIMESHEET_SENT_BACK
+		_mail(
+			doc,
+			"timesheet_decided",
+			[frappe.db.get_value("Employee", doc.employee, "user_id")],
+			lambda: context(
+				state="sent back" if sent_back else "approved",
+				approver_name=_decider_name(),
+				decision_note=(doc.get(DECISION_REASON_FIELD) or "").strip() if sent_back else "",
+			),
+		)
 
 
 def timesheet_on_update(doc, method=None):
@@ -163,6 +358,8 @@ def timesheet_on_update(doc, method=None):
 		# the docstatus-2 case were missing until P2-U7: a cancelled week
 		# kept its approver's write+submit share forever.
 		_reconcile_timesheet_share(doc.name, doc.employee, None)
+
+	_mail_timesheet_change(doc, before)
 
 
 def employee_on_update(doc, method=None):
@@ -619,7 +816,16 @@ def hr_request_validate(doc, method=None):
 	"""
 	before = doc.get_doc_before_save()
 	if not before:
+		_validate_new_correction(doc)
 		return
+
+	# KTD15a: write-once for everyone, HR and Administrator included, on
+	# every route -- before the HR short-circuit below.
+	if any((doc.get(field) or None) != (before.get(field) or None) for field in CORRECTION_FIELDS):
+		frappe.throw(
+			_("The correction details can't be changed after the request is filed."),
+			frappe.PermissionError,
+		)
 
 	stored_status = before.status or HR_REQUEST_OPEN
 	status_changed = doc.status != stored_status
@@ -631,6 +837,9 @@ def hr_request_validate(doc, method=None):
 		frappe.throw(
 			_("You can't decide your own request. Ask another worker."), frappe.PermissionError
 		)
+
+	if status_changed and doc.status == HR_REQUEST_DONE and doc.correction_field:
+		_apply_correction(doc)
 
 	# HR may correct a filing (a wrong category, a typo in the subject); a
 	# routed worker may not, at any status -- the Open state used to be
@@ -654,6 +863,182 @@ def hr_request_validate(doc, method=None):
 		)
 
 
+# --- Structured profile corrections (plan 2026-10-02-001 U13) ---------------
+#
+# A correction proposes a new value for one `PROFILE_CORRECTABLE_FIELDS` field
+# on the requester's Employee. Both the proposed and the then-current value
+# are Password fields (KTD15): Frappe keeps them encrypted in `__Auth` and the
+# row, list views, API reads and Version log only ever hold `*` padding. The
+# masked copies are what every screen and notice shows. Nothing in this block
+# may put either full value into a message, a log or a return value.
+CORRECTION_FIELDS = (
+	"correction_field",
+	"correction_current",
+	"correction_proposed",
+	"correction_current_masked",
+	"correction_proposed_masked",
+)
+CORRECTION_SECRET_FIELDS = ("correction_current", "correction_proposed")
+_CORRECTION_VALUE_MAX = 140
+
+
+def _validate_new_correction(doc):
+	"""Insert-time rules for a correction, on every route (KTD15a).
+
+	The double entry and the proof travel as `doc.flags` set by
+	`api.create_my_request`, not as fields: a generic insert (Desk,
+	`/api/resource`, `frappe.client`) cannot supply them and is refused.
+	"""
+	if not doc.correction_field:
+		if any(doc.get(field) for field in CORRECTION_FIELDS):
+			frappe.throw(_("Pick which detail you want corrected."))
+		return
+	if doc.correction_field not in PROFILE_CORRECTABLE_FIELDS:
+		frappe.throw(_("That detail can't be corrected through a request. Ask HR directly."))
+	if doc.category != PROFILE_CORRECTION_CATEGORY or doc.routed_to_role != "HR Manager":
+		frappe.throw(_("A detail correction has to be filed as a profile correction for HR."))
+
+	proposed = (doc.correction_proposed or "").strip()
+	if not proposed:
+		frappe.throw(_("Type the new value."))
+	if len(proposed) > _CORRECTION_VALUE_MAX:
+		frappe.throw(_("That value is too long."))
+	if proposed != (doc.flags.correction_confirm or "").strip():
+		frappe.throw(_("The two entries don't match. Type the new value again in both boxes."))
+	if not doc.flags.correction_proof:
+		frappe.throw(_("Attach proof of the new details, such as a bank letter or cancelled cheque."))
+	file_name, content = doc.flags.correction_proof
+	validate_portal_upload(file_name, content)
+
+	current = str(frappe.db.get_value("Employee", doc.employee, doc.correction_field) or "").strip()
+	if proposed == current:
+		frappe.throw(_("That is already the value on your record."))
+
+	doc.correction_proposed = proposed
+	doc.correction_current = current or None
+	doc.correction_proposed_masked = mask_identifier(proposed)
+	doc.correction_current_masked = mask_identifier(current)
+
+
+def _correction_recipients(employee):
+	"""R30: the employee's company and personal addresses -- two places, so a
+	hijacked login alone cannot hide the notice. The login is the fallback
+	only when neither is recorded."""
+	row = frappe.db.get_value(
+		"Employee", employee, ["company_email", "personal_email", "user_id"], as_dict=True
+	)
+	if not row:
+		return []
+	addresses = list(dict.fromkeys(a for a in (row.company_email, row.personal_email) if a))
+	return addresses or ([row.user_id] if row.user_id else [])
+
+
+def _personal_email_changed_recently(employee):
+	"""Whether a Version of this Employee in the last 72 hours changed
+	`personal_email` (R30). Version history, not `modified`, so an unrelated
+	save never starts the hold."""
+	since = frappe.utils.add_to_date(frappe.utils.now_datetime(), hours=-CORRECTION_EMAIL_HOLD_HOURS)
+	for data in frappe.get_all(
+		"Version",
+		filters={"ref_doctype": "Employee", "docname": employee, "creation": [">=", since]},
+		pluck="data",
+	):
+		try:
+			changed = frappe.parse_json(data or "{}").get("changed") or []
+		except Exception:
+			continue
+		if any(row and row[0] == "personal_email" for row in changed):
+			return True
+	return False
+
+
+def _apply_correction(doc):
+	"""Write the proposed value to Employee inside the Done save (KTD16).
+
+	Every refusal throws, which rolls the Done back with it. The Employee save
+	runs as the session user -- no `ignore_permissions` -- behind a savepoint,
+	and whatever it raised is replaced by one sentence: an Employee validation
+	message may quote the value, so it is dropped from `message_log` too.
+	"""
+	from frappe.utils.password import get_decrypted_password
+
+	if doc.routed_to_role != "HR Manager" or not _is_hr():
+		frappe.throw(_("Only HR can complete a detail correction."), frappe.PermissionError)
+
+	proposed = get_decrypted_password("HR Request", doc.name, "correction_proposed", raise_exception=False)
+	if not proposed:
+		frappe.throw(_("This correction has already been closed, so there is nothing to apply."))
+	current = get_decrypted_password("HR Request", doc.name, "correction_current", raise_exception=False) or ""
+	field = doc.correction_field
+	live = str(frappe.db.get_value("Employee", doc.employee, field) or "").strip()
+	if live != current:
+		frappe.throw(
+			_("The {0} has changed since this was requested, so it can't be applied. Reject it and ask for a new request.").format(
+				PROFILE_CORRECTABLE_FIELDS[field]
+			)
+		)
+	if _personal_email_changed_recently(doc.employee):
+		frappe.throw(
+			_("The employee's personal email changed in the last {0} hours, so bank changes are on hold until that passes.").format(
+				CORRECTION_EMAIL_HOLD_HOURS
+			)
+		)
+
+	messages = len(frappe.local.message_log or [])
+	savepoint = "helixhr_apply_correction"
+	frappe.db.savepoint(savepoint)
+	try:
+		employee = frappe.get_doc("Employee", doc.employee)
+		employee.set(field, proposed)
+		employee.save()
+	except Exception as error:
+		frappe.db.rollback(save_point=savepoint)
+		del frappe.local.message_log[messages:]
+		frappe.log_error(
+			f"HR Request {doc.name}: Employee save raised {type(error).__name__}.",
+			"HelixHR correction apply failed",
+		)
+		frappe.throw(_("The new value couldn't be saved on the employee record, so the request stays open."))
+
+
+def _purge_correction_secrets(doc):
+	"""R32: drop both encrypted values; the masked copies stay as the record."""
+	from frappe.utils.password import remove_encrypted_password
+
+	for field in CORRECTION_SECRET_FIELDS:
+		remove_encrypted_password("HR Request", doc.name, field)
+
+
+def _send_correction_notice(doc, event_key, extra):
+	send_notification(
+		event_key,
+		_correction_recipients(doc.employee),
+		{
+			"field_label": PROFILE_CORRECTABLE_FIELDS.get(doc.correction_field, doc.correction_field),
+			"masked_new_value": doc.correction_proposed_masked,
+			**extra,
+		},
+		reference_doctype="HR Request",
+		reference_name=doc.name,
+	)
+
+
+def _attach_correction_proof(doc):
+	"""The proof checked in `_validate_new_correction`, stored private on the
+	request in the same transaction, so a failure here undoes the filing."""
+	file_name, content = doc.flags.correction_proof
+	frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": file_name,
+			"content": content,
+			"attached_to_doctype": "HR Request",
+			"attached_to_name": doc.name,
+			"is_private": 1,
+		}
+	).insert(ignore_permissions=True)
+
+
 def hr_request_after_insert(doc, method=None):
 	"""Queue arrival mail for enabled holders of the request's stored route.
 
@@ -661,6 +1046,13 @@ def hr_request_after_insert(doc, method=None):
 	therefore cannot roll back a portal filing; they are logged for the operator
 	to retry while the request remains visible to its requester.
 	"""
+	if doc.correction_field:
+		_attach_correction_proof(doc)
+		_send_correction_notice(
+			doc,
+			"bank_change_requested",
+			{"requested_on": frappe.utils.format_datetime(doc.creation or frappe.utils.now_datetime())},
+		)
 	role = doc.routed_to_role
 	users = _enabled_users_with_role(role)
 	if not users and role != "HR Manager":
@@ -675,26 +1067,25 @@ def hr_request_after_insert(doc, method=None):
 			"HelixHR request routing",
 		)
 		return
-	tokens = {
-		"category": frappe.utils.escape_html(doc.category),
-		"subject": frappe.utils.escape_html(doc.subject),
-		"portal_url": frappe.utils.get_url("/helixhr/requests"),
-	}
-	template = get_message_template("request_arrival")
-	if template:
-		subject = render_tokens(template.subject, tokens)
-		message = render_tokens(template.body, tokens)
-	else:
-		subject = f"New {doc.category} request: {doc.subject}"
-		message = (
-			f"A new {tokens['category']} request, “{tokens['subject']}”, "
-			f"is waiting for you. <a href=\"{tokens['portal_url']}\">Open requests</a>."
-		)
+	# Plan 2026-10-02-001 U8: rendered by the HelixHR sandbox, which escapes
+	# every value itself -- pass raw text, never pre-escaped. Inside the try:
+	# nothing about the mail may fail the filing.
 	try:
+		message = render_message(
+			"request_arrival",
+			{
+				"employee_name": frappe.db.get_value("Employee", doc.employee, "employee_name"),
+				"category": doc.category,
+				"subject": doc.subject,
+				"action_url": frappe.utils.get_url("/helixhr/requests"),
+			},
+		)
+		if message is None:
+			return
 		frappe.sendmail(
 			recipients=users,
-			subject=subject,
-			message=message,
+			subject=message["subject"],
+			message=message["html"],
 			reference_doctype="HR Request",
 			reference_name=doc.name,
 		)
@@ -726,6 +1117,21 @@ def hr_request_on_update(doc, method=None):
 		# An insert. HR cannot write hr_note at creation (permlevel 1), and
 		# an employee's own new request has nothing to reply to yet.
 		return
+
+	if before.status != doc.status and doc.correction_field and doc.status in (
+		HR_REQUEST_DONE,
+		HR_REQUEST_REJECTED,
+	):
+		_purge_correction_secrets(doc)
+		if doc.status == HR_REQUEST_DONE:
+			_send_correction_notice(
+				doc,
+				"bank_change_applied",
+				{
+					"applied_by": frappe.utils.get_fullname(frappe.session.user),
+					"applied_on": frappe.utils.format_datetime(frappe.utils.now_datetime()),
+				},
+			)
 
 	if before.status != doc.status:
 		_notify_hr_request_status(doc)
@@ -773,15 +1179,18 @@ def _notify_hr_request_status(doc):
 		HR_REQUEST_DONE: "is done",
 		HR_REQUEST_REJECTED: "was declined",
 	}[doc.status]
-	tokens = {
-		"category": frappe.utils.escape_html(doc.category),
-		"subject": frappe.utils.escape_html(doc.subject),
-		"state": state,
-		"reason": frappe.utils.escape_html(reason) if reason else "",
-	}
-	template = get_message_template("request_status_changed")
-	subject = render_tokens(template.subject, tokens) if template else f"Your request {state}: {doc.subject}"
-	description = render_tokens(template.body, tokens) if template else (tokens["reason"] or None)
+	message = render_message(
+		"request_status_changed",
+		{"category": doc.category, "subject": doc.subject, "state": state, "reason": reason},
+	)
+	if message:
+		# A bell row, not an email: the inner content without the layout, and
+		# the plain-text subject escaped for the HTML the bell renders.
+		subject = frappe.utils.escape_html(message["subject"])
+		description = message["content"] or None
+	else:
+		subject = f"Your request {state}: {frappe.utils.escape_html(doc.subject)}"
+		description = frappe.utils.escape_html(reason) if reason else None
 	frappe.get_doc(
 		{
 			"doctype": "Notification Log",
@@ -1126,6 +1535,43 @@ def attendance_request_on_update(doc, method=None):
 	if not before or before.get("workflow_state") == doc.workflow_state:
 		return
 	_notify_attendance_request(doc)
+	_mail_attendance_change(doc)
+
+
+def _mail_attendance_change(doc):
+	"""U9: HR on a move into Pending HR (replaces the retired fixture), the
+	employee on a decision. Called only on a real state change."""
+	state = doc.workflow_state
+	date_range = _request_dates(doc.from_date, doc.to_date)
+	if state == REQUEST_PENDING_HR:
+		_mail(
+			doc,
+			"attendance_for_hr",
+			_hr_managers(),
+			lambda: {
+				"employee_name": doc.employee_name or doc.employee,
+				"date_range": date_range,
+				"reason": doc.reason or "",
+				"action_url": _portal_url(f"approvals/attendance/{doc.name}"),
+			},
+		)
+		return
+	words = {REQUEST_APPROVED: "approved", REQUEST_SENT_BACK: "sent back", REQUEST_REJECTED: "declined"}
+	if state not in words:
+		return
+	_mail(
+		doc,
+		"attendance_decided",
+		[frappe.db.get_value("Employee", doc.employee, "user_id")],
+		lambda: {
+			"date_range": date_range,
+			"state": words[state],
+			"approver_name": _decider_name(),
+			"decision_note": (doc.get(DECISION_REASON_FIELD) or "").strip()
+			if state != REQUEST_APPROVED
+			else "",
+		},
+	)
 
 
 def _notify_attendance_request(doc):
@@ -1312,6 +1758,16 @@ def hr_settings_validate(doc, method=None):
 	# this file would otherwise carry that import.
 	from helixhr.reminders import EVENTS
 
+	# Plan 2026-10-02-001 R21 / KTD10: HelixHR is the only sender of leave
+	# email; HRMS's own leave mail would be a second, Desk-worded copy.
+	if cint(doc.get("send_leave_notification")):
+		frappe.throw(
+			_(
+				"HelixHR already sends every leave email, so HRMS's 'Send Leave Notification' "
+				"must stay off. Edit the wording on the portal's Email templates page."
+			)
+		)
+
 	for event, spec in EVENTS.items():
 		reminder_enabled = frappe.db.get_value(
 			"HelixHR Celebration Reminder", event, "is_enabled"
@@ -1323,3 +1779,45 @@ def hr_settings_validate(doc, method=None):
 					"HR Settings > Reminders, or disable it on Settings > Celebrations in the portal."
 				).format(spec["label"].lower(), spec["hrms_label"])
 			)
+
+
+# Plan 2026-10-02-001 U4 / KTD13. When a request last entered a pending stage
+# or state -- what the overdue predicate (`api.is_overdue`) counts from.
+# `modified` cannot serve: Desk saves and HRMS's own in-flight writes bump it.
+PENDING_SINCE_FIELD = "helixhr_pending_since"
+
+
+def _pending_key(doc):
+	"""Which pending stage or state this record is in, or None when nobody
+	owes it a decision. A change of key is a fresh wait; the same key is not."""
+	if cint(doc.docstatus) != 0:
+		return None
+	if doc.doctype == "Leave Application":
+		if doc.status != "Open":
+			return None
+		return doc.get("helixhr_stage") or "Manager"
+	if doc.doctype == "Timesheet":
+		return doc.workflow_state if doc.workflow_state in (PENDING_STATE, TIMESHEET_PENDING_HR) else None
+	if doc.workflow_state in (REQUEST_PENDING_MANAGER, REQUEST_PENDING_HR):
+		return doc.workflow_state
+	return None
+
+
+def stamp_pending_since(doc, method=None):
+	"""`on_change` for Leave Application, Timesheet and Attendance Request.
+
+	`on_change` rather than `on_update`, because `db_set` runs it too, and the
+	leave stage moves (Send to HR, an HR-approved Leave Type) are `db_set`
+	writes; `db_set` also loads the stored row as `doc_before_save`. Written
+	with `frappe.db.set_value` and `update_modified=False`, so it neither
+	recurses into this hook nor moves the concurrency token.
+	"""
+	key = _pending_key(doc)
+	if key is None:
+		return
+	before = doc.get_doc_before_save()
+	if before and _pending_key(before) == key and doc.get(PENDING_SINCE_FIELD):
+		return
+	now = frappe.utils.now_datetime()
+	frappe.db.set_value(doc.doctype, doc.name, PENDING_SINCE_FIELD, now, update_modified=False)
+	doc.set(PENDING_SINCE_FIELD, now)

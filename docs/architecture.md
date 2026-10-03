@@ -91,6 +91,21 @@ There is no app-level auth code. Three Frappe mechanisms carry it:
    the method instead: the Employee is resolved from the session, never from
    an argument, so the bypass can only ever touch the caller's own photo.
 
+6. **Notification and correction writes (documented `ignore_permissions`
+   exceptions).** Each runs only after the method's own guard has decided:
+   - `_record_hr_acting_for_approver` inserts a Notification Log for the
+     approver. No role has `create` on Notification Log (it is system-written);
+     the row is reached only after `act_on_approval` has accepted an HR
+     decision, and its recipient is the document's `leave_approver`.
+   - `reset_message_template` deletes the HelixHR Message Template row and
+     writes the actor's Info Comment. HelixHR Notification Manager has no
+     `delete` DocPerm on the template (Desk delete stays System Manager's) and
+     no `create` on Comment; `_assert_can_manage_notifications` is the gate.
+   - `events._attach_correction_proof` inserts the private proof File on the
+     employee's own HR Request. The Employee role has no `write` on HR Request,
+     which File creation checks; the File is attached only to the request
+     being inserted, in the same transaction, after `_validate_new_correction`.
+
 Writes the employee should not be able to make are refused server-side:
 
 - `save_my_week` refuses a week that is not Draft or Sent Back, refuses projects
@@ -586,10 +601,10 @@ whenever HR raised the request and Attendance Request carries no user field.
 `attendance_request_subject` has one plain sentence per state — "…is with
 Priya", "…is with HR", "…counts", "…was sent back", "…was rejected" — and the
 two negative ones carry `helixhr_decision_reason` as the body. Nobody is
-notified about their own action. The *HR-facing* email is the opposite choice:
-it is a fixture Notification on channel Email, recipients by role (P4-KTD9),
-because Frappe's Notification DocType already sends to a role and there was
-nothing to write.
+notified about their own action. The *HR-facing* email was once a fixture
+Notification on channel Email (P4-KTD9); plan 2026-10-02-001 reversed that --
+it is now the `attendance_for_hr` / `attendance_decided` template sent from the
+doc event (see *Portal email*, below).
 
 
 ## Who may act: one table
@@ -913,6 +928,172 @@ gate exits non-zero. `TestPerUserRateLimits` forces the limiter back on with
 `frappe.flags.helixhr_enforce_rate_limits` and proves the eleventh request in
 an hour is refused, so the bypass is never the thing under test.
 
+## Notifications, leave rules, overdue and corrections (plan 2026-10-02-001)
+
+### Who may act, additions
+
+| Who | May | Where it is enforced |
+|---|---|---|
+| HR Manager | decide Manager-stage leave **in the approver's place** when the approver is on approved leave today or the request is overdue (admin scope only). Row tagged "Approver on leave" / "Overdue with approver". | `get_my_approvals` adds the rows with `hr_reason`; `_leave_allowed_actions` |
+| HR Manager | see the **Overdue** tab (`get_overdue_approvals`), grouped by owner | same collector as the digest, `resolve_admin_scope` |
+| HR Manager | review, Reveal (logged, comment written) and apply a bank-detail correction on Done | `reveal_correction_value`, `events` correction block |
+| `HelixHR Notification Manager` (or System Manager) | edit, preview, test-send, switch off and reset portal email templates | `_assert_can_manage_notifications`; bootstrap flag `can_manage_notifications` |
+
+The Notification Manager is a portal-only fixture Role (`desk_access 0`) with
+write on `HelixHR Message Template` only; HR Manager lost that DocPerm. It has
+no DocPerm on `Notification` or `Email Template`. A holder with no Employee
+lands on `/email-templates`.
+
+When HR decides for the approver, the audit line is an **Info** comment
+("Decided by HR for ...") plus a Notification Log to the approver. It is Info,
+not Comment, because a Comment-type line was read back as the sent-back reason
+on the employee's leave row (8fe512d).
+
+### Leave rules
+
+- **Pending-aware balance.** A new request is refused when it plus every open
+  request of the same type exceeds the balance (unless `allow_negative`).
+- **Max consecutive days** is HRMS's own Leave Type field, now editable in
+  `/settings → Leave types`.
+- **Backdated grace** replaces HRMS's `restrict_backdated_leave_application`:
+  `helixhr_backdated_leave_grace_days` working days (default 1), exempt for HR
+  Manager and `helixhr_backdated_leave_exempt_role`. Insert and From-date
+  change only, so approvers are never blocked. HRMS's flag must stay **off**;
+  preflight FAILs otherwise. Runbook has the troubleshooting.
+
+### Portal email: one sandboxed template system (reverses P4-KTD9, reads P5-KTD11)
+
+P5-KTD11 said a template must never be evaluated as code. Phase 5 met that
+with `{token}` substitution. This plan keeps the *intent* and changes the
+mechanism: templates are Jinja, rendered by `utils`' own
+`jinja2.sandbox.ImmutableSandboxedEnvironment` -- empty globals,
+`StrictUndefined`, no loader, `from_string` only, autoescape, and a context of
+plain values for the event's declared variables only. No template can read a
+record or call anything. `frappe.render_template(restrict_globals=True)` is
+**not** a sandbox (its safe globals still read any record), so it is never
+used here. Calls, `set`/`macro`/`include`, recursive loops, `**`, large
+repetition and padding filters are refused at save time, which names the
+unknown variable or failing line. A render failure at send time falls back to
+the default wording and logs; it never fails the write. Patch
+`migrate_message_templates_to_jinja` converted old `{token}` rows.
+
+P4-KTD9 (HR-facing email as fixture `Notification`s) is reversed: the four HR
+email fixtures were deleted by patch `retire_hr_email_notifications` and
+preflight FAILs if they come back. Bell (Notification Log) fixtures stay.
+HRMS's `send_leave_notification` is turned off by patch, refused on HR
+Settings save, and FAILed by preflight -- otherwise every leave mails twice.
+
+Sends live in doc events (`events.py`) through one helper, so Desk and portal
+actions mail the same way. Recipients come from document fields
+(`Employee.user_id`, `leave_approver`, enabled HR Managers), never `owner`, and
+never the acting user. No row in `HelixHR Message Template` means the default
+in `utils.NOTIFICATION_EVENTS`; a row is a customisation (`is_enabled 1`) or
+an Off switch (`is_enabled 0`). Locked events (`bank_change_requested`,
+`bank_change_applied`) ignore Off and keep their developer-owned subject and
+core sentence; the row's body is only an extra paragraph. The preview renders
+server-side with sample values into a sandboxed iframe (`srcdoc`, empty
+`sandbox`), never `v-html`.
+
+#### Template variable reference
+
+Every event also gets the shared variables:
+
+| Variable | Meaning | Sample |
+|---|---|---|
+| `company` | company name | `HelixHR Demo Ltd` |
+| `portal_url` | link to the portal | `https://hr.example.com/helixhr` |
+| `logo_url` | company logo (may be empty) | `https://hr.example.com/files/logo.png` |
+| `recipient_first_name` | first name of the recipient | `Priya` |
+
+| Event key | Audience | Extra variables |
+|---|---|---|
+| `leave_submitted` | Approver | `employee_name`, `leave_type`, `from_date`, `to_date`, `days`, `half_day`, `reason`, `balance_after`, `action_url` |
+| `leave_for_hr` | HR | as `leave_submitted`, plus `manager_name` |
+| `leave_approved` | Employee | `leave_type`, `from_date`, `to_date`, `days`, `approver_name`, `decision_note`, `balance_after` |
+| `leave_rejected` | Employee | `leave_type`, `from_date`, `to_date`, `approver_name`, `decision_note` |
+| `leave_sent_back` | Employee | `leave_type`, `from_date`, `to_date`, `approver_name`, `decision_note`, `action_url` |
+| `leave_cancelled` | Employee | `leave_type`, `from_date`, `to_date`, `days`, `cancelled_by` |
+| `timesheet_for_hr` | HR | `employee_name`, `week_label`, `total_hours`, `action_url` |
+| `timesheet_decided` | Employee | `week_label`, `total_hours`, `state`, `approver_name`, `decision_note` |
+| `attendance_for_hr` | HR | `employee_name`, `date_range`, `reason`, `action_url` |
+| `attendance_decided` | Employee | `date_range`, `state`, `approver_name`, `decision_note` |
+| `request_arrival` | Route role | `employee_name`, `category`, `subject`, `action_url` |
+| `request_status_changed` | Employee | `category`, `subject`, `state`, `reason` |
+| `request_reply` | Route role | `employee_name`, `category`, `subject`, `reply_excerpt`, `action_url` |
+| `approval_overdue_digest` | Approver | `count`, `items` (list of `kind`, `title`, `employee_name`, `age_days`, `url`) |
+| `hr_overdue_summary` | HR | `count`, `owners` (list of `owner_name`, `inactive`, `items`) |
+| `bank_change_requested` | Security (locked) | `field_label`, `masked_new_value`, `requested_on` |
+| `bank_change_applied` | Security (locked) | `field_label`, `masked_new_value`, `applied_on`, `applied_by` |
+
+`utils.NOTIFICATION_EVENTS` is the source of truth; the Email templates page
+shows the same list with descriptions. Examples:
+
+```jinja
+{# subject, leave_submitted #}
+Leave request from {{ employee_name }}: {{ leave_type }} ({{ days }} day(s))
+
+{# body: optional values guarded with if #}
+<p>Hi {{ recipient_first_name }},</p>
+<p>{{ employee_name }} asked for {{ leave_type }} from {{ from_date }} to {{ to_date }}
+{%- if half_day %} (half day){% endif %}.</p>
+{% if reason %}<p>Reason: {{ reason }}</p>{% endif %}
+<p><a href="{{ action_url }}">Review it in {{ company }}'s portal</a></p>
+
+{# approval_overdue_digest: loop over a list #}
+<ul>{% for item in items %}
+  <li>{{ item.kind }}: <a href="{{ item.url }}">{{ item.title }}</a>
+      ({{ item.employee_name }}, {{ item.age_days }} day(s))</li>
+{% endfor %}</ul>
+
+{# hr_overdue_summary: nested list #}
+{% for owner in owners %}<p><strong>{{ owner.owner_name }}</strong>
+{%- if owner.inactive %} (inactive){% endif %}</p>
+<ul>{% for item in owner.items %}<li>{{ item.title }}</li>{% endfor %}</ul>{% endfor %}
+```
+
+Refused: `{{ doc.employee_name }}` (no `doc`; unknown name), `{{ frappe.db... }}`,
+`{% set %}`, `{% include %}`, calls like `{{ name.upper() }}` -- use filters
+such as `{{ employee_name | upper }}`. Values are escaped; HTML in a variable
+prints as text.
+
+### Overdue: one predicate, one collector
+
+`api.is_overdue` is the one rule: a request waiting at its current stage
+longer than `helixhr_approval_overdue_days` calendar days (default 2), measured
+from `helixhr_pending_since` (Datetime on Leave Application, Timesheet,
+Attendance Request; stamped on entry to a new pending stage, backfilled from
+`modified`). The HR queue calls `is_overdue` directly; the Overdue tab and
+the daily digests both read `reminders.collect_overdue`, so tab and email
+counts agree. The daily job sends one
+`approval_overdue_digest` per late approver and one `hr_overdue_summary` per
+HR Manager (their admin scope). The dated rerun guard key is set **after**
+sending (a crash mid-run retries the next run rather than skipping the day),
+kept through `clear-cache` by `persistent_cache_keys`, expiring after 36 h.
+
+### Profile corrections for bank details
+
+`bank_name`, `bank_ac_no` and `iban` corrections are structured: double entry,
+required proof, Password fields (`correction_proposed`, `correction_current`)
+with masked copies for every screen and the queue. They can be filed **only
+through `create_my_request`**: the confirm value and proof arrive as
+`doc.flags`, which a Desk insert cannot set, so Desk cannot file one.
+Write-once on every route. HR's Done applies the value to Employee as HR
+behind a stale check and a 72 h hold after a `personal_email` change, then
+purges both secrets (also purged on Rejected). The locked
+`bank_change_requested` / `bank_change_applied` notices go to the employee.
+
+**Open decision:** the Employee's own Version log records the bank-field
+change when Done applies it (the request's Version log holds only `*`
+padding). Whether to suppress or accept that is not settled.
+
+### Navigation and filters
+
+The sidebar is grouped: pinned Home/Notifications, My work, Pay & policies,
+People & team, HR and Admin, pinned Profile. HR and Admin are collapsible and
+**collapsed by default** on first visit; state is per device in localStorage,
+and the current route's section opens for that view only. Filter chips live in
+the URL: Approvals `?kind=&category=`, Requests `?type=`.
+
 ## `helixhr/api.py` is one module on purpose
 
 It is about 4,600 lines after phase 3 (it was about 2,600 when this section was
@@ -1043,7 +1224,18 @@ method that asserts real data, and one clicked navigation in the e2e suite.
 
 Adding a setting: prefer site config read in `www/helixhr.py`'s `boot` (as
 `helixhr_hr_contact` is) over a new Single doctype, and add a line to
-`preflight.py` so the value is checked on every deploy. This is the rule for
+`preflight.py` so the value is checked on every deploy. Current examples:
+`helixhr_backdated_leave_grace_days`, `helixhr_backdated_leave_exempt_role`
+and `helixhr_approval_overdue_days` (read in `events.py` / `utils.py`, each
+reported by preflight).
+
+Adding a portal email: an entry in `utils.NOTIFICATION_EVENTS` (variables with
+description and sample, default subject and body), a send from the doc event
+through `send_notification`, recipients from document fields. The Email
+templates page and the variable reference pick it up with no frontend change.
+Adding a role that may act: a portal-only fixture Role (`desk_access 0`), a
+dated line in `apply_permission_deltas`, a preflight check, and a row in *Who
+may act* or the table in *Portal email*. This is the rule for
 a **scalar deploy-time flag** -- a threshold, a toggle, an address.
 
 It is not the rule for something HR edits at runtime. This app's standing
@@ -1051,9 +1243,10 @@ position is that Desk owns HR administration and the portal does not
 re-implement HRMS rules -- the routed-requests plan (phase 5) partly reverses
 that, deliberately and within bounds: HR now configures request categories
 and routing (`HelixHR Request Category`), the wording of the portal's own
-notifications (`HelixHR Message Template`, plain `{token}` substitution --
-**never** `frappe.render_template`, since a template evaluated as code would
-let HR's own text become remote code execution the moment it renders), and a
+notifications (`HelixHR Message Template` -- since plan 2026-10-02-001 owned
+by the `HelixHR Notification Manager` role, not HR, and rendered as Jinja in
+HelixHR's own sandbox, **never** `frappe.render_template`; see *Portal email*),
+and a
 **named, deliberately short** field set on three HRMS masters (Leave Type,
 Holiday List, Shift Type -- `helixhr/utils.py`'s `*_EDITABLE_FIELDS`
 constants, not every field the doctype has). Everything else that changes

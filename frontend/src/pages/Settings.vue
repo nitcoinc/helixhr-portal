@@ -5,7 +5,6 @@ import { createResource } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import CategoriesSection from '@/components/settings/CategoriesSection.vue'
-import TemplatesSection from '@/components/settings/TemplatesSection.vue'
 import LeaveTypesSection from '@/components/settings/LeaveTypesSection.vue'
 import HolidayListsSection from '@/components/settings/HolidayListsSection.vue'
 import ShiftTypesSection from '@/components/settings/ShiftTypesSection.vue'
@@ -27,7 +26,6 @@ const config = createResource({
 
 const SECTIONS = [
   { key: 'categories', label: 'Categories' },
-  { key: 'templates', label: 'Message text' },
   { key: 'leave-types', label: 'Leave types' },
   { key: 'holiday-lists', label: 'Holiday lists' },
   { key: 'shift-types', label: 'Shift types' },
@@ -60,7 +58,7 @@ function reload() {
   <div>
     <PageHeader
       title="Settings"
-      subtitle="Request categories, message text, and the day-to-day HRMS masters -- without Desk."
+      subtitle="Request categories and the day-to-day HRMS masters -- without Desk."
     >
       <template #actions>
         <!-- P8-U6: the server's own gate (`_can_open_desk`), not merely
@@ -112,12 +110,6 @@ function reload() {
         <CategoriesSection
           v-if="activeSection === 'categories'"
           :categories="config.data?.categories || []"
-          @saved="reload"
-        />
-        <TemplatesSection
-          v-else-if="activeSection === 'templates'"
-          :templates="config.data?.templates || []"
-          :template-tokens="config.data?.template_tokens || {}"
           @saved="reload"
         />
         <LeaveTypesSection

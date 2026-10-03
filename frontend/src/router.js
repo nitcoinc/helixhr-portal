@@ -172,11 +172,19 @@ const routes = [
     // the portal) rather than only via in-page tabs. `get_portal_config` is
     // the server's own gate -- an employee hitting this route directly gets
     // AsyncState's 'forbidden' region, not a client-side redirect.
-    path: '/settings/:section(categories|templates|leave-types|holiday-lists|shift-types|celebrations)',
+    path: '/settings/:section(categories|leave-types|holiday-lists|shift-types|celebrations)',
     name: 'SettingsSection',
     meta: { deskOnly: true },
     component: () => import('@/pages/Settings.vue'),
     props: true,
+  },
+  {
+    // Plan 2026-10-02-001 U7. The page is U10's; every method behind it is
+    // the server's own gate, same posture as /settings above.
+    path: '/email-templates',
+    name: 'EmailTemplates',
+    meta: { deskOnly: true, notificationsOnly: true },
+    component: () => import('@/pages/EmailTemplates.vue'),
   },
   {
     // P5-U15. `get_organisation_view` is the server's own gate -- a caller
@@ -290,6 +298,13 @@ router.beforeEach(async (to) => {
 
   await ensureBootstrap()
 
+  // Plan 2026-10-02-001 U10: a caller without `can_manage_notifications`
+  // (an HR Manager, say) is sent Home rather than shown a refusal. The
+  // server's guard is still the real gate.
+  if (to.meta.notificationsOnly && !session.canManageNotifications && session.status !== 'unavailable') {
+    return { name: 'Dashboard' }
+  }
+
   if (session.status === 'ready') {
     // Reaching a state page with a healthy session (a stale bookmark, or a
     // Back into /unavailable after a successful retry) means the state is
@@ -300,7 +315,12 @@ router.beforeEach(async (to) => {
   // An HR or System Manager with no Employee record: the pages whose
   // server methods are scoped by role (`meta.deskOnly`), and Home. Every
   // other page reads "my" records and would only fail.
+  // A Notification Manager with no Desk role (plan 2026-10-02-001 U7) has
+  // one page in the portal, so every route lands on Email templates.
   if (session.status === 'desk-only') {
+    if (session.canManageNotifications && !session.deskUrl) {
+      return to.name === 'EmailTemplates' ? true : { name: 'EmailTemplates' }
+    }
     return to.meta.deskOnly ? true : { name: 'Dashboard' }
   }
 

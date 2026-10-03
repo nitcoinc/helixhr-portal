@@ -146,6 +146,13 @@ DELTAS = {
 	"HelixHR Request Category": (
 		(("IT Team", 0, 0), {"read": 1}),
 	),
+	# Plan 2026-10-02-001 U7 / KTD12: the portal-only Notification Manager owns
+	# message wording. HR Manager left this doctype's own JSON permissions, so
+	# the snapshot `setup_custom_perms` takes below (post_model_sync, after the
+	# doctype synced) carries System Manager only.
+	"HelixHR Message Template": (
+		(("HelixHR Notification Manager", 0, 0), {"read": 1, "write": 1, "create": 1}),
+	),
 	# P7-U1 originally granted HelixHR Delivery Manager a plain read/write/
 	# create DocPerm on Project and Task here, paired with the scope hooks
 	# in `helixhr/project_permissions.py` (KTD8). Code review found that

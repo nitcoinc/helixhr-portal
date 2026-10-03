@@ -49,6 +49,7 @@ const week = computed(() => dashboard.data?.week)
 const needsYou = computed(() => dashboard.data?.needs_you?.items || [])
 const needsYouMore = computed(() => dashboard.data?.needs_you?.more || 0)
 const needsYouWaiting = computed(() => dashboard.data?.needs_you?.waiting || [])
+const needsYouWaitingMore = computed(() => dashboard.data?.needs_you?.waiting_more || 0)
 // P2-R25. `get_dashboard` names the sections that failed rather than letting
 // a null pass for "nothing recorded yet" -- one broken reference rail must
 // not make the rest of the page look empty, and it must be labelled as
@@ -206,6 +207,7 @@ const today = new Intl.DateTimeFormat(undefined, {
             :items="needsYou"
             :more="needsYouMore"
             :waiting="needsYouWaiting"
+            :waiting-more="needsYouWaitingMore"
             :week-hours="week?.total_hours || 0"
             :timesheet-state="week?.timesheet_state"
           />

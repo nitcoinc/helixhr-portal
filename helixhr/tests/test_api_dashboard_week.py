@@ -295,13 +295,15 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 
 	def test_queue_reports_how_many_rows_it_could_not_show(self):
 		monday, _ = get_week_bounds(today())
-		for offset in range(10):
+		# R12: past the 20-row window, `more` still counts what was cut.
+		for offset in range(22):
 			self._make_rejected_timesheet(f"week {offset}", start=add_days(monday, -7 * offset))
 
 		queue = get_dashboard()["needs_you"]
 
-		self.assertEqual(len(queue["items"]), 8)
+		self.assertEqual(len(queue["items"]), 20)
 		self.assertEqual(queue["more"], 2)
+		self.assertEqual(queue["waiting_more"], 0)
 
 	def test_get_my_week_carries_the_managers_reason_for_sending_it_back(self):
 		"""Regression: the Timesheet page read this with

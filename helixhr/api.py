@@ -43,6 +43,7 @@ from helixhr.events import (
 	HR_REQUEST_OPEN,
 	HR_REQUEST_WAITING_ON_EMPLOYEE,
 	LEAVE_STAGE_HR,
+	PENDING_SINCE_FIELD,
 	PENDING_STATE,
 	REQUEST_APPROVED,
 	REQUEST_DRAFT,
@@ -69,7 +70,9 @@ from helixhr.utils import (
 	ADMIN_REPORTS,
 	HOLIDAY_LIST_EDITABLE_FIELDS,
 	LEAVE_TYPE_EDITABLE_FIELDS,
+	NOTIFICATION_EVENTS,
 	PERSON_EDITABLE_FIELDS,
+	PROFILE_CORRECTABLE_FIELDS,
 	PROFILE_CORRECTION_CATEGORY,
 	PROFILE_EDITABLE_FIELDS,
 	PROFILE_LABELS,
@@ -78,11 +81,12 @@ from helixhr.utils import (
 	PROFILE_SECTION_TABLES,
 	PROFILE_USER_LINK_FIELDS,
 	SHIFT_TYPE_EDITABLE_FIELDS,
-	TEMPLATE_TOKENS,
 	UPLOAD_MAX_BYTES,
+	TemplateRejected,
 	admin_scope_employee_filters,
 	as_administrator,
 	employee_in_admin_scope,
+	event_variables,
 	get_manager_user,
 	get_week_bounds,
 	is_photo_content,
@@ -93,9 +97,13 @@ from helixhr.utils import (
 	project_in_scope,
 	project_scope_filters,
 	rate_limit_per_user,
+	render_message,
 	resolve_admin_scope,
 	resolve_project_scope,
+	sample_context,
+	send_notification,
 	session_company,
+	validate_message_template,
 	validate_portal_upload,
 )
 
@@ -586,6 +594,9 @@ def get_portal_bootstrap():
 		# so the nav item and the server's own gate can never disagree --
 		# same shape as `can_configure` just above.
 		"can_see_organisation": _is_hr(frappe.session.user),
+		# Plan 2026-10-02-001 U7 / KTD12: the Email templates page. A boolean,
+		# never a role list; System Manager may open it too (R14).
+		"can_manage_notifications": _can_manage_notifications(frappe.session.user),
 		# P6-U4: same shape again -- `search_people` and `get_person` are
 		# gated by `resolve_admin_scope`, which grants a scope to exactly
 		# the roles `_is_hr` names, so the nav item and the server's gate
@@ -1282,6 +1293,8 @@ def _get_needs_you(employee, once):
 		"items": shown,
 		"more": max(0, len(items) - len(shown)),
 		"waiting": waiting[:_QUEUE_LIMIT],
+		# The "View all (N)" count for the waiting list, as `more` is for the queue.
+		"waiting_more": max(0, len(waiting) - _QUEUE_LIMIT),
 	}
 
 
@@ -1313,8 +1326,10 @@ def _queue_item(
 # Shown on the screen, versus fetched per source. Fetching limit+1 would only
 # ever prove "at least one more exists"; a bounded window instead makes the
 # "and N more" count exact without a second COUNT query per source, and these
-# tables hold a handful of rows per employee.
-_QUEUE_LIMIT = 8
+# tables hold a handful of rows per employee. Twenty, not eight (R12): Home
+# shows five and scrolls the rest, so an HR backlog stays reachable without
+# flooding the page; "View all (N)" carries the full count.
+_QUEUE_LIMIT = 20
 
 # The rail card's ceiling (P4-U9). Five rows is what fits the rail beside the
 # queue without becoming the taller column; the page behind it is the full
@@ -1476,6 +1491,9 @@ def _summary_row(
 		"for_hr": False,
 		"sent_to_hr_by": None,
 		"hr_note": None,
+		# U4 / R10: why HR sees a manager-stage leave -- "approver_away" or
+		# "overdue" -- and None for everything else.
+		"hr_reason": None,
 	}
 	row.update(extra)
 	return row
@@ -1929,7 +1947,114 @@ def _hr_leave_summaries(employee, today):
 			hr_note=senders[row.name]["note"],
 		)
 		for row in rows
-	]
+	] + _hr_stalled_leave_summaries(employee, today, employee_filter)
+
+
+# Plan 2026-10-02-001 R25 / KTD13. Calendar days, the default the plan chose;
+# working days is the recorded upgrade path.
+APPROVAL_OVERDUE_DAYS_DEFAULT = 2
+
+
+def approval_overdue_days():
+	"""R25's threshold for leave, timesheets and attendance requests: site
+	config `helixhr_approval_overdue_days`, default 2 calendar days."""
+	return max(0, cint(frappe.conf.get("helixhr_approval_overdue_days", APPROVAL_OVERDUE_DAYS_DEFAULT)))
+
+
+def is_overdue(pending_since, today, threshold):
+	"""The one overdue predicate (U4; U11 and U12 reuse it): pending for
+	longer than the threshold, counted from `helixhr_pending_since`."""
+	if not pending_since:
+		return False
+	return _age_in_days(pending_since, today) > threshold
+
+
+def _approvers_away(users, today):
+	"""Which of these approver users are on approved, submitted leave today
+	(half days included) -- KTD4's "away"."""
+	if not users:
+		return set()
+	employees = {
+		row.name: row.user_id
+		for row in frappe.get_all(
+			"Employee", filters={"user_id": ["in", list(users)]}, fields=["name", "user_id"]
+		)
+	}
+	if not employees:
+		return set()
+	on_leave = frappe.get_all(
+		"Leave Application",
+		filters={
+			"employee": ["in", list(employees)],
+			"docstatus": 1,
+			"status": "Approved",
+			"from_date": ["<=", today],
+			"to_date": [">=", today],
+		},
+		pluck="employee",
+	)
+	return {employees[name] for name in on_leave}
+
+
+def _hr_stalled_leave_summaries(employee, today, employee_filter):
+	"""Manager-stage leave HR may decide because the approver is away or the
+	request is overdue (R10, KTD4). Admin-scoped by `employee_filter`, never
+	narrowed by `_line_manager_filter`: these are other managers' reports.
+	The caller's own approvals are already in their line-manager half."""
+	rows = frappe.get_all(
+		"Leave Application",
+		filters={
+			"status": "Open",
+			"docstatus": 0,
+			"helixhr_stage": ["in", ["", None, _LEAVE_STAGE_MANAGER]],
+			"employee": employee_filter,
+			"leave_approver": ["not in", ["", frappe.session.user]],
+		},
+		fields=[
+			"name",
+			"employee",
+			"employee_name",
+			"leave_type",
+			"from_date",
+			"to_date",
+			"total_leave_days",
+			"status",
+			"creation",
+			"leave_approver",
+			PENDING_SINCE_FIELD,
+		],
+		order_by="creation asc",
+		limit=_QUEUE_FETCH,
+	)
+	away = _approvers_away({row.leave_approver for row in rows}, today)
+	threshold = approval_overdue_days()
+	stalled = []
+	for row in rows:
+		if row.leave_approver in away:
+			reason = "approver_away"
+		elif is_overdue(row.get(PENDING_SINCE_FIELD), today, threshold):
+			reason = "overdue"
+		else:
+			continue
+		stalled.append(
+			_summary_row(
+				"leave",
+				"Leave Application",
+				row.name,
+				row.employee,
+				row.employee_name,
+				row.from_date,
+				row.to_date,
+				row.creation,
+				row.status,
+				today,
+				leave_type=row.leave_type,
+				total_days=flt(row.total_leave_days),
+				for_hr=True,
+				hr_reason=reason,
+			)
+		)
+	return stalled
 
 
 def _hr_timesheet_summaries(employee, today):
@@ -2077,6 +2202,10 @@ def _hr_request_summaries(employee, today):
 			"creation",
 			"modified",
 			"hr_note",
+			# Plan 2026-10-02-001 U14 / R28: the masked copy only -- the
+			# Password fields are never read into a queue.
+			"correction_field",
+			"correction_proposed_masked",
 		],
 		order_by="creation asc",
 		limit=_QUEUE_FETCH,
@@ -2110,6 +2239,8 @@ def _hr_request_summaries(employee, today):
 			picked_up_by=row.picked_up_by,
 			for_hr=(row.routed_to_role == "HR Manager"),
 			hr_note=row.hr_note,
+			correction_field=row.correction_field,
+			correction_proposed_masked=row.correction_proposed_masked,
 		)
 		for row in rows
 	]
@@ -2195,6 +2326,16 @@ def _holds_routed_role(user=None):
 	other half of P5-R11's "is HR or holds a routed role" gate."""
 	user = user or frappe.session.user
 	return bool(set(frappe.get_roles(user)) & _ROUTED_WORKER_ROLES)
+
+
+NOTIFICATION_MANAGER = "HelixHR Notification Manager"
+
+
+def _can_manage_notifications(user=None):
+	"""Whether the caller owns portal email wording (plan 2026-10-02-001 R14):
+	the Notification Manager or System Manager -- never HR Manager alone."""
+	user = user or frappe.session.user
+	return bool(set(frappe.get_roles(user)) & {NOTIFICATION_MANAGER, "System Manager"})
 
 
 def _initials(full_name):
@@ -4522,22 +4663,67 @@ _DECIDED_LIMIT = 5
 _LEAVE_PENDING_HR = "Pending HR"
 
 
+# U6 / R13. The kinds a queue row can be, in the order the chips render.
+_APPROVAL_FILTER_KINDS = ("leave", "timesheet", "attendance", "request")
+
+
+def _valid_request_category(category):
+	"""The category filter, refused unless it names a category record --
+	active or not, because an inactive category still has past requests a
+	chip has to reach (R13). Returns None when no filter was asked for."""
+	if not category:
+		return None
+	if not isinstance(category, str) or not frappe.db.exists("HelixHR Request Category", category):
+		frappe.throw(_("There is no request category called {0}.").format(category))
+	return category
+
+
+def _count_by(values):
+	"""[{name, count}] for each distinct non-empty value, by name."""
+	counts = {}
+	for value in values:
+		if value:
+			counts[value] = counts.get(value, 0) + 1
+	return [{"name": name, "count": counts[name]} for name in sorted(counts)]
+
+
 @frappe.whitelist()
-def get_my_approvals():
+def get_my_approvals(kind=None, category=None):
 	"""The manager's queue: everything waiting on them, oldest first, plus
 	the handful of decisions they made this week (P2-U7 step 1).
 
 	Summary only. The evidence -- timesheet rows and day totals, a leave's
 	reason -- costs a document read per item, so it is loaded by
 	`get_approval_detail` for the one item actually selected (P2-R22).
+
+	U6 / R13: `kind` and `category` narrow the page; `counts` is always the
+	caller's whole queue, so every chip says what choosing it would show.
+	A category implies kind "request" -- only requests have one.
 	"""
 	rate_limit_per_user("get_my_approvals")
+	if kind and kind not in _APPROVAL_FILTER_KINDS:
+		frappe.throw(_("There is no approval kind called {0}.").format(kind))
+	category = _valid_request_category(category)
+	if category:
+		kind = "request"
 	employee = get_current_employee()
 	pending, capped = _approval_summaries(employee)
+	counts = {
+		"kinds": [
+			{"name": name, "count": sum(1 for row in pending if row["kind"] == name)}
+			for name in _APPROVAL_FILTER_KINDS
+		],
+		"categories": _count_by(row.get("category") for row in pending if row["kind"] == "request"),
+	}
+	if kind:
+		pending = [row for row in pending if row["kind"] == kind]
+	if category:
+		pending = [row for row in pending if row.get("category") == category]
 	return {
 		"today": user_today(),
 		"pending": pending[:_APPROVAL_PAGE],
 		"total": len(pending),
+		"counts": counts,
 		# `total` is what came back, and every kind's read is bounded, so on a
 		# very large backlog it is a floor and not a count. The flag is what
 		# lets the screen say "50+" rather than lie about 50; a real COUNT per
@@ -4817,6 +5003,35 @@ def _recently_decided(employee):
 	for entry in decided:
 		entry["age_days"] = _age_in_days(entry["decided_on"], today)
 	return _with_photo_urls(decided[:_DECIDED_LIMIT])
+
+
+@frappe.whitelist()
+def get_overdue_approvals():
+	"""U12 / R26. HR's Overdue tab: who is sitting on what, how long, and
+	against which threshold, within the caller's admin scope (P6-R6).
+
+	Same collector and grouping as the daily HR summary (U11), so the tab
+	and the email never disagree. Owner groups come oldest item first; rows
+	inside a group are oldest first."""
+	rate_limit_per_user("get_overdue_approvals")
+	if not _is_hr():
+		frappe.throw(_("Only HR can see overdue approvals."), frappe.PermissionError)
+	from helixhr.reminders import _summary_owners, collect_overdue
+
+	def row(item):
+		return {
+			"kind": item["kind"],
+			"route_kind": item["route_kind"],
+			"name": item["name"],
+			"title": item["title"],
+			"employee_name": item["employee_name"],
+			"age_days": item["age_days"],
+			"threshold_days": item["threshold_days"],
+		}
+
+	today = getdate(user_today())
+	groups = _summary_owners(collect_overdue(today), frappe.session.user, project=row)
+	return {"groups": groups, "count": sum(len(group["items"]) for group in groups)}
 
 
 @frappe.whitelist()
@@ -5288,12 +5503,45 @@ def act_on_approval(
 			f"{HR_HANDOVER_NOTE_PREFIX} {reason}" if action == "Send to HR" else reason,
 		)
 
+	# U9: leave keeps its reason as a Comment, so the decision email reads it
+	# from here (`events.leave_application_on_submit` / `_on_update`).
+	doc.flags.helixhr_decision_note = reason
 	_APPROVAL_KINDS[doctype]["act"](doc, action)
+	_record_hr_acting_for_approver(doc, action)
 	return {
 		"name": doc.name,
 		"action": action,
 		"state": doc.get(_APPROVAL_KINDS[doctype]["state_field"]),
 	}
+
+
+def _record_hr_acting_for_approver(doc, action):
+	"""U4 / R11: HR decided a manager-stage leave in the approver's place.
+	The timeline says so, and the approver gets a bell row. Runs after the
+	decision, so a refused action leaves neither behind."""
+	if doc.doctype != "Leave Application" or action == "Send to HR":
+		return
+	user = frappe.session.user
+	approver = doc.leave_approver
+	if not approver or approver == user or not _is_hr(user):
+		return
+	if (frappe.db.get_value("Leave Application", doc.name, "helixhr_stage") or _LEAVE_STAGE_MANAGER) != (
+		_LEAVE_STAGE_MANAGER
+	):
+		return
+	approver_name = frappe.utils.get_fullname(approver)
+	doc.add_comment("Info", _("Decided by HR for {0}.").format(approver_name))
+	frappe.get_doc(
+		{
+			"doctype": "Notification Log",
+			"for_user": approver,
+			"from_user": user,
+			"type": "Alert",
+			"document_type": doc.doctype,
+			"document_name": doc.name,
+			"subject": _("HR decided {0}'s leave request for you: {1}.").format(doc.employee_name, action),
+		}
+	).insert(ignore_permissions=True)
 
 
 def _act_through_workflow(doc, action):
@@ -5622,6 +5870,32 @@ def _request_decision_detail(doc):
 		"sent_on": str(doc.creation) if doc.creation else None,
 		"age_days": _age_in_days(doc.creation, _as_date(user_today())),
 		"thread": _request_thread(doc),
+		"correction": _correction_summary(doc),
+		# U14: the files on the request -- for a correction, the proof HR
+		# checks before Done. Private; File's own read check gates download.
+		"attachments": [
+			_attachment(row)
+			for row in frappe.get_all(
+				"File",
+				filters={"attached_to_doctype": "HR Request", "attached_to_name": doc.name},
+				fields=["name", "file_name", "file_url", "file_size", "is_private"],
+				order_by="creation asc",
+			)
+		],
+	}
+
+
+def _correction_summary(doc):
+	"""What a correction proposes, masked only (plan 2026-10-02-001 U14, R28).
+	None for an ordinary request. The full value is `reveal_correction_value`'s
+	alone, so neither Password field is read here."""
+	if not doc.get("correction_field"):
+		return None
+	return {
+		"field": doc.correction_field,
+		"label": PROFILE_CORRECTABLE_FIELDS.get(doc.correction_field, doc.correction_field),
+		"current_masked": doc.correction_current_masked,
+		"proposed_masked": doc.correction_proposed_masked,
 	}
 
 
@@ -5796,8 +6070,9 @@ _SUBJECT_MAX = 140
 _DETAILS_MAX = 5000
 
 
-def _requests_summary(employee, limit=None):
-	"""A bounded page of `employee`'s requests, newest first.
+def _requests_summary(employee, limit=None, category=None):
+	"""A bounded page of `employee`'s requests, newest first, optionally of
+	one category (U6 / R13; `counts` is per category across all of them).
 
 	Carries what the list actually renders and nothing else: the lifecycle
 	dates, HR's reply, how many files are on it, and whether there is an
@@ -5805,10 +6080,12 @@ def _requests_summary(employee, limit=None):
 	you" rather than a status word (P2-R13).
 	"""
 	limit = min(max(cint(limit) or _REQUEST_PAGE, 1), _REQUEST_MAX_PAGE)
+	category = _valid_request_category(category)
+	filters = {"employee": employee, **({"category": category} if category else {})}
 
 	rows = frappe.get_all(
 		"HR Request",
-		filters={"employee": employee},
+		filters=filters,
 		fields=list(_REQUEST_FIELDS),
 		order_by="creation desc",
 		limit=limit,
@@ -5826,15 +6103,22 @@ def _requests_summary(employee, limit=None):
 			}
 			for row in rows
 		],
-		"total": frappe.db.count("HR Request", {"employee": employee}),
+		"total": frappe.db.count("HR Request", filters),
+		# One column over one employee's requests -- small, and the same
+		# flat-read reasoning as `_attachment_counts`.
+		"counts": {
+			"categories": _count_by(
+				frappe.get_all("HR Request", filters={"employee": employee}, pluck="category")
+			)
+		},
 		"limit": limit,
 		"today": user_today(),
 	}
 
 
 @frappe.whitelist()
-def get_my_requests(limit=None):
-	return _requests_summary(get_current_employee(), limit)
+def get_my_requests(limit=None, category=None):
+	return _requests_summary(get_current_employee(), limit, category)
 
 
 @frappe.whitelist()
@@ -5853,7 +6137,10 @@ def get_my_request(name):
 
 def _request_detail(name, employee):
 	row = frappe.db.get_value(
-		"HR Request", name, [*_REQUEST_FIELDS, "details", "employee"], as_dict=True
+		"HR Request",
+		name,
+		[*_REQUEST_FIELDS, "details", "employee", "correction_field", "correction_proposed_masked"],
+		as_dict=True,
 	)
 	if not row:
 		frappe.throw(_("That request no longer exists."), frappe.DoesNotExistError)
@@ -5970,7 +6257,15 @@ def mark_my_request_read(name):
 
 
 @frappe.whitelist(methods=["POST"])
-def create_my_request(category, subject, details=None, operation_key=None):
+def create_my_request(
+	category,
+	subject,
+	details=None,
+	operation_key=None,
+	correction_field=None,
+	correction_value=None,
+	correction_confirm=None,
+):
 	"""Create this employee's HR Request, once, whatever the network does
 	(P2-R18, P2-R25, P2-AE7).
 
@@ -5992,6 +6287,13 @@ def create_my_request(category, subject, details=None, operation_key=None):
 	caller inputs, and category is checked against the DocType's own options
 	-- `frappe.client.insert` with a browser-built document, which this
 	replaces, offered every one of them as a parameter.
+
+	Plan 2026-10-02-001 U13: with `correction_field`, this files a profile
+	correction. The value is typed twice (`correction_value`,
+	`correction_confirm`) and the proof is the multipart `file` of this same
+	call, so the request and its proof commit together. Every rule lives in
+	`events.hr_request_validate`; this only hands the inputs over. The
+	response never echoes the value.
 	"""
 	rate_limit_per_user("create_my_request")
 	employee = get_current_employee()
@@ -6025,6 +6327,16 @@ def create_my_request(category, subject, details=None, operation_key=None):
 			"client_operation_key": key,
 		}
 	)
+	if correction_field:
+		doc.correction_field = correction_field
+		doc.correction_proposed = correction_value
+		doc.flags.correction_confirm = correction_confirm
+		upload = (getattr(frappe.request, "files", None) or {}).get("file")
+		if upload is not None:
+			doc.flags.correction_proof = (
+				os.path.basename(upload.filename or "").strip(),
+				upload.stream.read(),
+			)
 	try:
 		# Role Employee has no `create` on this DocType by design: the
 		# allow-list above *is* the create rule, and it is stricter than a
@@ -6040,6 +6352,42 @@ def create_my_request(category, subject, details=None, operation_key=None):
 		return {**_request_detail(won, employee), "created": False}
 
 	return {**_request_detail(doc.name, employee), "created": True}
+
+
+@frappe.whitelist(methods=["POST"])
+def reveal_correction_value(name):
+	"""The full proposed value of an open correction, for the HR user handling
+	it (plan 2026-10-02-001 R28, KTD15).
+
+	The same authorization a decision on the record gets (`_assert_may_act_on`:
+	not the requester, in HR's admin scope), narrowed to HR and, once picked
+	up, to the user who picked it up. Closed requests have nothing left to
+	reveal. Every reveal leaves an Info comment naming who looked.
+	"""
+	from frappe.utils.password import get_decrypted_password
+
+	rate_limit_per_user("reveal_correction_value")
+	if not frappe.db.exists("HR Request", name):
+		frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
+	doc = frappe.get_doc("HR Request", name)
+	if not _is_hr() or doc.routed_to_role != "HR Manager":
+		frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
+	_assert_may_act_on(doc)
+	if doc.picked_up_by and doc.picked_up_by != frappe.session.user:
+		frappe.throw(_("Only the person handling this request can see the full value."), frappe.PermissionError)
+	if not doc.correction_field or doc.status in ("Done", "Rejected"):
+		frappe.throw(_("There is no value to show on this request."))
+	value = get_decrypted_password("HR Request", name, "correction_proposed", raise_exception=False)
+	if not value:
+		frappe.throw(_("There is no value to show on this request."))
+	doc.add_comment(
+		"Info",
+		_("Proposed {0} revealed by {1}").format(
+			PROFILE_CORRECTABLE_FIELDS[doc.correction_field],
+			frappe.utils.get_fullname(frappe.session.user),
+		),
+	)
+	return {"name": name, "field": doc.correction_field, "value": value}
 
 
 def _request_for_key(key, employee):
@@ -6138,7 +6486,6 @@ def _apply_allowed_fields(doc, fields, allowed, skip_on_update=()):
 # tabs render.
 _SETTINGS_DESK_DOCTYPES = {
 	"categories": "HelixHR Request Category",
-	"templates": "HelixHR Message Template",
 	"leave_types": "Leave Type",
 	"holiday_lists": "Holiday List",
 	"shift_types": "Shift Type",
@@ -6178,12 +6525,6 @@ def get_portal_config():
 			fields=["name", "category_name", "hint", "route_to_role", "sla_days", "is_active"],
 			order_by="category_name asc",
 		),
-		"templates": frappe.get_all(
-			"HelixHR Message Template",
-			fields=["name", "template_key", "subject", "body", "is_enabled"],
-			order_by="template_key asc",
-		),
-		"template_tokens": TEMPLATE_TOKENS,
 		"leave_types": frappe.get_all(
 			"Leave Type", fields=["name", *LEAVE_TYPE_EDITABLE_FIELDS], order_by="leave_type_name asc"
 		),
@@ -6225,15 +6566,68 @@ def save_request_category(name, **fields):
 	return {field: doc.get(field) for field in ("name", "category_name", *_CATEGORY_EDITABLE_FIELDS)}
 
 
+# --- Email templates page (plan 2026-10-02-001 U10, R15, R18) --------------
+
+
+def _assert_can_manage_notifications():
+	"""The one gate every Email templates method calls first (R14): the
+	Notification Manager or System Manager. HR Manager alone is refused."""
+	if not _can_manage_notifications():
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+
+
+def _message_event(template_key):
+	if template_key not in NOTIFICATION_EVENTS:
+		frappe.throw(_("Not a valid message."))
+	return NOTIFICATION_EVENTS[template_key]
+
+
+@frappe.whitelist()
+def get_notification_setup():
+	"""Every portal email event with its state (Off / Default / Custom, KTD7),
+	wording, defaults and variable reference -- the whole page in one call."""
+	_assert_can_manage_notifications()
+	rate_limit_per_user("get_notification_setup")
+	saved = {
+		row.template_key: row
+		for row in frappe.get_all(
+			"HelixHR Message Template", fields=["template_key", "subject", "body", "is_enabled"]
+		)
+	}
+	events = []
+	for key, event in NOTIFICATION_EVENTS.items():
+		locked = bool(event.get("locked"))
+		row = saved.get(key)
+		state = "Default" if not row else ("Custom" if row.is_enabled or locked else "Off")
+		events.append(
+			{
+				"key": key,
+				"label": event["label"],
+				"audience": event["audience"],
+				"locked": locked,
+				"state": state,
+				"subject": (row.subject if row else None) or event["subject"],
+				"body": (row.body if row else None) or event["body"],
+				"default_subject": event["subject"],
+				"default_body": event["body"],
+				"variables": [
+					{"name": name, "description": description, "sample": sample}
+					for name, (description, sample) in event_variables(key).items()
+				],
+			}
+		)
+	return {"events": events, "subject_max": _TEMPLATE_SUBJECT_MAX}
+
+
 @frappe.whitelist(methods=["POST"])
 def save_message_template(template_key, subject=None, body=None, is_enabled=None):
-	"""Edit the wording of one message the portal sends (P5-R14). The body
-	is stored as-is and rendered later by `helixhr.utils.render_tokens` --
-	plain substitution, never Jinja (P5-R15, P5-KTD11) -- so nothing here
-	ever executes what HR types."""
+	"""Edit the wording of one message the portal sends (P5-R14). The
+	doctype's own `validate()` holds the template to the HelixHR sandbox's
+	rules (plan 2026-10-02-001 U8, R17): unknown variables, disallowed
+	constructs and templates that fail on sample data are refused there."""
+	_assert_can_manage_notifications()
 	rate_limit_per_user("save_message_template")
-	if template_key not in TEMPLATE_TOKENS:
-		frappe.throw(_("Not a valid message."))
+	_message_event(template_key)
 
 	if frappe.db.exists("HelixHR Message Template", template_key):
 		doc = frappe.get_doc("HelixHR Message Template", template_key)
@@ -6260,6 +6654,74 @@ def save_message_template(template_key, subject=None, body=None, is_enabled=None
 		"body": doc.body,
 		"is_enabled": cint(doc.is_enabled),
 	}
+
+
+@frappe.whitelist(methods=["POST"])
+def reset_message_template(template_key):
+	"""Back to the default wording: no row is Default (KTD7). The Info
+	comment names the actor (R18a); it is written after the delete because
+	`delete_doc` removes the row's own comments, so its link is not checked
+	-- the next save recreates the row under the same name."""
+	_assert_can_manage_notifications()
+	rate_limit_per_user("reset_message_template")
+	_message_event(template_key)
+	if frappe.db.exists("HelixHR Message Template", template_key):
+		# The Notification Manager has no delete DocPerm on purpose -- Desk
+		# delete stays System Manager's. The guard above is this path's gate.
+		frappe.delete_doc("HelixHR Message Template", template_key, ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "Comment",
+				"comment_type": "Info",
+				"reference_doctype": "HelixHR Message Template",
+				"reference_name": template_key,
+				"content": _("{0} reset this email template to the default").format(
+					frappe.utils.get_fullname(frappe.session.user)
+				),
+			}
+		).insert(ignore_permissions=True, ignore_links=True)
+	return {"template_key": template_key, "state": "Default"}
+
+
+def _render_draft(template_key, subject, body):
+	"""Validate then render an unsaved draft with the event's sample data.
+	A refusal is the same sentence a save would give (R17)."""
+	event = _message_event(template_key)
+	if event.get("locked"):
+		subject = event["subject"]
+	try:
+		validate_message_template(template_key, subject, body)
+	except TemplateRejected as exc:
+		frappe.throw(str(exc), title=_("Template not valid"))
+	return render_message(template_key, sample_context(template_key), source={"subject": subject, "body": body})
+
+
+@frappe.whitelist(methods=["POST"])
+def preview_message_template(template_key, subject=None, body=None):
+	"""The draft as the email would look, with sample data. The client shows
+	`html` only in a sandboxed iframe (KTD11)."""
+	_assert_can_manage_notifications()
+	rate_limit_per_user("preview_message_template")
+	message = _render_draft(template_key, subject or "", body or "")
+	return {"subject": message["subject"], "html": message["html"]}
+
+
+@frappe.whitelist(methods=["POST"])
+def send_test_message(template_key, subject=None, body=None):
+	"""Send the draft, with sample data, to the caller's own address only --
+	never a recipient the caller names."""
+	_assert_can_manage_notifications()
+	rate_limit_per_user("send_test_message")
+	message = _render_draft(template_key, subject or "", body or "")
+	email = frappe.db.get_value("User", frappe.session.user, "email")
+	if not email:
+		frappe.throw(_("Your account has no email address to send the test to."))
+	frappe.sendmail(
+		recipients=[email],
+		subject=_("[Test] {0}").format(message["subject"]),
+		message=message["html"],
+	)
+	return {"sent_to": email}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -6622,23 +7084,21 @@ def reply_to_my_request(name, message, expected_modified=None):
 	doc.add_comment("Comment", message)
 	doc.db_set("status", HR_REQUEST_IN_PROGRESS)
 
-	role = row.routed_to_role
-	recipients = _enabled_users_with_role(role)
-	if recipients:
-		try:
-			frappe.sendmail(
-				recipients=recipients,
-				subject=f"New reply on a {row.category} request: {row.subject}",
-				message=(
-					f"{frappe.utils.escape_html(row.category)} request "
-					f"“{frappe.utils.escape_html(row.subject)}” has a new reply. "
-					f"<a href=\"{frappe.utils.get_url('/helixhr/requests')}\">Open requests</a>."
-				),
-				reference_doctype="HR Request",
-				reference_name=name,
-			)
-		except Exception:
-			frappe.log_error(frappe.get_traceback(), "HelixHR request reply mail failed")
+	# U9: templated through the HelixHR sandbox; `send_notification` never
+	# raises, so a mail failure cannot undo the reply.
+	send_notification(
+		"request_reply",
+		_enabled_users_with_role(row.routed_to_role),
+		{
+			"employee_name": frappe.db.get_value("Employee", employee, "employee_name"),
+			"category": row.category,
+			"subject": row.subject,
+			"reply_excerpt": message[:300],
+			"action_url": frappe.utils.get_url(f"/helixhr/approvals/request/{name}"),
+		},
+		reference_doctype="HR Request",
+		reference_name=name,
+	)
 
 	return {"name": name, "status": doc.status}
 

@@ -42,7 +42,7 @@ test.describe('manager', () => {
     const fixture = await seedTeamWeek(baseURL!)
 
     await page.goto('/helixhr/team')
-    await expect(page.getByRole('heading', { name: 'Team' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Team', exact: true })).toBeVisible()
     await page.waitForLoadState('networkidle')
 
     // The field block: who is out today, by name.

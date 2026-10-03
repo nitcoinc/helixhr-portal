@@ -1,12 +1,13 @@
 <script setup>
 import Avatar from '@/components/Avatar.vue'
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { Dialog } from 'frappe-ui'
 import Icon from '@/components/Icon.vue'
 import { session, signOut } from '@/lib/session'
 import { currentUnread, watchUnread, unwatchUnread } from '@/lib/unread'
 import { watchDialogs, unwatchDialogs } from '@/lib/dialogA11y'
+import { groupNav, readCollapsed, writeCollapsed } from '@/lib/navGroups'
 
 // `primary` items are the four that fit the phone tab bar alongside
 // "More" (design system: max 5 tab items). Everything else lives in the
@@ -19,29 +20,34 @@ import { watchDialogs, unwatchDialogs } from '@/lib/dialogA11y'
 //
 // `deskOnly` marks the items a 'desk-only' session (HR or System Manager
 // with no Employee record) keeps: Home and the role-scoped admin pages.
+// `group` places the item in a sidebar section (lib/navGroups.js, U15).
+// Gates are unchanged; a section the gates leave empty is dropped.
 const NAV = [
-  { label: 'Home', to: '/', icon: 'home', primary: true, deskOnly: true },
-  { label: 'Leave', to: '/leave', icon: 'leave', primary: true },
-  { label: 'Timesheet', to: '/timesheet', icon: 'timesheet', primary: true },
-  { label: 'Requests', to: '/requests', icon: 'requests', primary: true },
-  { label: 'Attendance', to: '/attendance', icon: 'attendance' },
-  { label: 'Payslips', to: '/payslips', icon: 'wallet' },
-  { label: 'Holidays', to: '/holidays', icon: 'sun' },
-  { label: 'Documents', to: '/documents', icon: 'documents' },
-  { label: 'Directory', to: '/directory', icon: 'users' },
-  { label: 'Team', to: '/team', icon: 'users', reportsOnly: true },
+  { label: 'Home', to: '/', icon: 'home', primary: true, deskOnly: true, group: 'pinned' },
+  { label: 'Notifications', to: '/notifications', icon: 'notifications', badge: true, group: 'pinned' },
+  { label: 'Leave', to: '/leave', icon: 'leave', primary: true, group: 'work' },
+  { label: 'Timesheet', to: '/timesheet', icon: 'timesheet', primary: true, group: 'work' },
+  { label: 'Attendance', to: '/attendance', icon: 'attendance', group: 'work' },
+  { label: 'Requests', to: '/requests', icon: 'requests', primary: true, group: 'work' },
+  { label: 'Payslips', to: '/payslips', icon: 'wallet', group: 'pay' },
+  { label: 'Holidays', to: '/holidays', icon: 'sun', group: 'pay' },
+  { label: 'Documents', to: '/documents', icon: 'documents', group: 'pay' },
+  { label: 'Directory', to: '/directory', icon: 'users', group: 'people' },
+  { label: 'Team', to: '/team', icon: 'users', reportsOnly: true, group: 'people' },
   // Plan 2026-09-30-001 U9: everyone has a roster row of their own. Not
   // `primary` -- the tab bar is full. `rosterOnly` hides it from a desk-only
   // session with no admin scope, which would have no mode to show.
-  { label: 'Roster', to: '/roster', icon: 'timesheet', rosterOnly: true, deskOnly: true },
-  { label: 'Approvals', to: '/approvals', icon: 'approvals', managerOnly: true },
-  { label: 'Settings', to: '/settings', icon: 'settings', configureOnly: true, deskOnly: true },
-  { label: 'Organisation', to: '/organisation', icon: 'organisation', organisationOnly: true, deskOnly: true },
-  { label: 'People', to: '/people', icon: 'peopleSearch', peopleOnly: true, deskOnly: true },
-  { label: 'Reports', to: '/reports', icon: 'reports', peopleOnly: true, deskOnly: true },
-  { label: 'Projects', to: '/projects', icon: 'folder', projectsOnly: true, deskOnly: true },
-  { label: 'Notifications', to: '/notifications', icon: 'notifications', badge: true },
-  { label: 'Profile', to: '/profile', icon: 'profile' },
+  { label: 'Roster', to: '/roster', icon: 'timesheet', rosterOnly: true, deskOnly: true, group: 'people' },
+  { label: 'Approvals', to: '/approvals', icon: 'approvals', managerOnly: true, group: 'people' },
+  { label: 'People', to: '/people', icon: 'peopleSearch', peopleOnly: true, deskOnly: true, group: 'hr' },
+  { label: 'Reports', to: '/reports', icon: 'reports', peopleOnly: true, deskOnly: true, group: 'hr' },
+  { label: 'Organisation', to: '/organisation', icon: 'organisation', organisationOnly: true, deskOnly: true, group: 'hr' },
+  { label: 'Projects', to: '/projects', icon: 'folder', projectsOnly: true, deskOnly: true, group: 'hr' },
+  { label: 'Settings', to: '/settings', icon: 'settings', configureOnly: true, deskOnly: true, group: 'admin' },
+  // Plan 2026-10-02-001 U10: gated on the boolean `can_manage_notifications`
+  // flag (KTD12), never a role list. HR Manager alone does not see it.
+  { label: 'Email templates', to: '/email-templates', icon: 'notifications', notificationsOnly: true, deskOnly: true, group: 'admin' },
+  { label: 'Profile', to: '/profile', icon: 'profile', group: 'bottom' },
 ]
 
 const route = useRoute()
@@ -68,6 +74,7 @@ const navItems = computed(() =>
       (!item.managerOnly || isManager.value) &&
       (!item.reportsOnly || session.hasReports) &&
       (!item.configureOnly || session.canConfigure) &&
+      (!item.notificationsOnly || session.canManageNotifications) &&
       (!item.organisationOnly || session.canSeeOrganisation) &&
       (!item.peopleOnly || session.canSeePeople) &&
       (!item.projectsOnly || session.canSeeProjects) &&
@@ -77,6 +84,35 @@ const navItems = computed(() =>
 )
 const primaryItems = computed(() => navItems.value.filter((item) => item.primary))
 const moreItems = computed(() => navItems.value.filter((item) => !item.primary))
+const navGroups = computed(() => groupNav(navItems.value))
+const moreGroups = computed(() => groupNav(moreItems.value))
+
+// R8: collapsed state is per device; admin sections start collapsed. The group holding the current route is
+// shown open for this view only -- `routeOpen` never touches storage, so
+// leaving the route lets the remembered state come back.
+const collapsed = ref(new Set(readCollapsed()))
+const routeOpen = ref(null)
+watch(
+  () => [route.path, navGroups.value],
+  () => {
+    routeOpen.value = navGroups.value.find((g) => g.items.some(isActive))?.id ?? null
+  },
+  { immediate: true },
+)
+function isOpen(group) {
+  return !group.collapsible || group.id === routeOpen.value || !collapsed.value.has(group.id)
+}
+function toggleGroup(group) {
+  const next = new Set(collapsed.value)
+  if (isOpen(group)) {
+    next.add(group.id)
+    if (routeOpen.value === group.id) routeOpen.value = null
+  } else {
+    next.delete(group.id)
+  }
+  collapsed.value = next
+  writeCollapsed([...next])
+}
 
 const deskOnly = computed(() => session.status === 'desk-only')
 // A desk-only session has no Employee to name, and no Profile page to open.
@@ -174,30 +210,68 @@ onUnmounted(() => {
         </router-link>
 
         <nav
-          class="mt-4 flex-1 space-y-0.5 overflow-y-auto px-3"
+          class="mt-3 flex-1 overflow-y-auto px-3"
           aria-label="Main"
         >
-          <router-link
-            v-for="item in navItems"
-            :key="item.to"
-            :to="item.to"
-            :aria-current="isActive(item) ? 'page' : undefined"
-            class="flex cursor-pointer items-center gap-3 rounded-lg px-3 py-2 text-sm font-medium"
-            :class="
-              isActive(item)
-                ? 'bg-white/15 text-white'
-                : 'text-blue-100 hover:bg-white/10 hover:text-white'
-            "
+          <div
+            v-for="group in navGroups"
+            :key="group.id"
+            class="space-y-0.5"
+            :class="group.label || group.id === 'bottom' ? 'mt-2' : ''"
           >
-            <Icon :name="item.icon" />
-            <span class="flex-1">{{ item.label }}</span>
-            <span
-              v-if="item.badge && unread > 0"
-              class="flex h-5 min-w-5 items-center justify-center rounded-full bg-signal px-1.5 text-xs font-bold text-field"
+            <button
+              v-if="group.collapsible"
+              type="button"
+              class="flex w-full cursor-pointer items-center justify-between rounded-md px-3 py-1 text-xs font-semibold uppercase tracking-wide text-blue-200 hover:text-white"
+              :aria-expanded="isOpen(group)"
+              :aria-controls="`nav-group-${group.id}`"
+              @click="toggleGroup(group)"
             >
-              <span class="tabular">{{ unreadLabel }}</span>
-            </span>
-          </router-link>
+              {{ group.label }}
+              <span
+                class="transition-transform"
+                :class="isOpen(group) ? 'rotate-90' : ''"
+              >
+                <Icon
+                  name="chevronRight"
+                  size="h-3.5 w-3.5"
+                />
+              </span>
+            </button>
+            <h2
+              v-else-if="group.label"
+              class="px-3 py-1 text-xs font-semibold uppercase tracking-wide text-blue-200"
+            >
+              {{ group.label }}
+            </h2>
+            <div
+              v-show="isOpen(group)"
+              :id="`nav-group-${group.id}`"
+              class="space-y-0.5"
+            >
+              <router-link
+                v-for="item in group.items"
+                :key="item.to"
+                :to="item.to"
+                :aria-current="isActive(item) ? 'page' : undefined"
+                class="flex cursor-pointer items-center gap-3 rounded-lg px-3 py-1 text-sm font-medium"
+                :class="
+                  isActive(item)
+                    ? 'bg-white/15 text-white'
+                    : 'text-blue-100 hover:bg-white/10 hover:text-white'
+                "
+              >
+                <Icon :name="item.icon" />
+                <span class="flex-1">{{ item.label }}</span>
+                <span
+                  v-if="item.badge && unread > 0"
+                  class="flex h-5 min-w-5 items-center justify-center rounded-full bg-signal px-1.5 text-xs font-bold text-field"
+                >
+                  <span class="tabular">{{ unreadLabel }}</span>
+                </span>
+              </router-link>
+            </div>
+          </div>
         </nav>
 
         <button
@@ -310,33 +384,49 @@ onUnmounted(() => {
     >
       <template #body-content>
         <div class="space-y-0.5">
-          <router-link
-            v-for="item in moreItems"
-            :key="item.to"
-            :to="item.to"
-            :aria-current="isActive(item) ? 'page' : undefined"
-            class="flex min-h-11 cursor-pointer items-center gap-3 rounded-lg px-3 py-3 text-sm font-medium"
-            :class="
-              isActive(item)
-                ? 'bg-surface-gray-2 text-ink-gray-9'
-                : 'text-ink-gray-7 hover:bg-surface-gray-2'
-            "
-            @click="closeMore"
+          <!-- R9: same groups as the rail, always open, no collapse control. -->
+          <section
+            v-for="group in moreGroups"
+            :key="group.id"
+            :aria-labelledby="group.label ? `more-group-${group.id}` : undefined"
+            class="space-y-0.5"
+            :class="group.label || group.id === 'bottom' ? 'pt-2' : ''"
           >
-            <Icon :name="item.icon" />
-            <span class="flex-1">{{ item.label }}</span>
-            <span
-              v-if="item.badge && unread > 0"
-              class="flex h-5 min-w-5 items-center justify-center rounded-full bg-signal px-1.5 text-xs font-bold text-field"
+            <h2
+              v-if="group.label"
+              :id="`more-group-${group.id}`"
+              class="px-3 pb-1 text-xs font-semibold uppercase tracking-wide text-ink-gray-5"
             >
-              <span class="tabular">{{ unreadLabel }}</span>
-            </span>
-            <Icon
-              v-else
-              name="chevronRight"
-              size="h-4 w-4"
-            />
-          </router-link>
+              {{ group.label }}
+            </h2>
+            <router-link
+              v-for="item in group.items"
+              :key="item.to"
+              :to="item.to"
+              :aria-current="isActive(item) ? 'page' : undefined"
+              class="flex min-h-11 cursor-pointer items-center gap-3 rounded-lg px-3 py-3 text-sm font-medium"
+              :class="
+                isActive(item)
+                  ? 'bg-surface-gray-2 text-ink-gray-9'
+                  : 'text-ink-gray-7 hover:bg-surface-gray-2'
+              "
+              @click="closeMore"
+            >
+              <Icon :name="item.icon" />
+              <span class="flex-1">{{ item.label }}</span>
+              <span
+                v-if="item.badge && unread > 0"
+                class="flex h-5 min-w-5 items-center justify-center rounded-full bg-signal px-1.5 text-xs font-bold text-field"
+              >
+                <span class="tabular">{{ unreadLabel }}</span>
+              </span>
+              <Icon
+                v-else
+                name="chevronRight"
+                size="h-4 w-4"
+              />
+            </router-link>
+          </section>
           <button
             class="flex min-h-11 w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-3 text-sm font-medium text-ink-gray-6 hover:bg-surface-gray-2"
             @click="signOut"

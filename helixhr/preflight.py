@@ -864,15 +864,9 @@ def check_fixtures():
 		("Activity Type", "General"),
 		("Notification", "HelixHR Timesheet Status Changed"),
 		("Notification", "HelixHR Leave Status Changed"),
-		# P4-KTD9 / P4-R12: HR is told a request reached its queue by these
-		# four fixture Notifications and by nothing in code, so a missing one
-		# is a queue nobody is watching. Leave needs two -- Frappe skips
-		# Value Change while `flags.in_insert`, and an HR-approves leave is
-		# *inserted* in the HR stage.
-		("Notification", "HelixHR Leave Sent To HR"),
-		("Notification", "HelixHR New Leave For HR"),
-		("Notification", "HelixHR Timesheet Sent To HR"),
-		("Notification", "HelixHR Attendance Request Sent To HR"),
+		# The four HR-queue email fixtures (P4-KTD9) were retired by plan
+		# 2026-10-02-001 U9; `check_retired_hr_email_notifications` guards
+		# that they stay gone.
 	]
 	missing = [f"{dt} '{name}'" for dt, name in expected if not frappe.db.exists(dt, name)]
 	if missing:
@@ -905,6 +899,40 @@ def check_retired_request_notifications():
 			f"{', '.join(enabled)} still enabled -- run helixhr.patches.v1_0.retire_request_notifications",
 		)
 	return _result("Retired request notifications", PASS, f"{len(retired)} confirmed absent or disabled")
+
+
+def check_retired_hr_email_notifications():
+	"""Plan 2026-10-02-001 U9 / KTD9: HR's "waiting for you" mail is a
+	templated doc-event send now, so any of the four retired fixture email
+	Notifications coming back -- a restored site, a Desk re-create -- is a
+	second, untemplated copy of every one of those emails."""
+	from helixhr.patches.v1_0.retire_hr_email_notifications import RETIRED_NOTIFICATIONS
+
+	present = [name for name in RETIRED_NOTIFICATIONS if frappe.db.exists("Notification", name)]
+	if present:
+		return _result(
+			"Retired HR email notifications",
+			FAIL,
+			f"{', '.join(present)} still present -- run helixhr.patches.v1_0.retire_hr_email_notifications",
+		)
+	return _result(
+		"Retired HR email notifications", PASS, f"{len(RETIRED_NOTIFICATIONS)} confirmed absent"
+	)
+
+
+def check_hrms_leave_notification():
+	"""Plan 2026-10-02-001 R21 / KTD10: HelixHR is the only sender of leave
+	email. `events.hr_settings_validate` refuses re-enabling HRMS's
+	`send_leave_notification`; this is the backstop for routes that skip
+	`validate` (a raw `set_single_value`, a restored site)."""
+	if cint(_hr_setting("send_leave_notification")):
+		return _result(
+			"HRMS leave notification",
+			FAIL,
+			"HR Settings 'Send Leave Notification' is on, so every leave email goes out twice -- "
+			"run helixhr.patches.v1_0.turn_off_hrms_leave_notification",
+		)
+	return _result("HRMS leave notification", PASS, "off; HelixHR sends leave email")
 
 
 def check_hr_request_workflow_state_order():
@@ -1171,17 +1199,11 @@ def check_celebration_reminders():
 
 def check_outgoing_email():
 	"""P4-R18: `frappe.sendmail` throws without a default outgoing Email
-	Account, and the HR-queue Notifications send from *inside* the save that
-	escalates a request (P4-R12) -- so the throw is the save's throw.
-
-	A FAIL, not a WARN. Without the account two actions do not merely go
-	unannounced, they are refused outright: Send to HR on a leave, timesheet
-	or attendance request, and an employee applying for a leave type HR
-	approves (that insert starts in the HR queue and fires the same
-	notification). Both are new user-facing actions rather than existing
-	behaviour degrading, and swallowing the notification error instead would
-	be worse -- HR would silently never be told. The celebration reminders
-	need the same account, and fail quietly in the scheduler log.
+	Account. Since plan 2026-10-02-001 U9 every portal email is a templated
+	doc-event send that logs the failure instead of failing the save, so a
+	missing account no longer refuses any action -- it silently mails
+	nobody: no approver, no HR queue, no employee decision, no celebration
+	reminder. Still a FAIL for that reason.
 	"""
 	account = frappe.db.get_value(
 		"Email Account", {"enable_outgoing": 1, "default_outgoing": 1}, "name"
@@ -1191,10 +1213,24 @@ def check_outgoing_email():
 	return _result(
 		"Outgoing email",
 		FAIL,
-		"no default outgoing Email Account -- Send to HR is refused on every leave, timesheet "
-		"and attendance request, applying for an HR-approves leave type is refused too, and the "
-		"celebration reminders send nothing (Desk: Email Account)",
+		"no default outgoing Email Account -- no portal email is sent: approvers, HR queues, "
+		"employee decisions and celebration reminders all go unannounced (Desk: Email Account)",
 	)
+
+
+def check_overdue_digests():
+	"""Plan 2026-10-02-001 U11: the threshold the overdue digests use, and a
+	WARN when the scheduler is off -- the digests then never go out."""
+	from frappe.utils.scheduler import is_scheduler_disabled
+
+	from helixhr.api import approval_overdue_days
+
+	threshold = f"overdue after {approval_overdue_days()} day(s) (helixhr_approval_overdue_days)"
+	if is_scheduler_disabled(verbose=False):
+		return _result(
+			"Overdue digests", WARN, f"scheduler disabled -- no overdue digest is sent; {threshold}"
+		)
+	return _result("Overdue digests", PASS, threshold)
 
 
 def check_hr_manager_self_scope():
@@ -1244,28 +1280,34 @@ def check_hr_manager_self_scope():
 
 
 def check_template_tokens():
-	"""P5-U13 / P5-KTD11: every token `helixhr.utils.TEMPLATE_TOKENS` promises
-	for a message key is one its caller actually supplies to `render_tokens`.
-
-	This can only be verified by rendering, not by reading source, so it
-	sends each seeded template through its real caller with a sentinel
-	request and asserts every documented token was substituted -- a token
-	the plan promises but the code forgot to pass would otherwise render as
-	itself (a literal `{token}`) forever, silently.
-	"""
-	from helixhr.utils import TEMPLATE_TOKENS, render_tokens
+	"""Plan 2026-10-02-001 U8: every event's default renders against its
+	sample data in the HelixHR sandbox, and every saved template still passes
+	save-time validation -- a row that would now be refused (a migrated
+	legacy row, a Desk import) would otherwise fall back to the default on
+	every send, silently but for the Error Log."""
+	from helixhr.utils import (
+		NOTIFICATION_EVENTS,
+		TemplateRejected,
+		render_message,
+		sample_context,
+		validate_message_template,
+	)
 
 	problems = []
-	for template_key, tokens in TEMPLATE_TOKENS.items():
-		probe = {token: f"__probe_{token}__" for token in tokens}
-		body = " ".join(f"{{{token}}}" for token in tokens)
-		rendered = render_tokens(body, probe)
-		missing = [token for token in tokens if probe[token] not in rendered]
-		if missing:
-			problems.append(f"{template_key}: {', '.join(missing)} never substituted")
+	for event_key, event in NOTIFICATION_EVENTS.items():
+		try:
+			validate_message_template(event_key, event["subject"], event["body"])
+			render_message(event_key, sample_context(event_key))
+		except Exception as exc:
+			problems.append(f"{event_key} default: {exc}")
+	for row in frappe.get_all("HelixHR Message Template", fields=["template_key", "subject", "body"]):
+		try:
+			validate_message_template(row.template_key, row.subject, row.body)
+		except TemplateRejected as exc:
+			problems.append(f"{row.template_key}: {exc}")
 	if problems:
 		return _result("Message template tokens", FAIL, "; ".join(problems))
-	return _result("Message template tokens", PASS, f"{len(TEMPLATE_TOKENS)} templates checked")
+	return _result("Message template tokens", PASS, f"{len(NOTIFICATION_EVENTS)} events checked")
 
 
 def check_configuration_field_sets():
@@ -1354,6 +1396,37 @@ def check_curated_reports():
 	return _result("Curated reports", PASS, f"{len(ADMIN_REPORTS)} reports checked")
 
 
+NOTIFICATION_MANAGER = "HelixHR Notification Manager"
+
+
+def check_notification_manager_role():
+	"""Plan 2026-10-02-001 U7: the Notification Manager stays portal-only, and
+	WARNs while no enabled user holds it -- then only System Manager can edit
+	portal email wording, which is a gap rather than a fault."""
+	role = frappe.db.get_value("Role", NOTIFICATION_MANAGER, ["desk_access", "is_custom"], as_dict=True)
+	problems = []
+	if not role:
+		problems.append("Role fixture is missing")
+	else:
+		if cint(role.desk_access):
+			problems.append("desk_access must be 0")
+		if cint(role.is_custom):
+			problems.append("is_custom must be 0")
+	if problems:
+		return _result("Notification Manager role", FAIL, "; ".join(problems) + " -- run bench migrate")
+
+	holders = frappe.get_all(
+		"Has Role", filters={"role": NOTIFICATION_MANAGER, "parenttype": "User"}, pluck="parent"
+	)
+	if not holders or not frappe.db.exists("User", {"name": ("in", holders), "enabled": 1}):
+		return _result(
+			"Notification Manager role",
+			WARN,
+			"no enabled user holds it -- grant it in Desk (User > Roles) so someone owns email templates",
+		)
+	return _result("Notification Manager role", PASS, "portal-only role held by an enabled user")
+
+
 def check_no_timesheet_report_permission():
 	"""P7-U8 / R16: no role this app grants -- every entry in
 	`helixhr/fixtures/role.json`, not just `HelixHR Delivery Manager` --
@@ -1406,6 +1479,7 @@ CHECKS = [
 	check_employee_open_fields,
 	check_it_team_role,
 	check_delivery_manager_role,
+	check_notification_manager_role,
 	check_signup_disabled,
 	check_password_login,
 	check_entra,
@@ -1421,6 +1495,8 @@ CHECKS = [
 	check_hr_contact,
 	check_fixtures,
 	check_retired_request_notifications,
+	check_retired_hr_email_notifications,
+	check_hrms_leave_notification,
 	check_hr_request_workflow_state_order,
 	check_request_category_routes,
 	check_profile_correction_category,
@@ -1430,6 +1506,7 @@ CHECKS = [
 	check_holiday_list_coverage,
 	check_celebration_reminders,
 	check_outgoing_email,
+	check_overdue_digests,
 	check_hr_manager_self_scope,
 	check_template_tokens,
 	check_configuration_field_sets,

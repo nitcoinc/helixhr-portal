@@ -1,5 +1,14 @@
 import { describe, it, expect } from 'vitest'
-import { NOT_RECORDED, SUBJECT_MAX, correctionDraft, displayValue, spokenValue } from './profileCorrection'
+import {
+  CORRECTION_VALUE_MAX,
+  NOT_RECORDED,
+  SUBJECT_MAX,
+  correctionDraft,
+  correctionEntryError,
+  correctionParams,
+  displayValue,
+  spokenValue,
+} from './profileCorrection'
 
 describe('correctionDraft', () => {
   it('names the field and quotes the value the page shows', () => {
@@ -70,5 +79,40 @@ describe('spokenValue', () => {
     expect(spokenValue('••••1234')).toBe('ending in 1234')
     expect(spokenValue('••••')).toBe('hidden')
     expect(spokenValue('Engineering')).toBe('Engineering')
+  })
+})
+
+describe('structured corrections (plan 2026-10-02-001 U14)', () => {
+  const draft = correctionDraft({ label: 'Bank A/C No.', display: '••••5678', masked: true, fieldname: 'bank_ac_no' })
+
+  it('marks a correctable field and keeps the value out of the prose', () => {
+    expect(draft.correction_field).toBe('bank_ac_no')
+    expect(draft.details).not.toMatch(/\d/)
+    expect(correctionDraft({ label: 'Date of birth', display: '1 Jan 1990', fieldname: 'date_of_birth' }))
+      .not.toHaveProperty('correction_field')
+  })
+
+  it('returns create_my_request params once both entries match', () => {
+    expect(
+      correctionParams(draft, { value: ' 1234 ', confirm: '1234', category: 'Profile correction', operationKey: 'k' }),
+    ).toEqual({
+      category: 'Profile correction',
+      subject: draft.subject,
+      details: draft.details,
+      operation_key: 'k',
+      correction_field: 'bank_ac_no',
+      correction_value: '1234',
+      correction_confirm: '1234',
+    })
+    expect(correctionParams(draft, { value: '1234', confirm: '1235' })).toBeNull()
+    expect(correctionParams(draft, { value: '1234', confirm: '' })).toBeNull()
+    expect(correctionParams(correctionDraft({ label: 'X', display: 'y' }), { value: 'a', confirm: 'a' })).toBeNull()
+  })
+
+  it('says a mismatch in one sentence, and nothing before the second entry', () => {
+    expect(correctionEntryError('1234', '')).toBe('')
+    expect(correctionEntryError('1234', '1234 ')).toBe('')
+    expect(correctionEntryError('1234', '1235')).toMatch(/don’t match/)
+    expect(correctionEntryError('x'.repeat(CORRECTION_VALUE_MAX + 1), '')).toBe('That value is too long.')
   })
 })

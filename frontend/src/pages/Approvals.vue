@@ -1,13 +1,14 @@
 <script setup>
 import Avatar from '@/components/Avatar.vue'
 import { ref, computed, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { createResource, Button, FormControl } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
 import { attachToRequestReply } from '@/lib/api'
+import CorrectionReview from '@/components/approvals/CorrectionReview.vue'
 import { session } from '@/lib/session'
 import { formatDate, formatDateRange, formatDateTime } from '@/lib/dates'
 import { toPlainLeaveError } from '@/lib/errorMap'
@@ -23,6 +24,7 @@ const props = defineProps({
   name: { type: String, default: '' },
 })
 
+const route = useRoute()
 const router = useRouter()
 
 // P2-U7 step 1 / P2-R27. One session-scoped read, replacing the two the page
@@ -32,10 +34,50 @@ const router = useRouter()
 // read whose only limit was whatever Frappe happened to allow, and which did
 // not even exclude the manager's own week. The server now decides what is in
 // this queue, using the same rules that decide who may act on it.
+// U6 / R13. The chip lives in the URL query, so a link reproduces the view;
+// the server filters and counts, the browser only says which chip is on.
+const kindFilter = computed(() => route.query.kind || '')
+const categoryFilter = computed(() => route.query.category || '')
 const queue = createResource({
   url: 'helixhr.api.get_my_approvals',
+  makeParams: () => ({
+    kind: kindFilter.value || undefined,
+    category: categoryFilter.value || undefined,
+  }),
   auto: true,
 })
+watch([kindFilter, categoryFilter], () => queue.reload())
+
+const KIND_CHIP_LABEL = {
+  leave: 'Leave',
+  timesheet: 'Timesheets',
+  attendance: 'Attendance',
+  request: 'Requests',
+}
+const kindChips = computed(() =>
+  (queue.data?.counts?.kinds || []).filter((chip) => chip.count || chip.name === kindFilter.value),
+)
+const categoryChips = computed(() => queue.data?.counts?.categories || [])
+
+/** Turn one chip on (or the All chip, with neither value), keeping any open
+ * detail where it is. */
+function filterQueue(kind, category) {
+  router.push({ name: route.name, params: route.params, query: { kind: kind || undefined, category: category || undefined } })
+}
+
+// U12 / R26. HR-only Overdue tab, in the URL like the chips. The server
+// refuses anyone else; `canConfigure` mirrors that gate (`_is_hr`).
+const VIEW_TABS = [
+  { name: 'queue', label: 'Queue' },
+  { name: 'overdue', label: 'Overdue' },
+]
+const OVERDUE_VISIBLE_ROWS = 5
+const view = computed(() => (session.canConfigure && route.query.view === 'overdue' ? 'overdue' : 'queue'))
+const overdue = createResource({ url: 'helixhr.api.get_overdue_approvals' })
+watch(view, (value) => value === 'overdue' && overdue.fetch(), { immediate: true })
+function showView(name) {
+  router.push({ path: '/approvals', query: name === 'overdue' ? { view: 'overdue' } : {} })
+}
 
 const pending = computed(() => queue.data?.pending || [])
 const decided = computed(() => queue.data?.decided || [])
@@ -80,11 +122,15 @@ const detail = createResource({
 const selected = computed(() => (props.name ? detail.data : null))
 
 function open(row) {
-  router.push({ name: 'ApprovalDetail', params: { kind: row.kind, name: row.name } })
+  router.push({
+    name: 'ApprovalDetail',
+    params: { kind: row.kind, name: row.name },
+    query: route.query,
+  })
 }
 
 function closeDetail() {
-  router.push({ name: 'Approvals' })
+  router.push({ name: 'Approvals', query: route.query })
 }
 
 const isDesktop = useIsDesktop()
@@ -416,9 +462,16 @@ function requestedDayLabel(day) {
  * thing distinguishing HR's work from a manager's own. Both halves are
  * optional: a request of an HR-approves leave type reached HR with nobody
  * sending it (P4-R7). */
+// U4 / R10: why a manager-stage leave is in HR's queue at all.
+const HR_REASON_LABEL = {
+  approver_away: 'Approver on leave',
+  overdue: 'Overdue with approver',
+}
+
 function hrLine(row) {
   if (!row?.for_hr) return ''
   const parts = []
+  if (HR_REASON_LABEL[row.hr_reason]) parts.push(HR_REASON_LABEL[row.hr_reason])
   if (row.sent_to_hr_by) parts.push(`Sent by ${row.sent_to_hr_by}`)
   if (row.hr_note) parts.push(`“${row.hr_note}”`)
   return parts.join(' · ')
@@ -438,7 +491,95 @@ function hrLine(row) {
       </template>
     </PageHeader>
 
-    <p class="mb-4 text-sm text-ink-gray-5">
+    <!-- U12 / R26. HR's Overdue tab: who is sitting on what, past R25's
+         threshold, within HR's admin scope. Same collector as the daily HR
+         summary (U11). The tab lives in the URL query like the chips. -->
+    <div
+      v-if="session.canConfigure"
+      class="mb-4 flex gap-2 border-b border-outline-gray-2"
+      role="tablist"
+      aria-label="Approvals views"
+    >
+      <button
+        v-for="tab in VIEW_TABS"
+        :key="tab.name"
+        type="button"
+        role="tab"
+        class="-mb-px min-h-11 border-b-2 px-3 text-sm font-medium"
+        :class="
+          view === tab.name
+            ? 'border-ink-gray-9 text-ink-gray-9'
+            : 'border-transparent text-ink-gray-6 hover:text-ink-gray-9'
+        "
+        :aria-selected="view === tab.name"
+        @click="showView(tab.name)"
+      >
+        {{ tab.label }}
+      </button>
+    </div>
+
+    <section
+      v-if="view === 'overdue'"
+      data-testid="overdue-tab"
+    >
+      <AsyncState
+        section="approvals-overdue"
+        :resource="overdue"
+        :empty="!overdue.data?.count"
+        empty-title="Nothing overdue"
+        empty-body="Approvals and requests waiting past their deadline appear here, grouped by who owes the decision."
+        :skeleton-rows="3"
+      >
+        <div class="space-y-6">
+          <section
+            v-for="group in overdue.data.groups"
+            :key="group.owner_name + group.inactive"
+            data-testid="overdue-group"
+          >
+            <h2 class="label mb-2">
+              {{ group.owner_name }}
+              <span class="tabular text-ink-gray-5">{{ group.items.length }}</span>
+              <span
+                v-if="group.inactive"
+                class="ml-1 text-ink-amber-3"
+              >No active owner</span>
+            </h2>
+            <ul
+              class="space-y-2"
+              :class="group.items.length > OVERDUE_VISIBLE_ROWS ? 'scroll-queue max-h-[19.5rem]' : ''"
+              :tabindex="group.items.length > OVERDUE_VISIBLE_ROWS ? 0 : undefined"
+              :aria-label="group.items.length > OVERDUE_VISIBLE_ROWS ? `${group.owner_name}, scrollable` : undefined"
+            >
+              <li
+                v-for="item in group.items"
+                :key="item.route_kind + item.name"
+                data-testid="overdue-row"
+                :data-overdue-name="item.name"
+              >
+                <router-link
+                  :to="`/approvals/${item.route_kind}/${item.name}`"
+                  class="surface-card elev-1 flex h-14 min-w-0 items-center gap-3 px-3 hover:bg-surface-gray-2"
+                >
+                  <span class="min-w-0 flex-1">
+                    <span class="block truncate text-sm font-medium text-ink-gray-9">{{ item.employee_name }} · {{ item.title }}</span>
+                    <span class="block truncate text-xs text-ink-gray-5">{{ item.kind }}</span>
+                  </span>
+                  <span class="tabular shrink-0 text-right text-sm text-ink-gray-9">
+                    {{ item.age_days }} days
+                    <span class="block text-xs text-ink-gray-5">limit {{ item.threshold_days }}</span>
+                  </span>
+                </router-link>
+              </li>
+            </ul>
+          </section>
+        </div>
+      </AsyncState>
+    </section>
+
+    <p
+      v-if="view === 'queue'"
+      class="mb-4 text-sm text-ink-gray-5"
+    >
       <template v-if="hasHrWork">
         Oldest first. Your own team, plus anything marked HR.
       </template>
@@ -450,7 +591,7 @@ function hrLine(row) {
     <!-- P5-R12: requests split into what nobody has claimed and what the
          viewer already has, counted separately from the rest of the queue. -->
     <p
-      v-if="requestRows.length"
+      v-if="view === 'queue' && requestRows.length"
       class="mb-4 flex flex-wrap gap-x-4 gap-y-1 text-sm text-ink-gray-5"
       data-testid="request-claim-counts"
     >
@@ -464,7 +605,74 @@ function hrLine(row) {
       </span>
     </p>
 
-    <div class="lg:flex lg:items-start lg:gap-6">
+    <!-- U6 / R13. Kind chips, then -- for requests -- category chips. Same
+         chip shape as the Directory's department filter. -->
+    <div
+      v-if="view === 'queue' && (kindChips.length > 1 || kindFilter || categoryFilter)"
+      class="mb-4 flex flex-wrap items-center gap-2"
+      role="group"
+      aria-label="Filter approvals by kind"
+      data-testid="approval-kind-chips"
+    >
+      <button
+        type="button"
+        class="min-h-11 rounded-full border px-4 text-sm font-medium"
+        :class="
+          !kindFilter && !categoryFilter
+            ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
+            : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
+        "
+        :aria-pressed="!kindFilter && !categoryFilter"
+        @click="filterQueue()"
+      >
+        All
+      </button>
+      <button
+        v-for="chip in kindChips"
+        :key="chip.name"
+        type="button"
+        class="min-h-11 rounded-full border px-4 text-sm font-medium"
+        :class="
+          kindFilter === chip.name
+            ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
+            : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
+        "
+        :aria-pressed="kindFilter === chip.name"
+        @click="filterQueue(chip.name)"
+      >
+        {{ KIND_CHIP_LABEL[chip.name] }}
+        <span class="tabular text-ink-gray-5">{{ chip.count }}</span>
+      </button>
+    </div>
+    <div
+      v-if="view === 'queue' && (kindFilter === 'request' || categoryFilter) && categoryChips.length"
+      class="mb-4 flex flex-wrap items-center gap-2"
+      role="group"
+      aria-label="Filter requests by category"
+      data-testid="approval-category-chips"
+    >
+      <button
+        v-for="chip in categoryChips"
+        :key="chip.name"
+        type="button"
+        class="min-h-11 rounded-full border px-4 text-sm font-medium"
+        :class="
+          categoryFilter === chip.name
+            ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
+            : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
+        "
+        :aria-pressed="categoryFilter === chip.name"
+        @click="filterQueue('request', chip.name)"
+      >
+        {{ chip.name }}
+        <span class="tabular text-ink-gray-5">{{ chip.count }}</span>
+      </button>
+    </div>
+
+    <div
+      v-if="view === 'queue'"
+      class="lg:flex lg:items-start lg:gap-6"
+    >
       <!-- The queue. One list, leave and timesheets together: they are the
            same job -- somebody is waiting on a decision -- and splitting them
            into two sections made a manager check two places to find out
@@ -722,6 +930,14 @@ function hrLine(row) {
                       <p class="text-sm text-ink-gray-6">
                         {{ selected.category }}
                       </p>
+                      <CorrectionReview
+                        v-if="selected.correction"
+                        :key="selected.name"
+                        :request="selected.name"
+                        :correction="selected.correction"
+                        :attachments="selected.attachments"
+                        :can-reveal="actions.length > 0"
+                      />
                       <ul
                         v-if="selected.thread?.length"
                         class="mt-2 space-y-2"
@@ -1223,6 +1439,14 @@ function hrLine(row) {
               <p class="text-sm text-ink-gray-6">
                 {{ selected.category }}
               </p>
+              <CorrectionReview
+                v-if="selected.correction"
+                :key="selected.name"
+                :request="selected.name"
+                :correction="selected.correction"
+                :attachments="selected.attachments"
+                :can-reveal="actions.length > 0"
+              />
               <ul
                 v-if="selected.thread?.length"
                 class="mt-2 space-y-2"
@@ -1422,3 +1646,14 @@ function hrLine(row) {
     </div>
   </div>
 </template>
+
+<style scoped>
+/* Same scroll affordance as Home's queues (NeedsYou.vue): five 3.5rem rows
+   plus gaps, an always-visible gutter and a bottom rule. */
+.scroll-queue {
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+  padding-right: 0.25rem;
+  border-bottom: 1px solid var(--outline-gray-2);
+}
+</style>

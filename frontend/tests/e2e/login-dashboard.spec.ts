@@ -192,6 +192,31 @@ test.describe('HR Manager with no Employee record', () => {
   })
 })
 
+test.describe('Notification Manager with no Employee record', () => {
+  // Plan 2026-10-02-001 U7: a portal-only role with no Desk lands on Email
+  // templates, never on the not-linked page.
+  test.use({ storageState: { cookies: [], origins: [] } })
+
+  test('lands on Email templates from any route', async ({ page, baseURL }) => {
+    const api = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+    const login = await api.post('/api/method/login', {
+      form: { usr: 'notification-manager@helixhr.test', pwd: PASSWORD },
+    })
+    expect(login.ok()).toBeTruthy()
+    const storageState = await api.storageState()
+    await api.dispose()
+
+    await page.context().addCookies(storageState.cookies)
+    await page.goto('/helixhr')
+    await expect(page).toHaveURL(/\/helixhr\/email-templates$/)
+    await expect(page.getByRole('heading', { name: 'Email templates' })).toBeVisible()
+    await expect(page.getByText('Your account is not set up')).toHaveCount(0)
+
+    await page.goto('/helixhr/leave')
+    await expect(page).toHaveURL(/\/helixhr\/email-templates$/)
+  })
+})
+
 test.describe('dashboard week spine (redesign)', () => {
   test('shows the Monday..Sunday spine and the action queue', async ({ page }, testInfo) => {
     test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
@@ -231,6 +256,77 @@ test.describe('dashboard week spine (redesign)', () => {
     } else {
       await expect(queue.getByText('Nothing needs you.')).toBeVisible()
     }
+  })
+})
+
+// P3-U5 / R12. Home shows five queue rows and scrolls the rest. Stubbed, not
+// seeded: the shape under test is the list's, and a seeded HR backlog of
+// exactly twelve would drift with every other spec's fixtures.
+function stubQueue(page, count) {
+  return page.route('**/api/method/helixhr.api.get_dashboard*', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json()
+    const items = Array.from({ length: count }, (_, i) => ({
+      id: `leave:STUB-${i}`,
+      kind: 'leave',
+      notification: null,
+      title: `Stub leave request ${i + 1}`,
+      detail: null,
+      date: null,
+      day: null,
+      age_days: null,
+      action: 'Review',
+      owner: 'you',
+      urgency: 'action',
+      tone: 'action',
+      to: { name: 'Approvals' },
+    }))
+    body.message.needs_you = { items, more: 0, waiting: [], waiting_more: 0 }
+    await route.fulfill({ response, json: body })
+  })
+}
+
+test.describe('five-row queue (R12)', () => {
+  test('12 items: five visible, the rest scroll, View all (12) goes to Approvals', async ({
+    page,
+  }, testInfo) => {
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
+    await stubQueue(page, 12)
+    await page.goto('/helixhr')
+    const queue = page.getByRole('region', { name: 'Needs you' })
+    const list = queue.getByRole('list', { name: 'Needs you, scrollable' })
+    await expect(list.getByRole('listitem')).toHaveCount(12)
+
+    // Rows fully inside the list's own box -- not the page viewport, which
+    // on a phone may not reach the list at all.
+    const shownRows = () =>
+      list.evaluate((el) => {
+        const box = el.getBoundingClientRect()
+        return [...el.children]
+          .map((li, i) => [li.getBoundingClientRect(), i + 1])
+          .filter(([r]) => r.top >= box.top - 1 && r.bottom <= box.bottom + 1)
+          .map(([, n]) => n)
+      })
+    await expect.poll(shownRows).toEqual([1, 2, 3, 4, 5])
+
+    // Keyboard-reachable, and scrolling reveals the last row.
+    await expect(list).toHaveAttribute('tabindex', '0')
+    await list.evaluate((el) => el.scrollTo(0, el.scrollHeight))
+    await expect.poll(async () => (await shownRows()).at(-1)).toBe(12)
+
+    const viewAll = queue.getByRole('link', { name: 'View all (12)' })
+    await viewAll.click()
+    await expect(page).toHaveURL(/\/helixhr\/approvals$/)
+  })
+
+  test('3 items: no scroll chrome and no View all', async ({ page }, testInfo) => {
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
+    await stubQueue(page, 3)
+    await page.goto('/helixhr')
+    const queue = page.getByRole('region', { name: 'Needs you' })
+    await expect(queue.getByRole('listitem')).toHaveCount(3)
+    await expect(queue.getByRole('list', { name: /scrollable/ })).toHaveCount(0)
+    await expect(queue.getByRole('link', { name: /View all/ })).toHaveCount(0)
   })
 })
 
