@@ -606,6 +606,10 @@ def get_portal_bootstrap():
 		# scope to exactly the callers this flag names, so the nav item and the
 		# server's gate agree by construction.
 		"can_see_projects": resolve_project_scope(frappe.session.user)["kind"] != "none",
+		# Plan 2026-10-04-001 U4: the Reports nav item. True when
+		# `get_report_catalog` would list at least one entry -- the same
+		# `resolve_report_access` answer `run_report` enforces.
+		"can_run_reports": _can_run_reports(frappe.session.user),
 		# P6-KTD4: resolved on the caller's own ability to reach Desk (a
 		# System User holding a `desk_access` role), never on "is HR" --
 		# the two are correlated today but the flag must not assume they
@@ -7814,6 +7818,60 @@ def run_report(report_key, filters=None, group_by=None, sort=None, **kwargs):
 		"filters": result["filters"],
 		"can_export": access["can_export"],
 	}
+
+
+def _runnable_reports(user):
+	"""``(entry, access)`` for every catalog entry ``user`` may run, in
+	catalog order. The single source for the catalog and the nav flag."""
+	from helixhr import reports
+	from helixhr.utils import resolve_report_access
+
+	for entry in reports.CATALOG:
+		access = resolve_report_access(user, entry["key"])
+		if access["can_run"]:
+			yield entry, access
+
+
+def _can_run_reports(user):
+	return any(True for _pair in _runnable_reports(user))
+
+
+@frappe.whitelist()
+def get_report_catalog():
+	"""U4: the catalog entries this caller may run, with filter specs and
+	``can_export`` per entry -- the Reports page never decides access.
+	``can_open_in_desk`` marks the `frappe`-engine entries `get_report_link`
+	would actually hand a Desk URL out for."""
+	from helixhr import reports
+
+	rate_limit_per_user("get_report_catalog")
+	user = frappe.session.user
+	desk = resolve_admin_scope(user)["kind"] != "none" and _can_open_desk(user)
+	return [
+		{**reports.client_entry(entry, access), "can_open_in_desk": desk and entry["engine"] == "frappe"}
+		for entry, access in _runnable_reports(user)
+	]
+
+
+@frappe.whitelist()
+def search_report_options(report_key, filter, query=None, value=None, context=None, **kwargs):
+	"""U3: typeahead options for one report filter, scoped exactly like the
+	report itself. Access is resolved for ``report_key`` first (the uniform
+	refusal otherwise); only filter types the entry declares are served; at
+	most `reports.OPTIONS_LIMIT` results; a query under two characters
+	returns nothing. ``value`` resolves one chosen value's label (URL load).
+	``context`` carries a dependent picker's parent, e.g. ``{"project"}``
+	for tasks."""
+	from helixhr import reports
+	from helixhr.utils import resolve_report_access
+
+	rate_limit_per_user("search_report_options")
+	access = resolve_report_access(frappe.session.user, report_key)
+	if not access["can_run"]:
+		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
+	return reports.search_options(
+		reports.get_entry(report_key), filter, access["scope"], query=query, value=value, context=context
+	)
 
 
 @frappe.whitelist()

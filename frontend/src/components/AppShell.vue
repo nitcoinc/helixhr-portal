@@ -40,7 +40,7 @@ const NAV = [
   { label: 'Roster', to: '/roster', icon: 'timesheet', rosterOnly: true, deskOnly: true, group: 'people' },
   { label: 'Approvals', to: '/approvals', icon: 'approvals', managerOnly: true, group: 'people' },
   { label: 'People', to: '/people', icon: 'peopleSearch', peopleOnly: true, deskOnly: true, group: 'hr' },
-  { label: 'Reports', to: '/reports', icon: 'reports', peopleOnly: true, deskOnly: true, group: 'hr' },
+  { label: 'Reports', to: '/reports', icon: 'reports', runReportsOnly: true, deskOnly: true, group: 'hr' },
   { label: 'Organisation', to: '/organisation', icon: 'organisation', organisationOnly: true, deskOnly: true, group: 'hr' },
   { label: 'Projects', to: '/projects', icon: 'folder', projectsOnly: true, deskOnly: true, group: 'hr' },
   { label: 'Settings', to: '/settings', icon: 'settings', configureOnly: true, deskOnly: true, group: 'admin' },
@@ -78,6 +78,7 @@ const navItems = computed(() =>
       (!item.organisationOnly || session.canSeeOrganisation) &&
       (!item.peopleOnly || session.canSeePeople) &&
       (!item.projectsOnly || session.canSeeProjects) &&
+      (!item.runReportsOnly || session.canRunReports) &&
       (!item.rosterOnly || session.status !== 'desk-only' || session.canSeePeople) &&
       (session.status !== 'desk-only' || item.deskOnly),
   ),

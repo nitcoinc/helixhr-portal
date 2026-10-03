@@ -223,6 +223,15 @@ const routes = [
     component: () => import('@/pages/Reports.vue'),
   },
   {
+    // Plan 2026-10-04-001 U4: one report, its filters/grouping/sort in the
+    // query (lib/reportQuery.js) so a link reopens -- and re-runs -- it.
+    path: '/reports/:reportKey',
+    name: 'ReportView',
+    meta: { deskOnly: true },
+    component: () => import('@/pages/Reports.vue'),
+    props: true,
+  },
+  {
     // P7-U5. `search_projects` is the server's own gate (`resolve_project_
     // scope`) -- same posture as /people, /organisation and /settings above.
     path: '/projects',

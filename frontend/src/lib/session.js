@@ -55,6 +55,9 @@ const state = reactive({
   /** P7-U5: gates the Projects nav item. Mirrors `resolve_project_scope`'s own
    * gate on `search_projects`/`get_project`. */
   canSeeProjects: false,
+  /** Plan 2026-10-04-001 U4: gates the Reports nav item. True when
+   * `get_report_catalog` would list at least one entry for this caller. */
+  canRunReports: false,
   /** P6-U4: whether this caller can actually reach Desk (a System User
    * holding a `desk_access` role) -- decides whether a Desk link is drawn
    * anywhere in the portal, never whether one works: every method that
@@ -125,6 +128,7 @@ function apply(boot) {
   state.canSeeOrganisation = !!boot?.can_see_organisation
   state.canSeePeople = !!boot?.can_see_people
   state.canSeeProjects = !!boot?.can_see_projects
+  state.canRunReports = !!boot?.can_run_reports
   state.canOpenDesk = !!boot?.can_open_desk
   state.deskUrl = boot?.desk_url || null
   state.unread = boot?.unread_notifications ?? 0

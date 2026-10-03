@@ -1244,6 +1244,9 @@ RATE_LIMIT_POLICY = {
 	# HRMS reports are the heaviest read the portal makes, so it keeps
 	# `run_portal_report`'s tighter bound.
 	"run_report": (30, 60),
+	# U3/U4: picker typeahead (debounced 250 ms client-side) and the catalog.
+	"search_report_options": (60, 60),
+	"get_report_catalog": (60, 60),
 	# Reads that fan out (the home page and the approvals queue each run
 	# several queries) or that answer for one record by name -- bounded so
 	# a scripted walk over sequential record ids is a flood the limiter

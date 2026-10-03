@@ -7,6 +7,7 @@ import frappe
 from frappe.tests import IntegrationTestCase
 
 from helixhr import preflight
+from helixhr.api import search_report_options
 from helixhr.tests.utils import (
 	_make_role_user,
 	ensure_baseline_company,
@@ -15,6 +16,8 @@ from helixhr.tests.utils import (
 	make_test_delivery_manager,
 	make_test_hr_manager_employee,
 	make_test_hr_user,
+	make_test_project,
+	make_test_user,
 	make_test_user_without_employee,
 	set_report_access,
 )
@@ -144,6 +147,136 @@ class TestResolveReportAccess(IntegrationTestCase):
 		frappe.set_user(user)
 		with self.assertRaises(frappe.PermissionError):
 			get_person(employee)
+
+
+class TestReportOptions(IntegrationTestCase):
+	"""U3: `search_report_options` serves only in-scope values, only for
+	filter types the entry declares. U4: the catalog and nav flag agree with
+	`resolve_report_access`."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		self.other_company = ensure_baseline_company()
+		self.mine = make_test_user("opt-search-mine@helixhr.test", self.company)
+		self.theirs = make_test_user("opt-search-theirs@helixhr.test", self.other_company)
+		self.left = make_test_user(
+			"opt-search-left@helixhr.test", self.company, status="Left", relieving_date="2026-01-31"
+		)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _search(self, user, key, filter, **kwargs):
+		frappe.set_user(user)
+		try:
+			return search_report_options(key, filter, **kwargs)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_hr_user_gets_only_own_company_active_employees_for_a_granted_report(self):
+		_, user = make_test_hr_user()
+		set_report_access(COMPANY_ONLY_KEY, hr_user_run=1)
+		values = {o["value"] for o in self._search(user, COMPANY_ONLY_KEY, "employee", query="opt-search")}
+		self.assertIn(self.mine, values)
+		self.assertNotIn(self.theirs, values)
+		self.assertNotIn(self.left, values)
+
+		frappe.db.delete("HelixHR Report Access", {"name": COMPANY_ONLY_KEY})
+		with self.assertRaises(frappe.PermissionError):
+			self._search(user, COMPANY_ONLY_KEY, "employee", query="opt-search")
+		with self.assertRaises(frappe.PermissionError):
+			self._search(user, "no_such_report", "employee", query="opt-search")
+
+	def test_value_lookup_resolves_a_label_only_inside_scope(self):
+		_, user = make_test_hr_user()
+		set_report_access(COMPANY_ONLY_KEY, hr_user_run=1)
+		[option] = self._search(user, COMPANY_ONLY_KEY, "employee", value=self.mine)
+		self.assertEqual(option["value"], self.mine)
+		self.assertTrue(option["label"])
+		self.assertEqual(self._search(user, COMPANY_ONLY_KEY, "employee", value=self.theirs), [])
+		self.assertEqual(self._search(user, COMPANY_ONLY_KEY, "employee", value=["in", [self.theirs]]), [])
+
+	def test_delivery_manager_sees_only_member_projects_tasks_and_members(self):
+		_, dm = make_test_delivery_manager()
+		set_report_access(PROJECT_KEY, dm_run=1)
+		member = make_test_project(
+			self.company, "_Test Opt Member Project", members=[dm, "opt-search-mine@helixhr.test"]
+		)
+		other = make_test_project(self.company, "_Test Opt Other Project")
+		for project in (member, other):
+			if not frappe.db.exists("Task", {"project": project, "subject": "_Test Opt Task"}):
+				frappe.get_doc(
+					{"doctype": "Task", "project": project, "subject": "_Test Opt Task", "status": "Open"}
+				).insert(ignore_permissions=True)
+
+		projects = {o["value"] for o in self._search(dm, PROJECT_KEY, "project", query="_Test Opt")}
+		self.assertEqual(projects, {member})
+
+		tasks = self._search(dm, PROJECT_KEY, "task", query="_Test Opt Task")
+		self.assertEqual({o["description"] for o in tasks}, {member})
+		# A dependent picker narrowed to an out-of-scope project gets nothing.
+		self.assertEqual(
+			self._search(dm, PROJECT_KEY, "task", query="_Test Opt Task", context={"project": other}), []
+		)
+
+		employees = {o["value"] for o in self._search(dm, PROJECT_KEY, "employee", query="opt-search")}
+		self.assertEqual(employees, {self.mine})
+
+	def test_undeclared_or_pickerless_filters_are_refused(self):
+		_, user = make_test_hr_manager_employee()
+		with self.assertRaises(frappe.ValidationError):
+			self._search(user, COMPANY_ONLY_KEY, "project", query="ab")
+		with self.assertRaises(frappe.ValidationError):
+			self._search(user, COMPANY_ONLY_KEY, "from_date", query="20")
+
+	def test_results_are_capped_and_one_character_returns_nothing(self):
+		from helixhr import reports
+
+		_, user = make_test_hr_manager_employee()
+		self.assertEqual(self._search(user, COMPANY_ONLY_KEY, "employee", query="o"), [])
+		with patch.object(reports, "OPTIONS_LIMIT", 1):
+			self.assertEqual(len(self._search(user, COMPANY_ONLY_KEY, "employee", query="opt-search")), 1)
+		self.assertLessEqual(len(self._search(user, COMPANY_ONLY_KEY, "employee", query="es")), 20)
+
+	def test_select_link_values_must_exist(self):
+		from helixhr import reports
+
+		entry = reports.get_entry("employee_directory")
+		scope = {"kind": "company", "company": self.company}
+		clean, removed = reports.resolve_filters(entry, {"designation": "No Such Designation"}, scope)
+		self.assertEqual(removed, ["designation"])
+		self.assertNotIn("designation", clean)
+
+	def test_catalog_and_nav_flag_follow_access(self):
+		from helixhr.api import get_portal_bootstrap, get_report_catalog
+
+		_, hr_user = make_test_hr_user()
+		set_report_access(COMPANY_ONLY_KEY, hr_user_run=1, hr_user_export=1)
+		set_report_access(PROJECT_KEY, hr_user_run=0)
+		_, dm = make_test_delivery_manager()
+		set_report_access(PROJECT_KEY, dm_run=1)
+		employee_user = "opt-search-mine@helixhr.test"
+
+		def as_user(user, fn):
+			frappe.set_user(user)
+			try:
+				return fn()
+			finally:
+				frappe.set_user("Administrator")
+
+		hr_catalog = {e["key"]: e for e in as_user(hr_user, get_report_catalog)}
+		self.assertIn(COMPANY_ONLY_KEY, hr_catalog)
+		self.assertNotIn(PROJECT_KEY, hr_catalog)
+		self.assertTrue(hr_catalog[COMPANY_ONLY_KEY]["can_export"])
+		self.assertTrue(as_user(hr_user, get_portal_bootstrap)["can_run_reports"])
+
+		self.assertEqual([e["key"] for e in as_user(dm, get_report_catalog)], [PROJECT_KEY])
+		self.assertFalse(as_user(dm, get_report_catalog)[0]["can_open_in_desk"])
+		self.assertTrue(as_user(dm, get_portal_bootstrap)["can_run_reports"])
+
+		self.assertEqual(as_user(employee_user, get_report_catalog), [])
+		self.assertFalse(as_user(employee_user, get_portal_bootstrap)["can_run_reports"])
 
 
 class TestReportAccessPreflight(IntegrationTestCase):

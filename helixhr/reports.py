@@ -25,7 +25,13 @@ import frappe
 from frappe import _
 from frappe.utils import cint, flt, get_first_day, get_last_day, getdate, today
 
-from helixhr.utils import as_administrator, employee_in_admin_scope, project_in_scope, project_scope_filters
+from helixhr.utils import (
+	admin_scope_employee_filters,
+	as_administrator,
+	employee_in_admin_scope,
+	project_in_scope,
+	project_scope_filters,
+)
 
 # KTD14. Screen cap; the export caps land with U5/U13.
 SCREEN_ROW_CAP = 2000
@@ -212,7 +218,8 @@ def _employee_directory(filters, scope):
 #   group_by: fieldnames allowed as group dimensions (max two at a time),
 #   totals: fieldnames to sum, or None for every numeric column,
 #   scopes: ("company",) or ("company", "project"), orientation,
-#   shows_amounts (keep Currency columns), default_grants (seed patch).
+#   shows_amounts (keep Currency columns), default_grants (seed patch),
+#   default_preset (U3: a lib/datePresets.js id for from/to entries).
 #
 # Families: "time", "attendance", "leave", "people".
 
@@ -234,6 +241,9 @@ def _entry(key, family, label, question, engine, filters, **extra):
 		"orientation": "portrait",
 		"shows_amounts": False,
 		"default_grants": {},
+		# U3: the date preset a fresh open starts on (lib/datePresets.js ids);
+		# None for entries without a from/to range.
+		"default_preset": None,
 	}
 	entry.update(extra)
 	return entry
@@ -257,6 +267,7 @@ CATALOG = (
 			_f("include_pending", "toggle", "Include pending approval", default=0),
 		],
 		query=_hours_by_project,
+		default_preset="last_month",
 		group_by=("employee", "project", "task", "date"),
 		totals=("hours", "billing_hours"),
 		scopes=("company", "project"),
@@ -282,6 +293,7 @@ CATALOG = (
 		"frappe",
 		[_FROM, _TO, _EMPLOYEE, _DEPARTMENT],
 		report="Shift Attendance",
+		default_preset="this_month",
 		group_by=("employee", "shift", "department"),
 		default_grants=_HR_USER_RUN,
 	),
@@ -293,6 +305,7 @@ CATALOG = (
 		"frappe",
 		[_FROM, _TO, _EMPLOYEE, _DEPARTMENT],
 		report="Employee Leave Balance",
+		default_preset="this_month",
 		group_by=("leave_type",),
 		default_grants=_HR_USER_RUN,
 	),
@@ -315,6 +328,7 @@ CATALOG = (
 		"frappe",
 		[_FROM, _TO, _EMPLOYEE, _DEPARTMENT],
 		report="Leave Ledger",
+		default_preset="this_month",
 		group_by=("employee", "leave_type", "transaction_type"),
 		default_grants=_HR_USER_RUN,
 	),
@@ -326,6 +340,7 @@ CATALOG = (
 		"frappe",
 		[_FROM, _TO, _EMPLOYEE, _DEPARTMENT],
 		report="Employee Exits",
+		default_preset="this_month",
 		group_by=("department", "designation"),
 		default_grants=_HR_USER_RUN,
 	),
@@ -445,8 +460,169 @@ def resolve_filters(entry, raw, scope):
 		elif kind == "select":
 			if value not in spec["options"]:
 				frappe.throw(_("Invalid {0} filter.").format(_(spec["label"])))
+		elif kind == "select_link":
+			# Global masters (no company field): existence is the whole check.
+			if not frappe.db.exists(_SELECT_LINK_DOCTYPES[name], value):
+				removed.append(name)
+				continue
 		clean[name] = value
 	return clean, removed
+
+
+# --- filter options (U3) ----------------------------------------------------
+#
+# `search_options` serves the EntityPicker typeahead. It answers only for
+# filter types the entry declares, and only inside the scope
+# `resolve_report_access` granted for THIS report -- never a wider one.
+# Designation, Branch and Employment Type are global masters with no company
+# field, so they are served unscoped: their names are not personal data and
+# the report itself is still company-scoped.
+
+OPTIONS_LIMIT = 20
+OPTIONS_QUERY_MIN = 2
+_OPTIONS_QUERY_MAX = 60
+_SELECT_LINK_DOCTYPES = {
+	"designation": "Designation",
+	"branch": "Branch",
+	"employment_type": "Employment Type",
+}
+
+
+def _scope_projects(scope):
+	"""Project names in scope, or None for "every project" (unscoped)."""
+	filters = project_scope_filters(scope)
+	if filters is None:
+		return []
+	if not filters:
+		return None
+	if "name" in filters:
+		return list(filters["name"][1])
+	return frappe.get_all("Project", filters=filters, pluck="name")
+
+
+def _option_source(spec, scope, context):
+	"""(doctype, scope filters | None, label field, description field,
+	search fields) for one filter spec. None filters = nothing in scope."""
+	kind = spec["type"]
+	if kind == "employee":
+		if scope["kind"] == "assigned":
+			projects = _scope_projects(scope)
+			users = (
+				frappe.get_all("Project User", filters={"parent": ["in", projects]}, pluck="user")
+				if projects
+				else []
+			)
+			filters = {"user_id": ["in", users]} if users else None
+		else:
+			filters = admin_scope_employee_filters(scope)
+		return (
+			"Employee",
+			filters,
+			"employee_name",
+			"designation",
+			("name", "employee_name", "employee_number"),
+		)
+	if kind == "project":
+		return "Project", project_scope_filters(scope), "project_name", "status", ("name", "project_name")
+	if kind == "task":
+		projects = _scope_projects(scope)
+		filters = None if projects == [] else ({} if projects is None else {"project": ["in", projects]})
+		wanted = context.get("project") if isinstance(context, dict) else None
+		if filters is not None and isinstance(wanted, str) and wanted:
+			filters = {"project": wanted} if project_in_scope(wanted, scope) else None
+		return "Task", filters, "subject", "project", ("name", "subject")
+	if kind == "department":
+		filters = admin_scope_employee_filters(scope) if scope["kind"] != "assigned" else None
+		return "Department", filters, "department_name", "company", ("name", "department_name")
+	doctype = _SELECT_LINK_DOCTYPES[spec["name"]]
+	return doctype, {}, "name", None, ("name",)
+
+
+def search_options(entry, filter_name, scope, query=None, value=None, context=None):
+	"""Up to `OPTIONS_LIMIT` ``{value, label, description}`` for one picker.
+
+	``query`` shorter than `OPTIONS_QUERY_MIN` returns nothing. ``value``
+	(instead of ``query``) resolves the label of one already-chosen value --
+	the URL-load case -- and returns ``[]`` when it is out of scope.
+	A filter the entry does not declare, or one with no picker, is refused.
+	"""
+	spec = next((s for s in entry["filters"] if s["name"] == filter_name), None)
+	if not spec or spec["type"] not in _ENTITY_TYPES | {"select_link"}:
+		frappe.throw(_("That filter has no options here."))
+	if isinstance(context, str):
+		context = frappe.parse_json(context) if context else {}
+
+	doctype, filters, label_field, description_field, search_fields = _option_source(spec, scope, context)
+	if filters is None:
+		return []
+
+	or_filters = None
+	if value not in (None, ""):
+		if not isinstance(value, str):
+			return []
+		filters = {**filters, "name": value}
+	else:
+		needle = query.strip()[:_OPTIONS_QUERY_MAX] if isinstance(query, str) else ""
+		if len(needle) < OPTIONS_QUERY_MIN:
+			return []
+		if doctype == "Employee":
+			filters = {**filters, "status": "Active"}
+		or_filters = [[field, "like", f"%{needle}%"] for field in search_fields]
+
+	fields = ["name", label_field] + ([description_field] if description_field else [])
+	rows = frappe.get_all(
+		doctype,
+		filters=filters,
+		or_filters=or_filters,
+		fields=list(dict.fromkeys(fields)),
+		order_by=f"{label_field} asc",
+		limit=OPTIONS_LIMIT,
+		ignore_permissions=True,
+	)
+	return [
+		{
+			"value": row.name,
+			"label": row.get(label_field) or row.name,
+			"description": (row.get(description_field) if description_field else None) or None,
+		}
+		for row in rows
+	]
+
+
+# --- catalog for the client (U4) --------------------------------------------
+
+
+def _client_default(spec):
+	default = spec["default"]
+	return default() if callable(default) else default
+
+
+def client_entry(entry, access):
+	"""The JSON-safe slice of one catalog entry the Reports page needs.
+	The page never decides access; `access` came from the server."""
+	return {
+		"key": entry["key"],
+		"family": entry["family"],
+		"label": entry["label"],
+		"question": entry["question"],
+		"engine": entry["engine"],
+		# The HRMS Report name, for `get_report_link`'s Desk hand-off only.
+		"report": entry["report"],
+		"default_preset": entry["default_preset"],
+		"filters": [
+			{
+				"name": spec["name"],
+				"type": spec["type"],
+				"label": spec["label"],
+				"reqd": spec["reqd"],
+				"default": _client_default(spec),
+				"options": list(spec["options"]) if spec["options"] else None,
+			}
+			for spec in entry["filters"]
+		],
+		"group_by": [{"field": field, "label": frappe.unscrub(field)} for field in entry["group_by"]],
+		"can_export": access["can_export"],
+	}
 
 
 def _scope_company(scope, raw):
