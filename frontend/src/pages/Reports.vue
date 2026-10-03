@@ -161,6 +161,8 @@ const runMessage = computed(() => {
 // U7: the flagship's grid and pending figure ride along in `extra`.
 const grid = computed(() => result.value?.extra?.grid || null)
 const pendingHours = computed(() => result.value?.extra?.pending_hours || 0)
+// U11: headline figures (joiners and leavers' attrition) above the table.
+const summary = computed(() => result.value?.extra?.summary || [])
 
 const narrowed = computed(() => !!entry.value?.filters.some(
   (spec) => !['date', 'month'].includes(spec.type) && spec.type !== 'toggle' && filters.value[spec.name],
@@ -352,6 +354,24 @@ async function openInDesk() {
           >
             {{ roundHours(pendingHours) }} h awaiting approval are not included.
           </p>
+
+          <dl
+            v-if="summary.length && !reportResource.loading"
+            class="mb-3 flex flex-wrap gap-x-6 gap-y-2"
+            data-testid="report-summary"
+          >
+            <div
+              v-for="item in summary"
+              :key="item.label"
+            >
+              <dt class="text-xs text-ink-gray-6">
+                {{ item.label }}
+              </dt>
+              <dd class="text-base font-semibold tabular-nums text-ink-gray-9">
+                {{ item.value }}
+              </dd>
+            </div>
+          </dl>
 
           <AsyncState
             v-if="!runMessage"

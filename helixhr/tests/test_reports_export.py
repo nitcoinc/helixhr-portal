@@ -154,14 +154,30 @@ class TestPdfLetterHead(IntegrationTestCase):
 	def test_company_letter_head_is_static_html_with_images_inlined(self):
 		url = self._private_png("helixhr-export-lh.png")
 		self._letter_head(
-			f'<div class="lh">ACME {{{{ frappe.session.user }}}}<img src="{url}"><script>x()</script></div>'
+			f'<div class="lh">ACME Letter<img src="{url}"><script>x()</script></div>'
 		)
 		html = self._html()
 		self.assertIn('id="header-html"', html)
-		self.assertIn("ACME {{ frappe.session.user }}", html)
+		self.assertIn("ACME Letter", html)
 		self.assertIn("data:image/png;base64,", html)
 		self.assertNotIn(url, html)
 		self.assertNotIn("<script>x()", html)
+
+	def test_jinja_in_a_letter_head_falls_back_instead_of_printing_raw(self):
+		self._letter_head("<div>{% if doc %}ACME{% endif %} {{ frappe.session.user }}</div>")
+		frappe.db.set_value("Letter Head", "HelixHR Export Test Head", "footer", "<p>{{ company }}</p>")
+		try:
+			html = self._html()
+		finally:
+			frappe.db.set_value("Letter Head", "HelixHR Export Test Head", "footer", None)
+		self.assertNotIn('id="header-html"', html)
+		self.assertNotIn("{%", html)
+		self.assertNotIn("{{", html)
+		self.assertNotIn('class="lh-footer"', html)
+		self.assertIn(self.company, html)
+
+		lh = reports.resolve_letter_head(self.company)
+		self.assertEqual((lh["header"], lh["footer"]), (None, None))
 
 	def test_without_a_letter_head_logo_and_name_then_name_alone(self):
 		html = self._html()

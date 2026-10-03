@@ -40,6 +40,11 @@
   {% for label, value in meta.filters %}<tr><td class="muted">{{ label }}</td><td>{{ value }}</td></tr>{% endfor %}
   {% if meta.group_by %}<tr><td class="muted">Grouped by</td><td>{{ meta.group_by | join(", ") }}</td></tr>{% endif %}
 </table>
+{% if extra.summary %}
+<table class="meta">
+  {% for item in extra.summary %}<tr><td class="muted">{{ item.label }}</td><td>{{ item.value }}</td></tr>{% endfor %}
+</table>
+{% endif %}
 
 <table class="data">
   <thead><tr>

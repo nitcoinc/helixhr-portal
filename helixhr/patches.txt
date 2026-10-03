@@ -74,3 +74,5 @@ helixhr.patches.v1_0.turn_off_hrms_leave_notification
 helixhr.patches.v1_0.seed_report_access
 # Plan 2026-10-04-001 U7/U8: re-run for project_timesheet, missing_timesheets, hours_utilization (2026-10-04).
 helixhr.patches.v1_0.seed_report_access #2026-10-04 U7 U8 new catalog entries
+# Plan 2026-10-04-001 U9/U10/U11: re-run for holiday_work, late_early_summary, leave_taken, who_is_out, headcount, headcount_trend, joiners_leavers, celebrations, hr_request_aging, unpaid_expense_claims, employee_advances (2026-10-04).
+helixhr.patches.v1_0.seed_report_access #2026-10-04 U9 U10 U11 new catalog entries

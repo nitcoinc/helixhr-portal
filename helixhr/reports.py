@@ -353,7 +353,9 @@ def _project_timesheet_extra(clean, scope, rows):
 def _grid_columns_and_rows(grid):
 	"""The grid as a (columns, shaped rows) pair for the Excel Grid sheet."""
 	columns = [{"fieldname": "task", "label": "Task", "fieldtype": "Data"}]
-	columns += [{"fieldname": f"d{d['day']}", "label": str(d["day"]), "fieldtype": "Float"} for d in grid["days"]]
+	columns += [
+		{"fieldname": f"d{d['day']}", "label": str(d["day"]), "fieldtype": "Float"} for d in grid["days"]
+	]
 	columns.append({"fieldname": "total", "label": "Total", "fieldtype": "Float"})
 	rows = [
 		{
@@ -483,7 +485,9 @@ def _missing_timesheets(filters, scope):
 		while day <= end:
 			if first <= day <= last:
 				key = (leave.employee, frappe.utils.add_days(day, -day.weekday()))
-				portion = 0.5 if leave.half_day and getdate(leave.half_day_date or leave.from_date) == day else 1
+				portion = (
+					0.5 if leave.half_day and getdate(leave.half_day_date or leave.from_date) == day else 1
+				)
 				leave_days[key] = leave_days.get(key, 0) + portion
 			day = frappe.utils.add_days(day, 1)
 
@@ -503,6 +507,454 @@ def _missing_timesheets(filters, scope):
 				}
 			)
 	return columns, rows
+
+
+# --- U9-U11: shared helpers ---------------------------------------------------
+
+
+def _company_condition(scope, column, values):
+	"""``[condition]`` narrowing ``column`` to the scope's company, ``[]`` for
+	an unscoped caller, None when nothing is in scope (these reports have
+	company tiers only)."""
+	if scope["kind"] == "company":
+		values["scope_company"] = scope["company"]
+		return [f"{column} = %(scope_company)s"]
+	if scope["kind"] == "unscoped":
+		return []
+	return None
+
+
+def _range(filters, max_days=None, message=None):
+	start, end = getdate(filters["from_date"]), getdate(filters["to_date"])
+	if end < start:
+		frappe.throw(_("From must be on or before To."))
+	if max_days and (end - start).days > max_days:
+		frappe.throw(message)
+	return start, end
+
+
+def _where(conditions):
+	return " and ".join(conditions) if conditions else "1 = 1"
+
+
+# --- U9: late and early summary -----------------------------------------------
+
+
+def _late_early_summary(filters, scope):
+	"""Per employee per month: submitted Attendance flagged ``late_entry`` /
+	``early_exit``. Cancelled (docstatus 2) and draft rows never count."""
+	columns = [
+		{"fieldname": "employee", "label": "Employee", "fieldtype": "Link", "options": "Employee"},
+		{"fieldname": "employee_name", "label": "Employee name", "fieldtype": "Data"},
+		{"fieldname": "department", "label": "Department", "fieldtype": "Link", "options": "Department"},
+		{"fieldname": "month", "label": "Month", "fieldtype": "Data"},
+		{"fieldname": "late_entries", "label": "Late entries", "fieldtype": "Int"},
+		{"fieldname": "early_exits", "label": "Early exits", "fieldtype": "Int"},
+	]
+	values = {}
+	conditions = _company_condition(scope, "a.company", values)
+	if conditions is None or not filters.get("from_date"):
+		return columns, []
+	start, end = _range(filters, 366, _("Choose a period of one year or less."))
+	values.update({"start": start, "end": end})
+	conditions += ["a.docstatus = 1", "a.attendance_date between %(start)s and %(end)s"]
+	for key, condition in (
+		("employee", "a.employee = %(employee)s"),
+		("department", "a.department = %(department)s"),
+	):
+		if filters.get(key):
+			conditions.append(condition)
+			values[key] = filters[key]
+	rows = frappe.db.sql(
+		f"""
+		select a.employee, a.employee_name, a.department,
+			date_format(a.attendance_date, '%%Y-%%m') as `month`,
+			sum(a.late_entry) as late_entries, sum(a.early_exit) as early_exits
+		from `tabAttendance` a
+		where {_where(conditions)} and (a.late_entry = 1 or a.early_exit = 1)
+		group by a.employee, a.employee_name, a.department, `month`
+		order by `month` asc, a.employee_name asc
+		""",
+		values,
+		as_dict=True,
+	)
+	return columns, rows
+
+
+# --- U10: leave taken, who is out ---------------------------------------------
+
+
+def _leave_taken(filters, scope):
+	"""Approved, submitted Leave Applications by leave type and the month of
+	``from_date`` (an application spanning two months counts in the first;
+	the catalog question says so)."""
+	columns = [
+		{"fieldname": "leave_type", "label": "Leave type", "fieldtype": "Link", "options": "Leave Type"},
+		{"fieldname": "month", "label": "Month", "fieldtype": "Data"},
+		{"fieldname": "applications", "label": "Applications", "fieldtype": "Int"},
+		{"fieldname": "leave_days", "label": "Leave days", "fieldtype": "Float"},
+	]
+	values = {}
+	conditions = _company_condition(scope, "la.company", values)
+	if conditions is None or not filters.get("from_date"):
+		return columns, []
+	start, end = _range(filters, 731, _("Choose a period of two years or less."))
+	values.update({"start": start, "end": end})
+	conditions += ["la.docstatus = 1", "la.status = 'Approved'", "la.from_date between %(start)s and %(end)s"]
+	for key, condition in (
+		("employee", "la.employee = %(employee)s"),
+		("department", "la.department = %(department)s"),
+	):
+		if filters.get(key):
+			conditions.append(condition)
+			values[key] = filters[key]
+	rows = frappe.db.sql(
+		f"""
+		select la.leave_type, date_format(la.from_date, '%%Y-%%m') as `month`,
+			count(*) as applications, sum(la.total_leave_days) as leave_days
+		from `tabLeave Application` la
+		where {_where(conditions)}
+		group by la.leave_type, `month`
+		order by `month` asc, la.leave_type asc
+		""",
+		values,
+		as_dict=True,
+	)
+	return columns, rows
+
+
+def _who_is_out(filters, scope):
+	"""Leave overlapping the range, one row per person per application.
+	Approved and submitted only, unless ``include_pending`` adds Open drafts,
+	marked in ``approval``."""
+	columns = [
+		{"fieldname": "employee", "label": "Employee", "fieldtype": "Link", "options": "Employee"},
+		{"fieldname": "employee_name", "label": "Employee name", "fieldtype": "Data"},
+		{"fieldname": "department", "label": "Department", "fieldtype": "Link", "options": "Department"},
+		{"fieldname": "leave_type", "label": "Leave type", "fieldtype": "Link", "options": "Leave Type"},
+		{"fieldname": "from_date", "label": "From", "fieldtype": "Date"},
+		{"fieldname": "to_date", "label": "To", "fieldtype": "Date"},
+		{"fieldname": "total_leave_days", "label": "Days", "fieldtype": "Float"},
+		{"fieldname": "approval", "label": "Approval", "fieldtype": "Data"},
+	]
+	values = {}
+	conditions = _company_condition(scope, "la.company", values)
+	if conditions is None or not filters.get("from_date"):
+		return columns, []
+	start, end = _range(filters, 366, _("Choose a period of one year or less."))
+	values.update({"start": start, "end": end})
+	conditions += ["la.from_date <= %(end)s", "la.to_date >= %(start)s"]
+	if cint(filters.get("include_pending")):
+		conditions.append(
+			"((la.docstatus = 1 and la.status = 'Approved') or (la.docstatus = 0 and la.status = 'Open'))"
+		)
+	else:
+		conditions.append("la.docstatus = 1 and la.status = 'Approved'")
+	for key, condition in (
+		("employee", "la.employee = %(employee)s"),
+		("department", "la.department = %(department)s"),
+	):
+		if filters.get(key):
+			conditions.append(condition)
+			values[key] = filters[key]
+	rows = frappe.db.sql(
+		f"""
+		select la.employee, la.employee_name, la.department, la.leave_type, la.from_date, la.to_date,
+			la.total_leave_days, if(la.docstatus = 1, 'Approved', 'Pending') as approval
+		from `tabLeave Application` la
+		where {_where(conditions)}
+		order by la.from_date asc, la.employee_name asc
+		""",
+		values,
+		as_dict=True,
+	)
+	return columns, rows
+
+
+# --- U11: people and lifecycle ------------------------------------------------
+
+
+def _employee_scope(scope, filters):
+	"""(sql conditions on ``tabEmployee e``, values) or (None, None)."""
+	values = {}
+	conditions = _company_condition(scope, "e.company", values)
+	if conditions is None:
+		return None, None
+	for key in ("department", "designation", "branch", "employment_type"):
+		if filters.get(key):
+			conditions.append(f"e.{key} = %({key})s")
+			values[key] = filters[key]
+	return conditions, values
+
+
+def _headcount_on(day, conditions, values):
+	"""Employees on the books at end of ``day``: joined on or before it, and
+	no relieving date or one after it."""
+	return frappe.db.sql(
+		f"""
+		select count(*) from `tabEmployee` e
+		where {_where(conditions)} and e.date_of_joining <= %(day)s
+			and (e.relieving_date is null or e.relieving_date > %(day)s)
+		""",
+		{**values, "day": day},
+	)[0][0]
+
+
+def _headcount_trend(filters, scope):
+	columns = [
+		{"fieldname": "month", "label": "Month", "fieldtype": "Data"},
+		{"fieldname": "month_end", "label": "Month end", "fieldtype": "Date"},
+		{"fieldname": "headcount", "label": "Headcount", "fieldtype": "Int"},
+	]
+	conditions, values = _employee_scope(scope, filters)
+	if conditions is None or not filters.get("from_date"):
+		return columns, []
+	start, end = _range(filters)
+	month_end = getdate(get_last_day(start))
+	rows = []
+	while month_end <= getdate(get_last_day(end)):
+		if len(rows) >= 36:
+			frappe.throw(_("Choose a period of three years or less."))
+		rows.append(
+			{
+				"month": str(month_end)[:7],
+				"month_end": month_end,
+				"headcount": _headcount_on(month_end, conditions, values),
+			}
+		)
+		month_end = getdate(get_last_day(frappe.utils.add_days(month_end, 1)))
+	return columns, rows
+
+
+def _joiners_and_leavers(filters, scope):
+	"""One row per join or leave event in the period."""
+	columns = [
+		{"fieldname": "event", "label": "Event", "fieldtype": "Data"},
+		{"fieldname": "event_date", "label": "Date", "fieldtype": "Date"},
+		{"fieldname": "employee", "label": "Employee", "fieldtype": "Link", "options": "Employee"},
+		{"fieldname": "employee_name", "label": "Employee name", "fieldtype": "Data"},
+		{"fieldname": "department", "label": "Department", "fieldtype": "Link", "options": "Department"},
+		{"fieldname": "designation", "label": "Designation", "fieldtype": "Link", "options": "Designation"},
+	]
+	conditions, values = _employee_scope(scope, filters)
+	if conditions is None or not filters.get("from_date"):
+		return columns, []
+	start, end = _range(filters)
+	values = {**values, "start": start, "end": end}
+	rows = frappe.db.sql(
+		f"""
+		select 'Joined' as event, e.date_of_joining as event_date, e.name as employee,
+			e.employee_name, e.department, e.designation
+		from `tabEmployee` e
+		where {_where(conditions)} and e.date_of_joining between %(start)s and %(end)s
+		union all
+		select 'Left', e.relieving_date, e.name, e.employee_name, e.department, e.designation
+		from `tabEmployee` e
+		where {_where(conditions)} and e.relieving_date between %(start)s and %(end)s
+		order by event_date asc, employee_name asc
+		""",
+		values,
+		as_dict=True,
+	)
+	return columns, rows
+
+
+def attrition_summary(start_headcount, end_headcount, leavers):
+	"""Attrition = leavers / average of start and end headcount, as a
+	percentage string; "n/a" when the starting headcount is 0."""
+	average = (start_headcount + end_headcount) / 2
+	if not start_headcount or not average:
+		return "n/a"
+	return f"{flt(leavers / average * 100, 1)}%"
+
+
+def _joiners_and_leavers_extra(clean, scope, rows):
+	conditions, values = _employee_scope(scope, clean)
+	if conditions is None or not clean.get("from_date"):
+		return {}
+	start, end = getdate(clean["from_date"]), getdate(clean["to_date"])
+	start_headcount = _headcount_on(frappe.utils.add_days(start, -1), conditions, values)
+	end_headcount = _headcount_on(end, conditions, values)
+	joiners = sum(1 for row in rows if row["event"] == "Joined")
+	leavers = sum(1 for row in rows if row["event"] == "Left")
+	return {
+		"summary": [
+			{"label": "Joiners", "value": joiners},
+			{"label": "Leavers", "value": leavers},
+			{"label": "Headcount at start", "value": start_headcount},
+			{"label": "Headcount at end", "value": end_headcount},
+			{"label": "Attrition", "value": attrition_summary(start_headcount, end_headcount, leavers)},
+		]
+	}
+
+
+MONTHS = (
+	"January",
+	"February",
+	"March",
+	"April",
+	"May",
+	"June",
+	"July",
+	"August",
+	"September",
+	"October",
+	"November",
+	"December",
+)
+
+
+def _this_month_name():
+	return MONTHS[getdate(today()).month - 1]
+
+
+def _celebrations(filters, scope):
+	"""Birthdays (day and month only -- never a year or an age) and work
+	anniversaries (with years of service) of Active employees in one month."""
+	columns = [
+		{"fieldname": "occasion", "label": "Occasion", "fieldtype": "Data"},
+		{"fieldname": "day", "label": "Day", "fieldtype": "Int"},
+		{"fieldname": "employee", "label": "Employee", "fieldtype": "Link", "options": "Employee"},
+		{"fieldname": "employee_name", "label": "Employee name", "fieldtype": "Data"},
+		{"fieldname": "department", "label": "Department", "fieldtype": "Link", "options": "Department"},
+		{"fieldname": "years", "label": "Years of service", "fieldtype": "Data"},
+	]
+	conditions, values = _employee_scope(scope, filters)
+	if conditions is None or filters.get("month") not in MONTHS:
+		return columns, []
+	month = MONTHS.index(filters["month"]) + 1
+	year = getdate(today()).year
+	# Only day-of-month and month leave SQL; the birth year is never selected.
+	employees = frappe.db.sql(
+		f"""
+		select e.name, e.employee_name, e.department,
+			month(e.date_of_birth) as birth_month, dayofmonth(e.date_of_birth) as birth_day,
+			e.date_of_joining
+		from `tabEmployee` e
+		where {_where(conditions)} and e.status = 'Active'
+			and (month(e.date_of_birth) = %(month)s or month(e.date_of_joining) = %(month)s)
+		""",
+		{**values, "month": month},
+		as_dict=True,
+	)
+	rows = []
+	for e in employees:
+		base = {"employee": e.name, "employee_name": e.employee_name, "department": e.department}
+		if e.birth_month == month:
+			rows.append({**base, "occasion": "Birthday", "day": e.birth_day, "years": None})
+		joined = getdate(e.date_of_joining) if e.date_of_joining else None
+		if joined and joined.month == month and year - joined.year >= 1:
+			rows.append(
+				{**base, "occasion": "Work anniversary", "day": joined.day, "years": str(year - joined.year)}
+			)
+	rows.sort(key=lambda row: (row["day"], row["employee_name"] or ""))
+	return columns, rows
+
+
+HR_REQUEST_AGE_BUCKETS = ((2, "0-2 days"), (7, "3-7 days"), (14, "8-14 days"), (30, "15-30 days"))
+_HR_REQUEST_CLOSED = ("Done", "Rejected")
+
+
+def _age_bucket(days):
+	return next((label for limit, label in HR_REQUEST_AGE_BUCKETS if days <= limit), "Over 30 days")
+
+
+def _hr_request_aging(filters, scope):
+	"""Open HR Requests with their age. Named columns only: never
+	``details``, ``hr_note``, ``helixhr_decision_reason`` or any
+	``correction_*`` field."""
+	columns = [
+		{"fieldname": "request", "label": "Request", "fieldtype": "Link", "options": "HR Request"},
+		{"fieldname": "employee", "label": "Employee", "fieldtype": "Link", "options": "Employee"},
+		{"fieldname": "employee_name", "label": "Employee name", "fieldtype": "Data"},
+		{
+			"fieldname": "category",
+			"label": "Category",
+			"fieldtype": "Link",
+			"options": "HelixHR Request Category",
+		},
+		{"fieldname": "status", "label": "Status", "fieldtype": "Data"},
+		{"fieldname": "routed_to_role", "label": "Routed to", "fieldtype": "Link", "options": "Role"},
+		{"fieldname": "picked_up_by", "label": "Assignee", "fieldtype": "Link", "options": "User"},
+		{"fieldname": "opened_on", "label": "Opened", "fieldtype": "Date"},
+		{"fieldname": "age_days", "label": "Age (days)", "fieldtype": "Int"},
+		{"fieldname": "age_bucket", "label": "Age", "fieldtype": "Data"},
+	]
+	values = {"closed": _HR_REQUEST_CLOSED}
+	conditions = _company_condition(scope, "e.company", values)
+	if conditions is None:
+		return columns, []
+	conditions.append("r.status not in %(closed)s")
+	conditions.append("r.docstatus < 2")
+	for key in ("employee", "department"):
+		if filters.get(key):
+			conditions.append(f"e.{'name' if key == 'employee' else key} = %({key})s")
+			values[key] = filters[key]
+	rows = frappe.db.sql(
+		f"""
+		select r.name as request, r.employee, e.employee_name, r.category, r.status,
+			r.routed_to_role, r.picked_up_by, date(r.creation) as opened_on,
+			datediff(%(today)s, date(r.creation)) as age_days
+		from `tabHR Request` r
+		inner join `tabEmployee` e on e.name = r.employee
+		where {_where(conditions)}
+		order by age_days desc, r.name asc
+		""",
+		{**values, "today": today()},
+		as_dict=True,
+	)
+	for row in rows:
+		row["age_bucket"] = _age_bucket(cint(row["age_days"]))
+	return columns, rows
+
+
+# --- U11: wrapped-report post-processing --------------------------------------
+
+
+def _headcount_post(columns, rows):
+	"""Employee Analytics: drop Date of Birth (never shown), and call its
+	"Name" column what it is."""
+	columns = [dict(c) for c in columns if c["fieldname"] != "date_of_birth"]
+	for column in columns:
+		if column["fieldname"] == "name":
+			column.update({"fieldname": "employee_name", "label": "Employee name"})
+	rows = [
+		{("employee_name" if k == "name" else k): v for k, v in row.items() if k != "date_of_birth"}
+		for row in rows
+	]
+	return columns, rows
+
+
+def _advance_post(columns, rows):
+	"""Employee Advance Summary joins ``"<id>: <name>"`` into one column;
+	split it back so the employee column holds the Employee id."""
+	columns = [dict(c) for c in columns]
+	for column in columns:
+		if column["fieldname"] == "employee":
+			column.update({"fieldtype": "Link", "options": "Employee"})
+	index = next((i for i, c in enumerate(columns) if c["fieldname"] == "employee"), None)
+	if index is not None:
+		columns.insert(
+			index + 1, {"fieldname": "employee_name", "label": "Employee name", "fieldtype": "Data"}
+		)
+	out = []
+	for row in rows:
+		row = dict(row)
+		employee, _sep, name = str(row.get("employee") or "").partition(": ")
+		row["employee"], row["employee_name"] = employee or None, name or None
+		out.append(row)
+	return columns, out
+
+
+def _list_adapt(*fields):
+	"""HRMS filters applied with ``isin``: wrap the portal's single value."""
+
+	def adapt(engine_filters):
+		for field in fields:
+			if engine_filters.get(field):
+				engine_filters[field] = [engine_filters[field]]
+
+	return adapt
 
 
 # Employee Information's twelve columns plus the name, as a fixed allowlist
@@ -595,6 +1047,9 @@ def _entry(key, family, label, question, engine, filters, **extra):
 		"extra": None,
 		"fixed_group_by": None,
 		"csv_detail_only": False,
+		# U11: frappe engine only, ``(columns, rows) -> (columns, rows)`` run on
+		# the wrapped output before the Currency strip (drop or reshape columns).
+		"post": None,
 	}
 	entry.update(extra)
 	return entry
@@ -771,6 +1226,182 @@ CATALOG = (
 		group_by=("department", "designation", "branch", "employment_type", "status"),
 		totals=(),
 		default_grants=_HR_USER_RUN,
+	),
+	# --- U9: attendance and shifts ---
+	_entry(
+		"holiday_work",
+		"attendance",
+		"Employees working on a holiday",
+		"Who was marked present on a company holiday?",
+		"frappe",
+		[_FROM, _TO, _DEPARTMENT],
+		report="Employees Working on a Holiday",
+		default_preset="last_month",
+		group_by=("employee", "holiday"),
+		totals=(),
+		default_grants=_HR_USER_RUN,
+	),
+	_entry(
+		"late_early_summary",
+		"attendance",
+		"Late and early summary",
+		"How often did each person come in late or leave early, month by month?",
+		"helixhr",
+		[_FROM, _TO, _EMPLOYEE, _DEPARTMENT],
+		query=_late_early_summary,
+		default_preset="last_month",
+		group_by=("department", "month", "employee"),
+		totals=("late_entries", "early_exits"),
+		default_grants=_HR_USER_RUN,
+	),
+	# --- U10: leave ---
+	_entry(
+		"leave_taken",
+		"leave",
+		"Leave taken by type and month",
+		"How much approved leave was taken, by type and month? "
+		"(Each application counts in the month it starts.)",
+		"helixhr",
+		[_FROM, _TO, _EMPLOYEE, _DEPARTMENT],
+		query=_leave_taken,
+		default_preset="this_year",
+		group_by=("leave_type", "month"),
+		totals=("applications", "leave_days"),
+		default_grants=_HR_USER_RUN,
+	),
+	_entry(
+		"who_is_out",
+		"leave",
+		"Who is out",
+		"Who is on leave during these dates?",
+		"helixhr",
+		[
+			_FROM,
+			_TO,
+			_EMPLOYEE,
+			_DEPARTMENT,
+			_f("include_pending", "toggle", "Include pending approval", default=0),
+		],
+		query=_who_is_out,
+		default_preset="this_month",
+		group_by=("department", "leave_type", "employee", "approval"),
+		totals=("total_leave_days",),
+		default_grants=_HR_USER_RUN,
+	),
+	# --- U11: people and lifecycle ---
+	_entry(
+		"headcount",
+		"people",
+		"Headcount",
+		"How many active employees are there, by department, designation or branch?",
+		"frappe",
+		[
+			_f(
+				"parameter",
+				"select",
+				"Counted by",
+				reqd=1,
+				default="Department",
+				options=("Department", "Designation", "Branch", "Employment Type", "Grade"),
+			)
+		],
+		report="Employee Analytics",
+		post=_headcount_post,
+		group_by=("department", "designation", "branch"),
+		totals=(),
+		default_grants=_HR_USER_RUN,
+	),
+	_entry(
+		"headcount_trend",
+		"people",
+		"Headcount trend",
+		"How many people were on the books at each month end?",
+		"helixhr",
+		[_FROM, _TO, _DEPARTMENT],
+		query=_headcount_trend,
+		default_preset="this_year",
+		totals=(),
+		default_grants=_HR_USER_RUN,
+	),
+	_entry(
+		"joiners_leavers",
+		"people",
+		"Joiners and leavers",
+		"Who joined and who left in a period, and what was the attrition?",
+		"helixhr",
+		[_FROM, _TO, _DEPARTMENT],
+		query=_joiners_and_leavers,
+		extra=_joiners_and_leavers_extra,
+		default_preset="this_year",
+		group_by=("event", "department", "designation"),
+		totals=(),
+		default_grants=_HR_USER_RUN,
+	),
+	_entry(
+		"celebrations",
+		"people",
+		"Celebrations by month",
+		"Whose birthday or work anniversary falls in a month?",
+		"helixhr",
+		[
+			_f("month", "select", "Month", reqd=1, default=_this_month_name, options=MONTHS),
+			_DEPARTMENT,
+		],
+		query=_celebrations,
+		group_by=("occasion", "department"),
+		totals=(),
+		default_grants=_HR_USER_RUN,
+	),
+	_entry(
+		"hr_request_aging",
+		"people",
+		"HR request aging",
+		"Which HR requests are still open, with whom, and for how long?",
+		"helixhr",
+		[_EMPLOYEE, _DEPARTMENT],
+		query=_hr_request_aging,
+		group_by=("category", "status", "routed_to_role", "picked_up_by", "age_bucket"),
+		totals=(),
+		default_grants=_HR_USER_RUN,
+	),
+	_entry(
+		"unpaid_expense_claims",
+		"people",
+		"Unpaid expense claims",
+		"Which approved expense claims are still waiting to be paid?",
+		"frappe",
+		[_EMPLOYEE, _DEPARTMENT, _f("branch", "select_link", "Branch")],
+		report="Unpaid Expense Claim",
+		shows_amounts=True,
+		group_by=("employee", "department", "branch"),
+		# R3: amounts -- HR User is off until HR grants it.
+		default_grants={"hr_user_run": 0},
+	),
+	_entry(
+		"employee_advances",
+		"people",
+		"Employee advance summary",
+		"Which employee advances are outstanding, paid or claimed?",
+		"frappe",
+		[
+			_FROM,
+			_TO,
+			_EMPLOYEE,
+			_DEPARTMENT,
+			_f(
+				"status",
+				"select",
+				"Status",
+				options=("Draft", "Paid", "Partially Paid", "Unpaid", "Claimed", "Cancelled"),
+			),
+		],
+		report="Employee Advance Summary",
+		adapt=_list_adapt("department"),
+		post=_advance_post,
+		shows_amounts=True,
+		default_preset="this_year",
+		group_by=("employee", "department", "status"),
+		default_grants={"hr_user_run": 0},
 	),
 )
 
@@ -1069,6 +1700,8 @@ def _run_frappe_report(entry, clean, scope, raw):
 	columns = [get_column_as_dict(column) for column in (columns or [])]
 	rows = normalize_result(result or [], columns)
 	rows = [row for row in rows if isinstance(row, dict)]
+	if entry["post"]:
+		columns, rows = entry["post"](columns, rows)
 	if not entry["shows_amounts"]:
 		# R3: Currency columns leave wrapped output unless the entry is
 		# declared to show expense amounts.
@@ -1493,16 +2126,30 @@ def resolve_letter_head(company):
 				if lh.source == "Image" and lh.image
 				else lh.content
 			)
-			return {
-				"header": _static_html(header),
-				"footer": _static_html(lh.footer),
-				"logo": None,
-				"company": company,
-			}
+			# Jinja in a Letter Head is never evaluated here (KTD9); rather
+			# than print it raw, that part falls back -- the header to logo
+			# plus company name, the footer to nothing.
+			footer = None if _has_jinja(lh.footer) else _static_html(lh.footer)
+			if not _has_jinja(header):
+				return {
+					"header": _static_html(header),
+					"footer": footer,
+					"logo": None,
+					"company": company,
+				}
+			return _logo_letter_head(company, footer)
+	return _logo_letter_head(company, None)
+
+
+def _has_jinja(html):
+	return bool(html) and ("{%" in html or "{{" in html)
+
+
+def _logo_letter_head(company, footer):
 	logo = company and frappe.db.get_value("Company", company, "company_logo")
 	return {
 		"header": None,
-		"footer": None,
+		"footer": footer,
 		"logo": _file_data_uri(logo) if logo else None,
 		"company": company,
 	}
