@@ -719,11 +719,61 @@ def setup_playwright_fixtures():
 	from helixhr.patches.v1_0.seed_report_access import execute as seed_report_access
 
 	seed_report_access()
+	# Plan 2026-10-04-001 U7: the flagship timesheet's approved month.
+	ensure_flagship_timesheet_fixture(employee_name, company)
 
 	# Plan 2026-09-30-001 U11: the roster specs (U9/U10).
 	ensure_roster_fixtures()
 
 	frappe.db.commit()  # nosemgrep
+
+
+FLAGSHIP_PROJECT = "_Test Flagship Timesheet"
+FLAGSHIP_MONTH = "2016-03"
+
+
+def ensure_flagship_timesheet_fixture(employee_name, company):
+	"""One approved Timesheet on `FLAGSHIP_PROJECT` in `FLAGSHIP_MONTH`
+	(a 31-day month, two tasks, a weekend day) for `reports.spec.ts`'s
+	flagship grid -- a past month no other fixture books, so ERPNext's
+	overlap check never collides. Inserted once; approved by setting the
+	end state directly, as the report tests do."""
+	from frappe.utils import add_to_date, get_datetime
+
+	project = make_test_project(company, FLAGSHIP_PROJECT)
+	if frappe.db.exists("Timesheet Detail", {"project": project}):
+		return project
+	tasks = {}
+	for subject in ("_Test Flagship Build", "_Test Flagship Review"):
+		tasks[subject] = frappe.db.get_value("Task", {"project": project, "subject": subject}) or (
+			frappe.get_doc({"doctype": "Task", "project": project, "subject": subject, "status": "Open"})
+			.insert(ignore_permissions=True)
+			.name
+		)
+	doc = frappe.new_doc("Timesheet")
+	doc.update({"employee": employee_name, "company": company})
+	for day, subject, hours in (
+		("2016-03-01", "_Test Flagship Build", 3),
+		("2016-03-02", "_Test Flagship Review", 2),
+		("2016-03-05", "_Test Flagship Build", 1.5),
+	):
+		start = get_datetime(f"{day} 09:00:00")
+		doc.append(
+			"time_logs",
+			{
+				"project": project,
+				"task": tasks[subject],
+				"activity_type": "General",
+				"from_time": start,
+				"to_time": add_to_date(start, hours=hours),
+				"hours": hours,
+				"description": "Fixture work",
+			},
+		)
+	doc.insert(ignore_permissions=True)
+	frappe.db.set_value("Timesheet", doc.name, {"workflow_state": "Approved", "docstatus": 1})
+	frappe.db.set_value("Timesheet Detail", {"parent": doc.name}, "docstatus", 1)
+	return project
 
 
 def ensure_test_it_request(employee_name):

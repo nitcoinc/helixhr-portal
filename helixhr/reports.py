@@ -171,6 +171,340 @@ def _hours_by_project(filters, scope):
 	return columns, rows
 
 
+def _timesheet_scope_conditions(scope, values):
+	"""SQL conditions narrowing ``tabTimesheet ts`` / ``tabTimesheet Detail
+	td`` to ``scope``, or None when nothing is in scope."""
+	if scope["kind"] == "company":
+		values["scope_company"] = scope["company"]
+		return ["ts.company = %(scope_company)s"]
+	if scope["kind"] == "assigned":
+		scope_filters = project_scope_filters(scope)
+		if scope_filters is None:
+			return None
+		values["scope_projects"] = tuple(scope_filters["name"][1])
+		return ["td.project in %(scope_projects)s"]
+	if scope["kind"] == "unscoped":
+		return []
+	return None
+
+
+# --- U7: monthly project timesheet (flagship) --------------------------------
+
+NO_TASK = "(No task)"
+HOURS_BASIS = ("All hours", "Billable hours")
+
+_PROJECT_TIMESHEET_COLUMNS = [
+	{"fieldname": "date", "label": "Date", "fieldtype": "Date"},
+	{"fieldname": "employee_name", "label": "Employee", "fieldtype": "Data"},
+	{"fieldname": "task_subject", "label": "Task", "fieldtype": "Data"},
+	{"fieldname": "note", "label": "Note", "fieldtype": "Data"},
+	{"fieldname": "hours", "label": "Hours", "fieldtype": "Float"},
+	{"fieldname": "billing_hours", "label": "Billable hours", "fieldtype": "Float"},
+]
+
+
+def _month_bounds(month):
+	start = getdate(f"{month}-01")
+	return start, getdate(get_last_day(start))
+
+
+def _project_timesheet(filters, scope):
+	"""Approved (submitted) hours on one project in one month, one row per
+	time log (KTD3: named columns only, no rate or amount)."""
+	columns = [dict(column) for column in _PROJECT_TIMESHEET_COLUMNS]
+	if not filters.get("project") or not filters.get("month"):
+		return columns, []
+	values = {}
+	conditions = _timesheet_scope_conditions(scope, values)
+	if conditions is None:
+		return columns, []
+	start, end = _month_bounds(filters["month"])
+	values.update({"project": filters["project"], "start": start, "end": end})
+	rows = frappe.db.sql(
+		f"""
+		select date(td.from_time) as `date`, ts.employee_name as employee_name,
+			coalesce(nullif(tsk.subject, ''), td.task, %(no_task)s) as task_subject,
+			td.description as note, td.hours as hours, td.billing_hours as billing_hours
+		from `tabTimesheet Detail` td
+		inner join `tabTimesheet` ts on ts.name = td.parent
+		left join `tabTask` tsk on tsk.name = td.task
+		where ts.docstatus = 1 and td.project = %(project)s
+			and date(td.from_time) between %(start)s and %(end)s
+			{"".join(f" and {condition}" for condition in conditions)}
+		order by `date` asc, ts.employee_name asc, td.idx asc
+		""",
+		{**values, "no_task": NO_TASK},
+		as_dict=True,
+	)
+	return columns, rows
+
+
+def _pending_project_hours(filters, scope):
+	"""Hours on the same project and month still awaiting approval
+	(resolved decision 6: workflow states, not every draft)."""
+	values = {}
+	conditions = _timesheet_scope_conditions(scope, values)
+	if conditions is None or not filters.get("project") or not filters.get("month"):
+		return 0
+	start, end = _month_bounds(filters["month"])
+	values.update(
+		{"project": filters["project"], "start": start, "end": end, "states": PENDING_TIMESHEET_STATES}
+	)
+	total = frappe.db.sql(
+		f"""
+		select coalesce(sum(td.hours), 0)
+		from `tabTimesheet Detail` td
+		inner join `tabTimesheet` ts on ts.name = td.parent
+		where ts.docstatus = 0 and ts.workflow_state in %(states)s and td.project = %(project)s
+			and date(td.from_time) between %(start)s and %(end)s
+			{"".join(f" and {condition}" for condition in conditions)}
+		""",
+		values,
+	)[0][0]
+	return flt(total, 2)
+
+
+def _company_holidays(company, start, end):
+	"""``{date: description}`` for the company's holiday list in the month,
+	weekly offs left out (weekends are shaded separately). The list is the
+	company's Holiday List Assignment as of month end, else its default."""
+	from hrms.utils.holiday_list import get_assigned_holiday_list
+
+	holiday_list = get_assigned_holiday_list(company, end) or frappe.db.get_value(
+		"Company", company, "default_holiday_list"
+	)
+	if not holiday_list:
+		return {}
+	rows = frappe.get_all(
+		"Holiday",
+		filters={"parent": holiday_list, "holiday_date": ["between", [start, end]], "weekly_off": 0},
+		fields=["holiday_date", "description"],
+	)
+	return {
+		getdate(row.holiday_date): frappe.utils.strip_html(row.description or "") or _("Holiday")
+		for row in rows
+	}
+
+
+def project_timesheet_grid(filters, rows, holidays=None):
+	"""The task x day pivot of the detail rows (KTD7: one structure feeds
+	screen, Excel and PDF). Values are Σ hours (or billable hours, by the
+	"Hours basis" filter), rounded per row first exactly as `shape` rounds,
+	so the grid's grand total equals the detail's."""
+	start, end = _month_bounds(filters["month"])
+	field = "billing_hours" if filters.get("basis") == "Billable hours" else "hours"
+	holidays = holidays or {}
+	days = []
+	for offset in range((end - start).days + 1):
+		day = frappe.utils.add_days(start, offset)
+		days.append(
+			{
+				"day": day.day,
+				"date": str(day),
+				"weekday": day.strftime("%a")[:2],
+				"weekend": day.weekday() >= 5,
+				"holiday": holidays.get(day),
+			}
+		)
+
+	cells = {}
+	for row in rows:
+		task = row.get("task_subject") or NO_TASK
+		key = (task, getdate(row["date"]).day)
+		cells[key] = cells.get(key, 0) + flt(row.get(field), 2)
+	tasks = sorted({task for task, _day in cells}, key=lambda task: (task == NO_TASK, task.lower()))
+
+	grid_rows = []
+	for task in tasks:
+		values = [flt(cells[(task, d["day"])], 2) if (task, d["day"]) in cells else None for d in days]
+		grid_rows.append({"task": task, "cells": values, "total": flt(sum(v or 0 for v in values), 2)})
+	day_totals = [
+		flt(sum(row["cells"][index] or 0 for row in grid_rows), 2) if grid_rows else None
+		for index in range(len(days))
+	]
+	return {
+		"field": field,
+		"days": days,
+		"rows": grid_rows,
+		"day_totals": [total or None for total in day_totals],
+		"grand_total": flt(sum(row["total"] for row in grid_rows), 2),
+		"holidays": [{"date": str(day), "description": text} for day, text in sorted(holidays.items())],
+	}
+
+
+def _project_timesheet_extra(clean, scope, rows):
+	"""Flagship extras next to the shaped detail: the grid, the pending
+	footnote figure and the project header (name, customer)."""
+	if not clean.get("project") or not clean.get("month"):
+		return {}
+	project = frappe.db.get_value(
+		"Project", clean["project"], ["project_name", "customer", "company"], as_dict=True
+	)
+	start, end = _month_bounds(clean["month"])
+	holidays = _company_holidays(project.company, start, end) if project and project.company else {}
+	return {
+		"grid": project_timesheet_grid(clean, rows, holidays),
+		"pending_hours": _pending_project_hours(clean, scope),
+		"project_name": project.project_name if project else clean["project"],
+		"customer": project.customer if project else None,
+	}
+
+
+def _grid_columns_and_rows(grid):
+	"""The grid as a (columns, shaped rows) pair for the Excel Grid sheet."""
+	columns = [{"fieldname": "task", "label": "Task", "fieldtype": "Data"}]
+	columns += [{"fieldname": f"d{d['day']}", "label": str(d["day"]), "fieldtype": "Float"} for d in grid["days"]]
+	columns.append({"fieldname": "total", "label": "Total", "fieldtype": "Float"})
+	rows = [
+		{
+			"task": row["task"],
+			**{f"d{d['day']}": value for d, value in zip(grid["days"], row["cells"], strict=True)},
+			"total": row["total"],
+			"_kind": "row",
+		}
+		for row in grid["rows"]
+	]
+	rows.append(
+		{
+			**{f"d{d['day']}": value for d, value in zip(grid["days"], grid["day_totals"], strict=True)},
+			"total": grid["grand_total"],
+			"_kind": "total",
+		}
+	)
+	return columns, rows
+
+
+def _project_timesheet_sheets(result, columns):
+	extra = result.get("extra") or {}
+	sheets = []
+	if extra.get("grid"):
+		grid_columns, grid_rows = _grid_columns_and_rows(extra["grid"])
+		sheets.append(("Grid", grid_columns, grid_rows))
+	sheets.append(("Detail", columns, result["shaped"]["rows"]))
+	return sheets
+
+
+# --- U8: missing timesheets ---------------------------------------------------
+
+
+def _week_starts(from_date, to_date):
+	"""Mondays of every Monday-Sunday week touching the period (KTD10 of
+	plan 2026-09-02-001: one week = one Timesheet)."""
+	start, end = getdate(from_date), getdate(to_date)
+	monday = frappe.utils.add_days(start, -start.weekday())
+	weeks = []
+	while monday <= end:
+		weeks.append(monday)
+		monday = frappe.utils.add_days(monday, 7)
+	return weeks
+
+
+def _missing_timesheets(filters, scope):
+	"""One row per Active in-scope employee per week: hours logged, the
+	week's timesheet state (none / draft / pending / approved) and approved
+	leave days that week."""
+	columns = [
+		{"fieldname": "employee", "label": "Employee", "fieldtype": "Link", "options": "Employee"},
+		{"fieldname": "employee_name", "label": "Employee name", "fieldtype": "Data"},
+		{"fieldname": "department", "label": "Department", "fieldtype": "Link", "options": "Department"},
+		{"fieldname": "week_start", "label": "Week of", "fieldtype": "Date"},
+		{"fieldname": "state", "label": "Timesheet", "fieldtype": "Data"},
+		{"fieldname": "hours", "label": "Hours", "fieldtype": "Float"},
+		{"fieldname": "leave_days", "label": "Leave days", "fieldtype": "Float"},
+	]
+	if scope["kind"] not in ("company", "unscoped") or not filters.get("from_date"):
+		return columns, []
+	if getdate(filters["to_date"]) < getdate(filters["from_date"]):
+		frappe.throw(_("From must be on or before To."))
+	weeks = _week_starts(filters["from_date"], filters["to_date"])
+	if len(weeks) > 27:
+		frappe.throw(_("Choose a period of six months or less."))
+
+	query = {"status": "Active"}
+	if scope["kind"] == "company":
+		query["company"] = scope["company"]
+	for key, field in (("employee", "name"), ("department", "department")):
+		if filters.get(key):
+			query[field] = filters[key]
+	if filters.get("project_members_only"):
+		members = frappe.get_all("Project User", distinct=True, pluck="user")
+		query["user_id"] = ["in", members or [""]]
+	employees = frappe.get_all(
+		"Employee",
+		filters=query,
+		fields=["name", "employee_name", "department"],
+		order_by="employee_name asc",
+		ignore_permissions=True,
+	)
+	if not employees:
+		return columns, []
+	names = [employee.name for employee in employees]
+	first, last = weeks[0], frappe.utils.add_days(weeks[-1], 6)
+
+	sheets = frappe.db.sql(
+		"""
+		select employee, start_date, docstatus, workflow_state, total_hours
+		from `tabTimesheet`
+		where employee in %(names)s and docstatus < 2 and start_date between %(first)s and %(last)s
+		""",
+		{"names": names, "first": first, "last": last},
+		as_dict=True,
+	)
+	rank = {"none": 0, "draft": 1, "pending": 2, "approved": 3}
+	logged = {}
+	for sheet in sheets:
+		start = getdate(sheet.start_date)
+		key = (sheet.employee, frappe.utils.add_days(start, -start.weekday()))
+		state = (
+			"approved"
+			if sheet.docstatus == 1
+			else "pending"
+			if sheet.workflow_state in PENDING_TIMESHEET_STATES
+			else "draft"
+		)
+		hours, best = logged.get(key, (0, "none"))
+		logged[key] = (hours + flt(sheet.total_hours), state if rank[state] > rank[best] else best)
+
+	leaves = frappe.get_all(
+		"Leave Application",
+		filters={
+			"employee": ["in", names],
+			"docstatus": 1,
+			"status": "Approved",
+			"from_date": ["<=", last],
+			"to_date": [">=", first],
+		},
+		fields=["employee", "from_date", "to_date", "half_day", "half_day_date"],
+		ignore_permissions=True,
+	)
+	leave_days = {}
+	for leave in leaves:
+		day, end = getdate(leave.from_date), getdate(leave.to_date)
+		while day <= end:
+			if first <= day <= last:
+				key = (leave.employee, frappe.utils.add_days(day, -day.weekday()))
+				portion = 0.5 if leave.half_day and getdate(leave.half_day_date or leave.from_date) == day else 1
+				leave_days[key] = leave_days.get(key, 0) + portion
+			day = frappe.utils.add_days(day, 1)
+
+	rows = []
+	for employee in employees:
+		for week in weeks:
+			hours, state = logged.get((employee.name, week), (0, "none"))
+			rows.append(
+				{
+					"employee": employee.name,
+					"employee_name": employee.employee_name,
+					"department": employee.department,
+					"week_start": week,
+					"state": state,
+					"hours": flt(hours, 2),
+					"leave_days": leave_days.get((employee.name, week), 0),
+				}
+			)
+	return columns, rows
+
+
 # Employee Information's twelve columns plus the name, as a fixed allowlist
 # (the client cannot ask for another column).
 _DIRECTORY_COLUMNS = (
@@ -255,6 +589,12 @@ def _entry(key, family, label, question, engine, filters, **extra):
 		# for a multi-sheet workbook. None = the generic one.
 		"pdf_template": None,
 		"xlsx_sheets": None,
+		# U7: callable ``(clean filters, scope, rows) -> dict`` stored as
+		# ``result["extra"]`` (the flagship grid and footnote); a fixed
+		# grouping the client cannot change; CSV of data rows only.
+		"extra": None,
+		"fixed_group_by": None,
+		"csv_detail_only": False,
 	}
 	entry.update(extra)
 	return entry
@@ -266,7 +606,7 @@ CATALOG = (
 	_entry(
 		"hours_by_project",
 		"time",
-		"Hours by project",
+		"Hours by project, task and employee",
 		"How many approved hours went into each project and task, and by whom?",
 		"helixhr",
 		[
@@ -283,6 +623,59 @@ CATALOG = (
 		totals=("hours", "billing_hours"),
 		scopes=("company", "project"),
 		default_grants={"dm_run": 1, "dm_export": 1},
+	),
+	_entry(
+		"project_timesheet",
+		"time",
+		"Monthly project timesheet",
+		"What did the team log on one project this month, task by task and day by day?",
+		"helixhr",
+		[
+			_f("project", "project", "Project", reqd=1),
+			_f("month", "month", "Month", reqd=1, default=_this_month),
+			_f("basis", "select", "Hours basis", default="All hours", options=HOURS_BASIS),
+		],
+		query=_project_timesheet,
+		extra=_project_timesheet_extra,
+		fixed_group_by=("date",),
+		csv_detail_only=True,
+		totals=("hours", "billing_hours"),
+		scopes=("company", "project"),
+		orientation="landscape",
+		pdf_template="project_timesheet.html",
+		xlsx_sheets=_project_timesheet_sheets,
+		default_grants={"dm_run": 1, "dm_export": 1},
+	),
+	_entry(
+		"missing_timesheets",
+		"time",
+		"Missing timesheets",
+		"Who has not logged a timesheet for a week, and were they on leave?",
+		"helixhr",
+		[
+			_FROM,
+			_TO,
+			_EMPLOYEE,
+			_DEPARTMENT,
+			_f("project_members_only", "toggle", "Project members only", default=1),
+		],
+		query=_missing_timesheets,
+		default_preset="last_month",
+		group_by=("employee", "department", "week_start", "state"),
+		totals=("hours", "leave_days"),
+		default_grants=_HR_USER_RUN,
+	),
+	_entry(
+		"hours_utilization",
+		"time",
+		"Employee hours utilization",
+		"How much of each person's standard working time was logged, and how much was billable?",
+		"frappe",
+		[_FROM, _TO, _EMPLOYEE, _DEPARTMENT, _f("project", "project", "Project")],
+		report="Employee Hours Utilization Based On Timesheet",
+		default_preset="last_month",
+		group_by=("department",),
+		default_grants=_HR_USER_RUN,
 	),
 	_entry(
 		"monthly_attendance",
@@ -834,6 +1227,9 @@ def run(report_key, scope, filters=None, group_by=None, sort=None):
 	):
 		frappe.throw(_("Invalid sort."))
 
+	if entry["fixed_group_by"] is not None:
+		group_by = list(entry["fixed_group_by"])
+
 	clean, removed = resolve_filters(entry, raw, scope)
 	if removed:
 		columns, rows = [], []
@@ -850,6 +1246,7 @@ def run(report_key, scope, filters=None, group_by=None, sort=None):
 		"groups_applied": group_by,
 		"filters_removed": removed,
 		"filters": clean,
+		"extra": entry["extra"](clean, scope, rows) if entry["extra"] and not removed else None,
 	}
 
 
@@ -1124,8 +1521,9 @@ def _pdf_env():
 	)
 
 
-def render_pdf_html(entry, meta, columns, shaped_rows, letter_head=None):
-	"""The PDF's HTML, from ``entry["pdf_template"]`` or ``report.html``."""
+def render_pdf_html(entry, meta, columns, shaped_rows, letter_head=None, extra=None):
+	"""The PDF's HTML, from ``entry["pdf_template"]`` or ``report.html``.
+	``extra`` is the run's ``result["extra"]`` (U7's grid and footnote)."""
 	letter_head = letter_head if letter_head is not None else resolve_letter_head(meta["company"])
 	template = _pdf_env().get_template(entry["pdf_template"] or "report.html")
 	return template.render(
@@ -1142,6 +1540,7 @@ def render_pdf_html(entry, meta, columns, shaped_rows, letter_head=None):
 			{"kind": kind, "cells": ["" if cell is None else cell for cell in cells]}
 			for kind, cells in export_rows(columns, shaped_rows)
 		],
+		extra=extra or {},
 	)
 
 
@@ -1162,13 +1561,13 @@ def pdf_options(entry, meta, columns, has_header):
 	return options
 
 
-def to_pdf(entry, meta, columns, shaped_rows):
+def to_pdf(entry, meta, columns, shaped_rows, extra=None):
 	"""KTD8: server-rendered HTML through wkhtmltopdf. A missing or failing
 	generator is one plain sentence for the user and a logged error."""
 	from frappe.utils.pdf import get_pdf
 
 	letter_head = resolve_letter_head(meta["company"])
-	html = render_pdf_html(entry, meta, columns, shaped_rows, letter_head)
+	html = render_pdf_html(entry, meta, columns, shaped_rows, letter_head, extra)
 	try:
 		return get_pdf(html, pdf_options(entry, meta, columns, bool(letter_head["header"])))
 	except Exception:
@@ -1182,11 +1581,14 @@ def build_export(entry, result, fmt, scope, raw=None, hidden=None):
 	"""``(content bytes, filename, content type)`` for one run `result`."""
 	columns = visible_columns(result["columns"], hidden)
 	if fmt == "csv":
-		content = to_csv(columns, result["shaped"]["rows"])
+		rows = result["shaped"]["rows"]
+		if entry["csv_detail_only"]:
+			rows = [row for row in rows if row["_kind"] == "row"]
+		content = to_csv(columns, rows)
 	else:
 		meta = export_meta(entry, result, scope, raw)
 		if fmt == "xlsx":
 			content = to_xlsx(entry, meta, columns, result)
 		else:
-			content = to_pdf(entry, meta, columns, result["shaped"]["rows"])
+			content = to_pdf(entry, meta, columns, result["shaped"]["rows"], result.get("extra"))
 	return content, export_filename(entry, result["filters"], fmt), _CONTENT_TYPES[fmt]

@@ -14,6 +14,7 @@ import { call } from '@/lib/api'
 import { presetRange } from '@/lib/datePresets'
 import { today } from '@/lib/dates'
 import { fromQuery, toQuery } from '@/lib/reportQuery'
+import { roundHours } from '@/lib/hours'
 
 // Plan 2026-10-04-001 U4. Two routes, one page:
 //   /reports              the catalog: what `get_report_catalog` says this
@@ -156,6 +157,10 @@ const runMessage = computed(() => {
   if (error.exc_type === 'ValidationError') return error.messages?.[0] || 'That report could not run.'
   return ''
 })
+
+// U7: the flagship's grid and pending figure ride along in `extra`.
+const grid = computed(() => result.value?.extra?.grid || null)
+const pendingHours = computed(() => result.value?.extra?.pending_hours || 0)
 
 const narrowed = computed(() => !!entry.value?.filters.some(
   (spec) => !['date', 'month'].includes(spec.type) && spec.type !== 'toggle' && filters.value[spec.name],
@@ -338,13 +343,23 @@ async function openInDesk() {
             {{ runMessage }}
           </p>
 
+          <!-- U7: approved hours only; say what was left out (resolved decision 6). -->
+          <p
+            v-if="pendingHours > 0 && !reportResource.loading"
+            class="surface-inset mb-3 p-3 text-sm text-ink-gray-7"
+            role="note"
+            data-testid="pending-hours-note"
+          >
+            {{ roundHours(pendingHours) }} h awaiting approval are not included.
+          </p>
+
           <AsyncState
             v-if="!runMessage"
             :resource="reportResource"
             section="report-results"
             :empty="isEmpty"
-            :empty-title="narrowed ? 'Nothing matched these filters' : 'No data in this period'"
-            :empty-body="narrowed ? 'Clear or change a filter, then run again.' : 'Try a wider date range.'"
+            :empty-title="grid ? 'No approved hours in this period' : narrowed ? 'Nothing matched these filters' : 'No data in this period'"
+            :empty-body="grid ? 'Try another month or project.' : narrowed ? 'Clear or change a filter, then run again.' : 'Try a wider date range.'"
             skeleton="block"
             skeleton-height="h-48"
           >
@@ -358,6 +373,7 @@ async function openInDesk() {
               :can-export="result.can_export"
               :sort="sort"
               :hidden="hidden"
+              :grid="grid"
               :class="stale ? 'opacity-60' : ''"
               @update:sort="onSort"
               @update:hidden="onHidden"

@@ -277,6 +277,8 @@ class TestRunReportWrapped(IntegrationTestCase):
 		self.other_employee = frappe.db.get_value(
 			"Employee", {"user_id": "other-company-report-probe@helixhr.test"}, "name"
 		)
+		# U8: Employee Hours Utilization refuses to run without it.
+		frappe.db.set_single_value("HR Settings", "standard_working_hours", 8)
 
 	def tearDown(self):
 		frappe.set_user("Administrator")

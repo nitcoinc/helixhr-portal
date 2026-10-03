@@ -7795,7 +7795,7 @@ def run_report(report_key, filters=None, group_by=None, sort=None, **kwargs):
 	``**kwargs`` and is never read.
 
 	Returns ``{columns, rows, total_rows, totals, groups_applied, truncated,
-	filters_removed, filters}``. ``rows`` is shaped (``_kind`` row /
+	filters_removed, filters, can_export, extra}``. ``rows`` is shaped (``_kind`` row /
 	subtotal / total) and capped at `reports.SCREEN_ROW_CAP` data rows at a
 	group boundary; ``totals`` and the trailing total row cover every row.
 	"""
@@ -7819,6 +7819,8 @@ def run_report(report_key, filters=None, group_by=None, sort=None, **kwargs):
 		"filters_removed": result["filters_removed"],
 		"filters": result["filters"],
 		"can_export": access["can_export"],
+		# U7: the flagship's task x day grid and pending-hours figure.
+		"extra": result["extra"],
 	}
 
 

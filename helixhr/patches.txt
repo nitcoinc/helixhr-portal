@@ -72,3 +72,5 @@ helixhr.patches.v1_0.retire_hr_email_notifications
 helixhr.patches.v1_0.turn_off_hrms_leave_notification
 # Plan 2026-10-04-001 U2: default per-report grants for HR User and Delivery Manager; insert-if-absent.
 helixhr.patches.v1_0.seed_report_access
+# Plan 2026-10-04-001 U7/U8: re-run for project_timesheet, missing_timesheets, hours_utilization (2026-10-04).
+helixhr.patches.v1_0.seed_report_access #2026-10-04 U7 U8 new catalog entries

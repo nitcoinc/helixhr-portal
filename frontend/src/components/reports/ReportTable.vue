@@ -21,6 +21,12 @@ const props = defineProps({
   /** `{field, order}` or null. */
   sort: { type: Object, default: null },
   hidden: { type: Array, default: () => [] },
+  /**
+   * U7 grid mode (the monthly project timesheet): `extra.grid` from
+   * `run_report` -- `{field, days, rows, day_totals, grand_total, holidays}`.
+   * Shown above the detail, which then renders unpaginated.
+   */
+  grid: { type: Object, default: null },
 })
 const emit = defineEmits(['update:sort', 'update:hidden'])
 
@@ -37,8 +43,23 @@ const visible = computed(() => available.value.filter((column) => !props.hidden.
 const body = computed(() => props.rows.filter((row) => row._kind !== 'total'))
 const total = computed(() => props.rows.find((row) => row._kind === 'total') || null)
 const shown = computed(() => body.value.filter((row) => row._kind === 'row').length)
-const pages = computed(() => Math.max(1, Math.ceil(body.value.length / PAGE_SIZE)))
-const pageRows = computed(() => body.value.slice(page.value * PAGE_SIZE, (page.value + 1) * PAGE_SIZE))
+const pageSize = computed(() => (props.grid ? Math.max(body.value.length, 1) : PAGE_SIZE))
+const pages = computed(() => Math.max(1, Math.ceil(body.value.length / pageSize.value)))
+const pageRows = computed(() => body.value.slice(page.value * pageSize.value, (page.value + 1) * pageSize.value))
+
+function dayClass(day) {
+  if (day.holiday) return 'bg-surface-gray-3 font-semibold'
+  return day.weekend ? 'bg-surface-gray-2' : ''
+}
+
+const gridLegend = computed(() => {
+  const list = (props.grid?.holidays || []).map((h) => `${formatDate(h.date)} ${h.description}`).join('; ')
+  return `Shaded columns are weekends. H marks a company holiday${list ? `: ${list}` : ''}.`
+})
+
+function gridValue(value) {
+  return value === null || value === undefined ? '' : roundHours(value)
+}
 
 watch(
   () => props.rows,
@@ -136,6 +157,113 @@ function subtotalLabel(row) {
         </fieldset>
       </div>
     </div>
+
+    <section
+      v-if="grid && grid.rows.length"
+      class="mb-6"
+      aria-labelledby="grid-heading"
+      data-testid="timesheet-grid"
+    >
+      <h3
+        id="grid-heading"
+        class="mb-2 text-sm font-semibold text-ink-gray-9"
+      >
+        Tasks by day ({{ grid.field === 'billing_hours' ? 'billable hours' : 'hours' }})
+      </h3>
+      <div class="surface-card elev-1 overflow-x-auto">
+        <table class="border-separate border-spacing-0 text-xs">
+          <caption class="sr-only">
+            {{ caption }}: hours per task per day
+          </caption>
+          <thead>
+            <tr>
+              <th
+                scope="col"
+                class="label sticky left-0 z-10 min-w-48 border-b border-r border-outline-gray-2 bg-surface-white px-3 py-2 text-left"
+              >
+                Task
+              </th>
+              <th
+                v-for="day in grid.days"
+                :key="day.day"
+                scope="col"
+                class="min-w-9 border-b border-outline-gray-2 px-1 py-2 text-center font-medium text-ink-gray-7"
+                :class="dayClass(day)"
+                :title="day.holiday || undefined"
+              >
+                <span class="tabular block">{{ day.day }}</span>
+                <span class="block text-ink-gray-5">{{ day.holiday ? 'H' : day.weekday }}</span>
+                <span
+                  v-if="day.holiday"
+                  class="sr-only"
+                >Holiday: {{ day.holiday }}</span>
+              </th>
+              <th
+                scope="col"
+                class="border-b border-l border-outline-gray-2 px-2 py-2 text-right font-semibold text-ink-gray-9"
+              >
+                Total
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="row in grid.rows"
+              :key="row.task"
+              class="text-ink-gray-7"
+            >
+              <th
+                scope="row"
+                class="sticky left-0 z-10 border-b border-r border-outline-gray-2 bg-surface-white px-3 py-1.5 text-left font-normal text-ink-gray-8"
+              >
+                {{ row.task }}
+              </th>
+              <td
+                v-for="(value, index) in row.cells"
+                :key="index"
+                class="tabular border-b border-outline-gray-2 px-1 py-1.5 text-center"
+                :class="dayClass(grid.days[index])"
+              >
+                {{ gridValue(value) }}
+              </td>
+              <td class="tabular border-b border-l border-outline-gray-2 px-2 py-1.5 text-right font-semibold text-ink-gray-9">
+                {{ gridValue(row.total) }}
+              </td>
+            </tr>
+          </tbody>
+          <tfoot>
+            <tr
+              class="font-semibold text-ink-gray-9"
+              data-kind="grid-total"
+            >
+              <th
+                scope="row"
+                class="sticky left-0 z-10 border-r border-t-2 border-outline-gray-3 bg-surface-white px-3 py-2 text-left"
+              >
+                Total
+              </th>
+              <td
+                v-for="(value, index) in grid.day_totals"
+                :key="index"
+                class="tabular border-t-2 border-outline-gray-3 px-1 py-2 text-center"
+                :class="dayClass(grid.days[index])"
+              >
+                {{ gridValue(value) }}
+              </td>
+              <td class="tabular border-l border-t-2 border-outline-gray-3 px-2 py-2 text-right">
+                {{ gridValue(grid.grand_total) }}
+              </td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+      <p class="mt-2 text-xs text-ink-gray-6">
+        {{ gridLegend }}
+      </p>
+      <h3 class="mb-2 mt-6 text-sm font-semibold text-ink-gray-9">
+        Detail by day
+      </h3>
+    </section>
 
     <p
       v-if="truncated"

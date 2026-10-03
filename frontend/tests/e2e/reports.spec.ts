@@ -147,7 +147,7 @@ test.describe('hr', () => {
 
   test('hours by project runs its own scoped query, with pickers and no Desk link', async ({ page }) => {
     await page.goto('/helixhr/reports/hours_by_project')
-    await expect(page.getByRole('heading', { name: 'Hours by project', exact: true })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Hours by project, task and employee', exact: true })).toBeVisible()
     for (const name of ['Employee', 'Project', 'Task']) {
       await expect(page.getByRole('combobox', { name })).toBeVisible()
     }
@@ -160,6 +160,40 @@ test.describe('hr', () => {
     )
     await expect(page.getByText("You don't have access to this")).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Open in Frappe' })).toHaveCount(0)
+  })
+
+  test('the monthly project timesheet renders a task x day grid, detail and a PDF', async ({ page }) => {
+    // `ensure_flagship_timesheet_fixture`: 2016-03, two tasks, 6.5 approved hours.
+    await page.goto('/helixhr/reports/project_timesheet')
+    await expect(page.getByRole('heading', { name: 'Monthly project timesheet', exact: true })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Run report' })).toBeDisabled()
+    await expect(page.getByLabel('Group by')).toHaveCount(0)
+
+    const picker = page.getByRole('combobox', { name: 'Project' })
+    await picker.fill('Flagship')
+    await page.getByRole('option', { name: /_Test Flagship Timesheet/ }).click()
+    await page.getByLabel('Month').fill('2016-03')
+    await page.getByRole('button', { name: 'Run report' }).click()
+
+    const grid = page.getByTestId('timesheet-grid')
+    await expect(grid).toBeVisible()
+    const gridTable = grid.locator('table')
+    await expect(gridTable.locator('thead th')).toHaveCount(1 + 31 + 1)
+    await expect(gridTable.getByRole('rowheader', { name: '_Test Flagship Build' })).toBeVisible()
+    await expect(gridTable.locator('tfoot tr[data-kind="grid-total"] td').last()).toHaveText('6.5')
+    // Task column stays put while the days scroll sideways.
+    await expect(gridTable.locator('tbody th').first()).toHaveClass(/sticky/)
+    // Detail below: grouped by day, unpaginated, totals equal the grid.
+    await expect(page.locator('tfoot tr[data-kind="total"]')).toContainText('6.5')
+    await expect(page.getByRole('navigation', { name: 'Table pages' })).toHaveCount(0)
+    await expect(page.getByText(/\$|amount|rate/i)).toHaveCount(0)
+
+    await page.getByRole('button', { name: 'Export', exact: true }).click()
+    const [download] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByRole('menuitem', { name: /PDF/ }).click(),
+    ])
+    expect(download.suggestedFilename()).toMatch(/^helixhr_project_timesheet_2016-03_\d{8}T\d{4}\.pdf$/)
   })
 
   test('the Desk link stays a secondary affordance on a wrapped report', async ({ page, context }) => {
