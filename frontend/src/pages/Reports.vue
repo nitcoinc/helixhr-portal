@@ -12,8 +12,8 @@ import { roundHours } from '@/lib/hours'
 // P7-U9 / P7-R12, P7-R13, P7-R15. Reports render inside the portal now --
 // this screen used to be a launcher that opened Frappe's own report view in
 // a new tab (P6-U6) and refused everyone who could not reach Desk (P6-R12).
-// That gate is gone: `run_portal_report` and `get_billable_hours` (P7-U8)
-// are the server's own gates now, so a caller who cannot reach Desk still
+// That gate is gone: `run_report` (plan 2026-10-04-001 U2, which replaced
+// P7-U8's two methods) is the server's own gate now, so a caller who cannot reach Desk still
 // gets rows here (R15) -- Desk stays only as a secondary export affordance
 // for a System User (see `openInDesk` below).
 //
@@ -23,36 +23,44 @@ import { roundHours } from '@/lib/hours'
 // to a caller `resolve_project_scope` grants something to.
 const REPORTS = [
   {
+    key: 'leave_balance',
     report: 'Employee Leave Balance',
     label: 'Leave balance',
     question: 'How much leave does someone have left, by type?',
   },
   {
+    key: 'leave_balance_summary',
     report: 'Employee Leave Balance Summary',
     label: 'Leave balance summary',
     question: 'Leave balances across the whole company, one row per person.',
   },
   {
+    key: 'monthly_attendance',
     report: 'Monthly Attendance Sheet',
     label: 'Monthly attendance',
     question: 'A month of attendance, one row per person per day.',
   },
   {
+    key: 'shift_attendance',
     report: 'Shift Attendance',
     label: 'Shift attendance',
     question: 'Who was on which shift, and when.',
   },
   {
+    key: 'leave_ledger',
     report: 'Leave Ledger',
     label: 'Leave ledger',
     question: 'Every leave transaction that moved a balance.',
   },
   {
-    report: 'Employee Information',
-    label: 'Employee information',
-    question: 'A directory-style export of the whole company.',
+    // A HelixHR query (plan 2026-10-04-001 U2), so no Desk hand-off.
+    key: 'employee_directory',
+    report: null,
+    label: 'Employee directory',
+    question: 'Who works here, in which department, branch and role?',
   },
   {
+    key: 'employee_exits',
     report: 'Employee Exits',
     label: 'Employee exits',
     question: 'Who has left, and when.',
@@ -88,40 +96,28 @@ function resetFilters() {
   filters.to_date = ''
 }
 
-const reportResource = createResource({ url: 'helixhr.api.run_portal_report', method: 'POST', auto: false })
-const billableResource = createResource({ url: 'helixhr.api.get_billable_hours', method: 'POST', auto: false })
-
-const activeResource = computed(() =>
-  active.value?.kind === 'billable-hours' ? billableResource : reportResource,
-)
+// Minimal bridge onto `run_report` (U2); the catalog-driven page is U4.
+const reportResource = createResource({ url: 'helixhr.api.run_report', method: 'POST', auto: false })
+const activeResource = computed(() => reportResource)
 
 function runActive() {
-  if (active.value?.kind === 'billable-hours') {
-    billableResource.submit({
+  if (!active.value) return
+  const isHours = active.value.kind === 'billable-hours'
+  // Keys a report does not declare are dropped server-side.
+  reportResource.submit({
+    report_key: isHours ? 'hours_by_project' : active.value.key,
+    filters: {
       employee: filters.employee || undefined,
-      project: filters.project || undefined,
-      task: filters.task || undefined,
+      project: isHours ? filters.project || undefined : undefined,
+      task: isHours ? filters.task || undefined : undefined,
       from_date: filters.from_date || undefined,
       to_date: filters.to_date || undefined,
-    })
-  } else if (active.value?.kind === 'curated') {
-    // `employee`/`from_date`/`to_date` cover what these seven reports
-    // actually use between them; a report that names none of them simply
-    // ignores the extra keys, the same way `get_billable_hours` ignores an
-    // unrecognised one (KTD5's cousin, applied here).
-    reportResource.submit({
-      report_name: active.value.report,
-      filters: {
-        employee: filters.employee || undefined,
-        from_date: filters.from_date || undefined,
-        to_date: filters.to_date || undefined,
-      },
-    })
-  }
+    },
+  })
 }
 
-function openCurated(report) {
-  active.value = { kind: 'curated', report }
+function openCurated(entry) {
+  active.value = { kind: 'curated', key: entry.key, report: entry.report, label: entry.label }
   resetFilters()
   runActive()
 }
@@ -152,41 +148,18 @@ onUnmounted(() => clearTimeout(pending))
 
 // --- rendering server-declared columns --------------------------------------
 //
-// `run_portal_report`'s `columns` are already normalised to dicts by
-// Frappe's own report engine (`get_column_as_dict`) by the time they reach
-// this method -- `fieldname`, `label`, `fieldtype`, `hidden`, etc. --
-// regardless of whether the report itself declared them as dicts or as
-// "fieldname:Label:Type:Width" strings. `get_billable_hours` returns no
-// column metadata at all (it is not a Frappe Report, KTD3a), so its columns
-// are named here, once, in the same shape.
-const BILLABLE_HOURS_COLUMNS = [
-  { fieldname: 'date', label: 'Date', fieldtype: 'Date' },
-  { fieldname: 'employee_name', label: 'Employee', fieldtype: 'Data' },
-  { fieldname: 'project', label: 'Project', fieldtype: 'Link' },
-  { fieldname: 'task_subject', label: 'Task', fieldtype: 'Data' },
-  { fieldname: 'hours', label: 'Hours', fieldtype: 'Float' },
-  { fieldname: 'billing_hours', label: 'Billable hours', fieldtype: 'Float' },
-]
-
+// `run_report` returns dict columns for every engine, and shaped rows typed
+// by `_kind`; this bridge shows data rows only (totals arrive with U4).
 const NUMERIC_FIELDTYPES = new Set(['Int', 'Float', 'Currency', 'Percent', 'Duration'])
 const DATE_FIELDTYPES = new Set(['Date', 'Datetime'])
 
-const columns = computed(() => {
-  if (active.value?.kind === 'billable-hours') return BILLABLE_HOURS_COLUMNS
-  if (active.value?.kind === 'curated') {
-    // A column the report itself marks `hidden` (an id column kept only for
-    // linking, e.g. Leave Ledger's own entry name) is not shown here either
-    // -- the same thing Frappe's own report view does with it.
-    return (reportResource.data?.columns || []).filter((column) => !column?.hidden)
-  }
-  return []
-})
+const columns = computed(() =>
+  active.value ? (reportResource.data?.columns || []).filter((column) => !column?.hidden) : [],
+)
 
-const allRows = computed(() => {
-  if (active.value?.kind === 'billable-hours') return billableResource.data?.rows || []
-  if (active.value?.kind === 'curated') return reportResource.data?.result || []
-  return []
-})
+const allRows = computed(() =>
+  active.value ? (reportResource.data?.rows || []).filter((row) => row._kind === 'row') : [],
+)
 
 // A stated ceiling rather than an unbounded table (P7-U9), settled against
 // how the approval queue treats its own cap (P2-U4's `_QUEUE_LIMIT`): show a
@@ -220,7 +193,7 @@ function formatCell(row, column) {
 
 // --- the secondary Desk link (P7-R12, System User only) --------------------
 //
-// No longer the primary path -- `run_portal_report` already rendered the
+// No longer the primary path -- `run_report` already rendered the
 // report above -- kept only for what the portal deliberately does not
 // cover (Frappe's own export toolbar). Absent entirely for anyone Desk
 // would not load for (`session.canOpenDesk` mirrors `_can_open_desk`
@@ -231,7 +204,7 @@ const openError = ref('')
 const opening = ref(false)
 
 async function openInDesk() {
-  if (active.value?.kind !== 'curated') return
+  if (active.value?.kind !== 'curated' || !active.value.report) return
   openError.value = ''
   opening.value = true
   try {
@@ -291,12 +264,12 @@ async function openInDesk() {
         >
           <li
             v-for="entry in REPORTS"
-            :key="entry.report"
+            :key="entry.key"
           >
             <button
               type="button"
               class="surface-card elev-1 flex h-full w-full flex-col items-start gap-1 p-4 text-left"
-              @click="openCurated(entry.report)"
+              @click="openCurated(entry)"
             >
               <span class="font-medium text-ink-gray-9">{{ entry.label }}</span>
               <span class="text-sm text-ink-gray-6">{{ entry.question }}</span>
@@ -315,10 +288,10 @@ async function openInDesk() {
           class="surface-card elev-1 mt-3 flex w-full flex-col items-start gap-1 p-4 text-left lg:max-w-md"
           @click="openBillableHours"
         >
-          <span class="font-medium text-ink-gray-9">Billable hours</span>
+          <span class="font-medium text-ink-gray-9">Hours by project</span>
           <span class="text-sm text-ink-gray-6">
-            Hours logged against projects and tasks, by employee and date. Hours only -- no rate,
-            no amount.
+            Approved hours logged against projects and tasks, by employee and date. Hours only --
+            no rate, no amount.
           </span>
         </button>
       </template>
@@ -334,7 +307,7 @@ async function openInDesk() {
             &larr; Back to reports
           </button>
 
-          <div v-if="active.kind === 'curated' && session.canOpenDesk">
+          <div v-if="active.kind === 'curated' && active.report && session.canOpenDesk">
             <button
               type="button"
               class="cursor-pointer text-sm text-blue-700 underline underline-offset-2"
@@ -355,7 +328,7 @@ async function openInDesk() {
         </p>
 
         <h2 class="type-section mb-3 font-heading text-ink-gray-9">
-          {{ active.kind === 'billable-hours' ? 'Billable hours' : active.report }}
+          {{ active.kind === 'billable-hours' ? 'Hours by project' : active.label }}
         </h2>
 
         <div class="mb-4 flex flex-wrap gap-3">

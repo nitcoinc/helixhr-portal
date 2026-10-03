@@ -67,7 +67,6 @@ from helixhr.events import (
 # `hr_request.get_permission_query_conditions` cannot drift apart.
 from helixhr.helixhr.doctype.hr_request.hr_request import _WORKER_ROLES as _ROUTED_WORKER_ROLES
 from helixhr.utils import (
-	ADMIN_REPORTS,
 	HOLIDAY_LIST_EDITABLE_FIELDS,
 	LEAVE_TYPE_EDITABLE_FIELDS,
 	NOTIFICATION_EVENTS,
@@ -7747,7 +7746,9 @@ def get_report_link(report, employee=None):
 	scope = resolve_admin_scope(frappe.session.user)
 	if scope["kind"] == "none":
 		frappe.throw(_("You are not authorised to open reports here."), frappe.PermissionError)
-	if report not in ADMIN_REPORTS:
+	from helixhr.reports import wrapped_report_names
+
+	if report not in wrapped_report_names():
 		frappe.throw(_("That report is not offered here."), frappe.PermissionError)
 	if not _can_open_desk(frappe.session.user):
 		frappe.throw(_("You do not have access to Frappe's Desk."), frappe.PermissionError)
@@ -7762,175 +7763,57 @@ def get_report_link(report, employee=None):
 
 
 # ---------------------------------------------------------------------------
-# P7-U8: reports inside the portal.
+# Plan 2026-10-04-001 U2: reports inside the portal.
 #
-# Two methods, because there are two different things wearing the word
-# "report" (KTD3a). `run_portal_report` renders one of the existing curated
-# HR reports through Frappe's own report engine (KTD4) -- HelixHR computes
-# nothing, it narrows filters and renders what came back. `get_billable_hours`
-# is HelixHR's own scoped query over `Timesheet Detail` rows -- deliberately
-# *not* a Frappe Report, because registering it as one would require granting
-# the `report` permission on Timesheet to a role that needs a task dimension,
-# and that permission is doctype-wide: it would hand the holder every
-# Timesheet report through Frappe's own report endpoint, including
-# `Timesheet Billing Summary`'s `billing_amount` (KTD3, verified by exploit --
-# see the plan's Sources and Research). Neither method grants nor requires
-# `report` on Timesheet; `helixhr.preflight.check_no_timesheet_report_permission`
-# is the standing guard that this stays true.
+# `run_report` replaces P7-U8's `run_portal_report` and `get_billable_hours`
+# (KTD13). The catalog, engines and shaper live in `helixhr/reports.py`; this
+# endpoint is the gate. Wrapped HRMS reports never go through
+# `frappe.desk.query_report.run` as the portal user, and no portal role holds
+# `report` on Timesheet -- `helixhr.preflight.check_no_timesheet_report_permission`
+# is the standing guard.
 # ---------------------------------------------------------------------------
 
 _REPORT_NOT_OFFERED = "That report is not offered here."
 
-# KTD3: the named column list `get_billable_hours` selects -- date, employee,
-# employee name, project, task, task subject, hours, billable hours. No
-# monetary column (`billing_rate`, `billing_amount`, `costing_rate`,
-# `costing_amount`) is ever named here, so none can be returned (R8). This is
-# the mechanism, not a side effect.
-_BILLABLE_HOURS_FIELDS = (
-	"date(td.from_time) as `date`",
-	"ts.employee as employee",
-	"ts.employee_name as employee_name",
-	"td.project as project",
-	"td.task as task",
-	"tsk.subject as task_subject",
-	"td.hours as hours",
-	"td.billing_hours as billing_hours",
-)
-
 
 @frappe.whitelist()
-def get_billable_hours(employee=None, project=None, task=None, from_date=None, to_date=None, **kwargs):
-	"""HelixHR's own scoped query over `Timesheet Detail` rows (P7-R13, KTD3)
-	-- not a Frappe Report.
+def run_report(report_key, filters=None, group_by=None, sort=None, **kwargs):
+	"""Run one catalog report for the screen (R8, R9, R22).
 
-	Accepts exactly four filter keys -- `employee`, `project`, `task`, and a
-	date range (`from_date`/`to_date`) -- as explicit keyword arguments;
-	anything else in the request lands in `**kwargs` and is never read, the
-	same swallow-extra-input pattern `create_project` uses for `company`
-	(P7-KTD5's cousin here: a request cannot smuggle in a key this method
-	does not name, such as one naming a different user to run as, because
-	nothing here ever forwards the request dict anywhere -- unlike
-	`run_portal_report`, this method never reaches Frappe's report engine at
-	all).
+	Access comes from `resolve_report_access` alone: an unknown key, a
+	deny-listed report and a report this caller may not run all get the same
+	refusal. `filters` is allowlisted against the entry's filter specs,
+	company is forced to the caller's scope, and entity filters must be plain
+	in-scope strings (see `reports.resolve_filters`). Anything else in the
+	request -- including a key naming a user to run as -- lands in
+	``**kwargs`` and is never read.
 
-	Filters INTERSECT with `resolve_project_scope`'s answer, they never
-	replace it (KTD3a): naming a project outside the caller's scope can only
-	narrow the caller's own rows to nothing, never substitute somebody
-	else's. An empty "assigned" scope (a HelixHR Delivery Manager who is a
-	member of zero projects) returns an empty result rather than running an
-	unbounded query or refusing outright -- the same contract
-	`project_scope_filters` already promises `search_projects`.
+	Returns ``{columns, rows, total_rows, totals, groups_applied, truncated,
+	filters_removed, filters}``. ``rows`` is shaped (``_kind`` row /
+	subtotal / total) and capped at `reports.SCREEN_ROW_CAP` data rows at a
+	group boundary; ``totals`` and the trailing total row cover every row.
 	"""
-	rate_limit_per_user("get_billable_hours")
-	scope = resolve_project_scope(frappe.session.user)
-	if scope["kind"] == "none":
-		frappe.throw(_("You are not authorised to view billable hours here."), frappe.PermissionError)
+	from helixhr import reports
+	from helixhr.utils import resolve_report_access
 
-	conditions = ["ts.docstatus != 2"]
-	values = {}
-
-	if scope["kind"] == "company":
-		conditions.append("ts.company = %(scope_company)s")
-		values["scope_company"] = scope["company"]
-	elif scope["kind"] == "assigned":
-		scope_filters = project_scope_filters(scope)
-		if scope_filters is None:
-			return {"rows": []}
-		conditions.append("td.project in %(scope_projects)s")
-		values["scope_projects"] = tuple(scope_filters["name"][1])
-	# "unscoped" (System Manager, or an HR-role holder with no Employee
-	# record) adds no extra condition -- every project, per U2.
-
-	if employee:
-		conditions.append("ts.employee = %(employee)s")
-		values["employee"] = employee
-	if project:
-		conditions.append("td.project = %(project)s")
-		values["project"] = project
-	if task:
-		conditions.append("td.task = %(task)s")
-		values["task"] = task
-	if from_date:
-		conditions.append("date(td.from_time) >= %(from_date)s")
-		values["from_date"] = getdate(from_date)
-	if to_date:
-		conditions.append("date(td.from_time) <= %(to_date)s")
-		values["to_date"] = getdate(to_date)
-
-	rows = frappe.db.sql(
-		f"""
-		select {", ".join(_BILLABLE_HOURS_FIELDS)}
-		from `tabTimesheet Detail` td
-		inner join `tabTimesheet` ts on ts.name = td.parent
-		left join `tabTask` tsk on tsk.name = td.task
-		where {" and ".join(conditions)}
-		order by date desc, ts.employee asc, td.idx asc
-		""",
-		values,
-		as_dict=True,
-	)
-	return {"rows": rows}
-
-
-@frappe.whitelist()
-def run_portal_report(report_name, filters=None, **kwargs):
-	"""Render one of the existing curated HR reports inside the portal
-	(P7-R12, P7-R13, KTD4), by calling Frappe's own report engine --
-	HelixHR computes nothing here, it narrows filters and renders what came
-	back.
-
-	`report_name` must be on the curated list (`ADMIN_REPORTS`); anything
-	else -- a real report this app has not curated, or one that does not
-	exist at all -- gets the exact same refusal, the same uniform-refusal
-	pattern `get_report_link` and `get_project` already use, so this can
-	never become an oracle for which reports exist upstream.
-
-	`filters` is narrowed to `resolve_admin_scope` before the report runs:
-	an `employee` filter is checked against the caller's scope exactly like
-	`get_report_link` already does, and an HR Manager's own company is
-	injected regardless of what the request supplied, so a company named in
-	the request can only ever be overridden, never trusted. Frappe's report
-	engine is then called with a FIXED keyword set -- `report_name` and the
-	narrowed `filters`, nothing else -- never the caller's raw request
-	forwarded wholesale: the engine accepts parameters beyond filters,
-	including one naming a user to run the report as, and none of those may
-	originate from the request body (KTD3, KTD3a).
-	"""
-	from frappe.desk.query_report import run as run_query_report
-
-	rate_limit_per_user("run_portal_report")
-	scope = resolve_admin_scope(frappe.session.user)
-	if scope["kind"] == "none" or report_name not in ADMIN_REPORTS:
+	rate_limit_per_user("run_report")
+	access = resolve_report_access(frappe.session.user, report_key)
+	if not access["can_run"]:
 		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
 
-	if isinstance(filters, str):
-		filters = frappe.parse_json(filters) if filters else {}
-	filters = dict(filters or {})
-
-	# `requested_employee` must be a single document name, never an
-	# operator-shaped value (code review finding): `frappe.db.exists`'s
-	# filter dict treats a list value as `[operator, value]`, so
-	# `["in", ["own-emp", "other-companys-emp"]]` would satisfy
-	# `employee_in_admin_scope` as long as *any* one name in the list is
-	# in-scope -- and the whole list, unmodified, would then reach Frappe's
-	# report engine as a literal filter, returning rows for every name in
-	# it. Refusing anything but a plain string closes that off before the
-	# scope check ever runs.
-	requested_employee = filters.get("employee")
-	if requested_employee:
-		if not isinstance(requested_employee, str):
-			frappe.throw(_("Invalid employee filter."))
-		if not employee_in_admin_scope(requested_employee, scope):
-			frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
-	# Company is forced to the caller's own scope unconditionally -- not
-	# only when no employee filter is present -- so a caller cannot pin an
-	# arbitrary `company` alongside a legitimately in-scope `employee` and
-	# have a report's independent company dimension honour it.
-	if scope["kind"] == "company":
-		filters["company"] = scope["company"]
-
-	result = run_query_report(report_name=report_name, filters=filters)
-	return {"columns": result.get("columns"), "result": result.get("result")}
+	result = reports.run(report_key, access["scope"], filters, group_by, sort)
+	rows, truncated = reports.cap_rows(result["shaped"]["rows"])
+	return {
+		"columns": result["columns"],
+		"rows": rows,
+		"total_rows": result["shaped"]["total_rows"],
+		"totals": result["shaped"]["totals"],
+		"groups_applied": result["groups_applied"],
+		"truncated": truncated,
+		"filters_removed": result["filters_removed"],
+		"filters": result["filters"],
+		"can_export": access["can_export"],
+	}
 
 
 @frappe.whitelist()

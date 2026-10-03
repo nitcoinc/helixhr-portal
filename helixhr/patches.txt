@@ -70,3 +70,5 @@ helixhr.patches.v1_0.migrate_message_templates_to_jinja
 # Plan 2026-10-02-001 U9: HR-queue email fixtures replaced by templated doc-event sends; HRMS leave mail off.
 helixhr.patches.v1_0.retire_hr_email_notifications
 helixhr.patches.v1_0.turn_off_hrms_leave_notification
+# Plan 2026-10-04-001 U2: default per-report grants for HR User and Delivery Manager; insert-if-absent.
+helixhr.patches.v1_0.seed_report_access

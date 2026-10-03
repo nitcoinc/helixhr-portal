@@ -1372,28 +1372,35 @@ def check_frontend_built():
 
 
 def check_curated_reports():
-	"""P6-U4 / P6-AE6: the report launcher's curated list names only reports
-	actually installed on this site, and each is reachable by the roles the
-	portal offers it to -- a renamed or removed upstream report otherwise
-	becomes a dead link nobody notices."""
-	from helixhr.utils import ADMIN_REPORT_ROLES, ADMIN_REPORTS
+	"""Plan 2026-10-04-001 U2 (generalises P6-U4): every ``frappe``-engine
+	catalog entry names a standard, enabled Script Report on this site, and no
+	deny-listed report (KTD3) is in the catalog. `prepared_report` on is a
+	WARN (resolved decision 11): the portal calls `execute_module` directly,
+	so it still gets rows, but Desk users of that report get queued jobs."""
+	from helixhr.reports import CATALOG, DENY_LIST, wrapped_report_names
 
-	problems = []
-	for name in ADMIN_REPORTS:
-		ref_doctype = frappe.db.get_value("Report", name, "ref_doctype")
-		if not ref_doctype:
+	problems, warnings = [], []
+	for entry in CATALOG:
+		if entry["report"] in DENY_LIST:
+			problems.append(f"{entry['key']}: {entry['report']} is deny-listed")
+	for name in wrapped_report_names():
+		report = frappe.db.get_value(
+			"Report", name, ["report_type", "is_standard", "disabled", "prepared_report"], as_dict=True
+		)
+		if not report:
 			problems.append(f"{name}: not installed")
 			continue
-		reachable = frappe.get_all(
-			"DocPerm",
-			filters={"parent": ref_doctype, "role": ["in", list(ADMIN_REPORT_ROLES)], "report": 1},
-			limit=1,
-		)
-		if not reachable:
-			problems.append(f"{name}: no role the launcher offers it to can read it as a report")
+		if report.report_type != "Script Report" or report.is_standard != "Yes":
+			problems.append(f"{name}: not a standard Script Report")
+		if cint(report.disabled):
+			problems.append(f"{name}: disabled")
+		if cint(report.prepared_report):
+			warnings.append(f"{name}: prepared_report is on")
 	if problems:
-		return _result("Curated reports", FAIL, "; ".join(problems))
-	return _result("Curated reports", PASS, f"{len(ADMIN_REPORTS)} reports checked")
+		return _result("Curated reports", FAIL, "; ".join(problems + warnings))
+	if warnings:
+		return _result("Curated reports", WARN, "; ".join(warnings))
+	return _result("Curated reports", PASS, f"{len(wrapped_report_names())} wrapped reports checked")
 
 
 NOTIFICATION_MANAGER = "HelixHR Notification Manager"
@@ -1427,6 +1434,41 @@ def check_notification_manager_role():
 	return _result("Notification Manager role", PASS, "portal-only role held by an enabled user")
 
 
+REPORT_MANAGER = "HelixHR Report Manager"
+
+
+def check_report_manager_role():
+	"""Plan 2026-10-04-001 U1 / R23: the Report Manager stays portal-only and
+	holds no DocPerm that would reach Desk's report or export paths. It needs
+	none: wrapped reports run elevated after HelixHR's own gate."""
+	role = frappe.db.get_value("Role", REPORT_MANAGER, ["desk_access", "is_custom"], as_dict=True)
+	problems = []
+	if not role:
+		problems.append("Role fixture is missing")
+	else:
+		if cint(role.desk_access):
+			problems.append("desk_access must be 0")
+		if cint(role.is_custom):
+			problems.append("is_custom must be 0")
+	for doctype in ("DocPerm", "Custom DocPerm"):
+		for right in ("report", "export", "write", "create"):
+			granted = frappe.get_all(doctype, filters={"role": REPORT_MANAGER, right: 1}, pluck="parent")
+			if granted:
+				problems.append(f"holds {right} on {', '.join(sorted(set(granted)))} ({doctype})")
+	if problems:
+		return _result("Report Manager role", FAIL, "; ".join(problems))
+	return _result("Report Manager role", PASS, "portal-only role with no report/export/write/create grant")
+
+
+def _fixture_roles():
+	"""Every role `helixhr/fixtures/role.json` ships -- the one list, so a new
+	portal role is guarded without editing this module."""
+	import json
+
+	with open(frappe.get_app_path("helixhr", "fixtures", "role.json")) as handle:
+		return [row["name"] for row in json.load(handle)]
+
+
 def check_no_timesheet_report_permission():
 	"""P7-U8 / R16: no role this app grants -- every entry in
 	`helixhr/fixtures/role.json`, not just `HelixHR Delivery Manager` --
@@ -1449,7 +1491,8 @@ def check_no_timesheet_report_permission():
 	fixtures, not a grant this app made -- narrowing that is a separate
 	decision about existing roles, not this plan's.
 	"""
-	granted_roles = [row.name for row in frappe.get_all("Role", filters={"name": ["in", (IT_TEAM, DELIVERY_MANAGER)]})]
+	fixture_roles = _fixture_roles()
+	granted_roles = frappe.get_all("Role", filters={"name": ["in", fixture_roles]}, pluck="name")
 	problems = []
 	for role in granted_roles:
 		if frappe.db.get_value("Custom DocPerm", {"parent": "Timesheet", "role": role, "report": 1}):
@@ -1462,7 +1505,7 @@ def check_no_timesheet_report_permission():
 	return _result(
 		"Timesheet report guard",
 		PASS,
-		f"no role this app grants ({', '.join((IT_TEAM, DELIVERY_MANAGER))}) holds report on Timesheet",
+		f"no role this app grants ({', '.join(fixture_roles)}) holds report on Timesheet",
 	)
 
 
@@ -1480,6 +1523,7 @@ CHECKS = [
 	check_it_team_role,
 	check_delivery_manager_role,
 	check_notification_manager_role,
+	check_report_manager_role,
 	check_signup_disabled,
 	check_password_login,
 	check_entra,

@@ -299,6 +299,47 @@ def make_test_delivery_manager(**employee_fields):
 	return employee_name, DELIVERY_MANAGER_USER
 
 
+REPORT_MANAGER_USER = "report-manager@helixhr.test"
+HR_USER_USER = "hr-user@helixhr.test"
+
+
+def _make_role_user(user, role, company=None, **employee_fields):
+	"""A user with an Employee record in ``company`` (the test company by
+	default) plus ``role`` -- the shared shape of the report-tier fixtures
+	(plan 2026-10-04-001 U1). ``employee_fields`` (e.g. ``status="Left"``)
+	reach the existing Employee too. Returns (employee_name, user)."""
+	employee_name = make_test_user(user, company or ensure_test_company(), **employee_fields)
+	doc = frappe.get_doc("User", user)
+	if role not in [row.role for row in doc.roles]:
+		doc.append_roles(role)
+		doc.save(ignore_permissions=True)
+		frappe.clear_cache(user=user)
+	return employee_name, user
+
+
+def make_test_report_manager(company=None, **employee_fields):
+	"""A HelixHR Report Manager: portal-only, no Desk role."""
+	return _make_role_user(REPORT_MANAGER_USER, "HelixHR Report Manager", company, **employee_fields)
+
+
+def make_test_hr_user(company=None, **employee_fields):
+	"""An HR User with an Employee record (the report-matrix tier)."""
+	return _make_role_user(HR_USER_USER, "HR User", company, **employee_fields)
+
+
+def set_report_access(report_key, **flags):
+	"""Upsert one HelixHR Report Access row; unspecified flags become 0."""
+	values = {field: flags.get(field, 0) for field in ("hr_user_run", "hr_user_export", "dm_run", "dm_export")}
+	if frappe.db.exists("HelixHR Report Access", report_key):
+		doc = frappe.get_doc("HelixHR Report Access", report_key)
+		doc.update(values)
+		doc.save(ignore_permissions=True)
+	else:
+		frappe.get_doc({"doctype": "HelixHR Report Access", "report_key": report_key, **values}).insert(
+			ignore_permissions=True
+		)
+
+
 def make_test_project(company, name, members=()):
 	"""A Project for the permission and scope tests, with `members` (Frappe
 	user ids) added to its `Project User` child table -- the same field

@@ -19,5 +19,12 @@
   "is_custom": 0,
   "name": "HelixHR Notification Manager",
   "role_name": "HelixHR Notification Manager"
+ },
+ {
+  "desk_access": 0,
+  "doctype": "Role",
+  "is_custom": 0,
+  "name": "HelixHR Report Manager",
+  "role_name": "HelixHR Report Manager"
  }
 ]

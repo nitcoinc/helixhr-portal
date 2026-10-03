@@ -883,26 +883,6 @@ PERSON_EDITABLE_FIELDS = {
 }
 
 
-# P6-U4 / P6-R9. The reports the launcher offers -- a short, deliberate list
-# in the style above, not every report installed. Payroll reports are
-# excluded on purpose (P6-KTD2): the portal does not route HR into payroll.
-ADMIN_REPORTS = (
-	"Employee Leave Balance",
-	"Employee Leave Balance Summary",
-	"Monthly Attendance Sheet",
-	"Shift Attendance",
-	"Leave Ledger",
-	"Employee Information",
-	"Employee Exits",
-)
-
-# The roles the report launcher (and the person view's Desk link) are
-# offered to -- the same set `resolve_admin_scope` grants a scope to
-# (defined again here, deliberately, rather than imported forward: this
-# constant sits above `resolve_admin_scope` in the file).
-ADMIN_REPORT_ROLES = frozenset({"HR Manager", "System Manager"})
-
-
 def get_week_bounds(any_date):
 	"""Monday..Sunday for the week containing `any_date` (KTD10 -- one
 	week equals one Timesheet, always Monday to Sunday regardless of the
@@ -1098,6 +1078,105 @@ def project_in_scope(project, scope):
 	return False
 
 
+# Plan 2026-10-04-001 U1: portal-only role that runs and exports every
+# catalog report in its holder's company. Holds no DocPerm at all (resolved
+# decision 1 replaces KTD15): wrapped HRMS reports run in `reports.elevated`.
+REPORT_MANAGER_ROLE = "HelixHR Report Manager"
+HR_USER_ROLE = "HR User"
+
+# Widest first. `resolve_report_access` picks the widest scope among the
+# tiers that grant a right on the report in question (resolved decision 2).
+_SCOPE_RANK = {"unscoped": 3, "company": 2, "assigned": 1, "none": 0}
+
+
+def _active_anchor_company(user):
+	"""KTD6: the company of ``user``'s Employee when it is Active, else None.
+	No anchor and an inactive anchor both resolve to None for the new tiers;
+	the anchorless-HR-Manager exception stays inside `resolve_admin_scope`."""
+	anchor = frappe.db.get_value("Employee", {"user_id": user}, ["status", "company"], as_dict=True)
+	if anchor and anchor.status == "Active":
+		return anchor.company
+	return None
+
+
+def resolve_report_access(user, report_key):
+	"""Who may run and export one catalog report, and over what (KTD5).
+
+	Returns ``{"tier", "scope", "can_run", "can_export", "export_scope"}``.
+	``scope`` / ``export_scope`` use `resolve_admin_scope`'s vocabulary
+	(``unscoped`` / ``company`` / ``assigned`` / ``none``) and are each the
+	widest scope among the tiers granting that right on THIS report -- an HR
+	User + Delivery Manager running a Delivery-Manager-only report gets
+	project scope, not company scope. Export callers must use
+	``export_scope``, which can be narrower than ``scope``.
+
+	An unknown key and a denied key return the identical answer (R22).
+	"""
+	from helixhr.reports import get_entry
+
+	denied = {
+		"tier": None,
+		"scope": {"kind": "none"},
+		"can_run": False,
+		"can_export": False,
+		"export_scope": {"kind": "none"},
+	}
+	entry = get_entry(report_key)
+	if not entry:
+		return denied
+
+	roles = set(frappe.get_roles(user))
+	grants = []  # (tier, scope, can_export)
+
+	admin = resolve_admin_scope(user)
+	if admin["kind"] != "none":
+		grants.append(("admin", admin, True))
+
+	if REPORT_MANAGER_ROLE in roles:
+		company = _active_anchor_company(user)
+		if company:
+			grants.append(("report_manager", {"kind": "company", "company": company}, True))
+
+	matrix = None
+	if roles & {HR_USER_ROLE, DELIVERY_MANAGER_ROLE}:
+		matrix = frappe.db.get_value(
+			"HelixHR Report Access",
+			report_key,
+			["hr_user_run", "hr_user_export", "dm_run", "dm_export"],
+			as_dict=True,
+		)
+
+	if matrix and HR_USER_ROLE in roles and matrix.hr_user_run:
+		company = _active_anchor_company(user)
+		if company:
+			grants.append(
+				("hr_user", {"kind": "company", "company": company}, bool(matrix.hr_user_export))
+			)
+
+	if matrix and DELIVERY_MANAGER_ROLE in roles and matrix.dm_run and "project" in entry["scopes"]:
+		# Same offboarding rule as `resolve_project_scope`: an Employee that
+		# exists but is not Active narrows to nothing.
+		status = frappe.db.get_value("Employee", {"user_id": user}, "status")
+		if not status or status == "Active":
+			grants.append(("delivery_manager", {"kind": "assigned", "user": user}, bool(matrix.dm_export)))
+
+	if not grants:
+		return denied
+
+	def widest(candidates):
+		return max(candidates, key=lambda grant: _SCOPE_RANK[grant[1]["kind"]], default=None)
+
+	run_grant = widest(grants)
+	export_grant = widest([grant for grant in grants if grant[2]])
+	return {
+		"tier": run_grant[0],
+		"scope": run_grant[1],
+		"can_run": True,
+		"can_export": export_grant is not None,
+		"export_scope": export_grant[1] if export_grant else {"kind": "none"},
+	}
+
+
 def portal_home_page(user=None):
 	"""Where this user lands after signing in: the portal, for everyone.
 
@@ -1161,12 +1240,10 @@ RATE_LIMIT_POLICY = {
 	"create_project": (20, 3600),
 	"save_task": (30, 3600),
 	"set_project_members": (20, 3600),
-	# P7-U8. `get_billable_hours` fans out with a join per row, the same
-	# reason `search_projects` / `get_project` are bounded above.
-	# `run_portal_report` runs Frappe's own report engine, which is heavier
-	# per call, so it gets the tighter of the two bounds.
-	"get_billable_hours": (60, 60),
-	"run_portal_report": (30, 60),
+	# Plan 2026-10-04-001 U2: one runner for every catalog report. Wrapped
+	# HRMS reports are the heaviest read the portal makes, so it keeps
+	# `run_portal_report`'s tighter bound.
+	"run_report": (30, 60),
 	# Reads that fan out (the home page and the approvals queue each run
 	# several queries) or that answer for one record by name -- bounded so
 	# a scripted walk over sequential record ids is a flood the limiter
