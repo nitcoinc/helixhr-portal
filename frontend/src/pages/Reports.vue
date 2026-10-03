@@ -9,6 +9,7 @@ import ReportFilters from '@/components/reports/ReportFilters.vue'
 import ReportTable from '@/components/reports/ReportTable.vue'
 import ExportMenu from '@/components/reports/ExportMenu.vue'
 import ExportLog from '@/components/reports/ExportLog.vue'
+import SavedViews from '@/components/reports/SavedViews.vue'
 import { session } from '@/lib/session'
 import { call } from '@/lib/api'
 import { presetRange } from '@/lib/datePresets'
@@ -110,6 +111,23 @@ const exportQuery = computed(() => ({
   sort: sort.value,
   hidden: hidden.value,
 }))
+
+// U12: saved views store the URL state; applying one runs it as the viewer.
+const currentQuery = computed(() =>
+  entry.value
+    ? toQuery({ filters: filters.value, groupBy: groupBy.value, sort: sort.value, hidden: hidden.value }, entry.value)
+    : {},
+)
+
+function applyView(query) {
+  if (!entry.value) return
+  const parsed = fromQuery(query, entry.value)
+  filters.value = { ...defaults(entry.value), ...parsed.filters }
+  groupBy.value = parsed.groupBy
+  sort.value = parsed.sort
+  hidden.value = parsed.hidden
+  run()
+}
 
 // U5: the export log tab on the catalog page, for HR Manager / System
 // Manager -- `canConfigure` is the same `_is_hr` predicate
@@ -273,11 +291,15 @@ async function openInDesk() {
             &larr; All reports
           </router-link>
 
-          <!-- Report actions. U12's SavedViews mounts here too. -->
           <div
             class="flex flex-wrap items-center gap-3"
             data-slot="report-actions"
           >
+            <SavedViews
+              :report-key="entry.key"
+              :current-query="currentQuery"
+              @apply="applyView"
+            />
             <ExportMenu
               :report-key="entry.key"
               :can-export="entry.can_export"

@@ -2239,3 +2239,90 @@ def build_export(entry, result, fmt, scope, raw=None, hidden=None):
 		else:
 			content = to_pdf(entry, meta, columns, result["shaped"]["rows"], result.get("extra"))
 	return content, export_filename(entry, result["filters"], fmt), _CONTENT_TYPES[fmt]
+
+
+# --- background export job (U13) -------------------------------------------
+
+
+class _ExportRefused(Exception):
+	"""A background export that may no longer run; the message is for the user."""
+
+
+def run_background_export(export, filters=None, group_by=None, sort=None, hidden=None):
+	"""Build one queued export (enqueued by `api.request_export`).
+
+	Runs as the requester and re-resolves their access now -- a grant revoked
+	since the request ends the export Failed with no file. On success the
+	file is a private File attached to the owner-only export row, which is
+	what keeps it downloadable by the requester alone. Either way the
+	requester gets a Notification Log routed to Reports."""
+	from helixhr.utils import resolve_report_access
+
+	row = frappe.db.get_value(
+		"HelixHR Report Export", export, ["name", "owner", "report_key", "format", "status"], as_dict=True
+	)
+	if not row or row.status != "Queued":
+		return
+	original_user = frappe.session.user
+	frappe.set_user(row.owner)
+	try:
+		frappe.db.set_value("HelixHR Report Export", export, "status", "Running")
+		frappe.db.commit()  # nosemgrep -- the "My exports" panel shows Running
+		try:
+			access = resolve_report_access(row.owner, row.report_key)
+			if not access["can_export"]:
+				raise _ExportRefused(_("You no longer have access to export this report."))
+			entry = get_entry(row.report_key)
+			scope = access["export_scope"]
+			result = run(row.report_key, scope, filters, group_by, sort)
+			total_rows = result["shaped"]["total_rows"]
+			if export_mode(row.format, total_rows) == "refused":
+				raise _ExportRefused(_("This export is too large. Narrow the filters and try again."))
+			content, filename, _content_type = build_export(
+				entry, result, row.format, scope, _parse(filters, {}), hidden
+			)
+			file = frappe.get_doc(
+				{
+					"doctype": "File",
+					"file_name": filename,
+					"is_private": 1,
+					"content": content,
+					"attached_to_doctype": "HelixHR Report Export",
+					"attached_to_name": export,
+				}
+			).insert(ignore_permissions=True)
+			frappe.db.set_value(
+				"HelixHR Report Export",
+				export,
+				{"status": "Ready", "file": file.file_url, "file_name": filename, "row_count": total_rows},
+			)
+			_notify_export(row, entry["label"], ready=True)
+			frappe.db.commit()  # nosemgrep -- background job owns its transaction
+		except Exception as failure:
+			frappe.db.rollback()
+			if isinstance(failure, _ExportRefused | frappe.ValidationError):
+				message = str(failure)
+			else:
+				frappe.log_error(f"HelixHR report export {export} failed")
+				message = _("The export could not be prepared. Try again.")
+			frappe.db.set_value("HelixHR Report Export", export, {"status": "Failed", "error": message})
+			entry = get_entry(row.report_key)
+			_notify_export(row, entry["label"] if entry else row.report_key, ready=False)
+			frappe.db.commit()  # nosemgrep
+	finally:
+		frappe.set_user(original_user)
+
+
+def _notify_export(row, label, ready):
+	frappe.get_doc(
+		{
+			"doctype": "Notification Log",
+			"for_user": row.owner,
+			"type": "Alert",
+			"document_type": "HelixHR Report Export",
+			"document_name": row.name,
+			"subject": (
+				_("Your export of {0} is ready to download.") if ready else _("Your export of {0} failed.")
+			).format(frappe.utils.escape_html(label)),
+		}
+	).insert(ignore_permissions=True)

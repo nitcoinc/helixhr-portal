@@ -37,6 +37,9 @@ const ROUTE_FOR_DOCTYPE = {
   // to open the request it is about -- the sheet over the Attendance page,
   // which is where the days it names live.
   'Attendance Request': { detail: 'AttendanceRequestDetail', list: 'Attendance' },
+  // Plan 2026-10-04-001 U13: a background export's Ready/Failed notice opens
+  // Reports, whose export menu holds "My exports".
+  'HelixHR Report Export': { list: 'Reports' },
 }
 
 const ICON_FOR_DOCTYPE = {

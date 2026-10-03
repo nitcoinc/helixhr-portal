@@ -271,8 +271,12 @@ class TestReportOptions(IntegrationTestCase):
 		self.assertTrue(hr_catalog[COMPANY_ONLY_KEY]["can_export"])
 		self.assertTrue(as_user(hr_user, get_portal_bootstrap)["can_run_reports"])
 
-		self.assertEqual([e["key"] for e in as_user(dm, get_report_catalog)], [PROJECT_KEY])
-		self.assertFalse(as_user(dm, get_report_catalog)[0]["can_open_in_desk"])
+		# Only the keys this test controls: other entries carry seeded
+		# Delivery Manager default grants (e.g. project_timesheet).
+		dm_catalog = {e["key"]: e for e in as_user(dm, get_report_catalog)}
+		self.assertIn(PROJECT_KEY, dm_catalog)
+		self.assertNotIn(COMPANY_ONLY_KEY, dm_catalog)
+		self.assertFalse(dm_catalog[PROJECT_KEY]["can_open_in_desk"])
 		self.assertTrue(as_user(dm, get_portal_bootstrap)["can_run_reports"])
 
 		self.assertEqual(as_user(employee_user, get_report_catalog), [])

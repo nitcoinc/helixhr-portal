@@ -7916,8 +7916,9 @@ def request_export(report_key, format, filters=None, group_by=None, sort=None, h
 	which the file leaves out. Up to `reports.INLINE_EXPORT_CAP` rows the file
 	is built now and ``{token, export, filename, row_count}`` returned; the
 	token is good for one `download_export` by this user within five minutes.
-	Larger results are refused with a "narrow the filters" sentence until
-	U13's background queue lands.
+	Up to `reports.BACKGROUND_EXPORT_CAP` it is queued (U13) and
+	``{export, status}`` returned; above that, refused with a "narrow the
+	filters" sentence.
 	"""
 	from helixhr import reports
 	from helixhr.utils import resolve_report_access
@@ -7937,44 +7938,34 @@ def request_export(report_key, format, filters=None, group_by=None, sort=None, h
 	result = reports.run(report_key, scope, filters, group_by, sort)
 	total_rows = result["shaped"]["total_rows"]
 
+	raw = reports._parse(filters, {})
+	sort = reports._parse(sort, None)
+	fingerprint = _export_fingerprint(
+		report_key, format, result["filters"], result["groups_applied"], sort, hidden
+	)
+	row = {
+		"doctype": "HelixHR Report Export",
+		"report_key": report_key,
+		"report_label": entry["label"],
+		"format": format,
+		"company": scope.get("company")
+		or (reports._scope_company(scope, raw) if scope["kind"] == "unscoped" else None),
+		"row_count": total_rows,
+		"filters": json.dumps(result["filters"], sort_keys=True, default=str),
+		"group_by": ", ".join(result["groups_applied"]),
+		"filters_hash": fingerprint,
+	}
+
 	mode = reports.export_mode(format, total_rows)
-	if mode == "background":
-		# U13: the queue branch goes here -- dedup on `_export_fingerprint`
-		# (owner + key + format + query), per-user cap of two Queued/Running,
-		# insert the row as Queued/Background and enqueue
-		# (job_id report-export:<user>:<hash>, enqueue_after_commit=True),
-		# returning ``{export, status: "Queued"}``. Until then it is refused.
-		frappe.throw(_(_EXPORT_TOO_LARGE))
 	if mode == "refused":
 		frappe.throw(_(_EXPORT_TOO_LARGE))
+	if mode == "background":
+		return _queue_export(row, result, sort, hidden)
 
-	raw = reports._parse(filters, {})
 	content, filename, content_type = reports.build_export(entry, result, format, scope, raw, hidden)
-
-	log = frappe.get_doc(
-		{
-			"doctype": "HelixHR Report Export",
-			"report_key": report_key,
-			"report_label": entry["label"],
-			"format": format,
-			"mode": "Inline",
-			"status": "Ready",
-			"company": scope.get("company")
-			or (reports._scope_company(scope, raw) if scope["kind"] == "unscoped" else None),
-			"row_count": total_rows,
-			"file_name": filename,
-			"filters": json.dumps(result["filters"], sort_keys=True, default=str),
-			"group_by": ", ".join(result["groups_applied"]),
-			"filters_hash": _export_fingerprint(
-				report_key,
-				format,
-				result["filters"],
-				result["groups_applied"],
-				reports._parse(sort, None),
-				hidden,
-			),
-		}
-	).insert(ignore_permissions=True)
+	log = frappe.get_doc({**row, "mode": "Inline", "status": "Ready", "file_name": filename}).insert(
+		ignore_permissions=True
+	)
 
 	token = frappe.generate_hash(length=32)
 	frappe.cache.set_value(
@@ -8047,6 +8038,274 @@ def get_export_log(start=0, page_length=50):
 		row["user_name"] = frappe.utils.get_fullname(row.owner)
 		row["filters"] = frappe.parse_json(row.filters) if row.filters else {}
 	return {"rows": rows[:page_length], "has_more": len(rows) > page_length}
+
+
+# --- Background exports (plan 2026-10-04-001 U13, resolved decision 5) -----
+
+_EXPORT_ACTIVE = ("Queued", "Running")
+_EXPORT_USER_ACTIVE_CAP = 2
+_MY_EXPORTS_LIMIT = 20
+
+
+def _queue_export(row, result, sort, hidden):
+	"""Insert a Queued background export and enqueue its job -- or hand back
+	the caller's identical Queued/Running one. The job re-resolves access."""
+	user = frappe.session.user
+	existing = frappe.get_all(
+		"HelixHR Report Export",
+		filters={"owner": user, "filters_hash": row["filters_hash"], "status": ["in", _EXPORT_ACTIVE]},
+		fields=["name", "status"],
+		limit=1,
+	)
+	if existing:
+		return {"export": existing[0].name, "status": existing[0].status, "row_count": row["row_count"]}
+	if (
+		frappe.db.count("HelixHR Report Export", {"owner": user, "status": ["in", _EXPORT_ACTIVE]})
+		>= _EXPORT_USER_ACTIVE_CAP
+	):
+		frappe.throw(_("You already have two exports being prepared. Try again when one is ready."))
+
+	log = frappe.get_doc({**row, "mode": "Background", "status": "Queued"}).insert(ignore_permissions=True)
+	frappe.enqueue(
+		"helixhr.reports.run_background_export",
+		queue="long",
+		job_id=f"report-export:{user}:{row['filters_hash']}",
+		deduplicate=True,
+		# The job reads the row, so it must not start before this commits.
+		enqueue_after_commit=True,
+		export=log.name,
+		filters=result["filters"],
+		group_by=result["groups_applied"],
+		sort=sort,
+		hidden=hidden,
+	)
+	return {"export": log.name, "status": "Queued", "row_count": row["row_count"]}
+
+
+@frappe.whitelist()
+def list_my_exports():
+	"""The caller's own background exports, newest first (the "My exports"
+	panel). Metadata only; the file goes through `download_report_export`."""
+	from helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export import FILE_RETENTION_DAYS
+
+	rate_limit_per_user("list_my_exports")
+	rows = frappe.get_all(
+		"HelixHR Report Export",
+		filters={"owner": frappe.session.user, "mode": "Background"},
+		fields=["name", "creation", "report_key", "report_label", "format", "status", "row_count", "file_name"],
+		order_by="creation desc",
+		limit=_MY_EXPORTS_LIMIT,
+		ignore_permissions=True,
+	)
+	for row in rows:
+		row["expires_on"] = (
+			frappe.utils.add_days(row.creation, FILE_RETENTION_DAYS) if row.status == "Ready" else None
+		)
+	return rows
+
+
+@frappe.whitelist(methods=["GET"])
+def download_report_export(export):
+	"""Stream a Ready background export to its requester -- nobody else, HR
+	Manager included (the row and its private File are owner-only)."""
+	rate_limit_per_user("download_export")
+	row = (
+		frappe.db.get_value(
+			"HelixHR Report Export", export, ["owner", "status", "file", "file_name", "format"], as_dict=True
+		)
+		if isinstance(export, str)
+		else None
+	)
+	if not row or row.owner != frappe.session.user or row.status != "Ready" or not row.file:
+		frappe.throw(_(_EXPORT_GONE), frappe.PermissionError)
+	file_name = frappe.db.get_value(
+		"File", {"file_url": row.file, "attached_to_doctype": "HelixHR Report Export", "attached_to_name": export}
+	)
+	if not file_name:
+		frappe.throw(_(_EXPORT_GONE), frappe.PermissionError)
+	from helixhr import reports
+
+	frappe.local.response.filename = row.file_name
+	# Raw bytes: File.get_content decodes text and drops the CSV's BOM.
+	with open(frappe.get_doc("File", file_name).get_full_path(), "rb") as handle:
+		frappe.local.response.filecontent = handle.read()
+	frappe.local.response.content_type = reports._CONTENT_TYPES[row.format]
+	frappe.local.response.type = "download"
+	frappe.local.response_headers["Content-Disposition"] = (
+		f"attachment; filename*=UTF-8''{quote(row.file_name)}"
+	)
+	frappe.local.response_headers["Cache-Control"] = "no-store"
+
+
+# --- Saved report views (plan 2026-10-04-001 U12, resolved decision 10) -----
+#
+# A view stores the URL state of `frontend/src/lib/reportQuery.js`
+# (``{<filter>: value, group, sort, hide}``). Applying one is a plain
+# `run_report` as the viewer, so an out-of-scope entity value comes back as
+# ``filters_removed`` with no rows -- never widened (resolved decision 8).
+
+_VIEW_FIELD_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+_VIEW_VALUE_MAX = 140
+_VIEW_QUERY_MAX = 4000
+_VIEW_LABEL_MAX = 80
+
+
+def _viewer_company(user, scope):
+	"""The company a view is shared within: the scope's company, else the
+	caller's Active Employee's (project-scoped tiers). None when unscoped."""
+	if scope["kind"] == "unscoped":
+		return None
+	return scope.get("company") or frappe.db.get_value(
+		"Employee", {"user_id": user, "status": "Active"}, "company"
+	)
+
+
+def _clean_view_query(entry, query):
+	"""Validate a saved query against the entry's own filter/group specs."""
+	query = frappe.parse_json(query) if isinstance(query, str) else query
+	if not isinstance(query, dict):
+		frappe.throw(_("Invalid view."))
+	filter_names = {spec["name"] for spec in entry["filters"]}
+	groupable = set(entry["group_by"] or ())
+	clean = {}
+	for key, value in query.items():
+		if isinstance(value, bool) or not isinstance(value, (str, int)):
+			frappe.throw(_("Invalid view."))
+		value = str(value)
+		if not value:
+			continue
+		if len(value) > _VIEW_VALUE_MAX:
+			frappe.throw(_("Invalid view."))
+		if key in filter_names:
+			clean[key] = value
+		elif key in ("group", "hide"):
+			fields = value.split(",")
+			if not all(_VIEW_FIELD_RE.match(field) for field in fields):
+				frappe.throw(_("Invalid view."))
+			if key == "group" and (len(fields) > 2 or not set(fields) <= groupable):
+				frappe.throw(_("This report cannot be grouped that way."))
+			clean[key] = value
+		elif key == "sort":
+			if not _VIEW_FIELD_RE.match(value.removeprefix("-")):
+				frappe.throw(_("Invalid view."))
+			clean[key] = value
+		else:
+			frappe.throw(_("Invalid view."))
+	if len(json.dumps(clean)) > _VIEW_QUERY_MAX:
+		frappe.throw(_("Invalid view."))
+	return clean
+
+
+def _view_access(report_key):
+	from helixhr.utils import resolve_report_access
+
+	access = resolve_report_access(frappe.session.user, report_key)
+	if not access["can_run"]:
+		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
+	return access
+
+
+def _can_delete_view(view, user):
+	if view.owner == user:
+		return True
+	if view.visibility != "Shared" or not _is_hr(user):
+		return False
+	scope = resolve_admin_scope(user)
+	return scope["kind"] == "unscoped" or (scope["kind"] == "company" and scope["company"] == view.company)
+
+
+@frappe.whitelist()
+def list_report_views(report_key):
+	"""The caller's own views of ``report_key`` plus views shared within
+	their company. A report the caller can no longer run lists nothing (the
+	views are kept, not deleted)."""
+	rate_limit_per_user("list_report_views")
+	access = _view_access(report_key)
+	user = frappe.session.user
+	company = _viewer_company(user, access["scope"])
+	shared = {"visibility": "Shared", "report_key": report_key}
+	if access["scope"]["kind"] != "unscoped":
+		if not company:
+			shared = None
+		else:
+			shared["company"] = company
+	fields = ["name", "owner", "label", "visibility", "company", "query", "creation"]
+	rows = frappe.get_all(
+		"HelixHR Report View", filters={"owner": user, "report_key": report_key}, fields=fields
+	)
+	if shared:
+		rows += frappe.get_all(
+			"HelixHR Report View", filters={**shared, "owner": ["!=", user]}, fields=fields
+		)
+	rows.sort(key=lambda row: row.label.lower())
+	return [
+		{
+			"name": row.name,
+			"label": row.label,
+			"visibility": row.visibility,
+			"query": frappe.parse_json(row.query) if row.query else {},
+			"is_owner": row.owner == user,
+			"owner_name": frappe.utils.get_fullname(row.owner),
+			"can_delete": _can_delete_view(row, user),
+		}
+		for row in rows
+	]
+
+
+@frappe.whitelist(methods=["POST"])
+def save_report_view(report_key, label, query=None, visibility="Private", name=None):
+	"""Create a view, or (``name``) update the caller's own. Labels are
+	unique per owner and report; ``query`` is validated against the entry."""
+	from helixhr import reports
+
+	rate_limit_per_user("save_report_view")
+	access = _view_access(report_key)
+	user = frappe.session.user
+	label = (label or "").strip() if isinstance(label, str) else ""
+	if not label or len(label) > _VIEW_LABEL_MAX:
+		frappe.throw(_("Give the view a name of up to {0} characters.").format(_VIEW_LABEL_MAX))
+	if visibility not in ("Private", "Shared"):
+		frappe.throw(_("Invalid view."))
+	clean = _clean_view_query(reports.get_entry(report_key), query or {})
+
+	if name:
+		doc = frappe.get_doc("HelixHR Report View", name) if isinstance(name, str) else None
+		if not doc or doc.owner != user or doc.report_key != report_key:
+			frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	else:
+		doc = frappe.new_doc("HelixHR Report View")
+		doc.report_key = report_key
+	if frappe.db.exists(
+		"HelixHR Report View",
+		{"owner": user, "report_key": report_key, "label": label, "name": ["!=", doc.name or ""]},
+	):
+		frappe.throw(_("You already have a view called {0} for this report.").format(label))
+
+	doc.update(
+		{
+			"label": label,
+			"visibility": visibility,
+			"query": json.dumps(clean, sort_keys=True),
+			"company": _viewer_company(user, access["scope"]),
+		}
+	)
+	doc.save(ignore_permissions=True)
+	return {"name": doc.name, "label": doc.label, "visibility": doc.visibility, "query": clean}
+
+
+@frappe.whitelist(methods=["POST"])
+def delete_report_view(name):
+	"""The owner deletes their view; an HR Manager in the view's company
+	(or unscoped) may also delete a shared one."""
+	rate_limit_per_user("delete_report_view")
+	view = (
+		frappe.db.get_value("HelixHR Report View", name, ["name", "owner", "visibility", "company"], as_dict=True)
+		if isinstance(name, str)
+		else None
+	)
+	if not view or not _can_delete_view(view, frappe.session.user):
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	frappe.delete_doc("HelixHR Report View", view.name, ignore_permissions=True)
 
 
 # --- Report access matrix (plan 2026-10-04-001 U6, R20, R21) ---------------

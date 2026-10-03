@@ -1253,6 +1253,12 @@ RATE_LIMIT_POLICY = {
 	"request_export": (10, 60),
 	"download_export": (20, 60),
 	"get_export_log": (60, 60),
+	# U13: the "My exports" panel polls this while an export is preparing.
+	"list_my_exports": (60, 60),
+	# U12: saved views -- a read per report open, occasional writes.
+	"list_report_views": (60, 60),
+	"save_report_view": (60, 3600),
+	"delete_report_view": (60, 3600),
 	# U6: the access matrix -- a read, and an occasional administrative write.
 	"get_report_access": (60, 60),
 	"save_report_access": (30, 3600),

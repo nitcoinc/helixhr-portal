@@ -368,4 +368,44 @@ test.describe('report tiers', () => {
       await admin.dispose()
     }
   })
+
+  // U12: a shared view saved by HR Manager opens for an HR User in the same
+  // company and runs as them.
+  test('HR Manager shares a saved view; HR User applies it', async ({ page, baseURL }) => {
+    const label = `E2E shared ${Date.now()}`
+    const admin = await apiAs(baseURL, HR_MANAGER)
+    const grant = await admin.post('/api/method/helixhr.api.save_report_access', {
+      data: { rows: [{ key: 'leave_ledger', hr_user_run: 1, hr_user_export: 0 }] },
+    })
+    expect(grant.ok()).toBeTruthy()
+    try {
+      await signInAs(page, baseURL, HR_MANAGER)
+      await page.goto(LEDGER_URL)
+      await expect(page.locator('table').getByRole('cell', { name: 'Casual Leave' }).first()).toBeVisible()
+      await page.getByRole('button', { name: /Saved views/ }).click()
+      await page.getByLabel('Save the current filters as').fill(label)
+      await page.getByLabel('Share with my company').check()
+      await page.getByRole('button', { name: 'Save view' }).click()
+      await expect(page.getByRole('button', { name: new RegExp(`^${label}`) })).toBeVisible()
+
+      await signInAs(page, baseURL, HR_USER)
+      await page.goto('/helixhr/reports/leave_ledger')
+      await expect(page.getByText('Choose filters, then press Run report.')).toBeVisible()
+      await page.getByRole('button', { name: /Saved views/ }).click()
+      await page.getByRole('button', { name: new RegExp(`^${label}`) }).click()
+      await expect(page).toHaveURL(/from_date=2000-01-01/)
+      await expect(page.locator('table')).toBeVisible()
+      await expect(page.getByRole('button', { name: `Delete view ${label}` })).toHaveCount(0)
+    } finally {
+      const listed = await admin.post('/api/method/helixhr.api.list_report_views', {
+        data: { report_key: 'leave_ledger' },
+      })
+      for (const view of (await listed.json()).message || []) {
+        if (view.label === label) {
+          await admin.post('/api/method/helixhr.api.delete_report_view', { data: { name: view.name } })
+        }
+      }
+      await admin.dispose()
+    }
+  })
 })

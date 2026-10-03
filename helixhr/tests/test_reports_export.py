@@ -9,7 +9,13 @@ import frappe
 from frappe.tests import IntegrationTestCase
 
 from helixhr import reports
-from helixhr.api import download_export, get_export_log, request_export
+from helixhr.api import (
+	download_export,
+	download_report_export,
+	get_export_log,
+	list_my_exports,
+	request_export,
+)
 from helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export import HelixHRReportExport
 from helixhr.tests.utils import (
 	ensure_test_company,
@@ -282,8 +288,11 @@ class TestRequestExport(IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			_as("Administrator", request_export, KEY, "docx")
 
-	def test_above_the_inline_cap_says_narrow_the_filters(self):
-		with patch.dict(reports.INLINE_EXPORT_CAP, {"csv": 0}):
+	def test_above_both_caps_says_narrow_the_filters(self):
+		with (
+			patch.dict(reports.INLINE_EXPORT_CAP, {"csv": 0}),
+			patch.dict(reports.BACKGROUND_EXPORT_CAP, {"csv": 0}),
+		):
 			with self.assertRaises(frappe.ValidationError) as caught:
 				_as("Administrator", request_export, KEY, "csv")
 		self.assertIn("Narrow the filters", str(caught.exception))
@@ -301,6 +310,117 @@ class TestRequestExport(IntegrationTestCase):
 		row = next(row for row in page["rows"] if row.name == out["export"])
 		self.assertEqual(row.owner, self.hr_user)
 		self.assertNotIn("file", row)
+
+
+class TestBackgroundExport(IntegrationTestCase):
+	"""U13. The job commits, so every row, File and Notification Log it
+	makes is named and deleted explicitly (runbook isolation notes)."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		_, self.hr_user = make_test_hr_user()
+		set_report_access(KEY, hr_user_run=1, hr_user_export=1)
+		self._clear()
+		self.addCleanup(self._clear)
+		if not getattr(frappe.local, "response_headers", None):
+			from werkzeug.datastructures import Headers
+
+			frappe.local.response_headers = Headers()
+		caps = patch.dict(reports.INLINE_EXPORT_CAP, {"csv": 0, "xlsx": 0, "pdf": 0})
+		caps.start()
+		self.addCleanup(caps.stop)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		frappe.local.response = frappe._dict({"docs": []})
+
+	def _clear(self):
+		frappe.set_user("Administrator")
+		names = frappe.get_all(
+			"HelixHR Report Export", filters={"owner": self.hr_user, "mode": "Background"}, pluck="name"
+		)
+		for name in names:
+			for file in frappe.get_all(
+				"File",
+				filters={"attached_to_doctype": "HelixHR Report Export", "attached_to_name": name},
+				pluck="name",
+			):
+				frappe.delete_doc("File", file, ignore_permissions=True, force=True)
+			frappe.db.delete("Notification Log", {"document_type": "HelixHR Report Export", "document_name": name})
+			frappe.db.delete("HelixHR Report Export", {"name": name})
+		frappe.db.commit()  # nosemgrep -- the job under test commits too
+
+	def _request(self, fmt="csv"):
+		with patch("frappe.enqueue") as enqueue:
+			out = _as(self.hr_user, request_export, KEY, fmt, filters={"status": "Active"})
+		return out, enqueue
+
+	def _run_job(self, enqueue):
+		kwargs = dict(enqueue.call_args.kwargs)
+		for key in ("queue", "job_id", "deduplicate", "enqueue_after_commit"):
+			kwargs.pop(key)
+		reports.run_background_export(**kwargs)
+
+	def test_queues_then_job_attaches_a_file_and_notifies(self):
+		out, enqueue = self._request()
+		self.assertEqual(out["status"], "Queued")
+		self.assertEqual(enqueue.call_args.args, ("helixhr.reports.run_background_export",))
+		self.assertTrue(enqueue.call_args.kwargs["enqueue_after_commit"])
+		self.assertTrue(enqueue.call_args.kwargs["job_id"].startswith(f"report-export:{self.hr_user}:"))
+		row = frappe.get_doc("HelixHR Report Export", out["export"])
+		self.assertEqual((row.mode, row.status, row.owner), ("Background", "Queued", self.hr_user))
+
+		self._run_job(enqueue)
+		row.reload()
+		self.assertEqual(row.status, "Ready")
+		self.assertTrue(row.file.startswith("/private/files/"))
+		self.assertTrue(
+			frappe.db.exists(
+				"Notification Log",
+				{"for_user": self.hr_user, "document_type": "HelixHR Report Export", "document_name": row.name},
+			)
+		)
+		listed = _as(self.hr_user, list_my_exports)
+		self.assertEqual(next(r for r in listed if r.name == row.name).status, "Ready")
+
+		_as(self.hr_user, download_report_export, row.name)
+		self.assertTrue(frappe.local.response.filecontent.startswith(b"\xef\xbb\xbf"))
+		self.assertEqual(frappe.local.response_headers["Cache-Control"], "no-store")
+
+		# Another HR Manager: refused by the endpoint and by the File chain.
+		_, hr_manager = make_test_hr_manager_employee()
+		with self.assertRaises(frappe.PermissionError):
+			_as(hr_manager, download_report_export, row.name)
+		file = frappe.get_doc("File", {"file_url": row.file, "attached_to_name": row.name})
+		self.assertFalse(frappe.has_permission("File", "read", file, user=hr_manager))
+		self.assertTrue(frappe.has_permission("File", "read", file, user=self.hr_user))
+		self.assertNotIn(row.name, [r.name for r in _as(hr_manager, list_my_exports)])
+
+	def test_revoked_access_fails_with_no_file(self):
+		out, enqueue = self._request()
+		set_report_access(KEY, hr_user_run=1, hr_user_export=0)
+		self._run_job(enqueue)
+		row = frappe.get_doc("HelixHR Report Export", out["export"])
+		self.assertEqual(row.status, "Failed")
+		self.assertFalse(row.file)
+		self.assertFalse(frappe.db.exists("File", {"attached_to_name": row.name}))
+		self.assertIn("no longer have access", row.error)
+
+	def test_identical_request_dedups_and_two_active_is_the_cap(self):
+		first, _ = self._request("csv")
+		again, enqueue = self._request("csv")
+		self.assertEqual(again["export"], first["export"])
+		enqueue.assert_not_called()
+		self._request("xlsx")
+		with self.assertRaises(frappe.ValidationError):
+			self._request("pdf")
+
+	def test_above_the_background_cap_is_refused(self):
+		with patch.dict(reports.BACKGROUND_EXPORT_CAP, {"csv": 0}):
+			with self.assertRaises(frappe.ValidationError) as caught:
+				self._request()
+		self.assertIn("Narrow the filters", str(caught.exception))
 
 
 class TestExportRetention(IntegrationTestCase):
