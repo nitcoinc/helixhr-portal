@@ -360,3 +360,75 @@ class TestReportAccessPreflight(IntegrationTestCase):
 					"to_date": "2026-01-31",
 				},
 			)
+
+
+class TestReportAccessMatrix(IntegrationTestCase):
+	"""U6: `get_report_access` / `save_report_access`, HR Manager and System
+	Manager only, all-or-nothing batches, and immediate effect."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		_, self.hr_manager = make_test_hr_manager_employee()
+		_, self.hr_user = make_test_hr_user()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _as(self, user, fn, *args, **kwargs):
+		frappe.set_user(user)
+		try:
+			return fn(*args, **kwargs)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_grant_and_revoke_take_effect_on_the_next_call(self):
+		from helixhr.api import get_report_catalog, run_report, save_report_access
+
+		self._as(
+			self.hr_manager,
+			save_report_access,
+			[{"key": COMPANY_ONLY_KEY, "hr_user_run": 1, "hr_user_export": 1}],
+		)
+		catalog = {e["key"]: e for e in self._as(self.hr_user, get_report_catalog)}
+		self.assertTrue(catalog[COMPANY_ONLY_KEY]["can_export"])
+
+		self._as(self.hr_manager, save_report_access, [{"key": COMPANY_ONLY_KEY, "hr_user_run": 0}])
+		self.assertNotIn(COMPANY_ONLY_KEY, {e["key"] for e in self._as(self.hr_user, get_report_catalog)})
+		with self.assertRaises(frappe.PermissionError):
+			self._as(self.hr_user, run_report, COMPANY_ONLY_KEY)
+
+	def test_hr_user_and_report_manager_are_refused(self):
+		from helixhr.api import get_report_access, save_report_access
+		from helixhr.tests.utils import make_test_report_manager
+
+		_, report_manager = make_test_report_manager()
+		for user in (self.hr_user, report_manager):
+			with self.assertRaises(frappe.PermissionError):
+				self._as(user, save_report_access, [{"key": COMPANY_ONLY_KEY, "hr_user_run": 1}])
+			with self.assertRaises(frappe.PermissionError):
+				self._as(user, get_report_access)
+
+	def test_a_bad_row_rejects_the_whole_batch(self):
+		from helixhr.api import save_report_access
+
+		set_report_access(COMPANY_ONLY_KEY, hr_user_run=0)
+		for bad in (
+			{"key": "not_a_report", "hr_user_run": 1},
+			{"key": "employee_directory", "dm_run": 1},
+			{"key": "employee_directory", "hr_user_export": 1},
+		):
+			with self.assertRaises(frappe.ValidationError):
+				self._as(
+					self.hr_manager, save_report_access, [{"key": COMPANY_ONLY_KEY, "hr_user_run": 1}, bad]
+				)
+			self.assertEqual(frappe.db.get_value("HelixHR Report Access", COMPANY_ONLY_KEY, "hr_user_run"), 0)
+
+	def test_matrix_lists_every_entry_and_marks_dm_forbidden_cells(self):
+		from helixhr import reports
+		from helixhr.api import get_report_access
+
+		rows = {row["key"]: row for row in self._as(self.hr_manager, get_report_access)}
+		self.assertEqual(set(rows), {entry["key"] for entry in reports.CATALOG})
+		self.assertTrue(rows[PROJECT_KEY]["dm_allowed"])
+		self.assertFalse(rows[COMPANY_ONLY_KEY]["dm_allowed"])

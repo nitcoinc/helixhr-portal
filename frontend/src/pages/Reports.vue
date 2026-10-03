@@ -7,6 +7,9 @@ import AsyncState from '@/components/AsyncState.vue'
 import ReportCatalog from '@/components/reports/ReportCatalog.vue'
 import ReportFilters from '@/components/reports/ReportFilters.vue'
 import ReportTable from '@/components/reports/ReportTable.vue'
+import ExportMenu from '@/components/reports/ExportMenu.vue'
+import ExportLog from '@/components/reports/ExportLog.vue'
+import { session } from '@/lib/session'
 import { call } from '@/lib/api'
 import { presetRange } from '@/lib/datePresets'
 import { today } from '@/lib/dates'
@@ -81,20 +84,36 @@ function syncUrl() {
   })
 }
 
+function cleanFilters() {
+  return Object.fromEntries(
+    Object.entries(filters.value).filter(([, value]) => value !== '' && value !== null && value !== undefined),
+  )
+}
+
 function run() {
   if (!entry.value) return
   syncUrl()
   lastRun.value = snapshot()
-  const clean = Object.fromEntries(
-    Object.entries(filters.value).filter(([, value]) => value !== '' && value !== null && value !== undefined),
-  )
   reportResource.submit({
     report_key: entry.value.key,
-    filters: clean,
+    filters: cleanFilters(),
     group_by: groupBy.value,
     sort: sort.value,
   })
 }
+
+// U5: an export is the screen's own query (hidden columns left out).
+const exportQuery = computed(() => ({
+  filters: cleanFilters(),
+  group_by: groupBy.value,
+  sort: sort.value,
+  hidden: hidden.value,
+}))
+
+// U5: the export log tab on the catalog page, for HR Manager / System
+// Manager -- `canConfigure` is the same `_is_hr` predicate
+// `get_export_log` enforces.
+const catalogTab = ref('reports')
 
 // (Re)initialise when the report changes -- not on our own URL writes.
 watch(
@@ -212,11 +231,31 @@ async function openInDesk() {
         </router-link>
       </div>
 
-      <ReportCatalog
-        v-else-if="!entry"
-        :catalog="catalog"
-        :carry-query="carryQuery"
-      />
+      <template v-else-if="!entry">
+        <nav
+          v-if="session.canConfigure"
+          class="mb-4 flex gap-1 border-b border-outline-gray-1"
+          aria-label="Reports sections"
+        >
+          <button
+            v-for="tab in [{ key: 'reports', label: 'Reports' }, { key: 'exports', label: 'Export log' }]"
+            :key="tab.key"
+            type="button"
+            class="min-h-11 cursor-pointer rounded-t-lg px-3 py-2 text-sm font-medium"
+            :aria-current="catalogTab === tab.key ? 'page' : undefined"
+            :class="catalogTab === tab.key ? 'border-b-2 border-signal text-ink-gray-9' : 'text-ink-gray-6 hover:text-ink-gray-9'"
+            @click="catalogTab = tab.key"
+          >
+            {{ tab.label }}
+          </button>
+        </nav>
+        <ExportLog v-if="session.canConfigure && catalogTab === 'exports'" />
+        <ReportCatalog
+          v-else
+          :catalog="catalog"
+          :carry-query="carryQuery"
+        />
+      </template>
 
       <template v-else>
         <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -227,12 +266,16 @@ async function openInDesk() {
             &larr; All reports
           </router-link>
 
-          <!-- Report actions. U5's ExportMenu and U12's SavedViews mount
-               here; `entry.can_export` already says whether to offer export. -->
+          <!-- Report actions. U12's SavedViews mounts here too. -->
           <div
             class="flex flex-wrap items-center gap-3"
             data-slot="report-actions"
           >
+            <ExportMenu
+              :report-key="entry.key"
+              :can-export="entry.can_export"
+              :query="exportQuery"
+            />
             <button
               v-if="entry.can_open_in_desk"
               type="button"

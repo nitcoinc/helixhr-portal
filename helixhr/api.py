@@ -6496,6 +6496,8 @@ _SETTINGS_DESK_DOCTYPES = {
 	# the second is a thin pointer at the first, and the first is what a
 	# Desk-side look at the actual mail body means.
 	"celebrations": "Email Template",
+	# Plan 2026-10-04-001 U6: the report access matrix.
+	"report_access": "HelixHR Report Access",
 }
 
 
@@ -7872,6 +7874,263 @@ def search_report_options(report_key, filter, query=None, value=None, context=No
 	return reports.search_options(
 		reports.get_entry(report_key), filter, access["scope"], query=query, value=value, context=context
 	)
+
+
+# --- Report export (plan 2026-10-04-001 U5, resolved decision 3) ----------
+#
+# POST `request_export` checks access with ``export_scope``, runs the report
+# through the same runner and shaper as the screen, writes the audit row and
+# hands back a one-time token; GET `download_export` streams the bytes. The
+# split keeps the expensive work on a POST (CSRF-checked, commits the audit
+# row) and the download a plain navigation a phone browser can save.
+
+_EXPORT_TOKEN_PREFIX = "helixhr-report-export|"
+_EXPORT_TOKEN_SECONDS = 300
+_EXPORT_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+_EXPORT_TOO_LARGE = "This export is too large to download here. Narrow the filters and try again."
+_EXPORT_GONE = "That export has expired. Export it again."
+_EXPORT_LOG_PAGE_MAX = 100
+
+
+def _export_fingerprint(report_key, fmt, filters, group_by, sort, hidden):
+	"""Stable hash of one export request (U13 dedups queued exports on it)."""
+	import hashlib
+
+	payload = json.dumps(
+		[report_key, fmt, filters, group_by, sort, sorted(hidden)], sort_keys=True, default=str
+	)
+	return hashlib.sha256(payload.encode()).hexdigest()
+
+
+@frappe.whitelist(methods=["POST"])
+# wkhtmltopdf and a 10,000-row workbook are CPU-bound, so the same Redis
+# semaphore `download_my_payslip` uses bounds concurrent exports per site.
+@frappe.concurrent_limit()
+def request_export(report_key, format, filters=None, group_by=None, sort=None, hidden=None, **kwargs):
+	"""Export one catalog report as ``csv``, ``xlsx`` or ``pdf`` (R11-R14).
+
+	Requires ``can_export`` and runs over ``export_scope`` (never the run
+	scope, which can be wider). ``hidden`` names on-screen hidden columns,
+	which the file leaves out. Up to `reports.INLINE_EXPORT_CAP` rows the file
+	is built now and ``{token, export, filename, row_count}`` returned; the
+	token is good for one `download_export` by this user within five minutes.
+	Larger results are refused with a "narrow the filters" sentence until
+	U13's background queue lands.
+	"""
+	from helixhr import reports
+	from helixhr.utils import resolve_report_access
+
+	rate_limit_per_user("request_export")
+	access = resolve_report_access(frappe.session.user, report_key)
+	if not access["can_export"]:
+		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
+	if format not in reports.EXPORT_FORMATS:
+		frappe.throw(_("Choose CSV, Excel or PDF."))
+
+	entry = reports.get_entry(report_key)
+	scope = access["export_scope"]
+	hidden = reports._parse(hidden, [])
+	if not isinstance(hidden, list) or not all(isinstance(field, str) for field in hidden):
+		hidden = []
+	result = reports.run(report_key, scope, filters, group_by, sort)
+	total_rows = result["shaped"]["total_rows"]
+
+	mode = reports.export_mode(format, total_rows)
+	if mode == "background":
+		# U13: the queue branch goes here -- dedup on `_export_fingerprint`
+		# (owner + key + format + query), per-user cap of two Queued/Running,
+		# insert the row as Queued/Background and enqueue
+		# (job_id report-export:<user>:<hash>, enqueue_after_commit=True),
+		# returning ``{export, status: "Queued"}``. Until then it is refused.
+		frappe.throw(_(_EXPORT_TOO_LARGE))
+	if mode == "refused":
+		frappe.throw(_(_EXPORT_TOO_LARGE))
+
+	raw = reports._parse(filters, {})
+	content, filename, content_type = reports.build_export(entry, result, format, scope, raw, hidden)
+
+	log = frappe.get_doc(
+		{
+			"doctype": "HelixHR Report Export",
+			"report_key": report_key,
+			"report_label": entry["label"],
+			"format": format,
+			"mode": "Inline",
+			"status": "Ready",
+			"company": scope.get("company")
+			or (reports._scope_company(scope, raw) if scope["kind"] == "unscoped" else None),
+			"row_count": total_rows,
+			"file_name": filename,
+			"filters": json.dumps(result["filters"], sort_keys=True, default=str),
+			"group_by": ", ".join(result["groups_applied"]),
+			"filters_hash": _export_fingerprint(
+				report_key,
+				format,
+				result["filters"],
+				result["groups_applied"],
+				reports._parse(sort, None),
+				hidden,
+			),
+		}
+	).insert(ignore_permissions=True)
+
+	token = frappe.generate_hash(length=32)
+	frappe.cache.set_value(
+		_EXPORT_TOKEN_PREFIX + token,
+		{"user": frappe.session.user, "content": content, "filename": filename, "content_type": content_type},
+		expires_in_sec=_EXPORT_TOKEN_SECONDS,
+	)
+	return {"token": token, "export": log.name, "filename": filename, "row_count": total_rows}
+
+
+@frappe.whitelist(methods=["GET"])
+def download_export(token):
+	"""Stream one inline export prepared by `request_export`. The token is
+	single-use, short-lived and bound to the user who asked for it; anyone
+	else -- or a second use -- gets the same "expired" refusal."""
+	rate_limit_per_user("download_export")
+	key = _EXPORT_TOKEN_PREFIX + token if isinstance(token, str) and _EXPORT_TOKEN_RE.match(token) else None
+	payload = frappe.cache.get_value(key) if key else None
+	if not payload or payload.get("user") != frappe.session.user:
+		frappe.throw(_(_EXPORT_GONE), frappe.PermissionError)
+	frappe.cache.delete_value(key)
+
+	frappe.local.response.filename = payload["filename"]
+	frappe.local.response.filecontent = payload["content"]
+	frappe.local.response.content_type = payload["content_type"]
+	frappe.local.response.type = "download"
+	# Same correction `download_my_payslip` makes: RFC 5987 filename, and
+	# never cached by a browser or proxy.
+	frappe.local.response_headers["Content-Disposition"] = (
+		f"attachment; filename*=UTF-8''{quote(payload['filename'])}"
+	)
+	frappe.local.response_headers["Cache-Control"] = "no-store"
+
+
+@frappe.whitelist()
+def get_export_log(start=0, page_length=50):
+	"""HR Manager / System Manager: who exported what, newest first --
+	metadata only, never a file. Company-scoped HR sees its company's rows."""
+	rate_limit_per_user("get_export_log")
+	if not _is_hr(frappe.session.user):
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	start = max(cint(start), 0)
+	page_length = min(max(cint(page_length), 1), _EXPORT_LOG_PAGE_MAX)
+
+	scope = resolve_admin_scope(frappe.session.user)
+	filters = {"company": scope["company"]} if scope["kind"] == "company" else {}
+	rows = frappe.get_all(
+		"HelixHR Report Export",
+		filters=filters,
+		fields=[
+			"name",
+			"owner",
+			"creation",
+			"report_key",
+			"report_label",
+			"format",
+			"mode",
+			"status",
+			"row_count",
+			"company",
+			"filters",
+			"group_by",
+		],
+		order_by="creation desc",
+		start=start,
+		limit=page_length + 1,
+		ignore_permissions=True,
+	)
+	for row in rows:
+		row["user_name"] = frappe.utils.get_fullname(row.owner)
+		row["filters"] = frappe.parse_json(row.filters) if row.filters else {}
+	return {"rows": rows[:page_length], "has_more": len(rows) > page_length}
+
+
+# --- Report access matrix (plan 2026-10-04-001 U6, R20, R21) ---------------
+
+_REPORT_ACCESS_FLAGS = ("hr_user_run", "hr_user_export", "dm_run", "dm_export")
+
+
+def _assert_report_access_admin():
+	if not _is_hr(frappe.session.user):
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+
+
+@frappe.whitelist()
+def get_report_access():
+	"""Every catalog entry with its HR User / Delivery Manager run/export
+	flags. ``dm_allowed`` is false where the catalog forbids Delivery Manager
+	(no project scope); HR Manager and Report Manager rights are fixed."""
+	from helixhr import reports
+
+	rate_limit_per_user("get_report_access")
+	_assert_report_access_admin()
+	saved = {
+		row.name: row
+		for row in frappe.get_all("HelixHR Report Access", fields=["name", *_REPORT_ACCESS_FLAGS])
+	}
+	return [
+		{
+			"key": entry["key"],
+			"label": entry["label"],
+			"family": entry["family"],
+			"dm_allowed": "project" in entry["scopes"],
+			**{
+				flag: cint(saved[entry["key"]].get(flag)) if entry["key"] in saved else 0
+				for flag in _REPORT_ACCESS_FLAGS
+			},
+		}
+		for entry in reports.CATALOG
+	]
+
+
+@frappe.whitelist(methods=["POST"])
+def save_report_access(rows):
+	"""Save a batch of matrix rows ``[{key, hr_user_run, ...}]``, all or
+	nothing: every row is checked first (catalog key, Delivery Manager only
+	on project-scoped entries, export implies run), and one bad row rejects
+	the batch with a sentence naming that report. Each row then goes through
+	``doc.save()`` so the doctype's own validation runs too."""
+	from helixhr import reports
+
+	rate_limit_per_user("save_report_access")
+	_assert_report_access_admin()
+	rows = frappe.parse_json(rows) if isinstance(rows, str) else rows
+	if not isinstance(rows, list) or not rows or len(rows) > len(reports.CATALOG):
+		frappe.throw(_("Nothing to save."))
+
+	clean, seen = [], set()
+	for row in rows:
+		entry = reports.get_entry(row.get("key")) if isinstance(row, dict) else None
+		if not entry or entry["key"] in seen:
+			frappe.throw(_("One of these reports is not in the catalog. Reload and try again."))
+		seen.add(entry["key"])
+		flags = {flag: 1 if row.get(flag) in (1, True, "1") else 0 for flag in _REPORT_ACCESS_FLAGS}
+		label = _(entry["label"])
+		if (flags["dm_run"] or flags["dm_export"]) and "project" not in entry["scopes"]:
+			frappe.throw(_("{0}: Delivery Manager can't be given this report.").format(label))
+		if (flags["hr_user_export"] and not flags["hr_user_run"]) or (
+			flags["dm_export"] and not flags["dm_run"]
+		):
+			frappe.throw(_("{0}: export needs run as well.").format(label))
+		clean.append((entry["key"], flags))
+
+	frappe.db.savepoint("save_report_access")
+	try:
+		for key, flags in clean:
+			if frappe.db.exists("HelixHR Report Access", key):
+				doc = frappe.get_doc("HelixHR Report Access", key)
+			else:
+				doc = frappe.new_doc("HelixHR Report Access")
+				doc.report_key = key
+			_assert_config_write(doc)
+			_apply_allowed_fields(doc, flags, _REPORT_ACCESS_FLAGS)
+			doc.save()
+	except Exception:
+		frappe.db.rollback(save_point="save_report_access")
+		raise
+	return get_report_access()
 
 
 @frappe.whitelist()

@@ -1,0 +1,149 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-10-04 00:00:00.000000",
+ "description": "One row per report export: the audit log, and (background exports) the holder of the private file. Owner-only for every role.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "report_key",
+  "report_label",
+  "format",
+  "mode",
+  "status",
+  "column_break_main",
+  "company",
+  "row_count",
+  "file_name",
+  "section_query",
+  "filters",
+  "group_by",
+  "filters_hash",
+  "section_output",
+  "file",
+  "error"
+ ],
+ "fields": [
+  {
+   "fieldname": "report_key",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Report key",
+   "read_only": 1,
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "report_label",
+   "fieldtype": "Data",
+   "label": "Report",
+   "read_only": 1
+  },
+  {
+   "fieldname": "format",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Format",
+   "options": "csv\nxlsx\npdf",
+   "read_only": 1,
+   "reqd": 1
+  },
+  {
+   "default": "Inline",
+   "fieldname": "mode",
+   "fieldtype": "Select",
+   "label": "Mode",
+   "options": "Inline\nBackground",
+   "read_only": 1
+  },
+  {
+   "default": "Ready",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Status",
+   "options": "Queued\nRunning\nReady\nFailed\nExpired",
+   "read_only": 1
+  },
+  {
+   "fieldname": "column_break_main",
+   "fieldtype": "Column Break"
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "label": "Company",
+   "options": "Company",
+   "read_only": 1
+  },
+  {
+   "fieldname": "row_count",
+   "fieldtype": "Int",
+   "in_list_view": 1,
+   "label": "Rows",
+   "read_only": 1
+  },
+  {
+   "fieldname": "file_name",
+   "fieldtype": "Data",
+   "label": "File name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_query",
+   "fieldtype": "Section Break",
+   "label": "Query"
+  },
+  {
+   "fieldname": "filters",
+   "fieldtype": "Code",
+   "label": "Filters",
+   "options": "JSON",
+   "read_only": 1
+  },
+  {
+   "fieldname": "group_by",
+   "fieldtype": "Data",
+   "label": "Group by",
+   "read_only": 1
+  },
+  {
+   "fieldname": "filters_hash",
+   "fieldtype": "Data",
+   "label": "Query hash",
+   "read_only": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "section_output",
+   "fieldtype": "Section Break",
+   "label": "Output"
+  },
+  {
+   "fieldname": "file",
+   "fieldtype": "Attach",
+   "label": "File",
+   "read_only": 1
+  },
+  {
+   "fieldname": "error",
+   "fieldtype": "Small Text",
+   "label": "Error",
+   "read_only": 1
+  }
+ ],
+ "in_create": 1,
+ "module": "HelixHR",
+ "name": "HelixHR Report Export",
+ "naming_rule": "Random",
+ "permissions": [
+  {
+   "if_owner": 1,
+   "read": 1,
+   "role": "All"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

@@ -1247,6 +1247,15 @@ RATE_LIMIT_POLICY = {
 	# U3/U4: picker typeahead (debounced 250 ms client-side) and the catalog.
 	"search_report_options": (60, 60),
 	"get_report_catalog": (60, 60),
+	# U5: an export runs the report and renders a file (wkhtmltopdf for PDF),
+	# so it is bounded tighter than a screen run; the download only streams
+	# cached bytes. The export log is a paginated HR read.
+	"request_export": (10, 60),
+	"download_export": (20, 60),
+	"get_export_log": (60, 60),
+	# U6: the access matrix -- a read, and an occasional administrative write.
+	"get_report_access": (60, 60),
+	"save_report_access": (30, 3600),
 	# Reads that fan out (the home page and the approvals queue each run
 	# several queries) or that answer for one record by name -- bounded so
 	# a scripted walk over sequential record ids is a flood the limiter

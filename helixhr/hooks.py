@@ -520,9 +520,9 @@ after_request = ["helixhr.utils.set_security_headers"]
 # Automatically update python controller files with type annotations for this app.
 # export_python_type_annotations = True
 
-# default_log_clearing_doctypes = {
-# 	"Logging DocType Name": 30  # days to retain logs
-# }
+# Plan 2026-10-04-001 KTD10 / resolved decision 4: report export audit rows
+# are kept a year; their files only 7 days (`HelixHRReportExport.clear_old_logs`).
+default_log_clearing_doctypes = {"HelixHR Report Export": 365}
 
 # Translation
 # ------------

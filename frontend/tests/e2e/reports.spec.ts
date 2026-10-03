@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, request, type APIRequestContext, type Page } from '@playwright/test'
 
 // Plan 2026-10-04-001 U3/U4: the catalog-driven Reports page.
 //   /helixhr/reports          catalog from `get_report_catalog`
@@ -222,7 +222,116 @@ test('an IT Team identity is refused the same way, with no Desk-bound link visib
   await expect(page.getByRole('button', { name: 'Open in Frappe' })).toHaveCount(0)
 })
 
-// HR User, Delivery Manager and Report Manager identities are not seeded for
-// Playwright yet; their nav/catalog/picker branches are covered by
-// `helixhr.tests.test_reports_access.TestReportOptions` here and land as e2e
-// identities in U6.
+// Plan 2026-10-04-001 U5/U6: export, the export log, the access matrix, and
+// the report tiers. HR User, Delivery Manager and Report Manager are seeded by
+// `setup_playwright_fixtures` and signed in here on a clean context, the same
+// way email-templates.spec.ts signs in its Notification Manager.
+const SITE_HOST = process.env.SITE_HOST || 'test_site'
+const PASSWORD = process.env.TEST_USER_PASSWORD || 'Helixhr-Test-Fixture-2026!'
+const HR_USER = 'hr-user@helixhr.test'
+const DELIVERY_MANAGER = 'delivery-manager@helixhr.test'
+const REPORT_MANAGER = 'report-manager@helixhr.test'
+const HR_MANAGER = 'hr-manager-employee@helixhr.test'
+
+async function apiAs(baseURL: string | undefined, user: string): Promise<APIRequestContext> {
+  const api = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+  const login = await api.post('/api/method/login', { form: { usr: user, pwd: PASSWORD } })
+  expect(login.ok(), `login as ${user}`).toBeTruthy()
+  return api
+}
+
+async function signInAs(page: Page, baseURL: string | undefined, user: string) {
+  const api = await apiAs(baseURL, user)
+  const state = await api.storageState()
+  await api.dispose()
+  await page.context().clearCookies()
+  await page.context().addCookies(state.cookies)
+}
+
+test.describe('export', () => {
+  test.beforeEach(async ({}, testInfo) => {
+    test.skip(testInfo.project.name !== 'hr', 'HR Manager exports; tiers are below')
+  })
+
+  test('CSV export downloads a named file and lands in the export log', async ({ page }) => {
+    await page.goto(LEDGER_URL)
+    await expect(page.locator('table').getByRole('cell', { name: 'Casual Leave' }).first()).toBeVisible()
+
+    await page.getByRole('button', { name: 'Export', exact: true }).click()
+    const [download] = await Promise.all([
+      page.waitForEvent('download'),
+      page.getByRole('menuitem', { name: /CSV/ }).click(),
+    ])
+    expect(download.suggestedFilename()).toMatch(/^helixhr_leave_ledger_2000-01-01_2100-01-01_\d{8}T\d{4}\.csv$/)
+
+    await page.goto('/helixhr/reports')
+    await page.getByRole('button', { name: 'Export log' }).click()
+    await expect(page.getByTestId('export-log-row').first()).toContainText('Leave ledger')
+    await expect(page.getByTestId('export-log-row').first()).toContainText('CSV')
+  })
+})
+
+test.describe('report tiers', () => {
+  test.describe.configure({ mode: 'serial' })
+  test.use({ storageState: { cookies: [], origins: [] } })
+  test.beforeEach(async ({}, testInfo) => {
+    test.skip(testInfo.project.name !== 'hr', 'runs once, in the hr project')
+  })
+
+  test('a Delivery Manager sees only project-scoped reports', async ({ page, baseURL }) => {
+    await signInAs(page, baseURL, DELIVERY_MANAGER)
+    await page.goto('/helixhr/reports')
+    await expect(page.getByRole('link', { name: /Hours by project/ })).toBeVisible()
+    await expect(page.getByRole('link', { name: /Leave ledger/ })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Export log' })).toHaveCount(0)
+  })
+
+  test('a Report Manager sees every family and may export', async ({ page, baseURL }) => {
+    await signInAs(page, baseURL, REPORT_MANAGER)
+    await page.goto('/helixhr/reports')
+    for (const family of ['Time', 'Attendance', 'Leave', 'People']) {
+      await expect(page.getByRole('heading', { name: family, exact: true })).toBeVisible()
+    }
+    await page.goto('/helixhr/reports/leave_ledger')
+    await expect(page.getByRole('button', { name: 'Export', exact: true })).toBeEnabled()
+    await expect(page.getByRole('button', { name: 'Open in Frappe' })).toHaveCount(0)
+  })
+
+  test('HR Manager grants HR User export in Settings; HR User sees it after reload', async ({
+    page,
+    baseURL,
+  }) => {
+    const admin = await apiAs(baseURL, HR_MANAGER)
+    const restore = async (flags: object) => {
+      const response = await admin.post('/api/method/helixhr.api.save_report_access', {
+        data: { rows: [{ key: 'leave_ledger', ...flags }] },
+      })
+      expect(response.ok()).toBeTruthy()
+    }
+    await restore({ hr_user_run: 1, hr_user_export: 0 })
+    try {
+      await signInAs(page, baseURL, HR_USER)
+      await page.goto('/helixhr/reports/leave_ledger')
+      const exportButton = page.getByRole('button', { name: 'Export', exact: true })
+      await expect(exportButton).toBeDisabled()
+      await expect(exportButton).toHaveAccessibleDescription(/not export it/)
+
+      await signInAs(page, baseURL, HR_MANAGER)
+      await page.goto('/helixhr/settings/report-access')
+      const cell = page.getByRole('checkbox', { name: 'Leave ledger: HR User export' })
+      await cell.check()
+      // Delivery Manager cells on a company-only report are disabled, with the reason.
+      await expect(page.getByRole('checkbox', { name: 'Leave ledger: Delivery Manager run' })).toBeDisabled()
+      await expect(page.getByTestId('access-save-bar')).toContainText('1 unsaved change')
+      await page.getByRole('button', { name: 'Save', exact: true }).click()
+      await expect(page.getByText('Saved 1 report.')).toBeVisible()
+
+      await signInAs(page, baseURL, HR_USER)
+      await page.goto('/helixhr/reports/leave_ledger')
+      await expect(page.getByRole('button', { name: 'Export', exact: true })).toBeEnabled()
+    } finally {
+      await restore({ hr_user_run: 1, hr_user_export: 0 })
+      await admin.dispose()
+    }
+  })
+})

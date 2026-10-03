@@ -33,8 +33,13 @@ from helixhr.utils import (
 	project_scope_filters,
 )
 
-# KTD14. Screen cap; the export caps land with U5/U13.
+# KTD14. Screen cap, and the export caps by format. Inline exports stream
+# from the request; between the two caps is U13's background queue; above
+# the background cap the request is refused with "narrow the filters".
 SCREEN_ROW_CAP = 2000
+EXPORT_FORMATS = ("csv", "xlsx", "pdf")
+INLINE_EXPORT_CAP = {"csv": 10000, "xlsx": 10000, "pdf": 1500}
+BACKGROUND_EXPORT_CAP = {"csv": 100000, "xlsx": 100000, "pdf": 10000}
 
 # KTD3: never offered, and preflight FAILs if one enters the catalog.
 DENY_LIST = frozenset({"Timesheet Billing Summary", "Project Profitability", "Project-wise Stock Tracking"})
@@ -244,6 +249,12 @@ def _entry(key, family, label, question, engine, filters, **extra):
 		# U3: the date preset a fresh open starts on (lib/datePresets.js ids);
 		# None for entries without a from/to range.
 		"default_preset": None,
+		# U5 export hooks (U7's flagship uses both): a template under
+		# helixhr/templates/reports/ for the PDF, and a callable
+		# ``(result, columns) -> [(sheet_name, columns, shaped_rows), ...]``
+		# for a multi-sheet workbook. None = the generic one.
+		"pdf_template": None,
+		"xlsx_sheets": None,
 	}
 	entry.update(extra)
 	return entry
@@ -840,3 +851,342 @@ def run(report_key, scope, filters=None, group_by=None, sort=None):
 		"filters_removed": removed,
 		"filters": clean,
 	}
+
+
+# --- exporters (U5, KTD8/KTD9) ----------------------------------------------
+#
+# Every export renders `run`'s shaped output -- the same rows and totals the
+# screen shows (KTD7). Callers resolved access with ``export_scope`` first.
+
+_CONTENT_TYPES = {
+	"csv": "text/csv; charset=utf-8",
+	"xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+	"pdf": "application/pdf",
+}
+_PDF_LANDSCAPE_COLUMNS = 6
+_UNSAFE_LETTER_HEAD_TAGS = ("script", "iframe", "object", "embed", "link", "meta", "base", "form")
+
+
+def export_mode(fmt, total_rows):
+	"""``inline`` / ``background`` / ``refused`` for one format and row count."""
+	if total_rows <= INLINE_EXPORT_CAP[fmt]:
+		return "inline"
+	if total_rows <= BACKGROUND_EXPORT_CAP[fmt]:
+		return "background"
+	return "refused"
+
+
+def visible_columns(columns, hidden):
+	"""Columns minus the ones hidden on screen (resolved decision 10)."""
+	hidden = set(hidden) if isinstance(hidden, list | tuple) else set()
+	return [column for column in columns if column["fieldname"] not in hidden]
+
+
+def _period(filters):
+	if filters.get("from_date") and filters.get("to_date"):
+		return f"{filters['from_date']}_{filters['to_date']}"
+	return filters.get("month") or filters.get("date") or ""
+
+
+def export_filename(entry, filters, fmt, at=None):
+	"""``helixhr_<key>_<period>_<YYYYMMDDTHHMM>.<ext>``: ASCII, no person names
+	(the key and period are the only inputs)."""
+	at = at or frappe.utils.now_datetime()
+	parts = ["helixhr", entry["key"], _period(filters), at.strftime("%Y%m%dT%H%M")]
+	name = "_".join(part for part in parts if part)
+	return re.sub(r"[^A-Za-z0-9_.-]", "-", name) + f".{fmt}"
+
+
+def _filter_lines(entry, filters):
+	lines = []
+	for spec in entry["filters"]:
+		if spec["name"] not in filters:
+			continue
+		value = filters[spec["name"]]
+		if spec["type"] == "toggle":
+			value = _("Yes") if value else _("No")
+		lines.append((_(spec["label"]), str(value)))
+	return lines
+
+
+def export_meta(entry, result, scope, raw=None):
+	"""Title block shared by Excel and PDF: report, company, period, filters,
+	who generated it and when (with the site's time zone)."""
+	from frappe.utils import get_system_timezone
+
+	company = _scope_company(scope, raw or {}) if scope["kind"] != "assigned" else None
+	return {
+		"title": _(entry["label"]),
+		"company": company,
+		"period": _period(result["filters"]).replace("_", " to "),
+		"filters": _filter_lines(entry, result["filters"]),
+		"group_by": [frappe.unscrub(field) for field in result["groups_applied"]],
+		"generated_by": frappe.utils.get_fullname(frappe.session.user),
+		"generated_at": f"{frappe.utils.now_datetime().strftime('%Y-%m-%d %H:%M')} {get_system_timezone()}",
+	}
+
+
+def export_rows(columns, shaped_rows):
+	"""Shaped rows -> ``[(kind, [cell, ...])]`` for the visible columns.
+	Subtotal and total rows carry their label in the first column unless that
+	column itself holds a total."""
+	fields = [column["fieldname"] for column in columns]
+	out = []
+	for row in shaped_rows:
+		kind = row["_kind"]
+		cells = [row.get(field) for field in fields]
+		if kind != "row" and fields:
+			label = (
+				_("Total")
+				if kind == "total"
+				else _("Subtotal: {0}").format(row.get(row["_group_field"]) or _("(none)"))
+			)
+			if cells[0] in (None, "") or fields[0] == row.get("_group_field"):
+				cells[0] = label
+		out.append((kind, cells))
+	return out
+
+
+def to_csv(columns, shaped_rows):
+	"""Header plus every shaped row; formula-like strings escaped, numbers
+	left numeric, a UTF-8 BOM so Excel reads the encoding right."""
+	from csv import QUOTE_MINIMAL
+
+	from frappe.desk.utils import get_csv_bytes
+	from frappe.utils.csvutils import escape_formula_injection
+
+	data = [[_(column["label"]) for column in columns]]
+	for _kind, cells in export_rows(columns, shaped_rows):
+		data.append(
+			[
+				escape_formula_injection(cell)
+				if isinstance(cell, str)
+				else ("" if cell is None else cell if isinstance(cell, int | float) else str(cell))
+				for cell in cells
+			]
+		)
+	return b"\xef\xbb\xbf" + get_csv_bytes(data, {"delimiter": ",", "quoting": QUOTE_MINIMAL})
+
+
+def _xlsx_cell(value, fieldtype):
+	if value in (None, ""):
+		return None
+	if fieldtype == "Date":
+		try:
+			return getdate(value)
+		except Exception:
+			return str(value)
+	if isinstance(value, int | float | str):
+		return value
+	return str(value)
+
+
+def _xlsx_sheet(wb, sheet_name, meta, columns, shaped_rows):
+	from frappe.utils.xlsxutils import make_xlsx
+
+	title = [[meta["title"]]]
+	if meta["company"]:
+		title.append([_("Company"), meta["company"]])
+	if meta["period"]:
+		title.append([_("Period"), meta["period"]])
+	title.extend([[label, value] for label, value in meta["filters"]])
+	if meta["group_by"]:
+		title.append([_("Grouped by"), ", ".join(meta["group_by"])])
+	title.append([_("Generated"), f"{meta['generated_at']} by {meta['generated_by']}"])
+	title.append([])
+
+	data = [*title, [_(column["label"]) for column in columns]]
+	header_index = len(data) - 1
+	bold_rows = [0, header_index]
+	types = [column.get("fieldtype") for column in columns]
+	for kind, cells in export_rows(columns, shaped_rows):
+		if kind != "row":
+			bold_rows.append(len(data))
+		data.append([_xlsx_cell(cell, fieldtype) for cell, fieldtype in zip(cells, types, strict=True)])
+
+	styles = {"styles": [{"bold": True}], "row_styles": {index: (0,) for index in bold_rows}}
+	make_xlsx(data, sheet_name, wb=wb, styles=styles)
+
+
+def to_xlsx(entry, meta, columns, result):
+	"""One workbook: title rows above the header, bold subtotal/total rows,
+	typed numbers and dates. ``entry["xlsx_sheets"]`` may supply several
+	sheets (U7's Grid + Detail)."""
+	from io import BytesIO
+
+	from frappe.utils.xlsxutils import xlsxwriter
+
+	sheets = (
+		entry["xlsx_sheets"](result, columns)
+		if entry["xlsx_sheets"]
+		else [(entry["label"], columns, result["shaped"]["rows"])]
+	)
+	buffer = BytesIO()
+	wb = xlsxwriter.Workbook(buffer, {"constant_memory": True, "default_date_format": "yyyy-mm-dd"})
+	for sheet_name, sheet_columns, sheet_rows in sheets:
+		_xlsx_sheet(wb, sheet_name, meta, sheet_columns, sheet_rows)
+	wb.close()
+	return buffer.getvalue()
+
+
+def _file_data_uri(src):
+	"""A site File's content as a data URI, or None. Letter Head images are
+	shared branding, so this reads them without the viewer's permission --
+	only for File rows that already back a Letter Head or Company logo src."""
+	import base64
+	import mimetypes
+	from urllib.parse import urlparse
+
+	path = urlparse(src or "").path
+	mime = mimetypes.guess_type(path)[0]
+	if not path or not mime or not mime.startswith("image/"):
+		return None
+	name = frappe.db.get_value("File", {"file_url": path}, "name")
+	if not name:
+		return None
+	try:
+		content = frappe.get_doc("File", name).get_content()
+	except Exception:
+		return None
+	if isinstance(content, str):
+		content = content.encode()
+	return f"data:{mime};base64,{base64.b64encode(content).decode()}"
+
+
+def _static_html(html):
+	"""KTD9: Letter Head HTML as inert markup. Never evaluated as Jinja;
+	scripts and other active tags dropped; ``on*`` attributes removed; every
+	image inlined as a data URI (or dropped), so the PDF makes no fetches."""
+	from bs4 import BeautifulSoup
+	from markupsafe import Markup
+
+	if not html:
+		return None
+	soup = BeautifulSoup(html, "html.parser")
+	for tag in soup.find_all(_UNSAFE_LETTER_HEAD_TAGS):
+		tag.decompose()
+	for tag in soup.find_all(True):
+		for attr in [a for a in tag.attrs if a.lower().startswith("on")]:
+			del tag[attr]
+	for img in soup.find_all("img"):
+		src = img.get("src") or ""
+		inlined = src if src.startswith("data:image/") else _file_data_uri(src)
+		if inlined:
+			img["src"] = inlined
+		else:
+			img.decompose()
+	# Sanitised above, and inserted as a value -- never rendered as a template.
+	return Markup(str(soup))
+
+
+def resolve_letter_head(company):
+	"""KTD9 order: the company's default Letter Head, then the site default,
+	then the company logo plus name, then the name alone.
+	Returns ``{"header", "footer", "logo", "company"}``."""
+	name = (company and frappe.db.get_value("Company", company, "default_letter_head")) or None
+	if not name:
+		name = frappe.db.get_value("Letter Head", {"is_default": 1, "disabled": 0}, "name")
+	if name:
+		lh = frappe.db.get_value(
+			"Letter Head", name, ["source", "content", "image", "footer", "disabled"], as_dict=True
+		)
+		if lh and not lh.disabled:
+			header = (
+				f'<img src="{frappe.utils.escape_html(lh.image)}" style="max-height:80px">'
+				if lh.source == "Image" and lh.image
+				else lh.content
+			)
+			return {
+				"header": _static_html(header),
+				"footer": _static_html(lh.footer),
+				"logo": None,
+				"company": company,
+			}
+	logo = company and frappe.db.get_value("Company", company, "company_logo")
+	return {
+		"header": None,
+		"footer": None,
+		"logo": _file_data_uri(logo) if logo else None,
+		"company": company,
+	}
+
+
+def _pdf_env():
+	import os
+
+	from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+	# Own autoescaping environment, not frappe.render_template: report cells
+	# are untrusted data, and nothing here should reach Frappe's globals.
+	return Environment(
+		loader=FileSystemLoader(os.path.join(frappe.get_app_path("helixhr"), "templates", "reports")),
+		autoescape=select_autoescape(default=True),
+	)
+
+
+def render_pdf_html(entry, meta, columns, shaped_rows, letter_head=None):
+	"""The PDF's HTML, from ``entry["pdf_template"]`` or ``report.html``."""
+	letter_head = letter_head if letter_head is not None else resolve_letter_head(meta["company"])
+	template = _pdf_env().get_template(entry["pdf_template"] or "report.html")
+	return template.render(
+		meta=meta,
+		letter_head=letter_head,
+		columns=[
+			{
+				"label": _(column["label"]),
+				"numeric": column.get("fieldtype") in NUMERIC_FIELDTYPES,
+			}
+			for column in columns
+		],
+		rows=[
+			{"kind": kind, "cells": ["" if cell is None else cell for cell in cells]}
+			for kind, cells in export_rows(columns, shaped_rows)
+		],
+	)
+
+
+def pdf_options(entry, meta, columns, has_header):
+	landscape = entry["orientation"] == "landscape" or len(columns) > _PDF_LANDSCAPE_COLUMNS
+	options = {
+		"orientation": "Landscape" if landscape else "Portrait",
+		"page-size": "A4",
+		"margin-bottom": "18mm",
+		"footer-font-size": "8",
+		"footer-spacing": "5",
+		"footer-left": _("Generated by {0}, {1}").format(meta["generated_by"], meta["generated_at"]),
+		# wkhtmltopdf substitutes [page]/[topage]; footer JS is disabled (KTD8).
+		"footer-right": _("Page [page] of [topage]"),
+	}
+	if has_header:
+		options.update({"margin-top": "38mm", "header-spacing": "4"})
+	return options
+
+
+def to_pdf(entry, meta, columns, shaped_rows):
+	"""KTD8: server-rendered HTML through wkhtmltopdf. A missing or failing
+	generator is one plain sentence for the user and a logged error."""
+	from frappe.utils.pdf import get_pdf
+
+	letter_head = resolve_letter_head(meta["company"])
+	html = render_pdf_html(entry, meta, columns, shaped_rows, letter_head)
+	try:
+		return get_pdf(html, pdf_options(entry, meta, columns, bool(letter_head["header"])))
+	except Exception:
+		frappe.log_error(title=f"HelixHR report PDF failed: {entry['key']}")
+		frappe.throw(
+			_("PDF export isn't available right now. Try Excel or CSV, or ask HR to check the site.")
+		)
+
+
+def build_export(entry, result, fmt, scope, raw=None, hidden=None):
+	"""``(content bytes, filename, content type)`` for one run `result`."""
+	columns = visible_columns(result["columns"], hidden)
+	if fmt == "csv":
+		content = to_csv(columns, result["shaped"]["rows"])
+	else:
+		meta = export_meta(entry, result, scope, raw)
+		if fmt == "xlsx":
+			content = to_xlsx(entry, meta, columns, result)
+		else:
+			content = to_pdf(entry, meta, columns, result["shaped"]["rows"])
+	return content, export_filename(entry, result["filters"], fmt), _CONTENT_TYPES[fmt]

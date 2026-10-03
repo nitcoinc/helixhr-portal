@@ -711,6 +711,15 @@ def setup_playwright_fixtures():
 	make_test_it_user()
 	ensure_test_it_request(employee_name)
 
+	# Plan 2026-10-04-001 U6: the report tiers, signed in inside
+	# reports.spec.ts, plus the access matrix's default grants.
+	make_test_hr_user()
+	make_test_report_manager()
+	make_test_delivery_manager()
+	from helixhr.patches.v1_0.seed_report_access import execute as seed_report_access
+
+	seed_report_access()
+
 	# Plan 2026-09-30-001 U11: the roster specs (U9/U10).
 	ensure_roster_fixtures()
 
