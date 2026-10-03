@@ -1961,13 +1961,11 @@ def approval_overdue_days():
 	return max(0, cint(frappe.conf.get("helixhr_approval_overdue_days", APPROVAL_OVERDUE_DAYS_DEFAULT)))
 
 
-def is_overdue(pending_since, today, threshold=None):
+def is_overdue(pending_since, today, threshold):
 	"""The one overdue predicate (U4; U11 and U12 reuse it): pending for
 	longer than the threshold, counted from `helixhr_pending_since`."""
 	if not pending_since:
 		return False
-	if threshold is None:
-		threshold = approval_overdue_days()
 	return _age_in_days(pending_since, today) > threshold
 
 
@@ -5007,14 +5005,6 @@ def _recently_decided(employee):
 	return _with_photo_urls(decided[:_DECIDED_LIMIT])
 
 
-_OVERDUE_ROUTE_KIND = {
-	"Leave Application": "leave",
-	"Timesheet": "timesheet",
-	"Attendance Request": "attendance",
-	"HR Request": "request",
-}
-
-
 @frappe.whitelist()
 def get_overdue_approvals():
 	"""U12 / R26. HR's Overdue tab: who is sitting on what, how long, and
@@ -5031,7 +5021,7 @@ def get_overdue_approvals():
 	def row(item):
 		return {
 			"kind": item["kind"],
-			"route_kind": _OVERDUE_ROUTE_KIND[item["doctype"]],
+			"route_kind": item["route_kind"],
 			"name": item["name"],
 			"title": item["title"],
 			"employee_name": item["employee_name"],
@@ -6685,7 +6675,9 @@ def reset_message_template(template_key):
 				"comment_type": "Info",
 				"reference_doctype": "HelixHR Message Template",
 				"reference_name": template_key,
-				"content": _("{0} reset this email template to the default").format(frappe.session.user),
+				"content": _("{0} reset this email template to the default").format(
+					frappe.utils.get_fullname(frappe.session.user)
+				),
 			}
 		).insert(ignore_permissions=True, ignore_links=True)
 	return {"template_key": template_key, "state": "Default"}

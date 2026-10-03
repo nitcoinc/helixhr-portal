@@ -60,7 +60,7 @@ the exclusion, another for the shared-day email -- and this job uses one).
 
 import frappe
 from erpnext.setup.doctype.employee.employee import get_employee_emails
-from frappe.utils import cint, comma_sep, format_date, get_url, getdate
+from frappe.utils import add_days, cint, comma_sep, format_date, get_url, getdate
 from hrms.controllers.employee_reminders import (
 	get_all_employee_emails,
 	get_employee_email,
@@ -333,6 +333,10 @@ OVERDUE_GUARD_PREFIX = "helixhr-overdue-digest|"
 OVERDUE_GUARD_SECONDS = 36 * 60 * 60
 OVERDUE_ERROR_TITLE = "HelixHR overdue digests"
 _HR_ROLE = "HR Manager"
+# The per-doctype bound on `collect_overdue`'s reads (oldest first). The
+# queries already keep only rows past their threshold, so this is a backstop
+# against a site with a stuck backlog, not a page size.
+_OVERDUE_FETCH = 500
 _KIND_LABELS = {
 	"leave": "Leave",
 	"timesheet": "Timesheet",
@@ -405,6 +409,8 @@ def collect_overdue(today=None):
 
 	today = getdate(today)
 	threshold = approval_overdue_days()
+	# Overdue means pending since before this date (`is_overdue`'s age > threshold).
+	cutoff = add_days(today, -threshold)
 	items = []
 	hr_users = None
 
@@ -426,6 +432,7 @@ def collect_overdue(today=None):
 				"age_days": (today - getdate(since)).days,
 				"threshold_days": threshold_days,
 				"url": get_url(f"/helixhr/approvals/{path}/{row.name}"),
+				"route_kind": path,
 				"owners": owners,
 				"owner_name": owner_name,
 			}
@@ -433,10 +440,11 @@ def collect_overdue(today=None):
 
 	for row in frappe.get_all(
 		"Leave Application",
-		filters={"status": "Open", "docstatus": 0},
+		filters={"status": "Open", "docstatus": 0, PENDING_SINCE: ["<", cutoff]},
 		fields=["name", "employee", "employee_name", "leave_type", "from_date", "leave_approver",
 			"helixhr_stage", PENDING_SINCE],
 		order_by=f"{PENDING_SINCE} asc",
+		limit=_OVERDUE_FETCH,
 	):
 		if not is_overdue(row.get(PENDING_SINCE), today, threshold):
 			continue
@@ -453,9 +461,14 @@ def collect_overdue(today=None):
 	):
 		for row in frappe.get_all(
 			doctype,
-			filters={"docstatus": 0, "workflow_state": ["in", (manager_state, hr_state)]},
+			filters={
+				"docstatus": 0,
+				"workflow_state": ["in", (manager_state, hr_state)],
+				PENDING_SINCE: ["<", cutoff],
+			},
 			fields=["name", "employee", "employee_name", "workflow_state", date_field, PENDING_SINCE],
 			order_by=f"{PENDING_SINCE} asc",
+			limit=_OVERDUE_FETCH,
 		):
 			if not is_overdue(row.get(PENDING_SINCE), today, threshold):
 				continue
@@ -472,11 +485,22 @@ def collect_overdue(today=None):
 		row.name: cint(row.sla_days)
 		for row in frappe.get_all("HelixHR Request Category", fields=["name", "sla_days"])
 	}
-	for row in frappe.get_all(
-		"HR Request",
-		filters={"status": ["in", ("Open", "In Progress")]},
-		fields=["name", "employee", "category", "subject", "routed_to_role", "picked_up_by", "creation"],
-		order_by="creation asc",
+	timed = [sla for sla in slas.values() if sla > 0]
+	for row in (
+		frappe.get_all(
+			"HR Request",
+			filters={
+				"status": ["in", ("Open", "In Progress")],
+				"category": ["in", [name for name, sla in slas.items() if sla > 0]],
+				# The shortest SLA's cutoff; the per-category check below does the rest.
+				"creation": ["<", add_days(today, -min(timed))],
+			},
+			fields=["name", "employee", "category", "subject", "routed_to_role", "picked_up_by", "creation"],
+			order_by="creation asc",
+			limit=_OVERDUE_FETCH,
+		)
+		if timed
+		else []
 	):
 		sla = slas.get(row.category, 0)
 		if sla <= 0 or not is_overdue(row.creation, today, sla):

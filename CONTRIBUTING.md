@@ -23,7 +23,8 @@ and the fastest way to a merged change is to fit how it is already built.
   in a request path. Documented exception: `upload_my_photo` / `remove_my_photo`
   insert and delete the photo File with `ignore_permissions`, because strict
   user permissions refuse it; the target is always the session's own Employee
-  (see `docs/architecture.md` → Security model). Read exception: scoped read
+  (see `docs/architecture.md` → Security model). The notification and
+  correction writes listed there (item 6) are the other write exceptions. Read exception: scoped read
   projections (Team week, Roster) use `get_all(..., ignore_permissions=True)`
   over explicit field lists, only after the server has fixed the row set with
   the scope helpers (`_direct_report_filters`, `resolve_admin_scope` /

@@ -91,6 +91,21 @@ There is no app-level auth code. Three Frappe mechanisms carry it:
    the method instead: the Employee is resolved from the session, never from
    an argument, so the bypass can only ever touch the caller's own photo.
 
+6. **Notification and correction writes (documented `ignore_permissions`
+   exceptions).** Each runs only after the method's own guard has decided:
+   - `_record_hr_acting_for_approver` inserts a Notification Log for the
+     approver. No role has `create` on Notification Log (it is system-written);
+     the row is reached only after `act_on_approval` has accepted an HR
+     decision, and its recipient is the document's `leave_approver`.
+   - `reset_message_template` deletes the HelixHR Message Template row and
+     writes the actor's Info Comment. HelixHR Notification Manager has no
+     `delete` DocPerm on the template (Desk delete stays System Manager's) and
+     no `create` on Comment; `_assert_can_manage_notifications` is the gate.
+   - `events._attach_correction_proof` inserts the private proof File on the
+     employee's own HR Request. The Employee role has no `write` on HR Request,
+     which File creation checks; the File is attached only to the request
+     being inserted, in the same transaction, after `_validate_new_correction`.
+
 Writes the employee should not be able to make are refused server-side:
 
 - `save_my_week` refuses a week that is not Draft or Sent Back, refuses projects
