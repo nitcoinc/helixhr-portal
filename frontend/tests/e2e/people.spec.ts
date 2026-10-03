@@ -23,7 +23,7 @@ test.describe('hr', () => {
     await expect(page.getByRole('link', { name: 'People' })).toBeVisible()
 
     await page.goto('/helixhr/people')
-    await expect(page.getByRole('heading', { name: 'People' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'People', exact: true })).toBeVisible()
 
     const search = page.getByLabel('Search')
     await search.fill(COLLEAGUE_NAME)
