@@ -1303,6 +1303,9 @@ RATE_LIMIT_POLICY = {
 	"raise_timesheet_change": (10, 3600),
 	"withdraw_timesheet_change": (10, 3600),
 	"act_on_approval": (30, 60),
+	# Plan 2026-10-04-003 U6: one batch call stands in for up to 60 single
+	# decisions, so it is bounded tighter than the per-item path, not looser.
+	"approve_clean_items": (10, 60),
 	"get_overdue_approvals": (60, 60),
 	"apply_for_leave": (20, 3600),
 	"withdraw_my_leave": (20, 3600),

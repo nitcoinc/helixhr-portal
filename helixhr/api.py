@@ -5560,9 +5560,14 @@ def _get_unread_notification_count():
 #
 # There is no second approval model here. Timesheet keeps its Workflow and
 # its Pending-Approval-only DocShare; Leave Application keeps the native
-# HRMS submit lifecycle. There is no bulk approve, deliberately: the whole
-# point of P2-U7 is that a decision is made against evidence, and a button
-# that decides eight records at once cannot have been.
+# HRMS submit lifecycle. Bulk approval was refused in P2-U7 because "a
+# decision is made against evidence, and a button that decides eight
+# records at once cannot have been". Plan 2026-10-04-003 reverses that in a
+# guarded form (KTD6): `approve_clean_items` approves only rows the server
+# itself still classifies as clean -- it recomputes the R16 flags per item
+# and refuses anything flagged, anything whose concurrency token moved, and
+# anything the per-item authorization would refuse. The evidence is the
+# flag row the manager already saw; the confirm names the count and total.
 # ---------------------------------------------------------------------------
 
 # How much of the queue is shown at once. A manager with more than this many
@@ -6440,6 +6445,25 @@ def act_on_approval(
 	if not expected_modified:
 		frappe.throw(_("Open this request before deciding it, then try again."))
 
+	return _decide_one(doctype, name, action, reason, expected_modified, expected_state)
+
+
+def _decide_one(doctype, name, action, reason, expected_modified, expected_state):
+	"""Everything `act_on_approval` does after its rate limit, for one
+	record -- the sequence the batch endpoint re-runs per item (KTD6), so
+	there is one authorization path and never a second copy of it.
+
+	Order matters, and it is the P2-U1 fix. The sequence is: lock the
+	native row, authorize, check the state the caller was looking at, and
+	only then create any side effect. Before P2-U1 the comment was added
+	first, so an unauthorized caller left a real Comment on somebody else's
+	leave before the approver check refused them (P2-R10, P2-U1 step 9).
+	"""
+	if doctype not in _APPROVAL_DOCTYPES.values():
+		frappe.throw(_("Not a valid request."))
+	if action not in _APPROVAL_ACTIONS:
+		frappe.throw(_("Not a valid action."))
+
 	# SELECT ... FOR UPDATE on the one row: two concurrent decisions
 	# serialize here, so the second one reads the first one's result and is
 	# refused by the state check below rather than racing it (P2-U1 step 1).
@@ -6485,6 +6509,136 @@ def act_on_approval(
 		"action": action,
 		"state": doc.get(_APPROVAL_KINDS[doctype]["state_field"]),
 	}
+
+
+_BULK_MAX_ITEMS = 60
+
+
+@frappe.whitelist(methods=["POST"])
+def approve_clean_items(items):
+	"""Approve several clean items in one call (plan 2026-10-04-003 U6,
+	R17, R18).
+
+	`items` is `[{doctype, name, expected_modified, expected_state}]`, at
+	most 60, and only Timesheet and Leave Application -- the two kinds the
+	queue marks "Looks normal". Everything else about the batch is the
+	per-item path: each item is re-authorized by `_decide_one`, its
+	concurrency token is checked, and the R16 flags are **recomputed on the
+	server** first -- a flagged item is refused, so the browser can never
+	slip a "Needs a look" row through by sending it anyway (KTD6).
+
+	R18: one stale or refused item never stops the rest. Each item commits
+	on its own, so a failure later in the list cannot undo an earlier
+	approval, and the answer is a per-item `{name, ok, message}` the screen
+	reports verbatim.
+	"""
+	rate_limit_per_user("approve_clean_items")
+	if isinstance(items, str):
+		items = json.loads(items)
+	if not isinstance(items, list) or not items:
+		frappe.throw(_("Pick at least one item to approve."))
+	if len(items) > _BULK_MAX_ITEMS:
+		frappe.throw(_("Approve up to {0} items at once.").format(_BULK_MAX_ITEMS))
+
+	results = []
+	for item in items:
+		name = (item or {}).get("name")
+		doctype = (item or {}).get("doctype")
+		try:
+			if doctype not in ("Timesheet", "Leave Application"):
+				frappe.throw(_("Only timesheets and leave can be approved together."))
+			if _item_flags(doctype, name):
+				frappe.throw(_("This one needs a look, so it can't be approved with the rest."))
+			result = _decide_one(
+				doctype,
+				name,
+				"Approve",
+				None,
+				item.get("expected_modified"),
+				item.get("expected_state"),
+			)
+			# Commit per item (R18): a later failure must not undo this one.
+			frappe.db.commit()
+			results.append({"name": name, "ok": True, "state": result["state"]})
+		except Exception as exc:
+			frappe.db.rollback()
+			message = frappe.utils.strip_html(str(exc)).strip() or _("This one could not be approved.")
+			results.append({"name": name, "ok": False, "message": message})
+	return results
+
+
+def _item_flags(doctype, name):
+	"""The R16 flags for one item, recomputed on the server (KTD6).
+
+	The batch endpoint never trusts the client's "clean" claim: the same
+	helpers the queue shipped the flags with run again here, per item. An
+	empty dict is "looks normal"; anything else is "needs a look"."""
+	today = getdate(user_today())
+	if doctype == "Timesheet":
+		row = frappe.db.get_value(
+			"Timesheet",
+			name,
+			["employee", "start_date", "total_hours", "amended_from", "helixhr_decision_reason", PENDING_SINCE_FIELD],
+			as_dict=True,
+		)
+		if not row:
+			frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
+		monday, sunday = get_week_bounds(row.start_date)
+		index = _working_days_index([row.employee], monday, sunday)
+		working = _employee_working_days(index, row.employee, monday, sunday)
+		expected = flt(index["standard"] * len(working)) if index["standard"] and working else None
+		day_hours, _split = _team_time_logs([name])
+		return _timesheet_flags_for(
+			row, working, expected, day_hours.get(name, {}), today, approval_overdue_days()
+		)
+	if doctype == "Leave Application":
+		row = frappe.db.get_value(
+			"Leave Application",
+			name,
+			["employee", "leave_type", "from_date", "to_date", "total_leave_days", "helixhr_stage"],
+			as_dict=True,
+		)
+		if not row:
+			frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
+		try:
+			result = leave_overdraw(row.employee, row.leave_type, row.from_date, row.to_date, 0)
+		except Exception:
+			result = None
+		balance = flt(result["balance"]) - flt(row.total_leave_days) if result else None
+
+		# The overlap count against this caller's other reports, the same
+		# notion the queue's leave collector uses (R15).
+		employee = get_current_employee()
+		scope = _line_manager_filter(employee)
+		overlap = 0
+		if scope:
+			if scope[0] == "in":
+				others = [name for name in scope[1] if name != row.employee]
+				employee_filter = ["in", others] if others else None
+			else:
+				employee_filter = ["!=", row.employee]
+			if employee_filter:
+				overlap = len(
+					frappe.get_all(
+						"Leave Application",
+						filters={
+							"employee": employee_filter,
+							"docstatus": ["<", 2],
+							"status": ["in", ["Open", "Approved"]],
+							"from_date": ["<=", str(row.to_date)],
+							"to_date": [">=", str(row.from_date)],
+						},
+						pluck="name",
+						ignore_permissions=True,
+					)
+				)
+		return _leave_flags_for(
+			{"for_hr": (row.helixhr_stage or _LEAVE_STAGE_MANAGER) == LEAVE_STAGE_HR, "from_date": row.from_date},
+			balance,
+			overlap,
+			today,
+		)
+	return {}
 
 
 def _record_hr_acting_for_approver(doc, action):
