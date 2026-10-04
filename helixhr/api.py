@@ -6458,7 +6458,7 @@ _TEMPLATE_SUBJECT_MAX = 140
 # The category's own fields (not one of P5-KTD12's borrowed-doctype sets --
 # `HelixHR Request Category` is app-owned, so its whole shape beyond the
 # autoname key is already short).
-_CATEGORY_EDITABLE_FIELDS = ("hint", "route_to_role", "sla_days", "is_active")
+_CATEGORY_EDITABLE_FIELDS = ("hint", "route_to_role", "name_prefix", "sla_days", "is_active")
 
 
 def _assert_config_write(doc):
@@ -6534,7 +6534,7 @@ def get_portal_config():
 		"celebration_template_tokens": CELEBRATION_TEMPLATE_TOKENS,
 		"categories": frappe.get_all(
 			"HelixHR Request Category",
-			fields=["name", "category_name", "hint", "route_to_role", "sla_days", "is_active"],
+			fields=["name", "category_name", "hint", "route_to_role", "name_prefix", "sla_days", "is_active"],
 			order_by="category_name asc",
 		),
 		"leave_types": frappe.get_all(

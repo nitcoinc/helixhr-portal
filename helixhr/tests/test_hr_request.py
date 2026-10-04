@@ -1478,3 +1478,112 @@ class TestProfileCorrection(IntegrationTestCase):
 		for text in seen:
 			self.assertNotIn(self.NEW_ACCOUNT, text)
 			self.assertNotIn("111122223333", text)
+
+
+class TestRequestNaming(IntegrationTestCase):
+	"""Plan 2026-10-04-002 U1: each category carries its own ID prefix, new
+	requests are numbered from it, and existing names never change."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		from helixhr.patches.v1_0.seed_request_categories import execute
+		from helixhr.tests.utils import make_test_employee_and_manager
+
+		execute()
+		self.employee_name, _, _, _ = make_test_employee_and_manager()
+		# Category prefixes are mutated across this class; put whatever the
+		# site (or the seed patch) had back afterwards.
+		self.prefixes_before = dict(
+			frappe.get_all("HelixHR Request Category", fields=["name", "name_prefix"], as_list=True)
+		)
+		self.addCleanup(self._restore_prefixes)
+
+	def _restore_prefixes(self):
+		frappe.set_user("Administrator")
+		for name, prefix in self.prefixes_before.items():
+			frappe.db.set_value("HelixHR Request Category", name, "name_prefix", prefix)
+
+	def _make_request(self, **extra):
+		from helixhr.api import create_my_request
+		from helixhr.tests.utils import EMPLOYEE_USER
+
+		frappe.set_user(EMPLOYEE_USER)
+		created = create_my_request(operation_key=str(uuid.uuid4()), **extra)
+		frappe.set_user("Administrator")
+		return frappe.get_doc("HR Request", created["name"])
+
+	def _prefix(self, category):
+		return frappe.db.get_value("HelixHR Request Category", category, "name_prefix")
+
+	def test_an_it_request_is_numbered_from_the_category_prefix(self):
+		frappe.db.set_value("HelixHR Request Category", "IT / Asset", "name_prefix", "IT-REQ")
+
+		it_doc = self._make_request(category="IT / Asset", subject="Laptop needed")
+		hr_doc = self._make_request(category="HR Letter", subject="Employment letter")
+
+		self.assertTrue(it_doc.name.startswith("IT-REQ-"), it_doc.name)
+		self.assertTrue(hr_doc.name.startswith("HR-REQ-"), hr_doc.name)
+
+	def test_a_category_without_a_prefix_falls_back_to_hr_req(self):
+		category = frappe.get_doc(
+			{
+				"doctype": "HelixHR Request Category",
+				"category_name": "Prefixless naming test",
+				"hint": "Temporary",
+				"route_to_role": "HR Manager",
+			}
+		).insert(ignore_permissions=True)
+		self.addCleanup(
+			frappe.delete_doc,
+			"HelixHR Request Category",
+			category.name,
+			force=True,
+			ignore_permissions=True,
+		)
+
+		doc = self._make_request(category=category.name, subject="Anything")
+
+		self.assertTrue(doc.name.startswith("HR-REQ-"), doc.name)
+
+	def test_prefixes_normalise_to_uppercase_and_refuse_bad_formats(self):
+		from helixhr.tests.utils import EMPLOYEE_USER
+
+		original = self._prefix("IT / Asset")
+		self.addCleanup(frappe.db.set_value, "HelixHR Request Category", "IT / Asset", "name_prefix", original)
+		doc = frappe.get_doc("HelixHR Request Category", "IT / Asset")
+
+		doc.name_prefix = "it-req"
+		doc.save(ignore_permissions=True)
+		self.assertEqual(self._prefix("IT / Asset"), "IT-REQ")
+
+		for bad in ("IT REQ!", "IT-", "A", "TOOLONGPREFIX22", ""):
+			doc.name_prefix = bad
+			if not bad:
+				# An empty prefix is always allowed: it means the HR-REQ fallback.
+				continue
+			with self.assertRaises(frappe.ValidationError, msg=f"'{bad}' should be refused"):
+				doc.save(ignore_permissions=True)
+
+	def test_existing_names_survive_a_prefix_change(self):
+		frappe.db.set_value("HelixHR Request Category", "IT / Asset", "name_prefix", "IT-REQ")
+
+		first = self._make_request(category="IT / Asset", subject="First")
+		frappe.db.set_value("HelixHR Request Category", "IT / Asset", "name_prefix", "ITREQ2")
+		second = self._make_request(category="IT / Asset", subject="Second")
+
+		self.assertEqual(frappe.db.exists("HR Request", first.name), first.name)
+		self.assertTrue(second.name.startswith("ITREQ2-"), second.name)
+
+	def test_the_seed_patch_fills_empty_prefixes_and_never_overwrites_an_edit(self):
+		from helixhr.patches.v1_0.seed_request_category_prefixes import execute
+
+		frappe.db.set_value("HelixHR Request Category", "HR Letter", "name_prefix", "MINE-1")
+		frappe.db.set_value("HelixHR Request Category", "IT / Asset", "name_prefix", "")
+
+		execute()
+
+		self.assertEqual(self._prefix("HR Letter"), "MINE-1")
+		self.assertEqual(self._prefix("IT / Asset"), "IT-REQ")
+		for name in frappe.get_all("HelixHR Request Category", pluck="name"):
+			if name not in ("IT / Asset", "HR Letter"):
+				self.assertEqual(self._prefix(name), "HR-REQ")

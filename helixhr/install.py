@@ -42,6 +42,7 @@ def after_install():
 		seed_profile_correction_category,
 		seed_report_access,
 		seed_request_categories,
+		seed_request_category_prefixes,
 		turn_off_hrms_celebration_senders,
 		turn_off_hrms_leave_notification,
 	)
@@ -53,6 +54,9 @@ def after_install():
 	migrate_message_templates_to_jinja.execute()
 	seed_request_categories.execute()
 	seed_profile_correction_category.execute()
+	# Plan 2026-10-04-002 U1: after the categories exist, before anything
+	# else might read a prefix.
+	seed_request_category_prefixes.execute()
 	route_it_asset_requests.execute()
 	retire_request_notifications.execute()
 	retire_hr_email_notifications.execute()
