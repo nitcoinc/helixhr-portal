@@ -146,7 +146,7 @@ const routes = [
     component: () => import('@/pages/Approvals.vue'),
   },
   {
-    path: '/approvals/:kind(leave|timesheet|attendance|request)/:name',
+    path: '/approvals/:kind(leave|timesheet|attendance|request|change)/:name',
     name: 'ApprovalDetail',
     component: () => import('@/pages/Approvals.vue'),
     props: true,

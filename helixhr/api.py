@@ -1763,6 +1763,18 @@ def _leave_summaries(employee, today):
 
 	balances = {}
 
+	# The concurrency token the batch endpoint re-checks (U6): HRMS's own
+	# projection carries `creation` but not `modified`, so the page's tokens
+	# arrive in one query rather than one per row.
+	modified_by_name = {
+		row.name: str(row.modified)
+		for row in frappe.get_all(
+			"Leave Application",
+			filters={"name": ["in", [row["name"] for row in applications] or [""]]},
+			fields=["name", "modified"],
+		)
+	}
+
 	def balance_after(row):
 		"""The balance once this request is approved (R15). One HRMS ledger
 		read per employee and type, cached for the page; None where the
@@ -1808,6 +1820,7 @@ def _leave_summaries(employee, today):
 				overlap_count=count,
 				flags=flags or {},
 				needs_look=bool(flags),
+				token_modified=modified_by_name.get(row["name"]),
 			)
 		)
 	return rows
@@ -1916,6 +1929,8 @@ def _timesheet_summaries(employee, today):
 				project_split=project_split.get(row.name, []),
 				flags=flags or {},
 				needs_look=bool(flags),
+				# The concurrency token the batch endpoint re-checks (U6).
+				token_modified=str(row.modified),
 			)
 		)
 	return result
