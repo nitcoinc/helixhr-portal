@@ -1,0 +1,88 @@
+{
+ "actions": [],
+ "autoname": "field:report_key",
+ "creation": "2026-10-04 00:00:00.000000",
+ "description": "Per-report run/export rights for HR User and HelixHR Delivery Manager. A report with no row is denied to both.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "report_key",
+  "hr_user_section",
+  "hr_user_run",
+  "hr_user_export",
+  "dm_section",
+  "dm_run",
+  "dm_export"
+ ],
+ "fields": [
+  {
+   "fieldname": "report_key",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Report key",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "fieldname": "hr_user_section",
+   "fieldtype": "Section Break",
+   "label": "HR User"
+  },
+  {
+   "default": "0",
+   "fieldname": "hr_user_run",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "HR User may run"
+  },
+  {
+   "default": "0",
+   "fieldname": "hr_user_export",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "HR User may export"
+  },
+  {
+   "fieldname": "dm_section",
+   "fieldtype": "Section Break",
+   "label": "HelixHR Delivery Manager"
+  },
+  {
+   "default": "0",
+   "fieldname": "dm_run",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Delivery Manager may run"
+  },
+  {
+   "default": "0",
+   "fieldname": "dm_export",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Delivery Manager may export"
+  }
+ ],
+ "module": "HelixHR",
+ "name": "HelixHR Report Access",
+ "naming_rule": "By fieldname",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "HR Manager",
+   "write": 1
+  },
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

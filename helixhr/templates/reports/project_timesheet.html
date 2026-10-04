@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{{ meta.title }}</title>
+<style>
+  /* QtWebKit (wkhtmltopdf): tables and blocks only -- no flex, no grid (KTD8).
+     Plan 2026-10-04-001 U7: task x day grid first, then the detail. */
+  body { font-family: "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 8pt; color: #1f2933; margin: 0; }
+  h1 { font-size: 13pt; margin: 0 0 2px; }
+  h2 { font-size: 10pt; margin: 14px 0 4px; }
+  .muted { color: #52606d; }
+  .brand td { vertical-align: middle; }
+  .brand img { max-height: 48px; }
+  .meta { margin: 4px 0 8px; border-collapse: collapse; }
+  .meta td { padding: 1px 12px 1px 0; }
+  table.grid { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  table.grid th, table.grid td { border: 1px solid #9aa5b1; padding: 2px 1px; text-align: center; font-size: 6.5pt; overflow: hidden; }
+  table.grid th.task, table.grid td.task { text-align: left; width: 34mm; padding-left: 3px; font-size: 7pt; }
+  table.grid th.tot, table.grid td.tot { width: 11mm; font-weight: bold; }
+  table.grid thead { display: table-header-group; }
+  table.grid tr { page-break-inside: avoid; }
+  /* Grey fills only; holidays also carry an "H", so marking survives greyscale. */
+  .we { background: #e4e7eb; }
+  .hol { background: #cbd2d9; font-weight: bold; }
+  table.grid tr.total td { font-weight: bold; border-top: 2px solid #323f4b; }
+  .legend { margin-top: 4px; font-size: 7pt; }
+  .legend span.key { display: inline-block; width: 10px; height: 8px; border: 1px solid #9aa5b1; vertical-align: middle; }
+  table.data { width: 100%; border-collapse: collapse; }
+  table.data thead { display: table-header-group; }
+  table.data tr { page-break-inside: avoid; }
+  table.data th { text-align: left; border-bottom: 1px solid #323f4b; padding: 3px 4px; font-weight: bold; }
+  table.data td { border-bottom: 1px solid #e4e7eb; padding: 2px 4px; vertical-align: top; }
+  .num { text-align: right; white-space: nowrap; }
+  tr.subtotal td { font-weight: bold; background: #f5f7fa; }
+  tr.total td { font-weight: bold; border-top: 2px solid #323f4b; }
+  .footnote { margin-top: 6px; font-style: italic; }
+  .empty { margin: 16px 0; font-size: 10pt; }
+  table.sign { width: 100%; margin-top: 24px; border-collapse: collapse; page-break-inside: avoid; }
+  table.sign td { width: 50%; padding: 0 16px 0 0; vertical-align: top; }
+  .line { border-bottom: 1px solid #323f4b; height: 28px; }
+  .lh-footer { margin-top: 16px; }
+</style>
+</head>
+<body>
+{% if letter_head.header %}
+<div id="header-html">{{ letter_head.header }}</div>
+{% else %}
+<table class="brand"><tr>
+  {% if letter_head.logo %}<td><img src="{{ letter_head.logo }}" alt=""></td>{% endif %}
+  {% if letter_head.company %}<td><strong>{{ letter_head.company }}</strong></td>{% endif %}
+</tr></table>
+{% endif %}
+
+<h1>{{ meta.title }}{% if extra.project_name %}: {{ extra.project_name }}{% endif %}</h1>
+<table class="meta">
+  {% if extra.customer %}<tr><td class="muted">Customer</td><td>{{ extra.customer }}</td></tr>{% endif %}
+  {% if meta.company %}<tr><td class="muted">Company</td><td>{{ meta.company }}</td></tr>{% endif %}
+  {% if meta.period %}<tr><td class="muted">Period</td><td>{{ meta.period }}</td></tr>{% endif %}
+  {% for label, value in meta.filters %}{% if label != "Project" and label != "Month" %}<tr><td class="muted">{{ label }}</td><td>{{ value }}</td></tr>{% endif %}{% endfor %}
+</table>
+
+{% set grid = extra.grid %}
+{% if not grid or not grid.rows %}
+<p class="empty">No approved hours in this period.</p>
+{% else %}
+<table class="grid">
+  <thead>
+    <tr>
+      <th class="task">Task</th>
+      {% for d in grid.days %}<th class="{% if d.holiday %}hol{% elif d.weekend %}we{% endif %}">{{ d.day }}<br>{% if d.holiday %}H{% else %}{{ d.weekday }}{% endif %}</th>{% endfor %}
+      <th class="tot">Total</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in grid.rows %}
+    <tr>
+      <td class="task">{{ row.task }}</td>
+      {% for value in row.cells %}{% set d = grid.days[loop.index0] %}<td class="{% if d.holiday %}hol{% elif d.weekend %}we{% endif %}">{% if value is not none %}{{ "%g"|format(value) }}{% endif %}</td>{% endfor %}
+      <td class="tot">{{ "%g"|format(row.total) }}</td>
+    </tr>
+    {% endfor %}
+    <tr class="total">
+      <td class="task">Total</td>
+      {% for value in grid.day_totals %}{% set d = grid.days[loop.index0] %}<td class="{% if d.holiday %}hol{% elif d.weekend %}we{% endif %}">{% if value is not none %}{{ "%g"|format(value) }}{% endif %}</td>{% endfor %}
+      <td class="tot">{{ "%g"|format(grid.grand_total) }}</td>
+    </tr>
+  </tbody>
+</table>
+<p class="legend">
+  <span class="key we"></span> Weekend &nbsp;
+  <span class="key hol"></span> H = company holiday{% for h in grid.holidays %}{% if loop.first %}: {% endif %}{{ h.date }} {{ h.description }}{% if not loop.last %}; {% endif %}{% endfor %}
+  &nbsp; Figures are {{ "billable hours" if grid.field == "billing_hours" else "hours" }}.
+</p>
+{% endif %}
+{% if extra.pending_hours %}
+<p class="footnote">{{ "%g"|format(extra.pending_hours) }} h awaiting approval are not included.</p>
+{% endif %}
+
+{% if grid and grid.rows %}
+<h2 style="page-break-before: always">Detail</h2>
+<table class="data">
+  <thead><tr>
+    {% for column in columns %}<th{% if column.numeric %} class="num"{% endif %}>{{ column.label }}</th>{% endfor %}
+  </tr></thead>
+  <tbody>
+    {% for row in rows %}
+    <tr class="{{ row.kind }}">
+      {% for cell in row.cells %}<td{% if columns[loop.index0].numeric %} class="num"{% endif %}>{{ cell }}</td>{% endfor %}
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<table class="sign">
+  <tr>
+    <td>
+      <div class="muted">Prepared by</div>
+      <div>{{ meta.generated_by }}, {{ meta.generated_at }}</div>
+    </td>
+    <td>
+      <div class="muted">Customer approval</div>
+      <div class="line"></div>
+      <div class="muted">Name, signature and date</div>
+    </td>
+  </tr>
+</table>
+
+{% if letter_head.footer %}<div class="lh-footer">{{ letter_head.footer }}</div>{% endif %}
+</body>
+</html>

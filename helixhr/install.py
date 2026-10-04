@@ -40,6 +40,7 @@ def after_install():
 		seed_celebration_templates,
 		seed_message_templates,
 		seed_profile_correction_category,
+		seed_report_access,
 		seed_request_categories,
 		turn_off_hrms_celebration_senders,
 		turn_off_hrms_leave_notification,
@@ -62,4 +63,5 @@ def after_install():
 	migrate_celebration_reminders.execute()
 	turn_off_hrms_celebration_senders.execute()
 	turn_off_hrms_leave_notification.execute()
+	seed_report_access.execute()
 	frappe.db.commit()  # nosemgrep

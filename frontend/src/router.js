@@ -172,7 +172,7 @@ const routes = [
     // the portal) rather than only via in-page tabs. `get_portal_config` is
     // the server's own gate -- an employee hitting this route directly gets
     // AsyncState's 'forbidden' region, not a client-side redirect.
-    path: '/settings/:section(categories|leave-types|holiday-lists|shift-types|celebrations)',
+    path: '/settings/:section(categories|leave-types|holiday-lists|shift-types|celebrations|report-access|portal-roles)',
     name: 'SettingsSection',
     meta: { deskOnly: true },
     component: () => import('@/pages/Settings.vue'),
@@ -221,6 +221,15 @@ const routes = [
     name: 'Reports',
     meta: { deskOnly: true },
     component: () => import('@/pages/Reports.vue'),
+  },
+  {
+    // Plan 2026-10-04-001 U4: one report, its filters/grouping/sort in the
+    // query (lib/reportQuery.js) so a link reopens -- and re-runs -- it.
+    path: '/reports/:reportKey',
+    name: 'ReportView',
+    meta: { deskOnly: true },
+    component: () => import('@/pages/Reports.vue'),
+    props: true,
   },
   {
     // P7-U5. `search_projects` is the server's own gate (`resolve_project_

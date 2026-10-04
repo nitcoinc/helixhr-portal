@@ -9,30 +9,45 @@ import LeaveTypesSection from '@/components/settings/LeaveTypesSection.vue'
 import HolidayListsSection from '@/components/settings/HolidayListsSection.vue'
 import ShiftTypesSection from '@/components/settings/ShiftTypesSection.vue'
 import CelebrationsSection from '@/components/settings/CelebrationsSection.vue'
+import ReportAccessSection from '@/components/settings/ReportAccessSection.vue'
+import PortalRolesSection from '@/components/settings/PortalRolesSection.vue'
+import { session } from '@/lib/session'
 
 // P5-U14: `get_portal_config` is HR-only (`_is_hr()`, the same predicate
 // `can_configure` mirrors in the bootstrap). A non-HR caller hitting this
 // page directly gets AsyncState's 'forbidden' region below -- the server's
 // own gate, not a client-side redirect.
 const props = defineProps({
-  section: { type: String, default: 'categories' },
+  section: { type: String, default: '' },
 })
 const router = useRouter()
 
+// A Portal Admin who is not HR gets only the two sections whose endpoints
+// accept it, and never calls `get_portal_config` (HR-only). Anyone else still
+// goes through that call, so a direct hit keeps the server's refusal.
+const portalOnly = !session.canConfigure && session.canAdminPortal
+
 const config = createResource({
   url: 'helixhr.api.get_portal_config',
-  auto: true,
+  auto: !portalOnly,
 })
 
-const SECTIONS = [
+const ALL_SECTIONS = [
   { key: 'categories', label: 'Categories' },
   { key: 'leave-types', label: 'Leave types' },
   { key: 'holiday-lists', label: 'Holiday lists' },
   { key: 'shift-types', label: 'Shift types' },
   { key: 'celebrations', label: 'Celebrations' },
+  { key: 'report-access', label: 'Report access' },
+  { key: 'portal-roles', label: 'Portal roles' },
 ]
+const PORTAL_SECTIONS = ['report-access', 'portal-roles']
+const SECTIONS = portalOnly ? ALL_SECTIONS.filter((tab) => PORTAL_SECTIONS.includes(tab.key)) : ALL_SECTIONS
+const DEFAULT_SECTION = SECTIONS[0].key
 
-const activeSection = computed(() => props.section || 'categories')
+const activeSection = computed(() =>
+  SECTIONS.some((tab) => tab.key === props.section) ? props.section : DEFAULT_SECTION,
+)
 
 // P8-U6: `get_portal_config`'s `desk_urls` keys match its own response
 // shape (`leave_types`, `holiday_lists`, `shift_types`), snake_case like
@@ -46,7 +61,7 @@ const activeDeskUrl = computed(() => {
 })
 
 function selectSection(key) {
-  router.push(key === 'categories' ? '/settings' : `/settings/${key}`)
+  router.push(key === DEFAULT_SECTION ? '/settings' : `/settings/${key}`)
 }
 
 function reload() {
@@ -58,7 +73,7 @@ function reload() {
   <div>
     <PageHeader
       title="Settings"
-      subtitle="Request categories and the day-to-day HRMS masters -- without Desk."
+      :subtitle="portalOnly ? 'Report access and portal roles -- without Desk.' : 'Request categories and the day-to-day HRMS masters -- without Desk.'"
     >
       <template #actions>
         <!-- P8-U6: the server's own gate (`_can_open_desk`), not merely
@@ -79,7 +94,7 @@ function reload() {
 
     <AsyncState
       section="settings"
-      :resource="config"
+      :resource="portalOnly ? null : config"
       :empty="false"
       skeleton="block"
       skeleton-height="h-96"
@@ -133,6 +148,8 @@ function reload() {
           :template-tokens="config.data?.celebration_template_tokens || []"
           @saved="reload"
         />
+        <ReportAccessSection v-else-if="activeSection === 'report-access'" />
+        <PortalRolesSection v-else-if="activeSection === 'portal-roles'" />
       </div>
     </AsyncState>
   </div>

@@ -383,6 +383,15 @@ Manager`. Portal-only (no Desk). The user sees Admin → Email templates (`/emai
 a user with no Employee record lands there. System Manager also qualifies. Preflight WARNs
 when no enabled user holds the role. HR Manager no longer edits templates.
 
+**Granting portal roles without Desk.** Give someone `HelixHR Portal Admin` in Desk (User →
+Roles); they need an Active Employee, whose company bounds what they manage. They then grant
+Report Manager, Delivery Manager, Notification Manager and IT Team at `/settings/portal-roles`.
+"You are not authorised to change this person's roles" means the target is not an Active
+Employee with a User in their company (or does not exist -- deliberately the same message);
+their own account is refused too. "This person's roles come from a role profile" means the
+User has a Role Profile that rewrites roles on save: change it in Desk. Each grant/removal is
+an Info comment on the User. HR Manager, HR User and System Manager are never managed here.
+
 **A template email came out in default wording.** The saved template failed to render at
 send time (e.g. a variable removed from the event). The send fell back to the default and
 logged it: Desk → Error Log, title mentions the event key. Open the template, Save: the
@@ -1172,6 +1181,43 @@ bench --site <site> set-config helixhr_rate_limits '{"create_my_request": [5, 36
 
 Loosening one is a policy decision, and `preflight.check_rate_limits` FAILs until
 `RATE_LIMIT_POLICY` in `helixhr/utils.py` is edited to match.
+
+## Reports: PDF engine, Letter Heads, prepared reports, stuck exports (plan 2026-10-04-001)
+
+**PDF exports need wkhtmltopdf with patched Qt.** The unpatched build ignores
+`--header-html`/`--footer-*` and page breaks, so PDFs come out without a
+letter head or page numbers rather than failing. Check inside the bench
+container: `wkhtmltopdf --version` must print `0.12.6.1 (with patched qt)`
+(or similar "with patched qt"). Preflight's `PDF generator` only checks the
+binary is on PATH, not that it is the patched build.
+
+**A Letter Head image does not appear in the PDF.** Images are inlined as
+data URIs (KTD9) and the PDF makes no fetches, so an image appears only when
+its `src` is a site `File` row (`/files/...` or `/private/files/...`) with an
+image extension and readable content. An external URL, a deleted File, or a
+path with no image extension is silently dropped. Re-upload the image to the
+Letter Head (or Company logo) in Desk. A Letter Head whose header or footer
+contains Jinja (`{{` or `{%`) is never evaluated: that header falls back to the
+Company logo plus company name, that footer to nothing. Replace the Jinja
+with static HTML if the Letter Head should appear as designed.
+
+**Preflight WARNs "prepared_report is on".** Someone ran the report in Desk
+and it took over 15s, so Frappe flipped it to prepared mode. The portal calls
+the report module directly and still gets rows, so this is a WARN, not a
+FAIL; Desk users of that report now get queued jobs. Turn it off in Desk
+(Report > Prepared Report unchecked) if that is not wanted.
+
+**Exports stuck at Queued.** Background exports run on the `long` RQ queue.
+With no worker on `long` (dev bench without `bench start`, a production
+stack missing `queue-long`) the row stays Queued forever, and a user with two
+Queued/Running exports is refused further ones. Check `bench doctor` / the
+RQ Job list, start a worker, and the queued jobs run. A job that failed sets
+the row to Failed with an `error`; nothing re-queues it automatically.
+
+**Employee hours utilization errors with "standard working hours".** HRMS's
+`Employee Hours Utilization Based On Timesheet` refuses to run until
+**HR Settings → Standard Working Hours** is set. Set it; nothing in the
+portal can default it.
 
 ## Go-live checklist
 

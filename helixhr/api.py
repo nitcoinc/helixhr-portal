@@ -67,9 +67,9 @@ from helixhr.events import (
 # `hr_request.get_permission_query_conditions` cannot drift apart.
 from helixhr.helixhr.doctype.hr_request.hr_request import _WORKER_ROLES as _ROUTED_WORKER_ROLES
 from helixhr.utils import (
-	ADMIN_REPORTS,
 	HOLIDAY_LIST_EDITABLE_FIELDS,
 	LEAVE_TYPE_EDITABLE_FIELDS,
+	MANAGED_PORTAL_ROLES,
 	NOTIFICATION_EVENTS,
 	PERSON_EDITABLE_FIELDS,
 	PROFILE_CORRECTABLE_FIELDS,
@@ -85,6 +85,7 @@ from helixhr.utils import (
 	TemplateRejected,
 	admin_scope_employee_filters,
 	as_administrator,
+	can_admin_portal,
 	employee_in_admin_scope,
 	event_variables,
 	get_manager_user,
@@ -99,6 +100,7 @@ from helixhr.utils import (
 	rate_limit_per_user,
 	render_message,
 	resolve_admin_scope,
+	resolve_portal_admin_scope,
 	resolve_project_scope,
 	sample_context,
 	send_notification,
@@ -607,6 +609,14 @@ def get_portal_bootstrap():
 		# scope to exactly the callers this flag names, so the nav item and the
 		# server's gate agree by construction.
 		"can_see_projects": resolve_project_scope(frappe.session.user)["kind"] != "none",
+		# Plan 2026-10-04-001 U4: the Reports nav item. True when
+		# `get_report_catalog` would list at least one entry -- the same
+		# `resolve_report_access` answer `run_report` enforces.
+		"can_run_reports": _can_run_reports(frappe.session.user),
+		# Portal Admin (and HR Manager / System Manager): the access matrix,
+		# the export log and the portal-role section -- `can_admin_portal`
+		# is the predicate each of those endpoints enforces.
+		"can_admin_portal": can_admin_portal(frappe.session.user),
 		# P6-KTD4: resolved on the caller's own ability to reach Desk (a
 		# System User holding a `desk_access` role), never on "is HR" --
 		# the two are correlated today but the flag must not assume they
@@ -6493,6 +6503,8 @@ _SETTINGS_DESK_DOCTYPES = {
 	# the second is a thin pointer at the first, and the first is what a
 	# Desk-side look at the actual mail body means.
 	"celebrations": "Email Template",
+	# Plan 2026-10-04-001 U6: the report access matrix.
+	"report_access": "HelixHR Report Access",
 }
 
 
@@ -7747,7 +7759,9 @@ def get_report_link(report, employee=None):
 	scope = resolve_admin_scope(frappe.session.user)
 	if scope["kind"] == "none":
 		frappe.throw(_("You are not authorised to open reports here."), frappe.PermissionError)
-	if report not in ADMIN_REPORTS:
+	from helixhr.reports import wrapped_report_names
+
+	if report not in wrapped_report_names():
 		frappe.throw(_("That report is not offered here."), frappe.PermissionError)
 	if not _can_open_desk(frappe.session.user):
 		frappe.throw(_("You do not have access to Frappe's Desk."), frappe.PermissionError)
@@ -7762,175 +7776,765 @@ def get_report_link(report, employee=None):
 
 
 # ---------------------------------------------------------------------------
-# P7-U8: reports inside the portal.
+# Plan 2026-10-04-001 U2: reports inside the portal.
 #
-# Two methods, because there are two different things wearing the word
-# "report" (KTD3a). `run_portal_report` renders one of the existing curated
-# HR reports through Frappe's own report engine (KTD4) -- HelixHR computes
-# nothing, it narrows filters and renders what came back. `get_billable_hours`
-# is HelixHR's own scoped query over `Timesheet Detail` rows -- deliberately
-# *not* a Frappe Report, because registering it as one would require granting
-# the `report` permission on Timesheet to a role that needs a task dimension,
-# and that permission is doctype-wide: it would hand the holder every
-# Timesheet report through Frappe's own report endpoint, including
-# `Timesheet Billing Summary`'s `billing_amount` (KTD3, verified by exploit --
-# see the plan's Sources and Research). Neither method grants nor requires
-# `report` on Timesheet; `helixhr.preflight.check_no_timesheet_report_permission`
-# is the standing guard that this stays true.
+# `run_report` replaces P7-U8's `run_portal_report` and `get_billable_hours`
+# (KTD13). The catalog, engines and shaper live in `helixhr/reports.py`; this
+# endpoint is the gate. Wrapped HRMS reports never go through
+# `frappe.desk.query_report.run` as the portal user, and no portal role holds
+# `report` on Timesheet -- `helixhr.preflight.check_no_timesheet_report_permission`
+# is the standing guard.
 # ---------------------------------------------------------------------------
 
 _REPORT_NOT_OFFERED = "That report is not offered here."
 
-# KTD3: the named column list `get_billable_hours` selects -- date, employee,
-# employee name, project, task, task subject, hours, billable hours. No
-# monetary column (`billing_rate`, `billing_amount`, `costing_rate`,
-# `costing_amount`) is ever named here, so none can be returned (R8). This is
-# the mechanism, not a side effect.
-_BILLABLE_HOURS_FIELDS = (
-	"date(td.from_time) as `date`",
-	"ts.employee as employee",
-	"ts.employee_name as employee_name",
-	"td.project as project",
-	"td.task as task",
-	"tsk.subject as task_subject",
-	"td.hours as hours",
-	"td.billing_hours as billing_hours",
-)
-
 
 @frappe.whitelist()
-def get_billable_hours(employee=None, project=None, task=None, from_date=None, to_date=None, **kwargs):
-	"""HelixHR's own scoped query over `Timesheet Detail` rows (P7-R13, KTD3)
-	-- not a Frappe Report.
+def run_report(report_key, filters=None, group_by=None, sort=None, **kwargs):
+	"""Run one catalog report for the screen (R8, R9, R22).
 
-	Accepts exactly four filter keys -- `employee`, `project`, `task`, and a
-	date range (`from_date`/`to_date`) -- as explicit keyword arguments;
-	anything else in the request lands in `**kwargs` and is never read, the
-	same swallow-extra-input pattern `create_project` uses for `company`
-	(P7-KTD5's cousin here: a request cannot smuggle in a key this method
-	does not name, such as one naming a different user to run as, because
-	nothing here ever forwards the request dict anywhere -- unlike
-	`run_portal_report`, this method never reaches Frappe's report engine at
-	all).
+	Access comes from `resolve_report_access` alone: an unknown key, a
+	deny-listed report and a report this caller may not run all get the same
+	refusal. `filters` is allowlisted against the entry's filter specs,
+	company is forced to the caller's scope, and entity filters must be plain
+	in-scope strings (see `reports.resolve_filters`). Anything else in the
+	request -- including a key naming a user to run as -- lands in
+	``**kwargs`` and is never read.
 
-	Filters INTERSECT with `resolve_project_scope`'s answer, they never
-	replace it (KTD3a): naming a project outside the caller's scope can only
-	narrow the caller's own rows to nothing, never substitute somebody
-	else's. An empty "assigned" scope (a HelixHR Delivery Manager who is a
-	member of zero projects) returns an empty result rather than running an
-	unbounded query or refusing outright -- the same contract
-	`project_scope_filters` already promises `search_projects`.
+	Returns ``{columns, rows, total_rows, totals, groups_applied, truncated,
+	filters_removed, filters, can_export, extra}``. ``rows`` is shaped (``_kind`` row /
+	subtotal / total) and capped at `reports.SCREEN_ROW_CAP` data rows at a
+	group boundary; ``totals`` and the trailing total row cover every row.
 	"""
-	rate_limit_per_user("get_billable_hours")
-	scope = resolve_project_scope(frappe.session.user)
-	if scope["kind"] == "none":
-		frappe.throw(_("You are not authorised to view billable hours here."), frappe.PermissionError)
+	from helixhr import reports
+	from helixhr.utils import resolve_report_access
 
-	conditions = ["ts.docstatus != 2"]
-	values = {}
-
-	if scope["kind"] == "company":
-		conditions.append("ts.company = %(scope_company)s")
-		values["scope_company"] = scope["company"]
-	elif scope["kind"] == "assigned":
-		scope_filters = project_scope_filters(scope)
-		if scope_filters is None:
-			return {"rows": []}
-		conditions.append("td.project in %(scope_projects)s")
-		values["scope_projects"] = tuple(scope_filters["name"][1])
-	# "unscoped" (System Manager, or an HR-role holder with no Employee
-	# record) adds no extra condition -- every project, per U2.
-
-	if employee:
-		conditions.append("ts.employee = %(employee)s")
-		values["employee"] = employee
-	if project:
-		conditions.append("td.project = %(project)s")
-		values["project"] = project
-	if task:
-		conditions.append("td.task = %(task)s")
-		values["task"] = task
-	if from_date:
-		conditions.append("date(td.from_time) >= %(from_date)s")
-		values["from_date"] = getdate(from_date)
-	if to_date:
-		conditions.append("date(td.from_time) <= %(to_date)s")
-		values["to_date"] = getdate(to_date)
-
-	rows = frappe.db.sql(
-		f"""
-		select {", ".join(_BILLABLE_HOURS_FIELDS)}
-		from `tabTimesheet Detail` td
-		inner join `tabTimesheet` ts on ts.name = td.parent
-		left join `tabTask` tsk on tsk.name = td.task
-		where {" and ".join(conditions)}
-		order by date desc, ts.employee asc, td.idx asc
-		""",
-		values,
-		as_dict=True,
-	)
-	return {"rows": rows}
-
-
-@frappe.whitelist()
-def run_portal_report(report_name, filters=None, **kwargs):
-	"""Render one of the existing curated HR reports inside the portal
-	(P7-R12, P7-R13, KTD4), by calling Frappe's own report engine --
-	HelixHR computes nothing here, it narrows filters and renders what came
-	back.
-
-	`report_name` must be on the curated list (`ADMIN_REPORTS`); anything
-	else -- a real report this app has not curated, or one that does not
-	exist at all -- gets the exact same refusal, the same uniform-refusal
-	pattern `get_report_link` and `get_project` already use, so this can
-	never become an oracle for which reports exist upstream.
-
-	`filters` is narrowed to `resolve_admin_scope` before the report runs:
-	an `employee` filter is checked against the caller's scope exactly like
-	`get_report_link` already does, and an HR Manager's own company is
-	injected regardless of what the request supplied, so a company named in
-	the request can only ever be overridden, never trusted. Frappe's report
-	engine is then called with a FIXED keyword set -- `report_name` and the
-	narrowed `filters`, nothing else -- never the caller's raw request
-	forwarded wholesale: the engine accepts parameters beyond filters,
-	including one naming a user to run the report as, and none of those may
-	originate from the request body (KTD3, KTD3a).
-	"""
-	from frappe.desk.query_report import run as run_query_report
-
-	rate_limit_per_user("run_portal_report")
-	scope = resolve_admin_scope(frappe.session.user)
-	if scope["kind"] == "none" or report_name not in ADMIN_REPORTS:
+	rate_limit_per_user("run_report")
+	access = resolve_report_access(frappe.session.user, report_key)
+	if not access["can_run"]:
 		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
 
-	if isinstance(filters, str):
-		filters = frappe.parse_json(filters) if filters else {}
-	filters = dict(filters or {})
+	result = reports.run(report_key, access["scope"], filters, group_by, sort)
+	rows, truncated = reports.cap_rows(result["shaped"]["rows"])
+	return {
+		"columns": result["columns"],
+		"rows": rows,
+		"total_rows": result["shaped"]["total_rows"],
+		"totals": result["shaped"]["totals"],
+		"groups_applied": result["groups_applied"],
+		"truncated": truncated,
+		"filters_removed": result["filters_removed"],
+		"filters": result["filters"],
+		"can_export": access["can_export"],
+		# U7: the flagship's task x day grid and pending-hours figure.
+		"extra": result["extra"],
+	}
 
-	# `requested_employee` must be a single document name, never an
-	# operator-shaped value (code review finding): `frappe.db.exists`'s
-	# filter dict treats a list value as `[operator, value]`, so
-	# `["in", ["own-emp", "other-companys-emp"]]` would satisfy
-	# `employee_in_admin_scope` as long as *any* one name in the list is
-	# in-scope -- and the whole list, unmodified, would then reach Frappe's
-	# report engine as a literal filter, returning rows for every name in
-	# it. Refusing anything but a plain string closes that off before the
-	# scope check ever runs.
-	requested_employee = filters.get("employee")
-	if requested_employee:
-		if not isinstance(requested_employee, str):
-			frappe.throw(_("Invalid employee filter."))
-		if not employee_in_admin_scope(requested_employee, scope):
-			frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
-	# Company is forced to the caller's own scope unconditionally -- not
-	# only when no employee filter is present -- so a caller cannot pin an
-	# arbitrary `company` alongside a legitimately in-scope `employee` and
-	# have a report's independent company dimension honour it.
+
+def _runnable_reports(user):
+	"""``(entry, access)`` for every catalog entry ``user`` may run, in
+	catalog order. The single source for the catalog and the nav flag."""
+	from helixhr import reports
+	from helixhr.utils import resolve_report_access
+
+	for entry in reports.CATALOG:
+		access = resolve_report_access(user, entry["key"])
+		if access["can_run"]:
+			yield entry, access
+
+
+def _can_run_reports(user):
+	return any(True for _pair in _runnable_reports(user))
+
+
+@frappe.whitelist()
+def get_report_catalog():
+	"""U4: the catalog entries this caller may run, with filter specs and
+	``can_export`` per entry -- the Reports page never decides access.
+	``can_open_in_desk`` marks the `frappe`-engine entries `get_report_link`
+	would actually hand a Desk URL out for."""
+	from helixhr import reports
+
+	rate_limit_per_user("get_report_catalog")
+	user = frappe.session.user
+	desk = resolve_admin_scope(user)["kind"] != "none" and _can_open_desk(user)
+	return [
+		{**reports.client_entry(entry, access), "can_open_in_desk": desk and entry["engine"] == "frappe"}
+		for entry, access in _runnable_reports(user)
+	]
+
+
+@frappe.whitelist()
+def search_report_options(report_key, filter, query=None, value=None, context=None, **kwargs):
+	"""U3: typeahead options for one report filter, scoped exactly like the
+	report itself. Access is resolved for ``report_key`` first (the uniform
+	refusal otherwise); only filter types the entry declares are served; at
+	most `reports.OPTIONS_LIMIT` results; a query under two characters
+	returns nothing. ``value`` resolves one chosen value's label (URL load).
+	``context`` carries a dependent picker's parent, e.g. ``{"project"}``
+	for tasks."""
+	from helixhr import reports
+	from helixhr.utils import resolve_report_access
+
+	rate_limit_per_user("search_report_options")
+	access = resolve_report_access(frappe.session.user, report_key)
+	if not access["can_run"]:
+		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
+	return reports.search_options(
+		reports.get_entry(report_key), filter, access["scope"], query=query, value=value, context=context
+	)
+
+
+# --- Report export (plan 2026-10-04-001 U5, resolved decision 3) ----------
+#
+# POST `request_export` checks access with ``export_scope``, runs the report
+# through the same runner and shaper as the screen, writes the audit row and
+# hands back a one-time token; GET `download_export` streams the bytes. The
+# split keeps the expensive work on a POST (CSRF-checked, commits the audit
+# row) and the download a plain navigation a phone browser can save.
+
+_EXPORT_TOKEN_PREFIX = "helixhr-report-export|"
+_EXPORT_TOKEN_SECONDS = 300
+_EXPORT_TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+_EXPORT_TOO_LARGE = "This export is too large to download here. Narrow the filters and try again."
+_EXPORT_GONE = "That export has expired. Export it again."
+_EXPORT_LOG_PAGE_MAX = 100
+
+
+def _export_fingerprint(report_key, fmt, filters, group_by, sort, hidden):
+	"""Stable hash of one export request (U13 dedups queued exports on it)."""
+	import hashlib
+
+	payload = json.dumps(
+		[report_key, fmt, filters, group_by, sort, sorted(hidden)], sort_keys=True, default=str
+	)
+	return hashlib.sha256(payload.encode()).hexdigest()
+
+
+@frappe.whitelist(methods=["POST"])
+# wkhtmltopdf and a 10,000-row workbook are CPU-bound, so the same Redis
+# semaphore `download_my_payslip` uses bounds concurrent exports per site.
+@frappe.concurrent_limit()
+def request_export(report_key, format, filters=None, group_by=None, sort=None, hidden=None, **kwargs):
+	"""Export one catalog report as ``csv``, ``xlsx`` or ``pdf`` (R11-R14).
+
+	Requires ``can_export`` and runs over ``export_scope`` (never the run
+	scope, which can be wider). ``hidden`` names on-screen hidden columns,
+	which the file leaves out. Up to `reports.INLINE_EXPORT_CAP` rows the file
+	is built now and ``{token, export, filename, row_count}`` returned; the
+	token is good for one `download_export` by this user within five minutes.
+	Up to `reports.BACKGROUND_EXPORT_CAP` it is queued (U13) and
+	``{export, status}`` returned; above that, refused with a "narrow the
+	filters" sentence.
+	"""
+	from helixhr import reports
+	from helixhr.utils import resolve_report_access
+
+	rate_limit_per_user("request_export")
+	access = resolve_report_access(frappe.session.user, report_key)
+	if not access["can_export"]:
+		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
+	if format not in reports.EXPORT_FORMATS:
+		frappe.throw(_("Choose CSV, Excel or PDF."))
+
+	entry = reports.get_entry(report_key)
+	scope = access["export_scope"]
+	hidden = reports._parse(hidden, [])
+	if not isinstance(hidden, list) or not all(isinstance(field, str) for field in hidden):
+		hidden = []
+	result = reports.run(report_key, scope, filters, group_by, sort)
+	total_rows = result["shaped"]["total_rows"]
+
+	raw = reports._parse(filters, {})
+	sort = reports._parse(sort, None)
+	fingerprint = _export_fingerprint(
+		report_key, format, result["filters"], result["groups_applied"], sort, hidden
+	)
+	row = {
+		"doctype": "HelixHR Report Export",
+		"report_key": report_key,
+		"report_label": entry["label"],
+		"format": format,
+		"company": scope.get("company")
+		or (reports._scope_company(scope, raw) if scope["kind"] == "unscoped" else None),
+		"row_count": total_rows,
+		"filters": json.dumps(result["filters"], sort_keys=True, default=str),
+		"group_by": ", ".join(result["groups_applied"]),
+		"filters_hash": fingerprint,
+	}
+
+	mode = reports.export_mode(format, total_rows)
+	if mode == "refused":
+		frappe.throw(_(_EXPORT_TOO_LARGE))
+	if mode == "background":
+		return _queue_export(row, result, sort, hidden)
+
+	content, filename, content_type = reports.build_export(entry, result, format, scope, raw, hidden)
+	log = frappe.get_doc({**row, "mode": "Inline", "status": "Ready", "file_name": filename}).insert(
+		ignore_permissions=True
+	)
+
+	token = frappe.generate_hash(length=32)
+	frappe.cache.set_value(
+		_EXPORT_TOKEN_PREFIX + token,
+		{"user": frappe.session.user, "content": content, "filename": filename, "content_type": content_type},
+		expires_in_sec=_EXPORT_TOKEN_SECONDS,
+	)
+	return {"token": token, "export": log.name, "filename": filename, "row_count": total_rows}
+
+
+@frappe.whitelist(methods=["GET"])
+def download_export(token):
+	"""Stream one inline export prepared by `request_export`. The token is
+	single-use, short-lived and bound to the user who asked for it; anyone
+	else -- or a second use -- gets the same "expired" refusal."""
+	rate_limit_per_user("download_export")
+	key = _EXPORT_TOKEN_PREFIX + token if isinstance(token, str) and _EXPORT_TOKEN_RE.match(token) else None
+	payload = frappe.cache.get_value(key) if key else None
+	if not payload or payload.get("user") != frappe.session.user:
+		frappe.throw(_(_EXPORT_GONE), frappe.PermissionError)
+	frappe.cache.delete_value(key)
+
+	frappe.local.response.filename = payload["filename"]
+	frappe.local.response.filecontent = payload["content"]
+	frappe.local.response.content_type = payload["content_type"]
+	frappe.local.response.type = "download"
+	# Same correction `download_my_payslip` makes: RFC 5987 filename, and
+	# never cached by a browser or proxy.
+	frappe.local.response_headers["Content-Disposition"] = (
+		f"attachment; filename*=UTF-8''{quote(payload['filename'])}"
+	)
+	frappe.local.response_headers["Cache-Control"] = "no-store"
+
+
+@frappe.whitelist()
+def get_export_log(start=0, page_length=50):
+	"""HR Manager / System Manager / Portal Admin: who exported what, newest
+	first -- metadata only, never a file. A company-scoped caller sees its
+	company's rows; a caller whose scope resolves to none sees no rows."""
+	rate_limit_per_user("get_export_log")
+	if not can_admin_portal(frappe.session.user):
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	start = max(cint(start), 0)
+	page_length = min(max(cint(page_length), 1), _EXPORT_LOG_PAGE_MAX)
+
+	scope = resolve_portal_admin_scope(frappe.session.user)
+	if scope["kind"] == "none":
+		return {"rows": [], "has_more": False}
+	filters = {"company": scope["company"]} if scope["kind"] == "company" else {}
+	rows = frappe.get_all(
+		"HelixHR Report Export",
+		filters=filters,
+		fields=[
+			"name",
+			"owner",
+			"creation",
+			"report_key",
+			"report_label",
+			"format",
+			"mode",
+			"status",
+			"row_count",
+			"company",
+			"filters",
+			"group_by",
+		],
+		order_by="creation desc",
+		start=start,
+		limit=page_length + 1,
+		ignore_permissions=True,
+	)
+	for row in rows:
+		row["user_name"] = frappe.utils.get_fullname(row.owner)
+		row["filters"] = frappe.parse_json(row.filters) if row.filters else {}
+	return {"rows": rows[:page_length], "has_more": len(rows) > page_length}
+
+
+# --- Background exports (plan 2026-10-04-001 U13, resolved decision 5) -----
+
+_EXPORT_ACTIVE = ("Queued", "Running")
+_EXPORT_USER_ACTIVE_CAP = 2
+_MY_EXPORTS_LIMIT = 20
+
+
+def _queue_export(row, result, sort, hidden):
+	"""Insert a Queued background export and enqueue its job -- or hand back
+	the caller's identical Queued/Running one. The job re-resolves access."""
+	user = frappe.session.user
+	existing = frappe.get_all(
+		"HelixHR Report Export",
+		filters={"owner": user, "filters_hash": row["filters_hash"], "status": ["in", _EXPORT_ACTIVE]},
+		fields=["name", "status"],
+		limit=1,
+	)
+	if existing:
+		return {"export": existing[0].name, "status": existing[0].status, "row_count": row["row_count"]}
+	if (
+		frappe.db.count("HelixHR Report Export", {"owner": user, "status": ["in", _EXPORT_ACTIVE]})
+		>= _EXPORT_USER_ACTIVE_CAP
+	):
+		frappe.throw(_("You already have two exports being prepared. Try again when one is ready."))
+
+	log = frappe.get_doc({**row, "mode": "Background", "status": "Queued"}).insert(ignore_permissions=True)
+	frappe.enqueue(
+		"helixhr.reports.run_background_export",
+		queue="long",
+		job_id=f"report-export:{user}:{row['filters_hash']}",
+		deduplicate=True,
+		# The job reads the row, so it must not start before this commits.
+		enqueue_after_commit=True,
+		export=log.name,
+		filters=result["filters"],
+		group_by=result["groups_applied"],
+		sort=sort,
+		hidden=hidden,
+	)
+	return {"export": log.name, "status": "Queued", "row_count": row["row_count"]}
+
+
+@frappe.whitelist()
+def list_my_exports():
+	"""The caller's own background exports, newest first (the "My exports"
+	panel). Metadata only; the file goes through `download_report_export`."""
+	from helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export import FILE_RETENTION_DAYS
+
+	rate_limit_per_user("list_my_exports")
+	rows = frappe.get_all(
+		"HelixHR Report Export",
+		filters={"owner": frappe.session.user, "mode": "Background"},
+		fields=["name", "creation", "report_key", "report_label", "format", "status", "row_count", "file_name"],
+		order_by="creation desc",
+		limit=_MY_EXPORTS_LIMIT,
+		ignore_permissions=True,
+	)
+	for row in rows:
+		row["expires_on"] = (
+			frappe.utils.add_days(row.creation, FILE_RETENTION_DAYS) if row.status == "Ready" else None
+		)
+	return rows
+
+
+@frappe.whitelist(methods=["GET"])
+def download_report_export(export):
+	"""Stream a Ready background export to its requester -- nobody else, HR
+	Manager included (the row and its private File are owner-only)."""
+	rate_limit_per_user("download_export")
+	row = (
+		frappe.db.get_value(
+			"HelixHR Report Export", export, ["owner", "status", "file", "file_name", "format"], as_dict=True
+		)
+		if isinstance(export, str)
+		else None
+	)
+	if not row or row.owner != frappe.session.user or row.status != "Ready" or not row.file:
+		frappe.throw(_(_EXPORT_GONE), frappe.PermissionError)
+	file_name = frappe.db.get_value(
+		"File", {"file_url": row.file, "attached_to_doctype": "HelixHR Report Export", "attached_to_name": export}
+	)
+	if not file_name:
+		frappe.throw(_(_EXPORT_GONE), frappe.PermissionError)
+	from helixhr import reports
+
+	frappe.local.response.filename = row.file_name
+	# Raw bytes: File.get_content decodes text and drops the CSV's BOM.
+	with open(frappe.get_doc("File", file_name).get_full_path(), "rb") as handle:
+		frappe.local.response.filecontent = handle.read()
+	frappe.local.response.content_type = reports._CONTENT_TYPES[row.format]
+	frappe.local.response.type = "download"
+	frappe.local.response_headers["Content-Disposition"] = (
+		f"attachment; filename*=UTF-8''{quote(row.file_name)}"
+	)
+	frappe.local.response_headers["Cache-Control"] = "no-store"
+
+
+# --- Saved report views (plan 2026-10-04-001 U12, resolved decision 10) -----
+#
+# A view stores the URL state of `frontend/src/lib/reportQuery.js`
+# (``{<filter>: value, group, sort, hide}``). Applying one is a plain
+# `run_report` as the viewer, so an out-of-scope entity value comes back as
+# ``filters_removed`` with no rows -- never widened (resolved decision 8).
+
+_VIEW_FIELD_RE = re.compile(r"^[A-Za-z0-9_]{1,64}$")
+_VIEW_VALUE_MAX = 140
+_VIEW_QUERY_MAX = 4000
+_VIEW_LABEL_MAX = 80
+
+
+def _viewer_company(user, scope):
+	"""The company a view is shared within: the scope's company, else the
+	caller's Active Employee's (project-scoped tiers). None when unscoped."""
+	if scope["kind"] == "unscoped":
+		return None
+	return scope.get("company") or frappe.db.get_value(
+		"Employee", {"user_id": user, "status": "Active"}, "company"
+	)
+
+
+def _clean_view_query(entry, query):
+	"""Validate a saved query against the entry's own filter/group specs."""
+	query = frappe.parse_json(query) if isinstance(query, str) else query
+	if not isinstance(query, dict):
+		frappe.throw(_("Invalid view."))
+	filter_names = {spec["name"] for spec in entry["filters"]}
+	groupable = set(entry["group_by"] or ())
+	clean = {}
+	for key, value in query.items():
+		if isinstance(value, bool) or not isinstance(value, (str, int)):
+			frappe.throw(_("Invalid view."))
+		value = str(value)
+		if not value:
+			continue
+		if len(value) > _VIEW_VALUE_MAX:
+			frappe.throw(_("Invalid view."))
+		if key in filter_names:
+			clean[key] = value
+		elif key in ("group", "hide"):
+			fields = value.split(",")
+			if not all(_VIEW_FIELD_RE.match(field) for field in fields):
+				frappe.throw(_("Invalid view."))
+			if key == "group" and (len(fields) > 2 or not set(fields) <= groupable):
+				frappe.throw(_("This report cannot be grouped that way."))
+			clean[key] = value
+		elif key == "sort":
+			if not _VIEW_FIELD_RE.match(value.removeprefix("-")):
+				frappe.throw(_("Invalid view."))
+			clean[key] = value
+		else:
+			frappe.throw(_("Invalid view."))
+	if len(json.dumps(clean)) > _VIEW_QUERY_MAX:
+		frappe.throw(_("Invalid view."))
+	return clean
+
+
+def _view_access(report_key):
+	from helixhr.utils import resolve_report_access
+
+	access = resolve_report_access(frappe.session.user, report_key)
+	if not access["can_run"]:
+		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
+	return access
+
+
+def _can_delete_view(view, user):
+	if view.owner == user:
+		return True
+	if view.visibility != "Shared" or not _is_hr(user):
+		return False
+	scope = resolve_admin_scope(user)
+	return scope["kind"] == "unscoped" or (scope["kind"] == "company" and scope["company"] == view.company)
+
+
+@frappe.whitelist()
+def list_report_views(report_key):
+	"""The caller's own views of ``report_key`` plus views shared within
+	their company. A report the caller can no longer run lists nothing (the
+	views are kept, not deleted)."""
+	rate_limit_per_user("list_report_views")
+	access = _view_access(report_key)
+	user = frappe.session.user
+	company = _viewer_company(user, access["scope"])
+	shared = {"visibility": "Shared", "report_key": report_key}
+	if access["scope"]["kind"] != "unscoped":
+		if not company:
+			shared = None
+		else:
+			shared["company"] = company
+	fields = ["name", "owner", "label", "visibility", "company", "query", "creation"]
+	rows = frappe.get_all(
+		"HelixHR Report View", filters={"owner": user, "report_key": report_key}, fields=fields
+	)
+	if shared:
+		rows += frappe.get_all(
+			"HelixHR Report View", filters={**shared, "owner": ["!=", user]}, fields=fields
+		)
+	rows.sort(key=lambda row: row.label.lower())
+	return [
+		{
+			"name": row.name,
+			"label": row.label,
+			"visibility": row.visibility,
+			"query": frappe.parse_json(row.query) if row.query else {},
+			"is_owner": row.owner == user,
+			"owner_name": frappe.utils.get_fullname(row.owner),
+			"can_delete": _can_delete_view(row, user),
+		}
+		for row in rows
+	]
+
+
+@frappe.whitelist(methods=["POST"])
+def save_report_view(report_key, label, query=None, visibility="Private", name=None):
+	"""Create a view, or (``name``) update the caller's own. Labels are
+	unique per owner and report; ``query`` is validated against the entry."""
+	from helixhr import reports
+
+	rate_limit_per_user("save_report_view")
+	access = _view_access(report_key)
+	user = frappe.session.user
+	label = (label or "").strip() if isinstance(label, str) else ""
+	if not label or len(label) > _VIEW_LABEL_MAX:
+		frappe.throw(_("Give the view a name of up to {0} characters.").format(_VIEW_LABEL_MAX))
+	if visibility not in ("Private", "Shared"):
+		frappe.throw(_("Invalid view."))
+	clean = _clean_view_query(reports.get_entry(report_key), query or {})
+
+	if name:
+		doc = frappe.get_doc("HelixHR Report View", name) if isinstance(name, str) else None
+		if not doc or doc.owner != user or doc.report_key != report_key:
+			frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	else:
+		doc = frappe.new_doc("HelixHR Report View")
+		doc.report_key = report_key
+	if frappe.db.exists(
+		"HelixHR Report View",
+		{"owner": user, "report_key": report_key, "label": label, "name": ["!=", doc.name or ""]},
+	):
+		frappe.throw(_("You already have a view called {0} for this report.").format(label))
+
+	doc.update(
+		{
+			"label": label,
+			"visibility": visibility,
+			"query": json.dumps(clean, sort_keys=True),
+			"company": _viewer_company(user, access["scope"]),
+		}
+	)
+	doc.save(ignore_permissions=True)
+	return {"name": doc.name, "label": doc.label, "visibility": doc.visibility, "query": clean}
+
+
+@frappe.whitelist(methods=["POST"])
+def delete_report_view(name):
+	"""The owner deletes their view; an HR Manager in the view's company
+	(or unscoped) may also delete a shared one."""
+	rate_limit_per_user("delete_report_view")
+	view = (
+		frappe.db.get_value("HelixHR Report View", name, ["name", "owner", "visibility", "company"], as_dict=True)
+		if isinstance(name, str)
+		else None
+	)
+	if not view or not _can_delete_view(view, frappe.session.user):
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	frappe.delete_doc("HelixHR Report View", view.name, ignore_permissions=True)
+
+
+# --- Report access matrix (plan 2026-10-04-001 U6, R20, R21) ---------------
+
+_REPORT_ACCESS_FLAGS = ("hr_user_run", "hr_user_export", "dm_run", "dm_export")
+
+
+def _assert_report_access_admin():
+	if not can_admin_portal(frappe.session.user):
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+
+
+@frappe.whitelist()
+def get_report_access():
+	"""Every catalog entry with its HR User / Delivery Manager run/export
+	flags. ``dm_allowed`` is false where the catalog forbids Delivery Manager
+	(no project scope); HR Manager and Report Manager rights are fixed."""
+	from helixhr import reports
+
+	rate_limit_per_user("get_report_access")
+	_assert_report_access_admin()
+	saved = {
+		row.name: row
+		for row in frappe.get_all("HelixHR Report Access", fields=["name", *_REPORT_ACCESS_FLAGS])
+	}
+	return [
+		{
+			"key": entry["key"],
+			"label": entry["label"],
+			"family": entry["family"],
+			"dm_allowed": "project" in entry["scopes"],
+			**{
+				flag: cint(saved[entry["key"]].get(flag)) if entry["key"] in saved else 0
+				for flag in _REPORT_ACCESS_FLAGS
+			},
+		}
+		for entry in reports.CATALOG
+	]
+
+
+@frappe.whitelist(methods=["POST"])
+def save_report_access(rows):
+	"""Save a batch of matrix rows ``[{key, hr_user_run, ...}]``, all or
+	nothing: every row is checked first (catalog key, Delivery Manager only
+	on project-scoped entries, export implies run), and one bad row rejects
+	the batch with a sentence naming that report. Each row then goes through
+	``doc.save()`` so the doctype's own validation runs too."""
+	from helixhr import reports
+
+	rate_limit_per_user("save_report_access")
+	_assert_report_access_admin()
+	rows = frappe.parse_json(rows) if isinstance(rows, str) else rows
+	if not isinstance(rows, list) or not rows or len(rows) > len(reports.CATALOG):
+		frappe.throw(_("Nothing to save."))
+
+	clean, seen = [], set()
+	for row in rows:
+		entry = reports.get_entry(row.get("key")) if isinstance(row, dict) else None
+		if not entry or entry["key"] in seen:
+			frappe.throw(_("One of these reports is not in the catalog. Reload and try again."))
+		seen.add(entry["key"])
+		flags = {flag: 1 if row.get(flag) in (1, True, "1") else 0 for flag in _REPORT_ACCESS_FLAGS}
+		label = _(entry["label"])
+		if (flags["dm_run"] or flags["dm_export"]) and "project" not in entry["scopes"]:
+			frappe.throw(_("{0}: Delivery Manager can't be given this report.").format(label))
+		if (flags["hr_user_export"] and not flags["hr_user_run"]) or (
+			flags["dm_export"] and not flags["dm_run"]
+		):
+			frappe.throw(_("{0}: export needs run as well.").format(label))
+		clean.append((entry["key"], flags))
+
+	frappe.db.savepoint("save_report_access")
+	try:
+		for key, flags in clean:
+			if frappe.db.exists("HelixHR Report Access", key):
+				doc = frappe.get_doc("HelixHR Report Access", key)
+			else:
+				doc = frappe.new_doc("HelixHR Report Access")
+				doc.report_key = key
+			if _is_hr(frappe.session.user):
+				_assert_config_write(doc)
+			else:
+				# Portal Admin holds no DocPerm on purpose (preflight FAILs on a
+				# write/create grant); `_assert_report_access_admin` is its gate.
+				doc.flags.ignore_permissions = True
+			_apply_allowed_fields(doc, flags, _REPORT_ACCESS_FLAGS)
+			doc.save()
+	except Exception:
+		frappe.db.rollback(save_point="save_report_access")
+		raise
+	return get_report_access()
+
+
+# --- Portal roles (HelixHR Portal Admin) -------------------------------------
+
+_PORTAL_ROLE_RESULTS = 20
+
+
+def _assert_portal_admin():
+	"""Portal Admin / HR Manager / System Manager with a non-empty scope."""
+	user = frappe.session.user
+	scope = resolve_portal_admin_scope(user) if can_admin_portal(user) else {"kind": "none"}
+	if scope["kind"] == "none":
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	return scope
+
+
+def _role_holder_rows(employees):
+	users = [row.user_id for row in employees]
+	held = {}
+	for row in frappe.get_all(
+		"Has Role",
+		filters={"parenttype": "User", "parent": ["in", users], "role": ["in", MANAGED_PORTAL_ROLES]},
+		fields=["parent", "role"],
+	):
+		held.setdefault(row.parent, set()).add(row.role)
+	return [
+		{
+			"employee": row.name,
+			"employee_name": row.employee_name,
+			"user": row.user_id,
+			"roles": {role: role in held.get(row.user_id, ()) for role in MANAGED_PORTAL_ROLES},
+		}
+		for row in employees
+	]
+
+
+@frappe.whitelist()
+def get_portal_role_holders(query=None):
+	"""Active employees in the caller's scope with a User, and which of the
+	four portal-only roles each holds. With no ``query``: everyone holding at
+	least one of them. With a ``query`` (2+ characters): a name search.
+	Employee name, id and user only -- no HR data."""
+	rate_limit_per_user("get_portal_role_holders")
+	scope = _assert_portal_admin()
+	filters = {"status": "Active", "user_id": ["is", "set"]}
 	if scope["kind"] == "company":
 		filters["company"] = scope["company"]
+	query = (query or "").strip() if isinstance(query, str) else ""
+	or_filters = None
+	if query:
+		if len(query) < 2:
+			return {"roles": list(MANAGED_PORTAL_ROLES), "rows": []}
+		like = f"%{query[:80]}%"
+		or_filters = {"employee_name": ["like", like], "name": ["like", like]}
+	else:
+		holders = frappe.get_all(
+			"Has Role",
+			filters={"parenttype": "User", "role": ["in", MANAGED_PORTAL_ROLES]},
+			pluck="parent",
+			distinct=True,
+		)
+		if not holders:
+			return {"roles": list(MANAGED_PORTAL_ROLES), "rows": []}
+		filters["user_id"] = ["in", holders]
+	employees = frappe.get_all(
+		"Employee",
+		filters=filters,
+		or_filters=or_filters,
+		fields=["name", "employee_name", "user_id"],
+		order_by="employee_name asc",
+		limit=_PORTAL_ROLE_RESULTS if query else 0,
+	)
+	return {"roles": list(MANAGED_PORTAL_ROLES), "rows": _role_holder_rows(employees)}
 
-	result = run_query_report(report_name=report_name, filters=filters)
-	return {"columns": result.get("columns"), "result": result.get("result")}
+
+@frappe.whitelist(methods=["POST"])
+def set_portal_role(employee, role, enabled):
+	"""Grant or remove one of the four portal-only roles on ``employee``'s
+	User. Refused: any other role, an employee outside the caller's scope
+	(same refusal whether or not it exists), and the caller's own User. The
+	User is saved through ``doc.save()`` so its own validation runs, and an
+	Info comment on it records who changed what."""
+	rate_limit_per_user("set_portal_role")
+	scope = _assert_portal_admin()
+	if not isinstance(role, str) or role not in MANAGED_PORTAL_ROLES:
+		frappe.throw(_("That role can't be managed here."), frappe.PermissionError)
+	target = None
+	if isinstance(employee, str) and employee:
+		target = frappe.db.get_value(
+			"Employee", employee, ["name", "employee_name", "user_id", "status", "company"], as_dict=True
+		)
+	if (
+		not target
+		or target.status != "Active"
+		or not target.user_id
+		or (scope["kind"] == "company" and target.company != scope["company"])
+	):
+		frappe.throw(_("You are not authorised to change this person's roles."), frappe.PermissionError)
+	if target.user_id in (frappe.session.user, "Administrator", "Guest"):
+		frappe.throw(_("You can't change your own roles here."), frappe.PermissionError)
+
+	enabled = enabled in (1, True, "1", "true")
+	user = frappe.get_doc("User", target.user_id)
+	held = role in [row.role for row in user.roles]
+	if held != enabled:
+		if enabled:
+			user.append_roles(role)
+		else:
+			user.set("roles", [row for row in user.roles if row.role != role])
+		# The caller holds no write on User (Portal Admin has no DocPerm at
+		# all); the gate above is the permission. Validation still runs.
+		user.flags.ignore_permissions = True
+		user.save()
+		if (role in [row.role for row in user.roles]) != enabled:
+			# A Role Profile on the User re-derives its roles on save.
+			frappe.throw(_("This person's roles come from a role profile. Change it in Desk."))
+		user.add_comment(
+			"Info",
+			_("{0} {1} {2} in the HelixHR portal").format(
+				frappe.utils.get_fullname(frappe.session.user),
+				_("granted") if enabled else _("removed"),
+				role,
+			),
+		)
+		frappe.clear_cache(user=target.user_id)
+	return _role_holder_rows(
+		[frappe._dict(name=target.name, employee_name=target.employee_name, user_id=target.user_id)]
+	)[0]
 
 
 @frappe.whitelist()

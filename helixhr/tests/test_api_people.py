@@ -512,14 +512,15 @@ class TestDeskLinks(IntegrationTestCase):
 		from helixhr import preflight
 
 		result = preflight.check_curated_reports()
-		self.assertEqual(result["status"], preflight.PASS)
+		# WARN is a prepared_report flag (plan 2026-10-04-001 decision 11).
+		self.assertIn(result["status"], (preflight.PASS, preflight.WARN))
 
 	def test_preflight_fails_when_a_curated_report_is_not_installed(self):
 		from unittest.mock import patch
 
 		from helixhr import preflight
 
-		with patch("helixhr.utils.ADMIN_REPORTS", ("Not A Real Report",)):
+		with patch("helixhr.reports.wrapped_report_names", return_value=("Not A Real Report",)):
 			result = preflight.check_curated_reports()
 		self.assertEqual(result["status"], preflight.FAIL)
 		self.assertIn("Not A Real Report", result["detail"])

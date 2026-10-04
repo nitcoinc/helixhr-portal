@@ -170,7 +170,7 @@ class TestConfigApi(IntegrationTestCase):
 		desk_urls = get_portal_config()["desk_urls"]
 		self.assertEqual(
 			set(desk_urls),
-			{"categories", "leave_types", "holiday_lists", "shift_types", "celebrations"},
+			{"categories", "leave_types", "holiday_lists", "shift_types", "celebrations", "report_access"},
 		)
 		self.assertEqual(desk_urls["categories"], get_url_to_list("HelixHR Request Category"))
 		self.assertEqual(desk_urls["leave_types"], get_url_to_list("Leave Type"))
@@ -178,6 +178,7 @@ class TestConfigApi(IntegrationTestCase):
 		self.assertEqual(desk_urls["shift_types"], get_url_to_list("Shift Type"))
 		# P8-U12: the Email Template list, not HelixHR Celebration Reminder.
 		self.assertEqual(desk_urls["celebrations"], get_url_to_list("Email Template"))
+		self.assertEqual(desk_urls["report_access"], get_url_to_list("HelixHR Report Access"))
 
 	def test_desk_urls_is_none_for_a_caller_who_cannot_open_desk(self):
 		"""`_can_open_desk` is exhaustively tested on its own in

@@ -86,11 +86,23 @@ website_route_rules = [
 
 fixtures = [
 	{"dt": "Property Setter", "filters": [["module", "=", "HelixHR"]]},
-	# P5-U2 / P7-U1 / plan 2026-10-02-001 U7: all portal roles, so their
+	# P5-U2 / P7-U1 / plan 2026-10-02-001 U7 / plan 2026-10-04-001 U1: all portal roles, so their
 	# fixtures pin desk_access=0 rather than inheriting Frappe's Desk-user default.
 	{
 		"dt": "Role",
-		"filters": [["name", "in", ["IT Team", "HelixHR Delivery Manager", "HelixHR Notification Manager"]]],
+		"filters": [
+			[
+				"name",
+				"in",
+				[
+					"IT Team",
+					"HelixHR Delivery Manager",
+					"HelixHR Notification Manager",
+					"HelixHR Report Manager",
+					"HelixHR Portal Admin",
+				],
+			]
+		],
 	},
 	# Custom DocPerm is deliberately NOT a fixture. Frappe *replaces* a
 	# doctype's standard DocPerm rows with its Custom DocPerm rows rather than
@@ -509,9 +521,9 @@ after_request = ["helixhr.utils.set_security_headers"]
 # Automatically update python controller files with type annotations for this app.
 # export_python_type_annotations = True
 
-# default_log_clearing_doctypes = {
-# 	"Logging DocType Name": 30  # days to retain logs
-# }
+# Plan 2026-10-04-001 KTD10 / resolved decision 4: report export audit rows
+# are kept a year; their files only 7 days (`HelixHRReportExport.clear_old_logs`).
+default_log_clearing_doctypes = {"HelixHR Report Export": 365}
 
 # Translation
 # ------------

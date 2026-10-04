@@ -1266,14 +1266,73 @@ derivation. It writes nothing, and it discloses no more than HR already
 reaches in Desk through the roles it holds (`resolve_admin_scope`,
 `helixhr/utils.py`, is the one place "which employees may this caller
 administer" is decided; every administrative read in this plan calls it).
-For anything beyond that read -- a report, an export, a number this app is
-not the source of truth for -- the portal hands HR a **curated, named**
-launcher into Frappe's own report engine (`ADMIN_REPORTS`, `helixhr/
-utils.py`) rather than re-implementing one. A report opens in Frappe,
-pre-filtered when the portal knows the filter, and export happens there --
-the portal never re-implements a report or an export path. Payroll reports
-are deliberately excluded from the curated list; payroll stays a Desk-only
-concern this plan does not touch.
+Plan 2026-10-04-001 reverses the rest of P6-KTD2, which kept the portal a launcher into
+Frappe's report engine. The portal now runs reports and
+exports them itself (CSV, Excel, PDF), inside one bound and one access model:
+
+- **The bound (KTD1).** HelixHR shapes and exports; HRMS still computes HR
+  facts. Grouping, subtotals, totals, layout and export are HelixHR's, done by
+  one server-side shaper every output renders (`helixhr/reports.py`). Leave
+  balances, attendance status and ledger effects are never re-derived: they
+  come from HRMS's own report modules. Anything over Timesheet is a HelixHR
+  query with a named column list; the money-bearing Timesheet reports
+  (`Timesheet Billing Summary`, `Project Profitability`, `Project-wise Stock
+  Tracking`) are on `DENY_LIST`, which preflight enforces. Payroll reports
+  stay out.
+- **Catalog in code, access in data (KTD4).** Each report is a `CATALOG`
+  entry in `helixhr/reports.py` (key, family, filters, group-by, totals,
+  scopes, PDF layout); adding one is a release. Who may run or export it is
+  one `HelixHR Report Access` record per report key (track_changes on),
+  edited by HR in Settings; a missing record means deny.
+- **One resolver (KTD5, KTD6).** `resolve_report_access(user, report_key)`
+  returns tier, scope, `can_run`, `can_export` and `export_scope`; every
+  report endpoint consumes it and exports use `export_scope`. Scope is
+  resolved per report from only the tiers that grant run/export on that key,
+  reusing `resolve_admin_scope` and `resolve_project_scope`. Report Manager
+  and HR User need an Active Employee anchor whose company is their scope;
+  Delivery Manager gets project scope. Entity filters must be plain in-scope
+  strings: operator-shaped values are refused, an out-of-scope value empties
+  the result with a `filters_removed` notice, never widens it. Saved views
+  always run as the viewer.
+- **Elevated execution (KTD2, as amended).** Wrapped HRMS reports run their
+  own module via `Report.execute_module` -- never
+  `frappe.desk.query_report.run` as the portal user, and never through the
+  timing wrapper that flips a report to `prepared_report`. They run inside
+  `helixhr.utils.as_administrator()` (never `frappe.set_user`), and only
+  after `resolve_report_access` passed, company was forced and entity
+  filters were validated; the original user is always restored. No read
+  DocPerm is granted to HelixHR Report Manager for this. Every wrapped report
+  has a two-company isolation test.
+- **Exports (KTD10).** Every export writes a `HelixHR Report Export` audit
+  row (owner-only DocPerm). Small exports stream inline through a one-time,
+  user-bound token; larger ones are a deduplicated job on the `long` queue
+  that attaches a private File; above the background cap the request is
+  refused. Files expire after 7 days, audit rows after 365.
+
+- **Portal Admin.** `HelixHR Portal Admin` is a portal-only role (fixture,
+  desk_access 0, no DocPerm at all -- preflight "Portal Admin role" FAILs on
+  desk access or any report/export/write/create grant, and the Timesheet
+  report guard covers it as a fixture role). It edits the access matrix
+  (`get/save_report_access`, saving with `ignore_permissions` after
+  `can_admin_portal`), reads the export log, and grants or removes only the
+  four portal-only roles (`MANAGED_PORTAL_ROLES`: Report Manager, Delivery
+  Manager, Notification Manager, IT Team) through
+  `get_portal_role_holders` / `set_portal_role`. HR Manager and System
+  Manager may call all of these too. Scope is
+  `resolve_portal_admin_scope`: HR keeps `resolve_admin_scope`'s answer; a
+  Portal Admin gets its Active Employee's company, or none. A target must be
+  an Active Employee with a User in that scope, never the caller; the User is
+  saved through `doc.save()` (a Role Profile that re-derives roles is
+  refused) and an Info comment on the User records the change. A Portal
+  Admin never passes `resolve_admin_scope` or `resolve_report_access`: no
+  People, no reports, unless it also holds a report role. Bootstrap flag
+  `can_admin_portal` drives the Settings (Report access + Portal roles only)
+  and Reports (Export log only) nav entries.
+
+Desk access to HRMS reports is unchanged and still governed by Frappe's own
+Report roles and DocPerms, not by this matrix: granting a report here gives
+no Desk access, and a Desk role gives no portal report. A System User still
+gets a secondary "Open in Frappe" link (`get_report_link`).
 
 Plan 2026-09-30-001 (U7, U8) widens it once more, for **shifts**, and
 reverses KTD4 of `docs/plans/2026-09-20-002-fix-portal-session-and-hr-controls-plan.md`

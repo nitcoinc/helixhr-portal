@@ -1,243 +1,221 @@
 <script setup>
-import { computed, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { createResource, FormControl } from 'frappe-ui'
+import { createResource } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
-import { call } from '@/lib/api'
+import ReportCatalog from '@/components/reports/ReportCatalog.vue'
+import ReportFilters from '@/components/reports/ReportFilters.vue'
+import ReportTable from '@/components/reports/ReportTable.vue'
+import ExportMenu from '@/components/reports/ExportMenu.vue'
+import ExportLog from '@/components/reports/ExportLog.vue'
+import SavedViews from '@/components/reports/SavedViews.vue'
 import { session } from '@/lib/session'
-import { formatDate } from '@/lib/dates'
+import { call } from '@/lib/api'
+import { presetRange } from '@/lib/datePresets'
+import { today } from '@/lib/dates'
+import { fromQuery, toQuery } from '@/lib/reportQuery'
 import { roundHours } from '@/lib/hours'
 
-// P7-U9 / P7-R12, P7-R13, P7-R15. Reports render inside the portal now --
-// this screen used to be a launcher that opened Frappe's own report view in
-// a new tab (P6-U6) and refused everyone who could not reach Desk (P6-R12).
-// That gate is gone: `run_portal_report` and `get_billable_hours` (P7-U8)
-// are the server's own gates now, so a caller who cannot reach Desk still
-// gets rows here (R15) -- Desk stays only as a secondary export affordance
-// for a System User (see `openInDesk` below).
+// Plan 2026-10-04-001 U4. Two routes, one page:
+//   /reports              the catalog: what `get_report_catalog` says this
+//                         caller may run, in families, searchable
+//   /reports/<key>        one report: filter bar, Run, the shaped table
 //
-// Still a curated list, not a report tree (P6-R9-R11's posture, carried
-// forward): the seven HR reports below, plus one new entry -- billable
-// hours -- that is not a Frappe Report at all (KTD3a) and is offered only
-// to a caller `resolve_project_scope` grants something to.
-const REPORTS = [
-  {
-    report: 'Employee Leave Balance',
-    label: 'Leave balance',
-    question: 'How much leave does someone have left, by type?',
-  },
-  {
-    report: 'Employee Leave Balance Summary',
-    label: 'Leave balance summary',
-    question: 'Leave balances across the whole company, one row per person.',
-  },
-  {
-    report: 'Monthly Attendance Sheet',
-    label: 'Monthly attendance',
-    question: 'A month of attendance, one row per person per day.',
-  },
-  {
-    report: 'Shift Attendance',
-    label: 'Shift attendance',
-    question: 'Who was on which shift, and when.',
-  },
-  {
-    report: 'Leave Ledger',
-    label: 'Leave ledger',
-    question: 'Every leave transaction that moved a balance.',
-  },
-  {
-    report: 'Employee Information',
-    label: 'Employee information',
-    question: 'A directory-style export of the whole company.',
-  },
-  {
-    report: 'Employee Exits',
-    label: 'Employee exits',
-    question: 'Who has left, and when.',
-  },
-]
+// The page never decides access. The catalog is the server's answer, and
+// `run_report` / `search_report_options` re-check it per call. A key that is
+// not in this caller's catalog (an HR Manager's link opened by an HR User)
+// gets the same refusal the server would give.
+//
+// Run is explicit (resolved decision 14). A link carrying report state --
+// a shared URL, People.vue's `?employee=` -- runs on open; edits after a run
+// mark the results stale until Run is pressed again. Sorting is server-side
+// (resolved decision 7) so changing it re-runs; hidden columns are URL state
+// only.
+const props = defineProps({
+  reportKey: { type: String, default: '' },
+})
 
 const route = useRoute()
 const router = useRouter()
 
-// Arrived from a person's view (People.vue) with ?employee=<id>: opening any
-// report pre-fills the employee filter with them (P6-R10's rule, still
-// true now that opening means running the report rather than a Desk URL).
-const employee = computed(() => (typeof route.query.employee === 'string' ? route.query.employee : ''))
+const catalogResource = createResource({ url: 'helixhr.api.get_report_catalog', auto: true })
+const catalog = computed(() => catalogResource.data || [])
+const entry = computed(() => catalog.value.find((item) => item.key === props.reportKey) || null)
+const refused = computed(() => !!props.reportKey && !!catalogResource.data && !entry.value)
 
-function clearEmployee() {
-  router.replace({ name: 'Reports' })
-}
-
-// --- picker / detail state --------------------------------------------------
-//
-// `active` is null on the picker screen, or names which report is open:
-// `{ kind: 'curated', report }` for one of the seven HR reports, or
-// `{ kind: 'billable-hours' }` for the new one (R13).
-const active = ref(null)
-
-const filters = reactive({ employee: '', project: '', task: '', from_date: '', to_date: '' })
-
-function resetFilters() {
-  filters.employee = employee.value || ''
-  filters.project = ''
-  filters.task = ''
-  filters.from_date = ''
-  filters.to_date = ''
-}
-
-const reportResource = createResource({ url: 'helixhr.api.run_portal_report', method: 'POST', auto: false })
-const billableResource = createResource({ url: 'helixhr.api.get_billable_hours', method: 'POST', auto: false })
-
-const activeResource = computed(() =>
-  active.value?.kind === 'billable-hours' ? billableResource : reportResource,
+// Carried from People.vue onto whichever report is opened from the catalog.
+const carryQuery = computed(() =>
+  typeof route.query.employee === 'string' ? { employee: route.query.employee } : {},
 )
 
-function runActive() {
-  if (active.value?.kind === 'billable-hours') {
-    billableResource.submit({
-      employee: filters.employee || undefined,
-      project: filters.project || undefined,
-      task: filters.task || undefined,
-      from_date: filters.from_date || undefined,
-      to_date: filters.to_date || undefined,
-    })
-  } else if (active.value?.kind === 'curated') {
-    // `employee`/`from_date`/`to_date` cover what these seven reports
-    // actually use between them; a report that names none of them simply
-    // ignores the extra keys, the same way `get_billable_hours` ignores an
-    // unrecognised one (KTD5's cousin, applied here).
-    reportResource.submit({
-      report_name: active.value.report,
-      filters: {
-        employee: filters.employee || undefined,
-        from_date: filters.from_date || undefined,
-        to_date: filters.to_date || undefined,
-      },
-    })
+// --- report state -----------------------------------------------------------
+
+const filters = ref({})
+const groupBy = ref([])
+const sort = ref(null)
+const hidden = ref([])
+const lastRun = ref(null)
+
+const reportResource = createResource({ url: 'helixhr.api.run_report', method: 'POST', auto: false })
+const result = computed(() => (lastRun.value ? reportResource.data : null))
+
+function defaults(item) {
+  const values = {}
+  for (const spec of item.filters) {
+    if (spec.default !== null && spec.default !== undefined && spec.default !== '') values[spec.name] = spec.default
   }
+  const range = item.default_preset ? presetRange(item.default_preset, today()) : null
+  return range ? { ...values, ...range } : values
 }
 
-function openCurated(report) {
-  active.value = { kind: 'curated', report }
-  resetFilters()
-  runActive()
+function snapshot() {
+  return JSON.stringify({ filters: filters.value, groupBy: groupBy.value })
 }
 
-function openBillableHours() {
-  active.value = { kind: 'billable-hours' }
-  resetFilters()
-  runActive()
+const stale = computed(() => !!lastRun.value && lastRun.value !== snapshot())
+
+function syncUrl() {
+  router.replace({
+    name: 'ReportView',
+    params: { reportKey: entry.value.key },
+    query: toQuery(
+      { filters: filters.value, groupBy: groupBy.value, sort: sort.value, hidden: hidden.value },
+      entry.value,
+    ),
+  })
 }
 
-function backToList() {
-  active.value = null
+function cleanFilters() {
+  return Object.fromEntries(
+    Object.entries(filters.value).filter(([, value]) => value !== '' && value !== null && value !== undefined),
+  )
 }
 
-// Changing a filter re-runs the active report (debounced, the same
-// 250ms-ish pattern Projects.vue's member search already uses) rather than
-// waiting for an explicit "Run" click.
-let pending = null
+function run() {
+  if (!entry.value) return
+  syncUrl()
+  lastRun.value = snapshot()
+  reportResource.submit({
+    report_key: entry.value.key,
+    filters: cleanFilters(),
+    group_by: groupBy.value,
+    sort: sort.value,
+  })
+}
+
+// U5: an export is the screen's own query (hidden columns left out).
+const exportQuery = computed(() => ({
+  filters: cleanFilters(),
+  group_by: groupBy.value,
+  sort: sort.value,
+  hidden: hidden.value,
+}))
+
+// U12: saved views store the URL state; applying one runs it as the viewer.
+const currentQuery = computed(() =>
+  entry.value
+    ? toQuery({ filters: filters.value, groupBy: groupBy.value, sort: sort.value, hidden: hidden.value }, entry.value)
+    : {},
+)
+
+function applyView(query) {
+  if (!entry.value) return
+  const parsed = fromQuery(query, entry.value)
+  filters.value = { ...defaults(entry.value), ...parsed.filters }
+  groupBy.value = parsed.groupBy
+  sort.value = parsed.sort
+  hidden.value = parsed.hidden
+  run()
+}
+
+// U5: the export log tab on the catalog page, for HR Manager / System
+// Manager / Portal Admin -- `canAdminPortal` is the same `can_admin_portal`
+// predicate `get_export_log` enforces. A Portal Admin with no report role has
+// an empty catalog, so the log is all this page shows them.
+const showExportLog = computed(() => session.canAdminPortal)
+const tabs = computed(() =>
+  catalog.value.length
+    ? [{ key: 'reports', label: 'Reports' }, { key: 'exports', label: 'Export log' }]
+    : [{ key: 'exports', label: 'Export log' }],
+)
+const pickedTab = ref('reports')
+const catalogTab = computed(() => (catalog.value.length ? pickedTab.value : 'exports'))
+
+// (Re)initialise when the report changes -- not on our own URL writes.
 watch(
-  () => [filters.employee, filters.project, filters.task, filters.from_date, filters.to_date],
-  () => {
-    if (!active.value) return
-    clearTimeout(pending)
-    pending = setTimeout(runActive, 300)
+  entry,
+  (item, previous) => {
+    if (!item || item.key === previous?.key) return
+    const parsed = fromQuery(route.query, item)
+    filters.value = { ...defaults(item), ...parsed.filters }
+    groupBy.value = parsed.groupBy
+    sort.value = parsed.sort
+    hidden.value = parsed.hidden
+    lastRun.value = null
+    reportResource.reset?.()
+    if (parsed.hasState) run()
   },
+  { immediate: true },
 )
-onUnmounted(() => clearTimeout(pending))
 
-// --- rendering server-declared columns --------------------------------------
-//
-// `run_portal_report`'s `columns` are already normalised to dicts by
-// Frappe's own report engine (`get_column_as_dict`) by the time they reach
-// this method -- `fieldname`, `label`, `fieldtype`, `hidden`, etc. --
-// regardless of whether the report itself declared them as dicts or as
-// "fieldname:Label:Type:Width" strings. `get_billable_hours` returns no
-// column metadata at all (it is not a Frappe Report, KTD3a), so its columns
-// are named here, once, in the same shape.
-const BILLABLE_HOURS_COLUMNS = [
-  { fieldname: 'date', label: 'Date', fieldtype: 'Date' },
-  { fieldname: 'employee_name', label: 'Employee', fieldtype: 'Data' },
-  { fieldname: 'project', label: 'Project', fieldtype: 'Link' },
-  { fieldname: 'task_subject', label: 'Task', fieldtype: 'Data' },
-  { fieldname: 'hours', label: 'Hours', fieldtype: 'Float' },
-  { fieldname: 'billing_hours', label: 'Billable hours', fieldtype: 'Float' },
-]
+function onSort(value) {
+  sort.value = value
+  if (lastRun.value) run()
+  else syncUrl()
+}
 
-const NUMERIC_FIELDTYPES = new Set(['Int', 'Float', 'Currency', 'Percent', 'Duration'])
-const DATE_FIELDTYPES = new Set(['Date', 'Datetime'])
+function onHidden(value) {
+  hidden.value = value
+  syncUrl()
+}
 
-const columns = computed(() => {
-  if (active.value?.kind === 'billable-hours') return BILLABLE_HOURS_COLUMNS
-  if (active.value?.kind === 'curated') {
-    // A column the report itself marks `hidden` (an id column kept only for
-    // linking, e.g. Leave Ledger's own entry name) is not shown here either
-    // -- the same thing Frappe's own report view does with it.
-    return (reportResource.data?.columns || []).filter((column) => !column?.hidden)
-  }
-  return []
+// --- result states ----------------------------------------------------------
+
+const dataRows = computed(() => (result.value?.rows || []).filter((row) => row._kind === 'row'))
+
+// A ValidationError from `run_report` is a sentence for the user ("Choose
+// Month.", "That report could not run…"), not an outage; a PermissionError
+// is AsyncState's own refusal state.
+const runMessage = computed(() => {
+  const error = reportResource.error
+  if (!error || /PermissionError/.test(error.exc_type || '')) return ''
+  if (error.exc_type === 'ValidationError') return error.messages?.[0] || 'That report could not run.'
+  return ''
 })
 
-const allRows = computed(() => {
-  if (active.value?.kind === 'billable-hours') return billableResource.data?.rows || []
-  if (active.value?.kind === 'curated') return reportResource.data?.result || []
-  return []
-})
+// U7: the flagship's grid and pending figure ride along in `extra`.
+const grid = computed(() => result.value?.extra?.grid || null)
+const pendingHours = computed(() => result.value?.extra?.pending_hours || 0)
+// U11: headline figures (joiners and leavers' attrition) above the table.
+const summary = computed(() => result.value?.extra?.summary || [])
 
-// A stated ceiling rather than an unbounded table (P7-U9), settled against
-// how the approval queue treats its own cap (P2-U4's `_QUEUE_LIMIT`): show a
-// bounded page and say how many more there are, rather than paging or
-// rendering everything the query returned. A report table can reasonably
-// hold more rows than a work queue, so the number is larger, but the shape
-// -- a hard slice plus a stated remainder -- is the same one.
-const ROW_CAP = 100
-const rows = computed(() => allRows.value.slice(0, ROW_CAP))
-const overflow = computed(() => Math.max(0, allRows.value.length - ROW_CAP))
+const narrowed = computed(() => !!entry.value?.filters.some(
+  (spec) => !['date', 'month'].includes(spec.type) && spec.type !== 'toggle' && filters.value[spec.name],
+))
 
-// "Empty" is this page's own answer, computed from what the request
-// resolved to (AsyncState's contract) -- never true while a request is
-// still in flight or has failed, so a refusal or an outage can never be
-// mistaken for "no rows" (P7-U9's own test scenario).
 const isEmpty = computed(
-  () => !activeResource.value.loading && !activeResource.value.error && allRows.value.length === 0,
+  () => !reportResource.loading && !reportResource.error && !!result.value && dataRows.value.length === 0,
 )
 
-function isNumericColumn(column) {
-  return NUMERIC_FIELDTYPES.has(column.fieldtype)
-}
+const removedLabels = computed(() =>
+  (result.value?.filters_removed || []).map(
+    (name) => entry.value?.filters.find((spec) => spec.name === name)?.label || name,
+  ),
+)
 
-function formatCell(row, column) {
-  const value = row[column.fieldname]
-  if (value === null || value === undefined || value === '') return ''
-  if (DATE_FIELDTYPES.has(column.fieldtype)) return formatDate(value)
-  if (NUMERIC_FIELDTYPES.has(column.fieldtype)) return roundHours(value)
-  return value
-}
-
-// --- the secondary Desk link (P7-R12, System User only) --------------------
-//
-// No longer the primary path -- `run_portal_report` already rendered the
-// report above -- kept only for what the portal deliberately does not
-// cover (Frappe's own export toolbar). Absent entirely for anyone Desk
-// would not load for (`session.canOpenDesk` mirrors `_can_open_desk`
-// server-side, P6-KTD4), including a HelixHR Delivery Manager, and never
-// offered for billable hours -- it is not a Frappe Report, so there is no
-// Desk view to hand off to (KTD3a).
+// --- the secondary Desk link (System User with admin scope only) ------------
 const openError = ref('')
 const opening = ref(false)
 
 async function openInDesk() {
-  if (active.value?.kind !== 'curated') return
+  if (!entry.value?.can_open_in_desk) return
   openError.value = ''
   opening.value = true
   try {
     const url = await call('helixhr.api.get_report_link', {
-      report: active.value.report,
-      employee: filters.employee || undefined,
+      report: entry.value.report,
+      employee: filters.value.employee || undefined,
     })
     window.open(url, '_blank', 'noopener')
   } catch (error) {
@@ -252,92 +230,93 @@ async function openInDesk() {
   <div>
     <PageHeader
       title="Reports"
-      subtitle="Named questions, answered inside the portal -- no hand-off to Frappe required."
+      :subtitle="entry ? entry.question : 'Named questions, answered inside the portal.'"
     />
 
-    <div
-      v-if="!session.canSeePeople && !session.canSeeProjects"
-      class="surface-card p-5 text-sm text-ink-gray-6"
-      role="alert"
+    <AsyncState
+      :resource="catalogResource"
+      section="report-catalog"
+      :empty="false"
+      skeleton="card"
+      :skeleton-rows="4"
     >
-      <p class="font-medium text-ink-gray-9">
-        You don't have access to this
-      </p>
-      <p class="mt-1">
-        If you think that's wrong, ask HR to check your access.
-      </p>
-    </div>
-
-    <template v-else>
-      <!-- The picker. -->
-      <template v-if="!active">
-        <p
-          v-if="employee"
-          class="surface-inset mb-4 flex items-center justify-between gap-3 p-3 text-sm text-ink-gray-7"
-        >
-          Filtered to one person.
-          <button
-            type="button"
-            class="cursor-pointer text-blue-700 underline underline-offset-2"
-            @click="clearEmployee"
-          >
-            Clear
-          </button>
+      <!-- Zero granted: the same words as every other refusal. -->
+      <div
+        v-if="(!catalog.length && !(showExportLog && !reportKey)) || refused"
+        class="surface-card p-5 text-sm text-ink-gray-6"
+        role="alert"
+      >
+        <p class="font-medium text-ink-gray-9">
+          You don't have access to this
         </p>
-
-        <ul
-          v-if="session.canSeePeople"
-          class="space-y-2 lg:grid lg:grid-cols-2 lg:gap-3 lg:space-y-0"
+        <p class="mt-1">
+          <template v-if="refused">
+            That report is not offered to you here.
+          </template>
+          If you think that's wrong, ask HR to check your access.
+        </p>
+        <router-link
+          v-if="refused && catalog.length"
+          :to="{ name: 'Reports' }"
+          class="mt-3 inline-flex min-h-11 items-center text-blue-700 underline underline-offset-2"
         >
-          <li
-            v-for="entry in REPORTS"
-            :key="entry.report"
+          &larr; All reports
+        </router-link>
+      </div>
+
+      <template v-else-if="!entry">
+        <nav
+          v-if="showExportLog"
+          class="mb-4 flex gap-1 border-b border-outline-gray-1"
+          aria-label="Reports sections"
+        >
+          <button
+            v-for="tab in tabs"
+            :key="tab.key"
+            type="button"
+            class="min-h-11 cursor-pointer rounded-t-lg px-3 py-2 text-sm font-medium"
+            :aria-current="catalogTab === tab.key ? 'page' : undefined"
+            :class="catalogTab === tab.key ? 'border-b-2 border-signal text-ink-gray-9' : 'text-ink-gray-6 hover:text-ink-gray-9'"
+            @click="pickedTab = tab.key"
           >
-            <button
-              type="button"
-              class="surface-card elev-1 flex h-full w-full flex-col items-start gap-1 p-4 text-left"
-              @click="openCurated(entry.report)"
-            >
-              <span class="font-medium text-ink-gray-9">{{ entry.label }}</span>
-              <span class="text-sm text-ink-gray-6">{{ entry.question }}</span>
-            </button>
-          </li>
-        </ul>
-
-        <!-- The one report this plan adds (R13): its own scoped query, not
-             a curated Frappe report -- offered to whoever
-             `resolve_project_scope` grants something to, which is not
-             necessarily who `resolve_admin_scope` does (a HelixHR Delivery
-             Manager has one, never the other). -->
-        <button
-          v-if="session.canSeeProjects"
-          type="button"
-          class="surface-card elev-1 mt-3 flex w-full flex-col items-start gap-1 p-4 text-left lg:max-w-md"
-          @click="openBillableHours"
-        >
-          <span class="font-medium text-ink-gray-9">Billable hours</span>
-          <span class="text-sm text-ink-gray-6">
-            Hours logged against projects and tasks, by employee and date. Hours only -- no rate,
-            no amount.
-          </span>
-        </button>
+            {{ tab.label }}
+          </button>
+        </nav>
+        <ExportLog v-if="showExportLog && catalogTab === 'exports'" />
+        <ReportCatalog
+          v-else
+          :catalog="catalog"
+          :carry-query="carryQuery"
+        />
       </template>
 
-      <!-- The report itself: filters, and the table it produced. -->
       <template v-else>
         <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <button
-            type="button"
-            class="cursor-pointer text-sm text-blue-700 underline underline-offset-2"
-            @click="backToList"
+          <router-link
+            :to="{ name: 'Reports' }"
+            class="-my-2 inline-flex min-h-11 items-center text-sm text-blue-700 underline underline-offset-2"
           >
-            &larr; Back to reports
-          </button>
+            &larr; All reports
+          </router-link>
 
-          <div v-if="active.kind === 'curated' && session.canOpenDesk">
+          <div
+            class="flex flex-wrap items-center gap-3"
+            data-slot="report-actions"
+          >
+            <SavedViews
+              :report-key="entry.key"
+              :current-query="currentQuery"
+              @apply="applyView"
+            />
+            <ExportMenu
+              :report-key="entry.key"
+              :can-export="entry.can_export"
+              :query="exportQuery"
+            />
             <button
+              v-if="entry.can_open_in_desk"
               type="button"
-              class="cursor-pointer text-sm text-blue-700 underline underline-offset-2"
+              class="-my-2 inline-flex min-h-11 cursor-pointer items-center text-sm text-blue-700 underline underline-offset-2"
               :disabled="opening"
               @click="openInDesk"
             >
@@ -355,99 +334,103 @@ async function openInDesk() {
         </p>
 
         <h2 class="type-section mb-3 font-heading text-ink-gray-9">
-          {{ active.kind === 'billable-hours' ? 'Billable hours' : active.report }}
+          {{ entry.label }}
         </h2>
 
-        <div class="mb-4 flex flex-wrap gap-3">
-          <FormControl
-            v-model="filters.employee"
-            label="Employee"
-            placeholder="Employee ID"
-            class="w-48"
-          />
-          <template v-if="active.kind === 'billable-hours'">
-            <FormControl
-              v-model="filters.project"
-              label="Project"
-              placeholder="Project ID"
-              class="w-48"
-            />
-            <FormControl
-              v-model="filters.task"
-              label="Task"
-              placeholder="Task ID"
-              class="w-48"
-            />
-          </template>
-          <FormControl
-            v-model="filters.from_date"
-            type="date"
-            label="From"
-            class="w-40"
-          />
-          <FormControl
-            v-model="filters.to_date"
-            type="date"
-            label="To"
-            class="w-40"
-          />
-        </div>
+        <ReportFilters
+          v-model="filters"
+          v-model:group-by="groupBy"
+          :entry="entry"
+          :running="reportResource.loading"
+          @run="run"
+        />
 
-        <AsyncState
-          :resource="activeResource"
-          section="report-results"
-          :empty="isEmpty"
-          empty-title="No matching rows"
-          empty-body="Try widening or clearing the filters."
-          skeleton="block"
-          skeleton-height="h-48"
+        <p
+          v-if="!lastRun"
+          class="surface-inset p-4 text-sm text-ink-gray-7"
         >
-          <!-- Scrolls inside its own container rather than the page
-               (P2-R3), the same treatment the timesheet-detail table in
-               Approvals.vue already gets. -->
-          <div class="surface-card elev-1 overflow-x-auto p-4">
-            <table class="w-full min-w-[40rem] text-sm">
-              <thead>
-                <tr class="border-b border-outline-gray-2">
-                  <th
-                    v-for="column in columns"
-                    :key="column.fieldname"
-                    scope="col"
-                    class="label py-2"
-                    :class="isNumericColumn(column) ? 'text-right' : 'text-left'"
-                  >
-                    {{ column.label || column.fieldname }}
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr
-                  v-for="(row, index) in rows"
-                  :key="index"
-                  class="border-b border-outline-gray-2"
-                >
-                  <td
-                    v-for="column in columns"
-                    :key="column.fieldname"
-                    class="py-2 pr-3 text-ink-gray-7"
-                    :class="isNumericColumn(column) ? 'tabular text-right' : 'text-left'"
-                  >
-                    {{ formatCell(row, column) }}
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+          Choose filters, then press Run report.
+        </p>
+
+        <template v-else>
           <p
-            v-if="overflow > 0"
-            class="mt-2 text-sm text-ink-gray-6"
+            v-if="stale && !reportResource.loading"
+            class="surface-inset mb-3 p-3 text-sm text-ink-gray-7"
+            role="status"
           >
-            Showing the first {{ ROW_CAP }} rows.
-            <span class="tabular font-medium">{{ overflow }}</span>
-            more not shown here -- narrow the filters to see them.
+            Filters changed. These results are out of date until you run the report again.
           </p>
-        </AsyncState>
+          <p
+            v-if="removedLabels.length"
+            class="surface-inset mb-3 p-3 text-sm text-ink-gray-7"
+            role="status"
+          >
+            {{ removedLabels.join(', ') }}: outside what you can report on, so nothing is shown.
+          </p>
+          <p
+            v-if="runMessage"
+            class="surface-alert mb-3 p-3 text-sm"
+            role="alert"
+          >
+            {{ runMessage }}
+          </p>
+
+          <!-- U7: approved hours only; say what was left out (resolved decision 6). -->
+          <p
+            v-if="pendingHours > 0 && !reportResource.loading"
+            class="surface-inset mb-3 p-3 text-sm text-ink-gray-7"
+            role="note"
+            data-testid="pending-hours-note"
+          >
+            {{ roundHours(pendingHours) }} h awaiting approval are not included.
+          </p>
+
+          <dl
+            v-if="summary.length && !reportResource.loading"
+            class="mb-3 flex flex-wrap gap-x-6 gap-y-2"
+            data-testid="report-summary"
+          >
+            <div
+              v-for="item in summary"
+              :key="item.label"
+            >
+              <dt class="text-xs text-ink-gray-6">
+                {{ item.label }}
+              </dt>
+              <dd class="text-base font-semibold tabular-nums text-ink-gray-9">
+                {{ item.value }}
+              </dd>
+            </div>
+          </dl>
+
+          <AsyncState
+            v-if="!runMessage"
+            :resource="reportResource"
+            section="report-results"
+            :empty="isEmpty"
+            :empty-title="grid ? 'No approved hours in this period' : narrowed ? 'Nothing matched these filters' : 'No data in this period'"
+            :empty-body="grid ? 'Try another month or project.' : narrowed ? 'Clear or change a filter, then run again.' : 'Try a wider date range.'"
+            skeleton="block"
+            skeleton-height="h-48"
+          >
+            <ReportTable
+              v-if="result"
+              :caption="entry.label"
+              :columns="result.columns"
+              :rows="result.rows"
+              :total-rows="result.total_rows"
+              :truncated="result.truncated"
+              :can-export="result.can_export"
+              :sort="sort"
+              :hidden="hidden"
+              :grid="grid"
+              :class="stale ? 'opacity-60' : ''"
+              @update:sort="onSort"
+              @update:hidden="onHidden"
+            />
+          </AsyncState>
+        </template>
       </template>
-    </template>
+    </AsyncState>
   </div>
 </template>

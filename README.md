@@ -65,8 +65,9 @@ remain within the standard Frappe HR and ERPNext environments.
 |---|---|
 | **Every employee** | Home as an action queue built on the working week — what needs *me*, what is waiting on someone else, and three ways to start. Leave with live balances and a Withdraw that works. Attendance with a located check-in and a "Fix a day" request. Timesheets as a day-first weekly grid. Payslips with one-tap PDF. Holidays, HR requests with attachments and a reply thread, a policy documents page, a colleague directory, notifications, and a tabbed profile showing everything HR holds (bank and ID numbers masked) with one-tap correction requests. |
 | **Managers** | One Approvals queue, oldest first, four outcomes per request (approve, send back, reject, escalate to HR), a record of what was already decided, and a team leave week for direct reports. |
-| **HR** | The HR half of the same queue, including requests routed to a portal-only `IT Team` role, plus manager-stage leave whose approver is away or overdue (decide in their place; the approver is told). An **Overdue** tab grouped by approver, and a daily overdue summary email. Bank-detail corrections reviewed masked, with a logged Reveal, applied to the Employee on Done. A Settings screen for request categories and routing, and a short named field set on leave types, holiday lists and shift types. A read-only Organisation view (counts, never names). A **People** lookup that opens one person's leave balance, attendance, requests, shift, holiday list and manager — read-only, and no wider than Desk already shows the same roles. A **Reports** launcher into Frappe's own HR reports, pre-filtered to the person being viewed; export happens in Frappe, not here. |
+| **HR** | The HR half of the same queue, including requests routed to a portal-only `IT Team` role, plus manager-stage leave whose approver is away or overdue (decide in their place; the approver is told). An **Overdue** tab grouped by approver, and a daily overdue summary email. Bank-detail corrections reviewed masked, with a logged Reveal, applied to the Employee on Done. A Settings screen for request categories and routing, and a short named field set on leave types, holiday lists and shift types. A read-only Organisation view (counts, never names). A **People** lookup that opens one person's leave balance, attendance, requests, shift, holiday list and manager — read-only, and no wider than Desk already shows the same roles. **Reports**: a catalog of time, attendance, leave and people reports run in the portal, grouped and totalled on the server, exported as CSV, Excel or PDF on the company letter head (large exports in the background), with saved views. Who may run or export each report is a matrix HR edits in Settings; every export is logged. |
 | **Notification Manager** | Portal-only role `HelixHR Notification Manager` (System Manager also qualifies). The **Email templates** page (`/email-templates`, Admin section of the sidebar): every portal email's subject and body, with a live preview, a test send to yourself, Off, and Reset to default. Security notices (bank-detail changes) are locked. A holder with no Employee record lands straight on this page. |
+| **Portal Admin** | Portal-only role `HelixHR Portal Admin` (HR Manager and System Manager also qualify). Settings → **Report access** and **Portal roles** (grant or remove Report Manager, Delivery Manager, Notification Manager and IT Team for active employees of their own company; every change is noted on the User), and the Reports **Export log**. No People, no reports and no other HR data unless they also hold a report role. |
 
 Every number on every screen is Frappe's. The portal computes nothing it is
 not the source of truth for.
@@ -109,15 +110,15 @@ already decided.</td>
 <table>
 <tr>
 <td width="50%"><img src="docs/images/portal-people.png" alt="People: one colleague's status, joining date, manager, shift, holiday list, leave balance by type, this month's attendance and open requests, with an Open in Desk button"></td>
-<td width="50%"><img src="docs/images/portal-reports.png" alt="Reports: a curated list of Frappe HR reports, each named by the question it answers, each opening in a new tab"></td>
+<td width="50%"><img src="docs/images/portal-reports.png" alt="Reports: a catalog of HR reports grouped by family, each named by the question it answers"></td>
 </tr>
 <tr>
 <td><b>People</b> is HR's read-only view of one person: leave balance by type,
 this month's attendance, open requests, shift, holiday list and manager, with
 a Desk link for anything beyond that. It writes nothing.</td>
-<td><b>Reports</b> is a curated launcher into Frappe's own HR reports, each
-named by the question it answers and pre-filtered to the person HR was
-looking at. Export stays where it already works — in Frappe.</td>
+<td><b>Reports</b> is a catalog of time, attendance, leave and people
+reports, each named by the question it answers, run in the portal with
+server-side grouping and totals and exported as CSV, Excel or PDF.</td>
 </tr>
 </table>
 
@@ -261,6 +262,7 @@ within a minute with no restart.
 | `helixhr_approval_overdue_days` | `bench --site <site> set-config -p helixhr_approval_overdue_days 2` | calendar days a request may wait at one stage before it is overdue: drives the HR queue, the Overdue tab and the daily digests. Default `2`. |
 | Send Leave Notification / Restrict Backdated Leave Application | HR Settings | both **off**. HRMS's leave mail would duplicate HelixHR's; HRMS's backdating check blocks approvers. Install turns the first off and refuses re-enabling it; preflight FAILs on either. |
 | `HelixHR Notification Manager` | Desk: User → Roles | give it to whoever owns email wording. Preflight WARNs when no enabled user holds it. |
+| `HelixHR Portal Admin` | Desk: User → Roles | portal-only; needs an Active Employee. Edits report access, reads the export log, and grants the four portal-only roles (Report Manager, Delivery Manager, Notification Manager, IT Team) in `/settings/portal-roles` for its own company. Sees no HR data. Preflight FAILs if it gains Desk access or any report/export/write/create permission. |
 </details>
 
 ### Anonymous install ping (off by default)
