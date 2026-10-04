@@ -63,6 +63,9 @@ from helixhr.events import (
 	backdated_leave_reason,
 	leave_overdraw,
 )
+from helixhr.helixhr.doctype.helixhr_timesheet_change.helixhr_timesheet_change import (
+	comment_problem,
+)
 
 # The routed roles that are *not* already unscoped HR access (P5-U5's own
 # permission scope), reused here rather than re-listed so this gate and
@@ -2539,6 +2542,7 @@ _QUEUE_TITLE = {
 	"timesheet": lambda row: f"{row['employee_name']} sent a week for your approval",
 	"attendance": lambda row: f"{row['employee_name']} asked for {row['reason']}",
 	"request": lambda row: f"{row['employee_name']} filed a {row['category']} request",
+	"change": lambda row: f"{row['employee_name']} asked to change an approved week",
 }
 
 
@@ -4381,6 +4385,16 @@ def get_my_week(week_start=None):
 			],
 		}
 
+	# Plan 2026-10-04-003 U3 (R8, R9): the week's open change request, and
+	# -- on an approved week -- whether it can be changed at all, with the
+	# reason it cannot. The screen shows the why *before* the comment box,
+	# so an employee never writes a request the server would refuse.
+	change = _open_week_change(current.name) if current else None
+	changeable = None
+	if current and timesheet and timesheet["workflow_state"] == "Approved":
+		problem = week_change_problem(current.name)
+		changeable = {"ok": problem is None, "reason": problem}
+
 	return {
 		"week_start": str(monday),
 		"week_end": str(sunday),
@@ -4390,6 +4404,15 @@ def get_my_week(week_start=None):
 		"approver_name": _approver_name(employee),
 		"full_week_hours": FULL_WEEK_HOURS,
 		"timesheet": timesheet,
+		"change": {
+			"name": change.name,
+			"comment": change.comment,
+			"status": change.status,
+			"approver_user": change.approver_user,
+		}
+		if change
+		else None,
+		"changeable": changeable,
 	}
 
 
@@ -4434,6 +4457,20 @@ def get_my_timesheet_history(limit=12, start=0):
 		[row.name for row in rows if row.workflow_state == TIMESHEET_SENT_BACK],
 		employee,
 	)
+	# Plan 2026-10-04-003 U3 (R8): the open change request rides the same
+	# page -- one query for the page, so the history can show it and offer
+	# the withdraw without a second call per row.
+	changes = {}
+	open_names = [
+		row.name
+		for row in frappe.get_all(
+			"HelixHR Timesheet Change",
+			filters={"employee": employee, "status": "Open", "timesheet": ["in", [r.name for r in rows] or [""]]},
+			fields=["name", "timesheet", "comment"],
+		)
+	]
+	for change in open_names:
+		changes[change.timesheet] = {"name": change.name, "comment": change.comment}
 
 	weeks = []
 	for row in rows:
@@ -4446,6 +4483,7 @@ def get_my_timesheet_history(limit=12, start=0):
 				"total_hours": row.total_hours,
 				"workflow_state": row.workflow_state,
 				"rejection_comment": reasons.get(row.name),
+				"open_change": changes.get(row.name),
 			}
 		)
 
@@ -4673,6 +4711,392 @@ def recall_my_week(week_start, expected_modified=None):
 	}
 
 
+# ---------------------------------------------------------------------------
+# Change requests on approved weeks (plan 2026-10-04-003 U3, R7-R13)
+#
+# KTD3: a change request is its own DocType, `HelixHR Timesheet Change` --
+# an approved week is docstatus 1 and immutable, so state on it would need
+# allow-on-submit fields and could not keep the history of several requests.
+# The DocType carries no Employee-role DocPerm at all: every read and write
+# here goes through a projection that authorizes first (`get_all` with its
+# own scope, never `get_list`'s DocPerm check), which is this app's
+# "projections, not permissions" shape. `_assert_may_act_on` still gates
+# every decision before a single side effect runs.
+# ---------------------------------------------------------------------------
+
+_WEEK_NOT_CHANGEABLE = "This week can't be changed."
+
+
+def _open_week_change(timesheet_name, fields=("name", "status", "comment", "creation")):
+	"""The one open change request on a week, or None (R8: at most one)."""
+	return frappe.db.get_value(
+		"HelixHR Timesheet Change",
+		{"timesheet": timesheet_name, "status": "Open"},
+		list(fields),
+		as_dict=True,
+		order_by="creation desc",
+	)
+
+
+def week_change_problem(timesheet_name):
+	"""KTD5: why an approved week is locked, or None when it can be changed.
+
+	R9 wants the *why* shown to the employee before they write a comment, so
+	every branch answers with the sentence the screen shows. HR has no
+	override here (Scope Boundaries): a week inside payroll or billing is
+	not the portal's to reopen, whatever anybody asks for.
+	"""
+	if frappe.db.exists("Sales Invoice Timesheet", {"time_sheet": timesheet_name}):
+		invoice = frappe.db.get_value(
+			"Sales Invoice Timesheet", {"time_sheet": timesheet_name}, "parent"
+		)
+		if frappe.db.get_value("Sales Invoice", invoice, "docstatus") == 1:
+			return _("This week is part of a submitted invoice, so it can't be changed.")
+	salary_slip = frappe.db.get_value("Timesheet", timesheet_name, "salary_slip")
+	if salary_slip:
+		return _("This week is already in a payslip, so it can't be changed.")
+	row = frappe.db.get_value(
+		"Timesheet", timesheet_name, ["employee", "start_date", "end_date"], as_dict=True
+	)
+	if row and frappe.db.exists(
+		"Salary Slip",
+		{
+			"employee": row.employee,
+			"docstatus": 1,
+			"start_date": ["<=", str(row.end_date)],
+			"end_date": [">=", str(row.start_date)],
+		},
+	):
+		return _("This week is covered by a payslip, so it can't be changed.")
+	return None
+
+
+@frappe.whitelist(methods=["POST"])
+def raise_timesheet_change(week_start, comment, expected_modified=None):
+	"""Ask to change an approved week (R7, R8, R9).
+
+	The comment is the request: required, at least ten characters. Raised
+	only on the caller's own Approved week, only while nothing about it is
+	locked, and only when the week has no open request already. The current
+	`reports_to` manager is stamped as the approver; with no manager the
+	request routes to HR (R10).
+	"""
+	rate_limit_per_user("raise_timesheet_change")
+	employee = get_current_employee()
+	monday, _sunday = get_week_bounds(week_start)
+
+	current = _week_timesheet(employee, monday, ("name", "workflow_state", "modified"))
+	if not current:
+		frappe.throw(_("There is no timesheet for this week."), frappe.DoesNotExistError)
+	if current.workflow_state != "Approved":
+		frappe.throw(_("Only an approved week can be changed."))
+	problem = week_change_problem(current.name)
+	if problem:
+		frappe.throw(problem)
+	if _open_week_change(current.name):
+		frappe.throw(_("There is already an open change request for this week."))
+	text = (comment or "").strip()
+	problem = comment_problem(text)
+	if problem:
+		frappe.throw(problem)
+	if expected_modified and get_datetime(expected_modified) != get_datetime(current.modified):
+		frappe.throw(_(_STALE_WEEK))
+
+	doc = frappe.get_doc(
+		{
+			"doctype": "HelixHR Timesheet Change",
+			"naming_series": "HTC-.YYYY.-",
+			"employee": employee,
+			"company": frappe.db.get_value("Employee", employee, "company"),
+			"timesheet": current.name,
+			"week_start": str(monday),
+			"comment": text,
+			"status": "Open",
+			"approver_user": _approver_user(employee),
+		}
+	)
+	doc.insert(ignore_permissions=True)
+	return {"name": doc.name, "status": doc.status, "approver_user": doc.approver_user}
+
+
+@frappe.whitelist(methods=["POST"])
+def withdraw_timesheet_change(name):
+	"""Take back the caller's own open change request (R8)."""
+	rate_limit_per_user("withdraw_timesheet_change")
+	employee = get_current_employee()
+	current = frappe.db.get_value(
+		"HelixHR Timesheet Change",
+		name,
+		["employee", "status"],
+		as_dict=True,
+		for_update=True,
+	)
+	if not current:
+		frappe.throw(_("That change request no longer exists."), frappe.DoesNotExistError)
+	if current.employee != employee:
+		frappe.throw(_("That change request isn't yours."), frappe.PermissionError)
+	if current.status != "Open":
+		frappe.throw(_("This change request has already been decided."))
+	frappe.db.set_value("HelixHR Timesheet Change", name, "status", "Withdrawn")
+	return {"name": name, "status": "Withdrawn"}
+
+
+def _may_act_on_timesheet_change(doc, user):
+	"""The stamped approver decides. `employee_on_update` keeps
+	`approver_user` current across a `reports_to` change (KTD10), so the
+	stamp is the single answer for who owns an open request; HR reaches the
+	kind through `_assert_may_act_on`'s scope branch (R10)."""
+	if user != doc.approver_user:
+		frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
+
+
+def _change_allowed_actions(doc, user):
+	"""R13: exactly two decisions, and the employee's own request never
+	offers them to the employee (`_allowed_actions` refuses the requester
+	before this runs). The stamped approver gets them; HR gets them in the
+	manager's place, through the same admin-scope reach
+	`_assert_may_act_on` already applies (R10)."""
+	if user == doc.approver_user:
+		return ["Accept", "Decline"]
+	if _is_hr(user) and employee_in_admin_scope(doc.employee, resolve_admin_scope(user)):
+		return ["Accept", "Decline"]
+	return []
+
+
+def _change_request_decision_detail(doc):
+	"""R13: the request's own words and the approved week's hours -- the
+	evidence deciding it takes, without re-reading the whole grid."""
+	detail = _decision_head(doc, doc.employee_name)
+	detail.update(
+		{
+			"kind": "change",
+			"state": doc.status,
+			"status": doc.status,
+			"timesheet": doc.timesheet,
+			"week_start": str(doc.week_start),
+			"week_end": str(add_days(doc.week_start, 6)),
+			"comment": doc.comment,
+			"total_hours": flt(frappe.db.get_value("Timesheet", doc.timesheet, "total_hours")),
+			"decision_note": doc.decision_note,
+			"amended_timesheet": doc.amended_timesheet,
+			"sent_on": str(doc.creation) if doc.creation else None,
+		}
+	)
+	return detail
+
+
+def _change_request_hours(rows):
+	"""The approved week's hours for a page of change rows, one query for
+	the page (P2-R22)."""
+	names = {row.timesheet for row in rows if row.timesheet}
+	if not names:
+		return {}
+	return {
+		row.name: flt(row.total_hours)
+		for row in frappe.get_all(
+			"Timesheet",
+			filters={"name": ["in", list(names)]},
+			fields=["name", "total_hours"],
+		)
+	}
+
+
+def _change_request_summaries(employee, today):
+	"""Open change requests addressed to this caller (R13).
+
+	`frappe.get_all` with `ignore_permissions` is deliberate: role Employee
+	has no DocPerm on this doctype (KTD3), and `frappe.get_list` answers a
+	PermissionError rather than an empty list for exactly that caller. The
+	scope is the authorization: `approver_user` is stamped at raise and
+	kept current by `employee_on_update` (KTD10).
+	"""
+	if _is_hr():
+		# The HR half is `_hr_change_request_summaries`; a manager's own
+		# reports still arrive there, so this half stands down for HR to
+		# keep one row per request.
+		return []
+	rows = frappe.get_all(
+		"HelixHR Timesheet Change",
+		filters={"status": "Open", "approver_user": frappe.session.user},
+		fields=["name", "employee", "employee_name", "timesheet", "week_start", "comment", "creation"],
+		order_by="creation asc",
+		limit=_QUEUE_FETCH,
+	)
+	hours = _change_request_hours(rows)
+	return [
+		_summary_row(
+			"change",
+			"HelixHR Timesheet Change",
+			row.name,
+			row.employee,
+			row.employee_name,
+			row.week_start,
+			add_days(row.week_start, 6),
+			row.creation,
+			"Open",
+			today,
+			total_hours=hours.get(row.timesheet),
+			comment=row.comment,
+		)
+		for row in rows
+	]
+
+
+# The queue tuple above is built before this section's functions exist, so
+# the change kind joins it here rather than in the literal.
+_APPROVAL_SUMMARY_COLLECTORS = (*_APPROVAL_SUMMARY_COLLECTORS, _change_request_summaries)
+
+
+def _hr_change_request_summaries(employee, today):
+	"""HR's view of open change requests: everything in their admin scope
+	that is not already in their manager half, tagged. A routed request (no
+	manager) is HR's alone; one with a manager shows here because HR
+	decides in the manager's place (R10) -- but a request addressed to the
+	HR caller themselves stays in their manager half, once."""
+	employee_filter = _hr_queue_employee_filter(employee)
+	if employee_filter is None:
+		return []
+	rows = frappe.get_all(
+		"HelixHR Timesheet Change",
+		filters={
+			"status": "Open",
+			"employee": employee_filter,
+			"approver_user": ["!=", frappe.session.user],
+		},
+		fields=["name", "employee", "employee_name", "timesheet", "week_start", "comment", "approver_user", "creation"],
+		order_by="creation asc",
+		limit=_QUEUE_FETCH,
+	)
+	hours = _change_request_hours(rows)
+	return [
+		_summary_row(
+			"change",
+			"HelixHR Timesheet Change",
+			row.name,
+			row.employee,
+			row.employee_name,
+			row.week_start,
+			add_days(row.week_start, 6),
+			row.creation,
+			"Open",
+			today,
+			total_hours=hours.get(row.timesheet),
+			comment=row.comment,
+			for_hr=not row.approver_user,
+		)
+		for row in rows
+	]
+
+
+def _act_on_timesheet_change(doc, action):
+	"""Accept or Decline (R11, R12).
+
+	The whole move runs as Administrator inside `as_administrator()`: the
+	HelixHR gate (`_assert_may_act_on`) has already decided who may act, and
+	neither role Employee (the decider is an ordinary line manager) nor the
+	stamped approver has a DocPerm on this doctype to carry the status save.
+	Capturing the decider first is load-bearing: inside the block the
+	session user is Administrator, and "decided by Administrator" would be a
+	lie on the record and in the employee's email.
+	"""
+	from helixhr.utils import as_administrator
+
+	decider = frappe.session.user
+	with as_administrator():
+		current = frappe.db.get_value(
+			"HelixHR Timesheet Change",
+			doc.name,
+			["status", "employee", "timesheet"],
+			as_dict=True,
+			for_update=True,
+		)
+		if not current or current.status != "Open":
+			frappe.throw(_("This change request has already been decided. Reload to see the result."))
+		if action == "Accept":
+			_accept_timesheet_change(doc, decider)
+		else:
+			_decline_timesheet_change(doc, decider)
+
+	# The employee hears the outcome from outside the elevated block, so the
+	# send never runs as Administrator and the template's own checks see the
+	# real actor.
+	from helixhr import events
+
+	employee_user = frappe.db.get_value("Employee", doc.employee, "user_id")
+	events._mail(
+		doc,
+		"timesheet_change_decided",
+		[employee_user] if employee_user else [],
+		lambda: events._change_context(
+			doc,
+			state="accepted" if action == "Accept" else "declined",
+			approver_name=frappe.utils.get_fullname(decider),
+			decision_note=(doc.decision_note or "").strip() if action == "Decline" else "",
+			action_url=events._portal_url(f"timesheet/history?week={doc.week_start}")
+			if action == "Decline"
+			else events._portal_url(f"timesheet?week={doc.week_start}"),
+		),
+	)
+
+
+def _decline_timesheet_change(doc, decider):
+	doc.db_set("status", "Declined")
+	doc.db_set("decided_by", decider)
+	doc.db_set("decided_on", now_datetime())
+	doc.db_set("decision_note", (doc.flags.helixhr_decision_note or "").strip())
+
+
+def _accept_timesheet_change(doc, decider):
+	"""KTD4, one transaction: lock, recheck, cancel, amend.
+
+	Any failure throws and the whole accept rolls back -- the request stays
+	Open and the week stays Approved, which is the only state that cannot
+	confuse anybody.
+	"""
+	timesheet_name = doc.timesheet
+	# 1. The change row is locked by the caller; the week is locked here so
+	#    an accept racing a Desk cancel serialises on the row.
+	frappe.db.get_value("Timesheet", timesheet_name, "name", for_update=True)
+	state = frappe.db.get_value(
+		"Timesheet", timesheet_name, ["workflow_state", "docstatus"], as_dict=True
+	)
+	# 2. R9 rechecked under the lock: an invoice or payslip that landed
+	#    between raise and accept closes the door here.
+	if not state or state.workflow_state != "Approved" or cint(state.docstatus) != 1:
+		frappe.throw(_("The week is no longer approved. Reload and decide again."))
+	problem = week_change_problem(timesheet_name)
+	if problem:
+		frappe.throw(problem)
+
+	# 3. Cancel the approved week. The Cancelled workflow state is set
+	#    before `cancel()` so the stored row reads Cancelled at docstatus 2
+	#    (KTD2), and ERPNext's own `on_cancel` unwinds the Task/Project
+	#    hours it added at submit.
+	timesheet = frappe.get_doc("Timesheet", timesheet_name)
+	timesheet.workflow_state = "Cancelled"
+	timesheet.cancel()
+
+	# 4. The editable copy starts at Draft, owned by the employee -- an
+	#    amend run as the manager would hand them a week they could never
+	#    resend (the self-approval check keys on `doc.owner`).
+	employee_user = frappe.db.get_value("Employee", doc.employee, "user_id")
+	amended = frappe.copy_doc(timesheet)
+	amended.amended_from = timesheet_name
+	amended.docstatus = 0
+	amended.workflow_state = "Draft"
+	# 5. The old week's decision reason is the old week's; the copy starts
+	#    clean so the resubmit's queue row is not pre-flagged with it.
+	amended.set(DECISION_REASON_FIELD, None)
+	amended.insert(ignore_permissions=True)
+	frappe.db.set_value("Timesheet", amended.name, "owner", employee_user, update_modified=False)
+
+	doc.db_set("status", "Accepted")
+	doc.db_set("decided_by", decider)
+	doc.db_set("decided_on", now_datetime())
+	doc.db_set("amended_timesheet", amended.name)
+	return amended
+
+
 def _assert_week_is_still_sendable(current, expected_modified):
 	"""One send per week, per state. Everything here runs *after* the
 	employee row lock, so the second of two concurrent submits sees the
@@ -4873,7 +5297,7 @@ _LEAVE_PENDING_HR = "Pending HR"
 
 
 # U6 / R13. The kinds a queue row can be, in the order the chips render.
-_APPROVAL_FILTER_KINDS = ("leave", "timesheet", "attendance", "request")
+_APPROVAL_FILTER_KINDS = ("leave", "timesheet", "attendance", "request", "change")
 
 
 def _valid_request_category(category):
@@ -5294,6 +5718,8 @@ _APPROVAL_DOCTYPES = {
 	"timesheet": "Timesheet",
 	"attendance": "Attendance Request",
 	"request": "HR Request",
+	# Plan 2026-10-04-003 U3: the change request is a queue kind of its own.
+	"change": "HelixHR Timesheet Change",
 }
 
 # One refusal for "missing", "not yours to decide" and "outside your company"
@@ -5303,18 +5729,30 @@ _APPROVAL_DOCTYPES = {
 _APPROVAL_NOT_FOUND = "That request isn't here."
 
 
-# The seven outcomes, in the order the screen draws them: the decision, the
+# The nine outcomes, in the order the screen draws them: the decision, the
 # recoverable no, the final no, the hand-over (P4-R1..R5), and the routed
 # request's own three (Pick up, Need info, Done -- P5-U6). Timesheets reach
 # three of the first four and never Reject (P4-KTD2); HR Request never
 # reaches Approve or Send to HR at all -- both are facts of each workflow's
-# own transitions rather than a rule written here.
-_APPROVAL_ACTIONS = ("Approve", "Send Back", "Reject", "Send to HR", "Pick up", "Need info", "Done")
+# own transitions rather than a rule written here. Accept and Decline are
+# the change request's two (plan 2026-10-04-003 R13), and are never
+# batchable (U6).
+_APPROVAL_ACTIONS = (
+	"Approve",
+	"Send Back",
+	"Reject",
+	"Send to HR",
+	"Pick up",
+	"Need info",
+	"Done",
+	"Accept",
+	"Decline",
+)
 
-# The three that are meaningless without one: the employee is told what to
+# The four that are meaningless without one: the employee is told what to
 # change, why the answer is final, or what is missing before it can be
-# finished (P4-R3, P4-R4, P5-U6).
-_REASON_REQUIRED = ("Send Back", "Reject", "Need info")
+# finished (P4-R3, P4-R4, P5-U6); a decline is told why (R12).
+_REASON_REQUIRED = ("Send Back", "Reject", "Need info", "Decline")
 
 # Where an approver's reason is stored, per kind. Leave keeps its Comment --
 # its rows are never deleted -- while a rejected Attendance Request is
@@ -5362,6 +5800,8 @@ def _allowed_actions(doc, user):
 		return []
 	if doc.doctype == "Leave Application":
 		actions = _leave_allowed_actions(doc, user)
+	elif doc.doctype == "HelixHR Timesheet Change":
+		actions = _change_allowed_actions(doc, user)
 	else:
 		actions = _workflow_allowed_actions(doc, user)
 
@@ -5682,6 +6122,10 @@ def act_on_approval(
 		frappe.throw(_("Say why before rejecting this."))
 	if action == "Need info" and not reason:
 		frappe.throw(_("Say what you need from them before asking."))
+	# Plan 2026-10-04-003 R12: a decline without a reason is a dead end for
+	# the employee, who sees exactly that reason afterwards.
+	if action == "Decline" and not reason:
+		frappe.throw(_("Say why before declining this."))
 	if not expected_modified:
 		frappe.throw(_("Open this request before deciding it, then try again."))
 
@@ -6189,6 +6633,16 @@ _APPROVAL_KINDS = {
 		"hr_state": lambda doc: doc.routed_to_role == "HR Manager",
 		"hr_queue": _hr_request_summaries,
 		"act": _act_on_hr_request,
+	},
+	"HelixHR Timesheet Change": {
+		"state_field": "status",
+		"detail": _change_request_decision_detail,
+		"may_act": _may_act_on_timesheet_change,
+		"is_open": lambda doc: doc.status == "Open",
+		"open_message": "This change request has already been decided. Reload to see the result.",
+		"hr_state": lambda doc: not doc.approver_user,
+		"hr_queue": _hr_change_request_summaries,
+		"act": _act_on_timesheet_change,
 	},
 }
 

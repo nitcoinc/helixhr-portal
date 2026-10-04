@@ -849,6 +849,83 @@ class TestHrQueueEmails(IntegrationTestCase):
 		self.assertEqual(len(logs), 1, "the arrival notice is cleared and only the recall remains")
 		self.assertIn("recalled", logs[0].lower())
 
+	# --- Plan 2026-10-04-003 U3: the change request notices ------------------
+
+	def _approved_week(self):
+		"""One approved week for this class's employee, on a week unique to
+		the running test."""
+		from helixhr.api import submit_my_week
+		from helixhr.tests.test_api_timesheet import make_test_project
+
+		digest = int(hashlib.md5(("change" + self.id()).encode()).hexdigest(), 16)
+		monday, _sunday = get_week_bounds(add_days(today(), 300 + (digest % 200)))
+		project = make_test_project(f"change-{self.id().split('.')[-1]}", users=[self.EMAIL_EMPLOYEE_USER])
+		rows = [{"date": str(monday), "project": project, "task": "", "hours": 4, "note": ""}]
+		frappe.set_user(self.EMAIL_EMPLOYEE_USER)
+		submit_my_week(str(monday), json.dumps(rows))
+		timesheet = frappe.db.get_value(
+			"Timesheet", {"employee": self.employee_name, "start_date": str(monday)}, "name"
+		)
+		frappe.set_user(MANAGER_USER)
+		apply_workflow({"doctype": "Timesheet", "name": timesheet}, "Approve")
+		frappe.set_user(self.EMAIL_EMPLOYEE_USER)
+		return monday, timesheet
+
+	def test_a_change_request_mails_the_approver_with_the_comment(self):
+		from helixhr.api import raise_timesheet_change
+
+		monday, _timesheet = self._approved_week()
+		added = self._watch_mail()
+
+		change = raise_timesheet_change(str(monday), "Tuesday should be six hours, not two")
+
+		mails = self._to(added(), MANAGER_USER)
+		self.assertEqual(len(mails), 1)
+		message = self._message(mails[0])
+		self.assertIn("change", message.lower())
+		self.assertIn("Tuesday should be six hours", message)
+
+		# The bell rings too (R7).
+		self.assertTrue(
+			frappe.db.exists(
+				"Notification Log",
+				{
+					"for_user": MANAGER_USER,
+					"document_type": "HelixHR Timesheet Change",
+					"document_name": change["name"],
+				},
+			)
+		)
+
+	def test_a_decided_change_request_mails_the_employee_once(self):
+		from helixhr.api import act_on_approval, raise_timesheet_change
+
+		monday, timesheet = self._approved_week()
+		change = raise_timesheet_change(str(monday), "Tuesday should be six hours, not two")
+		added = self._watch_mail()
+
+		frappe.set_user(MANAGER_USER)
+		modified = frappe.db.get_value("HelixHR Timesheet Change", change["name"], "modified")
+		act_on_approval(
+			"HelixHR Timesheet Change",
+			change["name"],
+			"Decline",
+			comment="The hours match the project's record.",
+			expected_modified=str(modified),
+			expected_state="Open",
+		)
+
+		mails = self._to(added(), self.EMAIL_EMPLOYEE_USER)
+		self.assertEqual(len(mails), 1)
+		message = self._message(mails[0]).lower()
+		self.assertIn("declined", message)
+		self.assertIn("the hours match", message)
+
+		frappe.set_user("Administrator")
+		self.assertEqual(
+			frappe.db.get_value("Timesheet", timesheet, "workflow_state"), "Approved"
+		)
+
 
 class TestNotificationTemplateEscaping(IntegrationTestCase):
 	"""P4 security follow-up. Frappe's Jinja environment has no autoescape,

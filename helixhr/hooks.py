@@ -207,6 +207,12 @@ doc_events = {
 		# Plan 2026-10-02-001 U4: `helixhr_pending_since`, on save and db_set.
 		"on_change": "helixhr.events.stamp_pending_since",
 	},
+	# Plan 2026-10-04-003 U3: the change request's arrival notice, and the
+	# same pending-since stamp the other approval kinds carry.
+	"HelixHR Timesheet Change": {
+		"after_insert": "helixhr.events.timesheet_change_after_insert",
+		"on_change": "helixhr.events.stamp_pending_since",
+	},
 	"File": {
 		"before_insert": "helixhr.events.file_before_insert",
 	},

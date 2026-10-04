@@ -335,6 +335,62 @@ def _mail_timesheet_change(doc, before):
 		)
 
 
+# Plan 2026-10-04-003 U3: change requests on approved weeks (R7, R21).
+
+
+def _change_context(doc, **extra):
+	return {
+		"employee_name": doc.employee_name or doc.employee,
+		"week_label": f"{formatdate(doc.week_start)} to {formatdate(add_days(doc.week_start, 6))}",
+		**extra,
+	}
+
+
+def timesheet_change_after_insert(doc, method=None):
+	"""The approver learns a change request landed: a bell, plus the
+	`timesheet_change_requested` email. With no manager the request routed
+	to HR, so HR hears it instead -- the same split `timesheet_for_hr`
+	makes. Nobody is mailed about their own action."""
+	if doc.approver_user:
+		_notify_manager_of_arrival(
+			"HelixHR Timesheet Change",
+			doc,
+			doc.approver_user,
+			_("{0} asked to change their approved week for {1}").format(
+				doc.employee_name or doc.employee, formatdate(doc.week_start)
+			),
+		)
+		if doc.approver_user != frappe.session.user:
+			_mail(
+				doc,
+				"timesheet_change_requested",
+				[doc.approver_user],
+				lambda: _change_context(
+					doc,
+					comment=(doc.comment or "").strip(),
+					action_url=_portal_url(f"approvals/change/{doc.name}"),
+				),
+			)
+		return
+	_hr_mail_change(doc)
+
+
+def _hr_mail_change(doc):
+	recipients = [user for user in _hr_managers() if user != frappe.session.user]
+	if not recipients:
+		return
+	_mail(
+		doc,
+		"timesheet_change_requested",
+		recipients,
+		lambda: _change_context(
+			doc,
+			comment=(doc.comment or "").strip(),
+			action_url=_portal_url(f"approvals/change/{doc.name}"),
+		),
+	)
+
+
 def timesheet_on_update(doc, method=None):
 	manager_user = _approver_user(doc.employee)
 	before = doc.get_doc_before_save()
@@ -406,10 +462,16 @@ def employee_on_update(doc, method=None):
 
 	if before.reports_to != doc.reports_to:
 		_reconcile_pending_documents(doc.name)
+		# Plan 2026-10-04-003 KTD10: open change requests follow the new
+		# manager the same way. `approver_user` is the single answer for who
+		# may decide, so a stale one would leave the old manager holding a
+		# decision that is no longer theirs.
+		_repoint_change_requests(doc.name)
 
 	if before.user_id != doc.user_id or before.status != doc.status:
 		for report in frappe.get_all("Employee", filters={"reports_to": doc.name}, pluck="name"):
 			_reconcile_pending_documents(report)
+			_repoint_change_requests(report)
 
 	# P3-U4 step 2a / P3-KTD15 / P3-R28. Somebody who has left has no
 	# purpose left for their punch coordinates to serve, so they go now
@@ -420,6 +482,27 @@ def employee_on_update(doc, method=None):
 		from helixhr.tasks import scrub_employee_checkin_locations
 
 		scrub_employee_checkin_locations(doc.name)
+		# Plan 2026-10-04-003 KTD10: nobody left to raise or withdraw, and
+		# nobody left to decide -- an open request auto-closes as Withdrawn
+		# rather than waiting out the overdue clock for ever.
+		for name in frappe.get_all(
+			"HelixHR Timesheet Change",
+			filters={"employee": doc.name, "status": "Open"},
+			pluck="name",
+		):
+			frappe.db.set_value("HelixHR Timesheet Change", name, "status", "Withdrawn")
+
+
+def _repoint_change_requests(employee):
+	"""KTD10: point every open change request at whoever may act now --
+	the new manager, or nobody (which is how "routes to HR" is stored)."""
+	manager_user = _approver_user(employee)
+	for name in frappe.get_all(
+		"HelixHR Timesheet Change",
+		filters={"employee": employee, "status": "Open"},
+		pluck="name",
+	):
+		frappe.db.set_value("HelixHR Timesheet Change", name, "approver_user", manager_user)
 
 
 def _reconcile_pending_documents(employee):
@@ -1815,6 +1898,10 @@ def _pending_key(doc):
 		return doc.get("helixhr_stage") or "Manager"
 	if doc.doctype == "Timesheet":
 		return doc.workflow_state if doc.workflow_state in (PENDING_STATE, TIMESHEET_PENDING_HR) else None
+	# Plan 2026-10-04-003 U3: an open change request waits on its approver
+	# the same way, so the overdue predicate counts from the same stamp.
+	if doc.doctype == "HelixHR Timesheet Change":
+		return "Open" if doc.status == "Open" else None
 	if doc.workflow_state in (REQUEST_PENDING_MANAGER, REQUEST_PENDING_HR):
 		return doc.workflow_state
 	return None

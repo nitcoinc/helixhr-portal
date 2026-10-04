@@ -26,6 +26,26 @@ const total = computed(() => history.data?.total || 0)
 const fullWeek = computed(() => history.data?.full_week_hours || 40)
 const moreCount = computed(() => Math.max(0, total.value - weeks.value.length))
 
+// Plan 2026-10-04-003 U3 (R8): an open change request is withdrawable from
+// where the employee can see it. The raise dialog itself lives on the week
+// page; the history links there rather than carrying a second copy of it.
+const withdrawing = ref('')
+const withdraw = createResource({
+  url: 'helixhr.api.withdraw_timesheet_change',
+  method: 'POST',
+})
+
+async function withdrawRequest(week) {
+  if (!week.open_change) return
+  withdrawing.value = week.name
+  try {
+    await withdraw.submit({ name: week.open_change.name })
+    await history.reload()
+  } finally {
+    withdrawing.value = ''
+  }
+}
+
 function showMore() {
   pageLimit.value = Math.min(52, pageLimit.value + PAGE)
   history.reload()
@@ -167,6 +187,26 @@ function weekRoute(week) {
                   class="mt-2 block text-sm italic text-ink-gray-6"
                 >
                   &ldquo;{{ week.rejection_comment }}&rdquo;
+                </span>
+
+                <!-- Plan 2026-10-04-003 U3: the open request is visible and
+                     withdrawable in place; its words stay with the week. -->
+                <span
+                  v-if="week.open_change"
+                  class="surface-inset mt-2 flex items-center justify-between gap-2 p-2 text-sm"
+                >
+                  <span class="min-w-0 flex-1 truncate text-ink-gray-7">
+                    Change requested:
+                    <span class="text-ink-gray-9">&ldquo;{{ week.open_change.comment }}&rdquo;</span>
+                  </span>
+                  <button
+                    class="shrink-0 cursor-pointer text-sm font-medium text-ink-blue-link underline underline-offset-2"
+                    type="button"
+                    :disabled="withdrawing === week.name"
+                    @click.stop="withdrawRequest(week)"
+                  >
+                    {{ withdrawing === week.name ? 'Withdrawing&hellip;' : 'Withdraw' }}
+                  </button>
                 </span>
               </router-link>
             </li>

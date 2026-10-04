@@ -2,7 +2,7 @@
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { roundHours } from '@/lib/hours'
 import { useRouter } from 'vue-router'
-import { createResource, Button, Dialog } from 'frappe-ui'
+import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
 import WeekGrid from '@/components/WeekGrid.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
@@ -292,6 +292,57 @@ const save = createResource({ url: 'helixhr.api.save_my_week', method: 'POST' })
 const submit = createResource({ url: 'helixhr.api.submit_my_week', method: 'POST' })
 const recall = createResource({ url: 'helixhr.api.recall_my_week', method: 'POST' })
 const recalling = ref(false)
+
+// --- change requests on approved weeks (plan 2026-10-04-003 U3) ----------
+
+const changeRequest = computed(() => week.data?.change)
+const changeable = computed(() => week.data?.changeable)
+const confirmChange = ref(false)
+const changeComment = ref('')
+const raisingChange = ref(false)
+const withdrawingChange = ref(false)
+
+const raiseChange = createResource({ url: 'helixhr.api.raise_timesheet_change', method: 'POST' })
+const withdrawChange = createResource({
+  url: 'helixhr.api.withdraw_timesheet_change',
+  method: 'POST',
+})
+
+const changeCommentShort = computed(() => changeComment.value.trim().length < 10)
+
+async function sendChangeRequest() {
+  if (changeCommentShort.value) return
+  error.value = ''
+  raisingChange.value = true
+  try {
+    await raiseChange.submit({
+      week_start: monday.value,
+      comment: changeComment.value,
+      expected_modified: week.data?.timesheet?.modified || undefined,
+    })
+    confirmChange.value = false
+    changeComment.value = ''
+    await week.reload()
+  } catch (e) {
+    error.value = e?.messages?.[0] || 'Could not send the request.'
+  } finally {
+    raisingChange.value = false
+  }
+}
+
+async function withdrawChangeRequest() {
+  if (!changeRequest.value) return
+  error.value = ''
+  withdrawingChange.value = true
+  try {
+    await withdrawChange.submit({ name: changeRequest.value.name })
+    await week.reload()
+  } catch (e) {
+    error.value = e?.messages?.[0] || 'Could not withdraw the request.'
+  } finally {
+    withdrawingChange.value = false
+  }
+}
 
 /** Take a week that is still waiting for approval back (plan
  * 2026-10-04-003 U2, R5). The server refuses once the manager has decided;
@@ -589,6 +640,47 @@ const savedLabel = computed(() => {
         </Button>
       </div>
 
+      <!-- Plan 2026-10-04-003 R7-R9. An approved week has one door: ask to
+           change it, with a reason, while nothing about it is locked. The
+           server owns the "why not" sentence, so the employee never writes a
+           request that would be refused. -->
+      <div
+        v-else-if="workflowState === 'Approved'"
+        class="surface-inset mt-4 flex flex-col gap-2 p-3 text-sm sm:flex-row sm:items-center sm:justify-between"
+      >
+        <template v-if="changeRequest">
+          <p class="min-w-0 text-ink-gray-7">
+            You asked to change this week:
+            <span class="font-medium text-ink-gray-9">&ldquo;{{ changeRequest.comment }}&rdquo;</span>
+            &mdash; it is with {{ approverName || 'your manager' }}.
+          </p>
+          <Button
+            variant="outline"
+            :loading="withdrawingChange"
+            @click="withdrawChangeRequest"
+          >
+            Withdraw request
+          </Button>
+        </template>
+        <template v-else-if="changeable?.ok">
+          <p class="text-ink-gray-7">
+            Something wrong in this week? Ask to change it.
+          </p>
+          <Button
+            variant="outline"
+            @click="confirmChange = true"
+          >
+            Request a change
+          </Button>
+        </template>
+        <p
+          v-else
+          class="text-ink-gray-7"
+        >
+          {{ changeable?.reason }}
+        </p>
+      </div>
+
       <div class="mt-4">
         <WeekGrid
           :lines="lines"
@@ -679,6 +771,51 @@ const savedLabel = computed(() => {
         {{ workflowState === 'Sent Back' ? 'Send again' : 'Submit week' }}
       </Button>
     </div>
+
+    <Dialog
+      v-model="confirmChange"
+      :options="{ title: 'Ask to change this week?' }"
+    >
+      <template #body-content>
+        <p class="text-sm text-ink-gray-7">
+          Tell {{ approverName || 'your manager' }} what should change. They
+          decide; if they accept, the week comes back to you as a draft.
+        </p>
+        <FormControl
+          v-model="changeComment"
+          class="mt-2"
+          type="textarea"
+          label="What should change"
+          placeholder="What is wrong, and what it should say instead"
+          :aria-label="'What should change'"
+        />
+        <p
+          v-if="changeCommentShort && changeComment"
+          class="mt-1 text-sm text-ink-gray-6"
+        >
+          A little more, please &mdash; at least ten characters.
+        </p>
+      </template>
+      <template #actions>
+        <div class="flex justify-end gap-2">
+          <Button
+            variant="subtle"
+            @click="confirmChange = false"
+          >
+            Keep the week as it is
+          </Button>
+          <Button
+            variant="solid"
+            theme="blue"
+            :loading="raisingChange"
+            :disabled="changeCommentShort"
+            @click="sendChangeRequest"
+          >
+            Send request
+          </Button>
+        </div>
+      </template>
+    </Dialog>
 
     <Dialog
       v-model="confirmCopy"

@@ -336,6 +336,44 @@ NOTIFICATION_EVENTS = {
 			" It is no longer waiting for you.</p>"
 		),
 	},
+	"timesheet_change_requested": {
+		"label": "Change request on an approved week",
+		"audience": "Approver",
+		"variables": {
+			"employee_name": _LEAVE_VARIABLES["employee_name"],
+			"week_label": ("The week", "5 to 11 Oct 2026"),
+			"comment": ("What the employee asked to change", "Tuesday should be 6 hours, not 2"),
+			"action_url": _LEAVE_VARIABLES["action_url"],
+		},
+		"subject": "Change request: {{ employee_name }}, {{ week_label }}",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>{{ employee_name }} asked to change their approved timesheet for {{ week_label }}:</p>"
+			"<p>“{{ comment }}”</p>"
+		),
+		"action_label": "Review request",
+	},
+	"timesheet_change_decided": {
+		"label": "Change request decided",
+		"audience": "Employee",
+		"variables": {
+			"week_label": ("The week", "5 to 11 Oct 2026"),
+			"state": ("What happened to it", "accepted"),
+			**_DECISION,
+		},
+		"subject": "Your change request for {{ week_label }} was {{ state }}",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"{% if state == 'accepted' %}"
+			"<p>{{ approver_name }} accepted your change request for {{ week_label }}."
+			" The week is back with you as a draft -- edit it and send it again.</p>"
+			"{% else %}"
+			"<p>{{ approver_name }} declined your change request for {{ week_label }}."
+			" The week stays as it was.</p>"
+			"{% if decision_note %}<p>Note: {{ decision_note }}</p>{% endif %}"
+			"{% endif %}"
+		),
+	},
 	"attendance_for_hr": {
 		"label": "Attendance request waiting for HR",
 		"audience": "HR",
@@ -1261,6 +1299,9 @@ RATE_LIMIT_POLICY = {
 	"save_my_week": (30, 60),
 	# Plan 2026-10-04-003 U2: recall is a rare correction, not a loop.
 	"recall_my_week": (10, 60),
+	# U3: a change request mails its approver, and a withdraw is rare.
+	"raise_timesheet_change": (10, 3600),
+	"withdraw_timesheet_change": (10, 3600),
 	"act_on_approval": (30, 60),
 	"get_overdue_approvals": (60, 60),
 	"apply_for_leave": (20, 3600),

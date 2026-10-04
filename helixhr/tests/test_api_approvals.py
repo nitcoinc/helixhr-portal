@@ -431,7 +431,7 @@ class TestApprovalQueueAndEvidence(IntegrationTestCase):
 		self.assertIn(timesheet, names)
 		self.assertNotIn(leave.name, names)
 		kinds = {row["name"]: row["count"] for row in result["counts"]["kinds"]}
-		self.assertEqual(list(kinds), ["leave", "timesheet", "attendance", "request"])
+		self.assertEqual(list(kinds), ["leave", "timesheet", "attendance", "request", "change"])
 		self.assertEqual(result["total"], kinds["timesheet"])
 		self.assertGreaterEqual(kinds["leave"], 1)
 		with self.assertRaises(frappe.ValidationError):
@@ -1327,11 +1327,19 @@ class TestAttendanceRequestApprovals(IntegrationTestCase):
 		# feed yet -- its whole queue is `_hr_request_summaries`, reached
 		# through `_APPROVAL_KINDS["HR Request"]["hr_queue"]` rather than
 		# either tuple below (P5-U6; the receipts feed is explicitly deferred
-		# in the plan's Deferred to Follow-Up Work). The three doctypes that
-		# do have both must still each have exactly one entry.
+		# in the plan's Deferred to Follow-Up Work). The doctypes that do have
+		# both must still each have exactly one entry. HelixHR Timesheet
+		# Change (plan 2026-10-04-003 U3) joins the line-manager half with a
+		# queue collector of its own; it has no "recently decided" receipt on
+		# purpose -- the employee already hears every accept and decline
+		# through `timesheet_change_decided`, and the request's own record
+		# carries the outcome (R21).
 		line_manager_doctypes = doctypes - {"HR Request"}
 		self.assertEqual(len(api._APPROVAL_SUMMARY_COLLECTORS), len(line_manager_doctypes))
-		self.assertEqual(len(api._DECIDED_COLLECTORS), len(line_manager_doctypes))
+		self.assertEqual(
+			len(api._DECIDED_COLLECTORS),
+			len(line_manager_doctypes - {"HelixHR Timesheet Change"}),
+		)
 		# Each kind's "already decided" sentence names its own record type.
 		self.assertEqual(
 			len({kind["open_message"] for kind in api._APPROVAL_KINDS.values()}), len(doctypes)
