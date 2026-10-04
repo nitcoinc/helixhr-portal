@@ -328,6 +328,10 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"download_my_payslip": (10, 60),
 			"get_directory": (60, 60),
 			"get_my_team_week": (60, 60),
+			# Plan 2026-10-04-003 U4: the timesheets half and the read-only
+			# member week, bounded like the leave week they sit beside.
+			"get_my_team_timesheets": (60, 60),
+			"get_team_member_week": (60, 60),
 			"search_people": (60, 60),
 			"get_person": (60, 60),
 			"get_report_link": (60, 60),

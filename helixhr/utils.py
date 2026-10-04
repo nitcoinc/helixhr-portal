@@ -1326,6 +1326,11 @@ RATE_LIMIT_POLICY = {
 	"download_my_payslip": (10, 60),
 	"get_directory": (60, 60),
 	"get_my_team_week": (60, 60),
+	# Plan 2026-10-04-003 U4: the timesheets half of the Team page and the
+	# one report's read-only week -- both fan out per report like the leave
+	# week above, so they are bounded the same way.
+	"get_my_team_timesheets": (60, 60),
+	"get_team_member_week": (60, 60),
 	"get_organisation_view": (60, 60),
 	"search_people": (60, 60),
 	"get_person": (60, 60),

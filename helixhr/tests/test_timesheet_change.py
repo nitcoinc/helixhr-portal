@@ -317,6 +317,28 @@ class TestTimesheetChange(IntegrationTestCase):
 			frappe.db.get_value("Timesheet", timesheet, "workflow_state"), "Approved"
 		)
 
+	def test_the_declined_request_stays_visible_with_its_reason(self):
+		"""R12: after a decline the week's own read still carries the
+		request and the reason, so the employee reads the no where the week
+		lives -- not only in the email."""
+		self._approved_week()
+		change = self._raise()
+		self._act(
+			change["name"],
+			"Decline",
+			self.manager_user,
+			comment="The hours match the project's record.",
+		)
+
+		frappe.set_user(self.employee_user)
+		week = get_my_week(str(self.monday))
+		self.assertIsNone(week["change"], "no open request remains")
+		self.assertEqual(week["declined_change"]["name"], change["name"])
+		self.assertEqual(
+			week["declined_change"]["decision_note"],
+			"The hours match the project's record.",
+		)
+
 	def test_the_employee_withdraws_an_open_request(self):
 		timesheet = self._approved_week()
 		change = self._raise()

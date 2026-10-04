@@ -4684,7 +4684,19 @@ def get_my_week(week_start=None):
 	# -- on an approved week -- whether it can be changed at all, with the
 	# reason it cannot. The screen shows the why *before* the comment box,
 	# so an employee never writes a request the server would refuse.
+	# R12: with no open request, a declined one stays visible with its
+	# reason -- the employee reads the no where the week lives, not only in
+	# the email.
 	change = _open_week_change(current.name) if current else None
+	declined_change = None
+	if current and not change:
+		declined_change = frappe.db.get_value(
+			"HelixHR Timesheet Change",
+			{"timesheet": current.name, "status": "Declined"},
+			["name", "comment", "decision_note"],
+			as_dict=True,
+			order_by="creation desc",
+		)
 	changeable = None
 	if current and timesheet and timesheet["workflow_state"] == "Approved":
 		problem = week_change_problem(current.name)
@@ -4706,6 +4718,13 @@ def get_my_week(week_start=None):
 			"approver_user": change.approver_user,
 		}
 		if change
+		else None,
+		"declined_change": {
+			"name": declined_change.name,
+			"comment": declined_change.comment,
+			"decision_note": declined_change.decision_note,
+		}
+		if declined_change
 		else None,
 		"changeable": changeable,
 	}
@@ -4974,11 +4993,13 @@ def recall_my_week(week_start, expected_modified=None):
 	if current.workflow_state == TIMESHEET_PENDING_HR:
 		frappe.throw(_("This week is with HR now. Ask HR to sort it out."))
 	if current.workflow_state != PENDING_STATE:
-		frappe.throw(
-			_("This week is {0} and can't be recalled.").format(
-				current.workflow_state or "still a draft"
-			)
-		)
+		# The portal's own words, never the raw workflow state (design
+		# system copy rules).
+		if current.workflow_state == TIMESHEET_SENT_BACK:
+			frappe.throw(_("This week was sent back and is yours to edit, not recall."))
+		if not current.workflow_state or current.workflow_state == "Draft":
+			frappe.throw(_("This week is still a draft -- there is nothing to recall."))
+		frappe.throw(_("This week can't be recalled right now. Reload to see its state."))
 	if expected_modified and get_datetime(expected_modified) != get_datetime(current.modified):
 		frappe.throw(_(_STALE_WEEK))
 
@@ -5079,6 +5100,10 @@ def raise_timesheet_change(week_start, comment, expected_modified=None):
 	rate_limit_per_user("raise_timesheet_change")
 	employee = get_current_employee()
 	monday, _sunday = get_week_bounds(week_start)
+
+	# The employee row lock serialises two concurrent raises, so the
+	# one-open-request check below and the insert cannot both pass (R8).
+	_lock_employee(employee)
 
 	current = _week_timesheet(employee, monday, ("name", "workflow_state", "modified"))
 	if not current:
@@ -10438,7 +10463,7 @@ def get_my_team_timesheets(week_start=None):
 	one for the open change requests. A 50-report week is seven queries, not
 	one per row.
 	"""
-	rate_limit_per_user("get_my_team_week")
+	rate_limit_per_user("get_my_team_timesheets")
 	manager = get_current_employee()
 	monday, sunday = get_week_bounds(week_start or user_today())
 
@@ -10548,80 +10573,6 @@ def _team_time_logs(timesheet_names):
 	return day_hours, split
 
 
-def _working_days_by_employee(employees, monday, sunday):
-	"""`{employee: set(date)}` -- the days in the week each employee is
-	expected at work: not on their holiday list, not covered by approved
-	leave (KTD7's expected-hours arithmetic, named once so the team
-	projection and the queue flags cannot disagree about what a working
-	week is).
-
-	An employee with no holiday list at all has no measurable week here --
-	their set is empty and the expected hours answer None rather than a
-	guess.
-	"""
-	standard = flt(frappe.db.get_single_value("HR Settings", "standard_working_hours")) or None
-	rows = frappe.get_all(
-		"Employee",
-		filters={"name": ["in", list(employees)]},
-		fields=["name", "holiday_list", "company"],
-		ignore_permissions=True,
-	)
-	defaults = {
-		row.name: row.default_holiday_list
-		for row in frappe.get_all("Company", fields=["name", "default_holiday_list"])
-	}
-	lists = {row.name: row.holiday_list or defaults.get(row.company) for row in rows}
-
-	holidays = {}
-	if any(lists.values()):
-		for row in frappe.get_all(
-			"Holiday",
-			filters={
-				"parent": ["in", [name for name in lists.values() if name]],
-				"parenttype": "Holiday List",
-				"holiday_date": ["between", [str(monday), str(sunday)]],
-			},
-			fields=["parent", "holiday_date"],
-			ignore_permissions=True,
-		):
-			holidays.setdefault(row.parent, set()).add(str(row.holiday_date))
-
-	leave_days = {}
-	leaves = frappe.get_all(
-		"Leave Application",
-		filters={
-			"employee": ["in", list(employees)],
-			"docstatus": 1,
-			"status": "Approved",
-			"from_date": ["<=", str(sunday)],
-			"to_date": [">=", str(monday)],
-		},
-		fields=["employee", "from_date", "to_date"],
-		ignore_permissions=True,
-	)
-	for leave in leaves:
-		days = leave_days.setdefault(leave.employee, set())
-		date = max(getdate(leave.from_date), monday)
-		last = min(getdate(leave.to_date), sunday)
-		while date <= last:
-			days.add(str(date))
-			date = add_days(date, 1)
-
-	week_dates = [str(add_days(monday, offset)) for offset in range(7)]
-	working = {}
-	for employee in employees:
-		if not standard:
-			working[employee] = set()
-			continue
-		off_days = holidays.get(lists.get(employee), set())
-		working[employee] = {
-			date
-			for date in week_dates
-			if date not in off_days and date not in leave_days.get(employee, set())
-		}
-	return working, standard
-
-
 def _team_expected_hours(employees, monday, sunday):
 	"""`{employee: hours or None}` -- KTD7's expected hours, batched.
 
@@ -10665,7 +10616,7 @@ def get_team_member_week(employee, week_start):
 	why the allow-list below is explicit and the scope check above runs
 	first. Cost, billing and rate fields never leave the server.
 	"""
-	rate_limit_per_user("get_my_team_week")
+	rate_limit_per_user("get_team_member_week")
 	manager = get_current_employee()
 	if not frappe.db.exists("Employee", {"name": employee, **_direct_report_filters(manager)}):
 		frappe.throw(_("That person is not on your team."), frappe.PermissionError)

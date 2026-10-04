@@ -296,6 +296,7 @@ const recalling = ref(false)
 // --- change requests on approved weeks (plan 2026-10-04-003 U3) ----------
 
 const changeRequest = computed(() => week.data?.change)
+const declinedChange = computed(() => week.data?.declined_change)
 const changeable = computed(() => week.data?.changeable)
 const confirmChange = ref(false)
 const changeComment = ref('')
@@ -661,6 +662,21 @@ const savedLabel = computed(() => {
           >
             Withdraw request
           </Button>
+        </template>
+        <!-- R12: the decline and its reason stay visible where the request
+             was raised, not only in the email. -->
+        <template v-else-if="declinedChange">
+          <p class="min-w-0 text-ink-gray-7">
+            Your change request
+            <span class="font-medium text-ink-gray-9">&ldquo;{{ declinedChange.comment }}&rdquo;</span>
+            was declined. The week stays as it was.
+          </p>
+          <p
+            v-if="declinedChange.decision_note"
+            class="min-w-0 text-ink-gray-6"
+          >
+            &ldquo;{{ declinedChange.decision_note }}&rdquo;
+          </p>
         </template>
         <template v-else-if="changeable?.ok">
           <p class="text-ink-gray-7">
