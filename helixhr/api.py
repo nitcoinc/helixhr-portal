@@ -4613,6 +4613,66 @@ def submit_my_week(week_start, rows, expected_modified=None):
 _STALE_WEEK = "This week changed while you were working on it. Reload and try again."
 
 
+@frappe.whitelist(methods=["POST"])
+def recall_my_week(week_start, expected_modified=None):
+	"""Take back a week that is still waiting for its manager's decision
+	(plan 2026-10-04-003 U2, R5).
+
+	The workflow's Recall transition does the state move; this method is the
+	authorization and the concurrency token around it, laid out like
+	`submit_my_week`: the employee row is locked first, the stored week is
+	re-read under the lock, and only the caller's own week still in Pending
+	Approval moves. Once the manager has decided -- Approved, Sent Back,
+	Pending HR -- the week is not the employee's to recall (R6).
+	"""
+	from frappe.model.workflow import apply_workflow
+
+	rate_limit_per_user("recall_my_week")
+	employee = get_current_employee()
+	monday, sunday = get_week_bounds(week_start)
+
+	_lock_employee(employee)
+
+	current = _week_timesheet(employee, monday, ("name", "workflow_state", "modified"), sunday)
+	if not current:
+		frappe.throw(_("There is no timesheet for this week."), frappe.DoesNotExistError)
+	if current.workflow_state == "Approved":
+		frappe.throw(_("This week is already approved. Ask HR to change it."))
+	if current.workflow_state == TIMESHEET_PENDING_HR:
+		frappe.throw(_("This week is with HR now. Ask HR to sort it out."))
+	if current.workflow_state != PENDING_STATE:
+		frappe.throw(
+			_("This week is {0} and can't be recalled.").format(
+				current.workflow_state or "still a draft"
+			)
+		)
+	if expected_modified and get_datetime(expected_modified) != get_datetime(current.modified):
+		frappe.throw(_(_STALE_WEEK))
+
+	# The arrival bell is this week's "waiting for you" row; the recall is
+	# its answer, so the stale one goes before the new notice is written.
+	manager_user = _approver_user(employee)
+	if manager_user:
+		frappe.db.delete(
+			"Notification Log",
+			{
+				"for_user": manager_user,
+				"document_type": "Timesheet",
+				"document_name": current.name,
+				"subject": ["like", "%submitted a timesheet%"],
+			},
+		)
+
+	doc = frappe.get_doc("Timesheet", current.name)
+	apply_workflow(doc, "Recall")
+	doc.reload()
+	return {
+		"name": doc.name,
+		"workflow_state": doc.workflow_state,
+		"modified": str(doc.modified),
+	}
+
+
 def _assert_week_is_still_sendable(current, expected_modified):
 	"""One send per week, per state. Everything here runs *after* the
 	employee row lock, so the second of two concurrent submits sees the
@@ -5797,6 +5857,12 @@ def _assert_still_open(doc):
 	it can add a contradicting comment or a second ledger effect."""
 	kind = _APPROVAL_KINDS[doc.doctype]
 	if not kind["is_open"](doc):
+		# Plan 2026-10-04-003 R6: a week sitting at Draft while the approver
+		# was looking at Pending Approval is a recall, not a decision -- say
+		# which, because "already decided" sends them hunting for a decision
+		# that never happened.
+		if doc.doctype == "Timesheet" and doc.get("workflow_state") == "Draft":
+			frappe.throw(_("The employee recalled this week. Reload to see it."))
 		frappe.throw(_(kind["open_message"]))
 
 

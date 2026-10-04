@@ -290,6 +290,27 @@ const canWrite = computed(() => !isReadOnly.value && !issues.value.length && !su
 
 const save = createResource({ url: 'helixhr.api.save_my_week', method: 'POST' })
 const submit = createResource({ url: 'helixhr.api.submit_my_week', method: 'POST' })
+const recall = createResource({ url: 'helixhr.api.recall_my_week', method: 'POST' })
+const recalling = ref(false)
+
+/** Take a week that is still waiting for approval back (plan
+ * 2026-10-04-003 U2, R5). The server refuses once the manager has decided;
+ * the message it sends is what the employee sees. */
+async function recallWeek() {
+  error.value = ''
+  recalling.value = true
+  try {
+    await recall.submit({
+      week_start: monday.value,
+      expected_modified: week.data?.timesheet?.modified || undefined,
+    })
+    await week.reload()
+  } catch (e) {
+    error.value = e?.messages?.[0] || 'Could not recall this week.'
+  } finally {
+    recalling.value = false
+  }
+}
 
 async function saveDraft() {
   if (!canWrite.value) return
@@ -547,6 +568,26 @@ const savedLabel = computed(() => {
       >
         This week is with HR now. You can't change it until they decide.
       </p>
+
+      <!-- Plan 2026-10-04-003 R5. While the week waits for the manager it is
+           still the employee's to take back, and saying so beats making them
+           ask whether "waiting" is a dead end. -->
+      <div
+        v-else-if="workflowState === 'Pending Approval'"
+        class="surface-inset mt-4 flex flex-col gap-2 p-3 text-sm sm:flex-row sm:items-center sm:justify-between"
+      >
+        <p class="text-ink-gray-7">
+          This week is waiting for {{ approverName || 'your manager' }}. You can
+          take it back to change it.
+        </p>
+        <Button
+          variant="outline"
+          :loading="recalling"
+          @click="recallWeek"
+        >
+          Recall week
+        </Button>
+      </div>
 
       <div class="mt-4">
         <WeekGrid

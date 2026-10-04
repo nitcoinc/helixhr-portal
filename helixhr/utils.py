@@ -322,6 +322,20 @@ NOTIFICATION_EVENTS = {
 			"{% if decision_note %}<p>Note: {{ decision_note }}</p>{% endif %}"
 		),
 	},
+	"timesheet_recalled": {
+		"label": "Week recalled",
+		"audience": "Approver",
+		"variables": {
+			"employee_name": _LEAVE_VARIABLES["employee_name"],
+			"week_label": ("The week", "5 to 11 Oct 2026"),
+		},
+		"subject": "{{ employee_name }} recalled their week: {{ week_label }}",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>{{ employee_name }} took back their timesheet for {{ week_label }} before you decided it."
+			" It is no longer waiting for you.</p>"
+		),
+	},
 	"attendance_for_hr": {
 		"label": "Attendance request waiting for HR",
 		"audience": "HR",
@@ -1245,6 +1259,8 @@ def portal_home_page(user=None):
 RATE_LIMIT_POLICY = {
 	"update_my_profile": (20, 60),
 	"save_my_week": (30, 60),
+	# Plan 2026-10-04-003 U2: recall is a rare correction, not a loop.
+	"recall_my_week": (10, 60),
 	"act_on_approval": (30, 60),
 	"get_overdue_approvals": (60, 60),
 	"apply_for_leave": (20, 3600),

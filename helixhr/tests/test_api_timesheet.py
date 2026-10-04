@@ -11,6 +11,7 @@ from helixhr.api import (
 	get_my_timesheet_history,
 	get_my_week,
 	get_timesheet_week_start,
+	recall_my_week,
 	save_my_week,
 	submit_my_week,
 )
@@ -1246,3 +1247,182 @@ class TestTimesheetRecallAndCancel(IntegrationTestCase):
 			{"project": self.project, "month": month}, {"kind": "unscoped"}
 		)
 		return sum(row["hours"] for row in rows)
+
+
+class TestRecallMyWeekEndpoint(IntegrationTestCase):
+	"""Plan 2026-10-04-003 U2. The portal endpoint around the Recall
+	transition: the concurrency token, the state guards, the arrival notice
+	it clears and the bell it rings (R5, R6)."""
+
+	def setUp(self):
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		frappe.db.set_value("Employee", self.employee_name, "reports_to", self.manager_name)
+
+		method_name = self.id().split(".")[-1]
+		digest = int(hashlib.md5(self.id().encode()).hexdigest(), 16)
+		week_offset = (digest % 200000) * 7
+		self.monday, self.sunday = get_week_bounds(add_days(frappe.utils.today(), week_offset))
+		self.project = make_test_project(method_name, users=[EMPLOYEE_USER])
+		for key in ("save_my_week", "recall_my_week"):
+			frappe.cache.delete(f"helixhr:rate-limit:{key}:{EMPLOYEE_USER}")
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _week_row(self, hours=4, project=None):
+		return {
+			"date": str(self.monday),
+			"project": project or self.project,
+			"task": "",
+			"hours": hours,
+			"note": "worked",
+		}
+
+	def _pending_week(self):
+		frappe.set_user(EMPLOYEE_USER)
+		name = save_my_week(str(self.monday), json.dumps([self._week_row()]))
+		apply_workflow({"doctype": "Timesheet", "name": name}, "Submit")
+		return frappe.get_doc("Timesheet", name)
+
+	def test_recall_returns_the_week_to_draft_and_it_can_be_resent(self):
+		doc = self._pending_week()
+		previous_modified = doc.modified
+
+		frappe.set_user(EMPLOYEE_USER)
+		result = recall_my_week(str(self.monday), str(previous_modified))
+
+		self.assertEqual(result["name"], doc.name)
+		self.assertEqual(result["workflow_state"], "Draft")
+
+		# Editable again: the normal save-and-send path runs end to end.
+		save_my_week(str(self.monday), json.dumps([self._week_row(hours=6)]))
+		apply_workflow({"doctype": "Timesheet", "name": doc.name}, "Submit")
+		self.assertEqual(frappe.db.get_value("Timesheet", doc.name, "workflow_state"), "Pending Approval")
+
+	def test_recall_notifies_the_manager_and_clears_the_arrival_notice(self):
+		doc = self._pending_week()
+
+		arrival = frappe.get_all(
+			"Notification Log",
+			filters={"for_user": MANAGER_USER, "document_type": "Timesheet", "document_name": doc.name},
+		)
+		self.assertEqual(len(arrival), 1)
+
+		frappe.set_user(EMPLOYEE_USER)
+		recall_my_week(str(self.monday), str(doc.modified))
+
+		logs = frappe.get_all(
+			"Notification Log",
+			filters={"for_user": MANAGER_USER, "document_type": "Timesheet", "document_name": doc.name},
+			fields=["subject"],
+		)
+		self.assertEqual(len(logs), 1, "the arrival notice is cleared and only the recall remains")
+		self.assertIn("recalled", logs[0].subject.lower())
+
+	def test_recall_refused_once_approved(self):
+		doc = self._pending_week()
+
+		frappe.set_user(MANAGER_USER)
+		apply_workflow({"doctype": "Timesheet", "name": doc.name}, "Approve")
+
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			recall_my_week(str(self.monday), str(doc.modified))
+		self.assertIn("already approved", str(ctx.exception))
+
+	def test_recall_refused_in_pending_hr(self):
+		doc = self._pending_week()
+
+		frappe.set_user(MANAGER_USER)
+		apply_workflow({"doctype": "Timesheet", "name": doc.name}, "Send to HR")
+
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			recall_my_week(str(self.monday), str(doc.modified))
+		self.assertIn("HR", str(ctx.exception))
+
+	def test_recall_refused_when_sent_back(self):
+		doc = self._pending_week()
+
+		frappe.set_user(MANAGER_USER)
+		apply_workflow({"doctype": "Timesheet", "name": doc.name}, "Send Back")
+
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.ValidationError):
+			recall_my_week(str(self.monday), str(doc.modified))
+
+		frappe.set_user("Administrator")
+		self.assertEqual(
+			frappe.db.get_value("Timesheet", doc.name, "workflow_state"), "Sent Back"
+		)
+
+	def test_recall_with_a_stale_token_is_refused(self):
+		doc = self._pending_week()
+
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			recall_my_week(str(self.monday), "2000-01-01 00:00:00")
+		self.assertIn("changed", str(ctx.exception))
+
+		self.assertEqual(
+			frappe.db.get_value("Timesheet", doc.name, "workflow_state"), "Pending Approval"
+		)
+
+	def test_another_employees_week_is_not_recalled(self):
+		"""The endpoint reads only the caller's own week: another employee's
+		week_start answers "no timesheet", not the week itself."""
+		from helixhr.tests.utils import make_test_user
+
+		company = frappe.db.get_value("Employee", self.employee_name, "company")
+		other = make_test_user("recall-other@helixhr.test", company)
+		other_project = make_test_project(f"{self.id().split('.')[-1]}-other", users=[])
+		frappe.set_user("Administrator")
+		doc = frappe.get_doc(
+			{
+				"doctype": "Timesheet",
+				"employee": other,
+				"company": company,
+				"time_logs": [
+					{
+						"project": other_project,
+						"activity_type": "General",
+						"from_time": get_datetime(f"{self.monday} 09:00:00"),
+						"to_time": get_datetime(f"{self.monday} 12:00:00"),
+						"hours": 3,
+					}
+				],
+			}
+		)
+		doc.insert(ignore_permissions=True)
+		frappe.db.set_value("Timesheet", doc.name, "workflow_state", "Pending Approval")
+		frappe.db.set_value("Employee", other, "reports_to", self.manager_name)
+
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.DoesNotExistError):
+			recall_my_week(str(self.monday), None)
+
+		frappe.set_user("Administrator")
+		self.assertEqual(
+			frappe.db.get_value("Timesheet", doc.name, "workflow_state"), "Pending Approval"
+		)
+
+	def test_the_managers_stale_approve_names_the_recall(self):
+		"""R6: the manager who decides from a stale screen is told the
+		employee took the week back, not just that something moved."""
+		doc = self._pending_week()
+
+		frappe.set_user(EMPLOYEE_USER)
+		recall_my_week(str(self.monday), str(doc.modified))
+
+		frappe.set_user(MANAGER_USER)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			from helixhr.api import act_on_approval
+
+			act_on_approval(
+				"Timesheet",
+				doc.name,
+				"Approve",
+				expected_modified=str(doc.modified),
+				expected_state="Pending Approval",
+			)
+		self.assertIn("recalled", str(ctx.exception))

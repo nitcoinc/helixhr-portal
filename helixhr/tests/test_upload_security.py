@@ -305,6 +305,8 @@ class TestPerUserRateLimits(IntegrationTestCase):
 		expected = {
 			"update_my_profile": (20, 60),
 			"save_my_week": (30, 60),
+			# Plan 2026-10-04-003 U2: recall is a rare correction, not a loop.
+			"recall_my_week": (10, 60),
 			"act_on_approval": (30, 60),
 			"get_overdue_approvals": (60, 60),
 			"apply_for_leave": (20, 3600),

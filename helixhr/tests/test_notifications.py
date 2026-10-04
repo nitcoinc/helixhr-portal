@@ -1,4 +1,5 @@
 import hashlib
+import json
 import uuid
 
 import frappe
@@ -783,6 +784,70 @@ class TestHrQueueEmails(IntegrationTestCase):
 				{"for_user": self.EMAIL_EMPLOYEE_USER, "document_name": leave.name},
 			)
 		)
+
+	# --- Plan 2026-10-04-003 U2: the recall notices --------------------------
+
+	def _pending_week(self):
+		"""One submitted week for this class's employee, on a week unique to
+		the running test (the whole-suite convention for Timesheets)."""
+		from helixhr.api import save_my_week, submit_my_week
+		from helixhr.tests.test_api_timesheet import make_test_project
+
+		digest = int(hashlib.md5(self.id().encode()).hexdigest(), 16)
+		monday, _sunday = get_week_bounds(add_days(today(), 300 + (digest % 200)))
+		project = make_test_project(f"recall-{self.id().split('.')[-1]}", users=[self.EMAIL_EMPLOYEE_USER])
+		rows = [{"date": str(monday), "project": project, "task": "", "hours": 4, "note": ""}]
+		frappe.set_user(self.EMAIL_EMPLOYEE_USER)
+		submit_my_week(str(monday), json.dumps(rows))
+		timesheet = frappe.db.get_value(
+			"Timesheet", {"employee": self.employee_name, "start_date": str(monday)}, "name"
+		)
+		frappe.set_user("Administrator")
+		return monday, timesheet
+
+	def test_a_recalled_week_mails_the_manager_once(self):
+		import json
+
+		from helixhr.api import recall_my_week
+
+		monday, timesheet = self._pending_week()
+		added = self._watch_mail()
+
+		frappe.set_user(self.EMAIL_EMPLOYEE_USER)
+		recall_my_week(str(monday))
+
+		mails = self._to(added(), MANAGER_USER)
+		self.assertEqual(len(mails), 1)
+		self.assertIn("recalled", self._message(mails[0]).lower())
+
+		frappe.set_user("Administrator")
+		self.assertEqual(
+			frappe.db.get_value("Timesheet", timesheet, "workflow_state"), "Draft"
+		)
+
+	def test_a_recall_bells_the_manager_and_clears_the_arrival(self):
+		import json
+
+		from helixhr.api import recall_my_week
+
+		monday, timesheet = self._pending_week()
+
+		arrival = frappe.get_all(
+			"Notification Log",
+			filters={"for_user": MANAGER_USER, "document_type": "Timesheet", "document_name": timesheet},
+		)
+		self.assertEqual(len(arrival), 1, "the submit rang the manager's bell")
+
+		frappe.set_user(self.EMAIL_EMPLOYEE_USER)
+		recall_my_week(str(monday))
+
+		logs = frappe.get_all(
+			"Notification Log",
+			filters={"for_user": MANAGER_USER, "document_type": "Timesheet", "document_name": timesheet},
+			pluck="subject",
+		)
+		self.assertEqual(len(logs), 1, "the arrival notice is cleared and only the recall remains")
+		self.assertIn("recalled", logs[0].lower())
 
 
 class TestNotificationTemplateEscaping(IntegrationTestCase):

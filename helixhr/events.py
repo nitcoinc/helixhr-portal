@@ -306,6 +306,21 @@ def _mail_timesheet_change(doc, before):
 			_hr_managers(),
 			lambda: context(action_url=_portal_url(f"approvals/timesheet/{doc.name}")),
 		)
+	elif state == "Draft" and before.get("workflow_state") == PENDING_STATE:
+		# Plan 2026-10-04-003 U2 / R5, R21: the employee took the week back.
+		# The manager hears it once as a bell and once as the
+		# timesheet_recalled email; nobody is told about their own action.
+		manager_user = _approver_user(doc.employee)
+		_notify_manager_of_arrival(
+			"Timesheet",
+			doc,
+			manager_user,
+			_("{0} recalled their week for {1} to {2}").format(
+				doc.employee_name or doc.employee, doc.start_date, doc.end_date
+			),
+		)
+		if manager_user and manager_user != frappe.session.user:
+			_mail(doc, "timesheet_recalled", [manager_user], lambda: context())
 	elif state in ("Approved", TIMESHEET_SENT_BACK):
 		sent_back = state == TIMESHEET_SENT_BACK
 		_mail(
