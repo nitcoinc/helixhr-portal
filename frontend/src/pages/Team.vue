@@ -64,6 +64,7 @@ const team = createResource({
   makeParams: () => ({ week_start: weekStart.value }),
   auto: true,
 })
+watch(weekStart, () => team.fetch())
 const teamTimesheets = createResource({
   url: 'helixhr.api.get_my_team_timesheets',
   makeParams: () => ({ week_start: weekStart.value }),
