@@ -9941,6 +9941,305 @@ _TEAM_LEAVE_LIMIT = 500
 
 
 @frappe.whitelist()
+def get_my_team_timesheets(week_start=None):
+	"""Every current direct report's week, in any state (plan 2026-10-04-003
+	U4, R1-R4).
+
+	Approved weeks are no longer shared with the manager -- the DocShare
+	leaves with the decision -- so a permission-scoped read cannot work and
+	this projection reads with an explicit field allow-list under
+	`ignore_permissions` (KTD9), exactly the trade Team week's leave half
+	already makes. Scope stays the caller's own active direct reports, which
+	is what the share model ever granted.
+
+	Batched: one query for the reports, one for the weeks, one for the time
+	logs (which answers both the per-day hours and the project split), one
+	for the holiday lists, one for the holiday rows, one for approved leave,
+	one for the open change requests. A 50-report week is seven queries, not
+	one per row.
+	"""
+	rate_limit_per_user("get_my_team_week")
+	manager = get_current_employee()
+	monday, sunday = get_week_bounds(week_start or user_today())
+
+	total_reports = _count_direct_reports(manager)
+	if not total_reports:
+		frappe.throw(
+			_("Only a manager with people reporting to them has a team week to show."),
+			frappe.PermissionError,
+		)
+
+	reports = frappe.get_all(
+		"Employee",
+		filters=_direct_report_filters(manager),
+		fields=["name", "employee_name"],
+		order_by="employee_name asc",
+		limit=_TEAM_REPORT_LIMIT,
+		ignore_permissions=True,
+	)
+	employees = [report.name for report in reports]
+
+	# The same "newest non-cancelled row inside the week" rule
+	# `_week_timesheet` owns for one employee, run for the set at once.
+	weeks = frappe.get_all(
+		"Timesheet",
+		filters={
+			"employee": ["in", employees],
+			"start_date": ["between", [str(monday), str(sunday)]],
+			"docstatus": ["!=", 2],
+		},
+		fields=[
+			"name",
+			"employee",
+			"employee_name",
+			"workflow_state",
+			"total_hours",
+			"helixhr_decision_reason",
+			"modified",
+		],
+		order_by="creation asc",
+		limit=_TEAM_REPORT_LIMIT,
+		ignore_permissions=True,
+	)
+	by_employee = {row.employee: row for row in weeks}
+	timesheet_names = [row.name for row in by_employee.values()]
+
+	day_hours, project_split = _team_time_logs(timesheet_names)
+	expected = _team_expected_hours(employees, monday, sunday)
+	changes = _team_open_changes(employees)
+
+	rows = [
+		{
+			"employee": report.name,
+			"employee_name": report.employee_name,
+			"initials": _initials(report.employee_name),
+			# "Not started" is the honest state for a week with no Timesheet
+			# row at all -- a manager chases it the same way they chase a
+			# draft (R4).
+			"state": by_employee[report.name].workflow_state if report.name in by_employee else None,
+			"timesheet": by_employee[report.name].name if report.name in by_employee else None,
+			"total_hours": flt(by_employee[report.name].total_hours) if report.name in by_employee else 0.0,
+			"expected_hours": expected.get(report.name),
+			"hours": day_hours.get(by_employee[report.name].name, {}) if report.name in by_employee else {},
+			"projects": project_split.get(by_employee[report.name].name, []) if report.name in by_employee else [],
+			"decision_reason": (by_employee[report.name].helixhr_decision_reason or "").strip() or None
+			if report.name in by_employee
+			else None,
+			"open_change": changes.get(report.name),
+		}
+		for report in reports
+	]
+	_with_photo_urls(rows)
+
+	return {
+		"week_start": str(monday),
+		"week_end": str(sunday),
+		"reports": rows,
+		"total_reports": total_reports,
+	}
+
+
+def _team_time_logs(timesheet_names):
+	"""`({timesheet: {date: hours}}, {timesheet: [{project, hours}]})` from
+	one query over the page's time logs. Project, task, hours and the day
+	they were logged on only -- never rates, costing or billing amounts
+	(R3)."""
+	if not timesheet_names:
+		return {}, {}
+	day_hours = {}
+	split = {}
+	for row in frappe.get_all(
+		"Timesheet Detail",
+		filters={"parent": ["in", timesheet_names]},
+		fields=["parent", "from_time", "project", "task", "hours"],
+		order_by="parent asc, idx asc",
+	):
+		day = str(get_datetime(row.from_time).date()) if row.from_time else None
+		if day:
+			day_hours.setdefault(row.parent, {})
+			day_hours[row.parent][day] = flt(day_hours[row.parent].get(day, 0)) + flt(row.hours)
+		if row.project:
+			entries = split.setdefault(row.parent, [])
+			entry = next((e for e in entries if e["project"] == row.project), None)
+			if entry:
+				entry["hours"] = flt(entry["hours"]) + flt(row.hours)
+			else:
+				entries.append({"project": row.project, "hours": flt(row.hours)})
+	return day_hours, split
+
+
+def _team_expected_hours(employees, monday, sunday):
+	"""`{employee: hours or None}` -- KTD7's expected hours, batched.
+
+	`standard_working_hours` a day times the employee's working days in the
+	week: a day the holiday list marks off does not count, and neither does
+	a day approved leave covers. No standard hours configured (or no holiday
+	list to define a working week) answers None, which the flags treat as
+	"no hours flag" and the screen as "not measured".
+	"""
+	standard = flt(frappe.db.get_single_value("HR Settings", "standard_working_hours")) or None
+	if not standard:
+		return {employee: None for employee in employees}
+
+	rows = frappe.get_all(
+		"Employee",
+		filters={"name": ["in", list(employees)]},
+		fields=["name", "holiday_list", "company"],
+		ignore_permissions=True,
+	)
+	defaults = {
+		row.name: row.default_holiday_list
+		for row in frappe.get_all("Company", fields=["name", "default_holiday_list"])
+	}
+	lists = {}
+	for row in rows:
+		lists[row.name] = row.holiday_list or defaults.get(row.company)
+
+	holidays = {}
+	if any(lists.values()):
+		for row in frappe.get_all(
+			"Holiday",
+			filters={
+				"parent": ["in", [name for name in lists.values() if name]],
+				"parenttype": "Holiday List",
+				"holiday_date": ["between", [str(monday), str(sunday)]],
+			},
+			fields=["parent", "holiday_date"],
+			ignore_permissions=True,
+		):
+			holidays.setdefault(row.parent, set()).add(str(row.holiday_date))
+
+	leave_days = {}
+	leaves = frappe.get_all(
+		"Leave Application",
+		filters={
+			"employee": ["in", list(employees)],
+			"docstatus": 1,
+			"status": "Approved",
+			"from_date": ["<=", str(sunday)],
+			"to_date": [">=", str(monday)],
+		},
+		fields=["employee", "from_date", "to_date"],
+		ignore_permissions=True,
+	)
+	for leave in leaves:
+		days = leave_days.setdefault(leave.employee, set())
+		date = max(getdate(leave.from_date), monday)
+		last = min(getdate(leave.to_date), sunday)
+		while date <= last:
+			days.add(str(date))
+			date = add_days(date, 1)
+
+	expected = {}
+	for employee in employees:
+		off_days = holidays.get(lists.get(employee), set())
+		days = 0
+		for offset in range(7):
+			date = str(add_days(monday, offset))
+			if date in off_days or date in leave_days.get(employee, set()):
+				continue
+			days += 1
+		expected[employee] = flt(standard * days) if days else None
+	return expected
+
+
+def _team_open_changes(employees):
+	"""`{employee: {name, comment}}` -- the one open change request each
+	report has, if any (R2's "Change requested" state rides it)."""
+	if not employees:
+		return {}
+	return {
+		row.employee: {"name": row.name, "comment": row.comment}
+		for row in frappe.get_all(
+			"HelixHR Timesheet Change",
+			filters={"employee": ["in", list(employees)], "status": "Open"},
+			fields=["name", "employee", "comment"],
+			ignore_permissions=True,
+		)
+	}
+
+
+@frappe.whitelist()
+def get_team_member_week(employee, week_start):
+	"""One report's week read-only: tasks by day, hours, the decision trail
+	and any open change request (plan 2026-10-04-003 U4, R3).
+
+	Authorized here, not by Frappe: an approved week carries no DocShare
+	any more, so `frappe.get_doc`'s read (which checks nothing) is exactly
+	why the allow-list below is explicit and the scope check above runs
+	first. Cost, billing and rate fields never leave the server.
+	"""
+	rate_limit_per_user("get_my_team_week")
+	manager = get_current_employee()
+	if not frappe.db.exists("Employee", {"name": employee, **_direct_report_filters(manager)}):
+		frappe.throw(_("That person is not on your team."), frappe.PermissionError)
+
+	monday, sunday = get_week_bounds(week_start)
+	current = _week_timesheet(
+		employee,
+		monday,
+		("name", "workflow_state", "total_hours", "helixhr_decision_reason"),
+		sunday,
+	)
+
+	response = {
+		"employee": employee,
+		"week_start": str(monday),
+		"week_end": str(sunday),
+		"timesheet": None,
+	}
+	if not current:
+		return response
+
+	doc = frappe.get_doc("Timesheet", current.name)
+	day_hours, project_split = _team_time_logs([current.name])
+	change = _open_week_change(current.name, fields=("name", "status", "comment", "creation"))
+
+	response["timesheet"] = {
+		"name": doc.name,
+		"state": doc.workflow_state,
+		"total_hours": flt(doc.total_hours),
+		"expected_hours": _team_expected_hours([employee], monday, sunday).get(employee),
+		"hours": day_hours.get(current.name, {}),
+		"projects": project_split.get(current.name, []),
+		"decision_reason": (doc.helixhr_decision_reason or "").strip() or None,
+		"rows": [
+			{
+				"project": row.project,
+				"task": row.task,
+				"hours": flt(row.hours),
+				"note": row.description,
+				"date": _row_date(row),
+			}
+			for row in doc.time_logs
+		],
+		# The decision trail: the workflow's own state comments plus any
+		# reason the approver wrote, named by full name so no User record is
+		# ever needed to read it.
+		"trail": [
+			{
+				"on": str(comment.creation),
+				"kind": comment.comment_type,
+				"by": frappe.utils.get_fullname(comment.owner),
+				"text": comment.content,
+			}
+			for comment in frappe.get_all(
+				"Comment",
+				filters={
+					"reference_doctype": "Timesheet",
+					"reference_name": current.name,
+					"comment_type": ["in", ["Workflow", "Comment"]],
+				},
+				fields=["creation", "comment_type", "content", "owner"],
+				order_by="creation asc",
+			)
+		],
+		"open_change": {"name": change.name, "comment": change.comment} if change else None,
+	}
+	return response
+
+
+@frappe.whitelist()
 def get_my_team_week(week_start=None):
 	"""The week's approved and waiting leave for the logged-in manager's
 	active direct reports (P3-R20, P3-R21, P3-R23).

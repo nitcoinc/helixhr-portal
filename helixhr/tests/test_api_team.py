@@ -2,7 +2,12 @@ import frappe
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days
 
-from helixhr.api import get_my_team_week, get_portal_bootstrap
+from helixhr.api import (
+	get_my_team_timesheets,
+	get_my_team_week,
+	get_portal_bootstrap,
+	get_team_member_week,
+)
 from helixhr.tests.utils import (
 	MANAGER_USER,
 	OTHER_MANAGER_USER,
@@ -358,3 +363,248 @@ class TestHelixHRTeamWeek(IntegrationTestCase):
 			frappe.db.count("Employee", {"reports_to": self.manager_name, "status": "Active"}),
 		)
 		self.assertGreaterEqual(payload["total_reports"], 1)
+
+
+class TestTeamTimesheets(IntegrationTestCase):
+	"""Plan 2026-10-04-003 U4 (R1-R4). The timesheets half of the Team page:
+	every current direct report's week in any state, read as a projection
+	because an approved week carries no DocShare any more (KTD9)."""
+
+	def setUp(self):
+		self.employee_name, self.employee_user, self.manager_name, _ = make_test_employee_and_manager()
+		self.company = frappe.db.get_value("Employee", self.manager_name, "company")
+		frappe.set_user("Administrator")
+		frappe.db.set_value("Employee", self.employee_name, "reports_to", self.manager_name)
+		# This class's bulk reports persist between runs (the runbook's
+		# long-lived-bench note); detach any leftovers so each test's team is
+		# exactly the fixture employee plus what it seeds itself.
+		for name in frappe.get_all(
+			"Employee", filters={"employee_number": ["like", "_test-team-ts-%"]}, pluck="name"
+		):
+			frappe.db.set_value("Employee", name, "reports_to", None)
+		self.project = frappe.db.get_value("Project", {"company": self.company}, "name")
+		if not self.project:
+			self.project = (
+				frappe.get_doc(
+					{"doctype": "Project", "project_name": "_Test Team Project", "company": self.company}
+				)
+				.insert(ignore_permissions=True)
+				.name
+			)
+		self.monday = self._own_monday()
+		frappe.set_user(MANAGER_USER)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _own_monday(self):
+		import hashlib
+
+		digest = int(hashlib.md5(self.id().encode()).hexdigest(), 16)
+		return add_days("2019-01-07", (digest % 800) * 7)
+
+	def _seed_report(self, suffix):
+		name = frappe.db.get_value("Employee", {"employee_number": f"_test-team-ts-{suffix}"}, "name")
+		if not name:
+			doc = frappe.get_doc(
+				{
+					"doctype": "Employee",
+					"employee_number": f"_test-team-ts-{suffix}",
+					"first_name": "Report",
+					"last_name": suffix,
+					"company": self.company,
+					"date_of_birth": "1990-01-01",
+					"date_of_joining": "2020-01-01",
+					"gender": frappe.db.get_value("Gender", {}, "name"),
+					"status": "Active",
+				}
+			)
+			doc.insert(ignore_permissions=True)
+			name = doc.name
+		frappe.db.set_value("Employee", name, "reports_to", self.manager_name)
+		return name
+
+	def _seed_week(self, employee, hours, state, suffix):
+		"""One Timesheet week for `employee`, planted straight into the
+		tables -- the read projection's assertions are about the columns, not
+		about the write path (the write path has suites of its own)."""
+		from datetime import datetime
+
+		doc = frappe.get_doc(
+			{
+				"doctype": "Timesheet",
+				"employee": employee,
+				"company": self.company,
+				"time_logs": [
+					{
+						"project": self.project,
+						"activity_type": "General",
+						"from_time": datetime.strptime(f"{self.monday} 09:00:00", "%Y-%m-%d %H:%M:%S"),
+						"to_time": datetime.strptime(f"{self.monday} 13:00:00", "%Y-%m-%d %H:%M:%S"),
+						"hours": hours,
+					}
+				],
+			}
+		)
+		doc.insert(ignore_permissions=True)
+		docstatus = 1 if state == "Approved" else 0
+		frappe.db.set_value(
+			"Timesheet",
+			doc.name,
+			{"workflow_state": state, "docstatus": docstatus, "helixhr_decision_reason": None},
+		)
+		if docstatus:
+			frappe.db.set_value("Timesheet Detail", {"parent": doc.name}, "docstatus", 1)
+		return doc.name
+
+	def _team(self, week_start):
+		frappe.set_user(MANAGER_USER)
+		return get_my_team_timesheets(week_start)
+
+	def _row(self, payload, employee):
+		return next((row for row in payload["reports"] if row["employee"] == employee), None)
+
+	def test_three_reports_three_states_including_not_started(self):
+		second = self._seed_report("second")
+		third = self._seed_report("third")
+		approved = self._seed_week(self.employee_name, 4, "Approved", "a")
+		pending = self._seed_week(second, 2, "Pending Approval", "p")
+
+		payload = self._team(self.monday)
+		row = self._row(payload, self.employee_name)
+		self.assertEqual(row["state"], "Approved")
+		self.assertEqual(row["timesheet"], approved)
+		self.assertEqual(row["total_hours"], 4)
+
+		row = self._row(payload, second)
+		self.assertEqual(row["state"], "Pending Approval")
+		self.assertEqual(row["timesheet"], pending)
+
+		row = self._row(payload, third)
+		self.assertIsNone(row["state"])
+		self.assertIsNone(row["timesheet"])
+		self.assertEqual(row["total_hours"], 0)
+
+	def test_an_approved_week_is_readable_after_the_share_is_gone(self):
+		"""KTD9's whole reason: the DocShare left with the decision, so the
+		projection is the only way the manager still sees the week."""
+		self._seed_week(self.employee_name, 4, "Approved", "a")
+		from frappe.share import get_users
+
+		self.assertEqual([row.user for row in get_users("Timesheet", self._seeded_name())], [])
+		member = get_team_member_week(self.employee_name, str(self.monday))
+		self.assertIsNotNone(member["timesheet"])
+		self.assertEqual(member["timesheet"]["state"], "Approved")
+
+	def _seeded_name(self):
+		return frappe.db.get_value(
+			"Timesheet", {"employee": self.employee_name, "start_date": str(self.monday)}
+		)
+
+	def test_a_non_report_employees_week_is_refused(self):
+		other = make_test_user(OTHER_MANAGER_USER, self.company)
+		with self.assertRaises(frappe.PermissionError):
+			frappe.set_user(MANAGER_USER)
+			get_team_member_week(other, str(self.monday))
+
+	def test_the_projection_never_carries_cost_or_billing_fields(self):
+		"""R3: the manager reads hours, never money. The seeded week's
+		Timesheet Detail rows do carry ERPNext's own costing columns in the
+		database; the payload must not."""
+		self._seed_week(self.employee_name, 4, "Approved", "a")
+		frappe.set_user(MANAGER_USER)
+		payload = get_my_team_timesheets(str(self.monday))
+		row = self._row(payload, self.employee_name)
+		allowed = {
+			"employee",
+			"employee_name",
+			"initials",
+			"state",
+			"timesheet",
+			"total_hours",
+			"expected_hours",
+			"hours",
+			"projects",
+			"decision_reason",
+			"open_change",
+			"photo_url",
+		}
+		self.assertEqual(set(row), allowed)
+
+		member = get_team_member_week(self.employee_name, str(self.monday))
+		row_keys = set(member["timesheet"]["rows"][0])
+		self.assertEqual(row_keys, {"project", "task", "hours", "note", "date"})
+		self.assertNotIn("costing_amount", str(payload))
+		self.assertNotIn("billing_amount", str(payload))
+
+	def test_a_week_with_an_open_change_request_shows_it(self):
+		from helixhr.api import raise_timesheet_change
+
+		self._seed_week(self.employee_name, 4, "Approved", "a")
+		frappe.set_user(self.employee_user)
+		change = raise_timesheet_change(str(self.monday), "Tuesday should be six hours, not two")
+		frappe.set_user(MANAGER_USER)
+
+		payload = self._team(self.monday)
+		row = self._row(payload, self.employee_name)
+		self.assertEqual(row["open_change"]["name"], change["name"])
+
+		member = get_team_member_week(self.employee_name, str(self.monday))
+		self.assertEqual(member["timesheet"]["open_change"]["name"], change["name"])
+
+	def test_expected_hours_count_holidays_and_approved_leave(self):
+		"""KTD7's arithmetic, through the team projection: the employee's
+		holiday list marks a day off and approved leave covers another, so a
+		40-hour standard week expects the rest."""
+		from helixhr.tests.utils import ensure_holiday_list_assignment
+
+		standard = frappe.db.get_single_value("HR Settings", "standard_working_hours")
+		if not standard:
+			self.skipTest("this bench has no standard_working_hours configured")
+		holiday_list = ensure_holiday_list_assignment(self.company)
+		holidays = frappe.get_all(
+			"Holiday",
+			filters={"parent": holiday_list, "holiday_date": ["between", [str(self.monday), str(add_days(self.monday, 6))]]},
+			fields=["holiday_date"],
+		)
+		holiday_days = {str(row.holiday_date) for row in holidays}
+		# An approved leave on a non-holiday day inside the week.
+		leave_day = next(
+			(str(add_days(self.monday, offset)) for offset in range(7) if str(add_days(self.monday, offset)) not in holiday_days),
+			None,
+		)
+		expected = self._team(self.monday)["reports"][0]["expected_hours"]
+		working_days = 7 - len(holiday_days) - (1 if leave_day else 0)
+		self.assertEqual(expected, standard * working_days)
+
+	def test_fifty_reports_is_fifty_rows_and_a_bounded_number_of_queries(self):
+		for index in range(49):
+			self._seed_report(f"bulk{index}")
+		frappe.set_user(MANAGER_USER)
+
+		from unittest.mock import patch
+
+		count = {"n": 0}
+		real_sql = frappe.db.sql
+
+		def counting_sql(*args, **kwargs):
+			count["n"] += 1
+			return real_sql(*args, **kwargs)
+
+		# One warm call first: the DocType/meta loads a cold process pays are
+		# cache priming, not this projection's cost, and counting them would
+		# measure the bench's temperature instead of the batching.
+		get_my_team_timesheets(str(self.monday))
+		with patch.object(frappe.db, "sql", side_effect=counting_sql):
+			payload = get_my_team_timesheets(str(self.monday))
+
+		self.assertEqual(len(payload["reports"]), 50)
+		self.assertLessEqual(count["n"], 14, "the team projection must stay batched")
+
+		# The bulk reports persist between runs; hand them back so no other
+		# suite inherits a 50-person team it did not ask for.
+		frappe.set_user("Administrator")
+		for index in range(49):
+			name = frappe.db.get_value("Employee", {"employee_number": f"_test-team-ts-bulk{index}"})
+			frappe.db.set_value("Employee", name, "reports_to", None)
+
