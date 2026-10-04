@@ -2217,18 +2217,16 @@ def _hr_request_summaries(employee, today, states=None, picked_up_by=None, route
 	* `limit` / `start` page the feed; the queue stays bounded at
 	  `_QUEUE_FETCH` and reports a floor instead (P3-R25).
 
+	The filter dict itself is built by `_request_summaries_filters`, so the
+	feed's page and its count can never ask two different questions.
+
 	Rows always carry `picked_up_by_name` (resolved server-side, KTD4) and
 	`sla_overdue` (the category's SLA against age, `is_overdue`'s predicate)
 	-- keys the queue's consumers ignore and the feed renders.
 	"""
-	filters = {
-		"status": ["in", states or (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS)],
-		"employee": ["!=", employee],
-	}
-	if picked_up_by:
-		filters["picked_up_by"] = picked_up_by
-	if routed_roles:
-		filters["routed_to_role"] = ["in", routed_roles]
+	filters = _request_summaries_filters(
+		employee, states or (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS), picked_up_by, routed_roles
+	)
 	rows = frappe.get_list(
 		"HR Request",
 		filters=filters,
@@ -2301,6 +2299,22 @@ def _hr_request_summaries(employee, today, states=None, picked_up_by=None, route
 	]
 
 
+def _request_summaries_filters(employee, states, picked_up_by=None, routed_roles=None):
+	"""The one place the request summaries' filter dict is built: the queue,
+	the work feed's page and the feed's count all ask through it, so the
+	"both views read one function" claim (plan 2026-10-04-002 KTD5) cannot
+	drift into two hand-built copies of the same rule."""
+	filters = {
+		"status": ["in", states],
+		"employee": ["!=", employee],
+	}
+	if picked_up_by:
+		filters["picked_up_by"] = picked_up_by
+	if routed_roles:
+		filters["routed_to_role"] = ["in", routed_roles]
+	return filters
+
+
 # Plan 2026-10-04-002 U3: the "To work on" chips. Each chip names the
 # statuses it can mean; "open" is the working set, "waiting" is the ball in
 # the employee's hands, "closed" is off by default.
@@ -2363,12 +2377,12 @@ def get_request_work(state=None, limit=None, start=0):
 	total = len(
 		frappe.get_list(
 			"HR Request",
-			filters={
-				"status": ["in", filters["states"]],
-				"employee": ["!=", employee],
-				"routed_to_role": ["in", routed_roles],
-				**({"picked_up_by": frappe.session.user} if state == "mine" else {}),
-			},
+			filters=_request_summaries_filters(
+				employee,
+				_REQUEST_WORK_STATES[state],
+				frappe.session.user if state == "mine" else None,
+				routed_roles,
+			),
 			pluck="name",
 			limit_page_length=0,
 		)

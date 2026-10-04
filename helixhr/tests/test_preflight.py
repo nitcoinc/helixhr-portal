@@ -376,6 +376,22 @@ class TestPreflight(IntegrationTestCase):
 		finally:
 			frappe.delete_doc("HelixHR Request Category", category.name, force=True, ignore_permissions=True)
 
+	def test_request_category_prefixes_fail_on_a_corrupt_stored_prefix(self):
+		"""Plan 2026-10-04-002 U1: a prefix written around the doctype's own
+		validate would build a broken naming series for every new request in
+		that category, so preflight names it instead of letting naming accept
+		whatever the Data field carries."""
+		self.assertEqual(preflight.check_request_category_prefixes()["status"], preflight.PASS)
+
+		original = frappe.db.get_value("HelixHR Request Category", "IT / Asset", "name_prefix")
+		frappe.db.set_value("HelixHR Request Category", "IT / Asset", "name_prefix", "IT REQ!")
+		try:
+			result = preflight.check_request_category_prefixes()
+			self.assertEqual(result["status"], preflight.FAIL)
+			self.assertIn("IT / Asset", result["detail"])
+		finally:
+			frappe.db.set_value("HelixHR Request Category", "IT / Asset", "name_prefix", original)
+
 	def test_run_exits_non_zero_when_something_fails(self):
 		def _run():
 			with self.assertRaises(SystemExit):

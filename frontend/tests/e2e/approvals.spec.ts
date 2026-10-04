@@ -565,6 +565,14 @@ test('the Requests page gains a To work on tab for a routed worker', async ({ pa
     ).toHaveAttribute('aria-pressed', 'true')
     await expect(page.locator('[data-testid="work-row"]', { hasText: subject })).toBeVisible()
 
+    // The other chips restore the same way; nothing is waiting on the
+    // employee yet, so the chip presses on and the list answers empty.
+    await page.goto('/helixhr/requests?tab=work&state=waiting')
+    await expect(
+      page.getByTestId('work-filter-chips').getByRole('button', { name: 'Waiting on employee' }),
+    ).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.locator('[data-testid="work-row"]')).toHaveCount(0)
+
     // Keyboard: the tablist switches with the arrow keys.
     await page.goto('/helixhr/requests')
     await page.getByRole('tab', { name: 'My requests' }).focus()

@@ -1013,6 +1013,36 @@ def check_request_category_routes():
 	return _result("Request category routes", PASS, f"{len(categories)} active categor{'y' if len(categories) == 1 else 'ies'} routable")
 
 
+def check_request_category_prefixes():
+	"""Plan 2026-10-04-002 U1: a stored prefix that no longer matches
+	`NAME_PREFIX_PATTERN` -- a fixture or Desk-side write that bypassed the
+	doctype's own `validate` -- would build a broken naming series for every
+	new request in that category. Naming accepts whatever the Data field
+	carries, so the corruption surfaces as unusable IDs, not a save error.
+	"""
+	if not frappe.db.exists("DocType", "HelixHR Request Category"):
+		return _result("Request category prefixes", WARN, "HelixHR Request Category not installed")
+	from helixhr.helixhr.doctype.helixhr_request_category.helixhr_request_category import (
+		NAME_PREFIX_PATTERN,
+	)
+
+	bad = [
+		category.name
+		for category in frappe.get_all("HelixHR Request Category", fields=["name", "name_prefix"])
+		if category.name_prefix
+		and (
+			not NAME_PREFIX_PATTERN.fullmatch(category.name_prefix) or category.name_prefix.endswith("-")
+		)
+	]
+	if bad:
+		return _result(
+			"Request category prefixes",
+			FAIL,
+			"stored prefix fails the format, would break naming: " + ", ".join(bad) + " -- fix it in Settings > Categories",
+		)
+	return _result("Request category prefixes", PASS, "stored prefixes match the format")
+
+
 # --- check-in (P3-U1 step 6, P3-R26) ---------------------------------------
 
 
@@ -1561,6 +1591,7 @@ CHECKS = [
 	check_hrms_leave_notification,
 	check_hr_request_workflow_state_order,
 	check_request_category_routes,
+	check_request_category_prefixes,
 	check_profile_correction_category,
 	check_checkin_settings,
 	check_shift_types,
