@@ -36,12 +36,15 @@ class _UploadedFile:
 
 
 class _Request:
-	"""Only the two attributes Frappe reaches for on `frappe.local.request`
-	while a File is being written: the multipart body, and the host it would
+	"""Only the attributes Frappe reaches for on `frappe.local.request`
+	while a File is being written: the multipart body, the host it would
 	build an absolute URL from (None, so `get_url` falls back to the site
-	config the way it does in a background job)."""
+	config the way it does in a background job), and `path` -- which the
+	email footer's Jinja globals read while queueing the notices these
+	writes trigger (seen on frappe 16.36)."""
 
 	host = None
+	path = "/"
 
 	def __init__(self, files):
 		self.files = files
