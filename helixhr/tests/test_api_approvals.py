@@ -2455,25 +2455,19 @@ class TestBulkApproval(IntegrationTestCase):
 				}
 			).insert(ignore_permissions=True).submit()
 		# The batch commits per item, so approved leave permanently consumes
-		# the shared fixture employee's balance; heal the allocation for the
-		# runs after this one (the ledger follows the document's own save).
+		# the shared fixture employee's balance. Top the allocation up to a
+		# working level rather than incrementing it forever: an allocation
+		# larger than its own period refuses to save, and earlier runs have
+		# already pushed this one around (the runbook's balance-baseline
+		# note). The document's own save keeps the ledger with it.
 		allocation = frappe.db.get_value(
 			"Leave Allocation",
 			{"employee": self.employee_name, "leave_type": "Casual Leave", "docstatus": 1},
 			"name",
 		)
-		if allocation:
+		if allocation and flt(frappe.db.get_value("Leave Allocation", allocation, "new_leaves_allocated")) < 30:
 			allocation_doc = frappe.get_doc("Leave Allocation", allocation)
-			allocation_doc.new_leaves_allocated = flt(allocation_doc.new_leaves_allocated) + 10
-			allocation_doc.save(ignore_permissions=True)
-		leave_allocation = frappe.db.get_value(
-			"Leave Allocation",
-			{"employee": self.leave_name, "leave_type": "Casual Leave", "docstatus": 1},
-			"name",
-		)
-		if leave_allocation:
-			allocation_doc = frappe.get_doc("Leave Allocation", leave_allocation)
-			allocation_doc.new_leaves_allocated = flt(allocation_doc.new_leaves_allocated) + 10
+			allocation_doc.new_leaves_allocated = 30
 			allocation_doc.save(ignore_permissions=True)
 		# Open leave from earlier runs would trip HRMS's pending-balance
 		# check for every later request; this test's leave starts clean.
