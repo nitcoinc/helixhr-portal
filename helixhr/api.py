@@ -39,8 +39,10 @@ from hrms.utils.holiday_list import get_holiday_list_for_employee
 from helixhr.events import (
 	DECISION_REASON_FIELD,
 	HR_REPLY_SUBJECT_PREFIX,
+	HR_REQUEST_DONE,
 	HR_REQUEST_IN_PROGRESS,
 	HR_REQUEST_OPEN,
+	HR_REQUEST_REJECTED,
 	HR_REQUEST_WAITING_ON_EMPLOYEE,
 	LEAVE_STAGE_HR,
 	PENDING_SINCE_FIELD,
@@ -2174,7 +2176,7 @@ def _hr_attendance_request_summaries(employee, today):
 	]
 
 
-def _hr_request_summaries(employee, today):
+def _hr_request_summaries(employee, today, states=None, picked_up_by=None, routed_roles=None, limit=None, start=None):
 	"""Every routed request the session user may work right now (P5-R11,
 	P5-R12).
 
@@ -2194,13 +2196,38 @@ def _hr_request_summaries(employee, today):
 	`for_hr` is true only when the **stored** route is HR Manager: an IT
 	Team holder's rows must never carry Home's "waiting for HR" caption
 	(P4-KTD7's tag, applied to a fourth kind for the first time).
+
+	Plan 2026-10-04-002 U3 / KTD5: the same query behind the Requests page's
+	"To work on" tab, so counts can never disagree between the two views.
+	The optional arguments widen or narrow what Approvals asks by default:
+
+	* `states` replaces the default Open / In Progress pair -- the work
+	  feed's Waiting and Closed chips ask for the other statuses explicitly;
+	  nothing else does, so the queue keeps excluding "Waiting on Employee"
+	  and "Done / Rejected".
+	* `picked_up_by` narrows to the rows that caller picked up (the Mine
+	  chip). The queue never passes it.
+	* `routed_roles` narrows to the roles the caller holds -- an HR Manager
+	  cannot act on an IT-routed row, so the work feed refuses to show one;
+	  the queue keeps its wider behaviour untouched.
+	* `limit` / `start` page the feed; the queue stays bounded at
+	  `_QUEUE_FETCH` and reports a floor instead (P3-R25).
+
+	Rows always carry `picked_up_by_name` (resolved server-side, KTD4) and
+	`sla_overdue` (the category's SLA against age, `is_overdue`'s predicate)
+	-- keys the queue's consumers ignore and the feed renders.
 	"""
+	filters = {
+		"status": ["in", states or (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS)],
+		"employee": ["!=", employee],
+	}
+	if picked_up_by:
+		filters["picked_up_by"] = picked_up_by
+	if routed_roles:
+		filters["routed_to_role"] = ["in", routed_roles]
 	rows = frappe.get_list(
 		"HR Request",
-		filters={
-			"status": ["in", (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS)],
-			"employee": ["!=", employee],
-		},
+		filters=filters,
 		fields=[
 			"name",
 			"employee",
@@ -2218,7 +2245,8 @@ def _hr_request_summaries(employee, today):
 			"correction_proposed_masked",
 		],
 		order_by="creation asc",
-		limit=_QUEUE_FETCH,
+		limit=_QUEUE_FETCH if limit is None else min(max(cint(limit), 1), _REQUEST_MAX_PAGE),
+		**({"limit_start": max(cint(start), 0)} if start is not None else {}),
 	)
 	if not rows:
 		return []
@@ -2230,6 +2258,16 @@ def _hr_request_summaries(employee, today):
 			filters={"name": ["in", list({row.employee for row in rows})]},
 			fields=["name", "employee_name"],
 		)
+	}
+	picker_names = {
+		user: _picker_display_name(user)
+		for user in {row.picked_up_by for row in rows if row.picked_up_by}
+	}
+	# One read per page, not per row (P2-R22): SLA days ride beside the
+	# routed role the categories already answer.
+	sla_days = {
+		name: cint(sla)
+		for name, sla in frappe.get_all("HelixHR Request Category", fields=["name", "sla_days"], as_list=True)
 	}
 	return [
 		_summary_row(
@@ -2247,6 +2285,9 @@ def _hr_request_summaries(employee, today):
 			subject=row.subject,
 			routed_to_role=row.routed_to_role,
 			picked_up_by=row.picked_up_by,
+			picked_up_by_name=picker_names.get(row.picked_up_by),
+			sla_overdue=is_overdue(row.creation, today, sla_days.get(row.category, 0))
+			and row.status in (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS),
 			for_hr=(row.routed_to_role == "HR Manager"),
 			hr_note=row.hr_note,
 			correction_field=row.correction_field,
@@ -2254,6 +2295,86 @@ def _hr_request_summaries(employee, today):
 		)
 		for row in rows
 	]
+
+
+# Plan 2026-10-04-002 U3: the "To work on" chips. Each chip names the
+# statuses it can mean; "open" is the working set, "waiting" is the ball in
+# the employee's hands, "closed" is off by default.
+_REQUEST_WORK_STATES = {
+	"open": (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS),
+	"mine": (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS),
+	"waiting": (HR_REQUEST_WAITING_ON_EMPLOYEE,),
+	"closed": (HR_REQUEST_DONE, HR_REQUEST_REJECTED),
+}
+
+
+@frappe.whitelist()
+def get_request_work(state=None, limit=None, start=0):
+	"""The "To work on" feed behind /requests' second tab (plan
+	2026-10-04-002 U3, R7-R8).
+
+	The same rows Approvals' request half shows, read from the same query
+	(`_hr_request_summaries`) so the two views can never disagree, with the
+	state chips the tab offers: `open` (the default), `mine` (picked up by
+	the caller), `waiting` (on the employee) and `closed`. A caller with no
+	routed role and no HR role is refused -- the same
+	`_is_hr() or _holds_routed_role()` gate the queue itself uses, never a
+	route name -- and the rows the query answers are further narrowed by
+	Frappe's own permission conditions (company for a company-anchored HR
+	Manager, own route for a routed-role holder) and by the roles the
+	caller actually holds.
+	"""
+	rate_limit_per_user("get_request_work")
+	if not (_is_hr() or _holds_routed_role()):
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+
+	state = (state or "").strip().lower() or "open"
+	if state not in _REQUEST_WORK_STATES:
+		frappe.throw(_("There is no work filter called {0}.").format(state))
+
+	roles = set(frappe.get_roles())
+	routed_roles = [role for role in ("HR Manager", *_ROUTED_WORKER_ROLES) if role in roles]
+	if not routed_roles:
+		# An HR-adjacent session (System Manager) without either role that
+		# routes requests: nothing here is theirs to work.
+		return {"work": [], "total": 0, "limit": _REQUEST_PAGE, "today": user_today()}
+
+	employee = get_current_employee()
+	today = _as_date(user_today())
+	page = min(max(cint(limit) or _REQUEST_PAGE, 1), _REQUEST_MAX_PAGE)
+	filters = {
+		"states": _REQUEST_WORK_STATES[state],
+		"routed_roles": routed_roles,
+		"limit": page,
+		"start": max(cint(start), 0),
+	}
+	if state == "mine":
+		filters["picked_up_by"] = frappe.session.user
+
+	rows = _hr_request_summaries(employee, today, **filters)
+	# One count for the same filter, so Load More has an honest end (P2-R22).
+	# Read through `get_list`, not a bare COUNT: the caller's permission
+	# conditions are the scope, and the count must answer exactly what the
+	# page above was scoped to.
+	total = len(
+		frappe.get_list(
+			"HR Request",
+			filters={
+				"status": ["in", filters["states"]],
+				"employee": ["!=", employee],
+				"routed_to_role": ["in", routed_roles],
+				**({"picked_up_by": frappe.session.user} if state == "mine" else {}),
+			},
+			pluck="name",
+			limit_page_length=0,
+		)
+	)
+	return {
+		"work": rows,
+		"total": total,
+		"limit": page,
+		"today": user_today(),
+	}
 
 
 # Per-kind, never "not leave means timesheet" (P3-U6 step 0). A third kind

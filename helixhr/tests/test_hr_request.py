@@ -661,6 +661,7 @@ class TestRequestApprovalQueue(IntegrationTestCase):
 		fields = {"category": category, "subject": "Need a new laptop", "details": "Mine died", **extra}
 		created = create_my_request(operation_key=str(uuid.uuid4()), **fields)
 		frappe.set_user("Administrator")
+		self.addCleanup(_delete_request, created["name"])
 		return created["name"]
 
 	def _token(self, name):
@@ -1480,6 +1481,15 @@ class TestProfileCorrection(IntegrationTestCase):
 			self.assertNotIn("111122223333", text)
 
 
+
+def _delete_request(name):
+	"""Delete a request a test created, so a long-lived site's queues stay
+	empty for the modules that assume it (alphabetical order puts
+	test_api_approvals before this file)."""
+	if name and frappe.db.exists("HR Request", name):
+		frappe.delete_doc("HR Request", name, force=True, ignore_permissions=True)
+
+
 class TestRequestNaming(IntegrationTestCase):
 	"""Plan 2026-10-04-002 U1: each category carries its own ID prefix, new
 	requests are numbered from it, and existing names never change."""
@@ -1510,6 +1520,7 @@ class TestRequestNaming(IntegrationTestCase):
 		frappe.set_user(EMPLOYEE_USER)
 		created = create_my_request(operation_key=str(uuid.uuid4()), **extra)
 		frappe.set_user("Administrator")
+		self.addCleanup(_delete_request, created["name"])
 		return frappe.get_doc("HR Request", created["name"])
 
 	def _prefix(self, category):
@@ -1611,6 +1622,7 @@ class TestRequestPickerName(IntegrationTestCase):
 		fields = {"category": category, "subject": "Need a new laptop", "details": "Mine died", **extra}
 		created = create_my_request(operation_key=str(uuid.uuid4()), **fields)
 		frappe.set_user("Administrator")
+		self.addCleanup(_delete_request, created["name"])
 		return created["name"]
 
 	def _pick(self, name, user):
@@ -1694,3 +1706,153 @@ class TestRequestPickerName(IntegrationTestCase):
 		json = frappe.as_json(detail) + frappe.as_json(row)
 		self.assertNotIn(self.it_user, json)
 		self.assertNotIn('"picked_up_by"', json)
+
+
+class TestRequestWork(IntegrationTestCase):
+	"""Plan 2026-10-04-002 U3: one server feed behind Approvals' request rows
+	and the Requests page's "To work on" tab."""
+
+	def setUp(self):
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		self.it_employee, self.it_user = make_test_it_user()
+		ensure_test_email_account()
+		self.addCleanup(setattr, frappe.local, "request", None)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _file(self, category="IT / Asset", as_user=None, **extra):
+		from helixhr.api import create_my_request
+		from helixhr.tests.utils import EMPLOYEE_USER
+
+		frappe.set_user(as_user or EMPLOYEE_USER)
+		fields = {"category": category, "subject": "Work feed subject", "details": "Details", **extra}
+		created = create_my_request(operation_key=str(uuid.uuid4()), **fields)
+		frappe.set_user("Administrator")
+		return created["name"]
+
+	def _token(self, name):
+		row = frappe.db.get_value("HR Request", name, ["modified", "status"], as_dict=True)
+		return {"expected_modified": str(row.modified), "expected_state": row.status}
+
+	def _act(self, name, action, user, **extra):
+		from helixhr.api import act_on_approval
+
+		frappe.set_user(user)
+		act_on_approval("HR Request", name, action, **self._token(name), **extra)
+		frappe.set_user("Administrator")
+
+	def _work(self, as_user, **kwargs):
+		from helixhr.api import get_request_work
+
+		frappe.set_user(as_user)
+		result = get_request_work(**kwargs)
+		frappe.set_user("Administrator")
+		return result
+
+	def test_an_it_holder_sees_only_their_routed_rows_of_their_company(self):
+		it_name = self._file()
+		hr_name = self._file(category="HR Letter")
+
+		names = [row["name"] for row in self._work(self.it_user)["work"]]
+
+		self.assertIn(it_name, names)
+		self.assertNotIn(hr_name, names)
+
+	def test_an_hr_manager_sees_only_hr_routed_rows_here(self):
+		"""The Approvals queue is unchanged; the To work on feed narrows an
+		HR Manager to rows a held role can act on."""
+		from helixhr.tests.utils import HR_MANAGER_EMPLOYEE_USER, make_test_hr_manager_employee
+
+		make_test_hr_manager_employee()
+		hr_name = self._file(category="HR Letter")
+		it_name = self._file()
+
+		names = [row["name"] for row in self._work(HR_MANAGER_EMPLOYEE_USER)["work"]]
+
+		self.assertIn(hr_name, names)
+		self.assertNotIn(it_name, names)
+
+	def test_the_callers_own_request_is_excluded(self):
+		name = self._file(as_user=self.it_user)
+
+		names = [row["name"] for row in self._work(self.it_user)["work"]]
+
+		self.assertNotIn(name, names)
+
+	def test_the_state_filters_match_their_names(self):
+		open_name = self._file()  # stays Open
+		mine_name = self._file()
+		self._act(mine_name, "Pick up", self.it_user)
+		waiting_name = self._file()
+		self._act(waiting_name, "Pick up", self.it_user)
+		self._act(waiting_name, "Need info", self.it_user, comment="Which model?")
+		closed_name = self._file()
+		self._act(closed_name, "Pick up", self.it_user)
+		self._act(closed_name, "Done", self.it_user)
+
+		def names(result):
+			return {row["name"] for row in result["work"]}
+
+		# Open: not closed, and not waiting on the employee either (that is
+		# the employee's ball, on its own chip).
+		self.assertIn(open_name, names(self._work(self.it_user, state="open")))
+		self.assertNotIn(waiting_name, names(self._work(self.it_user, state="open")))
+		self.assertNotIn(closed_name, names(self._work(self.it_user, state="open")))
+		# Mine: what I picked up and still hold.
+		self.assertIn(mine_name, names(self._work(self.it_user, state="mine")))
+		self.assertNotIn(open_name, names(self._work(self.it_user, state="mine")))
+		# Waiting on employee: its own chip, off the default view.
+		self.assertIn(waiting_name, names(self._work(self.it_user, state="waiting")))
+		self.assertNotIn(mine_name, names(self._work(self.it_user, state="waiting")))
+		self.assertNotIn(waiting_name, names(self._work(self.it_user)))
+		# Closed arrives only when asked.
+		self.assertIn(closed_name, names(self._work(self.it_user, state="closed")))
+		self.assertNotIn(waiting_name, names(self._work(self.it_user, state="closed")))
+		self.assertNotIn(closed_name, names(self._work(self.it_user)))
+
+		with self.assertRaises(frappe.ValidationError):
+			self._work(self.it_user, state="nonsense")
+
+	def test_a_plain_employee_is_refused(self):
+		from helixhr.api import get_request_work
+		from helixhr.tests.utils import EMPLOYEE_USER
+
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.PermissionError):
+			get_request_work()
+
+	def test_rows_carry_the_what_is_this_row_fields(self):
+		name = self._file()
+
+		rows = {row["name"]: row for row in self._work(self.it_user)["work"]}
+		row = rows[name]
+
+		self.assertEqual(row["kind"], "request")
+		self.assertTrue(row["employee_name"])
+		self.assertEqual(row["category"], "IT / Asset")
+		self.assertEqual(row["status"], "Open")
+		self.assertIsNotNone(row["age_days"])
+		self.assertIsNone(row["picked_up_by_name"])
+		self.assertIn("sla_overdue", row)
+
+	def test_paging_is_bounded_and_counts(self):
+		first = self._file()
+		second = self._file()
+
+		result = self._work(self.it_user, limit=1, start=0)
+		self.assertEqual(len(result["work"]), 1)
+		self.assertGreaterEqual(result["total"], 2)
+
+		# Walk the pages until both seeded names have appeared -- the site
+		# carries older fixture rows, so the page a given name lands on is
+		# not predictable, only that the walk finds it.
+		found = set()
+		for start in range(result["total"]):
+			page_rows = self._work(self.it_user, limit=1, start=start)["work"]
+			if page_rows:
+				found.add(page_rows[0]["name"])
+			if {first, second} <= found:
+				break
+		self.assertIn(first, found)
+		self.assertIn(second, found)
