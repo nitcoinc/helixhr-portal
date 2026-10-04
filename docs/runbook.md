@@ -1463,3 +1463,25 @@ Not a check, but part of going live: to surface a document on the Documents page
 **HelixHR Document Link** (Desk list, HR Manager/System Manager only) with `title`, `url`,
 optional `company` (scopes it to one company; leave blank for all) and `description`. No app
 code change is needed for a new link.
+
+## Request ID prefixes: what HR can set, and what it changes (plan 2026-10-04-002)
+
+Each request category carries an **ID prefix** (Settings → Categories → Edit →
+"ID prefix"), and new requests are numbered from it: `IT-REQ-2026-00001` for an
+IT / Asset category, `HR-REQ-…` when the prefix is blank. Facts operators need:
+
+- **Format**: 2–10 uppercase letters, digits or hyphens, no trailing hyphen
+  (`HelixHRRequestCategory.validate` upper-cases and checks; `it-req` saves as
+  `IT-REQ`, `IT REQ!` or `IT-` is refused). The validation keeps a prefix from
+  ever containing the `-.` year/counter separators a naming series needs.
+- **Counters are per prefix, per year.** Two categories with the same prefix
+  share one counter — names stay unique, the numbers just interleave. This is
+  documented behaviour, not a defect.
+- **Existing request IDs never change.** Re-pointing a category or editing its
+  prefix changes where the *next* request is numbered, never a request already
+  filed (naming happens once, in `HRRequest.before_insert`).
+- **Migrated sites**: `helixhr.patches.v1_0.seed_request_category_prefixes`
+  fills every *empty* prefix (`IT-REQ` on the seeded IT / Asset category,
+  `HR-REQ` elsewhere) and never overwrites an HR edit; a fresh install gets the
+  same answer through `install.after_install`. An empty prefix in Desk is not a
+  bug — it means the `HR-REQ` fallback.

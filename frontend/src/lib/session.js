@@ -40,6 +40,12 @@ const state = reactive({
    * when `canApprove`'s queue-derived half is momentarily empty -- the same
    * "present regardless of a pending row" rule P4-R13 already gives HR. */
   canWorkRequests: false,
+  /** Plan 2026-10-04-002 U4/KTD6: gates the Requests page's "To work on"
+   * tab -- wider than `canWorkRequests` (Approvals nav), which only covers a
+   * non-HR routed role. Mirrors the server's `_is_hr() or
+   * _holds_routed_role()` gate exactly, so the tab and the feed's refusal
+   * can never disagree. */
+  canHandleRequests: false,
   /** P5-U14: gates the Settings nav item. Mirrors the exact predicate
    * `helixhr.api.get_portal_config` itself enforces server-side, so the nav
    * item and the server's own gate can never disagree. */
@@ -127,6 +133,7 @@ function apply(boot) {
   state.canApprove = !!boot?.can_approve
   state.hasReports = !!boot?.has_reports
   state.canWorkRequests = !!boot?.can_work_requests
+  state.canHandleRequests = !!boot?.can_handle_requests
   state.canConfigure = !!boot?.can_configure
   state.canManageNotifications = !!boot?.can_manage_notifications
   state.canSeeOrganisation = !!boot?.can_see_organisation

@@ -35,6 +35,12 @@ async function asEmployee(baseURL: string): Promise<APIRequestContext> {
   return api
 }
 
+async function asItTeam(baseURL: string): Promise<APIRequestContext> {
+  const api = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+  await api.post('/api/method/login', { form: { usr: 'it-team@helixhr.test', pwd: PASSWORD } })
+  return api
+}
+
 /** One request, made the way the portal makes one: the session-scoped method
  * with its own operation key. Role Employee has no generic create on HR
  * Request any more, so there is no other way to seed one as the employee. */
@@ -468,6 +474,73 @@ test.describe('employee', () => {
       expect(unsafe.ok(), 'a javascript: URL must be refused').toBeFalsy()
     } finally {
       await removeDocumentLink(api, otherName)
+      await employeeApi.dispose()
+      await api.dispose()
+    }
+  })
+
+  // ── Plan 2026-10-04-002 U4: a plain employee has no workspace tabs ──
+  test('a plain employee sees no tab bar on /requests', async ({ page }) => {
+    // R6: the tab bar only exists for a holder of a routed role. There is
+    // nothing to switch to for the person the requests are about.
+    await page.goto('/helixhr/requests')
+    await expect(page.getByTestId('requests-tabs')).toHaveCount(0)
+    await expect(page.locator('[data-async-state^="requests-list"]')).toBeVisible()
+  })
+
+  // ── Plan 2026-10-04-002 U2: the timeline names the real picker ────────
+  test('an IT request picked up by the IT identity names the picker', async ({
+    page,
+    baseURL,
+  }) => {
+    const api = await admin(baseURL!)
+    const employeeApi = await asEmployee(baseURL!)
+    const itApi = await asItTeam(baseURL!)
+    const subject = `U2 pickup ${Date.now()}`
+    let name = ''
+
+    try {
+      name = await seedRequest(employeeApi, subject, { category: 'IT / Asset' })
+
+      // The IT identity picks the request up through the same act the
+      // Approvals queue uses, so the stamp is a real one.
+      const state = await itApi.get(
+        '/api/method/frappe.client.get_value?doctype=HR%20Request' +
+          `&filters=${encodeURIComponent(JSON.stringify({ name }))}` +
+          '&fieldname=' +
+          encodeURIComponent(JSON.stringify(['modified', 'status'])),
+      )
+      const token = (await state.json())?.message
+      const picked = await itApi.post('/api/method/helixhr.api.act_on_approval', {
+        data: {
+          doctype: 'HR Request',
+          name,
+          action: 'Pick up',
+          expected_modified: token.modified,
+          expected_state: token.status,
+        },
+      })
+      expect(picked.ok(), await picked.text()).toBeTruthy()
+
+      const fullname = (
+        await (
+          await api.get(
+            '/api/method/frappe.client.get_value?doctype=User' +
+              `&filters=${encodeURIComponent(JSON.stringify({ name: 'it-team@helixhr.test' }))}` +
+              '&fieldname=full_name',
+          )
+        ).json()
+      )?.message?.full_name
+
+      // The employee's timeline names who picked it up -- not a fixed
+      // "Picked up by HR".
+      await page.goto(`/helixhr/requests/${name}`)
+      await expect(page.locator('[data-testid="request-timeline"]')).toContainText(
+        `Picked up by ${fullname}`,
+      )
+    } finally {
+      await removeRequest(api, name)
+      await itApi.dispose()
       await employeeApi.dispose()
       await api.dispose()
     }

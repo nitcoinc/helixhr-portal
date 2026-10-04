@@ -9,6 +9,7 @@
   "category_name",
   "hint",
   "route_to_role",
+  "name_prefix",
   "sla_days",
   "is_active"
  ],
@@ -35,6 +36,13 @@
    "label": "Route to role",
    "options": "Role",
    "reqd": 1
+  },
+  {
+   "description": "ID prefix for new requests in this category, e.g. IT-REQ. Empty means HR-REQ.",
+   "fieldname": "name_prefix",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "ID prefix"
   },
   {
    "default": "0",

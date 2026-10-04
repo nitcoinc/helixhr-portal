@@ -24,11 +24,20 @@ class HRRequest(Document):
 		# different employee on the very first insert -- resolve it from
 		# the session instead of trusting whatever was posted (KTD5).
 		self.employee = get_current_employee()
-		self.routed_to_role = frappe.db.get_value(
-			"HelixHR Request Category", self.category, "route_to_role"
-		)
+		route_to_role, name_prefix = frappe.db.get_value(
+			"HelixHR Request Category", self.category, ["route_to_role", "name_prefix"]
+		) or (None, None)
+		self.routed_to_role = route_to_role
 		if not self.routed_to_role:
 			frappe.throw("This request category has no worker role configured.")
+
+		# Plan 2026-10-04-002 U1: each category numbers its own requests.
+		# This runs before naming (`set_new_name` follows `before_insert`) and
+		# `_validate_selects` skips the naming_series Select, so the series
+		# the category picks is the one the counter uses. An empty or missing
+		# prefix means the HR-REQ fallback; an existing request's name is
+		# never revisited, so its ID keeps the prefix it was born with.
+		self.naming_series = f"{name_prefix or 'HR-REQ'}-.YYYY.-"
 
 		# P2-U8 step 2. The idempotency key is a *unique* column, and a
 		# unique column with several empty strings in it is not unique in

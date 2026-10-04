@@ -15,12 +15,12 @@ const props = defineProps({
 const emit = defineEmits(['saved'])
 
 const editing = ref(null) // category name being edited, or '__new__'
-const form = reactive({ category_name: '', hint: '', route_to_role: 'HR Manager', sla_days: 0, is_active: true })
+const form = reactive({ category_name: '', hint: '', route_to_role: 'HR Manager', name_prefix: '', sla_days: 0, is_active: true })
 const formError = ref('')
 
 function startCreate() {
   editing.value = '__new__'
-  Object.assign(form, { category_name: '', hint: '', route_to_role: 'HR Manager', sla_days: 0, is_active: true })
+  Object.assign(form, { category_name: '', hint: '', route_to_role: 'HR Manager', name_prefix: '', sla_days: 0, is_active: true })
   formError.value = ''
 }
 
@@ -30,6 +30,7 @@ function startEdit(category) {
     category_name: category.category_name,
     hint: category.hint || '',
     route_to_role: category.route_to_role,
+    name_prefix: category.name_prefix || '',
     sla_days: category.sla_days || 0,
     is_active: !!category.is_active,
   })
@@ -51,6 +52,7 @@ async function submit() {
       name: isNew ? form.category_name : editing.value,
       hint: form.hint,
       route_to_role: form.route_to_role,
+      name_prefix: form.name_prefix,
       sla_days: form.sla_days,
       is_active: form.is_active ? 1 : 0,
     })
@@ -156,6 +158,14 @@ async function submit() {
           </option>
         </select>
       </div>
+      <!-- Plan 2026-10-04-002 R3: new requests in the category are numbered
+           from this prefix (IT-REQ-2026-00001). Empty keeps the HR-REQ
+           fallback; the server upper-cases and validates the format. -->
+      <FormControl
+        v-model="form.name_prefix"
+        label="ID prefix (blank = HR-REQ)"
+        placeholder="IT-REQ"
+      />
       <FormControl
         v-model="form.sla_days"
         type="number"

@@ -1313,6 +1313,8 @@ RATE_LIMIT_POLICY = {
 	# sees, not a free enumeration.
 	"get_dashboard": (60, 60),
 	"get_my_approvals": (60, 60),
+	# Plan 2026-10-04-002 U3: the "To work on" tab polls like the queue.
+	"get_request_work": (60, 60),
 	"get_approval_detail": (60, 60),
 	"get_leave_day_count": (60, 60),
 	"get_my_leave_detail": (60, 60),
