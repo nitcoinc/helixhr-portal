@@ -79,3 +79,8 @@ helixhr.patches.v1_0.seed_report_access #2026-10-04 U9 U10 U11 new catalog entri
 # Plan 2026-10-04-002 U1: fills each category's empty ID prefix (IT-REQ on
 # IT / Asset, HR-REQ elsewhere); never overwrites an HR edit.
 helixhr.patches.v1_0.seed_request_category_prefixes
+# Plan 2026-10-04-003 U1: re-run so the deltas land on existing sites -- the
+# Timesheet delta removes Employee Self Service's cancel and amend, which
+# HRMS grants by default and `frappe.client.cancel` would otherwise honour
+# behind the workflow's back.
+helixhr.patches.v1_0.apply_permission_deltas #2026-10-04 U1 Employee Self Service cancel/amend off Timesheet

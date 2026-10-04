@@ -329,6 +329,58 @@ class TestPreflight(IntegrationTestCase):
 		self.assertEqual(result["status"], preflight.FAIL)
 		self.assertIn("In Progress", result["detail"])
 
+	def test_timesheet_workflow_state_order_passes_on_the_fixture_and_fails_when_reordered(self):
+		"""Plan 2026-10-04-003 U1 / KTD2: Draft first (docstatus-0 backfill),
+		Approved the first doc_status-1 state, Cancelled present and last --
+		the fixture is append-only and this is the standing guard."""
+		self.assertEqual(preflight.check_timesheet_workflow_state_order()["status"], preflight.PASS)
+
+		from types import SimpleNamespace
+		from unittest.mock import patch
+
+		def _workflow(states):
+			return SimpleNamespace(
+				states=[SimpleNamespace(state=name, doc_status=doc) for name, doc in states]
+			)
+
+		shuffled = _workflow(
+			[
+				("Pending Approval", "0"),
+				("Draft", "0"),
+				("Pending HR", "0"),
+				("Approved", "1"),
+				("Sent Back", "0"),
+				("Cancelled", "2"),
+			]
+		)
+		with patch.object(preflight.frappe, "get_doc", return_value=shuffled):
+			result = preflight.check_timesheet_workflow_state_order()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("Draft", result["detail"])
+
+		missing_cancelled = _workflow(
+			[("Draft", "0"), ("Pending Approval", "0"), ("Approved", "1"), ("Sent Back", "0")]
+		)
+		with patch.object(preflight.frappe, "get_doc", return_value=missing_cancelled):
+			result = preflight.check_timesheet_workflow_state_order()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("Cancelled", result["detail"])
+
+		inserted_middle = _workflow(
+			[
+				("Draft", "0"),
+				("Pending Approval", "0"),
+				("Cancelled", "2"),
+				("Pending HR", "0"),
+				("Approved", "1"),
+				("Sent Back", "0"),
+			]
+		)
+		with patch.object(preflight.frappe, "get_doc", return_value=inserted_middle):
+			result = preflight.check_timesheet_workflow_state_order()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("not last", result["detail"])
+
 	def test_request_category_routes_warns_when_nobody_holds_the_role(self):
 		"""P5-KTD8's fallback exists so this never blocks the employee, but a
 		category nobody currently works should not go unnoticed at deploy

@@ -5026,6 +5026,13 @@ def _decided_by_me():
 
 
 def _decided_timesheets(employee, since):
+	"""Plan 2026-10-04-003 KTD2: a cancelled week reads "Cancelled" here.
+
+	The Cancelled workflow state (docstatus 2) joins the receipt list, and
+	every docstatus-2 row reads Cancelled regardless of its stored state --
+	a week cancelled in Desk before the state existed keeps
+	`workflow_state = "Approved"`, and an approver must never see that
+	row as an approval."""
 	return [
 		_decided_row(
 			"timesheet",
@@ -5034,7 +5041,7 @@ def _decided_timesheets(employee, since):
 			"Timesheet",
 			row.start_date,
 			row.end_date,
-			row.workflow_state,
+			"Cancelled" if cint(row.docstatus) == 2 else row.workflow_state,
 			row.modified,
 			row.docstatus,
 		)
@@ -5046,6 +5053,7 @@ def _decided_timesheets(employee, since):
 					"in",
 					[
 						"Approved",
+						"Cancelled",
 						TIMESHEET_SENT_BACK,
 						*_decided_hr_handover_states(TIMESHEET_PENDING_HR),
 					],

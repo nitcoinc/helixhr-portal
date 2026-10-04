@@ -52,5 +52,14 @@
   "name": "Waiting on Employee",
   "style": "",
   "workflow_state_name": "Waiting on Employee"
+ },
+ {
+  "docstatus": 0,
+  "doctype": "Workflow State",
+  "icon": "",
+  "modified": "2026-10-04 10:00:00.000000",
+  "name": "Cancelled",
+  "style": "",
+  "workflow_state_name": "Cancelled"
  }
 ]

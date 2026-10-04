@@ -119,6 +119,15 @@ DELTAS = {
 	"Timesheet": (
 		(("Employee", 0, 0), {"submit": 1}),
 		(("HR Manager", 1, 0), {"read": 1, "write": 1}),
+		# Plan 2026-10-04-003 KTD2 / U1: HRMS hands Employee Self Service
+		# `cancel` and `amend` on Timesheet. With the Cancelled workflow
+		# state installed, Desk's own Cancel button hides behind
+		# `can_cancel_document`, but `frappe.client.cancel` only consults
+		# the DocPerm -- without this delta an employee could still cancel
+		# an approved week raw, off the workflow. Amend is the same door:
+		# the accept path of a change request amends server-side as the
+		# employee (KTD4), never through the Desk amend route.
+		(("Employee Self Service", 0, 0), {"cancel": 0, "amend": 0}),
 	),
 	# P3-KTD13 / P3-R7a: HRMS ships role Employee with create, write and
 	# delete on Employee Checkin, so an employee could insert a backdated
