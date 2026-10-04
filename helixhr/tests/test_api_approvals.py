@@ -2415,8 +2415,18 @@ class TestBulkApproval(IntegrationTestCase):
 		# A dedicated allocation window wide enough for the dates below,
 		# which sit years ahead on purpose: this test's leaves must never
 		# share dates with any other suite's (the overlap flag counts the
-		# whole company's leaves on the same days). Earlier runs' allocations
-		# go first -- two overlapping windows are refused.
+		# whole company's leaves on the same days). This test's leave starts
+		# clean every run -- the leaves go before their allocations, which an
+		# existing application would refuse to release -- and earlier runs'
+		# allocations go too, because two overlapping windows are refused.
+		for name in frappe.get_all(
+			"Leave Application", filters={"employee": self.leave_name}, pluck="name"
+		):
+			doc = frappe.get_doc("Leave Application", name)
+			if doc.docstatus == 1:
+				doc.flags.ignore_permissions = True
+				doc.cancel()
+			frappe.delete_doc("Leave Application", name, force=1, ignore_permissions=True)
 		for name in frappe.get_all(
 			"Leave Allocation", filters={"employee": self.leave_name}, pluck="name"
 		):
