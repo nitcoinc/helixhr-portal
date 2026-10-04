@@ -323,6 +323,10 @@ sits **Queued** forever (see the runbook). Production must run
 expires export files after 7 days. PDF exports need wkhtmltopdf with patched
 Qt (`check_pdf_generator`). The Employee hours utilization report needs
 **HR Settings → Standard Working Hours** set, or HRMS refuses to run it.
+The approval queue's "hours differ from expected" flag reads the same
+setting: unset, that one flag stays off (the rest of the queue still works)
+and preflight WARNs — set the hours and the flag appears on the next queue
+load, no migrate needed.
 
 A Desk link (in the person view, and behind every wrapped report) is offered
 only to a caller who can actually reach Desk — a System User holding a role

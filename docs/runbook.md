@@ -1485,3 +1485,31 @@ IT / Asset category, `HR-REQ-…` when the prefix is blank. Facts operators need
   `HR-REQ` elsewhere) and never overwrites an HR edit; a fresh install gets the
   same answer through `install.after_install`. An empty prefix in Desk is not a
   bug — it means the `HR-REQ` fallback.
+
+## Cancelled weeks, change requests and the invoice lock (plan 2026-10-04-003)
+
+- **Cancelling an approved week** moves it to the workflow's `Cancelled`
+  state (docstatus 2), which also hides Desk's raw Cancel button
+  (`can_cancel_document` is false the moment a docstatus-2 state is
+  reachable). ERPNext's own `on_cancel` unwinds the Task/Project hours it
+  added at submit; the amended copy's resubmit puts them back. Reports that
+  count approved hours read `docstatus = 1`, so a cancelled week drops out
+  on its own.
+- **A week inside payroll or billing cannot be reopened.** A submitted
+  Sales Invoice carrying the week (`Sales Invoice Timesheet.time_sheet`),
+  the week's own `salary_slip` link, or a submitted Salary Slip over the
+  week's dates all lock it (KTD5). There is no HR override — that is the
+  plan's recorded scope boundary. The employee sees the reason before they
+  write a change request; the accept path re-checks the same locks under a
+  row lock, so an invoice submitted between the raise and the accept
+  refuses the accept and the request stays Open.
+- **Accepting a change request cancels and amends in one transaction.** If
+  it fails part-way (a Desk edit moved the week, the invoice landed), the
+  whole accept rolls back: the request stays Open and the week stays
+  Approved. The amended copy is owned by the *employee* — if a week is
+  stuck "Approved" after an accept, look for a failed partial accept in the
+  Error Log, never for a state to fix by hand.
+- **The queue's "hours" flag is off until HR Settings has Standard Working
+  Hours.** Without it the other flags still work; the preflight WARN names
+  it. Set the hours, and the flag appears on the next queue load — no
+  migrate needed.
