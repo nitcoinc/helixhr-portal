@@ -662,7 +662,43 @@ then moves it through `Need info` / `Done` / `Reject` like any workflow kind
 -- `HR Request Handling`'s own transitions are the rule, exactly the way
 `get_transitions` already drives Timesheet and Attendance.
 
-Two things about this kind are genuinely different from the other three:
+Three things about this kind are genuinely different from the other three:
+
+- **Numbering is per category (plan 2026-10-04-002).** Each category carries
+  an `ID prefix` (`HelixHR Request Category.name_prefix`, validated as 2-10
+  uppercase letters/digits/hyphens, no trailing hyphen), and `HR Request`'s
+  `before_insert` builds the naming series from it — so an IT / Asset request
+  is `IT-REQ-2026-00001` while the others keep the `HR-REQ` counter they have
+  always shared. An empty or missing prefix falls back to `HR-REQ`; counters
+  run per prefix per year (`-.YYYY.-`), so two categories that deliberately
+  share a prefix deliberately share a counter. A category re-pointed or
+  re-prefixed later changes where the *next* request is numbered, never a
+  request already filed — the seed patch fills only empty prefixes, never an
+  HR edit.
+- **Surfaces name the picker and the team.** The employee's projections
+  (`get_my_request`, `get_my_requests`) resolve `picked_up_by` server-side
+  into `picked_up_by_name` (the user's full name; `None` for a request nobody
+  picked up, the Administrator account, or a disabled user) and derive
+  `handled_by_team` from the category's route (`HR` / `IT`) — the raw user id
+  never crosses the boundary, because an employee has no read on `User`. The
+  timeline, list meta, reply labels and thread fallback read those two fields,
+  never a fixed "HR".
+- **A routed worker works from /requests too.** The Requests page gains a
+  second tab for a holder of a routed role: "To work on" reads
+  `get_request_work`, the **same** collector Approvals' request half shows
+  (`_hr_request_summaries`, extended with optional state / `picked_up_by` /
+  `routed_roles` / paging), so the two views cannot disagree. The chips are
+  Open / Mine / Waiting on employee / Closed, with Closed off by default and
+  Waiting on Employee on its own chip — the employee's ball is not the
+  worker's backlog (P5-R6). Acting on a row opens `get_approval_detail`'s
+  decision detail and calls `act_on_approval`, so the buttons are the
+  workflow's own transitions and the server's own checks; there is no second
+  flow. An HR Manager's feed is narrowed to the routed roles they actually
+  hold (they cannot act on an IT-routed row); the Approvals queue keeps its
+  wider behaviour. Tab and filter live in the URL (`?tab=work&state=…`) so a
+  notification link reproduces the view; `request_arrival` links there. The
+  gate is the bootstrap boolean `can_handle_requests` (`_is_hr() or
+  _holds_routed_role()`), never a role name.
 
 - **The employee's `Reply` is not a workflow transition.** Role `Employee`
   has no `write` on `HR Request` at all, so `apply_workflow`'s `doc.save()`
