@@ -589,6 +589,10 @@ def get_portal_bootstrap():
 		# gap P4-R13 already closed for HR Manager. Read unconditionally on
 		# role, the same way HR's `can_approve` does not wait for a pending row.
 		"can_work_requests": _holds_routed_role(),
+		# Plan 2026-10-04-002 U4 / KTD6: the Requests page's "To work on" tab
+		# needs a wider gate than the Approvals nav item -- HR Manager also
+		# holds a routed role. A bootstrap boolean, never a role name.
+		"can_handle_requests": _is_hr() or _holds_routed_role(),
 		# P5-U14: the same predicate `get_portal_config` itself enforces, so
 		# the nav item and the server's own gate can never disagree. Read
 		# unconditionally on role, like `can_work_requests` above -- HR

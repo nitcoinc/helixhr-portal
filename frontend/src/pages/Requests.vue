@@ -8,6 +8,7 @@ import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
 import { attachToRequest, keepaliveRequest } from '@/lib/api'
+import { session } from '@/lib/session'
 import { formatDate, formatDateTime } from '@/lib/dates'
 import { currentUnread, setUnread, unreadCount } from '@/lib/unread'
 import { useIsDesktop } from '@/lib/useIsDesktop'
@@ -110,6 +111,142 @@ const detail = createResource({
   onSuccess: (data) => clearReadObligation(data),
 })
 
+// --- Plan 2026-10-04-002 U4: "To work on" --------------------------------
+//
+// R6: for a holder of a routed role the page gains a second tab listing what
+// is routed to them; a user with neither role gets no tab bar at all. R9: the
+// tab and its filter live in the URL, so a notification link reproduces the
+// view. R8: acting on a row calls the same `act_on_approval` the Approvals
+// queue uses -- the buttons are drawn from the detail's own `actions` (the
+// workflow's own transitions), never from a second rule.
+
+const WORK_TABS = [
+  { name: 'mine', label: 'My requests' },
+  { name: 'work', label: 'To work on' },
+]
+const WORK_FILTERS = [
+  { name: 'open', label: 'Open' },
+  { name: 'mine', label: 'Mine' },
+  { name: 'waiting', label: 'Waiting on employee' },
+  { name: 'closed', label: 'Closed' },
+]
+const REASON_HEADINGS = {
+  'Need info': 'Ask a question',
+  Reject: 'Why is this a no?',
+}
+
+const tab = computed(() =>
+  session.canHandleRequests && route.query.tab === 'work' ? 'work' : 'mine',
+)
+const workFilter = computed(() =>
+  WORK_FILTERS.some((filter) => filter.name === route.query.state) ? route.query.state : 'open',
+)
+
+function showTab(name) {
+  router.push({
+    name: route.name,
+    params: route.params,
+    query: name === 'work' ? { tab: 'work' } : {},
+  })
+}
+
+/** Arrow keys move between the two tabs, the way a `role="tablist"` is
+ * expected to behave. */
+function cycleTab(delta) {
+  const names = WORK_TABS.map((item) => item.name)
+  showTab(names[(names.indexOf(tab.value) + delta + names.length) % names.length])
+}
+
+function filterWork(state) {
+  router.push({
+    name: route.name,
+    params: route.params,
+    query: { tab: 'work', state: state === 'open' ? undefined : state },
+  })
+}
+
+const workLimit = ref(20)
+const work = createResource({
+  url: 'helixhr.api.get_request_work',
+  makeParams: () => ({ state: workFilter.value, limit: workLimit.value, start: 0 }),
+})
+watch(
+  [tab, workFilter],
+  ([value]) => {
+    workLimit.value = 20
+    if (value === 'work') work.fetch()
+  },
+  { immediate: true },
+)
+const workRows = computed(() => work.data?.work || [])
+const workTotal = computed(() => work.data?.total || 0)
+const workMoreCount = computed(() => Math.max(0, workTotal.value - workRows.value.length))
+
+function showMoreWork() {
+  workLimit.value = Math.min(100, workLimit.value + 20)
+  work.fetch()
+}
+
+// The feed's detail is the same decision detail the Approvals queue loads
+// (`get_approval_detail`), so the evidence, the thread and the legal actions
+// are the server's one answer -- R8's "not a second implementation".
+const workDetail = createResource({
+  url: 'helixhr.api.get_approval_detail',
+  makeParams: () => ({ kind: 'request', name: props.name }),
+})
+const workAct = createResource({ url: 'helixhr.api.act_on_approval', method: 'POST' })
+const workSelected = computed(() => (props.name && tab.value === 'work' ? workDetail.data : null))
+
+const workActing = ref('')
+const reasonFor = ref('') // 'Need info' or 'Reject' while its box is open
+const reasonMessage = ref('')
+const reasonError = ref('')
+
+function openReason(action) {
+  reasonFor.value = action
+  reasonMessage.value = ''
+  reasonError.value = ''
+}
+
+async function decide(action) {
+  const item = workSelected.value
+  if (!item || workActing.value) return
+  const wantsReason = action === 'Need info' || action === 'Reject'
+  const message = wantsReason ? reasonMessage.value.trim() : ''
+  if (wantsReason && !message) {
+    reasonError.value =
+      action === 'Reject' ? 'Say why before rejecting this.' : 'Say what you need from them first.'
+    return
+  }
+  workActing.value = item.name
+  reasonError.value = ''
+  try {
+    await workAct.submit({
+      doctype: 'HR Request',
+      name: item.name,
+      action,
+      comment: message || undefined,
+      expected_modified: item.modified,
+      expected_state: item.state,
+    })
+    reasonFor.value = ''
+    reasonMessage.value = ''
+    workDetail.fetch()
+    work.fetch()
+  } catch (error) {
+    reasonError.value =
+      error?.messages?.[0] || "That didn't go through. Reload and try again."
+  } finally {
+    workActing.value = ''
+  }
+}
+
+function confirmReason() {
+  decide(reasonFor.value)
+}
+
+const may = (action) => workSelected.value?.actions?.includes(action)
+
 // --- replying (P5-R10, P5-R6) --------------------------------------------
 //
 // Not a workflow action -- role Employee has no write on HR Request at all
@@ -121,11 +258,15 @@ const replyMessage = ref('')
 const replyError = ref('')
 
 watch(
-  () => props.name,
-  (name) => {
+  [() => props.name, tab],
+  ([name, value]) => {
     replyMessage.value = ''
     replyError.value = ''
-    if (name) detail.fetch()
+    if (!name) return
+    // One open record, two readers: the work tab reads the decision detail,
+    // the employee's tab reads their own projection.
+    if (value === 'work') workDetail.fetch()
+    else detail.fetch()
   },
   { immediate: true },
 )
@@ -133,7 +274,14 @@ watch(
 const selected = computed(() => (props.name ? detail.data : null))
 
 function closeDetail() {
-  router.push({ name: 'Requests', query: categoryFilter.value ? { type: categoryFilter.value } : {} })
+  // Back to the tab the detail was opened from (R9), keeping its filter.
+  const query =
+    tab.value === 'work'
+      ? { tab: 'work', ...(workFilter.value === 'open' ? {} : { state: workFilter.value }) }
+      : categoryFilter.value
+        ? { type: categoryFilter.value }
+        : {}
+  router.push({ name: 'Requests', query })
 }
 
 async function submitReply() {
@@ -287,6 +435,38 @@ const timeline = computed(() => {
       </template>
     </PageHeader>
 
+    <!-- Plan 2026-10-04-002 R6/R9: two workspace tabs for a holder of a
+         routed role; a user with neither role gets no tab bar at all. A
+         two-item segmented control, in the URL like the category chips,
+         arrow-key switchable like a `role="tablist"` should be. -->
+    <div
+      v-if="session.canHandleRequests"
+      class="mb-4 flex gap-2 border-b border-outline-gray-2"
+      role="tablist"
+      aria-label="Requests views"
+      data-testid="requests-tabs"
+    >
+      <button
+        v-for="item in WORK_TABS"
+        :key="item.name"
+        type="button"
+        role="tab"
+        class="-mb-px min-h-11 border-b-2 px-3 text-sm font-medium"
+        :class="
+          tab === item.name
+            ? 'border-ink-gray-9 text-ink-gray-9'
+            : 'border-transparent text-ink-gray-6 hover:text-ink-gray-9'
+        "
+        :aria-selected="tab === item.name"
+        :tabindex="tab === item.name ? 0 : -1"
+        @click="showTab(item.name)"
+        @keydown.right.prevent="cycleTab(1)"
+        @keydown.left.prevent="cycleTab(-1)"
+      >
+        {{ item.label }}
+      </button>
+    </div>
+
     <div class="lg:flex lg:items-start lg:gap-6">
       <!-- The list. On a phone a selected record takes the whole width
            (P2-R6's full-height treatment); at lg: both columns are on screen
@@ -295,116 +475,72 @@ const timeline = computed(() => {
         v-show="!name || isDesktop"
         class="min-w-0 lg:flex-1"
       >
-        <!-- U6 / R13. Category chips, counted over your own requests only;
-             an inactive category you used before still has one. -->
-        <div
-          v-if="categoryChips.length > 1 || categoryFilter"
-          class="mb-4 flex flex-wrap items-center gap-2"
-          role="group"
-          aria-label="Filter requests by category"
-          data-testid="request-category-chips"
-        >
-          <button
-            type="button"
-            class="min-h-11 rounded-full border px-4 text-sm font-medium"
-            :class="
-              !categoryFilter
-                ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-                : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-            "
-            :aria-pressed="!categoryFilter"
-            @click="filterByCategory()"
+        <template v-if="tab === 'work'">
+          <!-- R7: the feed's state chips, off the same server filter the
+               tab read. "Closed" is a deliberate click away, not a default. -->
+          <div
+            class="mb-4 flex flex-wrap items-center gap-2"
+            role="group"
+            aria-label="Filter work by state"
+            data-testid="work-filter-chips"
           >
-            All
-          </button>
-          <button
-            v-for="chip in categoryChips"
-            :key="chip.name"
-            type="button"
-            class="min-h-11 rounded-full border px-4 text-sm font-medium"
-            :class="
-              categoryFilter === chip.name
-                ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-                : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-            "
-            :aria-pressed="categoryFilter === chip.name"
-            @click="filterByCategory(chip.name)"
-          >
-            {{ chip.name }}
-            <span class="tabular text-ink-gray-5">{{ chip.count }}</span>
-          </button>
-        </div>
-        <AsyncState
-          section="requests-list"
-          :resource="requests"
-          :empty="rows.length === 0"
-          empty-title="No requests yet"
-          empty-body="Ask HR for a letter, a payroll correction, or anything else you need."
-          :skeleton-rows="3"
-        >
-          <template #empty-action>
-            <!-- Not the header's wording: with an empty list both are on
-                 screen at once, and two controls with the same accessible
-                 name is a duplicate rather than an affordance. -->
-            <Button
-              variant="solid"
-              theme="blue"
-              @click="newRequest"
+            <button
+              v-for="filter in WORK_FILTERS"
+              :key="filter.name"
+              type="button"
+              class="min-h-11 rounded-full border px-4 text-sm font-medium"
+              :class="
+                workFilter === filter.name
+                  ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
+                  : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
+              "
+              :aria-pressed="workFilter === filter.name"
+              @click="filterWork(filter.name)"
             >
-              Send your first request
-            </Button>
-          </template>
-
-          <section
-            v-for="group in groups"
-            :key="group.key"
-            class="mb-6 last:mb-0"
-            :aria-label="group.label"
+              {{ filter.label }}
+            </button>
+          </div>
+          <AsyncState
+            section="work-list"
+            :resource="work"
+            :empty="workRows.length === 0"
+            empty-title="Nothing to work on"
+            empty-body="Requests routed to you appear here as they arrive."
+            :skeleton-rows="3"
           >
-            <h2 class="label mb-2">
-              {{ group.label }}
-            </h2>
             <ul class="space-y-2">
               <li
-                v-for="row in group.rows"
+                v-for="row in workRows"
                 :key="row.name"
                 class="surface-card elev-1 relative p-4"
                 :class="row.name === name ? 'ring-2 ring-field' : ''"
-                data-testid="request-row"
-                :data-unread="row.unread ? '1' : '0'"
+                data-testid="work-row"
               >
                 <div class="flex items-start justify-between gap-3">
                   <div class="min-w-0">
-                    <p class="label flex items-center gap-2">
-                      <!-- Tone plus a caption, never hue alone: the row is
-                           also in the "Needs you" group and the dot is
-                           named for a screen reader. -->
-                      <span
-                        v-if="row.unread"
-                        class="inline-block h-2 w-2 shrink-0 rounded-full bg-field"
-                      ><span class="sr-only">Unread</span></span>
-                      {{ row.category }}
+                    <p class="label">
+                      {{ row.employee_name }}
                     </p>
-                    <!-- One link per row, stretched over the whole card. Two
-                         nested interactive elements would be the alternative,
-                         and that is neither valid markup nor navigable. -->
-                    <!-- P2-U9: `-my-2 min-h-11` for the same reason as the
-                         Leave row -- the stretched pseudo-element makes the
-                         card tappable, but an automated target-size check
-                         reads the link's own 24px box. The negative margin
-                         keeps the list's density unchanged. -->
                     <router-link
                       class="-my-2 inline-flex min-h-11 items-center font-medium text-ink-gray-9 after:absolute after:inset-0 after:content-['']"
-                      :class="row.unread ? 'font-semibold' : ''"
-                      :to="{ name: 'RequestDetail', params: { name: row.name }, query: categoryFilter ? { type: categoryFilter } : {} }"
+                      :class="row.name === name ? 'font-semibold' : ''"
+                      :to="{ name: 'RequestDetail', params: { name: row.name }, query: { tab: 'work', ...(workFilter === 'open' ? {} : { state: workFilter }) } }"
                     >
                       {{ row.subject }}
                     </router-link>
                     <p class="mt-0.5 text-sm text-ink-gray-5">
-                      {{ meta(row) }}
+                      {{ row.category }} · sent {{ formatDate(row.sent_on) }}
+                      <template v-if="row.picked_up_by_name">
+                        · picked up by {{ row.picked_up_by_name }}
+                      </template>
                     </p>
                   </div>
                   <div class="flex shrink-0 items-center gap-2">
+                    <span
+                      v-if="row.sla_overdue"
+                      class="rounded-full bg-surface-red-2 px-2 py-0.5 text-xs font-bold text-ink-red-3"
+                      data-testid="work-sla"
+                    >Past SLA</span>
                     <StatusBadge
                       kind="request"
                       :status="row.status"
@@ -416,49 +552,188 @@ const timeline = computed(() => {
                     />
                   </div>
                 </div>
+              </li>
+            </ul>
+            <div
+              v-if="workMoreCount"
+              class="mt-4 text-center"
+            >
+              <Button
+                variant="ghost"
+                :loading="work.loading"
+                @click="showMoreWork"
+              >
+                Show {{ workMoreCount }} more
+              </Button>
+            </div>
+          </AsyncState>
+        </template>
+        <template v-else>
+          <!-- U6 / R13. Category chips, counted over your own requests only;
+             an inactive category you used before still has one. -->
+          <div
+            v-if="categoryChips.length > 1 || categoryFilter"
+            class="mb-4 flex flex-wrap items-center gap-2"
+            role="group"
+            aria-label="Filter requests by category"
+            data-testid="request-category-chips"
+          >
+            <button
+              type="button"
+              class="min-h-11 rounded-full border px-4 text-sm font-medium"
+              :class="
+                !categoryFilter
+                  ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
+                  : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
+              "
+              :aria-pressed="!categoryFilter"
+              @click="filterByCategory()"
+            >
+              All
+            </button>
+            <button
+              v-for="chip in categoryChips"
+              :key="chip.name"
+              type="button"
+              class="min-h-11 rounded-full border px-4 text-sm font-medium"
+              :class="
+                categoryFilter === chip.name
+                  ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
+                  : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
+              "
+              :aria-pressed="categoryFilter === chip.name"
+              @click="filterByCategory(chip.name)"
+            >
+              {{ chip.name }}
+              <span class="tabular text-ink-gray-5">{{ chip.count }}</span>
+            </button>
+          </div>
+          <AsyncState
+            section="requests-list"
+            :resource="requests"
+            :empty="rows.length === 0"
+            empty-title="No requests yet"
+            empty-body="Ask HR for a letter, a payroll correction, or anything else you need."
+            :skeleton-rows="3"
+          >
+            <template #empty-action>
+              <!-- Not the header's wording: with an empty list both are on
+                 screen at once, and two controls with the same accessible
+                 name is a duplicate rather than an affordance. -->
+              <Button
+                variant="solid"
+                theme="blue"
+                @click="newRequest"
+              >
+                Send your first request
+              </Button>
+            </template>
 
-                <!-- The handling team's reply, attributed and quoted rather
+            <section
+              v-for="group in groups"
+              :key="group.key"
+              class="mb-6 last:mb-0"
+              :aria-label="group.label"
+            >
+              <h2 class="label mb-2">
+                {{ group.label }}
+              </h2>
+              <ul class="space-y-2">
+                <li
+                  v-for="row in group.rows"
+                  :key="row.name"
+                  class="surface-card elev-1 relative p-4"
+                  :class="row.name === name ? 'ring-2 ring-field' : ''"
+                  data-testid="request-row"
+                  :data-unread="row.unread ? '1' : '0'"
+                >
+                  <div class="flex items-start justify-between gap-3">
+                    <div class="min-w-0">
+                      <p class="label flex items-center gap-2">
+                        <!-- Tone plus a caption, never hue alone: the row is
+                           also in the "Needs you" group and the dot is
+                           named for a screen reader. -->
+                        <span
+                          v-if="row.unread"
+                          class="inline-block h-2 w-2 shrink-0 rounded-full bg-field"
+                        ><span class="sr-only">Unread</span></span>
+                        {{ row.category }}
+                      </p>
+                      <!-- One link per row, stretched over the whole card. Two
+                         nested interactive elements would be the alternative,
+                         and that is neither valid markup nor navigable. -->
+                      <!-- P2-U9: `-my-2 min-h-11` for the same reason as the
+                         Leave row -- the stretched pseudo-element makes the
+                         card tappable, but an automated target-size check
+                         reads the link's own 24px box. The negative margin
+                         keeps the list's density unchanged. -->
+                      <router-link
+                        class="-my-2 inline-flex min-h-11 items-center font-medium text-ink-gray-9 after:absolute after:inset-0 after:content-['']"
+                        :class="row.unread ? 'font-semibold' : ''"
+                        :to="{ name: 'RequestDetail', params: { name: row.name }, query: categoryFilter ? { type: categoryFilter } : {} }"
+                      >
+                        {{ row.subject }}
+                      </router-link>
+                      <p class="mt-0.5 text-sm text-ink-gray-5">
+                        {{ meta(row) }}
+                      </p>
+                    </div>
+                    <div class="flex shrink-0 items-center gap-2">
+                      <StatusBadge
+                        kind="request"
+                        :status="row.status"
+                      />
+                      <Icon
+                        name="chevronRight"
+                        size="h-4 w-4"
+                        class="text-ink-gray-4"
+                      />
+                    </div>
+                  </div>
+
+                  <!-- The handling team's reply, attributed and quoted rather
                      than prefixed with a bare label, so a reply reads as
                      somebody having answered (R5: "IT" for an IT-routed
                      request, not a fixed "HR"). -->
-                <div
-                  v-if="row.hr_note"
-                  class="surface-inset mt-3 flex gap-3 p-3"
-                >
-                  <span
-                    class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-field text-xs font-bold text-signal"
-                    aria-hidden="true"
-                  >{{ row.handled_by_team || 'HR' }}</span>
-                  <div class="min-w-0">
-                    <p class="text-sm font-medium text-ink-gray-9">
-                      {{ row.handled_by_team || 'HR' }}
-                      <template v-if="row.replied_on">
-                        <span class="font-normal text-ink-gray-5">·
-                          {{ formatDate(row.replied_on) }}</span>
-                      </template>
-                    </p>
-                    <p class="mt-0.5 text-sm text-ink-gray-7">
-                      {{ row.hr_note }}
-                    </p>
+                  <div
+                    v-if="row.hr_note"
+                    class="surface-inset mt-3 flex gap-3 p-3"
+                  >
+                    <span
+                      class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-field text-xs font-bold text-signal"
+                      aria-hidden="true"
+                    >{{ row.handled_by_team || 'HR' }}</span>
+                    <div class="min-w-0">
+                      <p class="text-sm font-medium text-ink-gray-9">
+                        {{ row.handled_by_team || 'HR' }}
+                        <template v-if="row.replied_on">
+                          <span class="font-normal text-ink-gray-5">·
+                            {{ formatDate(row.replied_on) }}</span>
+                        </template>
+                      </p>
+                      <p class="mt-0.5 text-sm text-ink-gray-7">
+                        {{ row.hr_note }}
+                      </p>
+                    </div>
                   </div>
-                </div>
-              </li>
-            </ul>
-          </section>
+                </li>
+              </ul>
+            </section>
 
-          <div
-            v-if="moreCount"
-            class="mt-4 text-center"
-          >
-            <Button
-              variant="ghost"
-              :loading="requests.loading"
-              @click="showMore"
+            <div
+              v-if="moreCount"
+              class="mt-4 text-center"
             >
-              Show {{ moreCount }} more
-            </Button>
-          </div>
-        </AsyncState>
+              <Button
+                variant="ghost"
+                :loading="requests.loading"
+                @click="showMore"
+              >
+                Show {{ moreCount }} more
+              </Button>
+            </div>
+          </AsyncState>
+        </template>
       </div>
 
       <!-- The selected request. Written once and shaped twice: a full-width
@@ -487,6 +762,217 @@ const timeline = computed(() => {
         </div>
 
         <AsyncState
+          v-if="tab === 'work'"
+          section="request-detail"
+          :resource="workDetail"
+          :empty="!workDetail.data"
+          empty-title="That request isn't here"
+          empty-body="It may have been closed by somebody else."
+          skeleton="block"
+          skeleton-height="h-64"
+        >
+          <template #error-title>
+            We couldn't load this request
+          </template>
+
+          <!-- R8: the same decision detail the Approvals queue opens -- the
+               evidence, the conversation and the legal actions, with the
+               server's permission check behind every button. -->
+          <article
+            v-if="workSelected"
+            class="surface-card elev-1 p-4"
+            aria-label="Request to work on"
+            data-testid="work-detail"
+          >
+            <p class="label">
+              {{ workSelected.category }} · {{ workSelected.name }}
+            </p>
+            <div class="mt-1 flex flex-wrap items-start justify-between gap-2">
+              <h2 class="type-section font-heading text-ink-gray-9">
+                {{ workSelected.subject }}
+              </h2>
+              <StatusBadge
+                kind="request"
+                :status="workSelected.status"
+              />
+            </div>
+            <p class="mt-1 text-sm text-ink-gray-6">
+              {{ workSelected.employee_name }}
+              <template v-if="workSelected.sent_on">
+                · sent {{ formatDate(workSelected.sent_on) }}
+              </template>
+              <template v-if="workSelected.age_days != null">
+                · waiting {{ workSelected.age_days }} day{{ workSelected.age_days === 1 ? '' : 's' }}
+              </template>
+              <template v-if="workSelected.picked_up_by_name">
+                · picked up by {{ workSelected.picked_up_by_name }}
+              </template>
+            </p>
+            <p
+              v-if="workSelected.sla_overdue"
+              class="mt-1 text-sm font-medium text-signal"
+              data-testid="work-sla-overdue"
+            >
+              Past this category's SLA
+            </p>
+
+            <!-- A structured correction's masked proposal, read-only (R28). -->
+            <p
+              v-if="workSelected.correction_field"
+              class="mt-2 text-sm text-ink-gray-7"
+              data-testid="request-correction"
+            >
+              New {{ CORRECTABLE_FIELDS[workSelected.correction_field] || workSelected.correction_field }}:
+              <span
+                class="tabular text-ink-gray-9"
+                :aria-label="spokenValue(workSelected.correction_proposed_masked || '')"
+              >{{ workSelected.correction_proposed_masked }}</span>
+            </p>
+
+            <ul
+              v-if="workSelected.attachments.length"
+              class="mt-3 flex flex-wrap gap-2"
+            >
+              <li
+                v-for="attachment in workSelected.attachments"
+                :key="attachment.name"
+              >
+                <a
+                  class="inline-flex min-h-11 items-center gap-2 rounded-full border border-outline-gray-2 px-3 text-sm text-ink-gray-8 hover:bg-surface-gray-2"
+                  :href="attachment.file_url"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  <Icon
+                    name="requests"
+                    size="h-4 w-4"
+                    class="text-ink-gray-5"
+                  />
+                  {{ attachment.file_name }}
+                  <span
+                    v-if="fileSize(attachment.file_size)"
+                    class="tabular text-ink-gray-5"
+                  >{{ fileSize(attachment.file_size) }}</span>
+                </a>
+              </li>
+            </ul>
+
+            <section
+              v-if="workSelected.thread?.length"
+              class="mt-4 border-t border-outline-gray-1 pt-4"
+              data-testid="request-thread"
+            >
+              <h3 class="label">
+                Conversation
+              </h3>
+              <ul class="mt-2 space-y-2">
+                <li
+                  v-for="(entry, index) in workSelected.thread"
+                  :key="index"
+                  class="surface-inset p-3 text-sm"
+                >
+                  <p class="text-xs font-medium text-ink-gray-5">
+                    {{ entry.by === 'employee' ? 'Employee' : 'You' }}
+                    · {{ formatDateTime(entry.on) }}
+                  </p>
+                  <p class="mt-0.5 whitespace-pre-line text-ink-gray-8">
+                    {{ entry.message }}
+                  </p>
+                </li>
+              </ul>
+            </section>
+
+            <!-- Need info / Reject refuse to submit without their words
+                 (P5-U6); the box holds them on the same surface. -->
+            <div
+              v-if="reasonFor"
+              class="surface-inset mt-4 p-3"
+              data-testid="work-reason"
+            >
+              <FormControl
+                v-model="reasonMessage"
+                type="textarea"
+                :label="REASON_HEADINGS[reasonFor]"
+                :placeholder="reasonFor === 'Reject' ? 'Why this is a final no' : 'What do you need from them?'"
+              />
+              <p
+                v-if="reasonError"
+                class="mt-1 text-sm font-medium text-signal"
+                role="alert"
+              >
+                {{ reasonError }}
+              </p>
+              <div class="mt-2 flex gap-2">
+                <Button
+                  variant="solid"
+                  :theme="reasonFor === 'Reject' ? 'red' : 'green'"
+                  :loading="workActing === workSelected.name"
+                  data-testid="work-reason-confirm"
+                  @click="confirmReason"
+                >
+                  {{ reasonFor }}
+                </Button>
+                <Button
+                  variant="ghost"
+                  @click="reasonFor = ''"
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+
+            <div
+              v-if="workSelected.actions?.length"
+              class="mt-4 flex flex-wrap items-center gap-2 border-t border-outline-gray-1 pt-4"
+              data-testid="decision-actions"
+            >
+              <Button
+                v-if="may('Pick up')"
+                variant="solid"
+                theme="green"
+                :loading="workActing === workSelected.name"
+                :disabled="workActing === workSelected.name"
+                data-testid="pick-up"
+                @click="decide('Pick up')"
+              >
+                Pick up
+              </Button>
+              <Button
+                v-if="may('Done')"
+                variant="solid"
+                theme="green"
+                :loading="workActing === workSelected.name"
+                :disabled="workActing === workSelected.name"
+                data-testid="done"
+                @click="decide('Done')"
+              >
+                Done
+              </Button>
+              <Button
+                v-if="may('Need info')"
+                variant="outline"
+                :disabled="workActing === workSelected.name"
+                data-testid="need-info"
+                @click="openReason('Need info')"
+              >
+                Need info
+              </Button>
+              <Button
+                v-if="may('Reject')"
+                variant="outline"
+                theme="red"
+                :disabled="workActing === workSelected.name"
+                data-testid="reject"
+                @click="openReason('Reject')"
+              >
+                Reject
+              </Button>
+            </div>
+          </article>
+        </AsyncState>
+
+        <AsyncState
+          v-else
           section="request-detail"
           :resource="detail"
           :empty="!detail.data"

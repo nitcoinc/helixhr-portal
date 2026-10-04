@@ -479,6 +479,15 @@ test.describe('employee', () => {
     }
   })
 
+  // ── Plan 2026-10-04-002 U4: a plain employee has no workspace tabs ──
+  test('a plain employee sees no tab bar on /requests', async ({ page }) => {
+    // R6: the tab bar only exists for a holder of a routed role. There is
+    // nothing to switch to for the person the requests are about.
+    await page.goto('/helixhr/requests')
+    await expect(page.getByTestId('requests-tabs')).toHaveCount(0)
+    await expect(page.locator('[data-async-state^="requests-list"]')).toBeVisible()
+  })
+
   // ── Plan 2026-10-04-002 U2: the timeline names the real picker ────────
   test('an IT request picked up by the IT identity names the picker', async ({
     page,

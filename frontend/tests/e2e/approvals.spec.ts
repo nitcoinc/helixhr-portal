@@ -502,3 +502,81 @@ test('an IT identity works only its own routed requests, end to end', async ({ p
     .toBe('Done')
   await check2.dispose()
 })
+
+// ── Plan 2026-10-04-002 U4 ────────────────────────────────────────────────
+// The Requests page's second tab, under the routed-worker identity. Own
+// request, filed by the employee fixture through the portal's own method, so
+// it never touches the single-run request the IT lifecycle test above
+// consumes.
+test('the Requests page gains a To work on tab for a routed worker', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'it', 'this is the routed-worker capability shape')
+  test.setTimeout(60000)
+
+  const baseURL = process.env.BASE_URL || 'http://localhost:8080'
+  const admin = await adminContext(baseURL)
+  const employeeApi = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+  await employeeApi.post('/api/method/login', { form: { usr: EMPLOYEE, pwd: PASSWORD } })
+  const subject = `U4 work tab ${Date.now()}`
+
+  const seeded = await employeeApi.post('/api/method/helixhr.api.create_my_request', {
+    data: {
+      category: 'IT / Asset',
+      subject,
+      details: 'Seeded for the work tab',
+      operation_key: crypto.randomUUID(),
+    },
+  })
+  expect(seeded.ok(), await seeded.text()).toBeTruthy()
+  const name = (await seeded.json())?.message?.name as string
+
+  try {
+    // R6: a routed worker gets the two-item tab bar; their own list is the
+    // default tab, and the work list starts empty of their own requests.
+    await page.goto('/helixhr/requests')
+    const tabs = page.getByTestId('requests-tabs')
+    await expect(tabs.getByRole('tab', { name: 'My requests' })).toBeVisible()
+    await expect(tabs.getByRole('tab', { name: 'To work on' })).toBeVisible()
+    await expect(tabs.getByRole('tab', { name: 'My requests' })).toHaveAttribute('aria-selected', 'true')
+
+    // R7/R9: the work tab lives in the URL and lists what is routed here.
+    await tabs.getByRole('tab', { name: 'To work on' }).click()
+    await expect(page).toHaveURL(/tab=work/)
+    const row = page.locator('[data-testid="work-row"]', { hasText: subject })
+    await expect(row).toBeVisible({ timeout: 10000 })
+
+    // R8: the detail is the same decision surface the Approvals queue opens,
+    // and picking up moves the row under Mine.
+    await row.click()
+    await expect(page).toHaveURL(new RegExp(`/helixhr/requests/${name}`))
+    const panel = page.getByTestId('work-detail')
+    await expect(panel.getByTestId('pick-up')).toBeVisible({ timeout: 10000 })
+    await panel.getByTestId('pick-up').click()
+    await expect(panel.getByTestId('done')).toBeVisible({ timeout: 10000 })
+
+    const chips = page.getByTestId('work-filter-chips')
+    await chips.getByRole('button', { name: 'Mine' }).click()
+    await expect(page).toHaveURL(/tab=work&state=mine/)
+    await expect(page.locator('[data-testid="work-row"]', { hasText: subject })).toBeVisible()
+
+    // R9: a notification-shaped link reproduces the tab and the filter.
+    await page.goto('/helixhr/requests?tab=work&state=mine')
+    await expect(
+      page.getByTestId('work-filter-chips').getByRole('button', { name: 'Mine' }),
+    ).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.locator('[data-testid="work-row"]', { hasText: subject })).toBeVisible()
+
+    // Keyboard: the tablist switches with the arrow keys.
+    await page.goto('/helixhr/requests')
+    await page.getByRole('tab', { name: 'My requests' }).focus()
+    await page.keyboard.press('ArrowRight')
+    await expect(page).toHaveURL(/tab=work/)
+    await page.keyboard.press('ArrowLeft')
+    await expect(page).not.toHaveURL(/tab=work/)
+  } finally {
+    await admin.post('/api/method/frappe.client.delete', {
+      data: { doctype: 'HR Request', name },
+    })
+    await employeeApi.dispose()
+    await admin.dispose()
+  }
+})

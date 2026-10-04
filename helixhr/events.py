@@ -1077,7 +1077,9 @@ def hr_request_after_insert(doc, method=None):
 				"employee_name": frappe.db.get_value("Employee", doc.employee, "employee_name"),
 				"category": doc.category,
 				"subject": doc.subject,
-				"action_url": frappe.utils.get_url("/helixhr/requests"),
+				# Plan 2026-10-04-002 U4/R9: straight into the worker's tab, so
+				# the arrival link opens what is theirs to work on.
+				"action_url": frappe.utils.get_url("/helixhr/requests?tab=work"),
 			},
 		)
 		if message is None:
