@@ -88,7 +88,11 @@ const groups = computed(() =>
 function meta(row) {
   const parts = [`Sent ${formatDate(row.creation)}`]
   if (row.closed_on) parts.push(`closed ${formatDate(row.closed_on)}`)
-  else if (row.picked_up_on) parts.push(`picked up ${formatDate(row.picked_up_on)}`)
+  else if (row.picked_up_on) {
+    // Plan 2026-10-04-002 R4: the picker is named; a team-resolved request
+    // without a resolvable picker falls back to the team label.
+    parts.push(`picked up ${row.picked_up_by_name ? `by ${row.picked_up_by_name} ` : ''}${formatDate(row.picked_up_on)}`)
+  }
   if (row.attachments) {
     parts.push(`${row.attachments} attachment${row.attachments === 1 ? '' : 's'}`)
   }
@@ -257,7 +261,13 @@ const timeline = computed(() => {
   if (!request) return []
   return [
     { key: 'sent', label: 'Sent', at: request.creation },
-    { key: 'picked-up', label: 'Picked up by HR', at: request.picked_up_on },
+    {
+      // Plan 2026-10-04-002 R4: the person who picked it up, not a fixed
+      // "Picked up by HR"; no resolvable picker falls back to the team.
+      key: 'picked-up',
+      label: `Picked up by ${request.picked_up_by_name || request.handled_by_team || 'HR'}`,
+      at: request.picked_up_on,
+    },
     { key: 'replied', label: 'Replied', at: request.replied_on },
   ].filter((step) => step.at)
 })
@@ -407,9 +417,10 @@ const timeline = computed(() => {
                   </div>
                 </div>
 
-                <!-- HR's reply, attributed and quoted rather than prefixed
-                     with a bare "HR:", so a reply reads as somebody having
-                     answered. -->
+                <!-- The handling team's reply, attributed and quoted rather
+                     than prefixed with a bare label, so a reply reads as
+                     somebody having answered (R5: "IT" for an IT-routed
+                     request, not a fixed "HR"). -->
                 <div
                   v-if="row.hr_note"
                   class="surface-inset mt-3 flex gap-3 p-3"
@@ -417,10 +428,10 @@ const timeline = computed(() => {
                   <span
                     class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-field text-xs font-bold text-signal"
                     aria-hidden="true"
-                  >HR</span>
+                  >{{ row.handled_by_team || 'HR' }}</span>
                   <div class="min-w-0">
                     <p class="text-sm font-medium text-ink-gray-9">
-                      HR
+                      {{ row.handled_by_team || 'HR' }}
                       <template v-if="row.replied_on">
                         <span class="font-normal text-ink-gray-5">·
                           {{ formatDate(row.replied_on) }}</span>
@@ -639,16 +650,16 @@ const timeline = computed(() => {
               class="mt-4 border-t border-outline-gray-1 pt-4"
             >
               <h3 class="label">
-                HR replied
+                {{ selected.handled_by_team || 'HR' }} replied
               </h3>
               <div class="mt-2 flex gap-3">
                 <span
                   class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-field text-xs font-bold text-signal"
                   aria-hidden="true"
-                >HR</span>
+                >{{ selected.handled_by_team || 'HR' }}</span>
                 <div class="min-w-0 flex-1">
                   <p class="text-sm font-medium text-ink-gray-9">
-                    HR
+                    {{ selected.handled_by_team || 'HR' }}
                     <template v-if="selected.replied_on">
                       <span class="font-normal text-ink-gray-5">·
                         {{ formatDateTime(selected.replied_on) }}</span>
@@ -717,7 +728,7 @@ const timeline = computed(() => {
                   class="surface-inset p-3 text-sm"
                 >
                   <p class="text-xs font-medium text-ink-gray-5">
-                    {{ entry.by === 'employee' ? 'You' : 'HR / IT' }}
+                    {{ entry.by === 'employee' ? 'You' : selected.handled_by_team || 'HR' }}
                     · {{ formatDateTime(entry.on) }}
                   </p>
                   <p class="mt-0.5 whitespace-pre-line text-ink-gray-8">

@@ -6080,6 +6080,41 @@ _SUBJECT_MAX = 140
 _DETAILS_MAX = 5000
 
 
+def _handled_by_team(routed_to_role):
+	"""The display label for whoever handles a request (plan 2026-10-04-002
+	R5): "IT" for the IT Team, "HR" for HR Manager, the role name itself
+	otherwise."""
+	if routed_to_role == "IT Team":
+		return "IT"
+	if routed_to_role == "HR Manager":
+		return "HR"
+	return routed_to_role or "HR"
+
+
+def _category_teams():
+	"""{category -> display team label}, one query over a bounded table."""
+	return {
+		name: _handled_by_team(role)
+		for name, role in frappe.get_all(
+			"HelixHR Request Category", fields=["name", "route_to_role"], as_list=True
+		)
+	}
+
+
+def _picker_display_name(picked_up_by):
+	"""The picker's full name, or None when the honest answer is "the team
+	handled it" (plan 2026-10-04-002 KTD4): no picker recorded, the
+	Administrator account, or a disabled user. The raw user id never
+	returns -- an employee has no read on User, so the client couldn't
+	resolve it anyway."""
+	if not picked_up_by or picked_up_by == "Administrator":
+		return None
+	row = frappe.db.get_value("User", picked_up_by, ["full_name", "enabled"], as_dict=True)
+	if not row or not row.enabled:
+		return None
+	return row.full_name
+
+
 def _requests_summary(employee, limit=None, category=None):
 	"""A bounded page of `employee`'s requests, newest first, optionally of
 	one category (U6 / R13; `counts` is per category across all of them).
@@ -6096,13 +6131,18 @@ def _requests_summary(employee, limit=None, category=None):
 	rows = frappe.get_all(
 		"HR Request",
 		filters=filters,
-		fields=list(_REQUEST_FIELDS),
+		fields=[*list(_REQUEST_FIELDS), "picked_up_by"],
 		order_by="creation desc",
 		limit=limit,
 	)
 	names = [row.name for row in rows]
 	unread = _unread_request_notifications(names)
 	counts = _attachment_counts(names)
+	# Team labels come from the category, one query for the whole page.
+	teams = _category_teams()
+	for row in rows:
+		row["picked_up_by_name"] = _picker_display_name(row.pop("picked_up_by"))
+		row["handled_by_team"] = teams.get(row.category) or "HR"
 
 	return {
 		"requests": [
@@ -6149,7 +6189,15 @@ def _request_detail(name, employee):
 	row = frappe.db.get_value(
 		"HR Request",
 		name,
-		[*_REQUEST_FIELDS, "details", "employee", "correction_field", "correction_proposed_masked"],
+		[
+			*_REQUEST_FIELDS,
+			"details",
+			"employee",
+			"routed_to_role",
+			"picked_up_by",
+			"correction_field",
+			"correction_proposed_masked",
+		],
 		as_dict=True,
 	)
 	if not row:
@@ -6159,6 +6207,11 @@ def _request_detail(name, employee):
 		# which the portal renders as its own state with no Retry (P2-R2).
 		frappe.throw(_("That request isn't yours."), frappe.PermissionError)
 	row.pop("employee")
+	# Plan 2026-10-04-002 R4/R5: the surface names who picked the request up
+	# and which team handles it -- resolved here, because the employee has
+	# no read on User; the raw ids are popped, never returned.
+	row["picked_up_by_name"] = _picker_display_name(row.pop("picked_up_by"))
+	row["handled_by_team"] = _handled_by_team(row.pop("routed_to_role"))
 
 	files = frappe.get_all(
 		"File",

@@ -1587,3 +1587,110 @@ class TestRequestNaming(IntegrationTestCase):
 		for name in frappe.get_all("HelixHR Request Category", pluck="name"):
 			if name not in ("IT / Asset", "HR Letter"):
 				self.assertEqual(self._prefix(name), "HR-REQ")
+
+
+class TestRequestPickerName(IntegrationTestCase):
+	"""Plan 2026-10-04-002 U2: request surfaces name the real picker and the
+	handling team, and the employee projection never carries a user id."""
+
+	def setUp(self):
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		self.it_employee, self.it_user = make_test_it_user()
+		# Pickup and reply writes both notify by mail; a site with no default
+		# outgoing Email Account would throw (P4-KTD9's failure mode).
+		ensure_test_email_account()
+		self.addCleanup(setattr, frappe.local, "request", None)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _file(self, category="IT / Asset", **extra):
+		from helixhr.api import create_my_request
+
+		frappe.set_user(EMPLOYEE_USER)
+		fields = {"category": category, "subject": "Need a new laptop", "details": "Mine died", **extra}
+		created = create_my_request(operation_key=str(uuid.uuid4()), **fields)
+		frappe.set_user("Administrator")
+		return created["name"]
+
+	def _pick(self, name, user):
+		from helixhr.api import act_on_approval
+
+		row = frappe.db.get_value("HR Request", name, ["modified", "status"], as_dict=True)
+		frappe.set_user(user)
+		act_on_approval(
+			"HR Request", name, "Pick up", expected_modified=str(row.modified), expected_state=row.status
+		)
+		frappe.set_user("Administrator")
+
+	def _own(self, name):
+		"""The employee's detail and list row for this request, as the
+		employee sees them."""
+		from helixhr.api import get_my_request, get_my_requests
+
+		frappe.set_user(EMPLOYEE_USER)
+		detail = get_my_request(name)
+		row = next(r for r in get_my_requests()["requests"] if r["name"] == name)
+		frappe.set_user("Administrator")
+		return detail, row
+
+	def test_the_employee_sees_the_pickers_full_name(self):
+		name = self._file()
+		self._pick(name, self.it_user)
+		expected = frappe.db.get_value("User", self.it_user, "full_name")
+
+		detail, row = self._own(name)
+
+		self.assertEqual(detail["picked_up_by_name"], expected)
+		self.assertEqual(row["picked_up_by_name"], expected)
+
+	def test_an_hr_request_picked_by_hr_names_the_picker_and_the_team(self):
+		from helixhr.tests.utils import HR_MANAGER_EMPLOYEE_USER, make_test_hr_manager_employee
+
+		make_test_hr_manager_employee()
+		name = self._file(category="HR Letter")
+		self._pick(name, HR_MANAGER_EMPLOYEE_USER)
+		expected = frappe.db.get_value("User", HR_MANAGER_EMPLOYEE_USER, "full_name")
+
+		detail, row = self._own(name)
+
+		self.assertEqual(detail["picked_up_by_name"], expected)
+		self.assertEqual(detail["handled_by_team"], "HR")
+		self.assertEqual(row["handled_by_team"], "HR")
+
+	def test_an_it_request_carries_the_it_team_label(self):
+		name = self._file()
+
+		detail, row = self._own(name)
+
+		self.assertEqual(detail["handled_by_team"], "IT")
+		self.assertEqual(row["handled_by_team"], "IT")
+
+	def test_a_request_nobody_picked_up_has_no_picker_name(self):
+		name = self._file()
+
+		detail, row = self._own(name)
+
+		self.assertIsNone(detail["picked_up_by_name"])
+		self.assertIsNone(row["picked_up_by_name"])
+
+	def test_an_administrator_picker_falls_back_to_the_team_label(self):
+		"""A disabled or system picker has no honest full name to show; the
+		name resolves to nothing and the surface falls back to the team."""
+		name = self._file()
+		frappe.db.set_value("HR Request", name, "picked_up_by", "Administrator")
+
+		detail, _row = self._own(name)
+
+		self.assertIsNone(detail["picked_up_by_name"])
+		self.assertEqual(detail["handled_by_team"], "IT")
+
+	def test_the_employee_projection_never_leaks_the_picker(self):
+		name = self._file()
+		self._pick(name, self.it_user)
+
+		detail, row = self._own(name)
+
+		json = frappe.as_json(detail) + frappe.as_json(row)
+		self.assertNotIn(self.it_user, json)
+		self.assertNotIn('"picked_up_by"', json)
