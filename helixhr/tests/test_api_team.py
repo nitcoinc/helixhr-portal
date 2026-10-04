@@ -553,29 +553,54 @@ class TestTeamTimesheets(IntegrationTestCase):
 		self.assertEqual(member["timesheet"]["open_change"]["name"], change["name"])
 
 	def test_expected_hours_count_holidays_and_approved_leave(self):
-		"""KTD7's arithmetic, through the team projection: the employee's
-		holiday list marks a day off and approved leave covers another, so a
-		40-hour standard week expects the rest."""
-		from helixhr.tests.utils import ensure_holiday_list_assignment
-
+		"""KTD7's arithmetic, through the team projection: a five-day week on
+		the employee's own holiday list, with one working day on approved
+		leave, expects four standard days."""
 		standard = frappe.db.get_single_value("HR Settings", "standard_working_hours")
 		if not standard:
 			self.skipTest("this bench has no standard_working_hours configured")
-		holiday_list = ensure_holiday_list_assignment(self.company)
-		holidays = frappe.get_all(
-			"Holiday",
-			filters={"parent": holiday_list, "holiday_date": ["between", [str(self.monday), str(add_days(self.monday, 6))]]},
-			fields=["holiday_date"],
+
+		frappe.set_user("Administrator")
+		list_name = "_Test Team Expected Hours"
+		if frappe.db.exists("Holiday List", list_name):
+			frappe.delete_doc("Holiday List", list_name, force=1, ignore_permissions=True)
+		frappe.get_doc(
+			{
+				"doctype": "Holiday List",
+				"holiday_list_name": list_name,
+				"from_date": self.monday,
+				"to_date": add_days(self.monday, 6),
+				"holidays": [
+					{"holiday_date": add_days(self.monday, 5), "weekly_off": 1, "description": "weekly off"},
+					{"holiday_date": add_days(self.monday, 6), "weekly_off": 1, "description": "weekly off"},
+				],
+			}
+		).insert(ignore_permissions=True)
+		frappe.db.set_value("Employee", self.employee_name, "holiday_list", list_name)
+
+		# Approved leave on one working day, planted (the week may sit years
+		# outside any allocation period; the projection reads columns).
+		leave = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": self.employee_name,
+				"leave_type": "Casual Leave",
+				"from_date": str(add_days(self.monday, 2)),
+				"to_date": str(add_days(self.monday, 2)),
+				"description": "_Test team expected hours",
+				"status": "Approved",
+				"docstatus": 1,
+			}
 		)
-		holiday_days = {str(row.holiday_date) for row in holidays}
-		# An approved leave on a non-holiday day inside the week.
-		leave_day = next(
-			(str(add_days(self.monday, offset)) for offset in range(7) if str(add_days(self.monday, offset)) not in holiday_days),
-			None,
-		)
-		expected = self._team(self.monday)["reports"][0]["expected_hours"]
-		working_days = 7 - len(holiday_days) - (1 if leave_day else 0)
-		self.assertEqual(expected, standard * working_days)
+		leave.name = "_TEST-TEAM-EXPECTED-HOURS"
+		leave.db_insert()
+
+		try:
+			payload = self._team(self.monday)
+			row = self._row(payload, self.employee_name)
+			self.assertEqual(row["expected_hours"], standard * 4)
+		finally:
+			frappe.db.set_value("Employee", self.employee_name, "holiday_list", None)
 
 	def test_fifty_reports_is_fifty_rows_and_a_bounded_number_of_queries(self):
 		for index in range(49):

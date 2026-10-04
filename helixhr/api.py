@@ -1355,6 +1355,13 @@ _QUEUE_LIMIT = 20
 # searchable catalogue.
 _LINKS_LIMIT = 5
 _QUEUE_FETCH = 50
+# Plan 2026-10-04-003 KTD8: the timesheet and leave kinds serve a team of up
+# to 50 reports, so their per-kind reads rise to 150 and the 25-row page is
+# gone for them (R19); a hard cap of 200 stays, reported through
+# `total_is_capped`.
+_TIMESHEET_QUEUE_FETCH = 150
+_LEAVE_QUEUE_FETCH = 150
+_QUEUE_HARD_CAP = 200
 # The bound on the one comment read that spans many records: a handful of
 # comments per sent-back record, over a page of records (P3-R25).
 _COMMENT_FETCH = 200
@@ -1513,9 +1520,143 @@ def _summary_row(
 		# U4 / R10: why HR sees a manager-stage leave -- "approver_away" or
 		# "overdue" -- and None for everything else.
 		"hr_reason": None,
+		# Plan 2026-10-04-003 KTD7: the "Needs a look" flags, computed on the
+		# server and shipped on the row, so the display and the batch
+		# endpoint's re-check can never disagree. None for the kinds that
+		# carry no flags (attendance, request, change).
+		"flags": None,
+		"needs_look": None,
 	}
 	row.update(extra)
 	return row
+
+
+# Plan 2026-10-04-003 KTD7 / R16. The flags live here and nowhere else: the
+# queue computes them once per row, the batch endpoint re-runs the same
+# helpers per item before approving (U6), and the screen only ever reads
+# what arrived. A flag is a named boolean, never a colour.
+#
+# A timesheet needs a look when its hours differ from expected by more than
+# 10%, an expected working day has no hours, it is a resubmission after a
+# send-back, it arrives from an amend, or it has waited past the overdue
+# threshold. A leave needs a look when approval would take the balance
+# negative, it overlaps another report's leave, it is in the HR stage, or it
+# starts within two days.
+_TIMESHIFT_THRESHOLD = 0.10
+
+
+def _working_days_index(employees, start, end):
+	"""The raw parts of the expected-hours arithmetic over a date span:
+	`standard` hours a day, each employee's holiday list, the holidays each
+	list marks in the span, and the approved-leave days each employee has in
+	it. One query per part for the whole span, so a queue page spanning
+	several weeks costs the same as one spanning one (KTD8)."""
+	standard = flt(frappe.db.get_single_value("HR Settings", "standard_working_hours")) or None
+	rows = frappe.get_all(
+		"Employee",
+		filters={"name": ["in", list(employees)]},
+		fields=["name", "holiday_list", "company"],
+		ignore_permissions=True,
+	)
+	defaults = {
+		row.name: row.default_holiday_list
+		for row in frappe.get_all("Company", fields=["name", "default_holiday_list"])
+	}
+	lists = {row.name: row.holiday_list or defaults.get(row.company) for row in rows}
+
+	holidays = {}
+	if any(lists.values()):
+		for row in frappe.get_all(
+			"Holiday",
+			filters={
+				"parent": ["in", [name for name in lists.values() if name]],
+				"parenttype": "Holiday List",
+				"holiday_date": ["between", [str(start), str(end)]],
+			},
+			fields=["parent", "holiday_date"],
+			ignore_permissions=True,
+		):
+			holidays.setdefault(row.parent, set()).add(str(row.holiday_date))
+
+	leave_days = {}
+	leaves = frappe.get_all(
+		"Leave Application",
+		filters={
+			"employee": ["in", list(employees)],
+			"docstatus": 1,
+			"status": "Approved",
+			"from_date": ["<=", str(end)],
+			"to_date": [">=", str(start)],
+		},
+		fields=["employee", "from_date", "to_date"],
+		ignore_permissions=True,
+	)
+	for leave in leaves:
+		days = leave_days.setdefault(leave.employee, set())
+		date = max(getdate(leave.from_date), getdate(start))
+		last = min(getdate(leave.to_date), getdate(end))
+		while date <= last:
+			days.add(str(date))
+			date = add_days(date, 1)
+
+	return {"standard": standard, "lists": lists, "holidays": holidays, "leave_days": leave_days}
+
+
+def _employee_working_days(index, employee, monday, sunday):
+	"""The days in one week `employee` is expected at work, from the index:
+	not on their holiday list, not covered by approved leave."""
+	off_days = index["holidays"].get(index["lists"].get(employee), set())
+	leave_days = index["leave_days"].get(employee, set())
+	return {
+		str(add_days(monday, offset))
+		for offset in range(7)
+		if str(add_days(monday, offset)) not in off_days and str(add_days(monday, offset)) not in leave_days
+	}
+
+
+def _working_days_by_employee(employees, monday, sunday):
+	"""`{employee: set(date)}` for one week -- the index, folded to a week."""
+	index = _working_days_index(employees, monday, sunday)
+	return {employee: _employee_working_days(index, employee, monday, sunday) for employee in employees}, index[
+		"standard"
+	]
+
+
+def _timesheet_flags_for(row, working_days, expected_hours, day_hours, today, threshold_days):
+	"""The flags for one pending week (R16). `row` is a dict of the week's
+	stored columns; `working_days` is the set of dates the employee was
+	expected to work; `day_hours` the hours actually logged per date."""
+	flags = {}
+	if expected_hours is not None and flt(expected_hours) > 0:
+		total = flt(row.get("total_hours"))
+		if abs(total - flt(expected_hours)) / flt(expected_hours) > _TIMESHIFT_THRESHOLD:
+			flags["hours_off"] = True
+	if any(flt(day_hours.get(date, 0)) == 0 for date in working_days):
+		flags["missing_day"] = True
+	# A week still carrying its manager's send-back reason is a resubmission
+	# -- one week is one row, so the reason is the only record of the round
+	# trip (P4-KTD7a).
+	if (row.get("helixhr_decision_reason") or "").strip():
+		flags["resubmitted"] = True
+	if row.get("amended_from"):
+		flags["amended"] = True
+	if is_overdue(row.get(PENDING_SINCE_FIELD), today, threshold_days):
+		flags["overdue"] = True
+	return flags
+
+
+def _leave_flags_for(row, balance_after, overlap_count, today):
+	"""The flags for one pending leave (R16)."""
+	flags = {}
+	if balance_after is not None and flt(balance_after) < 0:
+		flags["negative_balance"] = True
+	if cint(overlap_count) > 0:
+		flags["overlap"] = True
+	if row.get("for_hr"):
+		flags["with_hr"] = True
+	if row.get("from_date") and getdate(row["from_date"]) <= add_days(today, 2):
+		flags["short_notice"] = True
+	return flags
 
 
 def _leave_names_in_hr_stage(names):
@@ -1572,19 +1713,83 @@ def _leave_summaries(employee, today):
 	HRMS returns its own field list and does not know about the stage, so the
 	stage is asked for once, on the names it answered with, rather than by
 	re-reading the applications.
+
+	Plan 2026-10-04-003 KTD7/KTD8: each row gains the balance after approval
+	(cached per employee and type), how many of the caller's other reports
+	are off on overlapping days, and the R16 flags.
 	"""
 	from hrms.api import get_leave_applications
 
 	applications = get_leave_applications(
-		employee, approver_id=frappe.session.user, for_approval=True
+		employee, approver_id=frappe.session.user, for_approval=True, limit=_LEAVE_QUEUE_FETCH
 	)
 	with_hr = _leave_names_in_hr_stage([row["name"] for row in applications])
+
+	# The overlap count (R15): how many of this caller's *other* reports are
+	# off on overlapping days. One read over the whole scope answers the
+	# page; a caller with no reports has nobody to overlap with.
+	scope = _line_manager_filter(employee)
+	overlap_index = {}
+	if scope and applications:
+		first = min(str(row["from_date"]) for row in applications)
+		last = max(str(row["to_date"]) for row in applications)
+		for row in frappe.get_all(
+			"Leave Application",
+			filters={
+				"employee": scope,
+				"docstatus": ["<", 2],
+				"status": ["in", ["Open", "Approved"]],
+				"from_date": ["<=", last],
+				"to_date": [">=", first],
+			},
+			fields=["employee", "from_date", "to_date"],
+			ignore_permissions=True,
+		):
+			overlap_index.setdefault(row.employee, []).append((str(row.from_date), str(row.to_date)))
+
+	def overlap_count(row):
+		if not scope:
+			return 0
+		start, end = str(row["from_date"]), str(row["to_date"])
+		others = 0
+		for other, ranges in overlap_index.items():
+			if other == row["employee"]:
+				continue
+			for range_start, range_end in ranges:
+				if range_start <= end and start <= range_end:
+					others += 1
+					break
+		return others
+
+	balances = {}
+
+	def balance_after(row):
+		"""The balance once this request is approved (R15). One HRMS ledger
+		read per employee and type, cached for the page; None where the
+		balance is not the kind of number that can go negative (LWP,
+		negative-allowed, no allocation)."""
+		key = (row["employee"], row["leave_type"])
+		if key not in balances:
+			try:
+				result = leave_overdraw(row["employee"], row["leave_type"], row["from_date"], row["to_date"], 0)
+			except Exception:
+				result = None
+			balances[key] = result["balance"] if result else None
+		balance = balances[key]
+		if balance is None:
+			return None
+		return flt(balance) - flt(row.get("total_leave_days") or 0)
 
 	rows = []
 	for row in applications:
 		if row["name"] in with_hr:
 			continue
 		sent_on = row.get("creation") or row.get("posting_date")
+		balance = balance_after(row)
+		count = overlap_count(row)
+		flags = _leave_flags_for(
+			{**row, "for_hr": False}, balance, count, today
+		)
 		rows.append(
 			_summary_row(
 				"leave",
@@ -1599,6 +1804,10 @@ def _leave_summaries(employee, today):
 				today,
 				leave_type=row.get("leave_type"),
 				total_days=flt(row.get("total_leave_days")),
+				balance_after=balance,
+				overlap_count=count,
+				flags=flags or {},
+				needs_look=bool(flags),
 			)
 		)
 	return rows
@@ -1617,48 +1826,99 @@ def _timesheet_summaries(employee, today):
 	P4-KTD7: for an HR Manager, whose native read on Timesheet is that wide
 	answer all over again, `_line_manager_filter` narrows this half of the
 	queue to their own direct reports.
+
+	Plan 2026-10-04-003 KTD7/KTD8: the evidence the flags need -- per-day
+	hours, project split, expected hours, the send-back reason that marks a
+	resubmission, `amended_from` and the pending-since stamp -- is batched
+	for the page, and each row carries `flags` and `needs_look` (R15, R16).
 	"""
 	scope = _line_manager_filter(employee)
 	if scope is None:
 		return []
-	return [
-		# `modified` is when the week last moved, which for a Pending
-		# Approval timesheet is when it was sent. Timesheet has no
-		# submitted-on field of its own and the workflow transition is a
-		# plain field update, so this is the closest honest answer.
-		_summary_row(
-			"timesheet",
+	rows = frappe.get_list(
+		"Timesheet",
+		filters={
+			"workflow_state": PENDING_STATE,
+			"docstatus": 0,
+			"employee": scope,
+		},
+		fields=[
+			"name",
+			"employee",
+			"employee_name",
+			"start_date",
+			"end_date",
+			"total_hours",
+			"modified",
+			"amended_from",
+			"helixhr_decision_reason",
+			PENDING_SINCE_FIELD,
+		],
+		order_by="start_date asc",
+		limit=_TIMESHEET_QUEUE_FETCH,
+	)
+	if not rows:
+		return []
+
+	# `modified` is when the week last moved, which for a Pending
+	# Approval timesheet is when it was sent. Timesheet has no
+	# submitted-on field of its own and the workflow transition is a
+	# plain field update, so this is the closest honest answer.
+	day_hours, project_split = _team_time_logs([row.name for row in rows])
+	week_bounds = [get_week_bounds(row.start_date) for row in rows]
+	index = _working_days_index(
+		{row.employee for row in rows},
+		min(week[0] for week in week_bounds),
+		max(week[1] for week in week_bounds),
+	)
+	threshold = approval_overdue_days()
+	# The send-back reason sits at permlevel 1, which `get_list` strips for a
+	# caller without the level -- it is the flag's input here, read in one
+	# batched pass and never shipped on the row (the flag travels, the words
+	# stay with the decision detail).
+	reasons = {
+		row.name: row.helixhr_decision_reason
+		for row in frappe.get_all(
 			"Timesheet",
-			row.name,
-			row.employee,
-			row.employee_name,
-			row.start_date,
-			row.end_date,
-			row.modified,
-			"Pending Approval",
+			filters={"name": ["in", [row.name for row in rows]]},
+			fields=["name", "helixhr_decision_reason"],
+			ignore_permissions=True,
+		)
+	}
+
+	result = []
+	for row, (monday, sunday) in zip(rows, week_bounds, strict=True):
+		working = _employee_working_days(index, row.employee, monday, sunday)
+		expected = flt(index["standard"] * len(working)) if index["standard"] and working else None
+		flags = _timesheet_flags_for(
+			{**row, "helixhr_decision_reason": reasons.get(row.name)},
+			working,
+			expected,
+			day_hours.get(row.name, {}),
 			today,
-			total_hours=flt(row.total_hours),
+			threshold,
 		)
-		for row in frappe.get_list(
-			"Timesheet",
-			filters={
-				"workflow_state": PENDING_STATE,
-				"docstatus": 0,
-				"employee": scope,
-			},
-			fields=[
-				"name",
-				"employee",
-				"employee_name",
-				"start_date",
-				"end_date",
-				"total_hours",
-				"modified",
-			],
-			order_by="start_date asc",
-			limit=_QUEUE_FETCH,
+		result.append(
+			_summary_row(
+				"timesheet",
+				"Timesheet",
+				row.name,
+				row.employee,
+				row.employee_name,
+				row.start_date,
+				row.end_date,
+				row.modified,
+				"Pending Approval",
+				today,
+				total_hours=flt(row.total_hours),
+				expected_hours=expected,
+				hours=day_hours.get(row.name, {}),
+				project_split=project_split.get(row.name, []),
+				flags=flags or {},
+				needs_look=bool(flags),
+			)
 		)
-	]
+	return result
 
 
 def _attendance_request_summaries(employee, today):
@@ -1947,6 +2207,22 @@ def _hr_leave_summaries(employee, today):
 		limit=_QUEUE_FETCH,
 	)
 	senders = _hr_senders("Leave Application", rows)
+
+	def flags_for(row):
+		# R16: a send-to-HR item needs a look wherever it waits. HR's own
+		# view carries the same balance and short-notice flags the manager's
+		# half computes; the overlap count stays the line manager's notion
+		# and is not re-derived here.
+		try:
+			result = leave_overdraw(row.employee, row.leave_type, row.from_date, row.to_date, 0)
+		except Exception:
+			result = None
+		balance = flt(result["balance"]) - flt(row.total_leave_days) if result else None
+		return _leave_flags_for(
+			{"for_hr": True, "from_date": row.from_date}, balance, 0, today
+		), balance
+
+	flagged = [flags_for(row) for row in rows]
 	return [
 		_summary_row(
 			"leave",
@@ -1961,11 +2237,14 @@ def _hr_leave_summaries(employee, today):
 			today,
 			leave_type=row.leave_type,
 			total_days=flt(row.total_leave_days),
+			balance_after=flagged[index][1],
+			flags=flagged[index][0],
+			needs_look=bool(flagged[index][0]),
 			for_hr=True,
 			sent_to_hr_by=senders[row.name]["by"],
 			hr_note=senders[row.name]["note"],
 		)
-		for row in rows
+		for index, row in enumerate(rows)
 	] + _hr_stalled_leave_summaries(employee, today, employee_filter)
 
 
@@ -2400,11 +2679,13 @@ def get_request_work(state=None, limit=None, start=0):
 
 # Per-kind, never "not leave means timesheet" (P3-U6 step 0). A third kind
 # landed in P3-U5, and every one of these helpers used to branch on one
-# doctype and treat everything else as the other.
+# doctype and treat everything else as the other. Each carries its own read
+# bound (KTD8): the two kinds that serve a 50-report team read deeper. The
+# change kind joins the tuple where it is defined, further down.
 _APPROVAL_SUMMARY_COLLECTORS = (
-	_leave_summaries,
-	_timesheet_summaries,
-	_attendance_request_summaries,
+	(_leave_summaries, _LEAVE_QUEUE_FETCH),
+	(_timesheet_summaries, _TIMESHEET_QUEUE_FETCH),
+	(_attendance_request_summaries, _QUEUE_FETCH),
 )
 
 
@@ -2440,11 +2721,10 @@ def _approval_summaries(employee):
 	# widening in P5-U6, since nothing reached this function as that kind of
 	# caller before.
 	if "Employee" in frappe.get_roles():
-		for collect in _APPROVAL_SUMMARY_COLLECTORS:
+		for collect, bound in _APPROVAL_SUMMARY_COLLECTORS:
 			collected = collect(employee, today)
-			capped = capped or len(collected) >= _QUEUE_FETCH
+			capped = capped or len(collected) >= bound
 			rows.extend(collected)
-
 	# P4-R11: one queue. An HR Manager's own reports' work arrived above,
 	# narrowed by `_line_manager_filter`; everything waiting for HR is added
 	# here and tagged, so the two halves are one oldest-first backlog rather
@@ -4943,8 +5223,12 @@ def _change_request_summaries(employee, today):
 
 
 # The queue tuple above is built before this section's functions exist, so
-# the change kind joins it here rather than in the literal.
-_APPROVAL_SUMMARY_COLLECTORS = (*_APPROVAL_SUMMARY_COLLECTORS, _change_request_summaries)
+# the change kind joins it here rather than in the literal -- with its own
+# read bound, like every other entry (KTD8).
+_APPROVAL_SUMMARY_COLLECTORS = (
+	*_APPROVAL_SUMMARY_COLLECTORS,
+	(_change_request_summaries, _QUEUE_FETCH),
+)
 
 
 def _hr_change_request_summaries(employee, today):
@@ -5352,16 +5636,43 @@ def get_my_approvals(kind=None, category=None):
 		pending = [row for row in pending if row["kind"] == kind]
 	if category:
 		pending = [row for row in pending if row.get("category") == category]
+	# Plan 2026-10-04-003 KTD8 / R19: the 25-row page is gone for the kinds
+	# the redesign groups per person (timesheet, leave, and the mixed view
+	# those live in); the routed and attendance kinds keep theirs. The hard
+	# cap stands behind all of it.
+	shown = pending[:_APPROVAL_PAGE] if kind in ("attendance", "request") else pending[:_QUEUE_HARD_CAP]
+
+	# R14: the queue is grouped per person on the server, oldest waiting
+	# first -- the rows are already oldest-first, so the first time each
+	# employee appears is their oldest item, and the groups come out in the
+	# same order without a second sort.
+	people = []
+	by_employee = {}
+	for row in pending:
+		entry = by_employee.get(row["employee"])
+		if not entry:
+			entry = {
+				"employee": row["employee"],
+				"employee_name": row["employee_name"],
+				"initials": row["initials"],
+				"photo_url": row.get("photo_url"),
+				"count": 0,
+				"oldest_sent_on": row["sent_on"],
+			}
+			by_employee[row["employee"]] = entry
+			people.append(entry)
+		entry["count"] += 1
 	return {
 		"today": user_today(),
-		"pending": pending[:_APPROVAL_PAGE],
+		"pending": shown,
 		"total": len(pending),
 		"counts": counts,
+		"people": people,
 		# `total` is what came back, and every kind's read is bounded, so on a
 		# very large backlog it is a floor and not a count. The flag is what
 		# lets the screen say "50+" rather than lie about 50; a real COUNT per
 		# kind on every poll is the thing being avoided (P2-R22, P3-R25).
-		"total_is_capped": capped,
+		"total_is_capped": capped or len(pending) > len(shown),
 		"decided": _recently_decided(employee),
 	}
 
@@ -10068,19 +10379,18 @@ def _team_time_logs(timesheet_names):
 	return day_hours, split
 
 
-def _team_expected_hours(employees, monday, sunday):
-	"""`{employee: hours or None}` -- KTD7's expected hours, batched.
+def _working_days_by_employee(employees, monday, sunday):
+	"""`{employee: set(date)}` -- the days in the week each employee is
+	expected at work: not on their holiday list, not covered by approved
+	leave (KTD7's expected-hours arithmetic, named once so the team
+	projection and the queue flags cannot disagree about what a working
+	week is).
 
-	`standard_working_hours` a day times the employee's working days in the
-	week: a day the holiday list marks off does not count, and neither does
-	a day approved leave covers. No standard hours configured (or no holiday
-	list to define a working week) answers None, which the flags treat as
-	"no hours flag" and the screen as "not measured".
+	An employee with no holiday list at all has no measurable week here --
+	their set is empty and the expected hours answer None rather than a
+	guess.
 	"""
 	standard = flt(frappe.db.get_single_value("HR Settings", "standard_working_hours")) or None
-	if not standard:
-		return {employee: None for employee in employees}
-
 	rows = frappe.get_all(
 		"Employee",
 		filters={"name": ["in", list(employees)]},
@@ -10091,9 +10401,7 @@ def _team_expected_hours(employees, monday, sunday):
 		row.name: row.default_holiday_list
 		for row in frappe.get_all("Company", fields=["name", "default_holiday_list"])
 	}
-	lists = {}
-	for row in rows:
-		lists[row.name] = row.holiday_list or defaults.get(row.company)
+	lists = {row.name: row.holiday_list or defaults.get(row.company) for row in rows}
 
 	holidays = {}
 	if any(lists.values()):
@@ -10130,17 +10438,36 @@ def _team_expected_hours(employees, monday, sunday):
 			days.add(str(date))
 			date = add_days(date, 1)
 
-	expected = {}
+	week_dates = [str(add_days(monday, offset)) for offset in range(7)]
+	working = {}
 	for employee in employees:
+		if not standard:
+			working[employee] = set()
+			continue
 		off_days = holidays.get(lists.get(employee), set())
-		days = 0
-		for offset in range(7):
-			date = str(add_days(monday, offset))
-			if date in off_days or date in leave_days.get(employee, set()):
-				continue
-			days += 1
-		expected[employee] = flt(standard * days) if days else None
-	return expected
+		working[employee] = {
+			date
+			for date in week_dates
+			if date not in off_days and date not in leave_days.get(employee, set())
+		}
+	return working, standard
+
+
+def _team_expected_hours(employees, monday, sunday):
+	"""`{employee: hours or None}` -- KTD7's expected hours, batched.
+
+	`standard_working_hours` a day times the employee's working days in the
+	week (see `_working_days_by_employee`). No standard hours configured (or
+	no holiday list to define a working week) answers None, which the flags
+	treat as "no hours flag" and the screen as "not measured".
+	"""
+	working, standard = _working_days_by_employee(employees, monday, sunday)
+	if not standard:
+		return {employee: None for employee in employees}
+	return {
+		employee: flt(standard * len(days)) if days else None
+		for employee, days in working.items()
+	}
 
 
 def _team_open_changes(employees):

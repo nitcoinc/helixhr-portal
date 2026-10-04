@@ -39,7 +39,7 @@ scoped to their own Employee record has no HR queue (P4-R11).
 import os
 
 import frappe
-from frappe.utils import cint
+from frappe.utils import cint, flt
 
 from helixhr.patches.v1_0.apply_permission_deltas import DELTAS
 from helixhr.utils import (
@@ -940,6 +940,22 @@ def check_hrms_leave_notification():
 	return _result("HRMS leave notification", PASS, "off; HelixHR sends leave email")
 
 
+def check_standard_working_hours():
+	"""Plan 2026-10-04-003 KTD7: the queue's "hours off" flag measures a
+	week against `HR Settings.standard_working_hours`. Unset, the flag
+	stays off -- never wrong, just quiet -- so this is a WARN and says what
+	went quiet rather than failing a site that measures hours another way."""
+	value = flt(frappe.db.get_single_value("HR Settings", "standard_working_hours"))
+	if not value:
+		return _result(
+			"Standard working hours",
+			WARN,
+			"HR Settings has no standard working hours, so the approval queue's "
+			"hours flag stays off -- set it to measure weeks against a full one",
+		)
+	return _result("Standard working hours", PASS, f"{value} hours a day")
+
+
 def check_hr_request_workflow_state_order():
 	"""P5-KTD4: `Open` must be `states[0]` on the `HR Request Handling`
 	workflow, or every `create_my_request` throws -- `HR Request.status`
@@ -1635,6 +1651,7 @@ CHECKS = [
 	check_retired_request_notifications,
 	check_retired_hr_email_notifications,
 	check_hrms_leave_notification,
+	check_standard_working_hours,
 	check_hr_request_workflow_state_order,
 	check_timesheet_workflow_state_order,
 	check_request_category_routes,
