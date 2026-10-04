@@ -73,12 +73,13 @@ const navItems = computed(() =>
     (item) =>
       (!item.managerOnly || isManager.value) &&
       (!item.reportsOnly || session.hasReports) &&
-      (!item.configureOnly || session.canConfigure) &&
+      // A Portal Admin gets Settings (two sections) and Reports (export log).
+      (!item.configureOnly || session.canConfigure || session.canAdminPortal) &&
       (!item.notificationsOnly || session.canManageNotifications) &&
       (!item.organisationOnly || session.canSeeOrganisation) &&
       (!item.peopleOnly || session.canSeePeople) &&
       (!item.projectsOnly || session.canSeeProjects) &&
-      (!item.runReportsOnly || session.canRunReports) &&
+      (!item.runReportsOnly || session.canRunReports || session.canAdminPortal) &&
       (!item.rosterOnly || session.status !== 'desk-only' || session.canSeePeople) &&
       (session.status !== 'desk-only' || item.deskOnly),
   ),

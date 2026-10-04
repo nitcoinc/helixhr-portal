@@ -1099,6 +1099,47 @@ def _active_anchor_company(user):
 	return None
 
 
+# Portal-only administrator of the portal itself: edits the report access
+# matrix, reads the export log, and grants the portal-only roles below. Holds
+# no DocPerm and never passes `resolve_admin_scope` -- it sees no HR data.
+PORTAL_ADMIN_ROLE = "HelixHR Portal Admin"
+# The only roles `set_portal_role` may grant or remove. Never HR Manager, HR
+# User, System Manager or Portal Admin itself: those stay a Desk decision.
+MANAGED_PORTAL_ROLES = (
+	REPORT_MANAGER_ROLE,
+	DELIVERY_MANAGER_ROLE,
+	"HelixHR Notification Manager",
+	"IT Team",
+)
+
+
+def resolve_portal_admin_scope(user):
+	"""Which employees ``user`` may administer *portal settings* for -- the
+	export log rows and the role holders -- in `resolve_admin_scope`'s shape.
+
+	HR Manager / System Manager get exactly `resolve_admin_scope`'s answer.
+	A Portal Admin gets its Active Employee anchor's company, or ``"none"``
+	without one: unlike the Desk-only HR persona, it is never unscoped."""
+	if user == "Administrator":
+		return {"kind": "unscoped", "company": None}
+	roles = set(frappe.get_roles(user))
+	if roles & _ADMIN_UNSCOPED_ROLES:
+		return resolve_admin_scope(user)
+	if PORTAL_ADMIN_ROLE in roles:
+		company = _active_anchor_company(user)
+		if company:
+			return {"kind": "company", "company": company}
+	return {"kind": "none", "company": None}
+
+
+def can_admin_portal(user):
+	"""Portal Admin, HR Manager, System Manager or Administrator -- the callers
+	of the access matrix, export log and portal-role endpoints."""
+	if user == "Administrator":
+		return True
+	return bool(set(frappe.get_roles(user)) & (_ADMIN_UNSCOPED_ROLES | {PORTAL_ADMIN_ROLE}))
+
+
 def resolve_report_access(user, report_key):
 	"""Who may run and export one catalog report, and over what (KTD5).
 
@@ -1262,6 +1303,10 @@ RATE_LIMIT_POLICY = {
 	# U6: the access matrix -- a read, and an occasional administrative write.
 	"get_report_access": (60, 60),
 	"save_report_access": (30, 3600),
+	# Portal Admin: role holders in scope (a search per keystroke pause), and
+	# an occasional administrative grant.
+	"get_portal_role_holders": (60, 60),
+	"set_portal_role": (30, 3600),
 	# Reads that fan out (the home page and the approvals queue each run
 	# several queries) or that answer for one record by name -- bounded so
 	# a scripted walk over sequential record ids is a flood the limiter

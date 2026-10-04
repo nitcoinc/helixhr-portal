@@ -322,6 +322,14 @@ def make_test_report_manager(company=None, **employee_fields):
 	return _make_role_user(REPORT_MANAGER_USER, "HelixHR Report Manager", company, **employee_fields)
 
 
+PORTAL_ADMIN_USER = "portal-admin@helixhr.test"
+
+
+def make_test_portal_admin(company=None, **employee_fields):
+	"""A HelixHR Portal Admin: portal-only, no Desk role, no HR data."""
+	return _make_role_user(PORTAL_ADMIN_USER, "HelixHR Portal Admin", company, **employee_fields)
+
+
 def make_test_hr_user(company=None, **employee_fields):
 	"""An HR User with an Employee record (the report-matrix tier)."""
 	return _make_role_user(HR_USER_USER, "HR User", company, **employee_fields)
@@ -715,6 +723,7 @@ def setup_playwright_fixtures():
 	# reports.spec.ts, plus the access matrix's default grants.
 	make_test_hr_user()
 	make_test_report_manager()
+	make_test_portal_admin()
 	make_test_delivery_manager()
 	from helixhr.patches.v1_0.seed_report_access import execute as seed_report_access
 

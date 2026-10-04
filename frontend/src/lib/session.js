@@ -58,6 +58,10 @@ const state = reactive({
   /** Plan 2026-10-04-001 U4: gates the Reports nav item. True when
    * `get_report_catalog` would list at least one entry for this caller. */
   canRunReports: false,
+  /** Portal Admin, HR Manager or System Manager: the access matrix, export
+   * log and Portal roles. Mirrors `can_admin_portal`, which those endpoints
+   * enforce. */
+  canAdminPortal: false,
   /** P6-U4: whether this caller can actually reach Desk (a System User
    * holding a `desk_access` role) -- decides whether a Desk link is drawn
    * anywhere in the portal, never whether one works: every method that
@@ -129,6 +133,7 @@ function apply(boot) {
   state.canSeePeople = !!boot?.can_see_people
   state.canSeeProjects = !!boot?.can_see_projects
   state.canRunReports = !!boot?.can_run_reports
+  state.canAdminPortal = !!boot?.can_admin_portal
   state.canOpenDesk = !!boot?.can_open_desk
   state.deskUrl = boot?.desk_url || null
   state.unread = boot?.unread_notifications ?? 0

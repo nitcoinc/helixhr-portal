@@ -69,6 +69,7 @@ from helixhr.helixhr.doctype.hr_request.hr_request import _WORKER_ROLES as _ROUT
 from helixhr.utils import (
 	HOLIDAY_LIST_EDITABLE_FIELDS,
 	LEAVE_TYPE_EDITABLE_FIELDS,
+	MANAGED_PORTAL_ROLES,
 	NOTIFICATION_EVENTS,
 	PERSON_EDITABLE_FIELDS,
 	PROFILE_CORRECTABLE_FIELDS,
@@ -84,6 +85,7 @@ from helixhr.utils import (
 	TemplateRejected,
 	admin_scope_employee_filters,
 	as_administrator,
+	can_admin_portal,
 	employee_in_admin_scope,
 	event_variables,
 	get_manager_user,
@@ -98,6 +100,7 @@ from helixhr.utils import (
 	rate_limit_per_user,
 	render_message,
 	resolve_admin_scope,
+	resolve_portal_admin_scope,
 	resolve_project_scope,
 	sample_context,
 	send_notification,
@@ -610,6 +613,10 @@ def get_portal_bootstrap():
 		# `get_report_catalog` would list at least one entry -- the same
 		# `resolve_report_access` answer `run_report` enforces.
 		"can_run_reports": _can_run_reports(frappe.session.user),
+		# Portal Admin (and HR Manager / System Manager): the access matrix,
+		# the export log and the portal-role section -- `can_admin_portal`
+		# is the predicate each of those endpoints enforces.
+		"can_admin_portal": can_admin_portal(frappe.session.user),
 		# P6-KTD4: resolved on the caller's own ability to reach Desk (a
 		# System User holding a `desk_access` role), never on "is HR" --
 		# the two are correlated today but the flag must not assume they
@@ -8002,15 +8009,18 @@ def download_export(token):
 
 @frappe.whitelist()
 def get_export_log(start=0, page_length=50):
-	"""HR Manager / System Manager: who exported what, newest first --
-	metadata only, never a file. Company-scoped HR sees its company's rows."""
+	"""HR Manager / System Manager / Portal Admin: who exported what, newest
+	first -- metadata only, never a file. A company-scoped caller sees its
+	company's rows; a caller whose scope resolves to none sees no rows."""
 	rate_limit_per_user("get_export_log")
-	if not _is_hr(frappe.session.user):
+	if not can_admin_portal(frappe.session.user):
 		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
 	start = max(cint(start), 0)
 	page_length = min(max(cint(page_length), 1), _EXPORT_LOG_PAGE_MAX)
 
-	scope = resolve_admin_scope(frappe.session.user)
+	scope = resolve_portal_admin_scope(frappe.session.user)
+	if scope["kind"] == "none":
+		return {"rows": [], "has_more": False}
 	filters = {"company": scope["company"]} if scope["kind"] == "company" else {}
 	rows = frappe.get_all(
 		"HelixHR Report Export",
@@ -8314,7 +8324,7 @@ _REPORT_ACCESS_FLAGS = ("hr_user_run", "hr_user_export", "dm_run", "dm_export")
 
 
 def _assert_report_access_admin():
-	if not _is_hr(frappe.session.user):
+	if not can_admin_portal(frappe.session.user):
 		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
 
 
@@ -8385,13 +8395,146 @@ def save_report_access(rows):
 			else:
 				doc = frappe.new_doc("HelixHR Report Access")
 				doc.report_key = key
-			_assert_config_write(doc)
+			if _is_hr(frappe.session.user):
+				_assert_config_write(doc)
+			else:
+				# Portal Admin holds no DocPerm on purpose (preflight FAILs on a
+				# write/create grant); `_assert_report_access_admin` is its gate.
+				doc.flags.ignore_permissions = True
 			_apply_allowed_fields(doc, flags, _REPORT_ACCESS_FLAGS)
 			doc.save()
 	except Exception:
 		frappe.db.rollback(save_point="save_report_access")
 		raise
 	return get_report_access()
+
+
+# --- Portal roles (HelixHR Portal Admin) -------------------------------------
+
+_PORTAL_ROLE_RESULTS = 20
+
+
+def _assert_portal_admin():
+	"""Portal Admin / HR Manager / System Manager with a non-empty scope."""
+	user = frappe.session.user
+	scope = resolve_portal_admin_scope(user) if can_admin_portal(user) else {"kind": "none"}
+	if scope["kind"] == "none":
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	return scope
+
+
+def _role_holder_rows(employees):
+	users = [row.user_id for row in employees]
+	held = {}
+	for row in frappe.get_all(
+		"Has Role",
+		filters={"parenttype": "User", "parent": ["in", users], "role": ["in", MANAGED_PORTAL_ROLES]},
+		fields=["parent", "role"],
+	):
+		held.setdefault(row.parent, set()).add(row.role)
+	return [
+		{
+			"employee": row.name,
+			"employee_name": row.employee_name,
+			"user": row.user_id,
+			"roles": {role: role in held.get(row.user_id, ()) for role in MANAGED_PORTAL_ROLES},
+		}
+		for row in employees
+	]
+
+
+@frappe.whitelist()
+def get_portal_role_holders(query=None):
+	"""Active employees in the caller's scope with a User, and which of the
+	four portal-only roles each holds. With no ``query``: everyone holding at
+	least one of them. With a ``query`` (2+ characters): a name search.
+	Employee name, id and user only -- no HR data."""
+	rate_limit_per_user("get_portal_role_holders")
+	scope = _assert_portal_admin()
+	filters = {"status": "Active", "user_id": ["is", "set"]}
+	if scope["kind"] == "company":
+		filters["company"] = scope["company"]
+	query = (query or "").strip() if isinstance(query, str) else ""
+	or_filters = None
+	if query:
+		if len(query) < 2:
+			return {"roles": list(MANAGED_PORTAL_ROLES), "rows": []}
+		like = f"%{query[:80]}%"
+		or_filters = {"employee_name": ["like", like], "name": ["like", like]}
+	else:
+		holders = frappe.get_all(
+			"Has Role",
+			filters={"parenttype": "User", "role": ["in", MANAGED_PORTAL_ROLES]},
+			pluck="parent",
+			distinct=True,
+		)
+		if not holders:
+			return {"roles": list(MANAGED_PORTAL_ROLES), "rows": []}
+		filters["user_id"] = ["in", holders]
+	employees = frappe.get_all(
+		"Employee",
+		filters=filters,
+		or_filters=or_filters,
+		fields=["name", "employee_name", "user_id"],
+		order_by="employee_name asc",
+		limit=_PORTAL_ROLE_RESULTS if query else 0,
+	)
+	return {"roles": list(MANAGED_PORTAL_ROLES), "rows": _role_holder_rows(employees)}
+
+
+@frappe.whitelist(methods=["POST"])
+def set_portal_role(employee, role, enabled):
+	"""Grant or remove one of the four portal-only roles on ``employee``'s
+	User. Refused: any other role, an employee outside the caller's scope
+	(same refusal whether or not it exists), and the caller's own User. The
+	User is saved through ``doc.save()`` so its own validation runs, and an
+	Info comment on it records who changed what."""
+	rate_limit_per_user("set_portal_role")
+	scope = _assert_portal_admin()
+	if not isinstance(role, str) or role not in MANAGED_PORTAL_ROLES:
+		frappe.throw(_("That role can't be managed here."), frappe.PermissionError)
+	target = None
+	if isinstance(employee, str) and employee:
+		target = frappe.db.get_value(
+			"Employee", employee, ["name", "employee_name", "user_id", "status", "company"], as_dict=True
+		)
+	if (
+		not target
+		or target.status != "Active"
+		or not target.user_id
+		or (scope["kind"] == "company" and target.company != scope["company"])
+	):
+		frappe.throw(_("You are not authorised to change this person's roles."), frappe.PermissionError)
+	if target.user_id in (frappe.session.user, "Administrator", "Guest"):
+		frappe.throw(_("You can't change your own roles here."), frappe.PermissionError)
+
+	enabled = enabled in (1, True, "1", "true")
+	user = frappe.get_doc("User", target.user_id)
+	held = role in [row.role for row in user.roles]
+	if held != enabled:
+		if enabled:
+			user.append_roles(role)
+		else:
+			user.set("roles", [row for row in user.roles if row.role != role])
+		# The caller holds no write on User (Portal Admin has no DocPerm at
+		# all); the gate above is the permission. Validation still runs.
+		user.flags.ignore_permissions = True
+		user.save()
+		if (role in [row.role for row in user.roles]) != enabled:
+			# A Role Profile on the User re-derives its roles on save.
+			frappe.throw(_("This person's roles come from a role profile. Change it in Desk."))
+		user.add_comment(
+			"Info",
+			_("{0} {1} {2} in the HelixHR portal").format(
+				frappe.utils.get_fullname(frappe.session.user),
+				_("granted") if enabled else _("removed"),
+				role,
+			),
+		)
+		frappe.clear_cache(user=target.user_id)
+	return _role_holder_rows(
+		[frappe._dict(name=target.name, employee_name=target.employee_name, user_id=target.user_id)]
+	)[0]
 
 
 @frappe.whitelist()

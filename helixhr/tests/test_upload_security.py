@@ -342,6 +342,8 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"delete_report_view": (60, 3600),
 			"get_report_access": (60, 60),
 			"save_report_access": (30, 3600),
+			"get_portal_role_holders": (60, 60),
+			"set_portal_role": (30, 3600),
 			"get_dashboard": (60, 60),
 			"get_my_approvals": (60, 60),
 			"get_approval_detail": (60, 60),

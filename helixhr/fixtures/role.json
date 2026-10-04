@@ -26,5 +26,12 @@
   "is_custom": 0,
   "name": "HelixHR Report Manager",
   "role_name": "HelixHR Report Manager"
+ },
+ {
+  "desk_access": 0,
+  "doctype": "Role",
+  "is_custom": 0,
+  "name": "HelixHR Portal Admin",
+  "role_name": "HelixHR Portal Admin"
  }
 ]

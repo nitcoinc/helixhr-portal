@@ -99,6 +99,7 @@ fixtures = [
 					"HelixHR Delivery Manager",
 					"HelixHR Notification Manager",
 					"HelixHR Report Manager",
+					"HelixHR Portal Admin",
 				],
 			]
 		],

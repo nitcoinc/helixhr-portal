@@ -130,9 +130,17 @@ function applyView(query) {
 }
 
 // U5: the export log tab on the catalog page, for HR Manager / System
-// Manager -- `canConfigure` is the same `_is_hr` predicate
-// `get_export_log` enforces.
-const catalogTab = ref('reports')
+// Manager / Portal Admin -- `canAdminPortal` is the same `can_admin_portal`
+// predicate `get_export_log` enforces. A Portal Admin with no report role has
+// an empty catalog, so the log is all this page shows them.
+const showExportLog = computed(() => session.canAdminPortal)
+const tabs = computed(() =>
+  catalog.value.length
+    ? [{ key: 'reports', label: 'Reports' }, { key: 'exports', label: 'Export log' }]
+    : [{ key: 'exports', label: 'Export log' }],
+)
+const pickedTab = ref('reports')
+const catalogTab = computed(() => (catalog.value.length ? pickedTab.value : 'exports'))
 
 // (Re)initialise when the report changes -- not on our own URL writes.
 watch(
@@ -234,7 +242,7 @@ async function openInDesk() {
     >
       <!-- Zero granted: the same words as every other refusal. -->
       <div
-        v-if="!catalog.length || refused"
+        v-if="(!catalog.length && !(showExportLog && !reportKey)) || refused"
         class="surface-card p-5 text-sm text-ink-gray-6"
         role="alert"
       >
@@ -258,23 +266,23 @@ async function openInDesk() {
 
       <template v-else-if="!entry">
         <nav
-          v-if="session.canConfigure"
+          v-if="showExportLog"
           class="mb-4 flex gap-1 border-b border-outline-gray-1"
           aria-label="Reports sections"
         >
           <button
-            v-for="tab in [{ key: 'reports', label: 'Reports' }, { key: 'exports', label: 'Export log' }]"
+            v-for="tab in tabs"
             :key="tab.key"
             type="button"
             class="min-h-11 cursor-pointer rounded-t-lg px-3 py-2 text-sm font-medium"
             :aria-current="catalogTab === tab.key ? 'page' : undefined"
             :class="catalogTab === tab.key ? 'border-b-2 border-signal text-ink-gray-9' : 'text-ink-gray-6 hover:text-ink-gray-9'"
-            @click="catalogTab = tab.key"
+            @click="pickedTab = tab.key"
           >
             {{ tab.label }}
           </button>
         </nav>
-        <ExportLog v-if="session.canConfigure && catalogTab === 'exports'" />
+        <ExportLog v-if="showExportLog && catalogTab === 'exports'" />
         <ReportCatalog
           v-else
           :catalog="catalog"

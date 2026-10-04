@@ -383,6 +383,15 @@ Manager`. Portal-only (no Desk). The user sees Admin → Email templates (`/emai
 a user with no Employee record lands there. System Manager also qualifies. Preflight WARNs
 when no enabled user holds the role. HR Manager no longer edits templates.
 
+**Granting portal roles without Desk.** Give someone `HelixHR Portal Admin` in Desk (User →
+Roles); they need an Active Employee, whose company bounds what they manage. They then grant
+Report Manager, Delivery Manager, Notification Manager and IT Team at `/settings/portal-roles`.
+"You are not authorised to change this person's roles" means the target is not an Active
+Employee with a User in their company (or does not exist -- deliberately the same message);
+their own account is refused too. "This person's roles come from a role profile" means the
+User has a Role Profile that rewrites roles on save: change it in Desk. Each grant/removal is
+an Info comment on the User. HR Manager, HR User and System Manager are never managed here.
+
 **A template email came out in default wording.** The saved template failed to render at
 send time (e.g. a variable removed from the event). The send fell back to the default and
 logged it: Desk → Error Log, title mentions the event key. Open the template, Save: the

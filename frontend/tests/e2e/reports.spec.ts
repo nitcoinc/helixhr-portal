@@ -266,6 +266,7 @@ const HR_USER = 'hr-user@helixhr.test'
 const DELIVERY_MANAGER = 'delivery-manager@helixhr.test'
 const REPORT_MANAGER = 'report-manager@helixhr.test'
 const HR_MANAGER = 'hr-manager-employee@helixhr.test'
+const PORTAL_ADMIN = 'portal-admin@helixhr.test'
 
 async function apiAs(baseURL: string | undefined, user: string): Promise<APIRequestContext> {
   const api = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
@@ -405,6 +406,53 @@ test.describe('report tiers', () => {
           await admin.post('/api/method/helixhr.api.delete_report_view', { data: { name: view.name } })
         }
       }
+      await admin.dispose()
+    }
+  })
+
+  // HelixHR Portal Admin: Settings with only Report access + Portal roles,
+  // Reports with only the export log, and no HR data.
+  test('a Portal Admin manages portal roles and reads the export log, nothing more', async ({ page, baseURL }) => {
+    const admin = await apiAs(baseURL, HR_MANAGER)
+    const holders = await admin.post('/api/method/helixhr.api.get_portal_role_holders', {
+      data: { query: 'hr-user' },
+    })
+    const target = ((await holders.json()).message.rows || []).find((row) => row.user === HR_USER)
+    expect(target, 'HR User fixture is in the HR Manager company').toBeTruthy()
+    const restore = () =>
+      admin.post('/api/method/helixhr.api.set_portal_role', {
+        data: { employee: target.employee, role: 'IT Team', enabled: 0 },
+      })
+    await restore()
+    try {
+      await signInAs(page, baseURL, PORTAL_ADMIN)
+      await page.goto('/helixhr/settings')
+      await expect(page.getByTestId('settings-tab-report-access')).toBeVisible()
+      await expect(page.getByTestId('settings-tab-portal-roles')).toBeVisible()
+      await expect(page.getByTestId('settings-tab-categories')).toHaveCount(0)
+      await expect(page.getByRole('heading', { name: 'Report access' })).toBeVisible()
+
+      await page.getByTestId('settings-tab-portal-roles').click()
+      await expect(page).toHaveURL(/\/settings\/portal-roles/)
+      await page.getByLabel('Find an employee').fill('hr-user')
+      const row = page.getByTestId(`portal-role-row-${target.employee}`)
+      const itTeam = row.getByRole('checkbox', { name: /: IT Team$/ })
+      await expect(itTeam).not.toBeChecked()
+      await itTeam.check()
+      await expect(page.getByRole('status')).toContainText('IT Team granted')
+      await expect(row.getByRole('checkbox', { name: /: Report Manager$/ })).not.toBeChecked()
+      await itTeam.uncheck()
+      await expect(page.getByRole('status')).toContainText('IT Team removed')
+
+      await page.goto('/helixhr/reports')
+      await expect(page.getByRole('button', { name: 'Export log' })).toBeVisible()
+      await expect(page.getByRole('heading', { name: 'Leave', exact: true })).toHaveCount(0)
+      await expect(page.getByText("You don't have access to this")).toHaveCount(0)
+
+      await page.goto('/helixhr/people')
+      await expect(page.getByRole('link', { name: 'People' })).toHaveCount(0)
+    } finally {
+      await restore()
       await admin.dispose()
     }
   })

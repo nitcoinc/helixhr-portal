@@ -1437,11 +1437,10 @@ def check_notification_manager_role():
 REPORT_MANAGER = "HelixHR Report Manager"
 
 
-def check_report_manager_role():
-	"""Plan 2026-10-04-001 U1 / R23: the Report Manager stays portal-only and
-	holds no DocPerm that would reach Desk's report or export paths. It needs
-	none: wrapped reports run elevated after HelixHR's own gate."""
-	role = frappe.db.get_value("Role", REPORT_MANAGER, ["desk_access", "is_custom"], as_dict=True)
+def _no_grant_portal_role(role_name, label):
+	"""A portal-only role (desk_access 0, fixture-owned) that holds no DocPerm
+	reaching Desk's report, export or write paths."""
+	role = frappe.db.get_value("Role", role_name, ["desk_access", "is_custom"], as_dict=True)
 	problems = []
 	if not role:
 		problems.append("Role fixture is missing")
@@ -1452,12 +1451,30 @@ def check_report_manager_role():
 			problems.append("is_custom must be 0")
 	for doctype in ("DocPerm", "Custom DocPerm"):
 		for right in ("report", "export", "write", "create"):
-			granted = frappe.get_all(doctype, filters={"role": REPORT_MANAGER, right: 1}, pluck="parent")
+			granted = frappe.get_all(doctype, filters={"role": role_name, right: 1}, pluck="parent")
 			if granted:
 				problems.append(f"holds {right} on {', '.join(sorted(set(granted)))} ({doctype})")
 	if problems:
-		return _result("Report Manager role", FAIL, "; ".join(problems))
-	return _result("Report Manager role", PASS, "portal-only role with no report/export/write/create grant")
+		return _result(label, FAIL, "; ".join(problems))
+	return _result(label, PASS, "portal-only role with no report/export/write/create grant")
+
+
+def check_report_manager_role():
+	"""Plan 2026-10-04-001 U1 / R23: the Report Manager stays portal-only and
+	holds no DocPerm that would reach Desk's report or export paths. It needs
+	none: wrapped reports run elevated after HelixHR's own gate."""
+	return _no_grant_portal_role(REPORT_MANAGER, "Report Manager role")
+
+
+PORTAL_ADMIN = "HelixHR Portal Admin"
+
+
+def check_portal_admin_role():
+	"""The Portal Admin stays portal-only with no DocPerm at all that reaches
+	report, export or write. It needs none: its endpoints (access matrix,
+	export log, portal roles) gate themselves and save with
+	``ignore_permissions``."""
+	return _no_grant_portal_role(PORTAL_ADMIN, "Portal Admin role")
 
 
 def _fixture_roles():
@@ -1524,6 +1541,7 @@ CHECKS = [
 	check_delivery_manager_role,
 	check_notification_manager_role,
 	check_report_manager_role,
+	check_portal_admin_role,
 	check_signup_disabled,
 	check_password_login,
 	check_entra,

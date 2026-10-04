@@ -1309,6 +1309,26 @@ exports them itself (CSV, Excel, PDF), inside one bound and one access model:
   that attaches a private File; above the background cap the request is
   refused. Files expire after 7 days, audit rows after 365.
 
+- **Portal Admin.** `HelixHR Portal Admin` is a portal-only role (fixture,
+  desk_access 0, no DocPerm at all -- preflight "Portal Admin role" FAILs on
+  desk access or any report/export/write/create grant, and the Timesheet
+  report guard covers it as a fixture role). It edits the access matrix
+  (`get/save_report_access`, saving with `ignore_permissions` after
+  `can_admin_portal`), reads the export log, and grants or removes only the
+  four portal-only roles (`MANAGED_PORTAL_ROLES`: Report Manager, Delivery
+  Manager, Notification Manager, IT Team) through
+  `get_portal_role_holders` / `set_portal_role`. HR Manager and System
+  Manager may call all of these too. Scope is
+  `resolve_portal_admin_scope`: HR keeps `resolve_admin_scope`'s answer; a
+  Portal Admin gets its Active Employee's company, or none. A target must be
+  an Active Employee with a User in that scope, never the caller; the User is
+  saved through `doc.save()` (a Role Profile that re-derives roles is
+  refused) and an Info comment on the User records the change. A Portal
+  Admin never passes `resolve_admin_scope` or `resolve_report_access`: no
+  People, no reports, unless it also holds a report role. Bootstrap flag
+  `can_admin_portal` drives the Settings (Report access + Portal roles only)
+  and Reports (Export log only) nav entries.
+
 Desk access to HRMS reports is unchanged and still governed by Frappe's own
 Report roles and DocPerms, not by this matrix: granting a report here gives
 no Desk access, and a Desk role gives no portal report. A System User still

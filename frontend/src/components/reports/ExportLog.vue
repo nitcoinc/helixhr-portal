@@ -4,7 +4,7 @@ import { call } from '@/lib/api'
 import { formatDate } from '@/lib/dates'
 
 // Plan 2026-10-04-001 U5 (resolved decision 14): who exported what, for HR
-// Manager and System Manager. `get_export_log` is the gate and returns
+// Manager, System Manager and Portal Admin. `get_export_log` is the gate and returns
 // metadata only -- never a file. Newest first, 50 at a time.
 const PAGE = 50
 const FORMAT_LABELS = { csv: 'CSV', xlsx: 'Excel', pdf: 'PDF' }
