@@ -39,6 +39,11 @@ def _token(name):
 class TestLeaveFlow(IntegrationTestCase):
 	def setUp(self):
 		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		# Other suites file leave on the shared fixture employee and module
+		# discovery (os.walk) is not sorted, so whichever of them ran last
+		# may leave Open requests and spent balance behind. Clear the
+		# pendings so the pending-aware rule starts this method from what
+		# this class itself budgets (TestLeaveApprovalIsNative's pattern).
 		# leave_approver isn't auto-fetched from Employee server-side --
 		# hrms.hr.doctype.leave_application.leave_application.
 		# validate_leave_approver checks the field on the Leave Application
@@ -52,6 +57,7 @@ class TestLeaveFlow(IntegrationTestCase):
 		# rollback IntegrationTestCase relies on for isolation between
 		# test methods (confirmed: it leaked a Leave Application from one
 		# test into the next's overlap check before this was removed).
+		clear_open_leave(self.employee_name)
 		frappe.db.set_value("Employee", self.employee_name, "leave_approver", frappe.session.user)
 		frappe.db.set_value("Employee", self.manager_name, "leave_approver", frappe.session.user)
 
