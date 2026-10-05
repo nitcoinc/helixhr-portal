@@ -4781,15 +4781,14 @@ def get_my_timesheet_history(limit=12, start=0):
 	# page -- one query for the page, so the history can show it and offer
 	# the withdraw without a second call per row.
 	changes = {}
-	open_names = [
-		row.name
-		for row in frappe.get_all(
-			"HelixHR Timesheet Change",
-			filters={"employee": employee, "status": "Open", "timesheet": ["in", [r.name for r in rows] or [""]]},
-			fields=["name", "timesheet", "comment"],
-		)
-	]
-	for change in open_names:
+	# Plan 2026-10-05-001 U4: keep the rows, not their names -- the loop
+	# reads `.timesheet` and `.comment`.
+	open_changes = frappe.get_all(
+		"HelixHR Timesheet Change",
+		filters={"employee": employee, "status": "Open", "timesheet": ["in", [r.name for r in rows] or [""]]},
+		fields=["name", "timesheet", "comment"],
+	)
+	for change in open_changes:
 		changes[change.timesheet] = {"name": change.name, "comment": change.comment}
 
 	weeks = []
@@ -5363,9 +5362,9 @@ def _act_on_timesheet_change(doc, action):
 			state="accepted" if action == "Accept" else "declined",
 			approver_name=frappe.utils.get_fullname(decider),
 			decision_note=(doc.decision_note or "").strip() if action == "Decline" else "",
-			action_url=events._portal_url(f"timesheet/history?week={doc.week_start}")
-			if action == "Decline"
-			else events._portal_url(f"timesheet?week={doc.week_start}"),
+			# The week page reads only the `:weekStart` route param (plan
+			# 2026-10-05-001 U4); the amended Draft keeps the same Monday.
+			action_url=events._portal_url(f"timesheet/{doc.week_start}"),
 		),
 	)
 

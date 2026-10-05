@@ -665,18 +665,35 @@ const savedLabel = computed(() => {
         </template>
         <!-- R12: the decline and its reason stay visible where the request
              was raised, not only in the email. -->
+        <!-- Plan 2026-10-05-001 KTD5: a decline is not a ban. The server
+             accepts a new request, so the button follows the reason. -->
         <template v-else-if="declinedChange">
-          <p class="min-w-0 text-ink-gray-7">
-            Your change request
-            <span class="font-medium text-ink-gray-9">&ldquo;{{ declinedChange.comment }}&rdquo;</span>
-            was declined. The week stays as it was.
-          </p>
-          <p
-            v-if="declinedChange.decision_note"
-            class="min-w-0 text-ink-gray-6"
+          <div class="min-w-0">
+            <p class="text-ink-gray-7">
+              Your change request
+              <span class="font-medium text-ink-gray-9">&ldquo;{{ declinedChange.comment }}&rdquo;</span>
+              was declined. The week stays as it was.
+            </p>
+            <p
+              v-if="declinedChange.decision_note"
+              class="text-ink-gray-6"
+            >
+              &ldquo;{{ declinedChange.decision_note }}&rdquo;
+            </p>
+            <p
+              v-if="changeable && !changeable.ok"
+              class="text-ink-gray-7"
+            >
+              {{ changeable.reason }}
+            </p>
+          </div>
+          <Button
+            v-if="changeable?.ok"
+            variant="outline"
+            @click="confirmChange = true"
           >
-            &ldquo;{{ declinedChange.decision_note }}&rdquo;
-          </p>
+            Request a change
+          </Button>
         </template>
         <template v-else-if="changeable?.ok">
           <p class="text-ink-gray-7">

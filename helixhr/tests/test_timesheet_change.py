@@ -8,6 +8,7 @@ accept-path scenarios come first per the plan's execution note.
 
 import hashlib
 import json
+from unittest.mock import patch
 
 import frappe
 from frappe.model.workflow import apply_workflow
@@ -18,6 +19,7 @@ from helixhr.api import (
 	act_on_approval,
 	get_approval_detail,
 	get_my_approvals,
+	get_my_timesheet_history,
 	get_my_week,
 	raise_timesheet_change,
 	recall_my_week,
@@ -558,3 +560,56 @@ class TestTimesheetChange(IntegrationTestCase):
 		change = self._raise()
 		self.assertEqual(self._queue_count(hr_user, change["name"]), 1)
 		self.assertEqual(self._queue_count(self.manager_user, change["name"]), 1)
+
+	# --- plan 2026-10-05-001 U4: history, email links, re-raise ---------------
+
+	def _history_week(self, timesheet):
+		start = 0
+		while True:
+			page = get_my_timesheet_history(limit=52, start=start)
+			for week in page["weeks"]:
+				if week["name"] == timesheet:
+					return week
+			if not page["weeks"]:
+				return None
+			start += len(page["weeks"])
+
+	def test_history_with_an_open_change_request_carries_it(self):
+		timesheet = self._approved_week()
+		change = self._raise()
+		frappe.set_user(self.employee_user)
+		week = self._history_week(timesheet)
+		self.assertEqual(week["open_change"], {"name": change["name"], "comment": COMMENT})
+
+	def _decision_url(self, action, comment=None):
+		self._approved_week()
+		change = self._raise()
+		with patch("helixhr.events.send_notification") as send:
+			self._act(change["name"], action, self.manager_user, comment=comment)
+		contexts = [call.args[2] for call in send.call_args_list if call.args[0] == "timesheet_change_decided"]
+		self.assertEqual(len(contexts), 1)
+		return contexts[0]["action_url"]
+
+	def test_the_decline_email_links_to_the_week(self):
+		url = self._decision_url("Decline", comment="The hours match the project's record.")
+		self.assertTrue(url.endswith(f"/helixhr/timesheet/{self.monday}"), url)
+		self.assertNotIn("?week=", url)
+
+	def test_the_accept_email_links_to_the_amended_week(self):
+		url = self._decision_url("Accept")
+		frappe.set_user(self.employee_user)
+		amended = get_my_week(str(self.monday))
+		self.assertEqual(amended["timesheet"]["workflow_state"], "Draft")
+		self.assertTrue(url.endswith(f"/helixhr/timesheet/{self.monday}"), url)
+
+	def test_a_new_request_can_follow_a_decline(self):
+		self._approved_week()
+		change = self._raise()
+		self._act(change["name"], "Decline", self.manager_user, comment="The hours match the project's record.")
+
+		frappe.set_user(self.employee_user)
+		week = get_my_week(str(self.monday))
+		self.assertEqual(week["declined_change"]["name"], change["name"])
+		self.assertTrue(week["changeable"]["ok"])
+		again = self._raise("Wednesday should be three hours, not one")
+		self.assertNotEqual(again["name"], change["name"])
