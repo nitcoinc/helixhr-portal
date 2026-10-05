@@ -15,6 +15,7 @@ from helixhr.tests.utils import (
 	HR_MANAGER_EMPLOYEE_USER,
 	HR_MANAGER_USER,
 	NOTIFICATION_MANAGER_USER,
+	ensure_baseline_company,
 	ensure_hr_manager_user,
 	ensure_notification_manager_user,
 	ensure_test_company,
@@ -139,6 +140,23 @@ class TestCelebrationEndpoints(IntegrationTestCase):
 			event="birthday", subject="Unscoped edit", body="Y", is_enabled=0, company=OTHER_COMPANY
 		)
 		self.assertEqual(result["subject"], "Unscoped edit")
+
+	def test_an_unscoped_caller_with_no_default_company_gets_none_and_the_choice(self):
+		"""KTD3 on a multi-company site: a Desk-only HR Manager with no
+		Employee record has no company to default to -- the setup answers
+		with `company: None` plus the companies they may configure, and the
+		page's company selector takes it from there (the old throw left the
+		page blank with the refusal swallowed)."""
+		from helixhr.api import get_celebration_setup
+
+		ensure_test_company()
+		ensure_baseline_company()
+		ensure_hr_manager_user()
+		frappe.set_user(HR_MANAGER_USER)
+
+		setup = get_celebration_setup()
+		self.assertIsNone(setup["company"])
+		self.assertGreaterEqual(len(setup["companies"]), 2)
 
 	def test_a_notification_manager_without_hr_is_refused_everywhere(self):
 		"""KTD2/KTD3: the celebration group is HR's; the Notification Manager

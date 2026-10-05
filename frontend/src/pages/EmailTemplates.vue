@@ -232,7 +232,10 @@ const router = useRouter()
 // message templates.
 const activeGroup = computed(() => {
   if (route.query.group === 'celebrations') return 'celebrations'
-  return 'messages'
+  if (route.query.group === 'messages') return 'messages'
+  // No group in the URL: the caller's capability decides (an HR-only
+  // manager lands on the celebrations group, not an empty messages one).
+  return defaultGroup.value
 })
 const defaultGroup = computed(() =>
   session.canManageNotifications ? 'messages' : session.canConfigure ? 'celebrations' : 'messages',

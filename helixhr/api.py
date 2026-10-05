@@ -8165,7 +8165,11 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 	_assert_company_in_admin_scope(company)
 	# The cadence is the row's own for `holiday` (U1); the controller
 	# refuses a holiday row without one and ignores the field elsewhere.
-	if event == "holiday" and frequency not in ("Weekly", "Monthly"):
+	# A wrong value is refused, mirroring the controller -- a silent
+	# rewrite to Weekly would mail on a cadence HR never picked.
+	if event == "holiday" and frequency not in (None, "Weekly", "Monthly"):
+		frappe.throw(_("Pick how often the holiday reminder goes out: Weekly or Monthly."))
+	if event == "holiday" and frequency is None:
 		frequency = "Weekly"
 
 	subject = (subject or "").strip()
@@ -8241,7 +8245,14 @@ def get_celebration_setup(company=None):
 	rate_limit_per_user("get_celebration_setup")
 	if not _is_hr():
 		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
-	company = company or _celebration_company()
+	try:
+		company = company or _celebration_company()
+	except frappe.ValidationError:
+		# A Desk-only HR Manager on a multi-company site has no single
+		# company to default to (KTD3): hand the choice to the caller
+		# instead of refusing -- the editor renders its company selector
+		# from `companies`.
+		company = None
 	_assert_company_in_admin_scope(company)
 
 	return {
@@ -8312,11 +8323,17 @@ def _celebration_sample_context(event, company, frequency=None):
 def _celebration_draft(event, company, subject, body, frequency=None):
 	"""Compile then render an unsaved draft with the event's sample context
 	-- the same refusal a save would give (P8-U12's compile check), the
-	same restriction the real render runs under (P8-KTD7)."""
+	same restriction the real render runs under (P8-KTD7). A holiday draft
+	with no cadence given renders against the saved row's own cadence, so
+	the preview shows what this row will actually mail (R11)."""
 	from frappe.utils.jinja import validate_template
 
 	validate_template(subject or "", restrict_globals=True)
 	validate_template(body or "", restrict_globals=True)
+	if not frequency:
+		frequency = frappe.db.get_value(
+			"HelixHR Celebration Reminder", {"event": event, "company": company}, "frequency"
+		)
 	context = _celebration_sample_context(event, company, frequency)
 	return {
 		"subject": frappe.render_template(subject or "", context, restrict_globals=True),
@@ -8324,20 +8341,28 @@ def _celebration_draft(event, company, subject, body, frequency=None):
 	}
 
 
-@frappe.whitelist(methods=["POST"])
-def preview_celebration(event, subject, body, company=None):
-	"""R11: the draft as the email would look, rendered with the selected
-	company's own name and logo. The client shows `html` only in a
-	sandboxed iframe (KTD11)."""
+def _celebration_gate(event, endpoint, company=None):
+	"""The two draft endpoints' shared gate: rate-limited, HR only, a known
+	event, and a company inside the caller's admin scope. Returns the
+	resolved company."""
 	from helixhr.reminders import EVENTS
 
-	rate_limit_per_user("preview_celebration")
+	rate_limit_per_user(endpoint)
 	if not _is_hr():
 		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
 	if event not in EVENTS:
 		frappe.throw(_("That reminder is not offered here."))
 	company = company or _celebration_company()
 	_assert_company_in_admin_scope(company)
+	return company
+
+
+@frappe.whitelist(methods=["POST"])
+def preview_celebration(event, subject, body, company=None):
+	"""R11: the draft as the email would look, rendered with the selected
+	company's own name and logo. The client shows `html` only in a
+	sandboxed iframe (KTD11)."""
+	company = _celebration_gate(event, "preview_celebration", company)
 	rendered = _celebration_draft(event, company, subject, body)
 	return {"subject": rendered["subject"], "html": rendered["html"]}
 
@@ -8346,15 +8371,7 @@ def preview_celebration(event, subject, body, company=None):
 def send_test_celebration(event, subject, body, company=None):
 	"""R11: send the draft to the caller's own address only -- never a
 	recipient the caller names, the same rule `send_test_message` holds."""
-	from helixhr.reminders import EVENTS
-
-	rate_limit_per_user("send_test_celebration")
-	if not _is_hr():
-		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
-	if event not in EVENTS:
-		frappe.throw(_("That reminder is not offered here."))
-	company = company or _celebration_company()
-	_assert_company_in_admin_scope(company)
+	company = _celebration_gate(event, "send_test_celebration", company)
 	rendered = _celebration_draft(event, company, subject, body)
 	email = frappe.db.get_value("User", frappe.session.user, "email")
 	if not email:

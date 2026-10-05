@@ -377,13 +377,23 @@ def _send_company(template, sender, persons, company, event, selected, foreign, 
 
 	# The shared-day email is between celebrants about each other -- who
 	# hears about *them* (the pool above) is what `recipient_mode` scopes,
-	# not this. Unconditional on mode, exactly as before P8-U11.
+	# not this. Unconditional on mode, exactly as before P8-U11 -- but the
+	# cross-company guard (R3) covers this address too: a celebrant whose
+	# mailbox also resolves for another company's active employee receives
+	# their own event's mail there no longer (R3's reported shape), dropped
+	# and logged like any pool address.
 	if len(persons) > 1:
 		for person in persons:
-			own = get_employee_email(person)
+			own = _drop_foreign(
+				[address for address in [get_employee_email(person)] if address],
+				company,
+				foreign,
+				foreign_names,
+				dropped,
+			)
 			others = [other for other in persons if other is not person]
 			if own:
-				emails += _send(template, sender, [own], others, company, event)
+				emails += _send(template, sender, own, others, company, event)
 	return emails
 
 
@@ -509,9 +519,9 @@ def send_holiday_reminders():
 	the next Monday).
 
 	The mail is *to* the employee, about their own upcoming non-weekly
-	holidays from their own holiday list (`get_holidays_for_employee`,
-	imported, never re-implemented -- P4-KTD12). Employees whose list has
-	nothing ahead in the window -- or no list at all -- get nothing.
+	holidays from their own holiday list (resolved through HRMS's own
+	helpers -- P4-KTD12). Employees whose list has nothing ahead in the
+	window -- or no list at all -- get nothing.
 
 	Recipients with the same holiday set share one render and one send
 	(KTD6): the common case is a whole company on one list, and Monday's
@@ -524,7 +534,9 @@ def send_holiday_reminders():
 	also resolves for an active employee of another company is dropped and
 	logged.
 	"""
-	from hrms.hr.utils import get_holiday_list_for_employee
+	from hrms.utils.holiday_list import (
+		get_assigned_holiday_lists_to_employee_and_company,
+	)
 
 	today = getdate()
 	guard_day = str(today)
@@ -535,7 +547,7 @@ def send_holiday_reminders():
 	for row in frappe.get_all(
 		"HelixHR Celebration Reminder",
 		filters={"event": "holiday", "is_enabled": 1},
-		fields=["name", "company", "email_template", "frequency"],
+		fields=["name", "company", "email_template", "frequency", "recipient_mode"],
 	):
 		company = row.company
 		if not _is_holiday_send_day(row.frequency, today):
@@ -554,9 +566,7 @@ def send_holiday_reminders():
 			continue
 
 		try:
-			emails = _send_holiday_company(
-				row, today, get_holiday_list_for_employee, foreign, foreign_names, dropped
-			)
+			emails = _send_holiday_company(row, today, foreign, foreign_names, dropped)
 			result["companies"] += 1
 			result["emails"] += emails
 			if emails:
@@ -603,38 +613,78 @@ def _holiday_window(frequency, today):
 	return today, add_days(add_months(today, 1), -1)
 
 
-def _send_holiday_company(row, today, get_holiday_list, foreign, foreign_names, dropped):
+def _mail_address(employee):
+	"""The address the guard map records for `employee` -- its own order
+	(`user_id` -> company -> personal), not `get_employee_email`'s
+	(`user_id` -> personal -> company): an address resolved differently
+	than the map records it would never be dropped -- and `_pool_employee`'s
+	log would name nobody."""
+	doc = frappe.get_cached_doc("Employee", employee)
+	for field in ("user_id", "company_email", "personal_email"):
+		if doc.get(field):
+			return doc.get(field)
+	return None
+
+
+def _send_holiday_company(row, today, foreign, foreign_names, dropped):
 	"""One company's holiday reminder: every active employee's own list,
 	grouped by the holidays ahead in the window.
 
-	The list comes from HRMS (`get_holiday_list_for_employee`, imported,
-	not re-implemented -- P4-KTD12). The holiday rows are queried here,
-	not through `get_holidays_for_employee`, on purpose: that helper adds
-	`filters["weekly_off"] = False`, and under this Frappe a bare False in
-	a filter matches nothing -- HRMS's own weekly/monthly senders have
-	been mailing nobody for a while, which is one more reason the takeover
-	is happening. The explicit `weekly_off: 0` is the same intent, stated
-	so it actually runs."""
+	The list comes from HRMS -- `get_assigned_holiday_lists_to_employee_and_company`,
+	imported, not re-implemented (P4-KTD12) -- resolved for the whole
+	company in ONE query instead of HRMS's per-employee pair of lookups,
+	with the employee's assignment keeping precedence over the company's,
+	exactly as `get_holiday_list_for_employee` resolves it. The holiday
+	rows are queried here, not through `get_holidays_for_employee`, on
+	purpose: that helper adds `filters["weekly_off"] = False`, and under
+	this Frappe a bare False in a filter matches nothing -- HRMS's own
+	weekly/monthly senders have been mailing nobody for a while, which is
+	one more reason the takeover is happening. The explicit `weekly_off: 0`
+	is the same intent, stated so it actually runs."""
+	from hrms.utils.holiday_list import (
+		get_assigned_holiday_lists_to_employee_and_company,
+	)
+
 	start, end = _holiday_window(row.frequency, today)
-	groups = {}
-	for employee in frappe.get_all(
+	employees = frappe.get_all(
 		"Employee", filters={"status": "Active", "company": row.company}, pluck="name"
-	):
-		holiday_list = get_holiday_list(employee, raise_exception=False)
+	)
+	if row.recipient_mode == "Selected employees":
+		# The audience is the row's own (R9): a Selected holiday row mails
+		# only the people HR picked -- they are already company-validated by
+		# the doctype controller, and the Active/company narrowing below
+		# still applies.
+		picked = set(
+			frappe.get_all(
+				"HelixHR Celebration Recipient", filters={"parent": row.name}, pluck="employee"
+			)
+		)
+		employees = [employee for employee in employees if employee in picked]
+	assigned = get_assigned_holiday_lists_to_employee_and_company(
+		[*employees, row.company], today, today
+	)
+	group_holidays = {}
+	groups = {}
+	for employee in employees:
+		ranges = assigned.get(employee) or assigned.get(row.company)
+		holiday_list = ranges[0]["holiday_list"] if ranges else None
 		if not holiday_list:
 			continue
-		holidays = frappe.get_all(
-			"Holiday",
-			filters={
-				"parent": holiday_list,
-				"parenttype": "Holiday List",
-				"weekly_off": 0,
-				"holiday_date": [">=", start],
-			},
-			fields=["holiday_date", "description"],
-			order_by="holiday_date asc",
-		)
-		holidays = [holiday for holiday in holidays if holiday.holiday_date <= end]
+		if holiday_list not in group_holidays:
+			# One query per distinct list, not per employee: the common
+			# case is a whole company sharing one list.
+			group_holidays[holiday_list] = frappe.get_all(
+				"Holiday",
+				filters={
+					"parent": holiday_list,
+					"parenttype": "Holiday List",
+					"weekly_off": 0,
+					"holiday_date": ["between", [start, end]],
+				},
+				fields=["holiday_date", "description"],
+				order_by="holiday_date asc",
+			)
+		holidays = group_holidays[holiday_list]
 		if not holidays:
 			continue
 		key = tuple((holiday["holiday_date"], holiday["description"]) for holiday in holidays)
@@ -647,14 +697,7 @@ def _send_holiday_company(row, today, get_holiday_list, foreign, foreign_names, 
 			for holiday_date, description in key
 		]
 		recipients = _drop_foreign(
-			[
-				address
-				for address in (
-					get_employee_email(frappe.get_cached_doc("Employee", employee))
-					for employee in employees
-				)
-				if address
-			],
+			[address for employee in employees if (address := _mail_address(employee))],
 			row.company,
 			foreign,
 			foreign_names,

@@ -1338,10 +1338,15 @@ def check_cross_company_mailboxes():
 			break
 
 	if problems:
+		count = (
+			# The collection stops at 20, so say "at least" -- an exact-sounding
+			# number that is silently a cap misleads a triage read.
+			f"at least {len(problems)} " if len(problems) >= 20 else f"{len(problems)} "
+		)
 		return _result(
 			"Cross-company mailboxes",
 			WARN,
-			f"{len(problems)} address(es) resolve for active employees of more than one "
+			f"{count}address(es) resolve for active employees of more than one "
 			f"company -- celebration mail to them is dropped at send time (HelixHR "
 			f"celebration reminders log); set the stale duplicate to Left: "
 			+ "; ".join(problems),

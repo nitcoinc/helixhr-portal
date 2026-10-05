@@ -380,7 +380,7 @@ defineExpose({ setup })
               v-model="memberQuery"
               type="text"
               label="Add a person"
-              placeholder="Name, employee ID or work email"
+              placeholder="Name"
               maxlength="60"
               @input="onMemberQuery(memberQuery)"
             />

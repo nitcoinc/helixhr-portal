@@ -22,7 +22,7 @@ from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
-from frappe.utils import add_days, add_to_date, getdate, now_datetime, today
+from frappe.utils import add_days, add_months, add_to_date, get_first_day, getdate, now_datetime, today
 
 from helixhr import reminders
 from helixhr.events import PENDING_SINCE_FIELD as PENDING_SINCE
@@ -1321,6 +1321,124 @@ class TestHolidayReminders(IntegrationTestCase):
 		reminders.send_holiday_reminders()
 
 		self.assertEqual(len(added()), 1)
+
+	def test_the_weekly_window_covers_monday_through_sunday_only(self):
+		"""R7's exclusive bounds: a holiday on the window's first and last
+		day is listed; the following Monday is left to the next mail. Its
+		own list name -- `_list` returns an existing list unchanged, and
+		other tests stage `_Test Holiday List A` with other dates."""
+		self._list(
+			"_Test Holiday List BoundsW",
+			(self.monday, add_days(self.monday, 6), add_days(self.monday, 7)),
+		)
+		self._employees({"A1": "_Test Holiday List BoundsW", "A2": None})
+		added = self._watch_mail()
+
+		reminders.send_holiday_reminders()
+
+		mails = added()
+		self.assertEqual(len(mails), 1)
+		self.assertIn("Holiday 0", mails[0]["body"], "the window's first day is listed")
+		self.assertIn("Holiday 1", mails[0]["body"], "the window's last day is listed")
+		self.assertNotIn("Holiday 2", mails[0]["body"], "the following Monday belongs to the next mail")
+
+	def test_the_monthly_window_covers_the_whole_month_only(self):
+		"""R7's exclusive bounds for the Monthly cadence, pinned to a 1st:
+		the month's last day is listed, the next month's 1st is not."""
+		pinned = get_first_day(add_months(self.monday, 1))
+		self._monthly_patch = patch.object(reminders, "getdate", return_value=pinned)
+		self._monthly_patch.start()
+		self.addCleanup(self._monthly_patch.stop)
+		frappe.cache.delete_value(
+			f"{reminders.CELEBRATION_GUARD_PREFIX}{pinned}|holiday|{COMPANY_A}"
+		)
+		self.addCleanup(
+			frappe.cache.delete_value,
+			f"{reminders.CELEBRATION_GUARD_PREFIX}{pinned}|holiday|{COMPANY_A}",
+		)
+		month_end = add_days(add_months(pinned, 1), -1)
+		self._list(
+			"_Test Holiday List BoundsM", (pinned, month_end, add_days(month_end, 1))
+		)
+		self._employees({"A1": "_Test Holiday List BoundsM", "A2": None})
+		frappe.db.set_value(
+			"HelixHR Celebration Reminder",
+			frappe.db.get_value(
+				"HelixHR Celebration Reminder", {"event": "holiday", "company": COMPANY_A}, "name"
+			),
+			"frequency",
+			"Monthly",
+		)
+		added = self._watch_mail()
+
+		reminders.send_holiday_reminders()
+
+		mails = added()
+		self.assertEqual(len(mails), 1)
+		self.assertIn("Holiday 0", mails[0]["body"], "the 1st itself is listed")
+		self.assertIn("Holiday 1", mails[0]["body"], "the month's last day is listed")
+		self.assertNotIn("Holiday 2", mails[0]["body"], "next month's 1st belongs to next month's mail")
+
+	def test_a_selected_holiday_row_mails_only_its_recipients(self):
+		"""R9 for holidays: the audience is the row's own -- a Selected
+		row mails the picked people, not the whole company."""
+		self._list("_Test Holiday List A", (self.wednesday,))
+		self._employees({"A1": "_Test Holiday List A", "A2": "_Test Holiday List A", "A3": None})
+		row = frappe.db.get_value(
+			"HelixHR Celebration Reminder", {"event": "holiday", "company": COMPANY_A}, "name"
+		)
+		doc = frappe.get_doc("HelixHR Celebration Reminder", row)
+		doc.recipient_mode = "Selected employees"
+		doc.set("recipients", [{"employee": self._employee_id("A1")}])
+		doc.save(ignore_permissions=True)
+		added = self._watch_mail()
+
+		reminders.send_holiday_reminders()
+
+		mails = added()
+		self.assertEqual(len(mails), 1)
+		self.assertEqual(mails[0]["recipients"], [self._address("A1")], "A2 is not a picked recipient")
+
+	def test_a_duplicate_mailbox_in_another_company_is_dropped_from_holiday_mail(self):
+		"""R3 for the holiday sender too: an address that also resolves for
+		another company's active employee is dropped and logged."""
+		from helixhr.tests.utils import make_celebration_employee
+
+		self._list("_Test Holiday List A", (self.wednesday,))
+		self._employees({"A1": "_Test Holiday List A", "A2": "_Test Holiday List A"})
+		shared = self._address("A1")
+		real_one = make_celebration_employee(
+			"REM-HOL-A",
+			COMPANY_A,
+			date_of_birth="1990-01-01",
+			date_of_joining="2020-01-01",
+			company_email=shared,
+		)
+		stale = make_celebration_employee(
+			"REM-HOL-B",
+			COMPANY_B,
+			date_of_birth="1990-01-01",
+			date_of_joining="2020-01-01",
+			company_email=shared,
+		)
+		self.addCleanup(frappe.db.set_value, "Employee", real_one, "status", "Left")
+		self.addCleanup(frappe.db.set_value, "Employee", stale, "status", "Left")
+		added = self._watch_mail()
+
+		reminders.send_holiday_reminders()
+
+		mails = added()
+		recipients = [r for mail in mails for r in mail["recipients"]]
+		self.assertEqual(recipients, [self._address("A2")], "the shared address is dropped")
+		logs = frappe.get_all(
+			"Error Log", filters={"method": reminders.CROSS_COMPANY_LOG_TITLE}, pluck="name"
+		)
+		self.assertTrue(logs, "the drop is logged, naming both records")
+		for log in logs:
+			detail = frappe.db.get_value("Error Log", log, "error")
+			self.assertIn(real_one, detail)
+			self.assertIn(stale, detail)
+			self.addCleanup(frappe.delete_doc, "Error Log", log, force=True, ignore_permissions=True)
 
 	def test_an_hrms_holiday_flag_on_with_an_enabled_row_is_refused(self):
 		frappe.db.set_single_value("HR Settings", "send_holiday_reminders", 1)
