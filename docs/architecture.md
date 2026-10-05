@@ -175,6 +175,13 @@ accepts Approved and Rejected and only Approved touches the ledger — and
 `sent_back` for the first and `rejected` for the second; `statusBadge.js` keys
 the badge on the same pair.
 
+**Leave page grouping keys on state, not only dates (plan 2026-10-05-001 U14).**
+`rejected` and `cancelled` go under Past whatever their dates; everything else
+is Past only once `to_date` has gone by, so a `sent_back` row still shows Edit
+and resend under Coming up. A `rejected` card offers "Apply again": a new
+application prefilled with type, dates and half-day (not the reason). The
+rejected record stays final; reopening it would need HRMS cancel/amend.
+
 ### Leave has a stage, not a Workflow (P4-KTD4)
 
 P2-KTD17 still stands: Leave Application gets no Workflow, because HRMS's own

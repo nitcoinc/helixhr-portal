@@ -20,7 +20,7 @@ import { today } from '@/lib/dates'
 //     the watcher and the user disagreed the *watcher* lost -- the request
 //     went in with a half-day date from two edits ago (scenario 3).
 const props = defineProps({
-  /** Values to start from, for "Edit and resend" on a sent-back request. */
+  /** Values to start from, for "Edit and resend" or "Apply again". */
   initial: { type: Object, default: null },
 })
 const emit = defineEmits(['applied', 'cancel'])
@@ -227,6 +227,17 @@ async function submit() {
         required
       />
     </div>
+
+    <!-- "Apply again" on an old rejection can bring back dates that have
+         gone by. Backdated leave is legal, so this informs, it does not block. -->
+    <p
+      v-if="fromDate && fromDate < (context.data?.today || today())"
+      class="surface-inset p-3 text-sm text-ink-gray-7"
+      data-testid="leave-past-dates"
+    >
+      These dates are in the past. Check them, or send it as is if you're
+      recording leave you already took.
+    </p>
 
     <label class="flex min-h-11 items-center gap-2 text-sm text-ink-gray-7">
       <input

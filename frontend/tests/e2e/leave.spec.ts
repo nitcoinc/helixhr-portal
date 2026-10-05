@@ -63,7 +63,7 @@ async function seedLeave(
   employeeApi: APIRequestContext,
   employee: string,
   date: string,
-  options: { sendBack?: string } = {},
+  options: { sendBack?: string; reject?: string } = {},
 ) {
   const existing = await api.get(
     '/api/method/frappe.client.get_list?doctype=Leave%20Application&filters=' +
@@ -89,7 +89,12 @@ async function seedLeave(
   const name = (await created.json())?.message?.name
   expect(name, 'seeding a Leave Application should succeed').toBeTruthy()
 
-  if (options.sendBack) {
+  const decision = options.sendBack
+    ? { action: 'Send Back', comment: options.sendBack }
+    : options.reject
+      ? { action: 'Reject', comment: options.reject }
+      : null
+  if (decision) {
     // Administrator is an authorized actor in act_on_approval, so this is the
     // real portal path a send-back takes -- not a raw status write. P2-U7
     // made the concurrency token mandatory, so the seed reads the record
@@ -107,8 +112,7 @@ async function seedLeave(
       data: {
         doctype: 'Leave Application',
         name,
-        action: 'Send Back',
-        comment: options.sendBack,
+        ...decision,
         expected_modified: evidence?.modified,
         expected_state: evidence?.state,
       },
@@ -301,6 +305,85 @@ test.describe('employee', () => {
       for (const text of await labels.allTextContents()) {
         expect(['Coming up', 'Past']).toContain(text.trim())
       }
+    } finally {
+      await removeLeave(api, name)
+      await employeeApi.dispose()
+      await api.dispose()
+    }
+  })
+
+  // ── U14: a final rejection is history, with a way forward ─────────────
+  test('a rejected future leave sits in Past with its reason and offers Apply again', async ({
+    page,
+    baseURL,
+  }) => {
+    const api = await admin(baseURL!)
+    const employeeApi = await asEmployee(baseURL!)
+    const employee = await getValue(api, 'Employee', { user_id: EMPLOYEE }, 'name')
+    const reason = 'Quarter close, we need everyone that week.'
+    const date = seedDate(43)
+    const name = await seedLeave(api, employeeApi, employee, date, { reject: reason })
+    let again = ''
+
+    try {
+      await page.goto('/helixhr/leave')
+      const past = page.locator('div', { has: page.locator('h2.label', { hasText: 'Past' }) }).last()
+      const row = past.locator('li', { hasText: reason })
+      await expect(row).toBeVisible()
+      await expect(
+        page
+          .locator('div', { has: page.locator('h2.label', { hasText: 'Coming up' }) })
+          .last()
+          .locator('li', { hasText: reason }),
+      ).toHaveCount(0)
+
+      await row.getByRole('button', { name: 'Apply again' }).click()
+      const dialog = page.getByRole('dialog')
+      await expect(dialog.getByRole('button', { name: /^Casual/ })).toHaveAttribute(
+        'aria-pressed',
+        'true',
+      )
+      await expect(dialog.getByLabel('From')).toHaveValue(date)
+      await expect(dialog.getByLabel('To')).toHaveValue(date)
+      // Not the reason: the employee writes the case afresh.
+      await expect(dialog.getByText('Seeded by leave.spec.ts')).toHaveCount(0)
+
+      await dialog.getByRole('button', { name: /^Send/ }).click()
+      await expect(dialog).toBeHidden()
+      const rows = await api.get(
+        '/api/method/frappe.client.get_list?doctype=Leave%20Application&filters=' +
+          encodeURIComponent(JSON.stringify({ employee, from_date: date, status: 'Open' })) +
+          '&fields=' +
+          encodeURIComponent(JSON.stringify(['name'])),
+      )
+      again = (await rows.json())?.message?.[0]?.name || ''
+      expect(again, 'Apply again should create a new Open application').toBeTruthy()
+      expect(again).not.toBe(name)
+    } finally {
+      await removeLeave(api, again)
+      await removeLeave(api, name)
+      await employeeApi.dispose()
+      await api.dispose()
+    }
+  })
+
+  test('a sent-back future leave still shows Edit and resend under Coming up', async ({
+    page,
+    baseURL,
+  }) => {
+    const api = await admin(baseURL!)
+    const employeeApi = await asEmployee(baseURL!)
+    const employee = await getValue(api, 'Employee', { user_id: EMPLOYEE }, 'name')
+    const reason = 'Shift this by a week please.'
+    const name = await seedLeave(api, employeeApi, employee, seedDate(47), { sendBack: reason })
+
+    try {
+      await page.goto('/helixhr/leave')
+      const comingUp = page
+        .locator('div', { has: page.locator('h2.label', { hasText: 'Coming up' }) })
+        .last()
+      const row = comingUp.locator('li', { hasText: reason })
+      await expect(row.getByRole('button', { name: 'Edit and resend' })).toBeVisible()
     } finally {
       await removeLeave(api, name)
       await employeeApi.dispose()
