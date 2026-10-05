@@ -4,6 +4,7 @@ import { Button } from 'frappe-ui'
 import EntityPicker from '@/components/reports/EntityPicker.vue'
 import { DATE_PRESETS, matchPreset, presetRange } from '@/lib/datePresets'
 import { today } from '@/lib/dates'
+import { call } from '@/lib/api'
 
 // Plan 2026-10-04-001 U3 (resolved decision 14): the filter bar, built from
 // the catalog entry's own filter specs. Nothing here runs a report: Run is
@@ -36,6 +37,28 @@ const otherFilters = computed(() =>
 
 function set(name, value) {
   emit('update:modelValue', { ...props.modelValue, [name]: value })
+}
+
+// Plan 2026-10-05-001 U7 (R12): a new Project clears a chosen Task that
+// does not belong to it. The server answers "is this task in that project"
+// with the same scoped lookup the picker uses.
+async function setProject(value) {
+  const task = props.modelValue.task
+  set('project', value)
+  if (!value || !task || !props.entry.filters.some((f) => f.name === 'task')) return
+  let keep = false
+  try {
+    const found = await call('helixhr.api.search_report_options', {
+      report_key: props.entry.key,
+      filter: 'task',
+      value: task,
+      context: JSON.stringify({ project: value }),
+    })
+    keep = !!found?.length
+  } catch {
+    // Unknown -> clear; a stale task would only narrow the report to nothing.
+  }
+  if (!keep && props.modelValue.project === value && props.modelValue.task === task) set('task', '')
 }
 
 const preset = computed(() =>
@@ -144,7 +167,7 @@ function secondGroupOptions() {
             :filter="filter"
             :context="filter.type === 'task' && modelValue.project ? { project: modelValue.project } : null"
             :model-value="modelValue[filter.name] || ''"
-            @update:model-value="set(filter.name, $event)"
+            @update:model-value="filter.name === 'project' ? setProject($event) : set(filter.name, $event)"
           />
           <div
             v-else-if="filter.type === 'toggle'"

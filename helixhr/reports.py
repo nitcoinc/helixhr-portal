@@ -1514,7 +1514,18 @@ def resolve_filters(entry, raw, scope):
 # the report itself is still company-scoped.
 
 OPTIONS_LIMIT = 20
-OPTIONS_QUERY_MIN = 2
+# U7: what "active" means per picker doctype. Browse lists only these; a
+# typed query lists them first, then the inactive matches.
+_ACTIVE_FILTERS = {
+	"Project": {"status": "Open"},
+	"Task": {"status": ["not in", ("Completed", "Cancelled")]},
+	"Department": {"disabled": 0},
+}
+_INACTIVE_FILTERS = {
+	"Project": {"status": ["!=", "Open"]},
+	"Task": {"status": ["in", ("Completed", "Cancelled")]},
+	"Department": {"disabled": 1},
+}
 _OPTIONS_QUERY_MAX = 60
 _SELECT_LINK_DOCTYPES = {
 	"designation": "Designation",
@@ -1576,7 +1587,10 @@ def _option_source(spec, scope, context):
 def search_options(entry, filter_name, scope, query=None, value=None, context=None):
 	"""Up to `OPTIONS_LIMIT` ``{value, label, description}`` for one picker.
 
-	``query`` shorter than `OPTIONS_QUERY_MIN` returns nothing. ``value``
+	An empty ``query`` browses (plan 2026-10-05-001 U7, KTD7): active rows
+	only (`_ACTIVE_FILTERS`), most recently modified first. A typed ``query``
+	also matches inactive rows (a Completed project), listed after the
+	active matches. ``value``
 	(instead of ``query``) resolves the label of one already-chosen value --
 	the URL-load case -- and returns ``[]`` when it is out of scope.
 	A filter the entry does not declare, or one with no picker, is refused.
@@ -1591,29 +1605,37 @@ def search_options(entry, filter_name, scope, query=None, value=None, context=No
 	if filters is None:
 		return []
 
-	or_filters = None
+	fields = list(dict.fromkeys(["name", label_field] + ([description_field] if description_field else [])))
+
+	def fetch(row_filters, or_filters=None, order_by=f"{label_field} asc", limit=OPTIONS_LIMIT):
+		return frappe.get_all(
+			doctype,
+			filters=row_filters,
+			or_filters=or_filters,
+			fields=fields,
+			order_by=order_by,
+			limit=limit,
+			ignore_permissions=True,
+		)
+
 	if value not in (None, ""):
 		if not isinstance(value, str):
 			return []
-		filters = {**filters, "name": value}
+		rows = fetch({**filters, "name": value})
 	else:
 		needle = query.strip()[:_OPTIONS_QUERY_MAX] if isinstance(query, str) else ""
-		if len(needle) < OPTIONS_QUERY_MIN:
-			return []
 		if doctype == "Employee":
 			filters = {**filters, "status": "Active"}
-		or_filters = [[field, "like", f"%{needle}%"] for field in search_fields]
-
-	fields = ["name", label_field] + ([description_field] if description_field else [])
-	rows = frappe.get_all(
-		doctype,
-		filters=filters,
-		or_filters=or_filters,
-		fields=list(dict.fromkeys(fields)),
-		order_by=f"{label_field} asc",
-		limit=OPTIONS_LIMIT,
-		ignore_permissions=True,
-	)
+		active = {**filters, **_ACTIVE_FILTERS.get(doctype, {})}
+		if not needle:
+			rows = fetch(active, order_by="modified desc")
+		else:
+			or_filters = [[field, "like", f"%{needle}%"] for field in search_fields]
+			rows = fetch(active, or_filters)
+			if doctype in _INACTIVE_FILTERS and len(rows) < OPTIONS_LIMIT:
+				rows += fetch(
+					{**filters, **_INACTIVE_FILTERS[doctype]}, or_filters, limit=OPTIONS_LIMIT - len(rows)
+				)
 	return [
 		{
 			"value": row.name,

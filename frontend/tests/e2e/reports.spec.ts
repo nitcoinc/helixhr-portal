@@ -113,8 +113,12 @@ test.describe('hr', () => {
     await expect(page.locator('table')).toBeVisible()
 
     const picker = page.getByRole('combobox', { name: 'Employee' })
-    await picker.fill('M')
-    await expect(page.getByRole('listbox', { name: 'Employee' }).getByText('Type at least 2 letters.')).toBeVisible()
+    // Plan 2026-10-05-001 U7: focus browses; there is no minimum length.
+    await picker.focus()
+    const list = page.getByRole('listbox', { name: 'Employee' })
+    await expect(list.getByText('Showing active only — type to search completed')).toBeVisible()
+    await picker.fill('zzzz-no-such-person')
+    await expect(list.getByText('No matches')).toBeVisible()
     await picker.fill(COLLEAGUE_NAME)
     await page.getByRole('option', { name: new RegExp(COLLEAGUE_NAME) }).first().click()
     await page.getByRole('button', { name: 'Run report' }).click()
@@ -160,6 +164,21 @@ test.describe('hr', () => {
     )
     await expect(page.getByText("You don't have access to this")).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Open in Frappe' })).toHaveCount(0)
+  })
+
+  test('the project picker lists options on focus, and a new project clears an incompatible task', async ({
+    page,
+  }) => {
+    await page.goto('/helixhr/reports/hours_by_project?task=NO-SUCH-TASK-000')
+    const task = page.getByRole('combobox', { name: 'Task' })
+    await expect(task).toHaveValue('NO-SUCH-TASK-000')
+
+    const project = page.getByRole('combobox', { name: 'Project' })
+    await project.focus()
+    const first = page.getByRole('listbox', { name: 'Project' }).getByRole('option').first()
+    await expect(first).toBeVisible()
+    await first.click()
+    await expect(task).toHaveValue('')
   })
 
   test('the monthly project timesheet renders a task x day grid, detail and a PDF', async ({ page }) => {

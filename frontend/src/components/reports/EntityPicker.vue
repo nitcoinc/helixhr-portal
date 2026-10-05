@@ -8,6 +8,8 @@ import { call } from '@/lib/api'
 // the picker can never offer a value the report would refuse. ARIA 1.2
 // combobox: the input owns a listbox popup; arrow keys move
 // `aria-activedescendant`, Enter picks, Escape closes.
+// Plan 2026-10-05-001 U7 (KTD7): focus browses -- an empty query lists the
+// active in-scope options; typing searches every status.
 const props = defineProps({
   reportKey: { type: String, required: true },
   /** The catalog filter spec: `{name, type, label}`. */
@@ -18,7 +20,6 @@ const props = defineProps({
 })
 const emit = defineEmits(['update:modelValue'])
 
-const MIN_QUERY = 2
 const DEBOUNCE_MS = 250
 
 const id = useId()
@@ -68,22 +69,16 @@ watch(
   { immediate: true },
 )
 
-function onInput(event) {
-  text.value = event.target.value
-  open.value = true
-  active.value = -1
+// The text in the box is a search only when it is not the chosen label.
+const needle = () => (text.value === selectedLabel.value ? '' : text.value.trim())
+
+function load(delay) {
   clearTimeout(timer)
-  const needle = text.value.trim()
-  if (needle.length < MIN_QUERY) {
-    options.value = []
-    loading.value = false
-    return
-  }
   loading.value = true
   timer = setTimeout(async () => {
     const mine = ++seq
     try {
-      const result = await fetchOptions({ query: needle })
+      const result = await fetchOptions({ query: needle() })
       if (mine !== seq) return
       options.value = result || []
       failed.value = false
@@ -94,7 +89,20 @@ function onInput(event) {
     } finally {
       if (mine === seq) loading.value = false
     }
-  }, DEBOUNCE_MS)
+  }, delay)
+}
+
+function onInput(event) {
+  text.value = event.target.value
+  open.value = true
+  active.value = -1
+  load(DEBOUNCE_MS)
+}
+
+function onFocus() {
+  open.value = true
+  active.value = -1
+  load(0)
 }
 
 function pick(option) {
@@ -155,11 +163,11 @@ onUnmounted(() => clearTimeout(timer))
         :aria-expanded="open ? 'true' : 'false'"
         :aria-controls="listId"
         :aria-activedescendant="open && active >= 0 ? `${listId}-${active}` : undefined"
-        :placeholder="`Type ${MIN_QUERY}+ letters`"
+        placeholder="Choose or type to search"
         class="min-h-11 w-full min-w-0 rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8 sm:min-h-9"
         @input="onInput"
         @keydown="onKeydown"
-        @focus="open = text.trim().length >= MIN_QUERY"
+        @focus="onFocus"
         @blur="onBlur"
       >
       <button
@@ -180,16 +188,10 @@ onUnmounted(() => clearTimeout(timer))
       class="surface-card elev-2 absolute z-20 mt-1 max-h-72 w-full min-w-[16rem] overflow-y-auto p-1"
     >
       <li
-        v-if="text.trim().length < MIN_QUERY"
+        v-if="loading"
         class="px-3 py-2 text-sm text-ink-gray-5"
       >
-        Type at least {{ MIN_QUERY }} letters.
-      </li>
-      <li
-        v-else-if="loading"
-        class="px-3 py-2 text-sm text-ink-gray-5"
-      >
-        Searching…
+        Loading…
       </li>
       <li
         v-else-if="failed"
@@ -201,7 +203,7 @@ onUnmounted(() => clearTimeout(timer))
         v-else-if="!options.length"
         class="px-3 py-2 text-sm text-ink-gray-5"
       >
-        No match you can report on.
+        No matches
       </li>
       <li
         v-for="(option, index) in loading || failed ? [] : options"
@@ -216,6 +218,12 @@ onUnmounted(() => clearTimeout(timer))
       >
         <span class="block text-ink-gray-9">{{ option.label }}</span>
         <span class="block text-xs text-ink-gray-5">{{ option.value }}<template v-if="option.description"> · {{ option.description }}</template></span>
+      </li>
+      <li
+        v-if="!loading && !failed && !needle()"
+        class="border-t border-outline-gray-1 px-3 py-2 text-xs text-ink-gray-5"
+      >
+        Showing active only — type to search completed
       </li>
     </ul>
   </div>

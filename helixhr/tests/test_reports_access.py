@@ -230,11 +230,55 @@ class TestReportOptions(IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			self._search(user, COMPANY_ONLY_KEY, "from_date", query="20")
 
-	def test_results_are_capped_and_one_character_returns_nothing(self):
+	def test_empty_query_browses_open_projects_and_a_query_finds_completed_ones(self):
+		"""Plan 2026-10-05-001 U7 (KTD7): pickers list current options on focus."""
+		_, user = make_test_hr_manager_employee()
+		open_project = make_test_project(self.company, "_Test Opt Browse Open")
+		done = make_test_project(self.company, "_Test Opt Browse Done")
+		frappe.db.set_value("Project", done, "status", "Completed")
+		theirs = make_test_project(self.other_company, "_Test Opt Browse Theirs")
+
+		browse = self._search(user, PROJECT_KEY, "project", query="")
+		values = {o["value"] for o in browse}
+		self.assertIn(open_project, values)
+		self.assertNotIn(done, values)
+		self.assertNotIn(theirs, values)
+		self.assertLessEqual(len(browse), 20)
+		self.assertEqual(
+			{frappe.db.get_value("Project", v, "status") for v in values}, {"Open"} if values else set()
+		)
+
+		found = [o["value"] for o in self._search(user, PROJECT_KEY, "project", query="_Test Opt Browse")]
+		self.assertIn(done, found)
+		self.assertNotIn(theirs, found)
+		# Active matches list before inactive ones.
+		self.assertLess(found.index(open_project), found.index(done))
+
+	def test_task_browse_with_a_project_lists_only_that_projects_open_tasks(self):
+		_, user = make_test_hr_manager_employee()
+		project = make_test_project(self.company, "_Test Opt Task Browse A")
+		other = make_test_project(self.company, "_Test Opt Task Browse B")
+		names = {}
+		for parent, subject, status in (
+			(project, "_Test Opt Browse T1", "Open"),
+			(project, "_Test Opt Browse T2", "Completed"),
+			(other, "_Test Opt Browse T3", "Open"),
+		):
+			names[subject] = frappe.db.get_value("Task", {"project": parent, "subject": subject}) or (
+				frappe.get_doc(
+					{"doctype": "Task", "project": parent, "subject": subject, "status": status}
+				).insert(ignore_permissions=True).name
+			)
+		values = {
+			o["value"] for o in self._search(user, PROJECT_KEY, "task", query="", context={"project": project})
+		}
+		self.assertEqual(values, {names["_Test Opt Browse T1"]})
+
+	def test_results_are_capped_and_one_character_searches(self):
 		from helixhr import reports
 
 		_, user = make_test_hr_manager_employee()
-		self.assertEqual(self._search(user, COMPANY_ONLY_KEY, "employee", query="o"), [])
+		self.assertLessEqual(len(self._search(user, COMPANY_ONLY_KEY, "employee", query="o")), 20)
 		with patch.object(reports, "OPTIONS_LIMIT", 1):
 			self.assertEqual(len(self._search(user, COMPANY_ONLY_KEY, "employee", query="opt-search")), 1)
 		self.assertLessEqual(len(self._search(user, COMPANY_ONLY_KEY, "employee", query="es")), 20)
