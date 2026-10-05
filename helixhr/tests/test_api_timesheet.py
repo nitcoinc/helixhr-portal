@@ -1447,6 +1447,7 @@ class TestGetMyMonth(IntegrationTestCase):
 		self.standard = frappe.db.get_single_value("HR Settings", "standard_working_hours")
 		frappe.db.set_single_value("HR Settings", "standard_working_hours", 8)
 		self.holiday_list = frappe.db.get_value("Employee", self.employee_name, "holiday_list")
+		self.joined = frappe.db.get_value("Employee", self.employee_name, "date_of_joining")
 		frappe.cache.delete(f"helixhr:rate-limit:save_my_week:{EMPLOYEE_USER}")
 		self._purge()
 
@@ -1456,6 +1457,7 @@ class TestGetMyMonth(IntegrationTestCase):
 		frappe.db.set_single_value("HR Settings", "standard_working_hours", self.standard)
 		frappe.db.set_value("Employee", self.employee_name, "holiday_list", self.holiday_list)
 		frappe.db.set_value("Employee", self.employee_name, "relieving_date", None)
+		frappe.db.set_value("Employee", self.employee_name, "date_of_joining", self.joined)
 
 	def _purge(self):
 		first = frappe.utils.getdate(f"{self.month}-01")
@@ -1538,6 +1540,16 @@ class TestGetMyMonth(IntegrationTestCase):
 		first_monday = frappe.utils.getdate(self._month()[0]["week_start"])
 		frappe.db.set_value("Employee", self.employee_name, "relieving_date", str(add_days(first_monday, -1)))
 		self.assertFalse(any(week["missing"] for week in self._month(today=self._after_month())))
+
+	def test_weeks_before_joining_are_never_missing_and_the_joining_week_expects_less(self):
+		full = self._month(today=self._after_month())
+		second_monday = frappe.utils.getdate(full[1]["week_start"])
+		frappe.db.set_value("Employee", self.employee_name, "date_of_joining", str(add_days(second_monday, 2)))
+		weeks = self._month(today=self._after_month())
+		self.assertFalse(weeks[0]["missing"])
+		self.assertTrue(weeks[1]["missing"])
+		self.assertLess(weeks[1]["expected_hours"], full[1]["expected_hours"])
+		self.assertGreater(weeks[1]["expected_hours"], 0)
 
 	def test_no_standard_hours_is_not_measured_but_still_missing(self):
 		frappe.db.set_single_value("HR Settings", "standard_working_hours", 0)

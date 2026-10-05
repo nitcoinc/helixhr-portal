@@ -16,6 +16,11 @@ pointed at it. For each row not already on its per-company name
 The shared templates are left in place (nothing reads them afterwards, and
 deleting site data a patch did not create is not this patch's call).
 
+A row with no template yet (an idle, never-configured row) is left alone.
+A customised source that no longer renders in the new sandbox (e.g. it
+calls `frappe.*`) is cloned as the default instead, with an Error Log
+naming it, so the company keeps receiving mail.
+
 Idempotent: a row already on its per-company name is skipped, and an
 existing per-company template is never overwritten. Called from
 `install.after_install` too, where there are no rows and it does nothing.
@@ -36,7 +41,7 @@ def execute():
 		"HelixHR Celebration Reminder", fields=["name", "event", "company", "email_template"]
 	)
 	for row in rows:
-		if row.event not in CELEBRATION_DEFAULTS or not row.company:
+		if row.event not in CELEBRATION_DEFAULTS or not row.company or not row.email_template:
 			continue
 		target = celebration_template_name(row.event, row.company)
 		if row.email_template == target:
@@ -59,7 +64,7 @@ def _create(target, row, seeded, default):
 			and source.subject == spec["subject"]
 			and source.response_html == spec["response_html"]
 		)
-		if not unedited:
+		if not unedited and _renders(source, row):
 			values = {
 				"subject": source.subject,
 				"use_html": source.use_html,
@@ -67,3 +72,21 @@ def _create(target, row, seeded, default):
 				"response": source.response,
 			}
 	frappe.get_doc({"doctype": "Email Template", "name": target, **values}).insert(ignore_permissions=True)
+
+
+def _renders(source, row):
+	"""Dry-render a customised source through the U11 sandbox with the
+	event's sample context. False (and an Error Log) when it fails."""
+	from helixhr.api import _celebration_sample_context
+	from helixhr.utils import render_celebration_email
+
+	body = source.response_html if source.use_html else source.response
+	try:
+		render_celebration_email(source.subject, body, _celebration_sample_context(row.event, row.company))
+	except Exception:
+		frappe.log_error(
+			title=f"Celebration template {source.name} replaced by the default",
+			message=frappe.get_traceback(),
+		)
+		return False
+	return True

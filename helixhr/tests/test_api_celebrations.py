@@ -450,3 +450,62 @@ class TestPerCompanyCelebrationTemplates(IntegrationTestCase):
 		patch.execute()
 		self.assertEqual(frappe.db.count("Email Template"), before, "a second run creates nothing")
 		self.assertEqual(self._template("birthday", self.company).subject, "Edited after")
+
+	def _clone_row(self, event, template, is_enabled=0):
+		"""Point (event, self.company)'s row at `template`, per-company clone removed."""
+		from helixhr.reminders import celebration_template_name
+
+		target = celebration_template_name(event, self.company)
+		if frappe.db.exists("Email Template", target):
+			frappe.delete_doc("Email Template", target, force=True, ignore_permissions=True)
+		row = frappe.db.get_value("HelixHR Celebration Reminder", {"event": event, "company": self.company}, "name")
+		if not row:
+			row = (
+				frappe.get_doc(
+					{
+						"doctype": "HelixHR Celebration Reminder",
+						"event": event,
+						"company": self.company,
+						"recipient_mode": "All employees",
+						"frequency": "Weekly" if event == "holiday" else None,
+					}
+				)
+				.insert(ignore_permissions=True)
+				.name
+			)
+		frappe.db.set_value(
+			"HelixHR Celebration Reminder", row, {"email_template": template, "is_enabled": is_enabled}
+		)
+		return row
+
+	def test_the_clone_patch_leaves_a_row_with_no_template_idle(self):
+		from helixhr.patches.v1_0 import clone_celebration_templates_per_company as patch
+		from helixhr.reminders import celebration_template_name
+
+		row = self._clone_row("birthday", None, is_enabled=1)
+		patch.execute()
+		self.assertFalse(frappe.db.get_value("HelixHR Celebration Reminder", row, "email_template"))
+		self.assertFalse(frappe.db.exists("Email Template", celebration_template_name("birthday", self.company)))
+
+	def test_the_clone_patch_replaces_a_source_the_sandbox_refuses_with_the_default(self):
+		from helixhr.patches.v1_0 import clone_celebration_templates_per_company as patch
+		from helixhr.reminders import CELEBRATION_DEFAULTS
+
+		unsafe = "_Test Unsafe Shared Birthday"
+		if not frappe.db.exists("Email Template", unsafe):
+			frappe.get_doc(
+				{
+					"doctype": "Email Template",
+					"name": unsafe,
+					"use_html": 1,
+					"subject": "Hi {{ names }}",
+					"response_html": "<p>{{ frappe.get_doc('User', 'Administrator').email }}</p>",
+				}
+			).insert(ignore_permissions=True)
+		self._clone_row("birthday", unsafe)
+		frappe.db.delete("Error Log", {"method": ["like", f"%{unsafe}%"]})
+		patch.execute()
+		clone = self._template("birthday", self.company)
+		self.assertEqual(clone.subject, CELEBRATION_DEFAULTS["birthday"]["subject"])
+		self.assertEqual(clone.response_html, CELEBRATION_DEFAULTS["birthday"]["body"])
+		self.assertTrue(frappe.db.exists("Error Log", {"method": ["like", f"%{unsafe}%"]}))
