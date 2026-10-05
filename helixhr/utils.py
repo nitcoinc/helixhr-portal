@@ -1484,6 +1484,9 @@ RATE_LIMIT_POLICY = {
 	"reset_celebration_template": (30, 3600),
 	# U12: a logo changes rarely; bounded like the photo upload.
 	"set_company_logo": (20, 3600),
+	# Documents: occasional HR writes; a save may carry a 20 MB upload.
+	"save_document_link": (30, 3600),
+	"delete_document_link": (30, 3600),
 	# Plan 2026-09-30-001 U2. Each re-encodes an image, so bounded like the
 	# attachment writes. The photo GET is deliberately not listed: a page
 	# loads one per avatar.
@@ -1686,13 +1689,43 @@ def validate_portal_upload(file_name, content, policy=None, max_bytes=UPLOAD_MAX
 			with zipfile.ZipFile(io.BytesIO(bytes(content))) as archive:
 				names = set(archive.namelist())
 		except (zipfile.BadZipFile, OSError):
-			frappe.throw(_(_UPLOAD_KIND_MESSAGE))
+			frappe.throw(_(kind_message))
 		if "[Content_Types].xml" not in names or ooxml_part not in names:
-			frappe.throw(_(_UPLOAD_KIND_MESSAGE))
+			frappe.throw(_(kind_message))
 		if any(name.lower().endswith("vbaproject.bin") for name in names):
 			frappe.throw(_("Macro-enabled documents can't be attached. Save it without macros and try again."))
 
 	return content_type
+
+
+# --- HR document policy (Documents: uploaded policies) ----------------------
+
+# What HR may publish on the Documents page: the attachment policy plus
+# PowerPoint, up to 20 MB. Private, attached to the HelixHR Document Link, so
+# Frappe serves it only to someone who may read that link (its
+# `has_permission` hook). Never SVG or HTML -- both execute in the site's
+# origin -- and checked by signature, not by name.
+DOCUMENT_POLICY = {
+	**UPLOAD_POLICY,
+	".pptx": (
+		"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		_ZIP_MAGIC,
+		"ppt/presentation.xml",
+	),
+}
+DOCUMENT_MAX_BYTES = 20 * 1024 * 1024
+DOCUMENT_KIND_MESSAGE = "A document must be a PDF, a Word, Excel or PowerPoint file, or a PNG or JPEG image."
+
+
+def validate_document_upload(file_name, content):
+	"""Refuse anything outside `DOCUMENT_POLICY` (type by signature, 20 MB)."""
+	return validate_portal_upload(
+		file_name,
+		content,
+		policy=DOCUMENT_POLICY,
+		max_bytes=DOCUMENT_MAX_BYTES,
+		kind_message=DOCUMENT_KIND_MESSAGE,
+	)
 
 
 # --- profile photo policy (plan 2026-09-30-001, U1) ------------------------

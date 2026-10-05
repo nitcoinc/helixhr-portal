@@ -22,7 +22,17 @@ _UNSCOPED_ROLES = {"HR Manager", "HR User", "System Manager"}
 
 class HelixHRDocumentLink(Document):
 	def validate(self):
-		self.url = validate_document_url(self.url)
+		# Documents: an uploaded file or a web link -- at least one. The
+		# portal's `save_document_link` sets `flags.file_pending` while it
+		# inserts first and attaches the File (which needs this name) after.
+		if (self.url or "").strip():
+			self.url = validate_document_url(self.url)
+		elif not (self.file or self.flags.file_pending):
+			frappe.throw(_("A document needs a file or a link."))
+		if self.file and not self.file.startswith("/private/files/"):
+			frappe.throw(_("An uploaded document must be a private file."))
+		if not self.published_on:
+			self.published_on = frappe.utils.getdate(self.creation) if self.creation else frappe.utils.today()
 
 
 def document_url_problem(url):

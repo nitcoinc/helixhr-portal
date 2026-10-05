@@ -1711,13 +1711,21 @@ def ensure_dashboard_document_fixture():
 	real headless install, or CI, unlike the long-lived dev bench this was
 	first written against) renders the card empty and the rail hides it
 	(the very rule `test('the documents card is absent when HR has added
-	none')` checks). Idempotent on title."""
-	if frappe.db.exists("HelixHR Document Link", {"title": DASHBOARD_DOCUMENT_TITLE}):
+	none')` checks). Idempotent on title.
+
+	`company` is written as "" on purpose: an omitted Link field takes the
+	site's default Company (a test elsewhere may set one), which would
+	silently turn this global link into one company's. An existing row that
+	drifted that way is put back."""
+	existing = frappe.db.get_value("HelixHR Document Link", {"title": DASHBOARD_DOCUMENT_TITLE}, "name")
+	if existing:
+		frappe.db.set_value("HelixHR Document Link", existing, "company", None)
 		return
 	frappe.get_doc(
 		{
 			"doctype": "HelixHR Document Link",
 			"title": DASHBOARD_DOCUMENT_TITLE,
+			"company": "",
 			"url": "https://example.invalid/policies/handbook",
 			"description": "Seeded for the Playwright dashboard documents rail.",
 		}

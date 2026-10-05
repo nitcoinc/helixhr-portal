@@ -86,7 +86,8 @@ class TestHelixHRDashboard(IntegrationTestCase):
 				"doctype": "HelixHR Document Link",
 				"title": title,
 				"url": "https://example.com/p4-u9",
-				**({"company": company} if company else {}),
+				# "" not omitted: an omitted Link takes the site's default Company.
+				"company": company or "",
 			}
 		).insert(ignore_permissions=True)
 
@@ -108,7 +109,10 @@ class TestHelixHRDashboard(IntegrationTestCase):
 		page = get_my_documents()
 		card = get_dashboard()["documents"]
 
-		self.assertEqual(card["items"], page[:_LINKS_LIMIT])
+		# Important documents lead the card; the page's own order (newest
+		# first) holds within each category.
+		important_first = sorted(page, key=lambda row: row.category != "Important")
+		self.assertEqual(card["items"], important_first[:_LINKS_LIMIT])
 		self.assertEqual(card["more"], len(page) - _LINKS_LIMIT)
 		self.assertGreater(card["more"], 0, "the card must say how many it did not show")
 		self.assertEqual(len(card["items"]), _LINKS_LIMIT)

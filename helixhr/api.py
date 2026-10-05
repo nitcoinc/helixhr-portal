@@ -633,6 +633,9 @@ def get_portal_bootstrap():
 		# the export log and the portal-role section -- `can_admin_portal`
 		# is the predicate each of those endpoints enforces.
 		"can_admin_portal": can_admin_portal(frappe.session.user),
+		# Documents: the upload/edit/delete controls -- `save_document_link`'s
+		# own gate, asked without a company.
+		"can_manage_documents": _can_manage_documents(frappe.session.user),
 		# P6-KTD4: resolved on the caller's own ability to reach Desk (a
 		# System User holding a `desk_access` role), never on "is HR" --
 		# the two are correlated today but the flag must not assume they
@@ -7339,45 +7342,261 @@ _APPROVAL_KINDS = {
 # Documents (R19, P2-R19)
 
 
+_DOCUMENT_DOCTYPE = "HelixHR Document Link"
+_DOCUMENT_CATEGORIES = ("Important", "General")
+_DOCUMENT_TITLE_MAX = 140
+_DOCUMENT_DESCRIPTION_MAX = 1000
+
+
 def _visible_document_links(employee):
-	"""The policy links one employee may see: global ones plus their own
-	company's (P2-R19).
+	"""The documents one employee may see: global ones plus their own
+	company's (P2-R19), newest first.
 
 	One query, two callers -- `get_my_documents` for the full searchable page
 	and the dashboard's bounded card -- so the scope has one definition.
+	`published_on` falls back to the creation date for a row nobody dated.
+	`file` is a private File URL; Frappe serves it only to a reader of the
+	link (its `has_permission` hook), so handing it out widens nothing.
 	"""
 	company = frappe.db.get_value("Employee", employee, "company")
-	return frappe.get_all(
-		"HelixHR Document Link",
+	rows = frappe.get_all(
+		_DOCUMENT_DOCTYPE,
 		or_filters=[["company", "is", "not set"], ["company", "=", company]],
-		fields=["name", "title", "url", "company", "description"],
-		order_by="title asc",
+		fields=[
+			"name",
+			"title",
+			"url",
+			"file",
+			"company",
+			"description",
+			"category",
+			"published_on",
+			"creation",
+		],
+		order_by="published_on desc, creation desc",
 	)
+	for row in rows:
+		row.published_on = row.published_on or getdate(row.creation)
+		row.category = row.category or "General"
+		del row["creation"]
+	return rows
 
 
 def _get_documents_card(employee):
-	"""The rail card: the first `_LINKS_LIMIT` links and how many were not
-	shown. Ordered by title, the only stable order this catalogue has -- there
-	is no priority field, and adding one would give HR a column to maintain for
-	no gain at five rows."""
-	links = _visible_document_links(employee)
+	"""The rail card: the first `_LINKS_LIMIT` documents, Important ones
+	first, newest first within each, and how many were not shown."""
+	links = sorted(_visible_document_links(employee), key=lambda row: row.category != "Important")
 	shown = links[:_LINKS_LIMIT]
 	return {"items": shown, "more": max(0, len(links) - len(shown))}
 
 
 @frappe.whitelist()
 def get_my_documents():
-	"""The policy links this employee may see: global ones plus their own
-	company's (P2-R19).
+	"""The documents this employee may see: global ones plus their own
+	company's (P2-R19), newest first.
 
 	The scope is not this method's only enforcement -- HelixHR Document
 	Link registers `permission_query_conditions` and `has_permission`
 	(hooks.py), so a caller reaching for frappe.client.get_list,
 	/api/resource, report view, print or export gets the same answer. This
 	method exists so the portal asks a session-scoped question instead of
-	sending the filter itself (KTD5, R27).
+	sending the filter itself (KTD5, R27). Whether the caller may publish is
+	the bootstrap's `can_manage_documents`.
 	"""
 	return _visible_document_links(get_current_employee())
+
+
+def _can_manage_documents(user=None):
+	"""Whether `save_document_link` would accept *some* company from this
+	caller: HR, and either System Manager or holding an admin scope -- the
+	same rule as `_assert_can_set_company_logo`, asked without a company."""
+	user = user or frappe.session.user
+	if not _is_hr(user):
+		return False
+	if "System Manager" in frappe.get_roles(user):
+		return True
+	return resolve_admin_scope(user)["kind"] != "none"
+
+
+def _assert_can_manage_document(company):
+	"""The publish gate per company, reused from the logo upload: HR only;
+	an anchored HR Manager for their own company (so never a global, blank
+	company row), a System Manager for any."""
+	_assert_can_set_company_logo(company or None)
+
+
+@frappe.whitelist()
+def get_document_admin_options():
+	"""The upload dialog's company choices for this caller, and whether a
+	document "for everyone" (no company) is theirs to publish."""
+	if not _can_manage_documents():
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	sees_all = (
+		"System Manager" in frappe.get_roles()
+		or resolve_admin_scope(frappe.session.user)["kind"] == "unscoped"
+	)
+	companies = (
+		frappe.get_all("Company", pluck="name", order_by="company_name asc")
+		if sees_all
+		else _companies_in_admin_scope()
+	)
+	return {"companies": companies, "allow_global": sees_all}
+
+
+def _document_upload(file_url=None):
+	"""(file name, bytes) of the document this save carries, or (None, None).
+	A multipart `file` (the portal) wins over `file_url` (an agent reusing a
+	File it can already read); both pass the same document policy."""
+	upload = (getattr(frappe.request, "files", None) or {}).get("file")
+	if upload is not None:
+		file_name = os.path.basename(upload.filename or "").strip()
+		if not file_name:
+			frappe.throw(_("That file has no name. Pick another one."))
+		return file_name, upload.stream.read()
+
+	file_url = (file_url or "").strip()
+	if not file_url:
+		return None, None
+	source = frappe.db.get_value("File", {"file_url": file_url, "is_folder": 0}, "name")
+	if not source:
+		frappe.throw(_("That file does not exist."))
+	source = frappe.get_doc("File", source)
+	if not source.has_permission("read"):
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	# `encodings=[]`: raw bytes. The default tries text encodings first, and
+	# a zip that happens to decode would come back as a different byte string.
+	return source.file_name, source.get_content(encodings=[])
+
+
+def _remove_document_files(name, keep=None):
+	"""Delete the File(s) a document link's `file` field once pointed at."""
+	for file_name in frappe.get_all(
+		"File",
+		filters={"attached_to_doctype": _DOCUMENT_DOCTYPE, "attached_to_name": name, "attached_to_field": "file"},
+		pluck="name",
+	):
+		if file_name != keep:
+			# The publish gate is this path's authorisation, as for the logo.
+			frappe.delete_doc("File", file_name, ignore_permissions=True)
+
+
+@frappe.whitelist(methods=["POST"])
+def save_document_link(
+	name=None,
+	title=None,
+	description=None,
+	category=None,
+	company=None,
+	url=None,
+	published_on=None,
+	file_url=None,
+):
+	"""Create or edit one document on the Documents page (HR).
+
+	The document is an uploaded file -- multipart `file`, or `file_url` of
+	an existing File the caller can read -- or a web `url`, never both: a new
+	file clears the link, a link clears the file, and neither keeps whatever
+	the row already had. The file is checked by signature against
+	`DOCUMENT_POLICY` (20 MB), stored **private** and attached to this row,
+	so Frappe serves it exactly to the people who may read the row.
+
+	Gate: `_assert_can_manage_document` for the target company and, on an
+	edit, for the row's current company too -- an HR Manager can neither
+	reach into another company's row nor move one into theirs.
+	"""
+	from helixhr.utils import validate_document_upload
+
+	rate_limit_per_user("save_document_link")
+	company = (company or "").strip() or None
+	_assert_can_manage_document(company)
+	if company and not frappe.db.exists("Company", company):
+		frappe.throw(_("That company does not exist."))
+
+	title = (title or "").strip()
+	if not title:
+		frappe.throw(_("Give the document a title."))
+	if len(title) > _DOCUMENT_TITLE_MAX:
+		frappe.throw(_("Keep the title under {0} characters.").format(_DOCUMENT_TITLE_MAX))
+	description = (description or "").strip()
+	if len(description) > _DOCUMENT_DESCRIPTION_MAX:
+		frappe.throw(_("Keep the description under {0} characters.").format(_DOCUMENT_DESCRIPTION_MAX))
+	if category not in _DOCUMENT_CATEGORIES:
+		frappe.throw(_("Choose Important or General."))
+	try:
+		published_on = getdate(published_on) if published_on else None
+	except Exception:
+		frappe.throw(_("That date isn't valid."))
+
+	if name:
+		if not frappe.db.exists(_DOCUMENT_DOCTYPE, name):
+			frappe.throw(_("That document no longer exists."), frappe.DoesNotExistError)
+		doc = frappe.get_doc(_DOCUMENT_DOCTYPE, name)
+		_assert_can_manage_document(doc.company)
+	else:
+		doc = frappe.new_doc(_DOCUMENT_DOCTYPE)
+
+	file_name, content = _document_upload(file_url)
+	if content is not None:
+		validate_document_upload(file_name, content)
+	url = (url or "").strip()
+
+	doc.update(
+		{
+			"title": title,
+			"description": description,
+			"category": category,
+			"company": company,
+			"published_on": published_on or doc.published_on or frappe.utils.today(),
+		}
+	)
+	if content is not None:
+		doc.url = None
+		doc.file = None
+		doc.flags.file_pending = True
+	elif url:
+		doc.url = url
+		doc.file = None
+	doc.save()
+
+	if content is not None:
+		file_doc = frappe.get_doc(
+			{
+				"doctype": "File",
+				"file_name": file_name,
+				"content": content,
+				"attached_to_doctype": _DOCUMENT_DOCTYPE,
+				"attached_to_name": doc.name,
+				"attached_to_field": "file",
+				# Never a parameter; `events.file_before_insert` refuses a
+				# public one anyway.
+				"is_private": 1,
+			}
+		)
+		file_doc.insert(ignore_permissions=True)
+		doc.db_set("file", file_doc.file_url)
+		_remove_document_files(doc.name, keep=file_doc.name)
+	elif url:
+		_remove_document_files(doc.name)
+
+	return frappe.db.get_value(
+		_DOCUMENT_DOCTYPE,
+		doc.name,
+		["name", "title", "url", "file", "company", "description", "category", "published_on"],
+		as_dict=True,
+	)
+
+
+@frappe.whitelist(methods=["POST"])
+def delete_document_link(name):
+	"""Remove one document and its uploaded file (HR, same gate as the save)."""
+	rate_limit_per_user("delete_document_link")
+	company = frappe.db.get_value(_DOCUMENT_DOCTYPE, name, "company")
+	if company is None and not frappe.db.exists(_DOCUMENT_DOCTYPE, name):
+		frappe.throw(_("That document no longer exists."), frappe.DoesNotExistError)
+	_assert_can_manage_document(company)
+	_remove_document_files(name)
+	frappe.delete_doc(_DOCUMENT_DOCTYPE, name)
+	return {"name": name, "deleted": True}
 
 
 # ---------------------------------------------------------------------------

@@ -410,6 +410,9 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"reset_celebration_template": (30, 3600),
 			# U12.
 			"set_company_logo": (20, 3600),
+			# Documents.
+			"save_document_link": (30, 3600),
+			"delete_document_link": (30, 3600),
 		}
 		self.assertEqual(utils.RATE_LIMIT_POLICY, expected)
 		self.assertEqual(preflight.check_rate_limits()["status"], preflight.PASS)
