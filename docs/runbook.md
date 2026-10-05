@@ -1567,3 +1567,20 @@ IT / Asset category, `HR-REQ-…` when the prefix is blank. Facts operators need
   Hours.** Without it the other flags still work; the preflight WARN names
   it. Set the hours, and the flag appears on the next queue load — no
   migrate needed.
+- **A change request to an approver who also holds HR Manager or System
+  Manager used to show in neither queue half** (fixed in plan 2026-10-05-001
+  U2). `_change_request_summaries` returned nothing for any HR caller, while
+  `_hr_change_request_summaries` skips rows addressed to the caller. The
+  email link still opened the request, because `get_approval_detail` only
+  checks `_assert_may_act_on`. If an approver reports "the email works but
+  Approvals is empty", check their roles first. Queue tests now cover an
+  HR-role and a System Manager approver.
+- **"Declined, but the employee could resubmit": cause unconfirmed** (plan
+  2026-10-05-001 U1). No `HelixHR Timesheet Change` rows existed on any local
+  site to read. Leading hypothesis: an Accept misfire. Decline's first click
+  only opens the reason box, and Accept sat beside it and fired with no
+  confirm. Accept cancels the week and returns an editable Draft. U3 added a
+  confirm and hides Accept while the Decline reason is open. If it happens
+  again, read the row's `status`, `decided_by`, `decision_note` and
+  `amended_timesheet`. Accepted with an amended copy means Accept fired.
+  Declined with a Draft means look for a Send back or a second request.
