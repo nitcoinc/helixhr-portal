@@ -408,9 +408,13 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"search_celebration_recipients": (60, 60),
 			# Plan 2026-10-05-001 U11.
 			"reset_celebration_template": (30, 3600),
-			# U12.
-			"set_company_logo": (20, 3600),
-			"set_email_header_color": (20, 3600),
+			# The shared email theme.
+			"get_email_theme": (60, 60),
+			"save_email_theme": (30, 3600),
+			"upload_email_theme_logo": (20, 3600),
+			"reset_email_theme": (30, 3600),
+			"preview_email_theme": (60, 60),
+			"send_email_theme_test": (5, 600),
 			# Documents.
 			"save_document_link": (30, 3600),
 			"delete_document_link": (30, 3600),

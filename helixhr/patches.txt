@@ -101,3 +101,7 @@ helixhr.patches.v1_0.clone_celebration_templates_per_company
 # Documents (Important/General sub-tabs): existing links become General and
 # take `published_on` from their creation date. Idempotent.
 helixhr.patches.v1_0.backfill_document_link_dates
+# The shared HelixHR Email Theme replaces per-company logo and header colour:
+# carries a single company colour and the default company's logo into the
+# theme, then deletes the Company.helixhr_email_header_color Custom Field.
+helixhr.patches.v1_0.migrate_email_theme

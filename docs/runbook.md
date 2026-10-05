@@ -378,10 +378,11 @@ deletes, so a site restored from an old backup can have them back: preflight "Re
 notifications" FAILs and names them -- run `bench --site <site> migrate`, or delete them in
 Desk. Bell fixtures are not retired.
 
-**Granting the Notification Manager role.** Desk → User → Roles → `HelixHR Notification
-Manager`. Portal-only (no Desk). The user sees Admin → Email templates (`/email-templates`);
-a user with no Employee record lands there. System Manager also qualifies. Preflight WARNs
-when no enabled user holds the role. HR Manager no longer edits templates.
+**Who edits email.** The Email templates page (theme, message templates, celebrations &
+holidays) is `HelixHR Portal Admin` or System Manager only: Desk → User → Roles. The user sees
+Admin → Email templates (`/email-templates`); one with no Employee record lands there.
+Preflight "Portal Admin role" WARNs when no enabled user holds it. HR Manager, HR User and
+`HelixHR Notification Manager` are refused (the last still exists but grants nothing here).
 
 **Granting portal roles without Desk.** Give someone `HelixHR Portal Admin` in Desk (User →
 Roles); they need an Active Employee, whose company bounds what they manage. They then grant
@@ -483,25 +484,32 @@ Rendering is the HelixHR sandbox now (no `frappe.*`, unknown variables
 raise): an old custom template that called `frappe.db...` stops sending and
 logs under `HelixHR celebration reminders` -- open it in the editor, which
 refuses it with the reason, and fix or "Reset to default". A body-only
-template is wrapped in the branded layout; one containing `<html`, `<body`
+template is wrapped in the shared email theme; one containing `<html`, `<body`
 or `logo_url` is sent as is. **Editing or resetting a template does not
 lift the 36 h rerun guard**: a company already mailed today is not mailed
 again by a hand-run job after the fix.
 
-**Email logo (plan 2026-10-05-001 U12).** Portal → Email templates →
-"Celebrations & holidays" → Email logo writes `Company.company_logo` for the
-selected company (PNG/JPEG/WebP, 2 MB, public File). Every portal email is
-branded with the *recipient's* company logo, falling back to the default
-company only for a user with no active Employee. A mail with no logo shows
-the company name instead of an image.
+**Email theme: logo, colour, footer (one for all mail).** Portal → Email
+templates → Theme. Logo (PNG/JPEG/WebP, 2 MB, stored public), brand colour
+(presets or `#RRGGBB`; header text picked for contrast), footer text
+(`{{ company }}`, `{{ portal_url }}`), or Advanced → theme code (full HTML,
+must contain `{{ content }}`; placeholders `{{ logo }}`, `{{ company }}`,
+`{{ subject }}`, `{{ portal_url }}`, `{{ brand_color }}`). "Send test email"
+mails the caller; "Reset to default" clears colour, footer and code, keeps
+the logo. Stored in the Single `HelixHR Email Theme`. Details: architecture
+→ *The shared email theme*.
 
-**Email header colour.** Below the logo control, `set_email_header_color`
-(same gate) writes `Company.helixhr_email_header_color` (custom field
-fixture; `#rrggbb` or empty = white). `helixhr_layout.html` paints the
-header strip with it; text is white or `#1f2328` by WCAG relative luminance
-(`utils.email_header_colors`). The value is re-validated at render, so a
-bad value set in Desk renders white, never raw CSS. A transparent logo on a
-dark header needs a light version; the control hints at this.
+**"Test mail logo doesn't show."** Logos are embedded, not linked: sent mail
+has `<img src="cid:...">` plus an inline image part. Check the queued mail:
+`Email Queue.message` should contain `Content-ID` and `cid:`. No image means
+the theme has no logo, the template has "Include company logo" off, or the
+file under `sites/<site>/public/files/` is gone (Frappe drops an `embed=` it
+cannot read). Do not "fix" it with `host_name`: the old linked logo pointed at
+the internal site name, which mail clients cannot reach.
+
+**"HelixHR email theme failed" in Error Log.** Saved theme code raised on
+real data; that mail went out in the default theme. Fix the code on the
+Theme tab (the save re-validates) or untick custom code.
 
 **"This template failed when it was last sent" (plan 2026-10-05-001 U13).**
 A customised portal message template raised on real data and the default
