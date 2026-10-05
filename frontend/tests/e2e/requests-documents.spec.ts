@@ -591,6 +591,11 @@ test.describe('documents publishing', () => {
       const editor = hr.getByTestId('document-editor')
       await editor.getByLabel('Title').fill(title)
       await expect(editor.getByLabel('Category')).toHaveValue('Important')
+      // Category and Date share a row: same top, same height.
+      const category = (await editor.getByLabel('Category').boundingBox())!
+      const date = (await editor.getByLabel('Date', { exact: true }).boundingBox())!
+      expect(Math.abs(category.y - date.y)).toBeLessThanOrEqual(1)
+      expect(Math.abs(category.height - date.height)).toBeLessThanOrEqual(1)
       await editor.getByLabel('File', { exact: true }).setInputFiles({
         name: 'policy.pdf',
         mimeType: 'application/pdf',

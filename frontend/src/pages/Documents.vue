@@ -126,6 +126,13 @@ const askHr = computed(() => ({
 // size are checked here for a quick answer and again on the server, by
 // signature.
 const DOCUMENT_ACCEPT = '.pdf,.docx,.xlsx,.pptx,.png,.jpg,.jpeg'
+
+// The editor's native controls wear FormControl's own metrics (FormLabel's
+// text-xs label; TextInput's subtle `sm` field: h-7, gray-2 fill) so they
+// sit on the same baseline and height as the FormControl fields beside them.
+const LABEL_CLASS = 'block text-xs text-ink-gray-5'
+const SELECT_CLASS =
+  'block h-7 w-full cursor-pointer rounded border border-[--surface-gray-2] bg-surface-gray-2 py-0 pl-2 text-base text-ink-gray-8 hover:border-outline-gray-modals hover:bg-surface-gray-3 focus:border-outline-gray-4 focus:bg-surface-white focus:ring-0'
 const DOCUMENT_EXTENSIONS = /\.(pdf|docx|xlsx|pptx|png|jpe?g)$/i
 const DOCUMENT_MAX_BYTES = 20 * 1024 * 1024
 
@@ -459,17 +466,20 @@ async function confirmDelete() {
             maxlength="140"
             required
           />
+          <!-- Category and Date share one row. Both labels and controls use
+               FormControl's own metrics (text-xs label, h-7 subtle field)
+               so they line up; Category stays a native <select>, as in
+               CategoriesSection.vue, styled to match. -->
           <div class="grid gap-4 sm:grid-cols-2">
             <div class="space-y-1.5">
               <label
                 for="document-category"
-                class="text-sm text-ink-gray-7"
+                :class="LABEL_CLASS"
               >Category</label>
-              <!-- Native <select>, as in CategoriesSection.vue. -->
               <select
                 id="document-category"
                 v-model="form.category"
-                class="block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
+                :class="SELECT_CLASS"
               >
                 <option value="Important">
                   Important
@@ -486,17 +496,19 @@ async function confirmDelete() {
             />
           </div>
           <div
-            v-if="companyChoices.length > 1"
+            v-if="companyChoices.length"
             class="space-y-1.5"
           >
             <label
+              v-if="companyChoices.length > 1"
               for="document-company"
-              class="text-sm text-ink-gray-7"
+              :class="LABEL_CLASS"
             >Who sees it</label>
             <select
+              v-if="companyChoices.length > 1"
               id="document-company"
               v-model="form.company"
-              class="block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
+              :class="SELECT_CLASS"
             >
               <option
                 v-for="choice in companyChoices"
@@ -506,13 +518,18 @@ async function confirmDelete() {
                 {{ choice.label }}
               </option>
             </select>
+            <template v-else>
+              <p :class="LABEL_CLASS">
+                Who sees it
+              </p>
+              <p
+                class="text-sm text-ink-gray-8"
+                data-testid="document-scope"
+              >
+                {{ companyChoices[0].label === 'Everyone' ? 'Everyone' : `Everyone at ${companyChoices[0].label}` }}
+              </p>
+            </template>
           </div>
-          <p
-            v-else-if="companyChoices.length === 1"
-            class="text-sm text-ink-gray-6"
-          >
-            Shown to {{ companyChoices[0].label === 'Everyone' ? 'everyone' : `everyone at ${companyChoices[0].label}` }}.
-          </p>
           <FormControl
             v-model="form.description"
             type="textarea"
@@ -521,7 +538,7 @@ async function confirmDelete() {
           />
 
           <fieldset class="space-y-2">
-            <legend class="text-sm text-ink-gray-7">
+            <legend :class="LABEL_CLASS">
               Document
             </legend>
             <div class="flex flex-wrap gap-4">
@@ -550,13 +567,16 @@ async function confirmDelete() {
             >
               <label
                 for="document-file"
-                class="text-sm text-ink-gray-7"
+                :class="LABEL_CLASS"
               >File</label>
+              <!-- The native picker, dressed as a dropzone with a real
+                   button (Tailwind's `file:` variant) instead of the
+                   browser's bare grey control. -->
               <input
                 id="document-file"
                 type="file"
                 :accept="DOCUMENT_ACCEPT"
-                class="block w-full text-sm text-ink-gray-8"
+                class="block w-full cursor-pointer rounded-lg border border-dashed border-outline-gray-3 bg-surface-gray-1 p-2 text-sm text-ink-gray-7 hover:border-outline-gray-4 file:mr-3 file:h-7 file:cursor-pointer file:rounded file:border-0 file:bg-surface-white file:px-3 file:text-sm file:font-medium file:text-ink-gray-8 file:shadow-sm hover:file:bg-surface-gray-2"
                 aria-describedby="document-file-help"
                 @change="onFilePicked"
               >
