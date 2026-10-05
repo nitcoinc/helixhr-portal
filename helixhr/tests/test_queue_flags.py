@@ -23,6 +23,7 @@ from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	MANAGER_USER,
 	ensure_leave_allocation,
+	ensure_leave_approver_role,
 	make_test_employee_and_manager,
 	make_test_user,
 )
@@ -36,6 +37,12 @@ class TestQueueFlags(IntegrationTestCase):
 		self.employee_name, self.employee_user, self.manager_name, self.manager_user = (
 			make_test_employee_and_manager()
 		)
+		# This suite submits leave applications *as the manager*: writing
+		# Leave Application.status is a permlevel-1 field, and HRMS's own
+		# on_submit refuses an Open status -- without the Leave Approver
+		# role, frappe resets permlevel-1 fields to their stored value on
+		# every save (the same grant the approval endpoints' fixtures make).
+		ensure_leave_approver_role(self.manager_user)
 		frappe.db.set_value("Employee", self.employee_name, "reports_to", self.manager_name)
 		self.company = frappe.db.get_value("Employee", self.employee_name, "company")
 
@@ -68,8 +75,21 @@ class TestQueueFlags(IntegrationTestCase):
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
+		# Committed teardown: an addCleanup's raw delete runs after the last
+		# commit and is rolled back at the next test's boundary, so the
+		# assignment this suite submitted for the shared fixture employee
+		# would leak into the holiday suites that follow.
+		frappe.db.delete("Holiday List Assignment", {"assigned_to": self.employee_name})
+		frappe.db.commit()
 		frappe.db.set_single_value("HR Settings", "standard_working_hours", self._original_standard)
 		frappe.db.set_value("Employee", self.employee_name, "holiday_list", self._original_holiday_list)
+
+	def _drop_assignment(self, employee, list_name):
+		frappe.set_user("Administrator")
+		frappe.db.delete(
+			"Holiday List Assignment", {"assigned_to": employee, "holiday_list": list_name}
+		)
+		frappe.db.commit()
 
 	def _assign_five_day_week(self):
 		"""A holiday list whose only non-working days are this week's Saturday
@@ -188,6 +208,25 @@ class TestQueueFlags(IntegrationTestCase):
 			}
 		).insert(ignore_permissions=True)
 		frappe.db.set_value("Employee", self.employee_name, "holiday_list", list_name)
+		# The leave half is *submitted*, and the tips path resolves the
+		# holiday list through submitted `Holiday List Assignment` rows only
+		# (the `Employee.holiday_list` field no longer feeds that path).
+		assignment = frappe.get_doc(
+			{
+				"doctype": "Holiday List Assignment",
+				"assigned_to": self.employee_name,
+				"holiday_list": list_name,
+				"from_date": str(self.monday),
+				"to_date": str(add_days(self.monday, 6)),
+			}
+		)
+		assignment.insert(ignore_permissions=True)
+		assignment.submit()
+		self.addCleanup(
+			self._drop_assignment,
+			self.employee_name,
+			list_name,
+		)
 
 		ensure_leave_allocation(self.employee_name, "Casual Leave", 5)
 		# Earlier runs leave their leave behind; this week starts clean.

@@ -2382,6 +2382,7 @@ class TestBulkApproval(IntegrationTestCase):
 		# record's* leave approver, not the application's -- name the manager
 		# there the way HR does on a real site.
 		frappe.db.set_value("Employee", self.leave_name, "leave_approver", self.manager_user)
+		ensure_leave_approver_role(self.manager_user)
 		self.monday = get_week_bounds(add_days(today(), (digest % 200) + 50))[0]
 		list_name = "_Test Bulk Week"
 		if frappe.db.exists("Holiday List", list_name):
@@ -2410,8 +2411,6 @@ class TestBulkApproval(IntegrationTestCase):
 			.insert(ignore_permissions=True)
 			.name
 		)
-		for employee in (self.employee_name, self.second_name, self.leave_name):
-			frappe.db.set_value("Employee", employee, "holiday_list", self.holiday_list)
 		# A dedicated allocation window wide enough for the dates below,
 		# which sit years ahead on purpose: this test's leaves must never
 		# share dates with any other suite's (the overlap flag counts the
@@ -2454,6 +2453,36 @@ class TestBulkApproval(IntegrationTestCase):
 					"new_leaves_allocated": 60,
 				}
 			).insert(ignore_permissions=True).submit()
+		# Two resolutions, two stores: the APP's working-day arithmetic reads
+		# the `Employee.holiday_list` field (16.17 and tips alike), while the
+		# tips' `get_holiday_list_for_employee` -- which Leave Application's
+		# submit path validates through -- resolves only submitted
+		# `Holiday List Assignment` rows (the field no longer feeds it after
+		# 16.20's resolution refactor). The fixture feeds both.
+		for employee in (self.employee_name, self.second_name, self.leave_name):
+			frappe.db.set_value("Employee", employee, "holiday_list", self.holiday_list)
+			# Earlier runs' assignments persist (an aborted run can strand a
+			# submitted row), and the shared fixture employees resolve the
+			# whole-year bulk list for every later suite through them.
+			frappe.db.delete(
+				"Holiday List Assignment",
+				{"assigned_to": employee, "holiday_list": self.holiday_list},
+			)
+			if not frappe.db.exists(
+				"Holiday List Assignment",
+				{"assigned_to": employee, "holiday_list": self.holiday_list, "docstatus": 1},
+			):
+				assignment = frappe.get_doc(
+					{
+						"doctype": "Holiday List Assignment",
+						"assigned_to": employee,
+						"holiday_list": self.holiday_list,
+						"from_date": "2019-01-01",
+						"to_date": "2049-12-31",
+					}
+				)
+				assignment.insert(ignore_permissions=True)
+				assignment.submit()
 		# The batch commits per item, so approved leave permanently consumes
 		# the shared fixture employee's balance. Top the allocation up to a
 		# working level rather than incrementing it forever: an allocation
@@ -2502,6 +2531,58 @@ class TestBulkApproval(IntegrationTestCase):
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
+		# The batch commits per item (R18), so whatever a test approved is
+		# already in the database -- including its leave applications, whose
+		# far-future dates then surface in every later suite's action queue
+		# (the dashboard-week suite reads the same manager's queue). Delete
+		# what this class committed, exactly like setUp's entry cleanup.
+		for name in frappe.get_all(
+			"Leave Application", filters={"employee": self.leave_name}, pluck="name"
+		):
+			doc = frappe.get_doc("Leave Application", name)
+			if doc.docstatus == 1:
+				doc.flags.ignore_permissions = True
+				doc.cancel()
+			frappe.delete_doc("Leave Application", name, force=1, ignore_permissions=True)
+		# The applications' ledger entries survive both the cancel (which
+		# writes reversed rows) and the delete, and an allocation cancel
+		# refuses while an application's ledger rows overlap its window --
+		# so the ledger goes before the allocation does, or the next run's
+		# own cleanup dies cancelling it.
+		frappe.db.delete(
+			"Leave Ledger Entry",
+			{"transaction_type": "Leave Application", "employee": self.leave_name},
+		)
+		for name in frappe.get_all(
+			"Leave Allocation", filters={"employee": self.leave_name}, pluck="name"
+		):
+			doc = frappe.get_doc("Leave Allocation", name)
+			if doc.docstatus == 1:
+				doc.flags.ignore_permissions = True
+				doc.cancel()
+			frappe.delete_doc("Leave Allocation", name, force=1, ignore_permissions=True)
+		for employee in (self.employee_name, self.second_name, self.manager_name):
+			for name in frappe.get_all(
+				"Timesheet",
+				filters={
+					"employee": employee,
+					"start_date": ["between", [str(self.monday), str(add_days(self.monday, 6))]],
+				},
+				pluck="name",
+			):
+				doc = frappe.get_doc("Timesheet", name)
+				if doc.docstatus == 1:
+					doc.flags.ignore_permissions = True
+					doc.cancel()
+				frappe.delete_doc("Timesheet", name, force=1, ignore_permissions=True)
+		# This suite's Holiday List Assignments resolve the whole-year bulk
+		# list for the shared fixture employees; delete them inside the
+		# committed teardown -- an addCleanup's delete runs after the last
+		# commit and is rolled back at the next test's boundary, which is
+		# exactly how a leaked assignment poisons the holiday suites that
+		# follow. They go last: cancelling the submitted leave above resolves
+		# its holiday list through them.
+		frappe.db.delete("Holiday List Assignment", {"holiday_list": self.holiday_list})
 		frappe.db.set_single_value("HR Settings", "standard_working_hours", self.standard)
 		frappe.db.commit()
 
