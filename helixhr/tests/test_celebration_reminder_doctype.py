@@ -13,11 +13,13 @@ the site's real rows are.
 import frappe
 from frappe.tests import IntegrationTestCase
 
+from helixhr.tests.utils import suspend_chart_of_account_fixtures
+
 
 class TestHelixHRCelebrationReminderValidate(IntegrationTestCase):
 	@classmethod
 	def setUpClass(cls):
-		from helixhr.tests.utils import ensure_test_company
+		from helixhr.tests.utils import ensure_test_company, suspend_chart_of_account_fixtures
 
 		cls.company = ensure_test_company()
 
@@ -81,15 +83,16 @@ class TestHelixHRCelebrationReminderValidate(IntegrationTestCase):
 
 		other_company = "_Test Celebrations Other Co"
 		if not frappe.db.exists("Company", other_company):
-			frappe.get_doc(
-				{
-					"doctype": "Company",
-					"company_name": other_company,
-					"abbr": "TCOC",
-					"default_currency": "USD",
-					"country": "United States",
-				}
-			).insert(ignore_permissions=True)
+			with suspend_chart_of_account_fixtures():
+				frappe.get_doc(
+					{
+						"doctype": "Company",
+						"company_name": other_company,
+						"abbr": "TCOC",
+						"default_currency": "USD",
+						"country": "United States",
+					}
+				).insert(ignore_permissions=True)
 		self.addCleanup(
 			frappe.delete_doc,
 			"Company",
@@ -149,15 +152,16 @@ class TestHelixHRCelebrationReminderValidate(IntegrationTestCase):
 		per company."""
 		other_company = "_Test Reminders Co A"
 		if not frappe.db.exists("Company", other_company):
-			frappe.get_doc(
-				{
-					"doctype": "Company",
-					"company_name": other_company,
-					"abbr": "TRCA",
-					"default_currency": "USD",
-					"country": "United States",
-				}
-			).insert(ignore_permissions=True)
+			with suspend_chart_of_account_fixtures():
+				frappe.get_doc(
+					{
+						"doctype": "Company",
+						"company_name": other_company,
+						"abbr": "TRCA",
+						"default_currency": "USD",
+						"country": "United States",
+					}
+				).insert(ignore_permissions=True)
 			self.addCleanup(
 				frappe.delete_doc, "Company", other_company, force=True, ignore_permissions=True
 			)
@@ -195,7 +199,7 @@ class TestSplitCelebrationRemindersByCompany(IntegrationTestCase):
 
 	@classmethod
 	def setUpClass(cls):
-		from helixhr.tests.utils import ensure_test_company
+		from helixhr.tests.utils import ensure_test_company, suspend_chart_of_account_fixtures
 
 		cls.company = ensure_test_company()
 
@@ -294,15 +298,16 @@ class TestSplitCelebrationRemindersByCompany(IntegrationTestCase):
 
 		other_company = "_Test Reminders Co B"
 		if not frappe.db.exists("Company", other_company):
-			frappe.get_doc(
-				{
-					"doctype": "Company",
-					"company_name": other_company,
-					"abbr": "TRCB",
-					"default_currency": "USD",
-					"country": "United States",
-				}
-			).insert(ignore_permissions=True)
+			with suspend_chart_of_account_fixtures():
+				frappe.get_doc(
+					{
+						"doctype": "Company",
+						"company_name": other_company,
+						"abbr": "TRCB",
+						"default_currency": "USD",
+						"country": "United States",
+					}
+				).insert(ignore_permissions=True)
 			self.addCleanup(
 				frappe.delete_doc, "Company", other_company, force=True, ignore_permissions=True
 			)
@@ -356,7 +361,7 @@ class TestMigrateCelebrationReminders(IntegrationTestCase):
 
 	@classmethod
 	def setUpClass(cls):
-		from helixhr.tests.utils import ensure_test_company
+		from helixhr.tests.utils import ensure_test_company, suspend_chart_of_account_fixtures
 
 		cls.company = ensure_test_company()
 

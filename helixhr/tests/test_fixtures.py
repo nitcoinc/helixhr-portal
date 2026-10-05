@@ -5,7 +5,12 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, add_to_date, get_datetime, today
 
 from helixhr.tests.test_hr_request import SAFE_PDF_BASE64
-from helixhr.tests.utils import EMPLOYEE_USER, MANAGER_USER, make_test_employee_and_manager
+from helixhr.tests.utils import (
+	EMPLOYEE_USER,
+	MANAGER_USER,
+	make_test_employee_and_manager,
+	suspend_chart_of_account_fixtures,
+)
 from helixhr.utils import get_week_bounds
 
 
@@ -136,15 +141,16 @@ class TestStrictPermissionParity(IntegrationTestCase):
 		from helixhr.tests.utils import make_test_user
 
 		if not frappe.db.exists("Company", self.OTHER_COMPANY):
-			frappe.get_doc(
-				{
-					"doctype": "Company",
-					"company_name": self.OTHER_COMPANY,
-					"abbr": "TCOU",
-					"default_currency": "USD",
-					"country": "United States",
-				}
-			).insert(ignore_permissions=True)
+			with suspend_chart_of_account_fixtures():
+				frappe.get_doc(
+					{
+						"doctype": "Company",
+						"company_name": self.OTHER_COMPANY,
+						"abbr": "TCOU",
+						"default_currency": "USD",
+						"country": "United States",
+					}
+				).insert(ignore_permissions=True)
 		# Deliberately no reports_to: Employee is a nested set, so a manager
 		# in the same line would legitimately inherit access to their
 		# reports' records.

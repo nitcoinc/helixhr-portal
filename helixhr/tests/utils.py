@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import date
 
 import frappe
@@ -43,6 +44,43 @@ def ensure_test_gender():
 	return "Other"
 
 
+def create_test_company(company_name, abbr):
+	"""Insert a Company for tests, with HRMS's chart-of-accounts fixture
+	hook suspended. hrms 16.20's `set_expense_claim_type_accounts` runs on
+	Company.on_update and appends an Expense Claim Account row to every
+	existing Expense Claim Type; on a headless test site that link check
+	dies on the second company onwards (CI's LinkValidationError on
+	'Default Account: ...'), taking every later company-creating suite with
+	it. The hook itself honors `ignore_chart_of_accounts`, which is the
+	sanctioned off-switch -- test companies need HR fixtures, not
+	expense-claim accounts. Older HRMS without the hook is unaffected."""
+	if not frappe.db.exists("Company", company_name):
+		with suspend_chart_of_account_fixtures():
+			frappe.get_doc(
+				{
+					"doctype": "Company",
+					"company_name": company_name,
+					"abbr": abbr,
+					"default_currency": "USD",
+					"country": "United States",
+				}
+			).insert(ignore_permissions=True)
+	return company_name
+
+
+@contextmanager
+def suspend_chart_of_account_fixtures():
+	saved = frappe.local.flags.get("ignore_chart_of_accounts")
+	frappe.local.flags.ignore_chart_of_accounts = 1
+	try:
+		yield
+	finally:
+		if saved is None:
+			frappe.local.flags.pop("ignore_chart_of_accounts", None)
+		else:
+			frappe.local.flags.ignore_chart_of_accounts = saved
+
+
 def ensure_test_company():
 	"""ERPNext ships no Company until the setup wizard runs on a fresh
 	site. Create the one company these fixtures need if it's missing.
@@ -54,16 +92,7 @@ def ensure_test_company():
 		frappe.get_doc({"doctype": "Warehouse Type", "name": "Transit"}).insert(
 			ignore_permissions=True
 		)
-	if not frappe.db.exists("Company", TEST_COMPANY):
-		frappe.get_doc(
-			{
-				"doctype": "Company",
-				"company_name": TEST_COMPANY,
-				"abbr": "TC",
-				"default_currency": "USD",
-				"country": "United States",
-			}
-		).insert(ignore_permissions=True)
+	create_test_company(TEST_COMPANY, "TC")
 	return TEST_COMPANY
 
 
@@ -1167,17 +1196,7 @@ def _seed_bulk(doctype, prefix, fields, rows, docstatus=0):
 
 
 def ensure_baseline_company():
-	if not frappe.db.exists("Company", BASELINE_COMPANY_B):
-		frappe.get_doc(
-			{
-				"doctype": "Company",
-				"company_name": BASELINE_COMPANY_B,
-				"abbr": "TCB",
-				"default_currency": "USD",
-				"country": "United States",
-			}
-		).insert(ignore_permissions=True)
-	return BASELINE_COMPANY_B
+	return create_test_company(BASELINE_COMPANY_B, "TCB")
 
 
 def ensure_baseline_project(company, users):

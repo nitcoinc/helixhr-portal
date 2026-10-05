@@ -8,6 +8,7 @@ from helixhr.tests.utils import (
 	ensure_test_email_account,
 	ensure_test_gender,
 	make_test_it_user,
+	suspend_chart_of_account_fixtures,
 )
 
 # P5-U15 / P5-R20, P5-R23. A read-only, company-scoped, aggregate-only view
@@ -37,15 +38,16 @@ def _ensure_org_company():
 			ignore_permissions=True
 		)
 	if not frappe.db.exists("Company", ORG_COMPANY):
-		frappe.get_doc(
-			{
-				"doctype": "Company",
-				"company_name": ORG_COMPANY,
-				"abbr": "TOC",
-				"default_currency": "USD",
-				"country": "United States",
-			}
-		).insert(ignore_permissions=True)
+		with suspend_chart_of_account_fixtures():
+			frappe.get_doc(
+				{
+					"doctype": "Company",
+					"company_name": ORG_COMPANY,
+					"abbr": "TOC",
+					"default_currency": "USD",
+					"country": "United States",
+				}
+			).insert(ignore_permissions=True)
 	return ORG_COMPANY
 
 

@@ -14,6 +14,7 @@ from helixhr.tests.utils import (
 	make_test_hr_manager_employee,
 	make_test_it_user,
 	make_test_user,
+	suspend_chart_of_account_fixtures,
 )
 from helixhr.utils import admin_scope_employee_filters, employee_in_admin_scope, resolve_admin_scope
 
@@ -32,15 +33,16 @@ def _ensure_other_company():
 			ignore_permissions=True
 		)
 	if not frappe.db.exists("Company", OTHER_COMPANY):
-		frappe.get_doc(
-			{
-				"doctype": "Company",
-				"company_name": OTHER_COMPANY,
-				"abbr": "TPSC",
-				"default_currency": "USD",
-				"country": "United States",
-			}
-		).insert(ignore_permissions=True)
+		with suspend_chart_of_account_fixtures():
+			frappe.get_doc(
+				{
+					"doctype": "Company",
+					"company_name": OTHER_COMPANY,
+					"abbr": "TPSC",
+					"default_currency": "USD",
+					"country": "United States",
+				}
+			).insert(ignore_permissions=True)
 	return OTHER_COMPANY
 
 
@@ -82,15 +84,16 @@ class TestResolveAdminScope(IntegrationTestCase):
 	def test_an_hr_manager_whose_company_has_no_other_active_employees_resolves_to_empty_not_raising(self):
 		empty_company = "_Test People Empty Co"
 		if not frappe.db.exists("Company", empty_company):
-			frappe.get_doc(
-				{
-					"doctype": "Company",
-					"company_name": empty_company,
-					"abbr": "TPEC",
-					"default_currency": "USD",
-					"country": "United States",
-				}
-			).insert(ignore_permissions=True)
+			with suspend_chart_of_account_fixtures():
+				frappe.get_doc(
+					{
+						"doctype": "Company",
+						"company_name": empty_company,
+						"abbr": "TPEC",
+						"default_currency": "USD",
+						"country": "United States",
+					}
+				).insert(ignore_permissions=True)
 		# The HR admin is the only active employee this company has -- the
 		# nearest a company-anchored persona can get to "nobody to
 		# administer" without resolve_admin_scope itself falling back to

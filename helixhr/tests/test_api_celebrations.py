@@ -21,6 +21,7 @@ from helixhr.tests.utils import (
 	ensure_test_company,
 	make_test_employee_and_manager,
 	make_test_hr_manager_employee,
+	suspend_chart_of_account_fixtures,
 )
 
 OTHER_COMPANY = "_Test Reminders Co B"
@@ -28,15 +29,16 @@ OTHER_COMPANY = "_Test Reminders Co B"
 
 def _company(name, abbr):
 	if not frappe.db.exists("Company", name):
-		frappe.get_doc(
-			{
-				"doctype": "Company",
-				"company_name": name,
-				"abbr": abbr,
-				"default_currency": "USD",
-				"country": "United States",
-			}
-		).insert(ignore_permissions=True)
+		with suspend_chart_of_account_fixtures():
+			frappe.get_doc(
+				{
+					"doctype": "Company",
+					"company_name": name,
+					"abbr": abbr,
+					"default_currency": "USD",
+					"country": "United States",
+				}
+			).insert(ignore_permissions=True)
 	return name
 
 

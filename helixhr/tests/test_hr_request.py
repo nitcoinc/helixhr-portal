@@ -19,6 +19,7 @@ from helixhr.tests.utils import (
 	make_test_hr_manager_employee,
 	make_test_it_user,
 	make_test_user,
+	suspend_chart_of_account_fixtures,
 )
 
 
@@ -467,15 +468,16 @@ class TestHelixHRDocumentLink(IntegrationTestCase):
 	def test_company_less_and_own_company_links_are_returned_others_are_not(self):
 		other_company = "_Test Company Other"
 		if not frappe.db.exists("Company", other_company):
-			frappe.get_doc(
-				{
-					"doctype": "Company",
-					"company_name": other_company,
-					"abbr": "TCO",
-					"default_currency": "USD",
-					"country": "United States",
-				}
-			).insert(ignore_permissions=True)
+			with suspend_chart_of_account_fixtures():
+				frappe.get_doc(
+					{
+						"doctype": "Company",
+						"company_name": other_company,
+						"abbr": "TCO",
+						"default_currency": "USD",
+						"country": "United States",
+					}
+				).insert(ignore_permissions=True)
 
 		everyone_link = frappe.get_doc(
 			{"doctype": "HelixHR Document Link", "title": "Handbook", "url": "https://example.com/handbook"}
@@ -528,15 +530,16 @@ class TestDocumentLinkScope(IntegrationTestCase):
 		self.employee_name, _, _, _ = make_test_employee_and_manager()
 		self.company = frappe.db.get_value("Employee", self.employee_name, "company")
 		if not frappe.db.exists("Company", self.OTHER_COMPANY):
-			frappe.get_doc(
-				{
-					"doctype": "Company",
-					"company_name": self.OTHER_COMPANY,
-					"abbr": "TCO",
-					"default_currency": "USD",
-					"country": "United States",
-				}
-			).insert(ignore_permissions=True)
+			with suspend_chart_of_account_fixtures():
+				frappe.get_doc(
+					{
+						"doctype": "Company",
+						"company_name": self.OTHER_COMPANY,
+						"abbr": "TCO",
+						"default_currency": "USD",
+						"country": "United States",
+					}
+				).insert(ignore_permissions=True)
 
 		self.everyone_link = self._link("P2-U1 handbook", "https://example.com/handbook")
 		self.own_link = self._link("P2-U1 local policy", "https://example.com/local", self.company)

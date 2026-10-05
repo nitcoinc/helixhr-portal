@@ -33,6 +33,7 @@ from helixhr.tests.utils import (
 	ensure_test_email_account,
 	make_celebration_employee,
 	make_test_employee_and_manager,
+	suspend_chart_of_account_fixtures,
 )
 
 COMPANY_A = "_Test Reminders Co A"
@@ -67,15 +68,16 @@ TEMPLATE_HTML = (
 
 def _company(name, abbr):
 	if not frappe.db.exists("Company", name):
-		frappe.get_doc(
-			{
-				"doctype": "Company",
-				"company_name": name,
-				"abbr": abbr,
-				"default_currency": "USD",
-				"country": "United States",
-			}
-		).insert(ignore_permissions=True)
+		with suspend_chart_of_account_fixtures():
+			frappe.get_doc(
+				{
+					"doctype": "Company",
+					"company_name": name,
+					"abbr": abbr,
+					"default_currency": "USD",
+					"country": "United States",
+				}
+			).insert(ignore_permissions=True)
 	return name
 
 

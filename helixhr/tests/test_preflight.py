@@ -10,6 +10,7 @@ from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	ensure_notification_manager_user,
 	make_test_employee_and_manager,
+	suspend_chart_of_account_fixtures,
 )
 
 
@@ -1066,15 +1067,16 @@ class TestPreflightHolidayCoverage(IntegrationTestCase):
 		cover this employee and the failure is the one being asserted."""
 		name = "_Test Holidayless Company"
 		if not frappe.db.exists("Company", name):
-			frappe.get_doc(
-				{
-					"doctype": "Company",
-					"company_name": name,
-					"abbr": "THC",
-					"default_currency": "USD",
-					"country": "United States",
-				}
-			).insert(ignore_permissions=True)
+			with suspend_chart_of_account_fixtures():
+				frappe.get_doc(
+					{
+						"doctype": "Company",
+						"company_name": name,
+						"abbr": "THC",
+						"default_currency": "USD",
+						"country": "United States",
+					}
+				).insert(ignore_permissions=True)
 		return name
 
 	def _uncovered(self):
@@ -1356,15 +1358,16 @@ class TestPreflightCrossCompanyMailboxes(IntegrationTestCase):
 
 		other_company = "_Test Reminders Co B"
 		if not frappe.db.exists("Company", other_company):
-			frappe.get_doc(
-				{
-					"doctype": "Company",
-					"company_name": other_company,
-					"abbr": "TRCB",
-					"default_currency": "USD",
-					"country": "United States",
-				}
-			).insert(ignore_permissions=True)
+			with suspend_chart_of_account_fixtures():
+				frappe.get_doc(
+					{
+						"doctype": "Company",
+						"company_name": other_company,
+						"abbr": "TRCB",
+						"default_currency": "USD",
+						"country": "United States",
+					}
+				).insert(ignore_permissions=True)
 			self.addCleanup(
 				frappe.delete_doc, "Company", other_company, force=True, ignore_permissions=True
 			)
@@ -1397,15 +1400,16 @@ class TestPreflightCrossCompanyMailboxes(IntegrationTestCase):
 
 		other_company = "_Test Reminders Co B"
 		if not frappe.db.exists("Company", other_company):
-			frappe.get_doc(
-				{
-					"doctype": "Company",
-					"company_name": other_company,
-					"abbr": "TRCB",
-					"default_currency": "USD",
-					"country": "United States",
-				}
-			).insert(ignore_permissions=True)
+			with suspend_chart_of_account_fixtures():
+				frappe.get_doc(
+					{
+						"doctype": "Company",
+						"company_name": other_company,
+						"abbr": "TRCB",
+						"default_currency": "USD",
+						"country": "United States",
+					}
+				).insert(ignore_permissions=True)
 			self.addCleanup(
 				frappe.delete_doc, "Company", other_company, force=True, ignore_permissions=True
 			)
