@@ -5235,12 +5235,12 @@ def _change_request_summaries(employee, today):
 	PermissionError rather than an empty list for exactly that caller. The
 	scope is the authorization: `approver_user` is stamped at raise and
 	kept current by `employee_on_update` (KTD10).
+
+	This half never stands down for HR (plan 2026-10-05-001 KTD1): a
+	request addressed to an approver who also holds HR Manager or System
+	Manager arrives here, and `_hr_change_request_summaries` excludes rows
+	addressed to the caller, so each request still shows once.
 	"""
-	if _is_hr():
-		# The HR half is `_hr_change_request_summaries`; a manager's own
-		# reports still arrive there, so this half stands down for HR to
-		# keep one row per request.
-		return []
 	rows = frappe.get_all(
 		"HelixHR Timesheet Change",
 		filters={"status": "Open", "approver_user": frappe.session.user},
@@ -5281,8 +5281,9 @@ def _hr_change_request_summaries(employee, today):
 	"""HR's view of open change requests: everything in their admin scope
 	that is not already in their manager half, tagged. A routed request (no
 	manager) is HR's alone; one with a manager shows here because HR
-	decides in the manager's place (R10) -- but a request addressed to the
-	HR caller themselves stays in their manager half, once."""
+	decides in the manager's place (R10). A request addressed to the HR
+	caller themselves is excluded here because `_change_request_summaries`
+	always returns it, so it shows once."""
 	employee_filter = _hr_queue_employee_filter(employee)
 	if employee_filter is None:
 		return []

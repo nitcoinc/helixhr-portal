@@ -519,3 +519,42 @@ class TestTimesheetChange(IntegrationTestCase):
 		self.assertEqual(detail["actions"], ["Accept", "Decline"])
 		self.assertEqual(detail["comment"], COMMENT)
 		self.assertEqual(detail["total_hours"], 4)
+
+	# --- plan 2026-10-05-001 U2: an HR-role approver still sees their queue ----
+
+	def _queue_count(self, user, change_name):
+		frappe.set_user(user)
+		return sum(1 for row in get_my_approvals()["pending"] if row["name"] == change_name)
+
+	def _assert_approver_with_role_sees_it_once(self, role):
+		self._approved_week()
+		change = self._raise()
+		frappe.set_user("Administrator")
+		manager = frappe.get_doc("User", self.manager_user)
+		had_role = any(row.role == role for row in manager.roles)
+		if not had_role:
+			manager.add_roles(role)
+		try:
+			self.assertEqual(self._queue_count(self.manager_user, change["name"]), 1)
+		finally:
+			if not had_role:
+				frappe.set_user("Administrator")
+				frappe.get_doc("User", self.manager_user).remove_roles(role)
+
+	def test_an_hr_manager_approver_sees_their_reports_request_once(self):
+		self._assert_approver_with_role_sees_it_once("HR Manager")
+
+	def test_a_system_manager_approver_sees_their_reports_request_once(self):
+		self._assert_approver_with_role_sees_it_once("System Manager")
+
+	def test_a_plain_manager_approver_sees_the_request_once(self):
+		self._approved_week()
+		change = self._raise()
+		self.assertEqual(self._queue_count(self.manager_user, change["name"]), 1)
+
+	def test_in_scope_hr_who_is_not_the_approver_sees_it_once(self):
+		_hr_employee, hr_user = make_test_hr_manager_employee()
+		self._approved_week()
+		change = self._raise()
+		self.assertEqual(self._queue_count(hr_user, change["name"]), 1)
+		self.assertEqual(self._queue_count(self.manager_user, change["name"]), 1)
