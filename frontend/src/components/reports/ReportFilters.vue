@@ -4,6 +4,7 @@ import { Button } from 'frappe-ui'
 import EntityPicker from '@/components/reports/EntityPicker.vue'
 import { DATE_PRESETS, matchPreset, presetRange } from '@/lib/datePresets'
 import { today } from '@/lib/dates'
+import { call } from '@/lib/api'
 
 // Plan 2026-10-04-001 U3 (resolved decision 14): the filter bar, built from
 // the catalog entry's own filter specs. Nothing here runs a report: Run is
@@ -26,6 +27,18 @@ const LABEL_CLASS = 'mb-1 block text-sm text-ink-gray-7'
 const id = useId()
 const panelOpen = ref(false)
 
+// Plan 2026-10-05-001 U10 (R16): an "i" button toggles inline help text
+// that the field also references with aria-describedby. Native button, so
+// click, tap, Enter and Space all work; nothing is hover-only.
+const PERIOD_HELP = 'Pick a preset range, or Custom to set From and To yourself.'
+const INFO_CLASS =
+  'ml-1 inline-flex size-6 cursor-pointer items-center justify-center rounded-full border border-outline-gray-2 text-xs italic text-ink-gray-6 hover:bg-surface-gray-2'
+const helpOpen = ref({})
+const helpId = (name) => `${id}-help-${name}`
+function toggleHelp(name) {
+  helpOpen.value = { ...helpOpen.value, [name]: !helpOpen.value[name] }
+}
+
 const hasRange = computed(
   () =>
     props.entry.filters.some((f) => f.name === 'from_date') && props.entry.filters.some((f) => f.name === 'to_date'),
@@ -38,11 +51,46 @@ function set(name, value) {
   emit('update:modelValue', { ...props.modelValue, [name]: value })
 }
 
+// Plan 2026-10-05-001 U7 (R12): a new Project clears a chosen Task that
+// does not belong to it. The server answers "is this task in that project"
+// with the same scoped lookup the picker uses.
+async function setProject(value) {
+  const task = props.modelValue.task
+  set('project', value)
+  if (!value || !task || !props.entry.filters.some((f) => f.name === 'task')) return
+  let keep = false
+  try {
+    const found = await call('helixhr.api.search_report_options', {
+      report_key: props.entry.key,
+      filter: 'task',
+      value: task,
+      context: JSON.stringify({ project: value }),
+    })
+    keep = !!found?.length
+  } catch {
+    // Unknown -> clear; a stale task would only narrow the report to nothing.
+  }
+  if (!keep && props.modelValue.project === value && props.modelValue.task === task) set('task', '')
+}
+
+// Plan 2026-10-05-001 U9 (R15): Custom is a real choice. Picking it keeps
+// the dates (even when they equal a preset) and moves focus to From -- on
+// the select's change event only, so arrowing through options never jumps.
+const customChosen = ref(false)
 const preset = computed(() =>
-  matchPreset(props.modelValue.from_date, props.modelValue.to_date, today()),
+  customChosen.value ? 'custom' : matchPreset(props.modelValue.from_date, props.modelValue.to_date, today()),
+)
+const rangeInvalid = computed(
+  () => !!props.modelValue.from_date && !!props.modelValue.to_date && props.modelValue.from_date > props.modelValue.to_date,
 )
 
 function applyPreset(presetId) {
+  if (presetId === 'custom') {
+    customChosen.value = true
+    document.getElementById(`${id}-from_date`)?.focus()
+    return
+  }
+  customChosen.value = false
   const range = presetRange(presetId, today())
   if (range) emit('update:modelValue', { ...props.modelValue, ...range })
 }
@@ -91,14 +139,27 @@ function secondGroupOptions() {
       <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <template v-if="hasRange">
           <div>
-            <label
-              :for="`${id}-preset`"
-              :class="LABEL_CLASS"
-            >Period</label>
+            <div class="flex items-center">
+              <label
+                :for="`${id}-preset`"
+                :class="LABEL_CLASS"
+              >Period</label>
+              <button
+                type="button"
+                :class="INFO_CLASS"
+                aria-label="About Period"
+                :aria-expanded="helpOpen['period'] ? 'true' : 'false'"
+                :aria-controls="helpId('period')"
+                @click="toggleHelp('period')"
+              >
+                i
+              </button>
+            </div>
             <select
               :id="`${id}-preset`"
               :value="preset"
               :class="FIELD_CLASS"
+              :aria-describedby="helpId('period')"
               @change="applyPreset($event.target.value)"
             >
               <option
@@ -108,13 +169,17 @@ function secondGroupOptions() {
               >
                 {{ option.label }}
               </option>
-              <option
-                value="custom"
-                disabled
-              >
+              <option value="custom">
                 Custom
               </option>
             </select>
+            <p
+              v-show="helpOpen['period']"
+              :id="helpId('period')"
+              class="mt-1 text-xs text-ink-gray-6"
+            >
+              {{ PERIOD_HELP }}
+            </p>
           </div>
           <div
             v-for="name in ['from_date', 'to_date']"
@@ -129,9 +194,19 @@ function secondGroupOptions() {
               type="date"
               :value="modelValue[name] || ''"
               :class="FIELD_CLASS"
+              :aria-invalid="rangeInvalid ? 'true' : undefined"
+              :aria-describedby="rangeInvalid ? `${id}-range-error` : undefined"
               @change="set(name, $event.target.value)"
             >
           </div>
+          <p
+            v-if="rangeInvalid"
+            :id="`${id}-range-error`"
+            class="text-sm text-ink-red-4 sm:col-span-2 lg:col-span-4"
+            role="alert"
+          >
+            From must be on or before To.
+          </p>
         </template>
 
         <template
@@ -144,32 +219,68 @@ function secondGroupOptions() {
             :filter="filter"
             :context="filter.type === 'task' && modelValue.project ? { project: modelValue.project } : null"
             :model-value="modelValue[filter.name] || ''"
-            @update:model-value="set(filter.name, $event)"
+            @update:model-value="filter.name === 'project' ? setProject($event) : set(filter.name, $event)"
           />
           <div
             v-else-if="filter.type === 'toggle'"
-            class="flex items-end"
+            class="flex flex-col justify-end"
           >
-            <label class="flex min-h-11 cursor-pointer items-center gap-2 text-sm text-ink-gray-8 sm:min-h-9">
-              <input
-                type="checkbox"
-                class="size-4"
-                :checked="!!modelValue[filter.name]"
-                @change="set(filter.name, $event.target.checked ? 1 : 0)"
+            <div class="flex items-center">
+              <label class="flex min-h-11 cursor-pointer items-center gap-2 text-sm text-ink-gray-8 sm:min-h-9">
+                <input
+                  type="checkbox"
+                  class="size-4"
+                  :checked="!!modelValue[filter.name]"
+                  :aria-describedby="filter.help ? helpId(filter.name) : undefined"
+                  @change="set(filter.name, $event.target.checked ? 1 : 0)"
+                >
+                {{ filter.label }}
+              </label>
+              <button
+                v-if="filter.help"
+                type="button"
+                :class="INFO_CLASS"
+                :aria-label="`About ${filter.label}`"
+                :aria-expanded="helpOpen[filter.name] ? 'true' : 'false'"
+                :aria-controls="helpId(filter.name)"
+                @click="toggleHelp(filter.name)"
               >
-              {{ filter.label }}
-            </label>
+                i
+              </button>
+            </div>
+            <p
+              v-if="filter.help"
+              v-show="helpOpen[filter.name]"
+              :id="helpId(filter.name)"
+              class="mt-1 text-xs text-ink-gray-6"
+            >
+              {{ filter.help }}
+            </p>
           </div>
           <div v-else>
-            <label
-              :for="`${id}-${filter.name}`"
-              :class="LABEL_CLASS"
-            >{{ filter.label }}</label>
+            <div class="flex items-center">
+              <label
+                :for="`${id}-${filter.name}`"
+                :class="LABEL_CLASS"
+              >{{ filter.label }}</label>
+              <button
+                v-if="filter.help"
+                type="button"
+                :class="INFO_CLASS"
+                :aria-label="`About ${filter.label}`"
+                :aria-expanded="helpOpen[filter.name] ? 'true' : 'false'"
+                :aria-controls="helpId(filter.name)"
+                @click="toggleHelp(filter.name)"
+              >
+                i
+              </button>
+            </div>
             <select
               v-if="filter.type === 'select'"
               :id="`${id}-${filter.name}`"
               :value="modelValue[filter.name] || ''"
               :class="FIELD_CLASS"
+              :aria-describedby="filter.help ? helpId(filter.name) : undefined"
               @change="set(filter.name, $event.target.value)"
             >
               <option
@@ -192,8 +303,17 @@ function secondGroupOptions() {
               :type="filter.type === 'month' ? 'month' : 'date'"
               :value="modelValue[filter.name] || ''"
               :class="FIELD_CLASS"
+              :aria-describedby="filter.help ? helpId(filter.name) : undefined"
               @change="set(filter.name, $event.target.value)"
             >
+            <p
+              v-if="filter.help"
+              v-show="helpOpen[filter.name]"
+              :id="helpId(filter.name)"
+              class="mt-1 text-xs text-ink-gray-6"
+            >
+              {{ filter.help }}
+            </p>
           </div>
         </template>
 
@@ -254,7 +374,7 @@ function secondGroupOptions() {
           theme="blue"
           size="md"
           :loading="running"
-          :disabled="missing.length > 0"
+          :disabled="missing.length > 0 || rangeInvalid"
           :aria-describedby="missing.length ? `${id}-missing` : undefined"
           @click="emit('run')"
         >

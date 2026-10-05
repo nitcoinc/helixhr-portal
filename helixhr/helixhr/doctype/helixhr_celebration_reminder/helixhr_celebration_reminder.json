@@ -12,7 +12,8 @@
   "email_template",
   "recipient_mode",
   "recipients",
-  "frequency"
+  "frequency",
+  "hide_logo"
  ],
  "fields": [
   {
@@ -69,6 +70,13 @@
    "in_list_view": 1,
    "label": "Frequency",
    "options": "\nWeekly\nMonthly"
+  },
+  {
+   "default": "0",
+   "description": "Leave the company logo out of this reminder's header; the company name is shown instead.",
+   "fieldname": "hide_logo",
+   "fieldtype": "Check",
+   "label": "Hide company logo"
   }
  ],
  "module": "HelixHR",

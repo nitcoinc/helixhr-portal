@@ -6,6 +6,9 @@ from frappe.utils import add_days, cint, flt, formatdate, getdate
 from helixhr.helixhr.doctype.hr_request.hr_request import request_belongs_to_session
 from helixhr.utils import (
 	CORRECTION_EMAIL_HOLD_HOURS,
+	DOCUMENT_KIND_MESSAGE,
+	DOCUMENT_MAX_BYTES,
+	DOCUMENT_POLICY,
 	PHOTO_KIND_MESSAGE,
 	PHOTO_MAX_BYTES,
 	PHOTO_POLICY,
@@ -1380,6 +1383,17 @@ def file_before_insert(doc, method=None):
 			frappe.throw(_("A profile photo must be private."), frappe.PermissionError)
 		_enforce_upload_policy(
 			doc, policy=PHOTO_POLICY, max_bytes=PHOTO_MAX_BYTES, kind_message=PHOTO_KIND_MESSAGE
+		)
+		return
+
+	if doc.attached_to_doctype == "HelixHR Document Link":
+		# Documents: an HR-published file is private (its link's
+		# `has_permission` decides who downloads it) and inside the document
+		# policy, whichever path created it -- the portal, Desk or a script.
+		if not cint(doc.is_private):
+			frappe.throw(_("A published document must be private."), frappe.PermissionError)
+		_enforce_upload_policy(
+			doc, policy=DOCUMENT_POLICY, max_bytes=DOCUMENT_MAX_BYTES, kind_message=DOCUMENT_KIND_MESSAGE
 		)
 		return
 

@@ -94,3 +94,10 @@ helixhr.patches.v1_0.turn_off_hrms_celebration_senders #2026-10-04 U3 holiday ta
 # Plan 2026-10-04-004 U3: re-run to seed the holiday template on sites that
 # installed before the takeover shipped.
 helixhr.patches.v1_0.seed_celebration_templates #2026-10-04 U3 holiday template
+# Plan 2026-10-05-001 U11 (KTD12): one Email Template per (event, company),
+# rows repointed; unedited seeded text becomes the new body-only default,
+# customised text is copied as is. Idempotent.
+helixhr.patches.v1_0.clone_celebration_templates_per_company
+# Documents (Important/General sub-tabs): existing links become General and
+# take `published_on` from their creation date. Idempotent.
+helixhr.patches.v1_0.backfill_document_link_dates

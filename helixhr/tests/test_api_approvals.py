@@ -59,6 +59,13 @@ def token(doctype, name):
 class TestApiApprovals(IntegrationTestCase):
 	def setUp(self):
 		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		# Module discovery walks the filesystem unsorted (os.walk), so which
+		# suites ran before this one differs per machine -- and suites that
+		# file leave on the shared fixture employee leave Open requests
+		# behind that the pending-aware rule then counts against this
+		# class's inserts. Clear what they left (TestLeaveApprovalIsNative's
+		# own setUp pattern) and let the class start from a clean balance.
+		clear_open_leave(self.employee_name)
 		frappe.db.set_value("Employee", self.employee_name, "reports_to", self.manager_name)
 		frappe.db.set_value("Employee", self.employee_name, "leave_approver", MANAGER_USER)
 		ensure_leave_approver_role(MANAGER_USER)
@@ -285,6 +292,11 @@ class TestApprovalQueueAndEvidence(IntegrationTestCase):
 
 	def setUp(self):
 		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		# Same cross-suite reason as TestApiApprovals: the queue and the
+		# pending-aware balance must start this method clean of whatever
+		# earlier suites left on the shared employee (discovery order is
+		# not stable across machines).
+		clear_open_leave(self.employee_name)
 		frappe.db.set_value("Employee", self.employee_name, "reports_to", self.manager_name)
 		frappe.db.set_value("Employee", self.employee_name, "leave_approver", MANAGER_USER)
 		ensure_leave_approver_role(MANAGER_USER)

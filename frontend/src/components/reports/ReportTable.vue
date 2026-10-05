@@ -74,7 +74,9 @@ function isNumeric(column) {
 
 function cell(row, column) {
   const value = row[column.fieldname]
-  if (value === null || value === undefined || value === '') return ''
+  // Plan 2026-10-05-001 U8 (R14): an empty data cell reads as an em dash on
+  // screen; the raw value (and every export) stays empty.
+  if (value === null || value === undefined || value === '') return row._kind === 'row' ? '—' : ''
   if (DATES.has(column.fieldtype)) return formatDate(value)
   if (isNumeric(column)) return roundHours(value)
   return value
@@ -103,7 +105,8 @@ function toggleColumn(field, show) {
 }
 
 function subtotalLabel(row) {
-  const value = row[row._group_field]
+  // A group on a hidden ID column carries its name in `_group_label`.
+  const value = row._group_label ?? row[row._group_field]
   return `${value === null || value === undefined || value === '' ? 'Blank' : value} subtotal`
 }
 </script>

@@ -1,9 +1,10 @@
 <script setup>
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { roundHours } from '@/lib/hours'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
 import WeekGrid from '@/components/WeekGrid.vue'
+import MonthOverview from '@/components/MonthOverview.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
@@ -17,6 +18,7 @@ import {
   weekDates,
 } from '@/lib/dates'
 import { FULL_WEEK_HOURS as DEFAULT_FULL_WEEK_HOURS, barHeight } from '@/lib/week'
+import { TONE } from '@/lib/statusBadge'
 
 // P2-U6 / P2-R12 / P2-AE5. `/timesheet` and `/timesheet/:weekStart` are the
 // same component: the week is a route parameter, so refresh and browser Back
@@ -27,6 +29,7 @@ const props = defineProps({
 })
 
 const router = useRouter()
+const route = useRoute()
 
 const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
@@ -159,6 +162,16 @@ watch(monday, () => {
   savedAt.value = null
   week.reload()
 })
+
+// The month overview (plan 2026-10-05-001 U5) lives in MonthOverview.vue;
+// this ref only lets a week action reload it.
+const monthOverview = ref(null)
+
+/** The week and the month both move after any action on the week. */
+async function reloadWeek() {
+  await week.reload()
+  monthOverview.value?.reload()
+}
 
 function addLine(date) {
   const line = newLine()
@@ -323,7 +336,7 @@ async function sendChangeRequest() {
     })
     confirmChange.value = false
     changeComment.value = ''
-    await week.reload()
+    await reloadWeek()
   } catch (e) {
     error.value = e?.messages?.[0] || 'Could not send the request.'
   } finally {
@@ -337,7 +350,7 @@ async function withdrawChangeRequest() {
   withdrawingChange.value = true
   try {
     await withdrawChange.submit({ name: changeRequest.value.name })
-    await week.reload()
+    await reloadWeek()
   } catch (e) {
     error.value = e?.messages?.[0] || 'Could not withdraw the request.'
   } finally {
@@ -356,7 +369,7 @@ async function recallWeek() {
       week_start: monday.value,
       expected_modified: week.data?.timesheet?.modified || undefined,
     })
-    await week.reload()
+    await reloadWeek()
   } catch (e) {
     error.value = e?.messages?.[0] || 'Could not recall this week.'
   } finally {
@@ -370,7 +383,7 @@ async function saveDraft() {
   submitting.value = true
   try {
     await save.submit({ week_start: monday.value, rows: JSON.stringify(serialize()) })
-    await week.reload()
+    await reloadWeek()
     savedAt.value = Date.now()
   } catch (e) {
     error.value = e?.messages?.[0] || 'Could not save. Please check your rows.'
@@ -398,7 +411,7 @@ async function submitWeek() {
       rows: JSON.stringify(serialize()),
       expected_modified: week.data?.timesheet?.modified || undefined,
     })
-    await week.reload()
+    await reloadWeek()
     savedAt.value = Date.now()
   } catch (e) {
     error.value = e?.messages?.[0] || 'Could not send this week.'
@@ -431,6 +444,70 @@ onMounted(() => {
 })
 onUnmounted(() => clearInterval(ticker))
 
+// One banner per state at the top of the week (R1). Draft has none: the
+// action bar already carries Save and Submit.
+const banner = computed(() => {
+  const state = workflowState.value
+  const approver = approverName.value || 'your manager'
+  if (state === 'Sent Back') {
+    return {
+      tone: TONE.sentBack,
+      role: 'alert',
+      title: 'Sent back',
+      quote: rejectionComment.value,
+      body: 'Fix it up and send it again.',
+    }
+  }
+  if (state === 'Pending HR') {
+    return {
+      tone: TONE.waiting,
+      title: 'With HR',
+      body: "Your manager passed this week to HR. You can't change it until they decide.",
+    }
+  }
+  if (state === 'Pending Approval') {
+    return {
+      tone: TONE.waiting,
+      title: `Waiting for ${approver}`,
+      body: 'You can take it back to change it.',
+      action: { label: 'Recall week', loading: recalling.value, run: recallWeek },
+    }
+  }
+  if (state !== 'Approved') return null
+  if (changeRequest.value) {
+    return {
+      tone: TONE.waiting,
+      title: 'Change requested',
+      quote: changeRequest.value.comment,
+      body: `Your request is with ${approver}.`,
+      action: {
+        label: 'Withdraw request',
+        loading: withdrawingChange.value,
+        run: withdrawChangeRequest,
+      },
+    }
+  }
+  const ask = changeable.value?.ok
+    ? { label: 'Request a change', run: () => (confirmChange.value = true) }
+    : null
+  if (declinedChange.value) {
+    return {
+      tone: TONE.sentBack,
+      title: 'Change request declined',
+      quote: declinedChange.value.decision_note,
+      body: `You asked: \u201c${declinedChange.value.comment}\u201d. The week stays as it was.`,
+      note: changeable.value && !changeable.value.ok ? changeable.value.reason : '',
+      action: ask,
+    }
+  }
+  return {
+    tone: TONE.done,
+    title: 'Approved',
+    body: ask ? 'Something wrong in this week? Ask to change it.' : changeable.value?.reason,
+    action: ask,
+  }
+})
+
 const savedLabel = computed(() => {
   if (isDirty.value) return 'Unsaved changes'
   if (!savedAt.value) return ''
@@ -452,6 +529,11 @@ const savedLabel = computed(() => {
         </router-link>
       </template>
     </PageHeader>
+
+    <MonthOverview
+      ref="monthOverview"
+      :monday="monday"
+    />
 
     <AsyncState
       section="timesheet-week"
@@ -601,106 +683,47 @@ const savedLabel = computed(() => {
         </Button>
       </div>
 
+      <!-- Plan 2026-10-05-001 U5 (R1): one banner, tinted by state, with
+           that state's action as the primary button. Phone and desktop share
+           this block. -->
       <div
-        v-if="workflowState === 'Sent Back'"
-        class="surface-alert mt-4 p-3 text-sm"
-        role="alert"
+        v-if="banner"
+        class="mt-4 flex flex-col gap-3 rounded-lg p-3 text-sm sm:flex-row sm:items-center sm:justify-between lg:mt-0"
+        :class="banner.tone"
+        :role="banner.role || 'status'"
+        data-testid="week-banner"
       >
-        This week was sent back<span v-if="rejectionComment">: &ldquo;{{ rejectionComment }}&rdquo;</span>.
-        Fix it up and send it again.
-      </div>
-
-      <!-- P4-R5. The manager handed this week to HR, so it is nobody's to
-           edit until HR decides. The grid below is already read-only; saying
-           so is what stops the employee looking for the reason it will not
-           take their hours. -->
-      <p
-        v-else-if="workflowState === 'Pending HR'"
-        class="surface-inset mt-4 p-3 text-sm text-ink-gray-7"
-      >
-        This week is with HR now. You can't change it until they decide.
-      </p>
-
-      <!-- Plan 2026-10-04-003 R5. While the week waits for the manager it is
-           still the employee's to take back, and saying so beats making them
-           ask whether "waiting" is a dead end. -->
-      <div
-        v-else-if="workflowState === 'Pending Approval'"
-        class="surface-inset mt-4 flex flex-col gap-2 p-3 text-sm sm:flex-row sm:items-center sm:justify-between"
-      >
-        <p class="text-ink-gray-7">
-          This week is waiting for {{ approverName || 'your manager' }}. You can
-          take it back to change it.
-        </p>
+        <div class="min-w-0 space-y-0.5">
+          <p class="font-semibold">
+            {{ banner.title }}
+          </p>
+          <p v-if="banner.quote">
+            &ldquo;{{ banner.quote }}&rdquo;
+          </p>
+          <p v-if="banner.body">
+            {{ banner.body }}
+          </p>
+          <p v-if="banner.note">
+            {{ banner.note }}
+          </p>
+        </div>
         <Button
-          variant="outline"
-          :loading="recalling"
-          @click="recallWeek"
+          v-if="banner.action"
+          class="shrink-0"
+          variant="solid"
+          theme="blue"
+          :loading="banner.action.loading"
+          @click="banner.action.run"
         >
-          Recall week
+          {{ banner.action.label }}
         </Button>
-      </div>
-
-      <!-- Plan 2026-10-04-003 R7-R9. An approved week has one door: ask to
-           change it, with a reason, while nothing about it is locked. The
-           server owns the "why not" sentence, so the employee never writes a
-           request that would be refused. -->
-      <div
-        v-else-if="workflowState === 'Approved'"
-        class="surface-inset mt-4 flex flex-col gap-2 p-3 text-sm sm:flex-row sm:items-center sm:justify-between"
-      >
-        <template v-if="changeRequest">
-          <p class="min-w-0 text-ink-gray-7">
-            You asked to change this week:
-            <span class="font-medium text-ink-gray-9">&ldquo;{{ changeRequest.comment }}&rdquo;</span>
-            &mdash; it is with {{ approverName || 'your manager' }}.
-          </p>
-          <Button
-            variant="outline"
-            :loading="withdrawingChange"
-            @click="withdrawChangeRequest"
-          >
-            Withdraw request
-          </Button>
-        </template>
-        <!-- R12: the decline and its reason stay visible where the request
-             was raised, not only in the email. -->
-        <template v-else-if="declinedChange">
-          <p class="min-w-0 text-ink-gray-7">
-            Your change request
-            <span class="font-medium text-ink-gray-9">&ldquo;{{ declinedChange.comment }}&rdquo;</span>
-            was declined. The week stays as it was.
-          </p>
-          <p
-            v-if="declinedChange.decision_note"
-            class="min-w-0 text-ink-gray-6"
-          >
-            &ldquo;{{ declinedChange.decision_note }}&rdquo;
-          </p>
-        </template>
-        <template v-else-if="changeable?.ok">
-          <p class="text-ink-gray-7">
-            Something wrong in this week? Ask to change it.
-          </p>
-          <Button
-            variant="outline"
-            @click="confirmChange = true"
-          >
-            Request a change
-          </Button>
-        </template>
-        <p
-          v-else
-          class="text-ink-gray-7"
-        >
-          {{ changeable?.reason }}
-        </p>
       </div>
 
       <div class="mt-4">
         <WeekGrid
           :lines="lines"
           :projects="projects.data || []"
+          :projects-loaded="Array.isArray(projects.data)"
           :days="days"
           :selected-date="selectedDate"
           :full-week-hours="fullWeekHours"

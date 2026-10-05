@@ -35,6 +35,9 @@ const props = defineProps({
   /** What a full working week reads against, for the day-total row. */
   fullWeekHours: { type: Number, default: 40 },
   readOnly: { type: Boolean, default: false },
+  /** False until `get_my_projects` has answered, so "no projects" is never
+   * claimed off an empty list that is merely still loading. */
+  projectsLoaded: { type: Boolean, default: true },
 })
 
 const emit = defineEmits([
@@ -66,15 +69,44 @@ function isBillable(line) {
 }
 
 const projectOptions = computed(() => [
-  { label: 'Pick a project', value: '' },
+  { label: 'Choose a project', value: '' },
   ...props.projects.map((p) => ({ label: p.project_name || p.name, value: p.name })),
 ])
 
 function taskOptions(line) {
   return [
-    { label: 'No task', value: '' },
+    { label: 'No task (optional)', value: '' },
     ...tasksFor(line.project).map((t) => ({ label: t.subject, value: t.name })),
   ]
+}
+
+// The project and task pickers used to be borderless selects that read as
+// plain text ("Pick a project"), and employees took them for a statement
+// that they had no projects. They are real fields now: border, the forms
+// plugin's chevron (no `bg-none`), hover and focus states. The coarse-
+// pointer 44px floor in index.css covers the touch size.
+const SELECT_FIELD =
+  'w-full cursor-pointer truncate rounded-md border bg-surface-white py-1.5 pl-2.5 text-sm text-ink-gray-9 hover:border-outline-gray-4 focus:border-outline-gray-4 focus:ring-0'
+
+/** A row with no project yet is where the employee has to start: the
+ * picker is outlined in the brand tint so the eye lands on it first. */
+function projectSelectClass(line) {
+  return [
+    SELECT_FIELD,
+    'font-medium',
+    line.project ? 'border-outline-gray-2' : 'border-outline-blue-2 bg-surface-blue-2/40',
+  ]
+}
+
+const TASK_SELECT_CLASS = [SELECT_FIELD, 'mt-1.5 border-outline-gray-2 text-ink-gray-7']
+
+/** Employee is on no project at all: an empty picker would only repeat
+ * the misunderstanding, so the grid says so and points at HR instead. */
+const noProjects = computed(() => props.projectsLoaded && props.projects.length === 0)
+
+const askHrRoute = {
+  name: 'Requests',
+  query: { category: 'Other', subject: 'Please add me to a project I book time on' },
 }
 
 // --- the selected day (phone) -------------------------------------------
@@ -165,7 +197,25 @@ function focusIfPending(key) {
 </script>
 
 <template>
-  <div>
+  <div
+    v-if="noProjects && !readOnly"
+    class="surface-inset p-6 text-center"
+    data-testid="no-projects"
+  >
+    <p class="font-semibold text-ink-gray-9">
+      You're not on any project yet
+    </p>
+    <p class="mt-1 text-sm text-ink-gray-6">
+      Time is booked against a project, and HR adds you to the ones you work on.
+    </p>
+    <router-link
+      class="mt-3 inline-flex min-h-11 items-center rounded-lg border border-outline-gray-2 bg-surface-white px-4 font-medium text-ink-blue-link hover:bg-surface-gray-2"
+      :to="askHrRoute"
+    >
+      Ask HR
+    </router-link>
+  </div>
+  <div v-else>
     <!-- Phone: day-first ------------------------------------------------ -->
     <div
       class="lg:hidden"
@@ -198,7 +248,7 @@ function focusIfPending(key) {
             <div class="flex items-center gap-1.5">
               <select
                 v-if="!readOnly"
-                class="-ml-1 w-full cursor-pointer appearance-none truncate rounded-md border-0 bg-transparent bg-none px-1 py-0.5 font-semibold text-ink-gray-9"
+                :class="projectSelectClass(line)"
                 :value="line.project"
                 :aria-label="`Project for row ${line.id}`"
                 @change="emit('update-line', { id: line.id, field: 'project', value: $event.target.value })"
@@ -228,7 +278,8 @@ function focusIfPending(key) {
 
             <select
               v-if="!readOnly"
-              class="-ml-1 w-full cursor-pointer appearance-none truncate rounded-md border-0 bg-transparent bg-none px-1 py-0.5 text-sm text-ink-gray-6"
+              :class="TASK_SELECT_CLASS"
+              :disabled="!line.project"
               :value="line.task"
               :aria-label="`Task for row ${line.id}`"
               @change="emit('update-line', { id: line.id, field: 'task', value: $event.target.value })"
@@ -247,6 +298,13 @@ function focusIfPending(key) {
             >
               {{ tasksFor(line.project).find((t) => t.name === line.task)?.subject || line.task }}
             </p>
+            <p
+              v-if="!readOnly && !line.project"
+              class="mt-1 text-xs text-ink-blue-3"
+              data-testid="start-here"
+            >
+              Start here: choose a project, then enter hours.
+            </p>
 
             <!-- The phone layout already only ever shows one day's lines
                  (P7-KTD7), so this note input is already behind the day's
@@ -254,7 +312,7 @@ function focusIfPending(key) {
                  here the way the desktop grid needs it. -->
             <input
               v-if="!readOnly"
-              class="w-full appearance-none rounded-md border border-outline-gray-2 bg-surface-white px-2 py-1 text-sm text-ink-gray-8 focus:border-outline-gray-4"
+              class="mt-1.5 w-full appearance-none rounded-md border border-outline-gray-2 bg-surface-white px-2 py-1 text-sm text-ink-gray-8 focus:border-outline-gray-4"
               type="text"
               :value="line.notes[selectedDate] || ''"
               placeholder="Add a note"
@@ -400,7 +458,7 @@ function focusIfPending(key) {
                 <div class="flex items-center gap-1.5">
                   <select
                     v-if="!readOnly"
-                    class="-ml-1 w-full cursor-pointer appearance-none truncate rounded-md border-0 bg-transparent bg-none px-1 py-0.5 font-semibold text-ink-gray-9"
+                    :class="projectSelectClass(line)"
                     :value="line.project"
                     :aria-label="`Project for row ${line.id}`"
                     @change="emit('update-line', { id: line.id, field: 'project', value: $event.target.value })"
@@ -429,7 +487,8 @@ function focusIfPending(key) {
                 </div>
                 <select
                   v-if="!readOnly"
-                  class="-ml-1 w-full cursor-pointer appearance-none truncate rounded-md border-0 bg-transparent bg-none px-1 py-0.5 text-ink-gray-6"
+                  :class="TASK_SELECT_CLASS"
+                  :disabled="!line.project"
                   :value="line.task"
                   :aria-label="`Task for row ${line.id}`"
                   @change="emit('update-line', { id: line.id, field: 'task', value: $event.target.value })"
@@ -447,6 +506,13 @@ function focusIfPending(key) {
                   class="text-ink-gray-6"
                 >
                   {{ tasksFor(line.project).find((t) => t.name === line.task)?.subject || line.task }}
+                </p>
+                <p
+                  v-if="!readOnly && !line.project"
+                  class="mt-1 text-xs text-ink-blue-3"
+                  data-testid="start-here"
+                >
+                  Start here: choose a project, then enter hours.
                 </p>
               </th>
               <td
@@ -562,7 +628,7 @@ function focusIfPending(key) {
             Only projects you're booked on appear here. Missing one?
             <router-link
               class="font-medium text-ink-blue-link underline underline-offset-2"
-              :to="{ name: 'Requests', query: { category: 'Other', subject: 'Please add me to a project I book time on' } }"
+              :to="askHrRoute"
             >
               Ask HR
             </router-link>

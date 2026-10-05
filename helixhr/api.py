@@ -91,12 +91,15 @@ from helixhr.utils import (
 	admin_scope_employee_filters,
 	as_administrator,
 	can_admin_portal,
+	company_email_header_colors,
 	employee_in_admin_scope,
 	event_variables,
 	get_manager_user,
 	get_week_bounds,
+	has_custom_wording,
 	is_photo_content,
 	mask_identifier,
+	message_brand,
 	photo_file_filters,
 	portal_home_page,
 	prepare_profile_photo,
@@ -110,6 +113,7 @@ from helixhr.utils import (
 	sample_context,
 	send_notification,
 	session_company,
+	valid_email_header_color,
 	validate_message_template,
 	validate_portal_upload,
 )
@@ -632,6 +636,9 @@ def get_portal_bootstrap():
 		# the export log and the portal-role section -- `can_admin_portal`
 		# is the predicate each of those endpoints enforces.
 		"can_admin_portal": can_admin_portal(frappe.session.user),
+		# Documents: the upload/edit/delete controls -- `save_document_link`'s
+		# own gate, asked without a company.
+		"can_manage_documents": _can_manage_documents(frappe.session.user),
 		# P6-KTD4: resolved on the caller's own ability to reach Desk (a
 		# System User holding a `desk_access` role), never on "is HR" --
 		# the two are correlated today but the flag must not assume they
@@ -4781,15 +4788,14 @@ def get_my_timesheet_history(limit=12, start=0):
 	# page -- one query for the page, so the history can show it and offer
 	# the withdraw without a second call per row.
 	changes = {}
-	open_names = [
-		row.name
-		for row in frappe.get_all(
-			"HelixHR Timesheet Change",
-			filters={"employee": employee, "status": "Open", "timesheet": ["in", [r.name for r in rows] or [""]]},
-			fields=["name", "timesheet", "comment"],
-		)
-	]
-	for change in open_names:
+	# Plan 2026-10-05-001 U4: keep the rows, not their names -- the loop
+	# reads `.timesheet` and `.comment`.
+	open_changes = frappe.get_all(
+		"HelixHR Timesheet Change",
+		filters={"employee": employee, "status": "Open", "timesheet": ["in", [r.name for r in rows] or [""]]},
+		fields=["name", "timesheet", "comment"],
+	)
+	for change in open_changes:
 		changes[change.timesheet] = {"name": change.name, "comment": change.comment}
 
 	weeks = []
@@ -4814,6 +4820,102 @@ def get_my_timesheet_history(limit=12, start=0):
 	}
 
 
+_MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+_MONTH_UNSUBMITTED = (None, "Draft", TIMESHEET_SENT_BACK)
+
+
+@frappe.whitelist()
+def get_my_month(month=None):
+	"""Every Monday..Sunday week that overlaps `month` (YYYY-MM; defaults to
+	this month), for the Timesheet month overview (plan 2026-10-05-001 U5).
+
+	A week with no Timesheet still comes back, as `state` None ("Not
+	started"). The week's Timesheet is `_week_timesheet`'s rule -- newest
+	non-cancelled one whose `start_date` falls inside the week -- applied
+	to one query for the whole span. Expected hours come from the same
+	working-days index the Team tab reads (KTD4), clamped to the
+	employee's joining..relieving span: None when HR Settings has no
+	standard hours ("not measured"), 0 when no working day remains.
+
+	`missing`: the week is over, is not yet sent (Not started, Draft, Sent
+	back), and had at least one working day -- so it holds whether or not
+	expected hours are measured.
+	"""
+	if month in (None, ""):
+		month = str(getdate(user_today()))[:7]
+	if not isinstance(month, str) or not _MONTH_PATTERN.match(month):
+		frappe.throw(_("Month must look like YYYY-MM."), frappe.ValidationError)
+
+	employee = get_current_employee()
+	first = getdate(f"{month}-01")
+	last = get_last_day(first)
+	mondays = []
+	monday = get_week_bounds(first)[0]
+	while monday <= last:
+		mondays.append(monday)
+		monday = add_days(monday, 7)
+	span_start, span_end = mondays[0], add_days(mondays[-1], 6)
+
+	joined, relieved = frappe.db.get_value(
+		"Employee", employee, ["date_of_joining", "relieving_date"]
+	)
+	joined = getdate(joined) if joined else None
+	relieved = getdate(relieved) if relieved else None
+
+	sheets = {}
+	for row in frappe.get_all(
+		"Timesheet",
+		filters={
+			"employee": employee,
+			"start_date": ["between", [str(span_start), str(span_end)]],
+			"docstatus": ["!=", 2],
+		},
+		fields=["name", "start_date", "workflow_state", "total_hours"],
+		order_by="creation desc",
+	):
+		sheets.setdefault(get_week_bounds(row.start_date)[0], row)
+
+	open_changes = set(
+		frappe.get_all(
+			"HelixHR Timesheet Change",
+			filters={
+				"employee": employee,
+				"status": "Open",
+				"timesheet": ["in", [row.name for row in sheets.values()] or [""]],
+			},
+			pluck="timesheet",
+		)
+	)
+
+	index = _working_days_index([employee], span_start, span_end)
+	standard = index["standard"]
+	today = getdate(user_today())
+
+	weeks = []
+	for monday in mondays:
+		sunday = add_days(monday, 6)
+		days = {
+			day
+			for day in _employee_working_days(index, employee, monday, sunday)
+			if (not joined or getdate(day) >= joined) and (not relieved or getdate(day) <= relieved)
+		}
+		sheet = sheets.get(monday)
+		state = sheet.workflow_state if sheet else None
+		weeks.append(
+			{
+				"week_start": str(monday),
+				"week_end": str(sunday),
+				"state": state,
+				"total_hours": flt(sheet.total_hours) if sheet else 0.0,
+				"expected_hours": flt(standard * len(days)) if standard else None,
+				"missing": sunday < today and state in _MONTH_UNSUBMITTED and bool(days),
+				"change_open": bool(sheet and sheet.name in open_changes),
+			}
+		)
+
+	return {"month": month, "weeks": weeks, "full_week_hours": FULL_WEEK_HOURS}
+
+
 @frappe.whitelist()
 def get_timesheet_week_start(name):
 	"""The Monday of the week a Timesheet belongs to.
@@ -4830,6 +4932,15 @@ def get_timesheet_week_start(name):
 	return str(get_week_bounds(start)[0])
 
 
+def _my_project_names(user):
+	"""Projects `user` belongs to: a Project Users row or a User Permission
+	on Project. The one membership rule `get_my_projects` and
+	`get_my_project_overview` share."""
+	return set(frappe.get_all("Project User", filters={"user": user}, pluck="parent")) | set(
+		frappe.get_all("User Permission", filters={"user": user, "allow": "Project"}, pluck="for_value")
+	)
+
+
 @frappe.whitelist()
 def get_my_projects():
 	"""Open Projects the session user may book time on -- Project Users
@@ -4840,15 +4951,7 @@ def get_my_projects():
 	(P2-R22). It used to be one Task query per project, so an employee on
 	a dozen projects paid a dozen round trips to fill a dropdown.
 	"""
-	user = frappe.session.user
-
-	project_names = set(
-		frappe.get_all("Project User", filters={"user": user}, pluck="parent")
-	) | set(
-		frappe.get_all(
-			"User Permission", filters={"user": user, "allow": "Project"}, pluck="for_value"
-		)
-	)
+	project_names = _my_project_names(frappe.session.user)
 	if not project_names:
 		return []
 
@@ -4881,6 +4984,86 @@ def get_my_projects():
 		project["tasks"] = tasks_by_project.get(project.name, [])
 	return projects
 
+
+@frappe.whitelist()
+def get_my_project_overview():
+	"""The My projects page (plan 2026-10-05-001 U6): each Open project the
+	caller belongs to (same rule as `get_my_projects`), with its customer,
+	the caller's own open Tasks (assigned to them) and the caller's own
+	hours this calendar month. A sibling read so the timesheet dropdown's
+	payload stays as it is. No cost or billing fields, by design.
+
+	Ordered by my hours this month, highest first, then by name."""
+	user = frappe.session.user
+	employee = _my_employee()
+	project_names = _my_project_names(user)
+	if not project_names:
+		return []
+
+	projects = frappe.get_all(
+		"Project",
+		filters={"name": ["in", list(project_names)], "status": "Open"},
+		fields=["name", "project_name", "customer", "status"],
+	)
+	if not projects:
+		return []
+	names = [project.name for project in projects]
+
+	tasks_by_project = {}
+	for task in frappe.get_all(
+		"Task",
+		filters={
+			"project": ["in", names],
+			"status": ["not in", ["Cancelled", "Completed", "Template"]],
+			# `_assign` is Frappe's JSON list of assignees; the quotes keep
+			# one user id from matching inside another.
+			"_assign": ["like", f'%"{user}"%'],
+		},
+		fields=["name", "subject", "project", "status", "exp_end_date"],
+		order_by="subject",
+	):
+		tasks_by_project.setdefault(task.project, []).append(
+			{"name": task.name, "subject": task.subject, "status": task.status, "due": task.exp_end_date}
+		)
+
+	month_start = get_first_day(user_today())
+	month_end = get_last_day(user_today())
+	hours_by_project = {}
+	timesheets = frappe.get_all(
+		"Timesheet",
+		filters={
+			"employee": employee,
+			"docstatus": ["<", 2],
+			"start_date": ["<=", month_end],
+			"end_date": [">=", month_start],
+		},
+		pluck="name",
+	)
+	if timesheets:
+		for row in frappe.get_all(
+			"Timesheet Detail",
+			filters={
+				"parent": ["in", timesheets],
+				"project": ["in", names],
+				"from_time": ["between", [month_start, month_end]],
+			},
+			fields=["project", "hours"],
+		):
+			hours_by_project[row.project] = flt(hours_by_project.get(row.project)) + flt(row.hours)
+
+	result = [
+		{
+			"name": project.name,
+			"project_name": project.project_name,
+			"customer": project.customer,
+			"status": project.status,
+			"tasks": tasks_by_project.get(project.name, []),
+			"hours_this_month": flt(hours_by_project.get(project.name), 2),
+		}
+		for project in projects
+	]
+	result.sort(key=lambda row: (-row["hours_this_month"], (row["project_name"] or "").lower()))
+	return result
 
 def _bookable_tasks_by_project():
 	"""`{project: {task ids}}` for the session user -- the allow-list both
@@ -5235,12 +5418,12 @@ def _change_request_summaries(employee, today):
 	PermissionError rather than an empty list for exactly that caller. The
 	scope is the authorization: `approver_user` is stamped at raise and
 	kept current by `employee_on_update` (KTD10).
+
+	This half never stands down for HR (plan 2026-10-05-001 KTD1): a
+	request addressed to an approver who also holds HR Manager or System
+	Manager arrives here, and `_hr_change_request_summaries` excludes rows
+	addressed to the caller, so each request still shows once.
 	"""
-	if _is_hr():
-		# The HR half is `_hr_change_request_summaries`; a manager's own
-		# reports still arrive there, so this half stands down for HR to
-		# keep one row per request.
-		return []
 	rows = frappe.get_all(
 		"HelixHR Timesheet Change",
 		filters={"status": "Open", "approver_user": frappe.session.user},
@@ -5281,8 +5464,9 @@ def _hr_change_request_summaries(employee, today):
 	"""HR's view of open change requests: everything in their admin scope
 	that is not already in their manager half, tagged. A routed request (no
 	manager) is HR's alone; one with a manager shows here because HR
-	decides in the manager's place (R10) -- but a request addressed to the
-	HR caller themselves stays in their manager half, once."""
+	decides in the manager's place (R10). A request addressed to the HR
+	caller themselves is excluded here because `_change_request_summaries`
+	always returns it, so it shows once."""
 	employee_filter = _hr_queue_employee_filter(employee)
 	if employee_filter is None:
 		return []
@@ -5362,9 +5546,9 @@ def _act_on_timesheet_change(doc, action):
 			state="accepted" if action == "Accept" else "declined",
 			approver_name=frappe.utils.get_fullname(decider),
 			decision_note=(doc.decision_note or "").strip() if action == "Decline" else "",
-			action_url=events._portal_url(f"timesheet/history?week={doc.week_start}")
-			if action == "Decline"
-			else events._portal_url(f"timesheet?week={doc.week_start}"),
+			# The week page reads only the `:weekStart` route param (plan
+			# 2026-10-05-001 U4); the amended Draft keeps the same Monday.
+			action_url=events._portal_url(f"timesheet/{doc.week_start}"),
 		),
 	)
 
@@ -7161,45 +7345,261 @@ _APPROVAL_KINDS = {
 # Documents (R19, P2-R19)
 
 
+_DOCUMENT_DOCTYPE = "HelixHR Document Link"
+_DOCUMENT_CATEGORIES = ("Important", "General")
+_DOCUMENT_TITLE_MAX = 140
+_DOCUMENT_DESCRIPTION_MAX = 1000
+
+
 def _visible_document_links(employee):
-	"""The policy links one employee may see: global ones plus their own
-	company's (P2-R19).
+	"""The documents one employee may see: global ones plus their own
+	company's (P2-R19), newest first.
 
 	One query, two callers -- `get_my_documents` for the full searchable page
 	and the dashboard's bounded card -- so the scope has one definition.
+	`published_on` falls back to the creation date for a row nobody dated.
+	`file` is a private File URL; Frappe serves it only to a reader of the
+	link (its `has_permission` hook), so handing it out widens nothing.
 	"""
 	company = frappe.db.get_value("Employee", employee, "company")
-	return frappe.get_all(
-		"HelixHR Document Link",
+	rows = frappe.get_all(
+		_DOCUMENT_DOCTYPE,
 		or_filters=[["company", "is", "not set"], ["company", "=", company]],
-		fields=["name", "title", "url", "company", "description"],
-		order_by="title asc",
+		fields=[
+			"name",
+			"title",
+			"url",
+			"file",
+			"company",
+			"description",
+			"category",
+			"published_on",
+			"creation",
+		],
+		order_by="published_on desc, creation desc",
 	)
+	for row in rows:
+		row.published_on = row.published_on or getdate(row.creation)
+		row.category = row.category or "General"
+		del row["creation"]
+	return rows
 
 
 def _get_documents_card(employee):
-	"""The rail card: the first `_LINKS_LIMIT` links and how many were not
-	shown. Ordered by title, the only stable order this catalogue has -- there
-	is no priority field, and adding one would give HR a column to maintain for
-	no gain at five rows."""
-	links = _visible_document_links(employee)
+	"""The rail card: the first `_LINKS_LIMIT` documents, Important ones
+	first, newest first within each, and how many were not shown."""
+	links = sorted(_visible_document_links(employee), key=lambda row: row.category != "Important")
 	shown = links[:_LINKS_LIMIT]
 	return {"items": shown, "more": max(0, len(links) - len(shown))}
 
 
 @frappe.whitelist()
 def get_my_documents():
-	"""The policy links this employee may see: global ones plus their own
-	company's (P2-R19).
+	"""The documents this employee may see: global ones plus their own
+	company's (P2-R19), newest first.
 
 	The scope is not this method's only enforcement -- HelixHR Document
 	Link registers `permission_query_conditions` and `has_permission`
 	(hooks.py), so a caller reaching for frappe.client.get_list,
 	/api/resource, report view, print or export gets the same answer. This
 	method exists so the portal asks a session-scoped question instead of
-	sending the filter itself (KTD5, R27).
+	sending the filter itself (KTD5, R27). Whether the caller may publish is
+	the bootstrap's `can_manage_documents`.
 	"""
 	return _visible_document_links(get_current_employee())
+
+
+def _can_manage_documents(user=None):
+	"""Whether `save_document_link` would accept *some* company from this
+	caller: HR, and either System Manager or holding an admin scope -- the
+	same rule as `_assert_can_set_company_logo`, asked without a company."""
+	user = user or frappe.session.user
+	if not _is_hr(user):
+		return False
+	if "System Manager" in frappe.get_roles(user):
+		return True
+	return resolve_admin_scope(user)["kind"] != "none"
+
+
+def _assert_can_manage_document(company):
+	"""The publish gate per company, reused from the logo upload: HR only;
+	an anchored HR Manager for their own company (so never a global, blank
+	company row), a System Manager for any."""
+	_assert_can_set_company_logo(company or None)
+
+
+@frappe.whitelist()
+def get_document_admin_options():
+	"""The upload dialog's company choices for this caller, and whether a
+	document "for everyone" (no company) is theirs to publish."""
+	if not _can_manage_documents():
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	sees_all = (
+		"System Manager" in frappe.get_roles()
+		or resolve_admin_scope(frappe.session.user)["kind"] == "unscoped"
+	)
+	companies = (
+		frappe.get_all("Company", pluck="name", order_by="company_name asc")
+		if sees_all
+		else _companies_in_admin_scope()
+	)
+	return {"companies": companies, "allow_global": sees_all}
+
+
+def _document_upload(file_url=None):
+	"""(file name, bytes) of the document this save carries, or (None, None).
+	A multipart `file` (the portal) wins over `file_url` (an agent reusing a
+	File it can already read); both pass the same document policy."""
+	upload = (getattr(frappe.request, "files", None) or {}).get("file")
+	if upload is not None:
+		file_name = os.path.basename(upload.filename or "").strip()
+		if not file_name:
+			frappe.throw(_("That file has no name. Pick another one."))
+		return file_name, upload.stream.read()
+
+	file_url = (file_url or "").strip()
+	if not file_url:
+		return None, None
+	source = frappe.db.get_value("File", {"file_url": file_url, "is_folder": 0}, "name")
+	if not source:
+		frappe.throw(_("That file does not exist."))
+	source = frappe.get_doc("File", source)
+	if not source.has_permission("read"):
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	# `encodings=[]`: raw bytes. The default tries text encodings first, and
+	# a zip that happens to decode would come back as a different byte string.
+	return source.file_name, source.get_content(encodings=[])
+
+
+def _remove_document_files(name, keep=None):
+	"""Delete the File(s) a document link's `file` field once pointed at."""
+	for file_name in frappe.get_all(
+		"File",
+		filters={"attached_to_doctype": _DOCUMENT_DOCTYPE, "attached_to_name": name, "attached_to_field": "file"},
+		pluck="name",
+	):
+		if file_name != keep:
+			# The publish gate is this path's authorisation, as for the logo.
+			frappe.delete_doc("File", file_name, ignore_permissions=True)
+
+
+@frappe.whitelist(methods=["POST"])
+def save_document_link(
+	name=None,
+	title=None,
+	description=None,
+	category=None,
+	company=None,
+	url=None,
+	published_on=None,
+	file_url=None,
+):
+	"""Create or edit one document on the Documents page (HR).
+
+	The document is an uploaded file -- multipart `file`, or `file_url` of
+	an existing File the caller can read -- or a web `url`, never both: a new
+	file clears the link, a link clears the file, and neither keeps whatever
+	the row already had. The file is checked by signature against
+	`DOCUMENT_POLICY` (20 MB), stored **private** and attached to this row,
+	so Frappe serves it exactly to the people who may read the row.
+
+	Gate: `_assert_can_manage_document` for the target company and, on an
+	edit, for the row's current company too -- an HR Manager can neither
+	reach into another company's row nor move one into theirs.
+	"""
+	from helixhr.utils import validate_document_upload
+
+	rate_limit_per_user("save_document_link")
+	company = (company or "").strip() or None
+	_assert_can_manage_document(company)
+	if company and not frappe.db.exists("Company", company):
+		frappe.throw(_("That company does not exist."))
+
+	title = (title or "").strip()
+	if not title:
+		frappe.throw(_("Give the document a title."))
+	if len(title) > _DOCUMENT_TITLE_MAX:
+		frappe.throw(_("Keep the title under {0} characters.").format(_DOCUMENT_TITLE_MAX))
+	description = (description or "").strip()
+	if len(description) > _DOCUMENT_DESCRIPTION_MAX:
+		frappe.throw(_("Keep the description under {0} characters.").format(_DOCUMENT_DESCRIPTION_MAX))
+	if category not in _DOCUMENT_CATEGORIES:
+		frappe.throw(_("Choose Important or General."))
+	try:
+		published_on = getdate(published_on) if published_on else None
+	except Exception:
+		frappe.throw(_("That date isn't valid."))
+
+	if name:
+		if not frappe.db.exists(_DOCUMENT_DOCTYPE, name):
+			frappe.throw(_("That document no longer exists."), frappe.DoesNotExistError)
+		doc = frappe.get_doc(_DOCUMENT_DOCTYPE, name)
+		_assert_can_manage_document(doc.company)
+	else:
+		doc = frappe.new_doc(_DOCUMENT_DOCTYPE)
+
+	file_name, content = _document_upload(file_url)
+	if content is not None:
+		validate_document_upload(file_name, content)
+	url = (url or "").strip()
+
+	doc.update(
+		{
+			"title": title,
+			"description": description,
+			"category": category,
+			"company": company,
+			"published_on": published_on or doc.published_on or frappe.utils.today(),
+		}
+	)
+	if content is not None:
+		doc.url = None
+		doc.file = None
+		doc.flags.file_pending = True
+	elif url:
+		doc.url = url
+		doc.file = None
+	doc.save()
+
+	if content is not None:
+		file_doc = frappe.get_doc(
+			{
+				"doctype": "File",
+				"file_name": file_name,
+				"content": content,
+				"attached_to_doctype": _DOCUMENT_DOCTYPE,
+				"attached_to_name": doc.name,
+				"attached_to_field": "file",
+				# Never a parameter; `events.file_before_insert` refuses a
+				# public one anyway.
+				"is_private": 1,
+			}
+		)
+		file_doc.insert(ignore_permissions=True)
+		doc.db_set("file", file_doc.file_url)
+		_remove_document_files(doc.name, keep=file_doc.name)
+	elif url:
+		_remove_document_files(doc.name)
+
+	return frappe.db.get_value(
+		_DOCUMENT_DOCTYPE,
+		doc.name,
+		["name", "title", "url", "file", "company", "description", "category", "published_on"],
+		as_dict=True,
+	)
+
+
+@frappe.whitelist(methods=["POST"])
+def delete_document_link(name):
+	"""Remove one document and its uploaded file (HR, same gate as the save)."""
+	rate_limit_per_user("delete_document_link")
+	company = frappe.db.get_value(_DOCUMENT_DOCTYPE, name, "company")
+	if company is None and not frappe.db.exists(_DOCUMENT_DOCTYPE, name):
+		frappe.throw(_("That document no longer exists."), frappe.DoesNotExistError)
+	_assert_can_manage_document(company)
+	_remove_document_files(name)
+	frappe.delete_doc(_DOCUMENT_DOCTYPE, name)
+	return {"name": name, "deleted": True}
 
 
 # ---------------------------------------------------------------------------
@@ -7830,14 +8230,19 @@ def get_notification_setup():
 	saved = {
 		row.template_key: row
 		for row in frappe.get_all(
-			"HelixHR Message Template", fields=["template_key", "subject", "body", "is_enabled"]
+			"HelixHR Message Template",
+			fields=["template_key", "subject", "body", "is_enabled", "hide_logo", "modified"],
 		)
 	}
 	events = []
 	for key, event in NOTIFICATION_EVENTS.items():
 		locked = bool(event.get("locked"))
 		row = saved.get(key)
-		state = "Default" if not row else ("Custom" if row.is_enabled or locked else "Off")
+		custom_wording = bool(row and has_custom_wording(row))
+		if row and not row.is_enabled and not locked:
+			state = "Off"
+		else:
+			state = "Custom" if custom_wording else "Default"
 		events.append(
 			{
 				"key": key,
@@ -7849,21 +8254,74 @@ def get_notification_setup():
 				"body": (row.body if row else None) or event["body"],
 				"default_subject": event["subject"],
 				"default_body": event["body"],
+				"custom_wording": custom_wording,
+				# The per-template logo opt-out; the logo itself is company-wide.
+				"hide_logo": bool(row and row.hide_logo),
+				"last_fallback": _last_template_fallback(key, row),
 				"variables": [
 					{"name": name, "description": description, "sample": sample}
 					for name, (description, sample) in event_variables(key).items()
 				],
 			}
 		)
-	return {"events": events, "subject_max": _TEMPLATE_SUBJECT_MAX}
+	return {"events": events, "subject_max": _TEMPLATE_SUBJECT_MAX, "brand": _message_logo_brand()}
+
+
+def _message_logo_brand():
+	"""The company-wide logo the message templates render with (the
+	caller's company, as `send_notification` resolves it) and whether this
+	caller may replace it (`set_company_logo`'s own gate)."""
+	brand = message_brand(frappe.session.user)
+	try:
+		_assert_can_set_company_logo(brand["company"])
+		can_set_logo = bool(brand["company"])
+	except frappe.PermissionError:
+		frappe.clear_last_message()
+		can_set_logo = False
+	return {
+		"company": brand["company"],
+		"logo_url": brand["logo_url"],
+		"header_color": brand["header_color"],
+		"can_set_logo": can_set_logo,
+	}
+
+
+def _last_template_fallback(event_key, row):
+	"""Plan 2026-10-05-001 U13: the most recent time the saved template for
+	`event_key` failed on real data and the default went out instead --
+	`render_message` already writes that Error Log row, so no new doctype.
+	Only a failure *after* the row was last saved counts, so the warning
+	clears once HR saves a fix. The event key, the time and a truncated
+	exception line only; never the traceback."""
+	if not row:
+		return None
+	log = frappe.db.get_value(
+		"Error Log",
+		{"method": f"HelixHR message template {event_key} failed", "creation": [">", row.modified]},
+		["creation", "error"],
+		order_by="creation desc",
+		as_dict=True,
+	)
+	if not log:
+		return None
+	lines = [line.strip() for line in (log.error or "").strip().splitlines() if line.strip()]
+	message = lines[-1] if lines else ""
+	return {
+		"event_key": event_key,
+		"at": frappe.utils.format_datetime(log.creation, "yyyy-MM-dd HH:mm"),
+		"message": message[:200],
+	}
 
 
 @frappe.whitelist(methods=["POST"])
-def save_message_template(template_key, subject=None, body=None, is_enabled=None):
+def save_message_template(template_key, subject=None, body=None, is_enabled=None, hide_logo=None):
 	"""Edit the wording of one message the portal sends (P5-R14). The
 	doctype's own `validate()` holds the template to the HelixHR sandbox's
 	rules (plan 2026-10-02-001 U8, R17): unknown variables, disallowed
-	constructs and templates that fail on sample data are refused there."""
+	constructs and templates that fail on sample data are refused there.
+
+	`hide_logo` alone (no subject/body) on a default-wording message keeps a
+	wording-less row that carries just the opt-out."""
 	_assert_can_manage_notifications()
 	rate_limit_per_user("save_message_template")
 	_message_event(template_key)
@@ -7886,12 +8344,15 @@ def save_message_template(template_key, subject=None, body=None, is_enabled=None
 		doc.body = body
 	if is_enabled is not None:
 		doc.is_enabled = cint(is_enabled)
+	if hide_logo is not None:
+		doc.hide_logo = cint(hide_logo)
 	doc.save()
 	return {
 		"template_key": doc.template_key,
 		"subject": doc.subject,
 		"body": doc.body,
 		"is_enabled": cint(doc.is_enabled),
+		"hide_logo": cint(doc.hide_logo),
 	}
 
 
@@ -7905,9 +8366,17 @@ def reset_message_template(template_key):
 	rate_limit_per_user("reset_message_template")
 	_message_event(template_key)
 	if frappe.db.exists("HelixHR Message Template", template_key):
-		# The Notification Manager has no delete DocPerm on purpose -- Desk
-		# delete stays System Manager's. The guard above is this path's gate.
-		frappe.delete_doc("HelixHR Message Template", template_key, ignore_permissions=True)
+		if frappe.db.get_value("HelixHR Message Template", template_key, "hide_logo"):
+			# The logo opt-out is not wording: keep it on a wording-less row.
+			frappe.db.set_value(
+				"HelixHR Message Template",
+				template_key,
+				{"subject": None, "body": None, "is_enabled": 1},
+			)
+		else:
+			# The Notification Manager has no delete DocPerm on purpose -- Desk
+			# delete stays System Manager's. The guard above is this path's gate.
+			frappe.delete_doc("HelixHR Message Template", template_key, ignore_permissions=True)
 		frappe.get_doc(
 			{
 				"doctype": "Comment",
@@ -7922,7 +8391,7 @@ def reset_message_template(template_key):
 	return {"template_key": template_key, "state": "Default"}
 
 
-def _render_draft(template_key, subject, body):
+def _render_draft(template_key, subject, body, hide_logo=0):
 	"""Validate then render an unsaved draft with the event's sample data.
 	A refusal is the same sentence a save would give (R17)."""
 	event = _message_event(template_key)
@@ -7932,26 +8401,33 @@ def _render_draft(template_key, subject, body):
 		validate_message_template(template_key, subject, body)
 	except TemplateRejected as exc:
 		frappe.throw(str(exc), title=_("Template not valid"))
-	return render_message(template_key, sample_context(template_key), source={"subject": subject, "body": body})
+	# The real brand, resolved as `send_notification` does for this caller
+	# (the test send's recipient): their company and its logo, else the
+	# default company's -- never the sample's placeholder logo address.
+	context = {**sample_context(template_key), **message_brand(frappe.session.user)}
+	return render_message(
+		template_key, context, source={"subject": subject, "body": body, "hide_logo": cint(hide_logo)}
+	)
 
 
 @frappe.whitelist(methods=["POST"])
-def preview_message_template(template_key, subject=None, body=None):
+def preview_message_template(template_key, subject=None, body=None, hide_logo=0):
 	"""The draft as the email would look, with sample data. The client shows
-	`html` only in a sandboxed iframe (KTD11)."""
+	`html` only in a sandboxed iframe (KTD11). `hide_logo` is the editor's
+	unsaved "Include company logo" checkbox, inverted."""
 	_assert_can_manage_notifications()
 	rate_limit_per_user("preview_message_template")
-	message = _render_draft(template_key, subject or "", body or "")
-	return {"subject": message["subject"], "html": message["html"]}
+	message = _render_draft(template_key, subject or "", body or "", hide_logo)
+	return {"subject": message["subject"], "html": message["html"], **_message_logo_brand()}
 
 
 @frappe.whitelist(methods=["POST"])
-def send_test_message(template_key, subject=None, body=None):
+def send_test_message(template_key, subject=None, body=None, hide_logo=0):
 	"""Send the draft, with sample data, to the caller's own address only --
 	never a recipient the caller names."""
 	_assert_can_manage_notifications()
 	rate_limit_per_user("send_test_message")
-	message = _render_draft(template_key, subject or "", body or "")
+	message = _render_draft(template_key, subject or "", body or "", hide_logo)
 	email = frappe.db.get_value("User", frappe.session.user, "email")
 	if not email:
 		frappe.throw(_("Your account has no email address to send the test to."))
@@ -8049,15 +8525,10 @@ def save_shift_type(name, **fields):
 # rather than creating a second template per event on first save.
 # ---------------------------------------------------------------------------
 
-# The seeded default template each event's reminder starts out linked to
-# (`patches/v1_0/seed_celebration_templates.py`) -- reused by name so a
-# first save edits that template rather than creating a duplicate.
-_CELEBRATION_DEFAULT_TEMPLATES = {
-	"birthday": "HelixHR Birthday Reminder",
-	"work_anniversary": "HelixHR Work Anniversary Reminder",
-	# Plan 2026-10-04-004 U3: the seeded holiday default, reused by name.
-	"holiday": "HelixHR Holiday Reminder",
-}
+# Plan 2026-10-05-001 U11 (KTD12): each (event, company) sends from its own
+# Email Template, `reminders.celebration_template_name` -- the shared seeded
+# names are no longer written by a save, so one company's edit never
+# reaches another's mail.
 
 
 def _celebration_reminder_projection(event, company):
@@ -8069,11 +8540,16 @@ def _celebration_reminder_projection(event, company):
 	reminder = frappe.db.get_value(
 		"HelixHR Celebration Reminder",
 		{"event": event, "company": company},
-		["name", "is_enabled", "email_template", "recipient_mode", "frequency"],
+		["name", "is_enabled", "email_template", "recipient_mode", "frequency", "hide_logo"],
 		as_dict=True,
 	)
 
-	subject = body = None
+	from helixhr.reminders import CELEBRATION_DEFAULTS
+
+	# No row or no template yet: the editor opens on the shipped default,
+	# never blank (U11).
+	subject = CELEBRATION_DEFAULTS[event]["subject"]
+	body = CELEBRATION_DEFAULTS[event]["body"]
 	use_html = True
 	template_name = reminder.email_template if reminder else None
 	if template_name and frappe.db.exists("Email Template", template_name):
@@ -8101,6 +8577,7 @@ def _celebration_reminder_projection(event, company):
 		"body": body,
 		"use_html": use_html,
 		"recipients": recipients,
+		"hide_logo": bool(reminder and reminder.hide_logo),
 	}
 
 
@@ -8135,19 +8612,18 @@ CELEBRATION_TEMPLATE_TOKENS = (
 
 
 @frappe.whitelist(methods=["POST"])
-def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode="All employees", recipients=None, company=None, frequency=None):
+def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode="All employees", recipients=None, company=None, frequency=None, hide_logo=0):
 	"""HR writes the birthday/work-anniversary email and picks its audience
 	from the portal (P8-U12 / P8-R5, P8-R6). Per company since plan
 	2026-10-04-004 U1: `company` names whose setting this is -- the
 	caller's own company when omitted, as the settings page's section
 	does until the Email Templates group replaces it (U4).
 
-	`subject`/`body` are compiled with `validate_template` before anything
-	is written (P8-U12's own test scenario: a Jinja syntax error is refused
-	at save time, not at 8am the next morning) -- `restrict_globals=True`,
-	the same restriction `reminders._render_restricted` renders with, so a
-	template that only compiles under the *unrestricted* globals still
-	fails here rather than only at send time.
+	`subject`/`body` are rendered against the event's sample context in
+	HelixHR's sandbox before anything is written (P8-U12's own test
+	scenario: a bad template is refused at save time, not at 8am the next
+	morning) -- the same sandbox `reminders._render_restricted` sends with
+	(plan 2026-10-05-001 U11).
 	"""
 	from helixhr.reminders import EVENTS
 
@@ -8174,10 +8650,7 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 
 	subject = (subject or "").strip()
 	body = body or ""
-	from frappe.utils.jinja import validate_template
-
-	validate_template(subject, restrict_globals=True)
-	validate_template(body, restrict_globals=True)
+	_render_celebration_or_throw(event, company, subject, body, frequency)
 
 	reminder = frappe.db.get_value(
 		"HelixHR Celebration Reminder", {"event": event, "company": company}, "name"
@@ -8189,24 +8662,18 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 		reminder.event = event
 		reminder.company = company
 
-	template_name = reminder.email_template or _CELEBRATION_DEFAULT_TEMPLATES[event]
-	if frappe.db.exists("Email Template", template_name):
-		template = frappe.get_doc("Email Template", template_name)
-	else:
-		template = frappe.new_doc("Email Template")
-		template.name = template_name
-		template.use_html = 1
+	template = _company_celebration_template(event, company)
 
 	# `ignore_permissions=True`, not `_assert_config_write` (KTD8's own
 	# framing, reused): Email Template is a shared core doctype used across
 	# the whole site, not one this app owns -- granting HR Manager a real
 	# DocPerm on it would let them edit or delete *any* Email Template, not
-	# just the two celebration ones. `_is_hr()` above is the real
-	# authorisation boundary here, and `template_name` is never caller
-	# input -- it only ever resolves to one of the two names in
-	# `_CELEBRATION_DEFAULT_TEMPLATES` or a reminder's own already-saved
-	# `email_template`, so there is no doctype this write can reach outside
-	# the two celebration templates.
+	# just the celebration ones. `_is_hr()` plus the company scope check
+	# above are the real authorisation boundary here, and the template name
+	# is never caller input -- it is always
+	# `reminders.celebration_template_name(event, company)` (U11: never the
+	# shared seeded name, so a company created after the clone patch still
+	# gets its own copy).
 	template.subject = subject
 	if template.use_html:
 		template.response_html = body
@@ -8219,6 +8686,7 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 	reminder.is_enabled = cint(is_enabled)
 	reminder.recipient_mode = recipient_mode
 	reminder.frequency = frequency
+	reminder.hide_logo = cint(hide_logo)
 	reminder.set("recipients", [{"employee": row} for row in recipients])
 	reminder.save()
 	# The portal owns this event: HRMS's own checkbox is read-only in Desk
@@ -8229,6 +8697,132 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 	frappe.db.set_single_value("HR Settings", EVENTS[event]["hrms_field"], 0)
 
 	return _celebration_reminder_projection(event, company)
+
+
+def _company_celebration_template(event, company):
+	"""The (event, company) Email Template, or a new unsaved one under its
+	per-company name (U11)."""
+	from helixhr.reminders import celebration_template_name
+
+	name = celebration_template_name(event, company)
+	if frappe.db.exists("Email Template", name):
+		return frappe.get_doc("Email Template", name)
+	template = frappe.new_doc("Email Template")
+	template.name = name
+	template.use_html = 1
+	return template
+
+
+@frappe.whitelist(methods=["POST"])
+def reset_celebration_template(event, company=None):
+	"""Back to the shipped default wording for the caller's company only
+	(U11): the default is written into that company's own Email Template and
+	the row, if any, is pointed at it. System Manager or an in-scope HR
+	Manager (`_celebration_gate`). The Info comment names the actor, like
+	`reset_message_template`."""
+	from helixhr.reminders import CELEBRATION_DEFAULTS
+
+	company = _celebration_gate(event, "reset_celebration_template", company)
+	default = CELEBRATION_DEFAULTS[event]
+	template = _company_celebration_template(event, company)
+	template.subject = default["subject"]
+	template.use_html = 1
+	template.response_html = default["body"]
+	# Same reasoning as `save_celebration_reminder`: the gate above is the
+	# boundary, and the name is derived, never caller input.
+	template.save(ignore_permissions=True)
+
+	reminder = frappe.db.get_value(
+		"HelixHR Celebration Reminder", {"event": event, "company": company}, "name"
+	)
+	if reminder:
+		frappe.db.set_value("HelixHR Celebration Reminder", reminder, "email_template", template.name)
+	frappe.get_doc(
+		{
+			"doctype": "Comment",
+			"comment_type": "Info",
+			"reference_doctype": "Email Template",
+			"reference_name": template.name,
+			"content": _("{0} reset this email template to the default").format(
+				frappe.utils.get_fullname(frappe.session.user)
+			),
+		}
+	).insert(ignore_permissions=True)
+	return _celebration_reminder_projection(event, company)
+
+
+def _assert_can_set_company_logo(company):
+	"""`set_company_logo`'s gate: HR only; an anchored HR Manager for their
+	own company, a System Manager for any."""
+	if not _is_hr():
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	if "System Manager" not in frappe.get_roles():
+		_assert_company_in_admin_scope(company)
+
+
+@frappe.whitelist(methods=["POST"])
+def set_company_logo(company=None, remove=0):
+	"""Plan 2026-10-05-001 U12 (KTD10): upload, replace or remove the logo
+	every email for `company` carries -- `Company.company_logo`, no new
+	setting. HR only; an anchored HR Manager for their own company, a
+	System Manager for any (review fold-in). The upload is
+	`frappe.request.files["file"]`: PNG, JPEG or WebP by signature, at most
+	2 MB, stored public (mail clients load it without a session) and
+	attached to the Company."""
+	from helixhr.utils import validate_logo_upload
+
+	rate_limit_per_user("set_company_logo")
+	company = company or _celebration_company()
+	_assert_can_set_company_logo(company)
+	if not frappe.db.exists("Company", company):
+		frappe.throw(_("That company does not exist."))
+
+	if cint(remove):
+		# `db.set_value`: HR Manager has no write DocPerm on Company, and
+		# the gate above is this path's authorisation, as for the templates.
+		frappe.db.set_value("Company", company, "company_logo", None)
+		return {"company": company, "logo_url": ""}
+
+	upload = (getattr(frappe.request, "files", None) or {}).get("file")
+	if upload is None:
+		frappe.throw(_("No file came through. Pick the file again."))
+	file_name = os.path.basename(upload.filename or "").strip()
+	content = upload.stream.read()
+	extension = validate_logo_upload(file_name, content)
+	doc = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": f"{frappe.scrub(company)}-logo{extension}",
+			"content": content,
+			"attached_to_doctype": "Company",
+			"attached_to_name": company,
+			"attached_to_field": "company_logo",
+			"is_private": 0,
+		}
+	)
+	doc.insert(ignore_permissions=True)
+	frappe.db.set_value("Company", company, "company_logo", doc.file_url)
+	return {"company": company, "logo_url": doc.file_url}
+
+
+@frappe.whitelist(methods=["POST"])
+def set_email_header_color(company=None, color=None):
+	"""The background of the email header strip for `company` --
+	`Company.helixhr_email_header_color`, beside the logo. `color` is a
+	`#RRGGBB` hex, or empty for the default white. Same gate as
+	`set_company_logo`."""
+	rate_limit_per_user("set_email_header_color")
+	company = company or _celebration_company()
+	_assert_can_set_company_logo(company)
+	if not frappe.db.exists("Company", company):
+		frappe.throw(_("That company does not exist."))
+	color = (color or "").strip()
+	if color and not valid_email_header_color(color):
+		frappe.throw(_("Enter the colour as a hex code like #0B2545."))
+	color = valid_email_header_color(color)
+	# `db.set_value`: as for the logo, the gate above is the authorisation.
+	frappe.db.set_value("Company", company, "helixhr_email_header_color", color or None)
+	return {"company": company, "header_color": company_email_header_colors(company)["header_bg"]}
 
 
 @frappe.whitelist()
@@ -8260,6 +8854,9 @@ def get_celebration_setup(company=None):
 		"companies": _companies_in_admin_scope(),
 		"events": {event: _celebration_reminder_projection(event, company) for event in EVENTS},
 		"template_tokens": CELEBRATION_TEMPLATE_TOKENS,
+		# U12: the logo every email for this company carries.
+		"logo_url": (frappe.db.get_value("Company", company, "company_logo") or "") if company else "",
+		"header_color": company_email_header_colors(company)["header_bg"] if company else "",
 	}
 
 
@@ -8320,25 +8917,32 @@ def _celebration_sample_context(event, company, frequency=None):
 	)
 
 
-def _celebration_draft(event, company, subject, body, frequency=None):
+def _celebration_draft(event, company, subject, body, frequency=None, hide_logo=0):
 	"""Compile then render an unsaved draft with the event's sample context
 	-- the same refusal a save would give (P8-U12's compile check), the
 	same restriction the real render runs under (P8-KTD7). A holiday draft
 	with no cadence given renders against the saved row's own cadence, so
 	the preview shows what this row will actually mail (R11)."""
-	from frappe.utils.jinja import validate_template
-
-	validate_template(subject or "", restrict_globals=True)
-	validate_template(body or "", restrict_globals=True)
 	if not frequency:
 		frequency = frappe.db.get_value(
 			"HelixHR Celebration Reminder", {"event": event, "company": company}, "frequency"
 		)
+	rendered = _render_celebration_or_throw(
+		event, company, subject, body, frequency, include_logo=not cint(hide_logo)
+	)
+	return {"subject": rendered["subject"], "html": rendered["message"]}
+
+
+def _render_celebration_or_throw(event, company, subject, body, frequency=None, include_logo=True):
+	"""Render a draft against the event's sample context in the HelixHR
+	sandbox (U11); any failure is a refusal naming why, not a stack trace."""
+	from helixhr.utils import render_celebration_email
+
 	context = _celebration_sample_context(event, company, frequency)
-	return {
-		"subject": frappe.render_template(subject or "", context, restrict_globals=True),
-		"html": frappe.render_template(body or "", context, restrict_globals=True),
-	}
+	try:
+		return render_celebration_email(subject or "", body or "", context, include_logo=include_logo)
+	except Exception as exc:
+		frappe.throw(_("This template cannot be used: {0}").format(exc), title=_("Template not valid"))
 
 
 def _celebration_gate(event, endpoint, company=None):
@@ -8358,21 +8962,21 @@ def _celebration_gate(event, endpoint, company=None):
 
 
 @frappe.whitelist(methods=["POST"])
-def preview_celebration(event, subject, body, company=None):
+def preview_celebration(event, subject, body, company=None, hide_logo=0):
 	"""R11: the draft as the email would look, rendered with the selected
 	company's own name and logo. The client shows `html` only in a
 	sandboxed iframe (KTD11)."""
 	company = _celebration_gate(event, "preview_celebration", company)
-	rendered = _celebration_draft(event, company, subject, body)
+	rendered = _celebration_draft(event, company, subject, body, hide_logo=hide_logo)
 	return {"subject": rendered["subject"], "html": rendered["html"]}
 
 
 @frappe.whitelist(methods=["POST"])
-def send_test_celebration(event, subject, body, company=None):
+def send_test_celebration(event, subject, body, company=None, hide_logo=0):
 	"""R11: send the draft to the caller's own address only -- never a
 	recipient the caller names, the same rule `send_test_message` holds."""
 	company = _celebration_gate(event, "send_test_celebration", company)
-	rendered = _celebration_draft(event, company, subject, body)
+	rendered = _celebration_draft(event, company, subject, body, hide_logo=hide_logo)
 	email = frappe.db.get_value("User", frappe.session.user, "email")
 	if not email:
 		frappe.throw(_("Your account has no email address to send the test to."))
@@ -9331,9 +9935,8 @@ def _export_fingerprint(report_key, fmt, filters, group_by, sort, hidden):
 	"""Stable hash of one export request (U13 dedups queued exports on it)."""
 	import hashlib
 
-	payload = json.dumps(
-		[report_key, fmt, filters, group_by, sort, sorted(hidden)], sort_keys=True, default=str
-	)
+	hidden = sorted(hidden) if hidden is not None else None
+	payload = json.dumps([report_key, fmt, filters, group_by, sort, hidden], sort_keys=True, default=str)
 	return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -9365,9 +9968,10 @@ def request_export(report_key, format, filters=None, group_by=None, sort=None, h
 
 	entry = reports.get_entry(report_key)
 	scope = access["export_scope"]
-	hidden = reports._parse(hidden, [])
+	# None = the screen never chose: the default-hidden ID columns stay out.
+	hidden = reports._parse(hidden, None)
 	if not isinstance(hidden, list) or not all(isinstance(field, str) for field in hidden):
-		hidden = []
+		hidden = None
 	result = reports.run(report_key, scope, filters, group_by, sort)
 	total_rows = result["shaped"]["total_rows"]
 

@@ -62,7 +62,9 @@ ERROR_LOG_TITLE = "HelixHR celebration reminders"
 TEMPLATE_HTML = (
 	"COUNT:{{ count }} FIRST:{{ persons[0].first_name }} COMPANY:{{ company }} "
 	"LOGO:[{{ logo_url }}] PORTAL:{{ portal_url }} DATE:{{ date }} "
-	"YEARS:{% for person in persons %}{{ person.years }};{% endfor %}"
+	# `years` is an anniversary-only key; the HelixHR sandbox (plan 2026-10-05-001
+	# U11) is StrictUndefined, so the shared marker template defaults it.
+	"YEARS:{% for person in persons %}{{ person.years|default('') }};{% endfor %}"
 )
 
 

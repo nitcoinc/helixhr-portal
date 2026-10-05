@@ -68,6 +68,9 @@ const state = reactive({
    * log and Portal roles. Mirrors `can_admin_portal`, which those endpoints
    * enforce. */
   canAdminPortal: false,
+  /** Documents: the upload / edit / delete controls. Mirrors
+   * `save_document_link`'s own gate, which is the real one. */
+  canManageDocuments: false,
   /** P6-U4: whether this caller can actually reach Desk (a System User
    * holding a `desk_access` role) -- decides whether a Desk link is drawn
    * anywhere in the portal, never whether one works: every method that
@@ -145,6 +148,7 @@ function apply(boot) {
   state.canSeeProjects = !!boot?.can_see_projects
   state.canRunReports = !!boot?.can_run_reports
   state.canAdminPortal = !!boot?.can_admin_portal
+  state.canManageDocuments = !!boot?.can_manage_documents
   state.canOpenDesk = !!boot?.can_open_desk
   state.deskUrl = boot?.desk_url || null
   state.unread = boot?.unread_notifications ?? 0

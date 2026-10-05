@@ -480,7 +480,8 @@ class TestHelixHRDocumentLink(IntegrationTestCase):
 				).insert(ignore_permissions=True)
 
 		everyone_link = frappe.get_doc(
-			{"doctype": "HelixHR Document Link", "title": "Handbook", "url": "https://example.com/handbook"}
+			# "" not omitted: an omitted Link takes the site's default Company.
+			{"doctype": "HelixHR Document Link", "title": "Handbook", "url": "https://example.com/handbook", "company": ""}
 		).insert(ignore_permissions=True)
 		own_company_link = frappe.get_doc(
 			{
@@ -553,13 +554,17 @@ class TestDocumentLinkScope(IntegrationTestCase):
 	def _link(self, title, url, company=None):
 		existing = frappe.db.get_value("HelixHR Document Link", {"title": title}, "name")
 		if existing:
+			# Undo drift: a row first written while a default Company was set
+			# took that company instead of none.
+			frappe.db.set_value("HelixHR Document Link", existing, "company", company)
 			return existing
 		return frappe.get_doc(
 			{
 				"doctype": "HelixHR Document Link",
 				"title": title,
 				"url": url,
-				"company": company,
+				# "" not None: an omitted/None Link takes the site's default Company.
+				"company": company or "",
 			}
 		).insert(ignore_permissions=True).name
 

@@ -120,6 +120,12 @@ const routes = [
     props: true,
   },
   {
+    // Plan 2026-10-05-001 U6: any linked employee's own projects.
+    path: '/my-projects',
+    name: 'MyProjects',
+    component: () => import('@/pages/MyProjects.vue'),
+  },
+  {
     path: '/requests',
     name: 'Requests',
     component: () => import('@/pages/Requests.vue'),

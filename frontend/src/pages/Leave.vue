@@ -48,17 +48,24 @@ function barWidth(entry) {
 // employee to guess which bucket their leave was in; the only division that
 // matters on this page is "still ahead of me" against "already happened", and
 // a `.label` over a run of cards says it without a control at all.
+// R22 / KTD13. A final no or a cancellation is history whatever its dates: a
+// rejected leave for next month is not "coming up". A send-back (docstatus 0)
+// is still live and stays in Coming up while its dates are ahead.
+function isPast(app) {
+  if (app.state === 'rejected' || app.state === 'cancelled') return true
+  return !!app.to_date && app.to_date < serverToday.value
+}
 const groups = computed(() =>
   [
     {
       key: 'coming-up',
       label: 'Coming up',
-      rows: applications.value.filter((app) => !app.to_date || app.to_date >= serverToday.value),
+      rows: applications.value.filter((app) => !isPast(app)),
     },
     {
       key: 'past',
       label: 'Past',
-      rows: applications.value.filter((app) => app.to_date && app.to_date < serverToday.value),
+      rows: applications.value.filter(isPast),
     },
   ].filter((group) => group.rows.length),
 )
@@ -184,6 +191,19 @@ function editAndResend(app) {
     to_date: app.to_date,
     half_day: app.half_day,
     description: app.description,
+  }
+  showForm.value = true
+}
+
+/** R23. "Apply again" on a final rejection: a new application starting from
+ * the rejected one's type, dates and half-day. Not its reason -- that was the
+ * case the manager already said no to, and the employee should write afresh. */
+function applyAgain(app) {
+  formInitial.value = {
+    leave_type: app.leave_type,
+    from_date: app.from_date,
+    to_date: app.to_date,
+    half_day: app.half_day,
   }
   showForm.value = true
 }
@@ -390,8 +410,9 @@ async function doWithdraw() {
                   </div>
 
                   <!-- Only a send-back can be edited and resent. A rejected
-                       application is submitted and final (P4-R4), so it gets
-                       the reason above and no affordance at all. -->
+                       application is submitted and final (P4-R4); it gets
+                       the reason above and "Apply again", which starts a new
+                       application rather than reopening this one (R23). -->
                   <div
                     v-if="app.state === 'sent_back'"
                     class="relative z-10 mt-2 flex flex-wrap items-center gap-2"
@@ -407,6 +428,17 @@ async function doWithdraw() {
                       @click="confirmWithdraw(app)"
                     >
                       Withdraw
+                    </Button>
+                  </div>
+                  <div
+                    v-else-if="app.state === 'rejected'"
+                    class="relative z-10 mt-2"
+                  >
+                    <Button
+                      variant="subtle"
+                      @click="applyAgain(app)"
+                    >
+                      Apply again
                     </Button>
                   </div>
                   <div
@@ -603,6 +635,14 @@ async function doWithdraw() {
                   Withdraw
                 </Button>
               </div>
+              <Button
+                v-else-if="selected.state === 'rejected'"
+                variant="solid"
+                theme="blue"
+                @click="applyAgain(selected)"
+              >
+                Apply again
+              </Button>
               <div
                 v-else-if="selected.can_withdraw"
                 class="flex flex-wrap items-center gap-3"

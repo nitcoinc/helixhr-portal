@@ -570,6 +570,32 @@ class TestNotificationSetupApi(IntegrationTestCase):
 			)
 		)
 
+	def test_a_template_that_fails_on_real_data_reports_its_last_fallback(self):
+		"""Plan 2026-10-05-001 U13: passes the sample data, fails on a real
+		send (zero days), falls back -- and the setup says so until a fix is
+		saved."""
+		from helixhr.utils import render_message
+
+		save_message_template(
+			"leave_approved", subject="Approved", body="<p>{{ 10 / days }}</p>", is_enabled=1
+		)
+		events = {event["key"]: event for event in get_notification_setup()["events"]}
+		self.assertIsNone(events["leave_approved"]["last_fallback"], "a healthy template reports nothing")
+
+		message = render_message("leave_approved", {"days": 0, "leave_type": "Casual"})
+		self.assertNotIn("10 /", message["html"])
+		fallback = {event["key"]: event for event in get_notification_setup()["events"]}["leave_approved"][
+			"last_fallback"
+		]
+		self.assertEqual(fallback["event_key"], "leave_approved")
+		self.assertIn("ZeroDivisionError", fallback["message"])
+		self.assertNotIn("Traceback", fallback["message"])
+		self.assertLessEqual(len(fallback["message"]), 200)
+
+		save_message_template("leave_approved", subject="Approved", body="<p>Fixed</p>", is_enabled=1)
+		events = {event["key"]: event for event in get_notification_setup()["events"]}
+		self.assertIsNone(events["leave_approved"]["last_fallback"], "the warning clears after a fix")
+
 	def test_preview_renders_samples_in_the_layout_and_refuses_an_unknown_variable(self):
 		result = preview_message_template(
 			"leave_approved", subject="Hi {{ recipient_first_name }}", body="<p>{{ approver_name }}</p>"

@@ -160,6 +160,28 @@ class TestHoursByProject(IntegrationTestCase):
 		frappe.set_user(self.hr_user)
 		self.assertEqual(_hours(project=self.other_company_project, **self.window), [])
 
+	def test_rows_carry_project_name_and_a_taskless_row_says_no_task(self):
+		"""Plan 2026-10-05-001 U8 (KTD8, R14)."""
+		_make_timesheet(
+			self.company,
+			self.employee_name,
+			"Emp",
+			[
+				{"date": self.today, "project": self.member_project, "task": self.task, "hours": 1},
+				{"date": self.today, "project": self.member_project, "hours": 1},
+			],
+		)
+		frappe.set_user(self.hr_user)
+		rows = [row for row in _hours(**self.window) if row["project"] == self.member_project]
+		expected = frappe.db.get_value("Project", self.member_project, "project_name")
+		self.assertEqual({row["project_name"] for row in rows}, {expected})
+		self.assertIn("(No task)", {row["task_subject"] for row in rows if not row["task"]})
+
+		result = run_report("hours_by_project", filters=self.window)
+		csv = reports.to_csv(result["columns"], result["rows"]).decode("utf-8-sig")
+		self.assertIn("Project name", csv.splitlines()[0])
+		self.assertIn(expected, csv)
+
 	def test_filtering_by_task_returns_only_that_tasks_rows(self):
 		_make_timesheet(
 			self.company,
@@ -423,7 +445,8 @@ class TestRunReportWrapped(IntegrationTestCase):
 	def test_employee_directory_returns_only_allowlisted_columns(self):
 		frappe.set_user(self.hr_user)
 		result = run_report("employee_directory", filters={"status": "Active"})
-		allowed = {column[0] for column in reports._DIRECTORY_COLUMNS}
+		# Plus the manager's name (plan 2026-10-05-001 U8), derived from reports_to.
+		allowed = {column[0] for column in reports._DIRECTORY_COLUMNS} | {"reports_to_name"}
 		for row in _rows(result):
 			self.assertLessEqual(set(row) - {"_kind"}, allowed)
 			self.assertNotEqual(frappe.db.get_value("Employee", row["name"], "company"), self.other_company)

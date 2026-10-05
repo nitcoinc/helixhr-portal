@@ -60,6 +60,14 @@ describe('reportQuery', () => {
     })
   })
 
+  it('tells "never chose columns" (defaults) from "show every column"', () => {
+    expect(fromQuery({}, ENTRY).hidden).toBe(null)
+    expect(toQuery({ hidden: null }, ENTRY)).toEqual({})
+    const all = toQuery({ hidden: [] }, ENTRY)
+    expect(all).toEqual({ hide: '' })
+    expect(fromQuery(all, ENTRY).hidden).toEqual([])
+  })
+
   it('a bare link carries no state', () => {
     expect(fromQuery({}, ENTRY).hasState).toBe(false)
   })

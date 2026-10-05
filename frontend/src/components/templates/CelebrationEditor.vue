@@ -8,6 +8,7 @@ import { computed, reactive, ref, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { createResource, FormControl, Button } from 'frappe-ui'
 import { session } from '@/lib/session'
+import CompanyLogoControl from '@/components/templates/CompanyLogoControl.vue'
 
 const props = defineProps({
   company: { type: String, required: true },
@@ -53,6 +54,8 @@ const form = reactive({
   is_enabled: false,
   recipient_mode: 'All employees',
   frequency: 'Weekly',
+  // This reminder's opt-out of the company-wide logo above.
+  include_logo: true,
   recipients: /** @type {{name: string, employee_name: string}[]} */ ([]),
 })
 const formError = ref('')
@@ -70,6 +73,7 @@ function edit(event) {
     is_enabled: !!row.is_enabled,
     recipient_mode: row.recipient_mode || 'All employees',
     frequency: row.frequency || 'Weekly',
+    include_logo: !row.hide_logo,
     recipients: (row.recipients || []).map((r) => ({ name: r.employee, employee_name: r.employee_name })),
   })
   formError.value = ''
@@ -152,12 +156,36 @@ async function submit() {
       recipients: selectedIds.value,
       company: props.company,
       frequency: editing.value === 'holiday' ? form.frequency : undefined,
+      hide_logo: form.include_logo ? 0 : 1,
     })
     editing.value = ''
     await setup.reload()
     emit('saved')
   } catch (error) {
     formError.value = error?.messages?.[0] || 'Could not save that. Please try again.'
+  }
+}
+
+// --- reset to the shipped default (plan 2026-10-05-001 U11) ----------------
+//
+// Server-side for the selected company only; the editor then reopens on the
+// default text so HR sees what came back.
+const resetResource = createResource({ url: 'helixhr.api.reset_celebration_template', method: 'POST' })
+
+async function resetToDefault() {
+  const event = editing.value
+  if (!event) return
+  const message =
+    'Replace this email with the default wording for ' + props.company + '? ' +
+    'Any edits you have not saved will be lost.'
+  if (!window.confirm(message)) return
+  formError.value = ''
+  try {
+    await resetResource.submit({ event, company: props.company })
+    await setup.reload()
+    edit(event)
+  } catch (error) {
+    formError.value = error?.messages?.[0] || 'Could not reset that. Please try again.'
   }
 }
 
@@ -177,6 +205,7 @@ async function refreshPreview() {
       subject: form.subject,
       body: form.body,
       company: props.company,
+      hide_logo: form.include_logo ? 0 : 1,
     })
     preview.html = result.html
     preview.subject = result.subject
@@ -195,6 +224,7 @@ async function sendTest() {
       subject: form.subject,
       body: form.body,
       company: props.company,
+      hide_logo: form.include_logo ? 0 : 1,
     })
     testStatus.value = 'Test sent to your own email address.'
   } catch (error) {
@@ -204,6 +234,12 @@ async function sendTest() {
         : `Test not sent: ${error?.messages?.[0] || 'something went wrong.'}`
   }
 }
+
+// The preview follows the checkbox before it is saved.
+watch(
+  () => form.include_logo,
+  () => refreshPreview(),
+)
 
 defineExpose({ setup })
 </script>
@@ -233,6 +269,13 @@ defineExpose({ setup })
         @update:model-value="(value) => router.replace({ query: { ...route.query, company: value, event: 'birthday' } })"
       />
     </div>
+
+    <CompanyLogoControl
+      :company="props.company"
+      :logo-url="setup.data?.logo_url || ''"
+      :header-color="setup.data?.header_color || ''"
+      @changed="setup.reload()"
+    />
 
     <div
       class="flex gap-1 overflow-x-auto"
@@ -294,6 +337,13 @@ defineExpose({ setup })
           v-model="form.is_enabled"
           type="checkbox"
           label="Send this reminder"
+        />
+
+        <FormControl
+          v-model="form.include_logo"
+          type="checkbox"
+          label="Include company logo"
+          data-testid="celebration-include-logo"
         />
 
         <FormControl
@@ -460,6 +510,14 @@ defineExpose({ setup })
             @click="sendTest"
           >
             Send me a test
+          </Button>
+          <Button
+            variant="ghost"
+            :loading="resetResource.loading"
+            data-testid="celebration-reset"
+            @click="resetToDefault"
+          >
+            Reset to default
           </Button>
           <Button
             variant="ghost"

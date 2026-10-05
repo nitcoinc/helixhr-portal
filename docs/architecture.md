@@ -155,6 +155,30 @@ is ever given its `/private/files/...` path. Every projection that carries `init
 - **The browser.** `components/Avatar.vue` draws the `<img>` and falls back to the monogram on
   `error`. A refusal, a missing photo and a broken URL therefore all render as initials.
 
+### Documents: HR publishes, the link row is the permission (R19, P2-R19)
+
+A HelixHR Document Link is either an uploaded **file** or a web **url** (the controller refuses
+neither), with a `category` (Important / General) and a `published_on` date (defaults to today;
+the `backfill_document_link_dates` patch gave older rows General and their creation date).
+
+- **Who publishes.** `save_document_link` / `delete_document_link` reuse the company-logo gate
+  (`_assert_can_set_company_logo`): HR only; an anchored HR Manager for their own company, never a
+  global (blank-company) row; a System Manager for any. An edit checks the row's current company
+  too, so a row can't be pulled across companies. The bootstrap's `can_manage_documents` only
+  decides whether the controls render.
+- **The file.** Multipart `file`, or `file_url` of a File the caller can already read (copied, not
+  moved). `validate_document_upload` checks it by signature: PDF, DOCX, XLSX, PPTX, PNG, JPEG, at
+  most 20 MB; SVG and HTML never. Stored **private** and attached to the row
+  (`attached_to_field = "file"`), so Frappe's own File permission asks the row's `has_permission`
+  hook: an employee in scope downloads it at `/private/files/...`, anyone else gets 403.
+  `events.file_before_insert` applies the same policy and the private rule to any other path.
+- **The page.** `get_my_documents` is newest first. `Documents.vue` splits it into Important |
+  General tabs (`?tab=general`), and `lib/documentGroups.js` buckets each tab: last 30 days by day,
+  earlier this year by month, older by year. The dashboard card puts Important first.
+- **Default Company trap.** An omitted `company` on insert takes the site's default Company, which
+  silently turns a "for everyone" link into one company's. The portal always sends it; seeds pass
+  `company: ""`.
+
 ## Leave approval runs the native lifecycle
 
 `act_on_approval` on a Leave Application **submits** it (`docstatus` 1). That
@@ -174,6 +198,13 @@ accepts Approved and Rejected and only Approved touches the ledger — and
 `docstatus` 1 is what makes the row unresendable. `api._leave_state` reports
 `sent_back` for the first and `rejected` for the second; `statusBadge.js` keys
 the badge on the same pair.
+
+**Leave page grouping keys on state, not only dates (plan 2026-10-05-001 U14).**
+`rejected` and `cancelled` go under Past whatever their dates; everything else
+is Past only once `to_date` has gone by, so a `sent_back` row still shows Edit
+and resend under Coming up. A `rejected` card offers "Apply again": a new
+application prefilled with type, dates and half-day (not the reason). The
+rejected record stays final; reopening it would need HRMS cancel/amend.
 
 ### Leave has a stage, not a Workflow (P4-KTD4)
 
@@ -364,7 +395,7 @@ company", fall back to the site's default company for that persona only
 | Roster | `get_roster_week` (`mode` = `mine` / `team` / `hr`) | HR only: `assign_shift`, `end_shift_assignment`, `change_shift_assignment`, `cancel_shift_assignment` | Employee (`reports_to`, `default_shift`), Shift Assignment, Shift Type, Leave Application, Holiday List |
 | Timesheet | `get_my_week`, `get_my_timesheet_history`, `get_timesheet_week_start`, `get_my_projects` | `save_my_week`, `submit_my_week` | Timesheet + Timesheet Detail, Workflow "Timesheet Approval" |
 | Requests | `get_my_requests`, `get_my_request` | `create_my_request`, `attach_to_my_request`, `mark_my_request_read` | HR Request, File, Notification Log |
-| Documents | `get_my_documents` (`frappe.client.get_list` is scoped by the same hooks) | none | HelixHR Document Link |
+| Documents | `get_my_documents` (`frappe.client.get_list` is scoped by the same hooks), `get_document_admin_options` (HR) | HR only: `save_document_link`, `delete_document_link` | HelixHR Document Link, File |
 | Notifications | `notification_log.get_notification_logs` | `notification_log.mark_all_as_read`, `mark_my_request_read` | Notification Log, fed by the Notification fixtures and `events.hr_request_on_update` |
 | Approvals | `get_my_approvals`, `get_approval_detail` | `act_on_approval` | Leave Application, Timesheet, Attendance Request, Workflow actions, DocShare |
 | Profile | `get_my_profile` (five tabs; the correction dialog files through `create_my_request`) | `update_my_profile`, `create_my_request` | Employee + its education and work-history tables, HR Request |

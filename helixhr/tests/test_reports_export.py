@@ -70,6 +70,37 @@ class TestExportFormats(IntegrationTestCase):
 		self.assertIn("Subtotal: E1", text)
 		self.assertTrue(text.rstrip().endswith("Total,,,3.25"))
 
+	def test_id_beside_its_name_is_hidden_by_default_and_groups_by_name(self):
+		columns = reports.mark_id_columns(
+			[
+				{"fieldname": "employee", "label": "Employee", "fieldtype": "Link", "options": "Employee"},
+				{"fieldname": "employee_name", "label": "Employee name", "fieldtype": "Data"},
+				{"fieldname": "note", "label": "Note", "fieldtype": "Data"},
+				{"fieldname": "hours", "label": "Hours", "fieldtype": "Float"},
+			]
+		)
+		self.assertEqual(columns[0]["default_hidden"], 1)
+		self.assertEqual(columns[0]["name_field"], "employee_name")
+		self.assertFalse(columns[1].get("default_hidden"))
+		rows = [{**row, "employee_name": f"Name {row['employee']}"} for row in HOURS_ROWS]
+		shaped = reports.shape(columns, rows, ["employee"])
+		subtotal = next(row for row in shaped["rows"] if row["_kind"] == "subtotal")
+		# Grouping still keys on the id; the label and name column carry the name.
+		self.assertEqual(
+			(subtotal["employee"], subtotal["employee_name"], subtotal["_group_label"]),
+			("E1", "Name E1", "Name E1"),
+		)
+		self.assertEqual(subtotal["note"], "Subtotal")
+
+		# hidden=None (never chose) exports names only; [] re-enables the id.
+		default = reports.visible_columns(columns, None)
+		self.assertEqual([c["fieldname"] for c in default], ["employee_name", "note", "hours"])
+		text = reports.to_csv(default, shaped["rows"])[3:].decode()
+		self.assertIn("Subtotal: Name E1", text)
+		self.assertNotIn("E1,", text.replace("Name E1", ""))
+		every = [c["fieldname"] for c in reports.visible_columns(columns, [])]
+		self.assertEqual(every[0], "employee")
+
 	def test_xlsx_totals_match_the_shaper_and_dates_are_dates(self):
 		from openpyxl import load_workbook
 

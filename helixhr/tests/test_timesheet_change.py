@@ -8,6 +8,7 @@ accept-path scenarios come first per the plan's execution note.
 
 import hashlib
 import json
+from unittest.mock import patch
 
 import frappe
 from frappe.model.workflow import apply_workflow
@@ -18,6 +19,7 @@ from helixhr.api import (
 	act_on_approval,
 	get_approval_detail,
 	get_my_approvals,
+	get_my_timesheet_history,
 	get_my_week,
 	raise_timesheet_change,
 	recall_my_week,
@@ -519,3 +521,95 @@ class TestTimesheetChange(IntegrationTestCase):
 		self.assertEqual(detail["actions"], ["Accept", "Decline"])
 		self.assertEqual(detail["comment"], COMMENT)
 		self.assertEqual(detail["total_hours"], 4)
+
+	# --- plan 2026-10-05-001 U2: an HR-role approver still sees their queue ----
+
+	def _queue_count(self, user, change_name):
+		frappe.set_user(user)
+		return sum(1 for row in get_my_approvals()["pending"] if row["name"] == change_name)
+
+	def _assert_approver_with_role_sees_it_once(self, role):
+		self._approved_week()
+		change = self._raise()
+		frappe.set_user("Administrator")
+		manager = frappe.get_doc("User", self.manager_user)
+		had_role = any(row.role == role for row in manager.roles)
+		if not had_role:
+			manager.add_roles(role)
+		try:
+			self.assertEqual(self._queue_count(self.manager_user, change["name"]), 1)
+		finally:
+			if not had_role:
+				frappe.set_user("Administrator")
+				frappe.get_doc("User", self.manager_user).remove_roles(role)
+
+	def test_an_hr_manager_approver_sees_their_reports_request_once(self):
+		self._assert_approver_with_role_sees_it_once("HR Manager")
+
+	def test_a_system_manager_approver_sees_their_reports_request_once(self):
+		self._assert_approver_with_role_sees_it_once("System Manager")
+
+	def test_a_plain_manager_approver_sees_the_request_once(self):
+		self._approved_week()
+		change = self._raise()
+		self.assertEqual(self._queue_count(self.manager_user, change["name"]), 1)
+
+	def test_in_scope_hr_who_is_not_the_approver_sees_it_once(self):
+		_hr_employee, hr_user = make_test_hr_manager_employee()
+		self._approved_week()
+		change = self._raise()
+		self.assertEqual(self._queue_count(hr_user, change["name"]), 1)
+		self.assertEqual(self._queue_count(self.manager_user, change["name"]), 1)
+
+	# --- plan 2026-10-05-001 U4: history, email links, re-raise ---------------
+
+	def _history_week(self, timesheet):
+		start = 0
+		while True:
+			page = get_my_timesheet_history(limit=52, start=start)
+			for week in page["weeks"]:
+				if week["name"] == timesheet:
+					return week
+			if not page["weeks"]:
+				return None
+			start += len(page["weeks"])
+
+	def test_history_with_an_open_change_request_carries_it(self):
+		timesheet = self._approved_week()
+		change = self._raise()
+		frappe.set_user(self.employee_user)
+		week = self._history_week(timesheet)
+		self.assertEqual(week["open_change"], {"name": change["name"], "comment": COMMENT})
+
+	def _decision_url(self, action, comment=None):
+		self._approved_week()
+		change = self._raise()
+		with patch("helixhr.events.send_notification") as send:
+			self._act(change["name"], action, self.manager_user, comment=comment)
+		contexts = [call.args[2] for call in send.call_args_list if call.args[0] == "timesheet_change_decided"]
+		self.assertEqual(len(contexts), 1)
+		return contexts[0]["action_url"]
+
+	def test_the_decline_email_links_to_the_week(self):
+		url = self._decision_url("Decline", comment="The hours match the project's record.")
+		self.assertTrue(url.endswith(f"/helixhr/timesheet/{self.monday}"), url)
+		self.assertNotIn("?week=", url)
+
+	def test_the_accept_email_links_to_the_amended_week(self):
+		url = self._decision_url("Accept")
+		frappe.set_user(self.employee_user)
+		amended = get_my_week(str(self.monday))
+		self.assertEqual(amended["timesheet"]["workflow_state"], "Draft")
+		self.assertTrue(url.endswith(f"/helixhr/timesheet/{self.monday}"), url)
+
+	def test_a_new_request_can_follow_a_decline(self):
+		self._approved_week()
+		change = self._raise()
+		self._act(change["name"], "Decline", self.manager_user, comment="The hours match the project's record.")
+
+		frappe.set_user(self.employee_user)
+		week = get_my_week(str(self.monday))
+		self.assertEqual(week["declined_change"]["name"], change["name"])
+		self.assertTrue(week["changeable"]["ok"])
+		again = self._raise("Wednesday should be three hours, not one")
+		self.assertNotEqual(again["name"], change["name"])

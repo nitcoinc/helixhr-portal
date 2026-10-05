@@ -466,6 +466,49 @@ no company twice. A company whose send *failed* (broken template, no account)
 is not marked, so fixing the cause and running the job by hand the same morning
 still delivers.
 
+**Per-company templates (plan 2026-10-05-001 U11).** Each (event, company)
+sends from its own Email Template, `HelixHR Birthday Reminder - <Company>`
+(and the anniversary / holiday equivalents). The migrate that ships this runs
+`clone_celebration_templates_per_company`: every row gets its company's copy
+of what it sent before, except text still identical to the old seeded default,
+which becomes the new body-only default. The shared templates stay but nothing
+reads them. Verify after migrate:
+
+```sql
+SELECT event, company, email_template FROM `tabHelixHR Celebration Reminder`;
+-- every email_template ends in " - <company>"
+```
+
+Rendering is the HelixHR sandbox now (no `frappe.*`, unknown variables
+raise): an old custom template that called `frappe.db...` stops sending and
+logs under `HelixHR celebration reminders` -- open it in the editor, which
+refuses it with the reason, and fix or "Reset to default". A body-only
+template is wrapped in the branded layout; one containing `<html`, `<body`
+or `logo_url` is sent as is. **Editing or resetting a template does not
+lift the 36 h rerun guard**: a company already mailed today is not mailed
+again by a hand-run job after the fix.
+
+**Email logo (plan 2026-10-05-001 U12).** Portal → Email templates →
+"Celebrations & holidays" → Email logo writes `Company.company_logo` for the
+selected company (PNG/JPEG/WebP, 2 MB, public File). Every portal email is
+branded with the *recipient's* company logo, falling back to the default
+company only for a user with no active Employee. A mail with no logo shows
+the company name instead of an image.
+
+**Email header colour.** Below the logo control, `set_email_header_color`
+(same gate) writes `Company.helixhr_email_header_color` (custom field
+fixture; `#rrggbb` or empty = white). `helixhr_layout.html` paints the
+header strip with it; text is white or `#1f2328` by WCAG relative luminance
+(`utils.email_header_colors`). The value is re-validated at render, so a
+bad value set in Desk renders white, never raw CSS. A transparent logo on a
+dark header needs a light version; the control hints at this.
+
+**"This template failed when it was last sent" (plan 2026-10-05-001 U13).**
+A customised portal message template raised on real data and the default
+wording went out. The banner reads the newest `HelixHR message template
+<event> failed` Error Log row newer than the template's last save; the full
+traceback is there. Saving a fix clears the banner.
+
 ## Employee gets locked/HR-only fields from more than one place (U5 follow-up)
 
 `helixhr/fixtures/property_setter.json`'s permlevel pass only queried the `DocField` doctype,
@@ -1380,8 +1423,9 @@ on every status change, silently.
 
 Three of those are new in P2-U9 and judge *values*, not presence:
 
-- **Upload policy** FAILs unless System Settings lists only PDF/PNG/JPG/JPEG/DOCX/XLSX, Max File
-  Size is at most 10 MB, guests cannot upload, and public uploads are restricted to System
+- **Upload policy** FAILs unless System Settings lists only PDF/PNG/JPG/JPEG/DOCX/XLSX/PPTX, Max File
+  Size is at most 20 MB (HR-published documents are the widest portal policy; Frappe's own File
+  checks apply underneath, so a site set to 10 MB or without PPTX refuses those uploads), guests cannot upload, and public uploads are restricted to System
   Managers. The app's own `validate_portal_upload` already refuses anything else on an HR Request;
   this is about every *other* upload the site accepts.
 - **Per-user write limits** re-derives every effective bound, `helixhr_rate_limits` site config
@@ -1518,6 +1562,18 @@ Not a check, but part of going live: to surface a document on the Documents page
 optional `company` (scopes it to one company; leave blank for all) and `description`. No app
 code change is needed for a new link.
 
+## Documents: uploads, the default-Company trap, and Desk edits
+
+- HR publishes from Portal -> Documents -> Upload document. On a site whose System Settings still
+  say 10 MB / no PPTX (the pre-Documents preflight policy), a 20 MB file or a `.pptx` is refused by
+  Frappe's File controller with its own message. Raise Max File Size to 20 and add `PPTX`.
+- A link created in Desk (or by `frappe.client.insert`) with the Company left empty is pre-filled
+  with the site's **default Company**, so "for everyone" quietly becomes one company's. This is
+  what hid the `P2-U8 handbook` e2e row once a test set a default Company. Clear the field in Desk,
+  or publish from the portal, which always sends it.
+- An uploaded document is a private File attached to its link. Deleting the link from the portal
+  deletes the file; replacing the file or switching to a URL deletes the old one.
+
 ## Request ID prefixes: what HR can set, and what it changes (plan 2026-10-04-002)
 
 Each request category carries an **ID prefix** (Settings → Categories → Edit →
@@ -1567,3 +1623,20 @@ IT / Asset category, `HR-REQ-…` when the prefix is blank. Facts operators need
   Hours.** Without it the other flags still work; the preflight WARN names
   it. Set the hours, and the flag appears on the next queue load — no
   migrate needed.
+- **A change request to an approver who also holds HR Manager or System
+  Manager used to show in neither queue half** (fixed in plan 2026-10-05-001
+  U2). `_change_request_summaries` returned nothing for any HR caller, while
+  `_hr_change_request_summaries` skips rows addressed to the caller. The
+  email link still opened the request, because `get_approval_detail` only
+  checks `_assert_may_act_on`. If an approver reports "the email works but
+  Approvals is empty", check their roles first. Queue tests now cover an
+  HR-role and a System Manager approver.
+- **"Declined, but the employee could resubmit": cause unconfirmed** (plan
+  2026-10-05-001 U1). No `HelixHR Timesheet Change` rows existed on any local
+  site to read. Leading hypothesis: an Accept misfire. Decline's first click
+  only opens the reason box, and Accept sat beside it and fired with no
+  confirm. Accept cancels the week and returns an editable Draft. U3 added a
+  confirm and hides Accept while the Decline reason is open. If it happens
+  again, read the row's `status`, `decided_by`, `decision_note` and
+  `amended_timesheet`. Accepted with an amended copy means Accept fired.
+  Declined with a Draft means look for a Send back or a second request.

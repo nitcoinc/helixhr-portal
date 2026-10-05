@@ -50,6 +50,7 @@ PENDING_TIMESHEET_STATES = ("Pending Approval", "Pending HR")
 
 NUMERIC_FIELDTYPES = frozenset({"Int", "Float", "Currency", "Duration"})
 _ROUNDED_FIELDTYPES = frozenset({"Float", "Currency"})
+_TEXT_FIELDTYPES = frozenset({"Data", "Link", "Dynamic Link", "Select", "Small Text", "Text"})
 _ENTITY_TYPES = frozenset({"employee", "project", "task", "department"})
 _MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
@@ -69,7 +70,10 @@ def _this_month():
 	return today()[:7]
 
 
-def _f(name, type, label, maps_to=None, reqd=0, default=None, options=None):
+def _f(name, type, label, maps_to=None, reqd=0, default=None, options=None, help=None):
+	"""One filter spec. ``help`` (plan 2026-10-05-001 U10, KTD9) is shown
+	behind the filter's "i" button; only set it where the label is not
+	self-evident."""
 	return {
 		"name": name,
 		"type": type,
@@ -78,9 +82,17 @@ def _f(name, type, label, maps_to=None, reqd=0, default=None, options=None):
 		"reqd": reqd,
 		"default": default,
 		"options": options,
+		"help": help,
 	}
 
 
+_INCLUDE_PENDING = _f(
+	"include_pending",
+	"toggle",
+	"Include pending approval",
+	default=0,
+	help="Also count timesheets or leave still waiting for approval. Those rows are marked Pending.",
+)
 _EMPLOYEE = _f("employee", "employee", "Employee")
 _DEPARTMENT = _f("department", "department", "Department")
 _FROM = _f("from_date", "date", "From", reqd=1, default=_this_month_start)
@@ -102,8 +114,10 @@ _HOURS_FIELDS = (
 	"ts.employee as employee",
 	"ts.employee_name as employee_name",
 	"td.project as project",
+	"prj.project_name as project_name",
 	"td.task as task",
-	"tsk.subject as task_subject",
+	# Plan 2026-10-05-001 U8: same label the flagship uses for a taskless row.
+	"coalesce(tsk.subject, %(no_task)s) as task_subject",
 	"td.hours as hours",
 	"td.billing_hours as billing_hours",
 )
@@ -119,13 +133,14 @@ def _hours_by_project(filters, scope):
 		{"fieldname": "employee", "label": "Employee", "fieldtype": "Link", "options": "Employee"},
 		{"fieldname": "employee_name", "label": "Employee name", "fieldtype": "Data"},
 		{"fieldname": "project", "label": "Project", "fieldtype": "Link", "options": "Project"},
+		{"fieldname": "project_name", "label": "Project name", "fieldtype": "Data"},
 		{"fieldname": "task", "label": "Task", "fieldtype": "Link", "options": "Task"},
 		{"fieldname": "task_subject", "label": "Task subject", "fieldtype": "Data"},
 		{"fieldname": "hours", "label": "Hours", "fieldtype": "Float"},
 		{"fieldname": "billing_hours", "label": "Billable hours", "fieldtype": "Float"},
 	]
 	fields = list(_HOURS_FIELDS)
-	values = {"pending_states": PENDING_TIMESHEET_STATES}
+	values = {"pending_states": PENDING_TIMESHEET_STATES, "no_task": NO_TASK}
 	if include_pending:
 		conditions = ["(ts.docstatus = 1 or (ts.docstatus = 0 and ts.workflow_state in %(pending_states)s))"]
 		fields.append("if(ts.docstatus = 1, 'Approved', 'Pending') as approval")
@@ -162,6 +177,7 @@ def _hours_by_project(filters, scope):
 		from `tabTimesheet Detail` td
 		inner join `tabTimesheet` ts on ts.name = td.parent
 		left join `tabTask` tsk on tsk.name = td.task
+		left join `tabProject` prj on prj.name = td.project
 		where {" and ".join(conditions)}
 		order by `date` desc, ts.employee asc, td.idx asc
 		""",
@@ -865,6 +881,7 @@ def _hr_request_aging(filters, scope):
 	``correction_*`` field."""
 	columns = [
 		{"fieldname": "request", "label": "Request", "fieldtype": "Link", "options": "HR Request"},
+		{"fieldname": "request_subject", "label": "Subject", "fieldtype": "Data"},
 		{"fieldname": "employee", "label": "Employee", "fieldtype": "Link", "options": "Employee"},
 		{"fieldname": "employee_name", "label": "Employee name", "fieldtype": "Data"},
 		{
@@ -876,6 +893,7 @@ def _hr_request_aging(filters, scope):
 		{"fieldname": "status", "label": "Status", "fieldtype": "Data"},
 		{"fieldname": "routed_to_role", "label": "Routed to", "fieldtype": "Link", "options": "Role"},
 		{"fieldname": "picked_up_by", "label": "Assignee", "fieldtype": "Link", "options": "User"},
+		{"fieldname": "picked_up_by_name", "label": "Assignee name", "fieldtype": "Data"},
 		{"fieldname": "opened_on", "label": "Opened", "fieldtype": "Date"},
 		{"fieldname": "age_days", "label": "Age (days)", "fieldtype": "Int"},
 		{"fieldname": "age_bucket", "label": "Age", "fieldtype": "Data"},
@@ -892,11 +910,13 @@ def _hr_request_aging(filters, scope):
 			values[key] = filters[key]
 	rows = frappe.db.sql(
 		f"""
-		select r.name as request, r.employee, e.employee_name, r.category, r.status,
-			r.routed_to_role, r.picked_up_by, date(r.creation) as opened_on,
+		select r.name as request, r.subject as request_subject, r.employee, e.employee_name, r.category, r.status,
+			r.routed_to_role, r.picked_up_by, u.full_name as picked_up_by_name,
+			date(r.creation) as opened_on,
 			datediff(%(today)s, date(r.creation)) as age_days
 		from `tabHR Request` r
 		inner join `tabEmployee` e on e.name = r.employee
+		left join `tabUser` u on u.name = r.picked_up_by
 		where {_where(conditions)}
 		order by age_days desc, r.name asc
 		""",
@@ -946,6 +966,69 @@ def _advance_post(columns, rows):
 	return columns, out
 
 
+def _employee_names(columns, rows):
+	"""Plan 2026-10-05-001 U8 (KTD8), wrapped reports only: every Employee
+	link column gets a visible name column right after it. An HRMS name
+	column that is already there (``employee_name``, ``reports_to_name``) is
+	un-hidden; a missing one is added and filled from Employee."""
+	columns = [dict(column) for column in columns]
+	fieldnames = {column["fieldname"] for column in columns}
+	for column in list(columns):
+		if column.get("fieldtype") != "Link" or column.get("options") != "Employee":
+			continue
+		field = column["fieldname"]
+		name_field = "employee_name" if field == "employee" else f"{field}_name"
+		if name_field in fieldnames:
+			next(c for c in columns if c["fieldname"] == name_field).pop("hidden", None)
+			continue
+		ids = list({row.get(field) for row in rows if row.get(field)})
+		names = (
+			dict(
+				frappe.get_all(
+					"Employee", filters={"name": ["in", ids]}, fields=["name", "employee_name"], as_list=True
+				)
+			)
+			if ids
+			else {}
+		)
+		columns.insert(
+			columns.index(column) + 1,
+			{
+				"fieldname": name_field,
+				"label": f"{column.get('label') or frappe.unscrub(field)} name",
+				"fieldtype": "Data",
+			},
+		)
+		fieldnames.add(name_field)
+		rows = [{**row, name_field: names.get(row.get(field))} for row in rows]
+	return columns, rows
+
+
+# ID column -> its human-name column, where the name is not ``<id>_name``.
+_ID_NAME_FIELDS = {"employee": "employee_name", "task": "task_subject", "request": "request_subject"}
+
+
+def mark_id_columns(columns):
+	"""Every report (catalog and wrapped): an ID column (Employee, Project,
+	Task, Reports to, Assignee...) that sits beside its name column is hidden
+	by default -- ``default_hidden`` for the screen's Columns picker and the
+	exports -- and names that column in ``name_field`` so a group on the ID
+	is labelled by the name. Re-enabling it on screen brings the ID back."""
+	fieldnames = {column["fieldname"] for column in columns}
+	out = []
+	for column in columns:
+		column = dict(column)
+		field = column["fieldname"]
+		if field == "name" and column.get("options") == "Employee":
+			name_field = "employee_name"
+		else:
+			name_field = _ID_NAME_FIELDS.get(field, f"{field}_name")
+		if column.get("fieldtype") == "Link" and name_field in fieldnames:
+			column.update({"default_hidden": 1, "name_field": name_field})
+		out.append(column)
+	return out
+
+
 def _list_adapt(*fields):
 	"""HRMS filters applied with ``isin``: wrap the portal's single value."""
 
@@ -981,6 +1064,9 @@ def _employee_directory(filters, scope):
 		{"fieldname": f, "label": label, "fieldtype": ft, **({"options": opt} if opt else {})}
 		for f, label, ft, opt in _DIRECTORY_COLUMNS
 	]
+	# Plan 2026-10-05-001 U8 (KTD8): the manager's name next to the id.
+	at = next(i for i, column in enumerate(columns) if column["fieldname"] == "reports_to") + 1
+	columns.insert(at, {"fieldname": "reports_to_name", "label": "Reports to name", "fieldtype": "Data"})
 	query = {}
 	if scope["kind"] == "company":
 		query["company"] = scope["company"]
@@ -996,6 +1082,21 @@ def _employee_directory(filters, scope):
 		order_by="employee_name asc",
 		ignore_permissions=True,
 	)
+	managers = {row.reports_to for row in rows if row.reports_to}
+	names = (
+		dict(
+			frappe.get_all(
+				"Employee",
+				filters={"name": ["in", list(managers)]},
+				fields=["name", "employee_name"],
+				as_list=True,
+			)
+		)
+		if managers
+		else {}
+	)
+	for row in rows:
+		row["reports_to_name"] = names.get(row.reports_to)
 	return columns, rows
 
 
@@ -1070,7 +1171,7 @@ CATALOG = (
 			_f("task", "task", "Task"),
 			_FROM,
 			_TO,
-			_f("include_pending", "toggle", "Include pending approval", default=0),
+			_INCLUDE_PENDING,
 		],
 		query=_hours_by_project,
 		default_preset="last_month",
@@ -1088,7 +1189,14 @@ CATALOG = (
 		[
 			_f("project", "project", "Project", reqd=1),
 			_f("month", "month", "Month", reqd=1, default=_this_month),
-			_f("basis", "select", "Hours basis", default="All hours", options=HOURS_BASIS),
+			_f(
+				"basis",
+				"select",
+				"Hours basis",
+				default="All hours",
+				options=HOURS_BASIS,
+				help="All hours counts every approved hour. Billable hours counts only hours marked billable.",
+			),
 		],
 		query=_project_timesheet,
 		extra=_project_timesheet_extra,
@@ -1112,7 +1220,13 @@ CATALOG = (
 			_TO,
 			_EMPLOYEE,
 			_DEPARTMENT,
-			_f("project_members_only", "toggle", "Project members only", default=1),
+			_f(
+				"project_members_only",
+				"toggle",
+				"Project members only",
+				default=1,
+				help="Only list people who are members of at least one project. Turn off to check everyone.",
+			),
 		],
 		query=_missing_timesheets,
 		default_preset="last_month",
@@ -1174,7 +1288,18 @@ CATALOG = (
 		"Leave balance summary",
 		"What are leave balances across the company, one row per person?",
 		"frappe",
-		[_f("date", "date", "As of", reqd=1, default=today), _EMPLOYEE, _DEPARTMENT],
+		[
+			_f(
+				"date",
+				"date",
+				"As of",
+				reqd=1,
+				default=today,
+				help="Balances are worked out as they stood at the end of this day.",
+			),
+			_EMPLOYEE,
+			_DEPARTMENT,
+		],
 		report="Employee Leave Balance Summary",
 		group_by=("department",),
 		default_grants=_HR_USER_RUN,
@@ -1280,7 +1405,7 @@ CATALOG = (
 			_TO,
 			_EMPLOYEE,
 			_DEPARTMENT,
-			_f("include_pending", "toggle", "Include pending approval", default=0),
+			_INCLUDE_PENDING,
 		],
 		query=_who_is_out,
 		default_preset="this_month",
@@ -1303,6 +1428,7 @@ CATALOG = (
 				reqd=1,
 				default="Department",
 				options=("Department", "Designation", "Branch", "Employment Type", "Grade"),
+				help="Which employee field the headcount is split by.",
 			)
 		],
 		report="Employee Analytics",
@@ -1514,7 +1640,18 @@ def resolve_filters(entry, raw, scope):
 # the report itself is still company-scoped.
 
 OPTIONS_LIMIT = 20
-OPTIONS_QUERY_MIN = 2
+# U7: what "active" means per picker doctype. Browse lists only these; a
+# typed query lists them first, then the inactive matches.
+_ACTIVE_FILTERS = {
+	"Project": {"status": "Open"},
+	"Task": {"status": ["not in", ("Completed", "Cancelled")]},
+	"Department": {"disabled": 0},
+}
+_INACTIVE_FILTERS = {
+	"Project": {"status": ["!=", "Open"]},
+	"Task": {"status": ["in", ("Completed", "Cancelled")]},
+	"Department": {"disabled": 1},
+}
 _OPTIONS_QUERY_MAX = 60
 _SELECT_LINK_DOCTYPES = {
 	"designation": "Designation",
@@ -1576,7 +1713,10 @@ def _option_source(spec, scope, context):
 def search_options(entry, filter_name, scope, query=None, value=None, context=None):
 	"""Up to `OPTIONS_LIMIT` ``{value, label, description}`` for one picker.
 
-	``query`` shorter than `OPTIONS_QUERY_MIN` returns nothing. ``value``
+	An empty ``query`` browses (plan 2026-10-05-001 U7, KTD7): active rows
+	only (`_ACTIVE_FILTERS`), most recently modified first. A typed ``query``
+	also matches inactive rows (a Completed project), listed after the
+	active matches. ``value``
 	(instead of ``query``) resolves the label of one already-chosen value --
 	the URL-load case -- and returns ``[]`` when it is out of scope.
 	A filter the entry does not declare, or one with no picker, is refused.
@@ -1591,29 +1731,37 @@ def search_options(entry, filter_name, scope, query=None, value=None, context=No
 	if filters is None:
 		return []
 
-	or_filters = None
+	fields = list(dict.fromkeys(["name", label_field] + ([description_field] if description_field else [])))
+
+	def fetch(row_filters, or_filters=None, order_by=f"{label_field} asc", limit=OPTIONS_LIMIT):
+		return frappe.get_all(
+			doctype,
+			filters=row_filters,
+			or_filters=or_filters,
+			fields=fields,
+			order_by=order_by,
+			limit=limit,
+			ignore_permissions=True,
+		)
+
 	if value not in (None, ""):
 		if not isinstance(value, str):
 			return []
-		filters = {**filters, "name": value}
+		rows = fetch({**filters, "name": value})
 	else:
 		needle = query.strip()[:_OPTIONS_QUERY_MAX] if isinstance(query, str) else ""
-		if len(needle) < OPTIONS_QUERY_MIN:
-			return []
 		if doctype == "Employee":
 			filters = {**filters, "status": "Active"}
-		or_filters = [[field, "like", f"%{needle}%"] for field in search_fields]
-
-	fields = ["name", label_field] + ([description_field] if description_field else [])
-	rows = frappe.get_all(
-		doctype,
-		filters=filters,
-		or_filters=or_filters,
-		fields=list(dict.fromkeys(fields)),
-		order_by=f"{label_field} asc",
-		limit=OPTIONS_LIMIT,
-		ignore_permissions=True,
-	)
+		active = {**filters, **_ACTIVE_FILTERS.get(doctype, {})}
+		if not needle:
+			rows = fetch(active, order_by="modified desc")
+		else:
+			or_filters = [[field, "like", f"%{needle}%"] for field in search_fields]
+			rows = fetch(active, or_filters)
+			if doctype in _INACTIVE_FILTERS and len(rows) < OPTIONS_LIMIT:
+				rows += fetch(
+					{**filters, **_INACTIVE_FILTERS[doctype]}, or_filters, limit=OPTIONS_LIMIT - len(rows)
+				)
 	return [
 		{
 			"value": row.name,
@@ -1652,6 +1800,7 @@ def client_entry(entry, access):
 				"reqd": spec["reqd"],
 				"default": _client_default(spec),
 				"options": list(spec["options"]) if spec["options"] else None,
+				**({"help": spec["help"]} if spec["help"] else {}),
 			}
 			for spec in entry["filters"]
 		],
@@ -1702,6 +1851,7 @@ def _run_frappe_report(entry, clean, scope, raw):
 	rows = [row for row in rows if isinstance(row, dict)]
 	if entry["post"]:
 		columns, rows = entry["post"](columns, rows)
+	columns, rows = _employee_names(columns, rows)
 	if not entry["shows_amounts"]:
 		# R3: Currency columns leave wrapped output unless the entry is
 		# declared to show expense amounts.
@@ -1760,6 +1910,23 @@ def shape(columns, rows, group_by=(), sort=None, totals=None):
 	if totals is None:
 		totals = [c["fieldname"] for c in columns if c.get("fieldtype") in NUMERIC_FIELDTYPES]
 	totals = [field for field in totals if field in fieldnames]
+	# Plan 2026-10-05-001 U8 (R14): a subtotal row says so in the first text
+	# column that is not a group field (else the group columns label it).
+	# A default-hidden ID column, and the name column of a grouped ID, are
+	# never the label: the one is off screen, the other shows the group.
+	names = {c["fieldname"]: c["name_field"] for c in columns if c.get("name_field")}
+	grouped_names = {names[field] for field in group_by if field in names}
+	label_field = next(
+		(
+			c["fieldname"]
+			for c in columns
+			if c["fieldname"] not in group_by
+			and c["fieldname"] not in grouped_names
+			and not c.get("default_hidden")
+			and c.get("fieldtype") in _TEXT_FIELDTYPES
+		),
+		None,
+	)
 
 	data = []
 	for row in rows:
@@ -1783,12 +1950,18 @@ def shape(columns, rows, group_by=(), sort=None, totals=None):
 		field = fields[0]
 		for value, members in itertools.groupby(group_rows, key=lambda row: row.get(field)):
 			members = list(members)
-			emit(members, fields[1:], level + 1, {**parents, field: value})
+			group = {field: value}
+			if field in names:
+				# A group on an ID is labelled by its name (the ID is hidden).
+				group[names[field]] = members[0].get(names[field])
+			emit(members, fields[1:], level + 1, {**parents, **group})
 			out.append(
 				{
 					**parents,
-					field: value,
+					**group,
+					"_group_label": group.get(names.get(field)) or value,
 					**_sums(members, totals),
+					**({label_field: _("Subtotal")} if label_field else {}),
 					"_kind": "subtotal",
 					"_level": level,
 					"_group_field": field,
@@ -1871,6 +2044,7 @@ def run(report_key, scope, filters=None, group_by=None, sort=None):
 			columns, _rows = entry["query"]({}, {"kind": "none"})
 	else:
 		columns, rows = _execute(entry, clean, scope, raw)
+	columns = mark_id_columns(columns)
 
 	shaped = shape(columns, rows, group_by, sort, entry["totals"])
 	return {
@@ -1907,8 +2081,12 @@ def export_mode(fmt, total_rows):
 
 
 def visible_columns(columns, hidden):
-	"""Columns minus the ones hidden on screen (resolved decision 10)."""
-	hidden = set(hidden) if isinstance(hidden, list | tuple) else set()
+	"""Columns minus the ones hidden on screen (resolved decision 10).
+	``hidden=None`` (the screen never chose) means the default: ID columns
+	that sit beside their name (`mark_id_columns`) stay out."""
+	if not isinstance(hidden, list | tuple):
+		hidden = [column["fieldname"] for column in columns if column.get("default_hidden")]
+	hidden = set(hidden)
 	return [column for column in columns if column["fieldname"] not in hidden]
 
 
@@ -1969,9 +2147,15 @@ def export_rows(columns, shaped_rows):
 			label = (
 				_("Total")
 				if kind == "total"
-				else _("Subtotal: {0}").format(row.get(row["_group_field"]) or _("(none)"))
+				else _("Subtotal: {0}").format(
+					row.get("_group_label", row.get(row["_group_field"])) or _("(none)")
+				)
 			)
-			if cells[0] in (None, "") or fields[0] == row.get("_group_field"):
+			if (
+				cells[0] in (None, "")
+				or fields[0] == row.get("_group_field")
+				or (kind == "subtotal" and cells[0] in (_("Subtotal"), row.get("_group_label")))
+			):
 				cells[0] = label
 		out.append((kind, cells))
 	return out

@@ -5,6 +5,8 @@ Employee Hours Utilization report. U9: attendance and shifts. U10: leave.
 U11: people and lifecycle. Every wrapped report has a two-company isolation
 test (resolved decision 1)."""
 
+import re
+
 import frappe
 from frappe.tests import IntegrationTestCase
 
@@ -87,6 +89,34 @@ class TestNewEntriesAreSeeded(IntegrationTestCase):
 			set_report_access(key, hr_user_run=1)
 			result = _as(hr_user, run_report, key)
 			self.assertEqual(result["rows"][-1]["_kind"], "total", key)
+
+
+class TestFilterHelp(IntegrationTestCase):
+	"""Plan 2026-10-05-001 U10 (KTD9): help rides in the filter spec."""
+
+	WITH_HELP = frozenset(
+		{
+			("hours_by_project", "include_pending"),
+			("who_is_out", "include_pending"),
+			("project_timesheet", "basis"),
+			("missing_timesheets", "project_members_only"),
+			("headcount", "parameter"),
+			("leave_balance_summary", "date"),
+		}
+	)
+
+	def test_catalog_payload_carries_help_only_where_named(self):
+		access = {"can_export": False}
+		seen = set()
+		for entry in reports.CATALOG:
+			for spec in reports.client_entry(entry, access)["filters"]:
+				pair = (entry["key"], spec["name"])
+				if pair in self.WITH_HELP:
+					self.assertTrue(spec.get("help"), pair)
+					seen.add(pair)
+				else:
+					self.assertNotIn("help", spec, pair)
+		self.assertEqual(seen, self.WITH_HELP)
 
 
 class TestHoursByProjectTaskEmployee(IntegrationTestCase):
@@ -593,3 +623,358 @@ class TestPeopleReports(_TwoCompanies):
 		self.assertNotIn("_T U11 ADV foreign", rows)
 		self.assertEqual(rows["_T U11 ADV own"]["employee"], self.employee)
 		self.assertEqual(rows["_T U11 ADV own"]["advance_amount"], 300)
+
+
+# Plan 2026-10-05-001 U8: columns that are allowed to be blank in every row of
+# the seeded data below, with the reason. Anything not listed here must carry a
+# value in at least one row, or the mapping layer has lost it.
+OPTIONAL_BLANK = {
+	# Exit paperwork is optional in HRMS; a leaver may have none of it.
+	"employee_exits": {"exit_interview", "interview_status", "employee_status", "full_and_final_statement"},
+	# Only filled when the employee came in late / left early.
+	"shift_attendance": {"late_entry_hrs", "early_exit_hrs"},
+	# An open request nobody has picked up yet has no assignee.
+	"hr_request_aging": {"picked_up_by", "picked_up_by_name"},
+	# Birthdays carry no year count (never a birth year, U11).
+	"celebrations": {"years"},
+	# HRMS sets it on leave-application entries only, never on allocations.
+	"leave_ledger": {"holiday_list"},
+}
+
+
+_DAY_COLUMN = re.compile(r"^\d{2}-\d{2}-\d{4}$")
+
+
+class TestNoUnexplainedBlanks(_TwoCompanies):
+	"""Plan 2026-10-05-001 U8 characterization: on seeded data, run every
+	catalog report and list declared columns blank in every row."""
+
+	DAY = "2015-03-04"
+
+	def setUp(self):
+		super().setUp()
+		from helixhr.tests.utils import (
+			_ensure_directory_masters,
+			ensure_holiday_list_assignment,
+			ensure_test_holiday,
+			ensure_test_shift_type,
+			make_celebration_employee,
+		)
+
+		frappe.db.set_single_value("HR Settings", "standard_working_hours", 8)
+		designation, department = _ensure_directory_masters(self.company)
+		for doctype, field, value in (
+			("Branch", "branch", "_Test U8 Branch"),
+			("Employment Type", "employee_type_name", "_Test U8 Type"),
+		):
+			frappe.get_doc({"doctype": doctype, field: value}).insert(
+				ignore_permissions=True, ignore_if_duplicate=True
+			)
+		manager = frappe.db.get_value("Employee", self.employee, "reports_to")
+		masters = {
+			"department": department,
+			"designation": designation,
+			"branch": "_Test U8 Branch",
+			"employment_type": "_Test U8 Type",
+			"reports_to": manager,
+		}
+		self.seed = make_celebration_employee("u8-blank", self.company, "1990-03-04", "2014-03-04", **masters)
+		frappe.db.set_value("Employee", self.seed, "company_email", "u8-blank@helixhr.test")
+		self.leaver = make_celebration_employee(
+			"u8-leaver",
+			self.company,
+			"1990-03-05",
+			"2010-01-01",
+			status="Left",
+			relieving_date=self.DAY,
+			**masters,
+		)
+		self.name = frappe.db.get_value("Employee", self.seed, "employee_name")
+
+		customer = frappe.db.get_value("Customer", {}, "name")
+		self.project = make_test_project(self.company, "_Test U8 Blank Project")
+		if customer:
+			frappe.db.set_value("Project", self.project, "customer", customer)
+		self.task = frappe.db.get_value(
+			"Task", {"project": self.project, "subject": "_Test U8 Blank Task"}
+		) or (
+			frappe.get_doc({"doctype": "Task", "project": self.project, "subject": "_Test U8 Blank Task"})
+			.insert(ignore_permissions=True)
+			.name
+		)
+		# Class-scoped rollback: a second method must not book the same hours again.
+		if not frappe.db.exists("Timesheet", {"employee": self.seed}):
+			_make_timesheet(
+				self.company,
+				self.seed,
+				self.name,
+				[
+					{
+						"date": self.DAY,
+						"project": self.project,
+						"task": self.task,
+						"hours": 5,
+						"is_billable": 1,
+					},
+					{"date": self.DAY, "project": self.project, "hours": 2, "note": "no task"},
+				],
+			)
+
+		shift = ensure_test_shift_type()
+		ensure_holiday_list_assignment(self.company)
+		ensure_test_holiday("2015-03-05")
+		attendance = []
+		for index, day in enumerate((self.DAY, "2015-03-05")):
+			attendance.append(
+				{
+					"name": f"_T U8 ATT {index}",
+					"employee": self.seed,
+					"employee_name": self.name,
+					"attendance_date": day,
+					"status": "Present",
+					"company": self.company,
+					"department": department,
+					"docstatus": 1,
+					"late_entry": 1,
+					"early_exit": 0,
+					"shift": shift,
+					"in_time": f"{day} 09:30:00",
+					"out_time": f"{day} 17:00:00",
+					"working_hours": 7.5,
+				}
+			)
+		_bulk("Attendance", attendance)
+		_bulk(
+			"Employee Checkin",
+			[
+				{
+					"name": f"_T U8 CHK {index}",
+					"employee": self.seed,
+					"employee_name": self.name,
+					"time": row["in_time"],
+					"log_type": "IN",
+					"attendance": row["name"],
+					"shift": shift,
+					"shift_start": f"{row['attendance_date']} 09:00:00",
+					"shift_end": f"{row['attendance_date']} 17:00:00",
+					"shift_actual_start": f"{row['attendance_date']} 09:00:00",
+					"shift_actual_end": f"{row['attendance_date']} 17:00:00",
+				}
+				for index, row in enumerate(attendance)
+			],
+		)
+
+		leave_type = "_Test U8 Leave"
+		frappe.get_doc({"doctype": "Leave Type", "leave_type_name": leave_type, "allow_negative": 1}).insert(
+			ignore_permissions=True, ignore_if_duplicate=True
+		)
+		self.leave_type = leave_type
+		if not frappe.db.exists("Leave Allocation", {"employee": self.seed, "leave_type": leave_type}):
+			frappe.get_doc(
+				{
+					"doctype": "Leave Allocation",
+					"employee": self.seed,
+					"leave_type": leave_type,
+					"from_date": "2015-01-01",
+					# Inside the run window: Leave Ledger needs both ends in it.
+					"to_date": "2015-03-31",
+					"new_leaves_allocated": 5,
+					"company": self.company,
+				}
+			).insert(ignore_permissions=True).submit()
+		_bulk(
+			"Leave Application",
+			[
+				{
+					"name": "_T U8 LA 1",
+					"employee": self.seed,
+					"employee_name": self.name,
+					"leave_type": leave_type,
+					"from_date": "2015-03-09",
+					"to_date": "2015-03-09",
+					"status": "Approved",
+					"docstatus": 1,
+					"company": self.company,
+					"department": department,
+					"total_leave_days": 1,
+				}
+			],
+		)
+		_bulk(
+			"HR Request",
+			[
+				{
+					"name": "_T U8 REQ",
+					"employee": self.seed,
+					"subject": "s",
+					"status": "Open",
+					"routed_to_role": "HR Manager",
+					"category": frappe.db.get_value("HelixHR Request Category", {}, "name"),
+					"docstatus": 0,
+				}
+			],
+		)
+		claim = {
+			"name": "_T U8 EC",
+			"employee": self.seed,
+			"employee_name": self.name,
+			"posting_date": self.DAY,
+			"company": self.company,
+			"department": department,
+			"docstatus": 1,
+			"is_paid": 0,
+			"total_sanctioned_amount": 10,
+			"total_amount_reimbursed": 0,
+		}
+		_bulk("Expense Claim", [claim])
+		_bulk(
+			"Payment Ledger Entry",
+			[
+				{
+					"name": "_T U8 PLE",
+					"against_voucher_type": "Expense Claim",
+					"against_voucher_no": claim["name"],
+					"voucher_type": "Expense Claim",
+					"voucher_no": claim["name"],
+					"company": self.company,
+					"amount": 10,
+					"delinked": 0,
+					"docstatus": 1,
+				}
+			],
+		)
+		# A headless test company has no chart of accounts; a raw leaf row is
+		# enough for the report, which only reads the field.
+		advance_account = frappe.db.get_value("Account", {"company": self.company}, "name")
+		if not advance_account:
+			advance_account = "_T U8 Advances - TC"
+			_bulk(
+				"Account",
+				[
+					{
+						"name": advance_account,
+						"account_name": "_T U8 Advances",
+						"company": self.company,
+						"root_type": "Asset",
+						"report_type": "Balance Sheet",
+						"is_group": 0,
+					}
+				],
+			)
+		_bulk(
+			"Employee Advance",
+			[
+				{
+					"name": "_T U8 ADV",
+					"employee": self.seed,
+					"employee_name": self.name,
+					"department": department,
+					"posting_date": self.DAY,
+					"company": self.company,
+					"docstatus": 1,
+					"status": "Unpaid",
+					"advance_account": advance_account,
+					"advance_amount": 30,
+					"paid_amount": 0,
+					"claimed_amount": 0,
+					"return_amount": 0,
+					"currency": "USD",
+				}
+			],
+		)
+
+	def _filters(self, entry):
+		names = {spec["name"] for spec in entry["filters"]}
+		candidates = {
+			"from_date": "2015-01-01",
+			"to_date": "2015-03-31",
+			"date": "2015-03-31",
+			"month": "2015-03",
+			"employee": self.seed,
+			"project": self.project,
+			"project_members_only": 0,
+		}
+		filters = {k: v for k, v in candidates.items() if k in names}
+		if entry["key"] == "celebrations":
+			filters["month"] = "March"
+		if entry["key"] in ("employee_exits", "joiners_leavers"):
+			filters.pop("employee", None)
+		return filters
+
+	def test_wrapped_reports_name_every_employee_id(self):
+		"""KTD8: an Employee link in a wrapped report gets a visible name
+		column next to it, filled in (the mapping layer, never HRMS)."""
+		for entry in reports.CATALOG:
+			if entry["engine"] != "frappe":
+				continue
+			result = self._run(entry["key"], **self._filters(entry))
+			columns = result["columns"]
+			fieldnames = [c["fieldname"] for c in columns]
+			for column in columns:
+				if column.get("options") != "Employee" or column.get("fieldtype") != "Link":
+					continue
+				field = column["fieldname"]
+				name_field = "employee_name" if field == "employee" else f"{field}_name"
+				self.assertIn(name_field, fieldnames, entry["key"])
+				name_column = columns[fieldnames.index(name_field)]
+				self.assertFalse(name_column.get("hidden"), entry["key"])
+				self.assertFalse(name_column.get("default_hidden"), entry["key"])
+				# The id itself is off by default (user feedback: names only).
+				self.assertEqual(column.get("default_hidden"), 1, (entry["key"], field))
+				# HRMS Leave Ledger appends a "Total Leaves (...)" row in the id column.
+				rows = [
+					row
+					for row in _data(result)
+					if row.get(field) and frappe.db.exists("Employee", row[field])
+				]
+				self.assertTrue(rows or entry["key"] == "monthly_attendance", (entry["key"], field))
+				self.assertTrue(all(row.get(name_field) for row in rows), (entry["key"], field))
+
+	def test_catalog_reports_hide_ids_that_sit_beside_a_name(self):
+		expected = {
+			"hours_by_project": {"employee", "project", "task"},
+			"employee_directory": {"name", "reports_to"},
+			"hr_request_aging": {"request", "employee", "picked_up_by"},
+			"who_is_out": {"employee"},
+		}
+		for key, ids in expected.items():
+			columns = reports.run(key, {"kind": "unscoped"}, {})["columns"]
+			hidden = {c["fieldname"] for c in columns if c.get("default_hidden")}
+			self.assertEqual(hidden, ids, key)
+			fieldnames = {c["fieldname"] for c in columns}
+			self.assertTrue(all(c["name_field"] in fieldnames for c in columns if c.get("name_field")), key)
+		# An HR Request id had no name: its subject now stands beside it.
+		self.assertIn(
+			"request_subject",
+			[c["fieldname"] for c in reports.run("hr_request_aging", {"kind": "unscoped"}, {})["columns"]],
+		)
+
+	def test_directory_names_the_manager_and_keeps_raw_blanks_empty(self):
+		result = self._run("employee_directory")
+		row = next(row for row in _data(result) if row["name"] == self.seed)
+		manager = frappe.db.get_value("Employee", row["reports_to"], "employee_name")
+		self.assertEqual(row["reports_to_name"], manager)
+		self.assertTrue(
+			any(row.get("reports_to_name") is None for row in _data(result) if not row["reports_to"])
+		)
+
+	def test_every_declared_column_has_a_value_somewhere(self):
+		blanks = {}
+		for entry in reports.CATALOG:
+			result = self._run(entry["key"], **self._filters(entry))
+			rows = _data(result)
+			if not rows:
+				blanks[entry["key"]] = "no rows"
+				continue
+			optional = OPTIONAL_BLANK.get(entry["key"], set())
+			empty = [
+				column["fieldname"]
+				for column in result["columns"]
+				if column["fieldname"] not in optional
+				# Monthly attendance's day columns are blank on days nobody was marked.
+				and not _DAY_COLUMN.match(column["fieldname"])
+				and not any(row.get(column["fieldname"]) not in (None, "") for row in rows)
+			]
+			if empty:
+				blanks[entry["key"]] = empty
+		self.assertEqual(blanks, {})

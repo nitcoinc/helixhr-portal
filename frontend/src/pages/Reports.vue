@@ -54,11 +54,18 @@ const carryQuery = computed(() =>
 const filters = ref({})
 const groupBy = ref([])
 const sort = ref(null)
-const hidden = ref([])
+// null until the viewer picks columns: then `shownHidden` is the result's
+// default-hidden ID columns (each sits beside its name column).
+const hidden = ref(null)
 const lastRun = ref(null)
 
 const reportResource = createResource({ url: 'helixhr.api.run_report', method: 'POST', auto: false })
 const result = computed(() => (lastRun.value ? reportResource.data : null))
+const shownHidden = computed(() => {
+  if (hidden.value) return hidden.value
+  const columns = result.value?.columns
+  return columns ? columns.filter((column) => column.default_hidden).map((column) => column.fieldname) : null
+})
 
 function defaults(item) {
   const values = {}
@@ -109,7 +116,8 @@ const exportQuery = computed(() => ({
   filters: cleanFilters(),
   group_by: groupBy.value,
   sort: sort.value,
-  hidden: hidden.value,
+  // null (no run yet) lets the server apply the same defaults.
+  hidden: shownHidden.value,
 }))
 
 // U12: saved views store the URL state; applying one runs it as the viewer.
@@ -375,6 +383,18 @@ async function openInDesk() {
             {{ runMessage }}
           </p>
 
+          <!-- Plan 2026-10-05-001 U8: the flagship names its project and customer. -->
+          <p
+            v-if="grid && result?.extra?.project_name"
+            class="mb-3 text-sm text-ink-gray-7"
+            data-testid="project-header"
+          >
+            <span class="font-medium text-ink-gray-9">{{ result.extra.project_name }}</span>
+            <template v-if="result.extra.customer">
+              · {{ result.extra.customer }}
+            </template>
+          </p>
+
           <!-- U7: approved hours only; say what was left out (resolved decision 6). -->
           <p
             v-if="pendingHours > 0 && !reportResource.loading"
@@ -422,7 +442,7 @@ async function openInDesk() {
               :truncated="result.truncated"
               :can-export="result.can_export"
               :sort="sort"
-              :hidden="hidden"
+              :hidden="shownHidden || []"
               :grid="grid"
               :class="stale ? 'opacity-60' : ''"
               @update:sort="onSort"

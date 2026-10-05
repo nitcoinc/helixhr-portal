@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import zipfile
 from contextlib import contextmanager
 from urllib.parse import quote
@@ -774,6 +775,51 @@ def _layout_template():
 	return cached
 
 
+# The email header strip's background: `Company.helixhr_email_header_color`,
+# a `#RRGGBB` hex or empty (white). Checked on save and again at render, so
+# a value written past the endpoint never reaches a `style` attribute.
+EMAIL_HEADER_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+EMAIL_HEADER_DEFAULT_BG = "#ffffff"
+EMAIL_HEADER_DARK_FG = "#1f2328"
+
+
+def valid_email_header_color(color):
+	"""`color` normalised to lower-case `#rrggbb`, or "" for empty/invalid."""
+	color = (color or "").strip()
+	return color.lower() if EMAIL_HEADER_COLOR_RE.match(color) else ""
+
+
+def _relative_luminance(color):
+	"""WCAG 2.x relative luminance of a valid `#rrggbb`."""
+
+	def channel(hex_pair):
+		value = int(hex_pair, 16) / 255
+		return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+
+	r, g, b = (channel(color[i : i + 2]) for i in (1, 3, 5))
+	return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def email_header_colors(color):
+	"""`{"header_bg", "header_fg"}` for the layout: the saved colour (white
+	when empty or invalid) and whichever of white / #1f2328 has the higher
+	WCAG contrast ratio against it."""
+	bg = valid_email_header_color(color) or EMAIL_HEADER_DEFAULT_BG
+	lum = _relative_luminance(bg)
+	white_contrast = 1.05 / (lum + 0.05)
+	dark_contrast = (lum + 0.05) / (_relative_luminance(EMAIL_HEADER_DARK_FG) + 0.05)
+	return {
+		"header_bg": bg,
+		"header_fg": "#ffffff" if white_contrast > dark_contrast else EMAIL_HEADER_DARK_FG,
+	}
+
+
+def company_email_header_colors(company):
+	"""`email_header_colors` for `company`'s saved header colour."""
+	color = frappe.db.get_value("Company", company, "helixhr_email_header_color") if company else ""
+	return email_header_colors(color)
+
+
 def _default_context():
 	company = frappe.defaults.get_global_default("company") or ""
 	logo = frappe.db.get_value("Company", company, "company_logo") if company else None
@@ -802,13 +848,24 @@ def render_message(event_key, context, source=None):
 	locked = bool(event.get("locked"))
 	context = {**_default_context(), **(context or {})}
 	if source is not None:
-		row = frappe._dict(subject=source.get("subject"), body=source.get("body"), is_enabled=1)
+		row = frappe._dict(
+			subject=source.get("subject"),
+			body=source.get("body"),
+			is_enabled=1,
+			hide_logo=frappe.utils.cint(source.get("hide_logo")),
+		)
 	else:
 		row = frappe.db.get_value(
-			"HelixHR Message Template", event_key, ["subject", "body", "is_enabled"], as_dict=True
+			"HelixHR Message Template",
+			event_key,
+			["subject", "body", "is_enabled", "hide_logo"],
+			as_dict=True,
 		)
 	if row and not row.is_enabled and not locked:
 		return None
+	if row and row.hide_logo:
+		# The per-template opt-out: the layout prints the company name instead.
+		context["logo_url"] = ""
 
 	body_env, subject_env = _template_envs()
 	body_ctx = _build_context(event_key, context, for_subject=False)
@@ -821,7 +878,8 @@ def render_message(event_key, context, source=None):
 		)
 
 	subject, content = None, None
-	if row and row.is_enabled:
+	# A row with no wording only carries `hide_logo`: default wording.
+	if row and row.is_enabled and has_custom_wording(row):
 		messages = len(frappe.local.message_log or [])
 		try:
 			subject, content = render(event["subject"] if locked else row.subject, row.body or "")
@@ -844,9 +902,85 @@ def render_message(event_key, context, source=None):
 			"action_url": action_url,
 			"action_label": event.get("action_label") or _("Open HelixHR"),
 			**{name: body_ctx[name] for name in ("company", "logo_url", "portal_url")},
+			**company_email_header_colors(context.get("company")),
 		},
 	)
 	return {"subject": subject, "content": content, "html": html}
+
+
+def has_custom_wording(row):
+	"""A `HelixHR Message Template` row customises the wording only when it
+	carries a subject or body; an empty enabled row exists just to keep the
+	per-template `hide_logo` opt-out for a message on the default wording."""
+	return bool((row.get("subject") or "").strip() or (row.get("body") or "").strip())
+
+
+def _self_branded(body):
+	"""KTD11 + review fold-in: a body that is already a whole document, or
+	that prints the logo itself (the P4 seeded templates and HR edits of
+	them), is not wrapped in the layout again -- one logo, never two."""
+	lowered = (body or "").lower()
+	return "<html" in lowered or "<body" in lowered or "logo_url" in lowered
+
+
+def render_celebration_email(subject, body, context, include_logo=True):
+	"""Celebration and holiday mail (plan 2026-10-05-001 U11): HR's Email
+	Template subject and body through the same sandbox as the portal's
+	message templates -- empty globals, StrictUndefined, plain-data context
+	-- so a template can neither call `frappe.*` nor read another record.
+	A body-only template is wrapped in the branded layout (KTD11).
+
+	`include_logo=False` is the reminder row's `hide_logo`: `logo_url` is
+	blanked, so the layout (and a self-branded default, which guards on
+	it) prints the company name instead.
+
+	Returns `{"subject", "message"}`. Raises on a bad template; callers
+	decide whether that is a refusal (save, preview) or a logged skip (send).
+	"""
+	from markupsafe import Markup
+
+	body_env, subject_env = _template_envs()
+	plain = {str(key): _plain(value) for key, value in (context or {}).items()}
+	if not include_logo:
+		plain["logo_url"] = ""
+	rendered_subject = " ".join(_run(_compile(subject_env, subject or ""), _subject_values(plain)).split())
+	content = _run(_compile(body_env, body or ""), _escape_values(plain)) if body else ""
+	if _self_branded(body):
+		return {"subject": rendered_subject, "message": content}
+	html = _run(
+		_layout_template(),
+		{
+			"subject": rendered_subject,
+			"core": None,
+			"content": Markup(content),
+			"action_url": plain.get("portal_url"),
+			"action_label": _("Open HelixHR"),
+			**{name: plain.get(name) or "" for name in ("company", "logo_url", "portal_url")},
+			**company_email_header_colors(plain.get("company")),
+		},
+	)
+	return {"subject": rendered_subject, "message": html}
+
+
+def _recipient_brand(user):
+	"""Plan 2026-10-05-001 U12 (KTD10): the recipient's own company and its
+	logo, so a mail to company B's employee carries B's branding while the
+	default company is A. Empty -- the default company's -- for a user
+	with no active Employee."""
+	company = session_company(user)
+	if not company:
+		return {}
+	logo = frappe.db.get_value("Company", company, "company_logo")
+	return {"company": company, "logo_url": frappe.utils.get_url(logo) if logo else ""}
+
+
+def message_brand(user):
+	"""`{"company", "logo_url"}` a message to `user` carries: what
+	`send_notification` resolves (their company, else the default's)."""
+	default = _default_context()
+	brand = {"company": default["company"], "logo_url": default["logo_url"], **_recipient_brand(user)}
+	brand["header_color"] = company_email_header_colors(brand["company"])["header_bg"]
+	return brand
 
 
 def send_notification(event_key, recipients, context, reference_doctype=None, reference_name=None):
@@ -856,7 +990,10 @@ def send_notification(event_key, recipients, context, reference_doctype=None, re
 	for recipient in recipients or ():
 		try:
 			first_name = frappe.db.get_value("User", recipient, "first_name")
-			message = render_message(event_key, {"recipient_first_name": first_name, **(context or {})})
+			message = render_message(
+				event_key,
+				{"recipient_first_name": first_name, **_recipient_brand(recipient), **(context or {})},
+			)
 			if message is None:
 				return
 			frappe.sendmail(
@@ -1418,6 +1555,14 @@ RATE_LIMIT_POLICY = {
 	"preview_celebration": (60, 60),
 	"send_test_celebration": (5, 600),
 	"search_celebration_recipients": (60, 60),
+	# Plan 2026-10-05-001 U11: an occasional administrative write, like the save.
+	"reset_celebration_template": (30, 3600),
+	# U12: a logo changes rarely; bounded like the photo upload.
+	"set_company_logo": (20, 3600),
+	"set_email_header_color": (20, 3600),
+	# Documents: occasional HR writes; a save may carry a 20 MB upload.
+	"save_document_link": (30, 3600),
+	"delete_document_link": (30, 3600),
 	# Plan 2026-09-30-001 U2. Each re-encodes an image, so bounded like the
 	# attachment writes. The photo GET is deliberately not listed: a page
 	# loads one per avatar.
@@ -1620,13 +1765,43 @@ def validate_portal_upload(file_name, content, policy=None, max_bytes=UPLOAD_MAX
 			with zipfile.ZipFile(io.BytesIO(bytes(content))) as archive:
 				names = set(archive.namelist())
 		except (zipfile.BadZipFile, OSError):
-			frappe.throw(_(_UPLOAD_KIND_MESSAGE))
+			frappe.throw(_(kind_message))
 		if "[Content_Types].xml" not in names or ooxml_part not in names:
-			frappe.throw(_(_UPLOAD_KIND_MESSAGE))
+			frappe.throw(_(kind_message))
 		if any(name.lower().endswith("vbaproject.bin") for name in names):
 			frappe.throw(_("Macro-enabled documents can't be attached. Save it without macros and try again."))
 
 	return content_type
+
+
+# --- HR document policy (Documents: uploaded policies) ----------------------
+
+# What HR may publish on the Documents page: the attachment policy plus
+# PowerPoint, up to 20 MB. Private, attached to the HelixHR Document Link, so
+# Frappe serves it only to someone who may read that link (its
+# `has_permission` hook). Never SVG or HTML -- both execute in the site's
+# origin -- and checked by signature, not by name.
+DOCUMENT_POLICY = {
+	**UPLOAD_POLICY,
+	".pptx": (
+		"application/vnd.openxmlformats-officedocument.presentationml.presentation",
+		_ZIP_MAGIC,
+		"ppt/presentation.xml",
+	),
+}
+DOCUMENT_MAX_BYTES = 20 * 1024 * 1024
+DOCUMENT_KIND_MESSAGE = "A document must be a PDF, a Word, Excel or PowerPoint file, or a PNG or JPEG image."
+
+
+def validate_document_upload(file_name, content):
+	"""Refuse anything outside `DOCUMENT_POLICY` (type by signature, 20 MB)."""
+	return validate_portal_upload(
+		file_name,
+		content,
+		policy=DOCUMENT_POLICY,
+		max_bytes=DOCUMENT_MAX_BYTES,
+		kind_message=DOCUMENT_KIND_MESSAGE,
+	)
 
 
 # --- profile photo policy (plan 2026-09-30-001, U1) ------------------------
@@ -1643,6 +1818,31 @@ PHOTO_MAX_SIDE = 512
 # phone camera is comfortably inside this.
 PHOTO_MAX_PIXELS = 64_000_000
 PHOTO_KIND_MESSAGE = "Your photo must be a PNG or JPEG image."
+
+
+# Plan 2026-10-05-001 U12: the company logo every email carries. Served
+# publicly (mail clients fetch it without a session), so raster only --
+# SVG can carry script -- and checked by signature, not by name. WebP's
+# signature is "RIFF", four size bytes, then "WEBP"; `logo_upload_kind`
+# checks the second half.
+LOGO_POLICY = {
+	**{extension: UPLOAD_POLICY[extension] for extension in (".png", ".jpg", ".jpeg")},
+	".webp": ("image/webp", (b"RIFF",), None),
+}
+LOGO_MAX_BYTES = 2 * 1024 * 1024
+LOGO_KIND_MESSAGE = "The logo must be a PNG, JPEG or WebP image."
+
+
+def validate_logo_upload(file_name, content):
+	"""Refuse anything but a PNG, JPEG or WebP of at most 2 MB whose bytes
+	match its name. Returns the extension."""
+	validate_portal_upload(
+		file_name, content, policy=LOGO_POLICY, max_bytes=LOGO_MAX_BYTES, kind_message=LOGO_KIND_MESSAGE
+	)
+	extension = upload_extension(file_name)
+	if extension == ".webp" and bytes(content[8:12]) != b"WEBP":
+		frappe.throw(_(LOGO_KIND_MESSAGE))
+	return extension
 
 
 def photo_file_filters(**extra):

@@ -6,12 +6,19 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import cint
 
-from helixhr.utils import NOTIFICATION_EVENTS, TemplateRejected, validate_message_template
+from helixhr.utils import (
+	NOTIFICATION_EVENTS,
+	TemplateRejected,
+	has_custom_wording,
+	validate_message_template,
+)
 
 
 class HelixHRMessageTemplate(Document):
 	"""A customised (`is_enabled=1`) or switched-off (`is_enabled=0`) portal
 	email; no row means the registry default (plan 2026-10-02-001 KTD7).
+	An enabled row with neither subject nor body is the default wording too:
+	it exists only to carry `hide_logo`, the per-template logo opt-out.
 
 	Validation lives here, not in the API, so a Desk save is held to the same
 	rule as the portal (R17)."""
@@ -23,7 +30,11 @@ class HelixHRMessageTemplate(Document):
 		if event.get("locked"):
 			if not cint(self.is_enabled):
 				frappe.throw(_("This security notice cannot be switched off."))
-		elif cint(self.is_enabled) and not ((self.subject or "").strip() and (self.body or "").strip()):
+		elif (
+			cint(self.is_enabled)
+			and has_custom_wording(self)
+			and not ((self.subject or "").strip() and (self.body or "").strip())
+		):
 			frappe.throw(_("Give the message a subject and a body."))
 		try:
 			validate_message_template(self.template_key, self.subject, self.body)

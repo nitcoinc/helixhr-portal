@@ -43,11 +43,11 @@ from frappe.utils import cint, flt
 
 from helixhr.patches.v1_0.apply_permission_deltas import DELTAS
 from helixhr.utils import (
-	ALLOWED_UPLOAD_EXTENSIONS,
+	DOCUMENT_MAX_BYTES,
+	DOCUMENT_POLICY,
 	PROFILE_CORRECTION_CATEGORY,
 	PROFILE_EDITABLE_FIELDS,
 	RATE_LIMIT_POLICY,
-	UPLOAD_MAX_BYTES,
 	portal_home_page,
 	rate_limit_bounds,
 )
@@ -316,8 +316,9 @@ def check_document_link_urls():
 
 	bad = [
 		row.name
-		for row in frappe.get_all("HelixHR Document Link", fields=["name", "url"])
-		if document_url_problem(row.url)
+		for row in frappe.get_all("HelixHR Document Link", fields=["name", "url", "file"])
+		# An uploaded document has no link to check; one with neither is bad.
+		if (row.url or not row.file) and document_url_problem(row.url)
 	]
 	if bad:
 		return _result(
@@ -600,9 +601,12 @@ def check_password_policy():
 # The extensions System Settings is allowed to list, as bare upper-case names
 # in the form that field uses. Anything outside this set is a site that would
 # accept a file the portal refuses -- SVG and HTML being the ones that matter,
-# because both execute in the site's own origin.
-_ALLOWED_EXTENSION_NAMES = {e.lstrip(".").upper() for e in ALLOWED_UPLOAD_EXTENSIONS}
-_MAX_FILE_SIZE_MB = UPLOAD_MAX_BYTES // (1024 * 1024)
+# because both execute in the site's own origin. The widest portal policy is
+# HR's published documents (attachment types plus PPTX, 20 MB); Frappe's own
+# File checks apply underneath it, so the site must allow at least that much
+# and no more.
+_ALLOWED_EXTENSION_NAMES = {e.lstrip(".").upper() for e in DOCUMENT_POLICY}
+_MAX_FILE_SIZE_MB = DOCUMENT_MAX_BYTES // (1024 * 1024)
 
 
 def check_file_settings():
@@ -612,7 +616,7 @@ def check_file_settings():
 	attached to an HR Request, and it needs no help from site settings. This
 	check is about everything *else* a logged-in user can upload: an
 	`allowed_file_extensions` list that still permits SVG or HTML, a
-	`max_file_size` above the portal's own 10MB, guests uploading at all, or
+	`max_file_size` above the portal's own 20 MB (HR documents), guests uploading at all, or
 	public uploads left open to non-System-Managers.
 	"""
 	raw = (_system("allowed_file_extensions") or "").strip()

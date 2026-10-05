@@ -100,7 +100,7 @@ test.describe('hr', () => {
     await page.getByRole('button', { name: /^Columns/ }).click()
     await page.getByRole('checkbox', { name: 'Leaves' }).uncheck()
     await expect(table.getByRole('columnheader', { name: /Leaves/ })).toHaveCount(0)
-    await expect(page).toHaveURL(/hide=leaves/)
+    await expect(page).toHaveURL(/hide=[^&]*leaves/)
 
     // Reloading the URL restores all three.
     await page.reload()
@@ -108,13 +108,34 @@ test.describe('hr', () => {
     await expect(table.getByRole('columnheader', { name: /Leaves/ })).toHaveCount(0)
   })
 
+  test('an ID beside its name is hidden by default; grouping on it is labelled by the name', async ({ page }) => {
+    await page.goto(`${LEDGER_URL}&group=employee`)
+    const table = page.locator('table')
+    await expect(table.getByRole('cell', { name: 'Casual Leave' }).first()).toBeVisible()
+    await expect(table.getByRole('columnheader', { name: /Employee name/i })).toBeVisible()
+    await expect(table.getByRole('columnheader', { name: 'Employee', exact: true })).toHaveCount(0)
+    await expect(table.getByText(/HR-EMP-/)).toHaveCount(0)
+    const subtotal = table.locator('tbody tr[data-kind="subtotal"]').first()
+    await expect(subtotal).toBeVisible()
+    await expect(subtotal).not.toContainText('HR-EMP-')
+
+    await page.getByRole('button', { name: /^Columns/ }).click()
+    await page.getByRole('checkbox', { name: 'Employee', exact: true }).check()
+    await expect(table.getByRole('columnheader', { name: 'Employee', exact: true })).toBeVisible()
+    await expect(page).toHaveURL(/hide=(&|$)/)
+  })
+
   test('the employee picker is a scoped combobox; empty and narrowed read differently', async ({ page }) => {
     await page.goto(LEDGER_URL)
     await expect(page.locator('table')).toBeVisible()
 
     const picker = page.getByRole('combobox', { name: 'Employee' })
-    await picker.fill('M')
-    await expect(page.getByRole('listbox', { name: 'Employee' }).getByText('Type at least 2 letters.')).toBeVisible()
+    // Plan 2026-10-05-001 U7: focus browses; there is no minimum length.
+    await picker.focus()
+    const list = page.getByRole('listbox', { name: 'Employee' })
+    await expect(list.getByText('Showing active only — type to search completed')).toBeVisible()
+    await picker.fill('zzzz-no-such-person')
+    await expect(list.getByText('No matches')).toBeVisible()
     await picker.fill(COLLEAGUE_NAME)
     await page.getByRole('option', { name: new RegExp(COLLEAGUE_NAME) }).first().click()
     await page.getByRole('button', { name: 'Run report' }).click()
@@ -151,7 +172,7 @@ test.describe('hr', () => {
     for (const name of ['Employee', 'Project', 'Task']) {
       await expect(page.getByRole('combobox', { name })).toBeVisible()
     }
-    await expect(page.getByLabel('Period')).toHaveValue('last_month')
+    await expect(page.getByLabel('Period', { exact: true })).toHaveValue('last_month')
     await page.getByRole('button', { name: 'Run report' }).click()
     await expect(page.locator('[data-async-state^="report-results:"]')).not.toHaveAttribute(
       'data-async-state',
@@ -160,6 +181,55 @@ test.describe('hr', () => {
     )
     await expect(page.getByText("You don't have access to this")).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Open in Frappe' })).toHaveCount(0)
+  })
+
+  test('the include-pending help opens from the keyboard and describes the toggle', async ({ page }) => {
+    await page.goto('/helixhr/reports/hours_by_project')
+    const info = page.getByRole('button', { name: 'About Include pending approval' })
+    await info.focus()
+    await expect(info).toBeFocused()
+    await expect(info).toHaveAttribute('aria-expanded', 'false')
+    await page.keyboard.press('Enter')
+    await expect(info).toHaveAttribute('aria-expanded', 'true')
+    const helpId = await info.getAttribute('aria-controls')
+    const help = page.locator(`[id="${helpId}"]`)
+    await expect(help).toBeVisible()
+    await expect(help).toContainText('waiting for approval')
+    await expect(page.getByRole('checkbox', { name: 'Include pending approval' })).toHaveAttribute(
+      'aria-describedby',
+      helpId!,
+    )
+    await page.keyboard.press('Space')
+    await expect(help).toBeHidden()
+  })
+
+  test('Custom period keeps the dates and moves focus to From', async ({ page }) => {
+    await page.goto('/helixhr/reports/hours_by_project')
+    const from = page.getByLabel('From')
+    const to = page.getByLabel('To')
+    const before = [await from.inputValue(), await to.inputValue()]
+    await page.getByLabel('Period', { exact: true }).selectOption('custom')
+    await expect(page.getByLabel('Period', { exact: true })).toHaveValue('custom')
+    await expect(from).toBeFocused()
+    expect([await from.inputValue(), await to.inputValue()]).toEqual(before)
+
+    await from.fill('2099-12-31')
+    await expect(page.getByText('From must be on or before To.')).toBeVisible()
+  })
+
+  test('the project picker lists options on focus, and a new project clears an incompatible task', async ({
+    page,
+  }) => {
+    await page.goto('/helixhr/reports/hours_by_project?task=NO-SUCH-TASK-000')
+    const task = page.getByRole('combobox', { name: 'Task' })
+    await expect(task).toHaveValue('NO-SUCH-TASK-000')
+
+    const project = page.getByRole('combobox', { name: 'Project' })
+    await project.focus()
+    const first = page.getByRole('listbox', { name: 'Project' }).getByRole('option').first()
+    await expect(first).toBeVisible()
+    await first.click()
+    await expect(task).toHaveValue('')
   })
 
   test('the monthly project timesheet renders a task x day grid, detail and a PDF', async ({ page }) => {

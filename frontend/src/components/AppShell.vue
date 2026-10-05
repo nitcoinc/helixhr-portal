@@ -27,6 +27,7 @@ const NAV = [
   { label: 'Notifications', to: '/notifications', icon: 'notifications', badge: true, group: 'pinned' },
   { label: 'Leave', to: '/leave', icon: 'leave', primary: true, group: 'work' },
   { label: 'Timesheet', to: '/timesheet', icon: 'timesheet', primary: true, group: 'work' },
+  { label: 'My projects', to: '/my-projects', icon: 'folder', group: 'work' },
   { label: 'Attendance', to: '/attendance', icon: 'attendance', group: 'work' },
   { label: 'Requests', to: '/requests', icon: 'requests', primary: true, group: 'work' },
   { label: 'Payslips', to: '/payslips', icon: 'wallet', group: 'pay' },
@@ -174,7 +175,7 @@ onUnmounted(() => {
          the nav once content scrolled past one screen. -->
     <div class="hidden shrink-0 bg-field lg:block">
       <aside class="sticky top-0 flex h-screen w-64 flex-col">
-        <div class="flex items-center gap-2 px-5 py-5">
+        <div class="flex items-center gap-2 px-5 py-4">
           <span
             class="flex h-8 w-8 items-center justify-center rounded-md bg-signal font-heading text-sm font-bold text-field"
           >
