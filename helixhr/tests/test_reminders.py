@@ -599,9 +599,10 @@ class TestCelebrationReminders(IntegrationTestCase):
 		send_celebration_reminders()
 		self.assertIn("LOGO:[]", added()[0]["body"], "no logo renders as empty, not as an error")
 
-		frappe.db.set_value("Company", COMPANY_A, "company_logo", "/files/_test_reminders_logo.png")
-		frappe.clear_document_cache("Company", COMPANY_A)
-		self.addCleanup(frappe.db.set_value, "Company", COMPANY_A, "company_logo", None)
+		# The shared email theme's logo, whatever the company.
+		previous = frappe.db.get_single_value("HelixHR Email Theme", "logo")
+		frappe.db.set_single_value("HelixHR Email Theme", "logo", "/files/_test_reminders_logo.png")
+		self.addCleanup(frappe.db.set_single_value, "HelixHR Email Theme", "logo", previous)
 
 		# The same-day rerun guard would keep the second look silent.
 		self._clear_guard()

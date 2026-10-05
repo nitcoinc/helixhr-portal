@@ -761,21 +761,22 @@ def validate_message_template(event_key, subject, body):
 			) from exc
 
 
-_LAYOUT_PATH = ("templates", "emails", "helixhr_layout.html")
+_EMAIL_TEMPLATE_DIR = ("templates", "emails")
 
 
-def _layout_template():
-	"""The developer-owned branded layout (R19), compiled once by the same
-	sandbox (autoescape on) so nothing it prints escapes unescaped."""
-	cached = getattr(_layout_template, "cached", None)
-	if cached is None:
-		with open(frappe.get_app_path("helixhr", *_LAYOUT_PATH), encoding="utf-8") as handle:
-			cached = _template_envs()[0].from_string(handle.read())
-		_layout_template.cached = cached
-	return cached
+def _layout_template(name="helixhr_layout.html"):
+	"""A developer-owned email template file (R19) -- the default theme
+	(`helixhr_layout.html`) or the inner content block
+	(`helixhr_content.html`) -- compiled once by the same sandbox (autoescape
+	on) so nothing it prints escapes unescaped."""
+	cache = _layout_template.__dict__.setdefault("cache", {})
+	if name not in cache:
+		with open(frappe.get_app_path("helixhr", *_EMAIL_TEMPLATE_DIR, name), encoding="utf-8") as handle:
+			cache[name] = _template_envs()[0].from_string(handle.read())
+	return cache[name]
 
 
-# The email header strip's background: `Company.helixhr_email_header_color`,
+# The email header strip's background: `HelixHR Email Theme.brand_color`,
 # a `#RRGGBB` hex or empty (white). Checked on save and again at render, so
 # a value written past the endpoint never reaches a `style` attribute.
 EMAIL_HEADER_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
@@ -814,23 +815,161 @@ def email_header_colors(color):
 	}
 
 
-def company_email_header_colors(company):
-	"""`email_header_colors` for `company`'s saved header colour."""
-	color = frappe.db.get_value("Company", company, "helixhr_email_header_color") if company else ""
-	return email_header_colors(color)
+# --- The shared email theme (`HelixHR Email Theme`, a Single) ---------------
+#
+# One look for every email the portal sends: message templates, celebration
+# and holiday mail. The simple fields drive the default theme
+# (`helixhr_layout.html`); `use_custom_code` swaps in admin-written HTML,
+# rendered by the same sandbox as every template here, never
+# `frappe.render_template`.
+
+EMAIL_THEME = "HelixHR Email Theme"
+THEME_PLACEHOLDERS = ("content", "logo", "company", "subject", "portal_url", "brand_color")
+FOOTER_PLACEHOLDERS = ("company", "portal_url")
+_THEME_FIELDS = ("logo", "brand_color", "footer_text", "use_custom_code", "theme_code")
+
+
+def valid_theme_logo(path):
+	"""A public `/files/...` path, or "". Only public files: the in-portal
+	preview loads the logo by URL, and Frappe's `embed=` reader resolves
+	exactly this prefix (`email_body.get_filecontent_from_path`)."""
+	path = (path or "").strip()
+	return path if path.startswith("/files/") and ".." not in path and '"' not in path else ""
+
+
+def email_theme(draft=None):
+	"""The saved theme as a `frappe._dict` of `_THEME_FIELDS`; `draft`
+	(unsaved editor values) overrides field by field."""
+	saved = frappe.db.get_singles_dict(EMAIL_THEME) if frappe.db else {}
+	theme = frappe._dict({field: saved.get(field) or "" for field in _THEME_FIELDS})
+	for field, value in (draft or {}).items():
+		if field in _THEME_FIELDS and value is not None:
+			theme[field] = value
+	theme.use_custom_code = frappe.utils.cint(theme.use_custom_code)
+	return theme
+
+
+def theme_logo_url(theme=None):
+	"""The theme logo as an absolute URL -- the `logo_url` template variable
+	(a self-branded body prints it). Empty when there is no logo."""
+	logo = valid_theme_logo((theme or email_theme()).logo)
+	return frappe.utils.get_url(logo) if logo else ""
+
+
+def _logo_markup(logo, company, fg, embed):
+	"""The `{{ logo }}` placeholder: an `<img>` -- `embed=` for a real send,
+	so Frappe attaches the file inline (cid:) and no mail client has to reach
+	this site; `src=` for the in-portal preview -- or the company name."""
+	from markupsafe import Markup
+
+	name = company or "HelixHR"
+	if logo:
+		return Markup('<img {0}="{1}" alt="{2}" style="max-height:36px;">').format(
+			Markup("embed" if embed else "src"), logo, name
+		)
+	return Markup('<strong style="font-size:16px;color:{0};">{1}</strong>').format(fg, name)
+
+
+def _theme_sample(content="<p>Sample message.</p>"):
+	from markupsafe import Markup
+
+	return {
+		"content": Markup(content),
+		"logo": Markup("<strong>Sample Co</strong>"),
+		"company": "Sample Co",
+		"subject": "Sample subject",
+		"portal_url": "https://example.com/helixhr",
+		"brand_color": EMAIL_HEADER_DEFAULT_BG,
+	}
+
+
+def _validate_theme_source(label, source, allowed, require_content):
+	from jinja2 import TemplateSyntaxError, meta
+
+	env = _template_envs()[0]
+	try:
+		ast = _check_template_shape(env, source)
+	except TemplateSyntaxError as exc:
+		raise TemplateRejected(_("{0}, line {1}: {2}").format(label, exc.lineno, exc.message)) from exc
+	except TemplateRejected as exc:
+		raise TemplateRejected(f"{label}: {exc}") from exc
+	names = meta.find_undeclared_variables(ast)
+	if require_content and "content" not in names:
+		raise TemplateRejected(_("{0}: add {{{{ content }}}} where the email's message goes.").format(label))
+	unknown = sorted(names - set(allowed))
+	if unknown:
+		raise TemplateRejected(
+			_("{0}: “{1}” is not a placeholder the theme has.").format(label, ", ".join(unknown))
+		)
+	try:
+		_run(env.from_string(source), {name: _theme_sample()[name] for name in allowed})
+	except Exception as exc:
+		raise TemplateRejected(_("{0}, line {1}: {2}").format(label, _error_line(exc) or "?", exc)) from exc
+
+
+def validate_email_theme(theme):
+	"""Refuse a theme that may not be saved: a bad colour, a non-public logo
+	path, a footer or theme code outside the sandbox's rules, or theme code
+	without `{{ content }}`. Raises `TemplateRejected`."""
+	if (theme.brand_color or "").strip() and not valid_email_header_color(theme.brand_color):
+		raise TemplateRejected(_("Enter the brand colour as a hex code like #0B2545."))
+	if (theme.logo or "").strip() and not valid_theme_logo(theme.logo):
+		raise TemplateRejected(_("The logo must be a public file uploaded from this page."))
+	if (theme.footer_text or "").strip():
+		_validate_theme_source(_("Footer"), theme.footer_text, FOOTER_PLACEHOLDERS, require_content=False)
+	if theme.use_custom_code:
+		if not (theme.theme_code or "").strip():
+			raise TemplateRejected(_("Theme code: paste the HTML, or untick custom code."))
+		_validate_theme_source(_("Theme code"), theme.theme_code, THEME_PLACEHOLDERS, require_content=True)
+
+
+def wrap_in_theme(subject, content, company, portal_url, include_logo=True, embed_logo=True, theme=None):
+	"""`content` (already rendered and escaped HTML) inside the shared email
+	theme. `include_logo=False` is a template's `hide_logo`: `{{ logo }}`
+	prints the company name. `embed_logo=False` is the in-portal preview.
+
+	Custom theme code that fails here (it was valid when saved) is logged and
+	the default theme renders instead -- the mail still goes out."""
+	from markupsafe import Markup
+
+	theme = theme or email_theme()
+	env = _template_envs()[0]
+	colors = email_header_colors(theme.brand_color)
+	logo = valid_theme_logo(theme.logo) if include_logo else ""
+	values = {
+		"subject": subject,
+		"company": company or "",
+		"portal_url": portal_url or "",
+		"brand_color": colors["header_bg"],
+		"content": Markup(content),
+		"logo": _logo_markup(logo, company, colors["header_fg"], embed_logo),
+	}
+	if theme.use_custom_code and (theme.theme_code or "").strip():
+		try:
+			return _run(_compile(env, theme.theme_code), values)
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), "HelixHR email theme failed")
+	footer = None
+	if (theme.footer_text or "").strip():
+		try:
+			footer = Markup(
+				_run(_compile(env, theme.footer_text), {name: values[name] for name in FOOTER_PLACEHOLDERS})
+			)
+		except Exception:
+			frappe.log_error(frappe.get_traceback(), "HelixHR email theme footer failed")
+	return _run(_layout_template(), {**values, **colors, "footer": footer})
 
 
 def _default_context():
 	company = frappe.defaults.get_global_default("company") or ""
-	logo = frappe.db.get_value("Company", company, "company_logo") if company else None
 	return {
 		"company": company,
 		"portal_url": frappe.utils.get_url("/helixhr"),
-		"logo_url": frappe.utils.get_url(logo) if logo else "",
+		"logo_url": theme_logo_url(),
 	}
 
 
-def render_message(event_key, context, source=None):
+def render_message(event_key, context, source=None, embed_logo=True, theme=None):
 	"""Render `event_key` for one send: `{"subject", "content", "html"}`, or
 	`None` when the event is switched off (and not locked).
 
@@ -841,7 +980,9 @@ def render_message(event_key, context, source=None):
 	The saved template is used when there is one; if it fails on real data the
 	default renders instead, the failure goes to the Error Log, and nothing is
 	left in `message_log` for the user whose action triggered the send (R17).
-	`html` is `content` wrapped in the branded layout."""
+	`html` is `content` wrapped in the shared email theme; `embed_logo=False`
+	(the in-portal preview) links the logo instead of embedding it; `theme`
+	(an `email_theme(draft)`) stands in for the saved theme."""
 	from markupsafe import Markup
 
 	event = NOTIFICATION_EVENTS[event_key]
@@ -892,18 +1033,23 @@ def render_message(event_key, context, source=None):
 		subject, content = render(event["subject"], "" if locked else event["body"])
 
 	core = Markup(_run(_compile(body_env, event["core"]), body_ctx)) if locked else None
-	action_url = context.get("action_url")
-	html = _run(
-		_layout_template(),
+	inner = _run(
+		_layout_template("helixhr_content.html"),
 		{
-			"subject": subject,
 			"core": core,
 			"content": Markup(content),
-			"action_url": action_url,
+			"action_url": context.get("action_url"),
 			"action_label": event.get("action_label") or _("Open HelixHR"),
-			**{name: body_ctx[name] for name in ("company", "logo_url", "portal_url")},
-			**company_email_header_colors(context.get("company")),
 		},
+	)
+	html = wrap_in_theme(
+		subject,
+		inner,
+		context.get("company"),
+		context.get("portal_url"),
+		include_logo=not (row and row.hide_logo),
+		embed_logo=embed_logo,
+		theme=theme,
 	)
 	return {"subject": subject, "content": content, "html": html}
 
@@ -923,21 +1069,22 @@ def _self_branded(body):
 	return "<html" in lowered or "<body" in lowered or "logo_url" in lowered
 
 
-def render_celebration_email(subject, body, context, include_logo=True):
+def render_celebration_email(subject, body, context, include_logo=True, embed_logo=True):
 	"""Celebration and holiday mail (plan 2026-10-05-001 U11): HR's Email
 	Template subject and body through the same sandbox as the portal's
 	message templates -- empty globals, StrictUndefined, plain-data context
 	-- so a template can neither call `frappe.*` nor read another record.
-	A body-only template is wrapped in the branded layout (KTD11).
+	A body-only template is wrapped in the shared email theme (KTD11).
 
 	`include_logo=False` is the reminder row's `hide_logo`: `logo_url` is
-	blanked, so the layout (and a self-branded default, which guards on
-	it) prints the company name instead.
+	blanked, so the theme (and a self-branded default, which guards on
+	it) prints the company name instead. `embed_logo=False` is the
+	in-portal preview: the logo is linked, not embedded.
 
 	Returns `{"subject", "message"}`. Raises on a bad template; callers
 	decide whether that is a refusal (save, preview) or a logged skip (send).
 	"""
-	from markupsafe import Markup
+	from markupsafe import Markup, escape
 
 	body_env, subject_env = _template_envs()
 	plain = {str(key): _plain(value) for key, value in (context or {}).items()}
@@ -946,41 +1093,42 @@ def render_celebration_email(subject, body, context, include_logo=True):
 	rendered_subject = " ".join(_run(_compile(subject_env, subject or ""), _subject_values(plain)).split())
 	content = _run(_compile(body_env, body or ""), _escape_values(plain)) if body else ""
 	if _self_branded(body):
+		# A self-branded body prints `<img src="{{ logo_url }}">` itself: an
+		# absolute URL a mail client may not reach. On a real send it becomes
+		# the same inline attachment the theme uses.
+		logo = valid_theme_logo(email_theme().logo)
+		if embed_logo and logo and plain.get("logo_url"):
+			content = content.replace(f'src="{escape(plain["logo_url"])}"', f'embed="{escape(logo)}"')
 		return {"subject": rendered_subject, "message": content}
-	html = _run(
-		_layout_template(),
-		{
-			"subject": rendered_subject,
-			"core": None,
-			"content": Markup(content),
-			"action_url": plain.get("portal_url"),
-			"action_label": _("Open HelixHR"),
-			**{name: plain.get(name) or "" for name in ("company", "logo_url", "portal_url")},
-			**company_email_header_colors(plain.get("company")),
-		},
+	inner = _run(
+		_layout_template("helixhr_content.html"),
+		{"core": None, "content": Markup(content), "action_url": plain.get("portal_url"), "action_label": _("Open HelixHR")},
+	)
+	html = wrap_in_theme(
+		rendered_subject,
+		inner,
+		plain.get("company"),
+		plain.get("portal_url"),
+		include_logo=include_logo,
+		embed_logo=embed_logo,
 	)
 	return {"subject": rendered_subject, "message": html}
 
 
 def _recipient_brand(user):
-	"""Plan 2026-10-05-001 U12 (KTD10): the recipient's own company and its
-	logo, so a mail to company B's employee carries B's branding while the
-	default company is A. Empty -- the default company's -- for a user
-	with no active Employee."""
+	"""Plan 2026-10-05-001 U12 (KTD10): the recipient's own company, so a
+	mail to company B's employee names B while the default company is A.
+	Empty -- the default company's -- for a user with no active Employee.
+	The logo is the shared theme's, whatever the company."""
 	company = session_company(user)
-	if not company:
-		return {}
-	logo = frappe.db.get_value("Company", company, "company_logo")
-	return {"company": company, "logo_url": frappe.utils.get_url(logo) if logo else ""}
+	return {"company": company} if company else {}
 
 
 def message_brand(user):
 	"""`{"company", "logo_url"}` a message to `user` carries: what
 	`send_notification` resolves (their company, else the default's)."""
 	default = _default_context()
-	brand = {"company": default["company"], "logo_url": default["logo_url"], **_recipient_brand(user)}
-	brand["header_color"] = company_email_header_colors(brand["company"])["header_bg"]
-	return brand
+	return {"company": default["company"], "logo_url": default["logo_url"], **_recipient_brand(user)}
 
 
 def send_notification(event_key, recipients, context, reference_doctype=None, reference_name=None):
@@ -1557,9 +1705,14 @@ RATE_LIMIT_POLICY = {
 	"search_celebration_recipients": (60, 60),
 	# Plan 2026-10-05-001 U11: an occasional administrative write, like the save.
 	"reset_celebration_template": (30, 3600),
-	# U12: a logo changes rarely; bounded like the photo upload.
-	"set_company_logo": (20, 3600),
-	"set_email_header_color": (20, 3600),
+	# The shared email theme: occasional admin writes; the preview renders
+	# per pause like the template previews; a test send is real mail.
+	"get_email_theme": (60, 60),
+	"save_email_theme": (30, 3600),
+	"upload_email_theme_logo": (20, 3600),
+	"reset_email_theme": (30, 3600),
+	"preview_email_theme": (60, 60),
+	"send_email_theme_test": (5, 600),
 	# Documents: occasional HR writes; a save may carry a 20 MB upload.
 	"save_document_link": (30, 3600),
 	"delete_document_link": (30, 3600),
