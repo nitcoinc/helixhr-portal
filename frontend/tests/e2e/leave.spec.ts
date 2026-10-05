@@ -343,7 +343,7 @@ test.describe('employee', () => {
         'aria-pressed',
         'true',
       )
-      await expect(dialog.getByLabel('From')).toHaveValue(date)
+      await expect(dialog.getByRole('textbox', { name: 'From (required)' })).toHaveValue(date)
       await expect(dialog.getByLabel('To')).toHaveValue(date)
       // Not the reason: the employee writes the case afresh.
       await expect(dialog.getByText('Seeded by leave.spec.ts')).toHaveCount(0)

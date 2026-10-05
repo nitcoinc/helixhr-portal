@@ -157,13 +157,17 @@ const note = ref('')
 // reopens it for the employee, so it never fires on one click: the first
 // click opens this confirm, and only its own button carries the decision.
 const confirmAccept = ref(false)
-const acceptCancel = ref(null)
 watch(confirmAccept, async (open) => {
   if (!open) return
   // Cancel takes the initial focus, after the dialog's own focus trap has
   // placed it on the first tabbable element.
+  // Two frames: reka's FocusScope focuses on its own mount tick. The
+  // query, not the component ref: frappe-ui's Button `$el` is not the
+  // <button> itself.
   await nextTick()
-  requestAnimationFrame(() => acceptCancel.value?.$el?.focus?.())
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => document.querySelector('[data-testid="accept-cancel"]')?.focus()),
+  )
 })
 
 function closeAcceptConfirm() {
@@ -2188,7 +2192,6 @@ function dismissBulkResult() {
       <template #actions>
         <div class="flex justify-end gap-2">
           <Button
-            ref="acceptCancel"
             variant="subtle"
             :disabled="!!acting"
             data-testid="accept-cancel"

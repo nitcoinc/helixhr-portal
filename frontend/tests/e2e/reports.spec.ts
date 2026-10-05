@@ -155,7 +155,7 @@ test.describe('hr', () => {
     for (const name of ['Employee', 'Project', 'Task']) {
       await expect(page.getByRole('combobox', { name })).toBeVisible()
     }
-    await expect(page.getByLabel('Period')).toHaveValue('last_month')
+    await expect(page.getByLabel('Period', { exact: true })).toHaveValue('last_month')
     await page.getByRole('button', { name: 'Run report' }).click()
     await expect(page.locator('[data-async-state^="report-results:"]')).not.toHaveAttribute(
       'data-async-state',
@@ -191,8 +191,8 @@ test.describe('hr', () => {
     const from = page.getByLabel('From')
     const to = page.getByLabel('To')
     const before = [await from.inputValue(), await to.inputValue()]
-    await page.getByLabel('Period').selectOption('custom')
-    await expect(page.getByLabel('Period')).toHaveValue('custom')
+    await page.getByLabel('Period', { exact: true }).selectOption('custom')
+    await expect(page.getByLabel('Period', { exact: true })).toHaveValue('custom')
     await expect(from).toBeFocused()
     expect([await from.inputValue(), await to.inputValue()]).toEqual(before)
 

@@ -175,7 +175,7 @@ onUnmounted(() => {
          the nav once content scrolled past one screen. -->
     <div class="hidden shrink-0 bg-field lg:block">
       <aside class="sticky top-0 flex h-screen w-64 flex-col">
-        <div class="flex items-center gap-2 px-5 py-5">
+        <div class="flex items-center gap-2 px-5 py-4">
           <span
             class="flex h-8 w-8 items-center justify-center rounded-md bg-signal font-heading text-sm font-bold text-field"
           >

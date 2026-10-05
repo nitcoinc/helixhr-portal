@@ -843,6 +843,24 @@ class TestNoUnexplainedBlanks(_TwoCompanies):
 				}
 			],
 		)
+		# A headless test company has no chart of accounts; a raw leaf row is
+		# enough for the report, which only reads the field.
+		advance_account = frappe.db.get_value("Account", {"company": self.company}, "name")
+		if not advance_account:
+			advance_account = "_T U8 Advances - TC"
+			_bulk(
+				"Account",
+				[
+					{
+						"name": advance_account,
+						"account_name": "_T U8 Advances",
+						"company": self.company,
+						"root_type": "Asset",
+						"report_type": "Balance Sheet",
+						"is_group": 0,
+					}
+				],
+			)
 		_bulk(
 			"Employee Advance",
 			[
@@ -855,7 +873,7 @@ class TestNoUnexplainedBlanks(_TwoCompanies):
 					"company": self.company,
 					"docstatus": 1,
 					"status": "Unpaid",
-					"advance_account": frappe.db.get_value("Account", {"company": self.company}, "name"),
+					"advance_account": advance_account,
 					"advance_amount": 30,
 					"paid_amount": 0,
 					"claimed_amount": 0,

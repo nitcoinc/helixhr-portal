@@ -108,7 +108,7 @@ defineExpose({ reload: () => monthView.reload() })
         >
           <router-link
             :to="weekLink(w.week_start)"
-            class="flex h-full items-center justify-between gap-2 rounded-lg border bg-surface-white px-3 py-2 text-sm hover:bg-surface-gray-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-outline-gray-4 sm:flex-col sm:items-start"
+            class="flex h-full min-h-11 items-center justify-between gap-2 rounded-lg border bg-surface-white px-3 py-2 text-sm hover:bg-surface-gray-1 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-outline-gray-4 sm:flex-col sm:items-start"
             :class="[
               w.selected ? 'border-outline-gray-4 ring-1 ring-outline-gray-4' : 'border-outline-gray-2',
               w.approved ? 'bg-surface-green-1' : '',
