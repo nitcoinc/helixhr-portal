@@ -100,12 +100,29 @@ test.describe('hr', () => {
     await page.getByRole('button', { name: /^Columns/ }).click()
     await page.getByRole('checkbox', { name: 'Leaves' }).uncheck()
     await expect(table.getByRole('columnheader', { name: /Leaves/ })).toHaveCount(0)
-    await expect(page).toHaveURL(/hide=leaves/)
+    await expect(page).toHaveURL(/hide=[^&]*leaves/)
 
     // Reloading the URL restores all three.
     await page.reload()
     await expect(table.locator('tbody tr[data-kind="subtotal"]').first()).toBeVisible()
     await expect(table.getByRole('columnheader', { name: /Leaves/ })).toHaveCount(0)
+  })
+
+  test('an ID beside its name is hidden by default; grouping on it is labelled by the name', async ({ page }) => {
+    await page.goto(`${LEDGER_URL}&group=employee`)
+    const table = page.locator('table')
+    await expect(table.getByRole('cell', { name: 'Casual Leave' }).first()).toBeVisible()
+    await expect(table.getByRole('columnheader', { name: /Employee name/i })).toBeVisible()
+    await expect(table.getByRole('columnheader', { name: 'Employee', exact: true })).toHaveCount(0)
+    await expect(table.getByText(/HR-EMP-/)).toHaveCount(0)
+    const subtotal = table.locator('tbody tr[data-kind="subtotal"]').first()
+    await expect(subtotal).toBeVisible()
+    await expect(subtotal).not.toContainText('HR-EMP-')
+
+    await page.getByRole('button', { name: /^Columns/ }).click()
+    await page.getByRole('checkbox', { name: 'Employee', exact: true }).check()
+    await expect(table.getByRole('columnheader', { name: 'Employee', exact: true })).toBeVisible()
+    await expect(page).toHaveURL(/hide=(&|$)/)
   })
 
   test('the employee picker is a scoped combobox; empty and narrowed read differently', async ({ page }) => {

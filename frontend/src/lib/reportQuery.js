@@ -5,7 +5,9 @@
 //                            `?employee=` deep link is one of these)
 //   ?group=a,b               up to two group-by fields, in order
 //   ?sort=field | -field     ascending | descending
-//   ?hide=a,b                hidden columns (resolved decision 10)
+//   ?hide=a,b                hidden columns (resolved decision 10); absent =
+//                            the report's defaults (ID columns beside a name),
+//                            `?hide=` = every column shown
 //
 // Everything is validated against the catalog entry's own specs; unknown
 // keys and malformed values are dropped, never passed through. The server
@@ -62,7 +64,8 @@ export function fromQuery(query, entry) {
     if (FIELD_RE.test(field)) sort = { field, order: desc ? 'desc' : 'asc' }
   }
 
-  const hidden = list(query.hide)
+  // null = no choice made yet: the page applies the columns' `default_hidden`.
+  const hidden = query.hide === undefined ? null : list(query.hide)
   const hasState = Object.keys(filters).length > 0 || groupBy.length > 0 || sort !== null
   return { filters, groupBy, sort, hidden, hasState }
 }
@@ -77,6 +80,6 @@ export function toQuery(state, entry) {
   }
   if (state.groupBy?.length) query.group = state.groupBy.slice(0, 2).join(',')
   if (state.sort?.field) query.sort = `${state.sort.order === 'desc' ? '-' : ''}${state.sort.field}`
-  if (state.hidden?.length) query.hide = state.hidden.join(',')
+  if (Array.isArray(state.hidden)) query.hide = state.hidden.join(',')
   return query
 }

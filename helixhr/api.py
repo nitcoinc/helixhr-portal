@@ -9633,9 +9633,8 @@ def _export_fingerprint(report_key, fmt, filters, group_by, sort, hidden):
 	"""Stable hash of one export request (U13 dedups queued exports on it)."""
 	import hashlib
 
-	payload = json.dumps(
-		[report_key, fmt, filters, group_by, sort, sorted(hidden)], sort_keys=True, default=str
-	)
+	hidden = sorted(hidden) if hidden is not None else None
+	payload = json.dumps([report_key, fmt, filters, group_by, sort, hidden], sort_keys=True, default=str)
 	return hashlib.sha256(payload.encode()).hexdigest()
 
 
@@ -9667,9 +9666,10 @@ def request_export(report_key, format, filters=None, group_by=None, sort=None, h
 
 	entry = reports.get_entry(report_key)
 	scope = access["export_scope"]
-	hidden = reports._parse(hidden, [])
+	# None = the screen never chose: the default-hidden ID columns stay out.
+	hidden = reports._parse(hidden, None)
 	if not isinstance(hidden, list) or not all(isinstance(field, str) for field in hidden):
-		hidden = []
+		hidden = None
 	result = reports.run(report_key, scope, filters, group_by, sort)
 	total_rows = result["shaped"]["total_rows"]
 

@@ -881,6 +881,7 @@ def _hr_request_aging(filters, scope):
 	``correction_*`` field."""
 	columns = [
 		{"fieldname": "request", "label": "Request", "fieldtype": "Link", "options": "HR Request"},
+		{"fieldname": "request_subject", "label": "Subject", "fieldtype": "Data"},
 		{"fieldname": "employee", "label": "Employee", "fieldtype": "Link", "options": "Employee"},
 		{"fieldname": "employee_name", "label": "Employee name", "fieldtype": "Data"},
 		{
@@ -909,7 +910,7 @@ def _hr_request_aging(filters, scope):
 			values[key] = filters[key]
 	rows = frappe.db.sql(
 		f"""
-		select r.name as request, r.employee, e.employee_name, r.category, r.status,
+		select r.name as request, r.subject as request_subject, r.employee, e.employee_name, r.category, r.status,
 			r.routed_to_role, r.picked_up_by, u.full_name as picked_up_by_name,
 			date(r.creation) as opened_on,
 			datediff(%(today)s, date(r.creation)) as age_days
@@ -1001,6 +1002,31 @@ def _employee_names(columns, rows):
 		fieldnames.add(name_field)
 		rows = [{**row, name_field: names.get(row.get(field))} for row in rows]
 	return columns, rows
+
+
+# ID column -> its human-name column, where the name is not ``<id>_name``.
+_ID_NAME_FIELDS = {"employee": "employee_name", "task": "task_subject", "request": "request_subject"}
+
+
+def mark_id_columns(columns):
+	"""Every report (catalog and wrapped): an ID column (Employee, Project,
+	Task, Reports to, Assignee...) that sits beside its name column is hidden
+	by default -- ``default_hidden`` for the screen's Columns picker and the
+	exports -- and names that column in ``name_field`` so a group on the ID
+	is labelled by the name. Re-enabling it on screen brings the ID back."""
+	fieldnames = {column["fieldname"] for column in columns}
+	out = []
+	for column in columns:
+		column = dict(column)
+		field = column["fieldname"]
+		if field == "name" and column.get("options") == "Employee":
+			name_field = "employee_name"
+		else:
+			name_field = _ID_NAME_FIELDS.get(field, f"{field}_name")
+		if column.get("fieldtype") == "Link" and name_field in fieldnames:
+			column.update({"default_hidden": 1, "name_field": name_field})
+		out.append(column)
+	return out
 
 
 def _list_adapt(*fields):
@@ -1886,11 +1912,18 @@ def shape(columns, rows, group_by=(), sort=None, totals=None):
 	totals = [field for field in totals if field in fieldnames]
 	# Plan 2026-10-05-001 U8 (R14): a subtotal row says so in the first text
 	# column that is not a group field (else the group columns label it).
+	# A default-hidden ID column, and the name column of a grouped ID, are
+	# never the label: the one is off screen, the other shows the group.
+	names = {c["fieldname"]: c["name_field"] for c in columns if c.get("name_field")}
+	grouped_names = {names[field] for field in group_by if field in names}
 	label_field = next(
 		(
 			c["fieldname"]
 			for c in columns
-			if c["fieldname"] not in group_by and c.get("fieldtype") in _TEXT_FIELDTYPES
+			if c["fieldname"] not in group_by
+			and c["fieldname"] not in grouped_names
+			and not c.get("default_hidden")
+			and c.get("fieldtype") in _TEXT_FIELDTYPES
 		),
 		None,
 	)
@@ -1917,11 +1950,16 @@ def shape(columns, rows, group_by=(), sort=None, totals=None):
 		field = fields[0]
 		for value, members in itertools.groupby(group_rows, key=lambda row: row.get(field)):
 			members = list(members)
-			emit(members, fields[1:], level + 1, {**parents, field: value})
+			group = {field: value}
+			if field in names:
+				# A group on an ID is labelled by its name (the ID is hidden).
+				group[names[field]] = members[0].get(names[field])
+			emit(members, fields[1:], level + 1, {**parents, **group})
 			out.append(
 				{
 					**parents,
-					field: value,
+					**group,
+					"_group_label": group.get(names.get(field)) or value,
 					**_sums(members, totals),
 					**({label_field: _("Subtotal")} if label_field else {}),
 					"_kind": "subtotal",
@@ -2006,6 +2044,7 @@ def run(report_key, scope, filters=None, group_by=None, sort=None):
 			columns, _rows = entry["query"]({}, {"kind": "none"})
 	else:
 		columns, rows = _execute(entry, clean, scope, raw)
+	columns = mark_id_columns(columns)
 
 	shaped = shape(columns, rows, group_by, sort, entry["totals"])
 	return {
@@ -2042,8 +2081,12 @@ def export_mode(fmt, total_rows):
 
 
 def visible_columns(columns, hidden):
-	"""Columns minus the ones hidden on screen (resolved decision 10)."""
-	hidden = set(hidden) if isinstance(hidden, list | tuple) else set()
+	"""Columns minus the ones hidden on screen (resolved decision 10).
+	``hidden=None`` (the screen never chose) means the default: ID columns
+	that sit beside their name (`mark_id_columns`) stay out."""
+	if not isinstance(hidden, list | tuple):
+		hidden = [column["fieldname"] for column in columns if column.get("default_hidden")]
+	hidden = set(hidden)
 	return [column for column in columns if column["fieldname"] not in hidden]
 
 
@@ -2104,12 +2147,14 @@ def export_rows(columns, shaped_rows):
 			label = (
 				_("Total")
 				if kind == "total"
-				else _("Subtotal: {0}").format(row.get(row["_group_field"]) or _("(none)"))
+				else _("Subtotal: {0}").format(
+					row.get("_group_label", row.get(row["_group_field"])) or _("(none)")
+				)
 			)
 			if (
 				cells[0] in (None, "")
 				or fields[0] == row.get("_group_field")
-				or (kind == "subtotal" and cells[0] == _("Subtotal"))
+				or (kind == "subtotal" and cells[0] in (_("Subtotal"), row.get("_group_label")))
 			):
 				cells[0] = label
 		out.append((kind, cells))

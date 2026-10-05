@@ -918,6 +918,9 @@ class TestNoUnexplainedBlanks(_TwoCompanies):
 				self.assertIn(name_field, fieldnames, entry["key"])
 				name_column = columns[fieldnames.index(name_field)]
 				self.assertFalse(name_column.get("hidden"), entry["key"])
+				self.assertFalse(name_column.get("default_hidden"), entry["key"])
+				# The id itself is off by default (user feedback: names only).
+				self.assertEqual(column.get("default_hidden"), 1, (entry["key"], field))
 				# HRMS Leave Ledger appends a "Total Leaves (...)" row in the id column.
 				rows = [
 					row
@@ -926,6 +929,25 @@ class TestNoUnexplainedBlanks(_TwoCompanies):
 				]
 				self.assertTrue(rows or entry["key"] == "monthly_attendance", (entry["key"], field))
 				self.assertTrue(all(row.get(name_field) for row in rows), (entry["key"], field))
+
+	def test_catalog_reports_hide_ids_that_sit_beside_a_name(self):
+		expected = {
+			"hours_by_project": {"employee", "project", "task"},
+			"employee_directory": {"name", "reports_to"},
+			"hr_request_aging": {"request", "employee", "picked_up_by"},
+			"who_is_out": {"employee"},
+		}
+		for key, ids in expected.items():
+			columns = reports.run(key, {"kind": "unscoped"}, {})["columns"]
+			hidden = {c["fieldname"] for c in columns if c.get("default_hidden")}
+			self.assertEqual(hidden, ids, key)
+			fieldnames = {c["fieldname"] for c in columns}
+			self.assertTrue(all(c["name_field"] in fieldnames for c in columns if c.get("name_field")), key)
+		# An HR Request id had no name: its subject now stands beside it.
+		self.assertIn(
+			"request_subject",
+			[c["fieldname"] for c in reports.run("hr_request_aging", {"kind": "unscoped"}, {})["columns"]],
+		)
 
 	def test_directory_names_the_manager_and_keeps_raw_blanks_empty(self):
 		result = self._run("employee_directory")

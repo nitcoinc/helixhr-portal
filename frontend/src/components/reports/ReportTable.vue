@@ -105,7 +105,8 @@ function toggleColumn(field, show) {
 }
 
 function subtotalLabel(row) {
-  const value = row[row._group_field]
+  // A group on a hidden ID column carries its name in `_group_label`.
+  const value = row._group_label ?? row[row._group_field]
   return `${value === null || value === undefined || value === '' ? 'Blank' : value} subtotal`
 }
 </script>
