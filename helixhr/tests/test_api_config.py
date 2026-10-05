@@ -170,14 +170,12 @@ class TestConfigApi(IntegrationTestCase):
 		desk_urls = get_portal_config()["desk_urls"]
 		self.assertEqual(
 			set(desk_urls),
-			{"categories", "leave_types", "holiday_lists", "shift_types", "celebrations", "report_access"},
+			{"categories", "leave_types", "holiday_lists", "shift_types", "report_access"},
 		)
 		self.assertEqual(desk_urls["categories"], get_url_to_list("HelixHR Request Category"))
 		self.assertEqual(desk_urls["leave_types"], get_url_to_list("Leave Type"))
 		self.assertEqual(desk_urls["holiday_lists"], get_url_to_list("Holiday List"))
 		self.assertEqual(desk_urls["shift_types"], get_url_to_list("Shift Type"))
-		# P8-U12: the Email Template list, not HelixHR Celebration Reminder.
-		self.assertEqual(desk_urls["celebrations"], get_url_to_list("Email Template"))
 		self.assertEqual(desk_urls["report_access"], get_url_to_list("HelixHR Report Access"))
 
 	def test_desk_urls_is_none_for_a_caller_who_cannot_open_desk(self):
@@ -194,30 +192,15 @@ class TestConfigApi(IntegrationTestCase):
 		with patch("helixhr.api._can_open_desk", return_value=False):
 			self.assertIsNone(get_portal_config()["desk_urls"])
 
-	def test_get_portal_config_returns_a_celebrations_projection_per_event(self):
+	def test_get_portal_config_no_longer_carries_celebrations(self):
+		"""Plan 2026-10-04-004 U5 / R13: the celebrations section left the
+		Settings page for the Email templates page's own group, whose
+		endpoints (`get_celebration_setup` and friends, U4) carry the data
+		now."""
 		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
 		config = get_portal_config()
-		# Holiday joined in plan 2026-10-04-004 U3; each row carries the
-		# per-company row's own `frequency` since U1.
-		self.assertEqual(set(config["celebrations"]), {"birthday", "work_anniversary", "holiday"})
-		for event in ("birthday", "work_anniversary", "holiday"):
-			row = config["celebrations"][event]
-			self.assertEqual(
-				set(row),
-				{
-					"event",
-					"label",
-					"is_enabled",
-					"recipient_mode",
-					"frequency",
-					"subject",
-					"body",
-					"use_html",
-					"recipients",
-				},
-			)
-		self.assertIn("company", config["celebration_template_tokens"])
-		self.assertIn("portal_url", config["celebration_template_tokens"])
+		self.assertNotIn("celebrations", config)
+		self.assertNotIn("celebration_template_tokens", config)
 
 	def test_save_request_category_refuses_a_caller_without_write(self):
 		frappe.set_user(EMPLOYEE_USER)

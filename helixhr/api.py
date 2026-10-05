@@ -7730,10 +7730,8 @@ _SETTINGS_DESK_DOCTYPES = {
 	"leave_types": "Leave Type",
 	"holiday_lists": "Holiday List",
 	"shift_types": "Shift Type",
-	# P8-U12: the Email Template list, not HelixHR Celebration Reminder --
-	# the second is a thin pointer at the first, and the first is what a
-	# Desk-side look at the actual mail body means.
-	"celebrations": "Email Template",
+	# Plan 2026-10-04-004 U5: the celebrations section left Settings for the
+	# Email templates page's own group, so it names no Desk doctype here.
 	# Plan 2026-10-04-001 U6: the report access matrix.
 	"report_access": "HelixHR Report Access",
 }
@@ -7761,8 +7759,6 @@ def get_portal_config():
 
 	return {
 		"desk_urls": _settings_desk_urls(),
-		"celebrations": _portal_celebration_config(),
-		"celebration_template_tokens": CELEBRATION_TEMPLATE_TOKENS,
 		"categories": frappe.get_all(
 			"HelixHR Request Category",
 			fields=["name", "category_name", "hint", "route_to_role", "name_prefix", "sla_days", "is_active"],
@@ -8122,13 +8118,6 @@ def _celebration_company(user=None):
 			return companies[0]
 		frappe.throw(_("Pick the company to configure."))
 	return company
-
-
-def _portal_celebration_config():
-	from helixhr.reminders import EVENTS
-
-	company = _celebration_company()
-	return {event: _celebration_reminder_projection(event, company) for event in EVENTS}
 
 
 # The documented context every celebration template renders against

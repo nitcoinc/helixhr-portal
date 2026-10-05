@@ -8,7 +8,6 @@ import CategoriesSection from '@/components/settings/CategoriesSection.vue'
 import LeaveTypesSection from '@/components/settings/LeaveTypesSection.vue'
 import HolidayListsSection from '@/components/settings/HolidayListsSection.vue'
 import ShiftTypesSection from '@/components/settings/ShiftTypesSection.vue'
-import CelebrationsSection from '@/components/settings/CelebrationsSection.vue'
 import ReportAccessSection from '@/components/settings/ReportAccessSection.vue'
 import PortalRolesSection from '@/components/settings/PortalRolesSection.vue'
 import { session } from '@/lib/session'
@@ -37,7 +36,8 @@ const ALL_SECTIONS = [
   { key: 'leave-types', label: 'Leave types' },
   { key: 'holiday-lists', label: 'Holiday lists' },
   { key: 'shift-types', label: 'Shift types' },
-  { key: 'celebrations', label: 'Celebrations' },
+  // Plan 2026-10-04-004 U5: celebrations moved to the Email templates
+  // page's own group; /settings/celebrations redirects there.
   { key: 'report-access', label: 'Report access' },
   { key: 'portal-roles', label: 'Portal roles' },
 ]
@@ -140,12 +140,6 @@ function reload() {
         <ShiftTypesSection
           v-else-if="activeSection === 'shift-types'"
           :shift-types="config.data?.shift_types || []"
-          @saved="reload"
-        />
-        <CelebrationsSection
-          v-else-if="activeSection === 'celebrations'"
-          :celebrations="config.data?.celebrations || {}"
-          :template-tokens="config.data?.celebration_template_tokens || []"
           @saved="reload"
         />
         <ReportAccessSection v-else-if="activeSection === 'report-access'" />

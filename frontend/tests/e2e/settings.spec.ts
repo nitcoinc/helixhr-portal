@@ -179,56 +179,9 @@ test('message text left Settings for the Email templates page (plan 2026-10-02-0
   await expect(page.getByTestId('settings-tab-templates')).toHaveCount(0)
 })
 
-test('P8-U12: HR authors the celebration email and switches to a selected audience', async ({ page }, testInfo) => {
+test('the celebrations section left Settings for the Email templates page (plan 2026-10-04-004 U5)', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'hr', 'settings is an HR-only screen')
 
   await page.goto('/helixhr/settings')
-  await page.getByTestId('settings-tab-celebrations').click()
-  await expect(page.getByText('Celebrations')).toBeVisible()
-
-  await page.getByTestId('settings-celebration-edit-birthday').click()
-  const form = page.getByTestId('settings-celebration-form')
-  await expect(form).toBeVisible()
-
-  const subject = `E2E birthday subject ${Date.now()}`
-  await form.getByLabel('Send this reminder').check()
-  await form.getByLabel('Subject').fill(subject)
-  await form.getByLabel('Body').fill('Cheers, {{ names }}')
-
-  // Switch to a selected audience and pick one person.
-  await form.getByLabel('Send to').selectOption('Selected employees')
-  await form.getByLabel('Add a person').fill('Manager')
-  const match = form.getByRole('button', { name: /Manager/ }).first()
-  await expect(match).toBeVisible()
-  await match.click()
-  await expect(form.getByText('Nobody selected yet.')).toHaveCount(0)
-
-  await form.getByRole('button', { name: 'Save' }).click()
-  await expect(form).toBeHidden()
-
-  // Read back from the server, not just the in-memory response.
-  await page.reload()
-  await page.getByTestId('settings-tab-celebrations').click()
-  await expect(page.getByTestId('settings-celebration-row').filter({ hasText: 'Birthday' })).toContainText('1 selected')
-
-  await page.getByTestId('settings-celebration-edit-birthday').click()
-  await expect(page.getByTestId('settings-celebration-form').getByLabel('Subject')).toHaveValue(subject)
-
-  // Open in Desk points at the Email Template list, not the reminder row.
-  await expect(page.getByTestId('settings-desk-link')).toHaveAttribute('href', /\/desk\/email-template$/)
-})
-
-test('P8-U12: switching to Selected employees with nobody picked is refused before saving', async ({ page }, testInfo) => {
-  test.skip(testInfo.project.name !== 'hr', 'settings is an HR-only screen')
-
-  await page.goto('/helixhr/settings')
-  await page.getByTestId('settings-tab-celebrations').click()
-  await page.getByTestId('settings-celebration-edit-work_anniversary').click()
-
-  const form = page.getByTestId('settings-celebration-form')
-  await form.getByLabel('Send to').selectOption('Selected employees')
-  await form.getByRole('button', { name: 'Save' }).click()
-
-  await expect(form.getByRole('alert')).toBeVisible()
-  await expect(form).toBeVisible()
+  await expect(page.getByTestId('settings-tab-celebrations')).toHaveCount(0)
 })
