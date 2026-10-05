@@ -74,7 +74,9 @@ function isNumeric(column) {
 
 function cell(row, column) {
   const value = row[column.fieldname]
-  if (value === null || value === undefined || value === '') return ''
+  // Plan 2026-10-05-001 U8 (R14): an empty data cell reads as an em dash on
+  // screen; the raw value (and every export) stays empty.
+  if (value === null || value === undefined || value === '') return row._kind === 'row' ? '—' : ''
   if (DATES.has(column.fieldtype)) return formatDate(value)
   if (isNumeric(column)) return roundHours(value)
   return value

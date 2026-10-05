@@ -375,6 +375,18 @@ async function openInDesk() {
             {{ runMessage }}
           </p>
 
+          <!-- Plan 2026-10-05-001 U8: the flagship names its project and customer. -->
+          <p
+            v-if="grid && result?.extra?.project_name"
+            class="mb-3 text-sm text-ink-gray-7"
+            data-testid="project-header"
+          >
+            <span class="font-medium text-ink-gray-9">{{ result.extra.project_name }}</span>
+            <template v-if="result.extra.customer">
+              · {{ result.extra.customer }}
+            </template>
+          </p>
+
           <!-- U7: approved hours only; say what was left out (resolved decision 6). -->
           <p
             v-if="pendingHours > 0 && !reportResource.loading"

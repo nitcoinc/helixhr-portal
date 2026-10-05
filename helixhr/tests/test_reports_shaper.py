@@ -45,6 +45,18 @@ class TestShape(UnitTestCase):
 		self.assertEqual(out[-1]["hours"], 10)
 		self.assertEqual(out[-1]["hours"], sum(row["hours"] for row in _data(out)))
 
+	def test_a_subtotal_labels_itself_in_the_first_non_group_text_column(self):
+		"""Plan 2026-10-05-001 U8 (R14)."""
+		rows = [
+			{"employee": "E1", "project": "P1", "hours": 1},
+			{"employee": "E1", "project": "P2", "hours": 2},
+		]
+		out = shape(COLUMNS, rows, ["employee"])["rows"]
+		subtotal = next(row for row in out if row["_kind"] == "subtotal")
+		self.assertEqual(subtotal["project"], "Subtotal")
+		self.assertEqual(subtotal["employee"], "E1")
+		self.assertNotIn("project", out[-1])
+
 	def test_rows_round_once_and_totals_agree(self):
 		rows = [{"employee": "E", "project": "P", "hours": h} for h in (0.333, 0.333, 0.334)]
 		result = shape(COLUMNS, rows)

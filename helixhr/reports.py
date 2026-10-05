@@ -50,6 +50,7 @@ PENDING_TIMESHEET_STATES = ("Pending Approval", "Pending HR")
 
 NUMERIC_FIELDTYPES = frozenset({"Int", "Float", "Currency", "Duration"})
 _ROUNDED_FIELDTYPES = frozenset({"Float", "Currency"})
+_TEXT_FIELDTYPES = frozenset({"Data", "Link", "Dynamic Link", "Select", "Small Text", "Text"})
 _ENTITY_TYPES = frozenset({"employee", "project", "task", "department"})
 _MONTH_RE = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
@@ -102,8 +103,10 @@ _HOURS_FIELDS = (
 	"ts.employee as employee",
 	"ts.employee_name as employee_name",
 	"td.project as project",
+	"prj.project_name as project_name",
 	"td.task as task",
-	"tsk.subject as task_subject",
+	# Plan 2026-10-05-001 U8: same label the flagship uses for a taskless row.
+	"coalesce(tsk.subject, %(no_task)s) as task_subject",
 	"td.hours as hours",
 	"td.billing_hours as billing_hours",
 )
@@ -119,13 +122,14 @@ def _hours_by_project(filters, scope):
 		{"fieldname": "employee", "label": "Employee", "fieldtype": "Link", "options": "Employee"},
 		{"fieldname": "employee_name", "label": "Employee name", "fieldtype": "Data"},
 		{"fieldname": "project", "label": "Project", "fieldtype": "Link", "options": "Project"},
+		{"fieldname": "project_name", "label": "Project name", "fieldtype": "Data"},
 		{"fieldname": "task", "label": "Task", "fieldtype": "Link", "options": "Task"},
 		{"fieldname": "task_subject", "label": "Task subject", "fieldtype": "Data"},
 		{"fieldname": "hours", "label": "Hours", "fieldtype": "Float"},
 		{"fieldname": "billing_hours", "label": "Billable hours", "fieldtype": "Float"},
 	]
 	fields = list(_HOURS_FIELDS)
-	values = {"pending_states": PENDING_TIMESHEET_STATES}
+	values = {"pending_states": PENDING_TIMESHEET_STATES, "no_task": NO_TASK}
 	if include_pending:
 		conditions = ["(ts.docstatus = 1 or (ts.docstatus = 0 and ts.workflow_state in %(pending_states)s))"]
 		fields.append("if(ts.docstatus = 1, 'Approved', 'Pending') as approval")
@@ -162,6 +166,7 @@ def _hours_by_project(filters, scope):
 		from `tabTimesheet Detail` td
 		inner join `tabTimesheet` ts on ts.name = td.parent
 		left join `tabTask` tsk on tsk.name = td.task
+		left join `tabProject` prj on prj.name = td.project
 		where {" and ".join(conditions)}
 		order by `date` desc, ts.employee asc, td.idx asc
 		""",
@@ -876,6 +881,7 @@ def _hr_request_aging(filters, scope):
 		{"fieldname": "status", "label": "Status", "fieldtype": "Data"},
 		{"fieldname": "routed_to_role", "label": "Routed to", "fieldtype": "Link", "options": "Role"},
 		{"fieldname": "picked_up_by", "label": "Assignee", "fieldtype": "Link", "options": "User"},
+		{"fieldname": "picked_up_by_name", "label": "Assignee name", "fieldtype": "Data"},
 		{"fieldname": "opened_on", "label": "Opened", "fieldtype": "Date"},
 		{"fieldname": "age_days", "label": "Age (days)", "fieldtype": "Int"},
 		{"fieldname": "age_bucket", "label": "Age", "fieldtype": "Data"},
@@ -893,10 +899,12 @@ def _hr_request_aging(filters, scope):
 	rows = frappe.db.sql(
 		f"""
 		select r.name as request, r.employee, e.employee_name, r.category, r.status,
-			r.routed_to_role, r.picked_up_by, date(r.creation) as opened_on,
+			r.routed_to_role, r.picked_up_by, u.full_name as picked_up_by_name,
+			date(r.creation) as opened_on,
 			datediff(%(today)s, date(r.creation)) as age_days
 		from `tabHR Request` r
 		inner join `tabEmployee` e on e.name = r.employee
+		left join `tabUser` u on u.name = r.picked_up_by
 		where {_where(conditions)}
 		order by age_days desc, r.name asc
 		""",
@@ -946,6 +954,44 @@ def _advance_post(columns, rows):
 	return columns, out
 
 
+def _employee_names(columns, rows):
+	"""Plan 2026-10-05-001 U8 (KTD8), wrapped reports only: every Employee
+	link column gets a visible name column right after it. An HRMS name
+	column that is already there (``employee_name``, ``reports_to_name``) is
+	un-hidden; a missing one is added and filled from Employee."""
+	columns = [dict(column) for column in columns]
+	fieldnames = {column["fieldname"] for column in columns}
+	for column in list(columns):
+		if column.get("fieldtype") != "Link" or column.get("options") != "Employee":
+			continue
+		field = column["fieldname"]
+		name_field = "employee_name" if field == "employee" else f"{field}_name"
+		if name_field in fieldnames:
+			next(c for c in columns if c["fieldname"] == name_field).pop("hidden", None)
+			continue
+		ids = list({row.get(field) for row in rows if row.get(field)})
+		names = (
+			dict(
+				frappe.get_all(
+					"Employee", filters={"name": ["in", ids]}, fields=["name", "employee_name"], as_list=True
+				)
+			)
+			if ids
+			else {}
+		)
+		columns.insert(
+			columns.index(column) + 1,
+			{
+				"fieldname": name_field,
+				"label": f"{column.get('label') or frappe.unscrub(field)} name",
+				"fieldtype": "Data",
+			},
+		)
+		fieldnames.add(name_field)
+		rows = [{**row, name_field: names.get(row.get(field))} for row in rows]
+	return columns, rows
+
+
 def _list_adapt(*fields):
 	"""HRMS filters applied with ``isin``: wrap the portal's single value."""
 
@@ -981,6 +1027,9 @@ def _employee_directory(filters, scope):
 		{"fieldname": f, "label": label, "fieldtype": ft, **({"options": opt} if opt else {})}
 		for f, label, ft, opt in _DIRECTORY_COLUMNS
 	]
+	# Plan 2026-10-05-001 U8 (KTD8): the manager's name next to the id.
+	at = next(i for i, column in enumerate(columns) if column["fieldname"] == "reports_to") + 1
+	columns.insert(at, {"fieldname": "reports_to_name", "label": "Reports to name", "fieldtype": "Data"})
 	query = {}
 	if scope["kind"] == "company":
 		query["company"] = scope["company"]
@@ -996,6 +1045,21 @@ def _employee_directory(filters, scope):
 		order_by="employee_name asc",
 		ignore_permissions=True,
 	)
+	managers = {row.reports_to for row in rows if row.reports_to}
+	names = (
+		dict(
+			frappe.get_all(
+				"Employee",
+				filters={"name": ["in", list(managers)]},
+				fields=["name", "employee_name"],
+				as_list=True,
+			)
+		)
+		if managers
+		else {}
+	)
+	for row in rows:
+		row["reports_to_name"] = names.get(row.reports_to)
 	return columns, rows
 
 
@@ -1724,6 +1788,7 @@ def _run_frappe_report(entry, clean, scope, raw):
 	rows = [row for row in rows if isinstance(row, dict)]
 	if entry["post"]:
 		columns, rows = entry["post"](columns, rows)
+	columns, rows = _employee_names(columns, rows)
 	if not entry["shows_amounts"]:
 		# R3: Currency columns leave wrapped output unless the entry is
 		# declared to show expense amounts.
@@ -1782,6 +1847,16 @@ def shape(columns, rows, group_by=(), sort=None, totals=None):
 	if totals is None:
 		totals = [c["fieldname"] for c in columns if c.get("fieldtype") in NUMERIC_FIELDTYPES]
 	totals = [field for field in totals if field in fieldnames]
+	# Plan 2026-10-05-001 U8 (R14): a subtotal row says so in the first text
+	# column that is not a group field (else the group columns label it).
+	label_field = next(
+		(
+			c["fieldname"]
+			for c in columns
+			if c["fieldname"] not in group_by and c.get("fieldtype") in _TEXT_FIELDTYPES
+		),
+		None,
+	)
 
 	data = []
 	for row in rows:
@@ -1811,6 +1886,7 @@ def shape(columns, rows, group_by=(), sort=None, totals=None):
 					**parents,
 					field: value,
 					**_sums(members, totals),
+					**({label_field: _("Subtotal")} if label_field else {}),
 					"_kind": "subtotal",
 					"_level": level,
 					"_group_field": field,
@@ -1993,7 +2069,11 @@ def export_rows(columns, shaped_rows):
 				if kind == "total"
 				else _("Subtotal: {0}").format(row.get(row["_group_field"]) or _("(none)"))
 			)
-			if cells[0] in (None, "") or fields[0] == row.get("_group_field"):
+			if (
+				cells[0] in (None, "")
+				or fields[0] == row.get("_group_field")
+				or (kind == "subtotal" and cells[0] == _("Subtotal"))
+			):
 				cells[0] = label
 		out.append((kind, cells))
 	return out
