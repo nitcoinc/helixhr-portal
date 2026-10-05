@@ -25,6 +25,10 @@ describe('presetRange', () => {
     expect(presetRange('last_year', '2026-07-04')).toEqual({ from_date: '2025-01-01', to_date: '2025-12-31' })
   })
 
+  it('custom is not a range: the caller keeps its dates (plan 2026-10-05-001 U9)', () => {
+    expect(presetRange('custom', '2026-01-15')).toBeNull()
+  })
+
   it('refuses an unknown id or a malformed today', () => {
     expect(presetRange('nope', '2026-01-01')).toBeNull()
     expect(presetRange('this_month', '')).toBeNull()
@@ -35,5 +39,6 @@ describe('matchPreset', () => {
   it('names the preset a range equals, else custom', () => {
     expect(matchPreset('2025-12-01', '2025-12-31', '2026-01-15')).toBe('last_month')
     expect(matchPreset('2025-12-02', '2025-12-31', '2026-01-15')).toBe('custom')
+    expect(matchPreset('2026-01-01', '2026-12-31', '2026-01-15')).toBe('this_year')
   })
 })

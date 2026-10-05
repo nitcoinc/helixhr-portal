@@ -61,11 +61,24 @@ async function setProject(value) {
   if (!keep && props.modelValue.project === value && props.modelValue.task === task) set('task', '')
 }
 
+// Plan 2026-10-05-001 U9 (R15): Custom is a real choice. Picking it keeps
+// the dates (even when they equal a preset) and moves focus to From -- on
+// the select's change event only, so arrowing through options never jumps.
+const customChosen = ref(false)
 const preset = computed(() =>
-  matchPreset(props.modelValue.from_date, props.modelValue.to_date, today()),
+  customChosen.value ? 'custom' : matchPreset(props.modelValue.from_date, props.modelValue.to_date, today()),
+)
+const rangeInvalid = computed(
+  () => !!props.modelValue.from_date && !!props.modelValue.to_date && props.modelValue.from_date > props.modelValue.to_date,
 )
 
 function applyPreset(presetId) {
+  if (presetId === 'custom') {
+    customChosen.value = true
+    document.getElementById(`${id}-from_date`)?.focus()
+    return
+  }
+  customChosen.value = false
   const range = presetRange(presetId, today())
   if (range) emit('update:modelValue', { ...props.modelValue, ...range })
 }
@@ -131,10 +144,7 @@ function secondGroupOptions() {
               >
                 {{ option.label }}
               </option>
-              <option
-                value="custom"
-                disabled
-              >
+              <option value="custom">
                 Custom
               </option>
             </select>
@@ -152,9 +162,19 @@ function secondGroupOptions() {
               type="date"
               :value="modelValue[name] || ''"
               :class="FIELD_CLASS"
+              :aria-invalid="rangeInvalid ? 'true' : undefined"
+              :aria-describedby="rangeInvalid ? `${id}-range-error` : undefined"
               @change="set(name, $event.target.value)"
             >
           </div>
+          <p
+            v-if="rangeInvalid"
+            :id="`${id}-range-error`"
+            class="text-sm text-ink-red-4 sm:col-span-2 lg:col-span-4"
+            role="alert"
+          >
+            From must be on or before To.
+          </p>
         </template>
 
         <template
@@ -277,7 +297,7 @@ function secondGroupOptions() {
           theme="blue"
           size="md"
           :loading="running"
-          :disabled="missing.length > 0"
+          :disabled="missing.length > 0 || rangeInvalid"
           :aria-describedby="missing.length ? `${id}-missing` : undefined"
           @click="emit('run')"
         >

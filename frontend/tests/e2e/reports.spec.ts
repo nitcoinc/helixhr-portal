@@ -166,6 +166,20 @@ test.describe('hr', () => {
     await expect(page.getByRole('button', { name: 'Open in Frappe' })).toHaveCount(0)
   })
 
+  test('Custom period keeps the dates and moves focus to From', async ({ page }) => {
+    await page.goto('/helixhr/reports/hours_by_project')
+    const from = page.getByLabel('From')
+    const to = page.getByLabel('To')
+    const before = [await from.inputValue(), await to.inputValue()]
+    await page.getByLabel('Period').selectOption('custom')
+    await expect(page.getByLabel('Period')).toHaveValue('custom')
+    await expect(from).toBeFocused()
+    expect([await from.inputValue(), await to.inputValue()]).toEqual(before)
+
+    await from.fill('2099-12-31')
+    await expect(page.getByText('From must be on or before To.')).toBeVisible()
+  })
+
   test('the project picker lists options on focus, and a new project clears an incompatible task', async ({
     page,
   }) => {
