@@ -473,4 +473,57 @@ test.describe.serial('timesheet entry', () => {
 
     await context.close()
   })
+  // Plan 2026-10-05-001 U5 (R1, R3, R4). The month overview opens the week
+  // it names, and the pending week's banner offers Recall as the primary
+  // action. TARGET_WEEK is Pending Approval after the first test.
+  test('the month overview opens a missing week, and a pending week offers Recall', async ({
+    browser,
+  }: {
+    browser: Browser
+  }) => {
+    test.setTimeout(60000)
+    const context = await browser.newContext({
+      storageState: 'tests/.auth/employee.json',
+      viewport: { width: 1280, height: 900 },
+    })
+    const page = await context.newPage()
+    const month = SOURCE_WEEK.slice(0, 7)
+
+    await page.goto(`/helixhr/timesheet?month=${month}`)
+    const weeks = page.getByTestId('month-weeks')
+    const missing = weeks.getByRole('link', { name: /, missing$/ }).first()
+    await expect(missing).toBeVisible({ timeout: 10000 })
+    const monday = await missing.getAttribute('data-week')
+    await missing.click()
+    await expect(page).toHaveURL(new RegExp(`/timesheet/${monday}\\?month=${month}$`))
+    await expect(weeks.locator(`[data-week="${monday}"]`)).toHaveAttribute('aria-current', 'page')
+
+    await page.goto(`/helixhr/timesheet/${TARGET_WEEK}`)
+    const banner = page.getByTestId('week-banner')
+    await expect(banner).toContainText('Waiting for', { timeout: 10000 })
+    await expect(banner.getByRole('button', { name: 'Recall week' })).toBeVisible()
+    await expect(
+      page.getByTestId('month-weeks').locator(`[data-week="${TARGET_WEEK}"]`),
+    ).toHaveAttribute('aria-label', /Waiting/)
+
+    await context.close()
+  })
+
+  // Phone: the overview is a vertical list of the same links.
+  test('the month overview is a vertical list on a phone', async ({
+    browser,
+  }: {
+    browser: Browser
+  }) => {
+    const context = await phone(browser)
+    const page = await context.newPage()
+    await page.goto(`/helixhr/timesheet/${SOURCE_WEEK}`)
+    const links = page.getByTestId('month-weeks').getByRole('link')
+    await expect(links.first()).toBeVisible({ timeout: 10000 })
+    const [a, b] = [await links.nth(0).boundingBox(), await links.nth(1).boundingBox()]
+    expect(b!.y).toBeGreaterThan(a!.y + a!.height - 1)
+    await page.getByRole('button', { name: 'Next month' }).click()
+    await expect(page).toHaveURL(/\?month=\d{4}-\d{2}$/)
+    await context.close()
+  })
 })
