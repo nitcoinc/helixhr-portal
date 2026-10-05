@@ -143,6 +143,12 @@ export function uploadMyPhoto(file) {
   return uploadFile('helixhr.api.upload_my_photo', file, {})
 }
 
+/** Plan 2026-10-05-001 U12: set or replace a company's email logo
+ * (`helixhr.api.set_company_logo`); resolves to `{ company, logo_url }`. */
+export function uploadCompanyLogo(file, { company }) {
+  return uploadFile('helixhr.api.set_company_logo', file, { company })
+}
+
 /**
  * A write that must survive the page unloading immediately after it is
  * sent -- `fetch`'s own `keepalive` flag, which frappe-ui's resourceFetcher

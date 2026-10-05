@@ -8,6 +8,7 @@ import { computed, reactive, ref, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { createResource, FormControl, Button } from 'frappe-ui'
 import { session } from '@/lib/session'
+import { uploadCompanyLogo } from '@/lib/api'
 
 const props = defineProps({
   company: { type: String, required: true },
@@ -161,6 +162,57 @@ async function submit() {
   }
 }
 
+// --- the company logo every email carries (plan 2026-10-05-001 U12) -------
+//
+// `Company.company_logo`, set for the selected company only. Type and size
+// are checked here for a quick answer and again on the server, which is
+// the real gate (signature, not name).
+const LOGO_TYPES = ['image/png', 'image/jpeg', 'image/webp']
+const LOGO_MAX_BYTES = 2 * 1024 * 1024
+const logoInput = ref(null)
+const logoError = ref('')
+const logoStatus = ref('')
+const logoBusy = ref(false)
+const removeLogoResource = createResource({ url: 'helixhr.api.set_company_logo', method: 'POST' })
+
+async function onLogoPicked(event) {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  logoError.value = ''
+  logoStatus.value = ''
+  if (!file) return
+  if (!LOGO_TYPES.includes(file.type)) {
+    logoError.value = 'The logo must be a PNG, JPEG or WebP image.'
+    return
+  }
+  if (file.size > LOGO_MAX_BYTES) {
+    logoError.value = 'That file is bigger than 2 MB. Pick a smaller one.'
+    return
+  }
+  logoBusy.value = true
+  try {
+    await uploadCompanyLogo(file, { company: props.company })
+    await setup.reload()
+    logoStatus.value = 'Logo saved. Every email for ' + props.company + ' now carries it.'
+  } catch (error) {
+    logoError.value = error?.messages?.[0] || 'Could not save the logo. Please try again.'
+  } finally {
+    logoBusy.value = false
+  }
+}
+
+async function removeLogo() {
+  logoError.value = ''
+  logoStatus.value = ''
+  try {
+    await removeLogoResource.submit({ company: props.company, remove: 1 })
+    await setup.reload()
+    logoStatus.value = 'Logo removed.'
+  } catch (error) {
+    logoError.value = error?.messages?.[0] || 'Could not remove the logo. Please try again.'
+  }
+}
+
 // --- reset to the shipped default (plan 2026-10-05-001 U11) ----------------
 //
 // Server-side for the selected company only; the editor then reopens on the
@@ -255,6 +307,70 @@ defineExpose({ setup })
         :options="(setup.data?.companies || []).map((c) => ({ label: c, value: c }))"
         @update:model-value="(value) => router.replace({ query: { ...route.query, company: value, event: 'birthday' } })"
       />
+    </div>
+
+    <div
+      class="surface-card elev-1 flex flex-wrap items-center gap-3 p-4"
+      data-testid="company-logo"
+    >
+      <div class="flex h-12 w-32 shrink-0 items-center justify-center rounded border border-outline-gray-1 bg-surface-white">
+        <img
+          v-if="setup.data?.logo_url"
+          :src="setup.data.logo_url"
+          :alt="`${props.company} logo`"
+          class="max-h-10 max-w-full"
+        >
+        <span
+          v-else
+          class="text-xs text-ink-gray-6"
+        >No logo</span>
+      </div>
+      <div class="min-w-0 flex-1">
+        <p class="font-medium text-ink-gray-9">
+          Email logo
+        </p>
+        <p class="text-sm text-ink-gray-6">
+          Shown at the top of every email to {{ props.company }}. PNG, JPEG or WebP, up to 2 MB.
+        </p>
+      </div>
+      <input
+        ref="logoInput"
+        type="file"
+        accept="image/png,image/jpeg,image/webp"
+        class="hidden"
+        data-testid="company-logo-input"
+        @change="onLogoPicked"
+      >
+      <Button
+        variant="subtle"
+        :loading="logoBusy"
+        @click="logoInput?.click()"
+      >
+        {{ setup.data?.logo_url ? 'Replace' : 'Upload' }}
+      </Button>
+      <Button
+        v-if="setup.data?.logo_url"
+        variant="ghost"
+        :loading="removeLogoResource.loading"
+        @click="removeLogo"
+      >
+        Remove
+      </Button>
+      <p
+        v-if="logoError"
+        class="surface-alert w-full p-3 text-sm"
+        role="alert"
+      >
+        {{ logoError }}
+      </p>
+      <p
+        v-if="logoStatus"
+        class="w-full text-sm text-ink-gray-6"
+        role="status"
+        data-testid="company-logo-status"
+      >
+        {{ logoStatus }}
+      </p>
     </div>
 
     <div

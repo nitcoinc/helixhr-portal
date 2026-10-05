@@ -8450,6 +8450,54 @@ def reset_celebration_template(event, company=None):
 	return _celebration_reminder_projection(event, company)
 
 
+@frappe.whitelist(methods=["POST"])
+def set_company_logo(company=None, remove=0):
+	"""Plan 2026-10-05-001 U12 (KTD10): upload, replace or remove the logo
+	every email for `company` carries -- `Company.company_logo`, no new
+	setting. HR only; an anchored HR Manager for their own company, a
+	System Manager for any (review fold-in). The upload is
+	`frappe.request.files["file"]`: PNG, JPEG or WebP by signature, at most
+	2 MB, stored public (mail clients load it without a session) and
+	attached to the Company."""
+	from helixhr.utils import validate_logo_upload
+
+	rate_limit_per_user("set_company_logo")
+	if not _is_hr():
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	company = company or _celebration_company()
+	if "System Manager" not in frappe.get_roles():
+		_assert_company_in_admin_scope(company)
+	if not frappe.db.exists("Company", company):
+		frappe.throw(_("That company does not exist."))
+
+	if cint(remove):
+		# `db.set_value`: HR Manager has no write DocPerm on Company, and
+		# the gate above is this path's authorisation, as for the templates.
+		frappe.db.set_value("Company", company, "company_logo", None)
+		return {"company": company, "logo_url": ""}
+
+	upload = (getattr(frappe.request, "files", None) or {}).get("file")
+	if upload is None:
+		frappe.throw(_("No file came through. Pick the file again."))
+	file_name = os.path.basename(upload.filename or "").strip()
+	content = upload.stream.read()
+	extension = validate_logo_upload(file_name, content)
+	doc = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": f"{frappe.scrub(company)}-logo{extension}",
+			"content": content,
+			"attached_to_doctype": "Company",
+			"attached_to_name": company,
+			"attached_to_field": "company_logo",
+			"is_private": 0,
+		}
+	)
+	doc.insert(ignore_permissions=True)
+	frappe.db.set_value("Company", company, "company_logo", doc.file_url)
+	return {"company": company, "logo_url": doc.file_url}
+
+
 @frappe.whitelist()
 def get_celebration_setup(company=None):
 	"""Plan 2026-10-04-004 U4 (R9, R10): the Email Templates page's
@@ -8479,6 +8527,8 @@ def get_celebration_setup(company=None):
 		"companies": _companies_in_admin_scope(),
 		"events": {event: _celebration_reminder_projection(event, company) for event in EVENTS},
 		"template_tokens": CELEBRATION_TEMPLATE_TOKENS,
+		# U12: the logo every email for this company carries.
+		"logo_url": (frappe.db.get_value("Company", company, "company_logo") or "") if company else "",
 	}
 
 

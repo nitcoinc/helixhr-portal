@@ -488,6 +488,13 @@ or `logo_url` is sent as is. **Editing or resetting a template does not
 lift the 36 h rerun guard**: a company already mailed today is not mailed
 again by a hand-run job after the fix.
 
+**Email logo (plan 2026-10-05-001 U12).** Portal → Email templates →
+"Celebrations & holidays" → Email logo writes `Company.company_logo` for the
+selected company (PNG/JPEG/WebP, 2 MB, public File). Every portal email is
+branded with the *recipient's* company logo, falling back to the default
+company only for a user with no active Employee. A mail with no logo shows
+the company name instead of an image.
+
 ## Employee gets locked/HR-only fields from more than one place (U5 follow-up)
 
 `helixhr/fixtures/property_setter.json`'s permlevel pass only queried the `DocField` doctype,

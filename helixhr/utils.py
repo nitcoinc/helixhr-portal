@@ -889,6 +889,18 @@ def render_celebration_email(subject, body, context):
 	return {"subject": rendered_subject, "message": html}
 
 
+def _recipient_brand(user):
+	"""Plan 2026-10-05-001 U12 (KTD10): the recipient's own company and its
+	logo, so a mail to company B's employee carries B's branding while the
+	default company is A. Empty -- the default company's -- for a user
+	with no active Employee."""
+	company = session_company(user)
+	if not company:
+		return {}
+	logo = frappe.db.get_value("Company", company, "company_logo")
+	return {"company": company, "logo_url": frappe.utils.get_url(logo) if logo else ""}
+
+
 def send_notification(event_key, recipients, context, reference_doctype=None, reference_name=None):
 	"""Render and queue `event_key` to each recipient (KTD8). One mail per
 	recipient so `recipient_first_name` is theirs. Never raises: a mail
@@ -896,7 +908,10 @@ def send_notification(event_key, recipients, context, reference_doctype=None, re
 	for recipient in recipients or ():
 		try:
 			first_name = frappe.db.get_value("User", recipient, "first_name")
-			message = render_message(event_key, {"recipient_first_name": first_name, **(context or {})})
+			message = render_message(
+				event_key,
+				{"recipient_first_name": first_name, **_recipient_brand(recipient), **(context or {})},
+			)
 			if message is None:
 				return
 			frappe.sendmail(
@@ -1460,6 +1475,8 @@ RATE_LIMIT_POLICY = {
 	"search_celebration_recipients": (60, 60),
 	# Plan 2026-10-05-001 U11: an occasional administrative write, like the save.
 	"reset_celebration_template": (30, 3600),
+	# U12: a logo changes rarely; bounded like the photo upload.
+	"set_company_logo": (20, 3600),
 	# Plan 2026-09-30-001 U2. Each re-encodes an image, so bounded like the
 	# attachment writes. The photo GET is deliberately not listed: a page
 	# loads one per avatar.
@@ -1685,6 +1702,31 @@ PHOTO_MAX_SIDE = 512
 # phone camera is comfortably inside this.
 PHOTO_MAX_PIXELS = 64_000_000
 PHOTO_KIND_MESSAGE = "Your photo must be a PNG or JPEG image."
+
+
+# Plan 2026-10-05-001 U12: the company logo every email carries. Served
+# publicly (mail clients fetch it without a session), so raster only --
+# SVG can carry script -- and checked by signature, not by name. WebP's
+# signature is "RIFF", four size bytes, then "WEBP"; `logo_upload_kind`
+# checks the second half.
+LOGO_POLICY = {
+	**{extension: UPLOAD_POLICY[extension] for extension in (".png", ".jpg", ".jpeg")},
+	".webp": ("image/webp", (b"RIFF",), None),
+}
+LOGO_MAX_BYTES = 2 * 1024 * 1024
+LOGO_KIND_MESSAGE = "The logo must be a PNG, JPEG or WebP image."
+
+
+def validate_logo_upload(file_name, content):
+	"""Refuse anything but a PNG, JPEG or WebP of at most 2 MB whose bytes
+	match its name. Returns the extension."""
+	validate_portal_upload(
+		file_name, content, policy=LOGO_POLICY, max_bytes=LOGO_MAX_BYTES, kind_message=LOGO_KIND_MESSAGE
+	)
+	extension = upload_extension(file_name)
+	if extension == ".webp" and bytes(content[8:12]) != b"WEBP":
+		frappe.throw(_(LOGO_KIND_MESSAGE))
+	return extension
 
 
 def photo_file_filters(**extra):
