@@ -1326,6 +1326,104 @@ class TestPreflightCelebrationReminders(IntegrationTestCase):
 		self.assertIn("read-only in Desk", result["detail"])
 
 
+class TestPreflightCrossCompanyMailboxes(IntegrationTestCase):
+	"""Plan 2026-10-04-004 U6 / R6: the duplicate-mailbox check.
+
+	The pair is the reported bug's shape: a real employee and a stale
+	active duplicate in another company resolving to one address."""
+
+	@classmethod
+	def setUpClass(cls):
+		from helixhr.tests.utils import ensure_test_company
+
+		cls.company = ensure_test_company()
+
+	def _employee(self, suffix, company, email):
+		from helixhr.tests.utils import make_celebration_employee
+
+		name = make_celebration_employee(
+			f"PREFLIGHT-{suffix}",
+			company,
+			date_of_birth="1990-01-01",
+			date_of_joining="2020-01-01",
+			company_email=email,
+		)
+		self.addCleanup(frappe.db.set_value, "Employee", name, "status", "Left")
+		return name
+
+	def test_two_companies_sharing_an_address_warn_and_name_both(self):
+		from helixhr.preflight import WARN, check_cross_company_mailboxes
+
+		other_company = "_Test Reminders Co B"
+		if not frappe.db.exists("Company", other_company):
+			frappe.get_doc(
+				{
+					"doctype": "Company",
+					"company_name": other_company,
+					"abbr": "TRCB",
+					"default_currency": "USD",
+					"country": "United States",
+				}
+			).insert(ignore_permissions=True)
+			self.addCleanup(
+				frappe.delete_doc, "Company", other_company, force=True, ignore_permissions=True
+			)
+		# Both without a User: the resolution order's first pick is then the
+		# company_email, which is the address the two share.
+		first = self._employee("DUP1", self.company, "shared-preflight@helixhr.test")
+		second = self._employee("DUP2", other_company, "shared-preflight@helixhr.test")
+
+		result = check_cross_company_mailboxes()
+
+		self.assertEqual(result["status"], WARN)
+		self.assertIn("shared-preflight@helixhr.test", result["detail"])
+		self.assertIn(first, result["detail"])
+		self.assertIn(second, result["detail"])
+
+	def test_an_address_shared_within_one_company_passes(self):
+		"""A shared mailbox inside one company is a normal arrangement."""
+		from helixhr.preflight import PASS, check_cross_company_mailboxes
+
+		self._employee("SAMECO1", self.company, "one-company@helixhr.test")
+		self._employee("SAMECO2", self.company, "one-company@helixhr.test")
+
+		result = check_cross_company_mailboxes()
+
+		self.assertEqual(result["status"], PASS)
+		self.assertNotIn("one-company@helixhr.test", result["detail"])
+
+	def test_one_of_the_pair_set_to_left_passes(self):
+		from helixhr.preflight import PASS, WARN, check_cross_company_mailboxes
+
+		other_company = "_Test Reminders Co B"
+		if not frappe.db.exists("Company", other_company):
+			frappe.get_doc(
+				{
+					"doctype": "Company",
+					"company_name": other_company,
+					"abbr": "TRCB",
+					"default_currency": "USD",
+					"country": "United States",
+				}
+			).insert(ignore_permissions=True)
+			self.addCleanup(
+				frappe.delete_doc, "Company", other_company, force=True, ignore_permissions=True
+			)
+		first = self._employee("LEFT1", self.company, "left-pair@helixhr.test")
+		stale = self._employee("LEFT2", other_company, "left-pair@helixhr.test")
+
+		result = check_cross_company_mailboxes()
+		self.assertEqual(result["status"], WARN)
+
+		frappe.db.set_value("Employee", stale, "status", "Left")
+		frappe.clear_document_cache("Employee", stale)
+		result = check_cross_company_mailboxes()
+
+		self.assertEqual(result["status"], PASS)
+		self.assertNotIn("left-pair@helixhr.test", result["detail"])
+		self.assertTrue(first)
+
+
 class TestPreflightMailAndHRQueue(IntegrationTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")

@@ -1301,6 +1301,58 @@ def check_celebration_reminders():
 	return _result("Celebration reminders", PASS, "; ".join(notes))
 
 
+def check_cross_company_mailboxes():
+	"""Plan 2026-10-04-004 U6 / R6: the data cause the send-time guard works
+	around, surfaced.
+
+	Two active Employees in different companies that resolve to one mailbox
+	are the reported celebration bug's shape: a stale active duplicate in
+	company B puts a company A person on B's list. The sender drops the
+	overlap and logs it every run (R3); this check finds the pairs before
+	anyone's birthday, naming the Employee records so HR can set the stale
+	one to Left.
+
+	The resolution is the pool helpers' own order (`user_id` ->
+	`company_email` -> `personal_email`), one query. Sharing an address
+	*within* one company is normal (a shared mailbox) and not warned; one
+	of a spanning pair being Left removes the pair."""
+	rows = frappe.get_all(
+		"Employee",
+		filters={"status": "Active"},
+		fields=["name", "company", "user_id", "company_email", "personal_email"],
+	)
+	by_address = {}
+	for row in rows:
+		address = row.user_id or row.company_email or row.personal_email
+		if not address:
+			continue
+		by_address.setdefault(address, []).append(row)
+
+	problems = []
+	for address, group in by_address.items():
+		if len({row.company for row in group}) < 2:
+			continue
+		names = ", ".join(f"{row.name} ({row.company})" for row in group[:3])
+		problems.append(f"{address}: {names}")
+		if len(problems) >= 20:
+			break
+
+	if problems:
+		return _result(
+			"Cross-company mailboxes",
+			WARN,
+			f"{len(problems)} address(es) resolve for active employees of more than one "
+			f"company -- celebration mail to them is dropped at send time (HelixHR "
+			f"celebration reminders log); set the stale duplicate to Left: "
+			+ "; ".join(problems),
+		)
+	return _result(
+		"Cross-company mailboxes",
+		PASS,
+		"no mailbox resolves for active employees of more than one company",
+	)
+
+
 def check_outgoing_email():
 	"""P4-R18: `frappe.sendmail` throws without a default outgoing Email
 	Account. Since plan 2026-10-02-001 U9 every portal email is a templated
@@ -1674,6 +1726,7 @@ CHECKS = [
 	check_checkin_location_retention,
 	check_holiday_list_coverage,
 	check_celebration_reminders,
+	check_cross_company_mailboxes,
 	check_outgoing_email,
 	check_overdue_digests,
 	check_hr_manager_self_scope,

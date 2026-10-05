@@ -532,50 +532,56 @@ Changing that sentence is a compliance change, not a copy tweak. A California
 risk assessment and notice-at-collection text for US employees is HR work that
 this phase deliberately did not attempt.
 
-## The birthday and work-anniversary emails HR words (P4-U6)
+## The birthday, anniversary and holiday emails HR words (P4-U6, plan 2026-10-04-004)
 
-HRMS sends both of these already, from a subject, header and Jinja file that
-are hardcoded in HRMS Python. There is no record to edit, so changing the copy
-means editing HRMS -- which the next `bench update` overwrites. HelixHR adds a
-second sender that reads an **Email Template** instead, so HR owns the words.
+HRMS sends all three of these already, from subjects, headers and Jinja files
+that are hardcoded in HRMS Python. There is no record to edit, so changing the
+copy means editing HRMS -- which the next `bench update` overwrites. HelixHR
+sends its own instead, from an **Email Template** HR words, and takes over the
+holiday reminder outright.
 
-### The switch: two pickers on HR Settings
+### The switch: the Email templates page, per company
 
-**HR Settings -> Reminders** now carries two extra fields:
+Everything lives on the portal's **Email templates** page, in the
+**Celebrations & holidays** group (HR Manager and System Manager; an
+HR Manager anchored to a company sees only their company). Each company has
+its own setting per event -- birthday, work anniversary, holiday -- as one
+`HelixHR Celebration Reminder` row per (event, company):
 
-| Field | What it does |
+| Setting | What it does |
 |---|---|
-| HelixHR Birthday Template | Empty: HelixHR sends no birthday email. Set: it sends that template, every morning, to everyone in the celebrating person's company. |
-| HelixHR Work Anniversary Template | The same, for work anniversaries. |
+| Send this reminder | Off (or no row at all): HelixHR sends nothing for that event, for that company. |
+| How often | Holiday only: Weekly sends Monday morning for Monday--Sunday; Monthly sends on the 1st for that month. |
+| Subject / body | The Email Template HR words. Three ship as starting points -- **HelixHR Birthday Reminder**, **HelixHR Work Anniversary Reminder**, **HelixHR Holiday Reminder** -- created once and never overwritten afterwards. |
+| Send to | Everyone in the company, or selected people (only the selected company's employees can be picked). |
 
-Two templates ship as starting points -- **HelixHR Birthday Reminder** and
-**HelixHR Work Anniversary Reminder** -- created once, on install or on the
-first `bench migrate`, and never overwritten afterwards. Edit them in Desk
-(**Email Template**); the edit survives every later deploy. Neither is picked
-for you: switching the emails on is HR's decision, so a site that upgrades
-does not start emailing anybody.
+Two templates for one event are refused: the save turns HRMS's matching
+checkbox off, and `events.hr_settings_validate` refuses the reverse. HRMS's
+own checkboxes are read-only in Desk, and the takeover patch unticks
+`send_holiday_reminders` (with its frequency selector) on migrate, so only one
+sender per event exists. `helixhr.preflight.run` FAILs on the same
+contradiction for the routes that never reach a save (a fixture import, a raw
+write), and FAILs when a picked template has since been deleted -- the job
+logs that and sends nothing, so the event would otherwise go quiet with no
+other sign. Neither sender on for an event is a WARN, not a FAIL: a site may
+not want the email at all.
 
-**Only one sender per event.** Frappe merges scheduler jobs across apps and
-offers no way to remove HRMS's, so HRMS's own reminder keeps going out for as
-long as its checkbox is ticked. Picking a HelixHR template while the matching
-HRMS checkbox is still on is therefore refused on save:
+**After migrating to this version, check each company's three settings**: the
+split patch copied whatever was configured globally to every company, so a
+company that should not get mail has to be switched off by hand.
 
-> HRMS and HelixHR would both send the birthday email: untick 'Birthdays' in
-> HR Settings > Reminders, or clear 'HelixHR Birthday Template'.
+The **Preview** button renders the draft against the selected company's own
+name and logo; **Send me a test** mails it to your own address only. Both are
+rate-limited like every other admin write.
 
-`helixhr.preflight.run` FAILs on the same contradiction, for the routes that
-never reach a save (a fixture import, a raw write), and FAILs when a picked
-template has since been deleted -- the job logs that and sends nothing, so the
-event would otherwise go quiet with no other sign. Neither sender on for an
-event is a WARN, not a FAIL: a site may not want the email at all.
-
-Both senders need a **default outgoing Email Account** (preflight WARNs
+All senders need a **default outgoing Email Account** (preflight FAILs
 without one), the same one the HR-queue notifications use.
 
 ### What the template can read
 
 This is the whole contract. A template that reads anything else is reading
-something the app does not promise to keep:
+something the app does not promise to keep. For the birthday and anniversary
+emails:
 
 | Variable | What it is |
 |---|---|
@@ -587,43 +593,27 @@ something the app does not promise to keep:
 | `date` | Today, formatted for the site. |
 | `portal_url` | Absolute link to the portal. |
 
+For the holiday reminder -- it is *to* the employee, about their own upcoming
+non-weekly holidays from their own holiday list:
+
+| Variable | What it is |
+|---|---|
+| `employee_name` | The recipients' names as one string (`Ada, Grace & Jim`) -- usually one person. |
+| `holidays` | The upcoming non-weekly holidays in the window; each has `date` (formatted) and `description`. |
+| `company`, `logo_url`, `date`, `portal_url` | As above. |
+| `frequency` | The row's own cadence, `Weekly` or `Monthly`. |
+
 Both the subject and the body are Jinja, and Email Template caps the subject
-at 140 characters -- template markup included.
-
-### Preview one before you switch it on
-
-From `bench --site <site> console`, with a real Employee name:
-
-```python
-# A console session has no language set, and Frappe's own email footer
-# rendering raises UnboundLocalError without one. Harmless, and only here.
-frappe.local.lang = "en"
-
-from helixhr.reminders import _context
-
-name = "<EMPLOYEE>"           # an Employee record's name, e.g. HR-EMP-00002
-company = frappe.db.get_value("Employee", name, "company")
-person = frappe.get_all(
-    "Employee",
-    filters={"name": name},
-    fields=["employee_name as name", "image", "date_of_joining"],
-)[0]
-mail = frappe.get_doc("Email Template", "HelixHR Birthday Reminder").get_formatted_email(
-    _context([person], company, "birthday")
-)
-frappe.sendmail(recipients=["you@example.com"], subject=mail["subject"], message=mail["message"], now=True)
-```
-
-`now=True` sends it instead of queueing it, so a mistake in the markup shows
-up in your own inbox rather than in everybody's tomorrow morning.
+at 140 characters -- template markup included. Employees whose holiday list
+has nothing ahead in the window -- or no list at all -- get nothing; preflight
+WARNs on employees no list resolves for.
 
 ### Two things about the recipients
 
 Who is celebrating, and who hears about it, is HRMS's own answer -- HelixHR
 imports those helpers rather than re-implementing them, so the email and
 Home's "this month" card can never disagree about who is eligible. Two
-consequences follow, and both are HRMS's behaviour rather than a choice made
-here:
+consequences follow:
 
 - **A personal address can receive it.** For an employee with no linked User
   and no company email, HRMS falls back to `personal_email`. So a branded
@@ -632,6 +622,17 @@ here:
 - **Everyone active in the company is a recipient**, minus the people
   celebrating. When two or more share a day, each of them also gets one email
   about the others.
+
+**One mailbox must not belong to two companies.** ERPNext only blocks a
+duplicate `user_id`; `company_email` and `personal_email` can repeat, and a
+stale active duplicate in another company would put a person on the wrong
+list. The sender drops any such address at send time and logs it under
+`HelixHR cross-company mailboxes` once per run, naming both Employee records;
+`helixhr.preflight.run` WARNs on the pairs themselves. The fix is data: set
+the stale duplicate's status to Left (the diagnostic query is in
+`docs/runbook.md`). Employees with no company are never celebrated and never
+mailed; the run counts them under `HelixHR celebrations skipped for want of a
+company`.
 
 ## Before the migrate that ships the four approval outcomes (P4-U1)
 
