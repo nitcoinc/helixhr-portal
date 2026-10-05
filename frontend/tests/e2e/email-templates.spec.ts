@@ -133,7 +133,7 @@ test.describe('Notification Manager', () => {
   })
 })
 
-test('the message preview carries the company logo and replaces it in place', async ({ page, baseURL }) => {
+test('one company logo sits atop the page; each template may opt out of it', async ({ page, baseURL }) => {
   // Administrator: a System Manager may both edit message templates and set
   // the logo. The brand is the one `send_notification` resolves -- for a
   // caller with no Employee, the default company -- so pin one for the test.
@@ -160,22 +160,48 @@ test('the message preview carries the company logo and replaces it in place', as
   await page.context().addCookies((await api.storageState()).cookies)
   try {
     await page.goto('/helixhr/email-templates')
-    await page.getByTestId('email-template-leave_approved').click()
-    const preview = page.getByTestId('email-template-preview')
-    await preview.getByRole('button', { name: 'Update preview' }).click()
-    const logo = preview.getByTestId('company-logo')
+    // The logo control is company-wide: once, above the list, before any
+    // template is open -- never per template.
+    const logo = page.getByTestId('company-logo')
+    await expect(logo).toHaveCount(1)
     await expect(logo).toContainText(company)
+    const item = page.getByTestId('email-template-leave_approved')
+    await item.click()
+    const preview = page.getByTestId('email-template-preview')
+    await expect(preview.getByTestId('company-logo')).toHaveCount(0)
     await logo.getByTestId('company-logo-input').setInputFiles({ name: 'logo.png', mimeType: 'image/png', buffer: PNG })
     await expect(logo.getByTestId('company-logo-status')).toContainText('Logo saved')
     await expect(logo.getByRole('img')).toHaveAttribute('src', /\/files\/.+\.png$/)
     const frame = page.frameLocator('iframe[title="Preview of Leave approved"]')
     await expect(frame.locator('img').first()).toHaveAttribute('src', /\/files\/.+\.png$/)
 
+    // Per template: unticking "Include company logo" swaps the image for the
+    // company name in the preview, and saving it keeps the default wording.
+    const editor = page.getByTestId('email-template-editor')
+    const include = editor.getByLabel('Include company logo')
+    await expect(include).toBeChecked()
+    await include.uncheck()
+    await expect(frame.locator('img')).toHaveCount(0)
+    await expect(frame.getByText(company).first()).toBeVisible()
+    await editor.getByRole('button', { name: 'Save' }).click()
+    await expect(page.getByTestId('email-template-status')).toHaveText('Saved.')
+    await expect(item.getByTestId('email-template-state')).toHaveText('Default')
+    await page.reload()
+    await page.getByTestId('email-template-leave_approved').click()
+    await expect(page.getByTestId('email-template-editor').getByLabel('Include company logo')).not.toBeChecked()
+    await page.getByTestId('email-template-editor').getByLabel('Include company logo').check()
+    await expect(frame.locator('img').first()).toHaveAttribute('src', /\/files\/.+\.png$/)
+    await page.getByTestId('email-template-editor').getByRole('button', { name: 'Save' }).click()
+    await expect(page.getByTestId('email-template-status')).toHaveText('Saved.')
+
     await logo.getByRole('button', { name: 'Remove' }).click()
     await expect(logo.getByTestId('company-logo-status')).toHaveText('Logo removed.')
     await expect(frame.locator('img')).toHaveCount(0)
     await expect(frame.getByText(company).first()).toBeVisible()
   } finally {
+    await api.post('/api/method/helixhr.api.save_message_template', {
+      form: { template_key: 'leave_approved', hide_logo: 0 },
+    })
     await api.post('/api/method/helixhr.api.set_company_logo', { form: { company, remove: 1 } })
     if (!previous) await setDefault('')
     await api.dispose()
@@ -198,6 +224,10 @@ test('P8-U12 moved to the celebrations group: HR authors the birthday email and 
   await form.getByLabel('Send this reminder').check()
   await form.getByLabel('Subject').fill(subject)
   await form.getByLabel('Body').fill('Cheers, {{ names }}')
+  // The per-reminder logo opt-out, saved with the rest of the form.
+  const includeLogo = form.getByLabel('Include company logo')
+  await includeLogo.check()
+  await includeLogo.uncheck()
 
   // Switch to a selected audience and pick one person; the search returns
   // only the selected company's employees (R12).
@@ -223,6 +253,11 @@ test('P8-U12 moved to the celebrations group: HR authors the birthday email and 
 
   await page.getByTestId('celebration-edit').click()
   await expect(page.getByTestId('celebration-form').getByLabel('Subject')).toHaveValue(subject)
+  await expect(page.getByTestId('celebration-form').getByLabel('Include company logo')).not.toBeChecked()
+  // Back on, so the next run (and the real birthday mail) carries the logo.
+  await page.getByTestId('celebration-form').getByLabel('Include company logo').check()
+  await page.getByTestId('celebration-form').getByRole('button', { name: 'Save' }).click()
+  await expect(page.getByTestId('celebration-form')).toBeHidden()
 })
 
 test('the holiday event shows a frequency selector and the birthday one does not (R9)', async ({ page }, testInfo) => {

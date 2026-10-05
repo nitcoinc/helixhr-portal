@@ -95,6 +95,7 @@ from helixhr.utils import (
 	event_variables,
 	get_manager_user,
 	get_week_bounds,
+	has_custom_wording,
 	is_photo_content,
 	mask_identifier,
 	message_brand,
@@ -8227,14 +8228,19 @@ def get_notification_setup():
 	saved = {
 		row.template_key: row
 		for row in frappe.get_all(
-			"HelixHR Message Template", fields=["template_key", "subject", "body", "is_enabled", "modified"]
+			"HelixHR Message Template",
+			fields=["template_key", "subject", "body", "is_enabled", "hide_logo", "modified"],
 		)
 	}
 	events = []
 	for key, event in NOTIFICATION_EVENTS.items():
 		locked = bool(event.get("locked"))
 		row = saved.get(key)
-		state = "Default" if not row else ("Custom" if row.is_enabled or locked else "Off")
+		custom_wording = bool(row and has_custom_wording(row))
+		if row and not row.is_enabled and not locked:
+			state = "Off"
+		else:
+			state = "Custom" if custom_wording else "Default"
 		events.append(
 			{
 				"key": key,
@@ -8246,6 +8252,9 @@ def get_notification_setup():
 				"body": (row.body if row else None) or event["body"],
 				"default_subject": event["subject"],
 				"default_body": event["body"],
+				"custom_wording": custom_wording,
+				# The per-template logo opt-out; the logo itself is company-wide.
+				"hide_logo": bool(row and row.hide_logo),
 				"last_fallback": _last_template_fallback(key, row),
 				"variables": [
 					{"name": name, "description": description, "sample": sample}
@@ -8253,7 +8262,21 @@ def get_notification_setup():
 				],
 			}
 		)
-	return {"events": events, "subject_max": _TEMPLATE_SUBJECT_MAX}
+	return {"events": events, "subject_max": _TEMPLATE_SUBJECT_MAX, "brand": _message_logo_brand()}
+
+
+def _message_logo_brand():
+	"""The company-wide logo the message templates render with (the
+	caller's company, as `send_notification` resolves it) and whether this
+	caller may replace it (`set_company_logo`'s own gate)."""
+	brand = message_brand(frappe.session.user)
+	try:
+		_assert_can_set_company_logo(brand["company"])
+		can_set_logo = bool(brand["company"])
+	except frappe.PermissionError:
+		frappe.clear_last_message()
+		can_set_logo = False
+	return {"company": brand["company"], "logo_url": brand["logo_url"], "can_set_logo": can_set_logo}
 
 
 def _last_template_fallback(event_key, row):
@@ -8284,11 +8307,14 @@ def _last_template_fallback(event_key, row):
 
 
 @frappe.whitelist(methods=["POST"])
-def save_message_template(template_key, subject=None, body=None, is_enabled=None):
+def save_message_template(template_key, subject=None, body=None, is_enabled=None, hide_logo=None):
 	"""Edit the wording of one message the portal sends (P5-R14). The
 	doctype's own `validate()` holds the template to the HelixHR sandbox's
 	rules (plan 2026-10-02-001 U8, R17): unknown variables, disallowed
-	constructs and templates that fail on sample data are refused there."""
+	constructs and templates that fail on sample data are refused there.
+
+	`hide_logo` alone (no subject/body) on a default-wording message keeps a
+	wording-less row that carries just the opt-out."""
 	_assert_can_manage_notifications()
 	rate_limit_per_user("save_message_template")
 	_message_event(template_key)
@@ -8311,12 +8337,15 @@ def save_message_template(template_key, subject=None, body=None, is_enabled=None
 		doc.body = body
 	if is_enabled is not None:
 		doc.is_enabled = cint(is_enabled)
+	if hide_logo is not None:
+		doc.hide_logo = cint(hide_logo)
 	doc.save()
 	return {
 		"template_key": doc.template_key,
 		"subject": doc.subject,
 		"body": doc.body,
 		"is_enabled": cint(doc.is_enabled),
+		"hide_logo": cint(doc.hide_logo),
 	}
 
 
@@ -8330,9 +8359,17 @@ def reset_message_template(template_key):
 	rate_limit_per_user("reset_message_template")
 	_message_event(template_key)
 	if frappe.db.exists("HelixHR Message Template", template_key):
-		# The Notification Manager has no delete DocPerm on purpose -- Desk
-		# delete stays System Manager's. The guard above is this path's gate.
-		frappe.delete_doc("HelixHR Message Template", template_key, ignore_permissions=True)
+		if frappe.db.get_value("HelixHR Message Template", template_key, "hide_logo"):
+			# The logo opt-out is not wording: keep it on a wording-less row.
+			frappe.db.set_value(
+				"HelixHR Message Template",
+				template_key,
+				{"subject": None, "body": None, "is_enabled": 1},
+			)
+		else:
+			# The Notification Manager has no delete DocPerm on purpose -- Desk
+			# delete stays System Manager's. The guard above is this path's gate.
+			frappe.delete_doc("HelixHR Message Template", template_key, ignore_permissions=True)
 		frappe.get_doc(
 			{
 				"doctype": "Comment",
@@ -8347,7 +8384,7 @@ def reset_message_template(template_key):
 	return {"template_key": template_key, "state": "Default"}
 
 
-def _render_draft(template_key, subject, body):
+def _render_draft(template_key, subject, body, hide_logo=0):
 	"""Validate then render an unsaved draft with the event's sample data.
 	A refusal is the same sentence a save would give (R17)."""
 	event = _message_event(template_key)
@@ -8361,41 +8398,29 @@ def _render_draft(template_key, subject, body):
 	# (the test send's recipient): their company and its logo, else the
 	# default company's -- never the sample's placeholder logo address.
 	context = {**sample_context(template_key), **message_brand(frappe.session.user)}
-	return render_message(template_key, context, source={"subject": subject, "body": body})
+	return render_message(
+		template_key, context, source={"subject": subject, "body": body, "hide_logo": cint(hide_logo)}
+	)
 
 
 @frappe.whitelist(methods=["POST"])
-def preview_message_template(template_key, subject=None, body=None):
+def preview_message_template(template_key, subject=None, body=None, hide_logo=0):
 	"""The draft as the email would look, with sample data. The client shows
-	`html` only in a sandboxed iframe (KTD11)."""
+	`html` only in a sandboxed iframe (KTD11). `hide_logo` is the editor's
+	unsaved "Include company logo" checkbox, inverted."""
 	_assert_can_manage_notifications()
 	rate_limit_per_user("preview_message_template")
-	message = _render_draft(template_key, subject or "", body or "")
-	brand = message_brand(frappe.session.user)
-	try:
-		_assert_can_set_company_logo(brand["company"])
-		can_set_logo = bool(brand["company"])
-	except frappe.PermissionError:
-		frappe.clear_last_message()
-		can_set_logo = False
-	return {
-		"subject": message["subject"],
-		"html": message["html"],
-		# The logo the preview carries, and whether this caller may replace it
-		# (`set_company_logo`'s own gate) -- the editor's logo control.
-		"company": brand["company"],
-		"logo_url": brand["logo_url"],
-		"can_set_logo": can_set_logo,
-	}
+	message = _render_draft(template_key, subject or "", body or "", hide_logo)
+	return {"subject": message["subject"], "html": message["html"], **_message_logo_brand()}
 
 
 @frappe.whitelist(methods=["POST"])
-def send_test_message(template_key, subject=None, body=None):
+def send_test_message(template_key, subject=None, body=None, hide_logo=0):
 	"""Send the draft, with sample data, to the caller's own address only --
 	never a recipient the caller names."""
 	_assert_can_manage_notifications()
 	rate_limit_per_user("send_test_message")
-	message = _render_draft(template_key, subject or "", body or "")
+	message = _render_draft(template_key, subject or "", body or "", hide_logo)
 	email = frappe.db.get_value("User", frappe.session.user, "email")
 	if not email:
 		frappe.throw(_("Your account has no email address to send the test to."))
@@ -8508,7 +8533,7 @@ def _celebration_reminder_projection(event, company):
 	reminder = frappe.db.get_value(
 		"HelixHR Celebration Reminder",
 		{"event": event, "company": company},
-		["name", "is_enabled", "email_template", "recipient_mode", "frequency"],
+		["name", "is_enabled", "email_template", "recipient_mode", "frequency", "hide_logo"],
 		as_dict=True,
 	)
 
@@ -8545,6 +8570,7 @@ def _celebration_reminder_projection(event, company):
 		"body": body,
 		"use_html": use_html,
 		"recipients": recipients,
+		"hide_logo": bool(reminder and reminder.hide_logo),
 	}
 
 
@@ -8579,7 +8605,7 @@ CELEBRATION_TEMPLATE_TOKENS = (
 
 
 @frappe.whitelist(methods=["POST"])
-def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode="All employees", recipients=None, company=None, frequency=None):
+def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode="All employees", recipients=None, company=None, frequency=None, hide_logo=0):
 	"""HR writes the birthday/work-anniversary email and picks its audience
 	from the portal (P8-U12 / P8-R5, P8-R6). Per company since plan
 	2026-10-04-004 U1: `company` names whose setting this is -- the
@@ -8653,6 +8679,7 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 	reminder.is_enabled = cint(is_enabled)
 	reminder.recipient_mode = recipient_mode
 	reminder.frequency = frequency
+	reminder.hide_logo = cint(hide_logo)
 	reminder.set("recipients", [{"employee": row} for row in recipients])
 	reminder.save()
 	# The portal owns this event: HRMS's own checkbox is read-only in Desk
@@ -8862,7 +8889,7 @@ def _celebration_sample_context(event, company, frequency=None):
 	)
 
 
-def _celebration_draft(event, company, subject, body, frequency=None):
+def _celebration_draft(event, company, subject, body, frequency=None, hide_logo=0):
 	"""Compile then render an unsaved draft with the event's sample context
 	-- the same refusal a save would give (P8-U12's compile check), the
 	same restriction the real render runs under (P8-KTD7). A holiday draft
@@ -8872,18 +8899,20 @@ def _celebration_draft(event, company, subject, body, frequency=None):
 		frequency = frappe.db.get_value(
 			"HelixHR Celebration Reminder", {"event": event, "company": company}, "frequency"
 		)
-	rendered = _render_celebration_or_throw(event, company, subject, body, frequency)
+	rendered = _render_celebration_or_throw(
+		event, company, subject, body, frequency, include_logo=not cint(hide_logo)
+	)
 	return {"subject": rendered["subject"], "html": rendered["message"]}
 
 
-def _render_celebration_or_throw(event, company, subject, body, frequency=None):
+def _render_celebration_or_throw(event, company, subject, body, frequency=None, include_logo=True):
 	"""Render a draft against the event's sample context in the HelixHR
 	sandbox (U11); any failure is a refusal naming why, not a stack trace."""
 	from helixhr.utils import render_celebration_email
 
 	context = _celebration_sample_context(event, company, frequency)
 	try:
-		return render_celebration_email(subject or "", body or "", context)
+		return render_celebration_email(subject or "", body or "", context, include_logo=include_logo)
 	except Exception as exc:
 		frappe.throw(_("This template cannot be used: {0}").format(exc), title=_("Template not valid"))
 
@@ -8905,21 +8934,21 @@ def _celebration_gate(event, endpoint, company=None):
 
 
 @frappe.whitelist(methods=["POST"])
-def preview_celebration(event, subject, body, company=None):
+def preview_celebration(event, subject, body, company=None, hide_logo=0):
 	"""R11: the draft as the email would look, rendered with the selected
 	company's own name and logo. The client shows `html` only in a
 	sandboxed iframe (KTD11)."""
 	company = _celebration_gate(event, "preview_celebration", company)
-	rendered = _celebration_draft(event, company, subject, body)
+	rendered = _celebration_draft(event, company, subject, body, hide_logo=hide_logo)
 	return {"subject": rendered["subject"], "html": rendered["html"]}
 
 
 @frappe.whitelist(methods=["POST"])
-def send_test_celebration(event, subject, body, company=None):
+def send_test_celebration(event, subject, body, company=None, hide_logo=0):
 	"""R11: send the draft to the caller's own address only -- never a
 	recipient the caller names, the same rule `send_test_message` holds."""
 	company = _celebration_gate(event, "send_test_celebration", company)
-	rendered = _celebration_draft(event, company, subject, body)
+	rendered = _celebration_draft(event, company, subject, body, hide_logo=hide_logo)
 	email = frappe.db.get_value("User", frappe.session.user, "email")
 	if not email:
 		frappe.throw(_("Your account has no email address to send the test to."))

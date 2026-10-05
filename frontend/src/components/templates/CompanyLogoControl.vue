@@ -86,7 +86,9 @@ async function removeLogo() {
         Email logo
       </p>
       <p class="text-sm text-ink-gray-6">
-        Shown at the top of every email to {{ props.company }}.
+        One logo for {{ props.company }}: shown at the top of every portal message,
+        celebration and holiday email. Untick "Include company logo" on a template to
+        leave it out there.
         {{ props.editable ? 'PNG, JPEG or WebP, up to 2 MB.' : 'An HR Manager changes it under Celebrations & holidays.' }}
       </p>
     </div>

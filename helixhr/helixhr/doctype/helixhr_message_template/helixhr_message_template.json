@@ -9,7 +9,8 @@
   "template_key",
   "is_enabled",
   "subject",
-  "body"
+  "body",
+  "hide_logo"
  ],
  "fields": [
   {
@@ -39,6 +40,13 @@
    "fieldtype": "Code",
    "label": "Body",
    "options": "Jinja"
+  },
+  {
+   "default": "0",
+   "description": "Leave the company logo out of this email's header; the company name is shown instead. Kept even when the wording is the default.",
+   "fieldname": "hide_logo",
+   "fieldtype": "Check",
+   "label": "Hide company logo"
   }
  ],
  "module": "HelixHR",

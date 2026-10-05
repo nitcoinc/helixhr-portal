@@ -223,7 +223,7 @@ def _row(event, company):
 	return frappe.db.get_value(
 		"HelixHR Celebration Reminder",
 		{"event": event, "company": company},
-		["name", "is_enabled", "email_template", "recipient_mode"],
+		["name", "is_enabled", "email_template", "recipient_mode", "hide_logo"],
 		as_dict=True,
 	)
 
@@ -299,7 +299,16 @@ def _send_event(event, foreign, foreign_names, dropped):
 		)
 		try:
 			sent_here = _send_company(
-				template, sender, persons, company, event, selected, foreign, foreign_names, dropped
+				template,
+				sender,
+				persons,
+				company,
+				event,
+				selected,
+				foreign,
+				foreign_names,
+				dropped,
+				include_logo=not reminder.hide_logo,
 			)
 			emails += sent_here
 			if sent_here:
@@ -398,7 +407,9 @@ def _pool_employee(recipients, address, company):
 	return [f"Employee {row.name} ({row.employee_name})" for row in rows]
 
 
-def _send_company(template, sender, persons, company, event, selected, foreign, foreign_names, dropped):
+def _send_company(
+	template, sender, persons, company, event, selected, foreign, foreign_names, dropped, include_logo=True
+):
 	"""`selected` is `None` for "All employees" mode -- every active
 	employee's own address, HRMS's own helper (P4-R16) -- or the
 	`recipients` child table's employee ids for "Selected employees" mode,
@@ -421,7 +432,7 @@ def _send_company(template, sender, persons, company, event, selected, foreign, 
 		sorted(set(pool) - celebrating), company, foreign, foreign_names, dropped
 	)
 	if recipients:
-		emails += _send(template, sender, recipients, persons, company, event)
+		emails += _send(template, sender, recipients, persons, company, event, include_logo)
 
 	# The shared-day email is between celebrants about each other -- who
 	# hears about *them* (the pool above) is what `recipient_mode` scopes,
@@ -441,7 +452,7 @@ def _send_company(template, sender, persons, company, event, selected, foreign, 
 			)
 			others = [other for other in persons if other is not person]
 			if own:
-				emails += _send(template, sender, own, others, company, event)
+				emails += _send(template, sender, own, others, company, event, include_logo)
 	return emails
 
 
@@ -461,8 +472,8 @@ def _celebrating_addresses(persons):
 	return addresses
 
 
-def _send(template, sender, recipients, persons, company, event):
-	rendered = _render_restricted(template, _context(persons, company, event), sender)
+def _send(template, sender, recipients, persons, company, event, include_logo=True):
+	rendered = _render_restricted(template, _context(persons, company, event), sender, include_logo)
 	frappe.sendmail(
 		sender=sender,
 		recipients=recipients,
@@ -473,7 +484,7 @@ def _send(template, sender, recipients, persons, company, event):
 	return 1
 
 
-def _render_restricted(template, context, sender):
+def _render_restricted(template, context, sender, include_logo=True):
 	"""Render one Email Template through HelixHR's own Jinja sandbox
 	(plan 2026-10-05-001 U11, `utils.render_celebration_email`), not
 	`frappe.render_template`: Frappe's `restrict_globals=True` still exposes
@@ -487,7 +498,7 @@ def _render_restricted(template, context, sender):
 	from helixhr.utils import render_celebration_email
 
 	body = template.response_html if template.use_html else template.response
-	return render_celebration_email(template.subject, body, context)
+	return render_celebration_email(template.subject, body, context, include_logo=include_logo)
 
 
 def _context(persons, company, event):
@@ -586,7 +597,7 @@ def send_holiday_reminders():
 	for row in frappe.get_all(
 		"HelixHR Celebration Reminder",
 		filters={"event": "holiday", "is_enabled": 1},
-		fields=["name", "company", "email_template", "frequency", "recipient_mode"],
+		fields=["name", "company", "email_template", "frequency", "recipient_mode", "hide_logo"],
 	):
 		company = row.company
 		if not _is_holiday_send_day(row.frequency, today):
@@ -788,7 +799,9 @@ def _send_holiday_company(row, today, foreign, foreign_names, dropped):
 			"date": format_date(today, _date_format()),
 			"frequency": row.frequency,
 		}
-		rendered = _render_restricted(template, context, get_sender_email())
+		rendered = _render_restricted(
+			template, context, get_sender_email(), include_logo=not row.get("hide_logo")
+		)
 		frappe.sendmail(
 			sender=get_sender_email(),
 			recipients=recipients,

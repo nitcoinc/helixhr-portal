@@ -802,13 +802,24 @@ def render_message(event_key, context, source=None):
 	locked = bool(event.get("locked"))
 	context = {**_default_context(), **(context or {})}
 	if source is not None:
-		row = frappe._dict(subject=source.get("subject"), body=source.get("body"), is_enabled=1)
+		row = frappe._dict(
+			subject=source.get("subject"),
+			body=source.get("body"),
+			is_enabled=1,
+			hide_logo=frappe.utils.cint(source.get("hide_logo")),
+		)
 	else:
 		row = frappe.db.get_value(
-			"HelixHR Message Template", event_key, ["subject", "body", "is_enabled"], as_dict=True
+			"HelixHR Message Template",
+			event_key,
+			["subject", "body", "is_enabled", "hide_logo"],
+			as_dict=True,
 		)
 	if row and not row.is_enabled and not locked:
 		return None
+	if row and row.hide_logo:
+		# The per-template opt-out: the layout prints the company name instead.
+		context["logo_url"] = ""
 
 	body_env, subject_env = _template_envs()
 	body_ctx = _build_context(event_key, context, for_subject=False)
@@ -821,7 +832,8 @@ def render_message(event_key, context, source=None):
 		)
 
 	subject, content = None, None
-	if row and row.is_enabled:
+	# A row with no wording only carries `hide_logo`: default wording.
+	if row and row.is_enabled and has_custom_wording(row):
 		messages = len(frappe.local.message_log or [])
 		try:
 			subject, content = render(event["subject"] if locked else row.subject, row.body or "")
@@ -849,6 +861,13 @@ def render_message(event_key, context, source=None):
 	return {"subject": subject, "content": content, "html": html}
 
 
+def has_custom_wording(row):
+	"""A `HelixHR Message Template` row customises the wording only when it
+	carries a subject or body; an empty enabled row exists just to keep the
+	per-template `hide_logo` opt-out for a message on the default wording."""
+	return bool((row.get("subject") or "").strip() or (row.get("body") or "").strip())
+
+
 def _self_branded(body):
 	"""KTD11 + review fold-in: a body that is already a whole document, or
 	that prints the logo itself (the P4 seeded templates and HR edits of
@@ -857,12 +876,16 @@ def _self_branded(body):
 	return "<html" in lowered or "<body" in lowered or "logo_url" in lowered
 
 
-def render_celebration_email(subject, body, context):
+def render_celebration_email(subject, body, context, include_logo=True):
 	"""Celebration and holiday mail (plan 2026-10-05-001 U11): HR's Email
 	Template subject and body through the same sandbox as the portal's
 	message templates -- empty globals, StrictUndefined, plain-data context
 	-- so a template can neither call `frappe.*` nor read another record.
 	A body-only template is wrapped in the branded layout (KTD11).
+
+	`include_logo=False` is the reminder row's `hide_logo`: `logo_url` is
+	blanked, so the layout (and a self-branded default, which guards on
+	it) prints the company name instead.
 
 	Returns `{"subject", "message"}`. Raises on a bad template; callers
 	decide whether that is a refusal (save, preview) or a logged skip (send).
@@ -871,6 +894,8 @@ def render_celebration_email(subject, body, context):
 
 	body_env, subject_env = _template_envs()
 	plain = {str(key): _plain(value) for key, value in (context or {}).items()}
+	if not include_logo:
+		plain["logo_url"] = ""
 	rendered_subject = " ".join(_run(_compile(subject_env, subject or ""), _subject_values(plain)).split())
 	content = _run(_compile(body_env, body or ""), _escape_values(plain)) if body else ""
 	if _self_branded(body):

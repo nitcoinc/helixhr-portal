@@ -36,12 +36,28 @@ const groups = computed(() => {
 
 const selectedKey = ref('')
 const selected = computed(() => events.value.find((e) => e.key === selectedKey.value) || null)
-const draft = reactive({ subject: '', body: '', is_enabled: true })
+// `include_logo`: this template's opt-out of the company-wide logo (the
+// logo itself is set once, at the top of the group).
+const draft = reactive({ subject: '', body: '', is_enabled: true, include_logo: true })
 const errors = reactive({ subject: '', body: '', general: '' })
 const status = ref('')
-// `company` / `logoUrl` / `canSetLogo`: the brand the preview renders with
-// (the caller's company, as `send_notification` resolves it).
-const preview = reactive({ html: '', subject: '', error: '', company: '', logoUrl: '', canSetLogo: false })
+const preview = reactive({ html: '', subject: '', error: '' })
+// The company-wide logo every message template carries: the caller's
+// company, as `send_notification` resolves it. Seeded by the setup call and
+// refreshed by every preview, so a logo change never reloads the page (and
+// the control's own "Logo saved" status survives).
+const brand = ref(null)
+watch(
+  () => setup.data?.brand,
+  (value) => {
+    if (value) brand.value = value
+  },
+  { immediate: true },
+)
+function onLogoChanged() {
+  if (selected.value) refreshPreview()
+  else setup.reload()
+}
 
 const dirty = computed(() => {
   const event = selected.value
@@ -49,7 +65,8 @@ const dirty = computed(() => {
   return (
     draft.subject !== event.subject ||
     draft.body !== event.body ||
-    draft.is_enabled !== (event.state !== 'Off')
+    draft.is_enabled !== (event.state !== 'Off') ||
+    draft.include_logo !== !event.hide_logo
   )
 })
 
@@ -67,6 +84,7 @@ function open(key) {
   draft.subject = event.subject
   draft.body = event.body
   draft.is_enabled = event.state !== 'Off'
+  draft.include_logo = !event.hide_logo
   clearMessages()
   refreshPreview()
 }
@@ -111,14 +129,31 @@ function showRefusal(error) {
 }
 
 function payload() {
-  return { template_key: selectedKey.value, subject: draft.subject, body: draft.body }
+  return {
+    template_key: selectedKey.value,
+    subject: draft.subject,
+    body: draft.body,
+    hide_logo: draft.include_logo ? 0 : 1,
+  }
 }
 
 async function save() {
   clearMessages()
   const key = selectedKey.value
+  const event = selected.value
+  const params = { ...payload(), is_enabled: draft.is_enabled ? 1 : 0 }
+  // Untouched default wording is not sent, so ticking "Include company
+  // logo" alone leaves the message on the default wording (state Default).
+  if (
+    !event.custom_wording &&
+    draft.subject === event.default_subject &&
+    draft.body === event.default_body
+  ) {
+    delete params.subject
+    delete params.body
+  }
   try {
-    await saveResource.submit({ ...payload(), is_enabled: draft.is_enabled ? 1 : 0 })
+    await saveResource.submit(params)
     await setup.reload()
     open(key)
     status.value = 'Saved.'
@@ -149,9 +184,7 @@ async function refreshPreview() {
     const result = await previewResource.submit(payload())
     preview.html = result.html
     preview.subject = result.subject
-    preview.company = result.company || ''
-    preview.logoUrl = result.logo_url || ''
-    preview.canSetLogo = !!result.can_set_logo
+    brand.value = { company: result.company, logo_url: result.logo_url, can_set_logo: result.can_set_logo }
   } catch (error) {
     preview.html = ''
     preview.error = messageOf(error, 'Something went wrong.')
@@ -225,6 +258,14 @@ const BADGE = {
   Custom: 'bg-surface-blue-2 text-ink-blue-2',
   Off: 'bg-surface-red-2 text-ink-red-4',
 }
+// The preview follows the checkbox before it is saved.
+watch(
+  () => draft.include_logo,
+  () => {
+    if (selected.value) refreshPreview()
+  },
+)
+
 const showList = computed(() => isDesktop.value || !selected.value)
 const showEditor = computed(() => !!selected.value)
 
@@ -329,316 +370,328 @@ watch(
       :company="celebrationCompany"
     />
 
-    <AsyncState
-      v-else-if="showMessagesGroup"
-      section="email-templates"
-      :resource="setup"
-      :empty="!events.length"
-      empty-title="No emails to edit yet"
-      empty-body="The portal has no email events registered."
-      skeleton="block"
-      skeleton-height="h-96"
-    >
-      <div class="grid gap-5 lg:grid-cols-[16rem_minmax(0,1fr)_minmax(0,1fr)]">
-        <nav
-          v-if="showList"
-          aria-label="Emails"
-          class="space-y-4"
-          data-testid="email-template-list"
-        >
-          <div
-            v-for="group in groups"
-            :key="group.audience"
+    <template v-else-if="showMessagesGroup">
+      <CompanyLogoControl
+        v-if="brand?.company"
+        class="mb-5"
+        :company="brand.company"
+        :logo-url="brand.logo_url"
+        :editable="brand.can_set_logo"
+        @changed="onLogoChanged"
+      />
+      <AsyncState
+        section="email-templates"
+        :resource="setup"
+        :empty="!events.length"
+        empty-title="No emails to edit yet"
+        empty-body="The portal has no email events registered."
+        skeleton="block"
+        skeleton-height="h-96"
+      >
+        <div class="grid gap-5 lg:grid-cols-[16rem_minmax(0,1fr)_minmax(0,1fr)]">
+          <nav
+            v-if="showList"
+            aria-label="Emails"
+            class="space-y-4"
+            data-testid="email-template-list"
           >
-            <h2 class="label mb-2">
-              {{ group.audience }}
-            </h2>
-            <ul class="space-y-1">
-              <li
-                v-for="event in group.items"
-                :key="event.key"
-              >
-                <button
-                  type="button"
-                  class="flex min-h-11 w-full cursor-pointer items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-surface-gray-2"
-                  :class="selectedKey === event.key ? 'bg-surface-gray-2 font-medium text-ink-gray-9' : 'text-ink-gray-7'"
-                  :aria-current="selectedKey === event.key ? 'true' : undefined"
-                  :data-testid="`email-template-${event.key}`"
-                  @click="choose(event.key)"
-                >
-                  <span class="min-w-0 truncate">{{ event.label }}</span>
-                  <span
-                    class="shrink-0 rounded px-1.5 py-0.5 text-xs font-medium"
-                    :class="BADGE[event.state]"
-                    data-testid="email-template-state"
-                  >{{ event.state }}</span>
-                </button>
-              </li>
-            </ul>
-          </div>
-        </nav>
-
-        <p
-          v-if="isDesktop && !selected"
-          class="text-sm text-ink-gray-6 lg:col-span-2"
-        >
-          Choose an email on the left to edit its wording.
-        </p>
-
-        <section
-          v-if="showEditor"
-          class="space-y-4"
-          aria-labelledby="email-template-editor-title"
-          data-testid="email-template-editor"
-        >
-          <button
-            v-if="!isDesktop"
-            type="button"
-            class="min-h-11 text-sm font-medium text-ink-gray-7 hover:text-ink-gray-9"
-            @click="back"
-          >
-            ← All emails
-          </button>
-          <div>
-            <h2
-              id="email-template-editor-title"
-              class="type-section"
-            >
-              {{ selected.label }}
-            </h2>
-            <p class="text-sm text-ink-gray-6">
-              {{ selected.audience }} · {{ selected.state }}
-            </p>
-          </div>
-
-          <!-- Plan 2026-10-05-001 U13: the saved template failed on real data
-               after its last save, so recipients got the default wording. -->
-          <p
-            v-if="selected.last_fallback"
-            class="surface-alert p-3 text-sm"
-            role="alert"
-            data-testid="email-template-fallback"
-          >
-            This template failed when it was last sent
-            ({{ selected.last_fallback.at }}), so the default wording went out instead.
-            Error: {{ selected.last_fallback.message }}
-          </p>
-
-          <p
-            v-if="selected.locked"
-            class="surface-inset p-3 text-sm text-ink-gray-7"
-          >
-            Security notice: always sent, and its subject and main sentence are fixed.
-            The body below is an optional extra paragraph.
-          </p>
-
-          <div>
-            <label
-              for="email-template-subject"
-              class="mb-1 block text-sm font-medium text-ink-gray-8"
-            >Subject</label>
-            <input
-              id="email-template-subject"
-              ref="subjectInput"
-              v-model="draft.subject"
-              type="text"
-              class="w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8 focus:border-outline-gray-4 disabled:bg-surface-gray-1"
-              :disabled="selected.locked"
-              :maxlength="setup.data?.subject_max"
-              :aria-invalid="errors.subject ? 'true' : undefined"
-              :aria-describedby="errors.subject ? 'email-template-subject-error' : undefined"
-              @focus="lastField = 'subject'"
-            >
-            <p
-              v-if="errors.subject"
-              id="email-template-subject-error"
-              class="mt-1 text-sm text-ink-red-4"
-              role="alert"
-            >
-              {{ errors.subject }}
-            </p>
-          </div>
-
-          <div>
-            <label
-              for="email-template-body"
-              class="mb-1 block text-sm font-medium text-ink-gray-8"
-            >Body</label>
-            <textarea
-              id="email-template-body"
-              ref="bodyInput"
-              v-model="draft.body"
-              rows="10"
-              class="w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 font-mono text-sm text-ink-gray-8 focus:border-outline-gray-4"
-              :aria-invalid="errors.body ? 'true' : undefined"
-              :aria-describedby="errors.body ? 'email-template-body-error' : undefined"
-              @focus="lastField = 'body'"
-            />
-            <p
-              v-if="errors.body"
-              id="email-template-body-error"
-              class="mt-1 text-sm text-ink-red-4"
-              role="alert"
-            >
-              {{ errors.body }}
-            </p>
-          </div>
-
-          <label
-            v-if="!selected.locked"
-            class="flex min-h-11 items-center gap-2 text-sm text-ink-gray-8"
-          >
-            <input
-              v-model="draft.is_enabled"
-              type="checkbox"
-              class="size-4"
-              data-testid="email-template-enabled"
-            >
-            Send this email (unticked switches it off)
-          </label>
-
-          <p
-            v-if="errors.general"
-            class="surface-alert p-3 text-sm"
-            role="alert"
-          >
-            {{ errors.general }}
-          </p>
-          <p
-            class="text-sm text-ink-gray-7"
-            role="status"
-            data-testid="email-template-status"
-          >
-            {{ status }}
-          </p>
-
-          <div class="flex flex-wrap items-center gap-2">
-            <Button
-              variant="solid"
-              :loading="saveResource.loading"
-              @click="save"
-            >
-              Save
-            </Button>
-            <Button
-              variant="subtle"
-              :loading="testResource.loading"
-              @click="sendTest"
-            >
-              Send test to me
-            </Button>
-            <Button
-              v-if="selected.state !== 'Default'"
-              variant="ghost"
-              @click="confirmReset = true"
-            >
-              Reset to default
-            </Button>
-          </div>
-
-          <div class="space-y-2">
-            <h3 class="label">
-              Variables
-            </h3>
-            <p class="text-sm text-ink-gray-6">
-              Click a variable to insert it where the cursor is. Only these names work here.
-            </p>
-            <ul class="space-y-1">
-              <li
-                v-for="variable in selected.variables"
-                :key="variable.name"
-                class="flex flex-wrap items-baseline gap-x-2 text-sm"
-              >
-                <button
-                  type="button"
-                  class="min-h-8 rounded bg-surface-gray-2 px-1.5 font-mono text-xs text-ink-gray-9 hover:bg-surface-gray-3"
-                  :aria-label="`Insert ${variable.name}`"
-                  @mousedown.prevent
-                  @click="insert(`{{ ${variable.name} }}`)"
-                  v-text="`{{ ${variable.name} }}`"
-                />
-                <span class="text-ink-gray-7">{{ variable.description }}</span>
-                <span class="text-ink-gray-5">e.g. {{ sampleText(variable.sample) }}</span>
-              </li>
-            </ul>
-            <h3 class="label pt-2">
-              Examples
-            </h3>
-            <ul class="space-y-1">
-              <li
-                v-for="example in examples"
-                :key="example"
-                class="flex items-start gap-2"
-              >
-                <code class="surface-inset min-w-0 flex-1 break-all p-2 text-xs">{{ example }}</code>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  :aria-label="`Copy example ${example}`"
-                  @click="copy(example)"
-                >
-                  Copy
-                </Button>
-              </li>
-            </ul>
-          </div>
-        </section>
-
-        <section
-          v-if="showEditor"
-          class="space-y-2"
-          aria-label="Preview"
-          data-testid="email-template-preview"
-        >
-          <div class="flex items-center justify-between gap-2">
-            <h2 class="label">
-              Preview, with sample data
-            </h2>
-            <Button
-              variant="ghost"
-              size="sm"
-              :loading="previewResource.loading"
-              @click="refreshPreview"
-            >
-              Update preview
-            </Button>
-          </div>
-          <CompanyLogoControl
-            v-if="preview.company"
-            :company="preview.company"
-            :logo-url="preview.logoUrl"
-            :editable="preview.canSetLogo"
-            @changed="refreshPreview"
-          />
-          <p
-            v-if="preview.error"
-            class="surface-alert p-3 text-sm"
-            role="alert"
-          >
-            Preview failed: {{ preview.error }}
-          </p>
-          <template v-else>
-            <p class="text-sm font-medium text-ink-gray-8">
-              {{ preview.subject }}
-            </p>
-            <!-- KTD11: srcdoc + an empty sandbox, never v-html -- a template
-                 cannot script the portal origin. -->
-            <iframe
-              v-if="preview.html"
-              :title="`Preview of ${selected.label}`"
-              sandbox=""
-              :srcdoc="preview.html"
-              class="h-[32rem] w-full rounded-lg border border-outline-gray-1 bg-white"
-            />
             <div
-              v-else
-              class="h-[32rem] animate-pulse rounded-lg bg-surface-gray-2"
-              aria-hidden="true"
-            />
-          </template>
-        </section>
-      </div>
-    </AsyncState>
+              v-for="group in groups"
+              :key="group.audience"
+            >
+              <h2 class="label mb-2">
+                {{ group.audience }}
+              </h2>
+              <ul class="space-y-1">
+                <li
+                  v-for="event in group.items"
+                  :key="event.key"
+                >
+                  <button
+                    type="button"
+                    class="flex min-h-11 w-full cursor-pointer items-center justify-between gap-2 rounded-lg px-3 py-2 text-left text-sm hover:bg-surface-gray-2"
+                    :class="selectedKey === event.key ? 'bg-surface-gray-2 font-medium text-ink-gray-9' : 'text-ink-gray-7'"
+                    :aria-current="selectedKey === event.key ? 'true' : undefined"
+                    :data-testid="`email-template-${event.key}`"
+                    @click="choose(event.key)"
+                  >
+                    <span class="min-w-0 truncate">{{ event.label }}</span>
+                    <span
+                      class="shrink-0 rounded px-1.5 py-0.5 text-xs font-medium"
+                      :class="BADGE[event.state]"
+                      data-testid="email-template-state"
+                    >{{ event.state }}</span>
+                  </button>
+                </li>
+              </ul>
+            </div>
+          </nav>
+
+          <p
+            v-if="isDesktop && !selected"
+            class="text-sm text-ink-gray-6 lg:col-span-2"
+          >
+            Choose an email on the left to edit its wording.
+          </p>
+
+          <section
+            v-if="showEditor"
+            class="space-y-4"
+            aria-labelledby="email-template-editor-title"
+            data-testid="email-template-editor"
+          >
+            <button
+              v-if="!isDesktop"
+              type="button"
+              class="min-h-11 text-sm font-medium text-ink-gray-7 hover:text-ink-gray-9"
+              @click="back"
+            >
+              ← All emails
+            </button>
+            <div>
+              <h2
+                id="email-template-editor-title"
+                class="type-section"
+              >
+                {{ selected.label }}
+              </h2>
+              <p class="text-sm text-ink-gray-6">
+                {{ selected.audience }} · {{ selected.state }}
+              </p>
+            </div>
+
+            <!-- Plan 2026-10-05-001 U13: the saved template failed on real data
+               after its last save, so recipients got the default wording. -->
+            <p
+              v-if="selected.last_fallback"
+              class="surface-alert p-3 text-sm"
+              role="alert"
+              data-testid="email-template-fallback"
+            >
+              This template failed when it was last sent
+              ({{ selected.last_fallback.at }}), so the default wording went out instead.
+              Error: {{ selected.last_fallback.message }}
+            </p>
+
+            <p
+              v-if="selected.locked"
+              class="surface-inset p-3 text-sm text-ink-gray-7"
+            >
+              Security notice: always sent, and its subject and main sentence are fixed.
+              The body below is an optional extra paragraph.
+            </p>
+
+            <div>
+              <label
+                for="email-template-subject"
+                class="mb-1 block text-sm font-medium text-ink-gray-8"
+              >Subject</label>
+              <input
+                id="email-template-subject"
+                ref="subjectInput"
+                v-model="draft.subject"
+                type="text"
+                class="w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8 focus:border-outline-gray-4 disabled:bg-surface-gray-1"
+                :disabled="selected.locked"
+                :maxlength="setup.data?.subject_max"
+                :aria-invalid="errors.subject ? 'true' : undefined"
+                :aria-describedby="errors.subject ? 'email-template-subject-error' : undefined"
+                @focus="lastField = 'subject'"
+              >
+              <p
+                v-if="errors.subject"
+                id="email-template-subject-error"
+                class="mt-1 text-sm text-ink-red-4"
+                role="alert"
+              >
+                {{ errors.subject }}
+              </p>
+            </div>
+
+            <div>
+              <label
+                for="email-template-body"
+                class="mb-1 block text-sm font-medium text-ink-gray-8"
+              >Body</label>
+              <textarea
+                id="email-template-body"
+                ref="bodyInput"
+                v-model="draft.body"
+                rows="10"
+                class="w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 font-mono text-sm text-ink-gray-8 focus:border-outline-gray-4"
+                :aria-invalid="errors.body ? 'true' : undefined"
+                :aria-describedby="errors.body ? 'email-template-body-error' : undefined"
+                @focus="lastField = 'body'"
+              />
+              <p
+                v-if="errors.body"
+                id="email-template-body-error"
+                class="mt-1 text-sm text-ink-red-4"
+                role="alert"
+              >
+                {{ errors.body }}
+              </p>
+            </div>
+
+            <label
+              v-if="!selected.locked"
+              class="flex min-h-11 items-center gap-2 text-sm text-ink-gray-8"
+            >
+              <input
+                v-model="draft.is_enabled"
+                type="checkbox"
+                class="size-4"
+                data-testid="email-template-enabled"
+              >
+              Send this email (unticked switches it off)
+            </label>
+            <label class="flex min-h-11 items-center gap-2 text-sm text-ink-gray-8">
+              <input
+                v-model="draft.include_logo"
+                type="checkbox"
+                class="size-4"
+                data-testid="email-template-include-logo"
+              >
+              Include company logo
+              <span class="text-ink-gray-6">(off shows the company name instead)</span>
+            </label>
+
+            <p
+              v-if="errors.general"
+              class="surface-alert p-3 text-sm"
+              role="alert"
+            >
+              {{ errors.general }}
+            </p>
+            <p
+              class="text-sm text-ink-gray-7"
+              role="status"
+              data-testid="email-template-status"
+            >
+              {{ status }}
+            </p>
+
+            <div class="flex flex-wrap items-center gap-2">
+              <Button
+                variant="solid"
+                :loading="saveResource.loading"
+                @click="save"
+              >
+                Save
+              </Button>
+              <Button
+                variant="subtle"
+                :loading="testResource.loading"
+                @click="sendTest"
+              >
+                Send test to me
+              </Button>
+              <Button
+                v-if="selected.state !== 'Default'"
+                variant="ghost"
+                @click="confirmReset = true"
+              >
+                Reset to default
+              </Button>
+            </div>
+
+            <div class="space-y-2">
+              <h3 class="label">
+                Variables
+              </h3>
+              <p class="text-sm text-ink-gray-6">
+                Click a variable to insert it where the cursor is. Only these names work here.
+              </p>
+              <ul class="space-y-1">
+                <li
+                  v-for="variable in selected.variables"
+                  :key="variable.name"
+                  class="flex flex-wrap items-baseline gap-x-2 text-sm"
+                >
+                  <button
+                    type="button"
+                    class="min-h-8 rounded bg-surface-gray-2 px-1.5 font-mono text-xs text-ink-gray-9 hover:bg-surface-gray-3"
+                    :aria-label="`Insert ${variable.name}`"
+                    @mousedown.prevent
+                    @click="insert(`{{ ${variable.name} }}`)"
+                    v-text="`{{ ${variable.name} }}`"
+                  />
+                  <span class="text-ink-gray-7">{{ variable.description }}</span>
+                  <span class="text-ink-gray-5">e.g. {{ sampleText(variable.sample) }}</span>
+                </li>
+              </ul>
+              <h3 class="label pt-2">
+                Examples
+              </h3>
+              <ul class="space-y-1">
+                <li
+                  v-for="example in examples"
+                  :key="example"
+                  class="flex items-start gap-2"
+                >
+                  <code class="surface-inset min-w-0 flex-1 break-all p-2 text-xs">{{ example }}</code>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    :aria-label="`Copy example ${example}`"
+                    @click="copy(example)"
+                  >
+                    Copy
+                  </Button>
+                </li>
+              </ul>
+            </div>
+          </section>
+
+          <section
+            v-if="showEditor"
+            class="space-y-2"
+            aria-label="Preview"
+            data-testid="email-template-preview"
+          >
+            <div class="flex items-center justify-between gap-2">
+              <h2 class="label">
+                Preview, with sample data
+              </h2>
+              <Button
+                variant="ghost"
+                size="sm"
+                :loading="previewResource.loading"
+                @click="refreshPreview"
+              >
+                Update preview
+              </Button>
+            </div>
+            <p
+              v-if="preview.error"
+              class="surface-alert p-3 text-sm"
+              role="alert"
+            >
+              Preview failed: {{ preview.error }}
+            </p>
+            <template v-else>
+              <p class="text-sm font-medium text-ink-gray-8">
+                {{ preview.subject }}
+              </p>
+              <!-- KTD11: srcdoc + an empty sandbox, never v-html -- a template
+                 cannot script the portal origin. -->
+              <iframe
+                v-if="preview.html"
+                :title="`Preview of ${selected.label}`"
+                sandbox=""
+                :srcdoc="preview.html"
+                class="h-[32rem] w-full rounded-lg border border-outline-gray-1 bg-white"
+              />
+              <div
+                v-else
+                class="h-[32rem] animate-pulse rounded-lg bg-surface-gray-2"
+                aria-hidden="true"
+              />
+            </template>
+          </section>
+        </div>
+      </AsyncState>
+    </template>
 
     <Dialog
       :model-value="confirmReset"

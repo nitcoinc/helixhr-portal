@@ -54,6 +54,8 @@ const form = reactive({
   is_enabled: false,
   recipient_mode: 'All employees',
   frequency: 'Weekly',
+  // This reminder's opt-out of the company-wide logo above.
+  include_logo: true,
   recipients: /** @type {{name: string, employee_name: string}[]} */ ([]),
 })
 const formError = ref('')
@@ -71,6 +73,7 @@ function edit(event) {
     is_enabled: !!row.is_enabled,
     recipient_mode: row.recipient_mode || 'All employees',
     frequency: row.frequency || 'Weekly',
+    include_logo: !row.hide_logo,
     recipients: (row.recipients || []).map((r) => ({ name: r.employee, employee_name: r.employee_name })),
   })
   formError.value = ''
@@ -153,6 +156,7 @@ async function submit() {
       recipients: selectedIds.value,
       company: props.company,
       frequency: editing.value === 'holiday' ? form.frequency : undefined,
+      hide_logo: form.include_logo ? 0 : 1,
     })
     editing.value = ''
     await setup.reload()
@@ -201,6 +205,7 @@ async function refreshPreview() {
       subject: form.subject,
       body: form.body,
       company: props.company,
+      hide_logo: form.include_logo ? 0 : 1,
     })
     preview.html = result.html
     preview.subject = result.subject
@@ -219,6 +224,7 @@ async function sendTest() {
       subject: form.subject,
       body: form.body,
       company: props.company,
+      hide_logo: form.include_logo ? 0 : 1,
     })
     testStatus.value = 'Test sent to your own email address.'
   } catch (error) {
@@ -228,6 +234,12 @@ async function sendTest() {
         : `Test not sent: ${error?.messages?.[0] || 'something went wrong.'}`
   }
 }
+
+// The preview follows the checkbox before it is saved.
+watch(
+  () => form.include_logo,
+  () => refreshPreview(),
+)
 
 defineExpose({ setup })
 </script>
@@ -324,6 +336,13 @@ defineExpose({ setup })
           v-model="form.is_enabled"
           type="checkbox"
           label="Send this reminder"
+        />
+
+        <FormControl
+          v-model="form.include_logo"
+          type="checkbox"
+          label="Include company logo"
+          data-testid="celebration-include-logo"
         />
 
         <FormControl

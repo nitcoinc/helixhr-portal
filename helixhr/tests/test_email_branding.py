@@ -185,3 +185,63 @@ class TestEmailBranding(IntegrationTestCase):
 		context = _context([{"name": "Ada Lovelace", "image": None}], OTHER_COMPANY, "birthday")
 		message = _render_restricted(template, context, None)["message"]
 		self.assertEqual(message.count("_branding_b_logo.png"), 1)
+
+	# --- the per-template "Include company logo" opt-out ----------------------
+
+	def _send_leave_submitted(self):
+		from helixhr.utils import send_notification
+
+		sent = []
+		with patch("frappe.sendmail", side_effect=lambda **kwargs: sent.append(kwargs)):
+			send_notification("leave_submitted", [OTHER_USER], {"employee_name": "Ada"})
+		return sent[0]["message"]
+
+	def test_a_message_template_opted_out_of_the_logo_prints_the_company_name(self):
+		from helixhr.api import get_notification_setup, reset_message_template, save_message_template
+
+		frappe.db.set_value("Company", OTHER_COMPANY, "company_logo", "/files/_branding_b_logo.png")
+		frappe.db.delete("HelixHR Message Template", {"template_key": "leave_submitted"})
+		self.assertIn("_branding_b_logo.png", self._send_leave_submitted())
+
+		# Opting out on the default wording keeps a wording-less row: still Default.
+		save_message_template("leave_submitted", hide_logo=1)
+		html = self._send_leave_submitted()
+		self.assertNotIn("<img", html)
+		self.assertIn(f"<strong style=\"font-size:16px;\">{OTHER_COMPANY}</strong>", html)
+		event = next(e for e in get_notification_setup()["events"] if e["key"] == "leave_submitted")
+		self.assertEqual(event["state"], "Default")
+		self.assertTrue(event["hide_logo"])
+
+		# Reset to default wording keeps the opt-out; ticking it back restores the logo.
+		reset_message_template("leave_submitted")
+		self.assertTrue(frappe.db.get_value("HelixHR Message Template", "leave_submitted", "hide_logo"))
+		save_message_template("leave_submitted", hide_logo=0)
+		self.assertIn("_branding_b_logo.png", self._send_leave_submitted())
+		frappe.db.delete("HelixHR Message Template", {"template_key": "leave_submitted"})
+
+	def test_the_message_preview_follows_the_unsaved_checkbox(self):
+		from helixhr.api import preview_message_template
+		from helixhr.utils import NOTIFICATION_EVENTS
+
+		frappe.db.set_value("Company", self.company, "company_logo", "/files/_branding_a_logo.png")
+		event = NOTIFICATION_EVENTS["leave_submitted"]
+		with patch("frappe.defaults.get_global_default", return_value=self.company):
+			shown = preview_message_template("leave_submitted", event["subject"], event["body"], hide_logo=0)
+			hidden = preview_message_template("leave_submitted", event["subject"], event["body"], hide_logo=1)
+		self.assertIn("<img", shown["html"])
+		self.assertNotIn("<img", hidden["html"])
+
+	def test_a_celebration_opted_out_of_the_logo_prints_the_company_name(self):
+		from helixhr.reminders import CELEBRATION_DEFAULTS, _context, _render_restricted
+
+		frappe.db.set_value("Company", OTHER_COMPANY, "company_logo", "/files/_branding_b_logo.png")
+		for body in (CELEBRATION_DEFAULTS["birthday"]["body"], "<p>Happy birthday, {{ names }}!</p>"):
+			template = frappe._dict(
+				use_html=1, subject=CELEBRATION_DEFAULTS["birthday"]["subject"], response_html=body
+			)
+			context = _context([{"name": "Ada Lovelace", "image": None}], OTHER_COMPANY, "birthday")
+			with_logo = _render_restricted(template, context, None)["message"]
+			without = _render_restricted(template, context, None, include_logo=False)["message"]
+			self.assertIn("_branding_b_logo.png", with_logo)
+			self.assertNotIn("_branding_b_logo.png", without)
+			self.assertNotIn("<img src=", without.split("Ada Lovelace")[0])
