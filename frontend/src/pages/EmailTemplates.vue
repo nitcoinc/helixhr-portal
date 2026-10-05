@@ -405,6 +405,19 @@ watch(
             </p>
           </div>
 
+          <!-- Plan 2026-10-05-001 U13: the saved template failed on real data
+               after its last save, so recipients got the default wording. -->
+          <p
+            v-if="selected.last_fallback"
+            class="surface-alert p-3 text-sm"
+            role="alert"
+            data-testid="email-template-fallback"
+          >
+            This template failed when it was last sent
+            ({{ selected.last_fallback.at }}), so the default wording went out instead.
+            Error: {{ selected.last_fallback.message }}
+          </p>
+
           <p
             v-if="selected.locked"
             class="surface-inset p-3 text-sm text-ink-gray-7"

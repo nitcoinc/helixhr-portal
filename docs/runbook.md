@@ -495,6 +495,12 @@ branded with the *recipient's* company logo, falling back to the default
 company only for a user with no active Employee. A mail with no logo shows
 the company name instead of an image.
 
+**"This template failed when it was last sent" (plan 2026-10-05-001 U13).**
+A customised portal message template raised on real data and the default
+wording went out. The banner reads the newest `HelixHR message template
+<event> failed` Error Log row newer than the template's last save; the full
+traceback is there. Saving a fix clears the banner.
+
 ## Employee gets locked/HR-only fields from more than one place (U5 follow-up)
 
 `helixhr/fixtures/property_setter.json`'s permlevel pass only queried the `DocField` doctype,

@@ -8007,7 +8007,7 @@ def get_notification_setup():
 	saved = {
 		row.template_key: row
 		for row in frappe.get_all(
-			"HelixHR Message Template", fields=["template_key", "subject", "body", "is_enabled"]
+			"HelixHR Message Template", fields=["template_key", "subject", "body", "is_enabled", "modified"]
 		)
 	}
 	events = []
@@ -8026,6 +8026,7 @@ def get_notification_setup():
 				"body": (row.body if row else None) or event["body"],
 				"default_subject": event["subject"],
 				"default_body": event["body"],
+				"last_fallback": _last_template_fallback(key, row),
 				"variables": [
 					{"name": name, "description": description, "sample": sample}
 					for name, (description, sample) in event_variables(key).items()
@@ -8033,6 +8034,33 @@ def get_notification_setup():
 			}
 		)
 	return {"events": events, "subject_max": _TEMPLATE_SUBJECT_MAX}
+
+
+def _last_template_fallback(event_key, row):
+	"""Plan 2026-10-05-001 U13: the most recent time the saved template for
+	`event_key` failed on real data and the default went out instead --
+	`render_message` already writes that Error Log row, so no new doctype.
+	Only a failure *after* the row was last saved counts, so the warning
+	clears once HR saves a fix. The event key, the time and a truncated
+	exception line only; never the traceback."""
+	if not row:
+		return None
+	log = frappe.db.get_value(
+		"Error Log",
+		{"method": f"HelixHR message template {event_key} failed", "creation": [">", row.modified]},
+		["creation", "error"],
+		order_by="creation desc",
+		as_dict=True,
+	)
+	if not log:
+		return None
+	lines = [line.strip() for line in (log.error or "").strip().splitlines() if line.strip()]
+	message = lines[-1] if lines else ""
+	return {
+		"event_key": event_key,
+		"at": frappe.utils.format_datetime(log.creation, "yyyy-MM-dd HH:mm"),
+		"message": message[:200],
+	}
 
 
 @frappe.whitelist(methods=["POST"])
