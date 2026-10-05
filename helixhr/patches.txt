@@ -87,3 +87,10 @@ helixhr.patches.v1_0.apply_permission_deltas #2026-10-04 U1 Employee Self Servic
 # Plan 2026-10-04-004 U1: P8's global one-row-per-event celebration settings
 # become one row per (event, company); settings copied to every company (R14).
 helixhr.patches.v1_0.split_celebration_reminders_by_company
+# Plan 2026-10-04-004 U3: re-run so existing sites get HRMS's holiday
+# reminder turned off too -- the patch already covered only the two
+# celebration checkboxes when it first ran.
+helixhr.patches.v1_0.turn_off_hrms_celebration_senders #2026-10-04 U3 holiday takeover
+# Plan 2026-10-04-004 U3: re-run to seed the holiday template on sites that
+# installed before the takeover shipped.
+helixhr.patches.v1_0.seed_celebration_templates #2026-10-04 U3 holiday template

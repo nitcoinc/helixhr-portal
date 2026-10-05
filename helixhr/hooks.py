@@ -419,6 +419,7 @@ scheduler_events = {
 	"daily": [
 		"helixhr.tasks.null_stale_checkin_coordinates",
 		"helixhr.reminders.send_celebration_reminders",
+		"helixhr.reminders.send_holiday_reminders",
 		"helixhr.reminders.send_overdue_digests",
 	],
 	# Off by default -- helixhr.telemetry.send_ping is a no-op until an

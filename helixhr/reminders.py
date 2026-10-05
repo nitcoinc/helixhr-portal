@@ -61,7 +61,7 @@ the exclusion, another for the shared-day email -- and this job uses one).
 
 import frappe
 from erpnext.setup.doctype.employee.employee import get_employee_emails
-from frappe.utils import add_days, cint, comma_sep, format_date, get_url, getdate
+from frappe.utils import add_days, add_months, cint, comma_sep, format_date, get_url, getdate
 from hrms.controllers.employee_reminders import (
 	get_all_employee_emails,
 	get_employee_email,
@@ -89,6 +89,15 @@ EVENTS = {
 		"label": "Work anniversary",
 		"hrms_field": "send_work_anniversary_reminders",
 		"hrms_label": "Work Anniversaries",
+	},
+	# Plan 2026-10-04-004 U3: HelixHR takes over HRMS's holiday reminder
+	# (`send_reminders_in_advance_weekly/monthly`), which was hardcoded
+	# wording, global on/off, and per-employee sends. The row's own
+	# `frequency` (Weekly / Monthly) is the cadence now.
+	"holiday": {
+		"label": "Holiday",
+		"hrms_field": "send_holiday_reminders",
+		"hrms_label": "Holidays",
 	},
 }
 
@@ -485,6 +494,205 @@ def _logo_url(company):
 
 def _date_format():
 	return frappe.db.get_single_value("System Settings", "date_format") or "yyyy-mm-dd"
+
+
+# --- holiday reminders (plan 2026-10-04-004 U3, R7/R8, KTD6/KTD7) ----------
+
+
+def send_holiday_reminders():
+	"""Daily (`hooks.scheduler_events`), replacing HRMS's own
+	`send_reminders_in_advance_weekly` / `..._monthly` (R8): each company
+	with an enabled `holiday` row gets the reminder on its own cadence --
+	Weekly rows send on Monday for Monday..Sunday, Monthly rows on the 1st
+	for that month (exclusive upper bounds, so a boundary day is never
+	listed by two consecutive mails the way HRMS's inclusive window lists
+	the next Monday).
+
+	The mail is *to* the employee, about their own upcoming non-weekly
+	holidays from their own holiday list (`get_holidays_for_employee`,
+	imported, never re-implemented -- P4-KTD12). Employees whose list has
+	nothing ahead in the window -- or no list at all -- get nothing.
+
+	Recipients with the same holiday set share one render and one send
+	(KTD6): the common case is a whole company on one list, and Monday's
+	volume must not be one Email Queue row per employee. The template's
+	`employee_name` is therefore the group's names, comma-separated -- for
+	the usual single-person group it reads exactly as HR writes it.
+
+	The same per-(event, company, day) rerun guard as the celebrations
+	(KTD8), and the same cross-company address guard (R3): an address that
+	also resolves for an active employee of another company is dropped and
+	logged.
+	"""
+	from hrms.hr.utils import get_holiday_list_for_employee
+
+	today = getdate()
+	guard_day = str(today)
+	foreign, foreign_names = _foreign_address_companies()
+	dropped = []
+
+	result = {"companies": 0, "emails": 0, "failed": 0}
+	for row in frappe.get_all(
+		"HelixHR Celebration Reminder",
+		filters={"event": "holiday", "is_enabled": 1},
+		fields=["name", "company", "email_template", "frequency"],
+	):
+		company = row.company
+		if not _is_holiday_send_day(row.frequency, today):
+			continue
+		if frappe.cache.get_value(
+			f"{CELEBRATION_GUARD_PREFIX}{guard_day}|holiday|{company}"
+		):
+			continue
+		if not frappe.db.exists("Email Template", row.email_template):
+			frappe.log_error(
+				title="HelixHR holiday reminders",
+				message=f"The holiday reminder for '{company}' picks Email Template "
+				f"'{row.email_template}', but no such template exists -- nothing was sent.",
+			)
+			result["failed"] += 1
+			continue
+
+		try:
+			emails = _send_holiday_company(
+				row, today, get_holiday_list_for_employee, foreign, foreign_names, dropped
+			)
+			result["companies"] += 1
+			result["emails"] += emails
+			if emails:
+				frappe.cache.set_value(
+					f"{CELEBRATION_GUARD_PREFIX}{guard_day}|holiday|{company}",
+					1,
+					expires_in_sec=CELEBRATION_GUARD_SECONDS,
+				)
+		except Exception:
+			result["failed"] += 1
+			frappe.log_error(
+				f"The holiday reminder for '{company}' failed -- Email Template "
+				f"'{row.email_template}' was not sent to that company. The other "
+				f"companies are unaffected.\n\n{frappe.get_traceback()}",
+				"HelixHR holiday reminders",
+			)
+
+	if dropped:
+		frappe.log_error(title=CROSS_COMPANY_LOG_TITLE, message="\n".join(dropped))
+	return result
+
+
+def _is_holiday_send_day(frequency, today):
+	"""The row's cadence decides whether *today* is a send day at all:
+	Weekly on Monday, Monthly on the 1st. Anything else (no frequency --
+	the controller refuses a holiday row without one, but a legacy write
+	could still produce it) is never a send day."""
+	if frequency == "Weekly":
+		return today.weekday() == 0
+	if frequency == "Monthly":
+		return today.day == 1
+	return False
+
+
+def _holiday_window(frequency, today):
+	"""Exclusive bounds: what the window *covers*, not what the last
+	email's last day was. Weekly covers Monday..Sunday -- seven days, so
+	the following Monday is left to the next mail. Monthly covers the
+	calendar month -- the 1st of next month is left to next month's mail.
+	HRMS's inclusive `[today, today+7]` / `[1st, next 1st]` listed a
+	boundary day twice."""
+	if frequency == "Weekly":
+		return today, add_days(today, 6)
+	return today, add_days(add_months(today, 1), -1)
+
+
+def _send_holiday_company(row, today, get_holiday_list, foreign, foreign_names, dropped):
+	"""One company's holiday reminder: every active employee's own list,
+	grouped by the holidays ahead in the window.
+
+	The list comes from HRMS (`get_holiday_list_for_employee`, imported,
+	not re-implemented -- P4-KTD12). The holiday rows are queried here,
+	not through `get_holidays_for_employee`, on purpose: that helper adds
+	`filters["weekly_off"] = False`, and under this Frappe a bare False in
+	a filter matches nothing -- HRMS's own weekly/monthly senders have
+	been mailing nobody for a while, which is one more reason the takeover
+	is happening. The explicit `weekly_off: 0` is the same intent, stated
+	so it actually runs."""
+	start, end = _holiday_window(row.frequency, today)
+	groups = {}
+	for employee in frappe.get_all(
+		"Employee", filters={"status": "Active", "company": row.company}, pluck="name"
+	):
+		holiday_list = get_holiday_list(employee, raise_exception=False)
+		if not holiday_list:
+			continue
+		holidays = frappe.get_all(
+			"Holiday",
+			filters={
+				"parent": holiday_list,
+				"parenttype": "Holiday List",
+				"weekly_off": 0,
+				"holiday_date": [">=", start],
+			},
+			fields=["holiday_date", "description"],
+			order_by="holiday_date asc",
+		)
+		holidays = [holiday for holiday in holidays if holiday.holiday_date <= end]
+		if not holidays:
+			continue
+		key = tuple((holiday["holiday_date"], holiday["description"]) for holiday in holidays)
+		groups.setdefault(key, []).append(employee)
+
+	emails = 0
+	for key, employees in groups.items():
+		holidays = [
+			{"date": format_date(holiday_date, _date_format()), "description": description}
+			for holiday_date, description in key
+		]
+		recipients = _drop_foreign(
+			[
+				address
+				for address in (
+					get_employee_email(frappe.get_cached_doc("Employee", employee))
+					for employee in employees
+				)
+				if address
+			],
+			row.company,
+			foreign,
+			foreign_names,
+			dropped,
+		)
+		if not recipients:
+			continue
+		names = comma_sep(
+			frappe.db.get_all(
+				"Employee",
+				filters={"name": ["in", employees]},
+				fields=["employee_name"],
+				order_by="employee_name asc",
+				pluck="employee_name",
+			),
+			"{0} & {1}",
+			False,
+		)
+		template = frappe.get_doc("Email Template", row.email_template)
+		context = {
+			"employee_name": names,
+			"holidays": holidays,
+			"company": row.company,
+			"logo_url": _logo_url(row.company),
+			"portal_url": get_url("/helixhr"),
+			"date": format_date(today, _date_format()),
+			"frequency": row.frequency,
+		}
+		rendered = _render_restricted(template, context, get_sender_email())
+		frappe.sendmail(
+			sender=get_sender_email(),
+			recipients=recipients,
+			subject=rendered["subject"],
+			message=rendered["message"],
+			reference_doctype="Employee",
+		)
+		emails += 1
+	return emails
 
 
 # --- overdue digests (plan 2026-10-02-001 U11, R23..R25, KTD13) -------------

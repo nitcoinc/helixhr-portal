@@ -1183,11 +1183,17 @@ class TestPreflightCelebrationReminders(IntegrationTestCase):
 	FIELDS = (
 		"helixhr_birthday_template",
 		"helixhr_anniversary_template",
+		"helixhr_holiday_template",
 		"send_birthday_reminders",
 		"send_work_anniversary_reminders",
+		"send_holiday_reminders",
 	)
 	_FIELD_TO_EVENT = MappingProxyType(
-		{"helixhr_birthday_template": "birthday", "helixhr_anniversary_template": "work_anniversary"}
+		{
+			"helixhr_birthday_template": "birthday",
+			"helixhr_anniversary_template": "work_anniversary",
+			"helixhr_holiday_template": "holiday",
+		}
 	)
 	TEMPLATE = "_Test HelixHR Birthday"
 
@@ -1198,7 +1204,7 @@ class TestPreflightCelebrationReminders(IntegrationTestCase):
 
 		self.company = ensure_test_company()
 		_template(self.TEMPLATE, "BDAYMARK {{ names }}")
-		for event in ("birthday", "work_anniversary"):
+		for event in ("birthday", "work_anniversary", "holiday"):
 			# Per company since plan 2026-10-04-004 U1: the row this suite
 			# drives is the test company's own.
 			if not frappe.db.get_value(
@@ -1210,11 +1216,17 @@ class TestPreflightCelebrationReminders(IntegrationTestCase):
 						"event": event,
 						"company": self.company,
 						"recipient_mode": "All employees",
+						# A holiday row cannot exist without a cadence (U1).
+						**({"frequency": "Weekly"} if event == "holiday" else {}),
 					}
 				).insert(ignore_permissions=True)
 		self.original = {
 			field: frappe.db.get_single_value("HR Settings", field)
-			for field in ("send_birthday_reminders", "send_work_anniversary_reminders")
+			for field in (
+				"send_birthday_reminders",
+				"send_work_anniversary_reminders",
+				"send_holiday_reminders",
+			)
 		}
 		self.original_reminders = {
 			event: frappe.db.get_value(
@@ -1291,7 +1303,13 @@ class TestPreflightCelebrationReminders(IntegrationTestCase):
 	def test_helixhr_only_passes_and_names_the_sender(self):
 		from helixhr.preflight import PASS
 
-		self._set({"helixhr_birthday_template": self.TEMPLATE, "helixhr_anniversary_template": self.TEMPLATE})
+		self._set(
+			{
+				"helixhr_birthday_template": self.TEMPLATE,
+				"helixhr_anniversary_template": self.TEMPLATE,
+				"helixhr_holiday_template": self.TEMPLATE,
+			}
+		)
 		result = self._check()
 
 		self.assertEqual(result["status"], PASS)
