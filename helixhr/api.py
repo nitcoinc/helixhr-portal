@@ -97,6 +97,7 @@ from helixhr.utils import (
 	get_week_bounds,
 	is_photo_content,
 	mask_identifier,
+	message_brand,
 	photo_file_filters,
 	portal_home_page,
 	prepare_profile_photo,
@@ -8137,7 +8138,11 @@ def _render_draft(template_key, subject, body):
 		validate_message_template(template_key, subject, body)
 	except TemplateRejected as exc:
 		frappe.throw(str(exc), title=_("Template not valid"))
-	return render_message(template_key, sample_context(template_key), source={"subject": subject, "body": body})
+	# The real brand, resolved as `send_notification` does for this caller
+	# (the test send's recipient): their company and its logo, else the
+	# default company's -- never the sample's placeholder logo address.
+	context = {**sample_context(template_key), **message_brand(frappe.session.user)}
+	return render_message(template_key, context, source={"subject": subject, "body": body})
 
 
 @frappe.whitelist(methods=["POST"])
@@ -8147,7 +8152,22 @@ def preview_message_template(template_key, subject=None, body=None):
 	_assert_can_manage_notifications()
 	rate_limit_per_user("preview_message_template")
 	message = _render_draft(template_key, subject or "", body or "")
-	return {"subject": message["subject"], "html": message["html"]}
+	brand = message_brand(frappe.session.user)
+	try:
+		_assert_can_set_company_logo(brand["company"])
+		can_set_logo = bool(brand["company"])
+	except frappe.PermissionError:
+		frappe.clear_last_message()
+		can_set_logo = False
+	return {
+		"subject": message["subject"],
+		"html": message["html"],
+		# The logo the preview carries, and whether this caller may replace it
+		# (`set_company_logo`'s own gate) -- the editor's logo control.
+		"company": brand["company"],
+		"logo_url": brand["logo_url"],
+		"can_set_logo": can_set_logo,
+	}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -8478,6 +8498,15 @@ def reset_celebration_template(event, company=None):
 	return _celebration_reminder_projection(event, company)
 
 
+def _assert_can_set_company_logo(company):
+	"""`set_company_logo`'s gate: HR only; an anchored HR Manager for their
+	own company, a System Manager for any."""
+	if not _is_hr():
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	if "System Manager" not in frappe.get_roles():
+		_assert_company_in_admin_scope(company)
+
+
 @frappe.whitelist(methods=["POST"])
 def set_company_logo(company=None, remove=0):
 	"""Plan 2026-10-05-001 U12 (KTD10): upload, replace or remove the logo
@@ -8490,11 +8519,8 @@ def set_company_logo(company=None, remove=0):
 	from helixhr.utils import validate_logo_upload
 
 	rate_limit_per_user("set_company_logo")
-	if not _is_hr():
-		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
 	company = company or _celebration_company()
-	if "System Manager" not in frappe.get_roles():
-		_assert_company_in_admin_scope(company)
+	_assert_can_set_company_logo(company)
 	if not frappe.db.exists("Company", company):
 		frappe.throw(_("That company does not exist."))
 

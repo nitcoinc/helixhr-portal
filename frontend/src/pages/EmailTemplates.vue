@@ -5,6 +5,7 @@ import { createResource, Button, Dialog } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import CelebrationEditor from '@/components/templates/CelebrationEditor.vue'
+import CompanyLogoControl from '@/components/templates/CompanyLogoControl.vue'
 import { useIsDesktop } from '@/lib/useIsDesktop'
 import { session } from '@/lib/session'
 
@@ -38,7 +39,9 @@ const selected = computed(() => events.value.find((e) => e.key === selectedKey.v
 const draft = reactive({ subject: '', body: '', is_enabled: true })
 const errors = reactive({ subject: '', body: '', general: '' })
 const status = ref('')
-const preview = reactive({ html: '', subject: '', error: '' })
+// `company` / `logoUrl` / `canSetLogo`: the brand the preview renders with
+// (the caller's company, as `send_notification` resolves it).
+const preview = reactive({ html: '', subject: '', error: '', company: '', logoUrl: '', canSetLogo: false })
 
 const dirty = computed(() => {
   const event = selected.value
@@ -146,6 +149,9 @@ async function refreshPreview() {
     const result = await previewResource.submit(payload())
     preview.html = result.html
     preview.subject = result.subject
+    preview.company = result.company || ''
+    preview.logoUrl = result.logo_url || ''
+    preview.canSetLogo = !!result.can_set_logo
   } catch (error) {
     preview.html = ''
     preview.error = messageOf(error, 'Something went wrong.')
@@ -597,6 +603,13 @@ watch(
               Update preview
             </Button>
           </div>
+          <CompanyLogoControl
+            v-if="preview.company"
+            :company="preview.company"
+            :logo-url="preview.logoUrl"
+            :editable="preview.canSetLogo"
+            @changed="refreshPreview"
+          />
           <p
             v-if="preview.error"
             class="surface-alert p-3 text-sm"

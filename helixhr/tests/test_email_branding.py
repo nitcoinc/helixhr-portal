@@ -147,6 +147,22 @@ class TestEmailBranding(IntegrationTestCase):
 		self.assertIn("_branding_b_logo.png", sent[0]["message"])
 		self.assertNotIn("_branding_a_logo.png", sent[0]["message"])
 
+	def test_message_template_preview_carries_the_real_company_logo(self):
+		"""The Email templates preview renders through helixhr_layout.html with
+		the company `send_notification` would use -- not the sample's
+		placeholder logo address -- and hands the editor its logo control."""
+		from helixhr.api import preview_message_template
+
+		frappe.db.set_value("Company", self.company, "company_logo", "/files/_branding_a_logo.png")
+		with patch("frappe.defaults.get_global_default", return_value=self.company):
+			result = preview_message_template("leave_submitted", "Leave", "<p>Hi</p>")
+
+		self.assertEqual(result["company"], self.company)
+		self.assertEqual(result["logo_url"], frappe.utils.get_url("/files/_branding_a_logo.png"))
+		self.assertIn(f'<img src="{result["logo_url"]}"', result["html"])
+		self.assertNotIn("hr.example.com/files/logo.png", result["html"])
+		self.assertTrue(result["can_set_logo"])
+
 	def test_no_logo_renders_no_image(self):
 		from helixhr.utils import send_notification
 

@@ -8,6 +8,12 @@ import { test, expect, request, type Page } from '@playwright/test'
 // `setup_playwright_fixtures`) on a clean context.
 const SITE_HOST = process.env.SITE_HOST || 'test_site'
 const PASSWORD = process.env.TEST_USER_PASSWORD || 'Helixhr-Test-Fixture-2026!'
+// A valid 1x1 PNG for the logo upload.
+const PNG = Buffer.from(
+  '89504e470d0a1a0a0000000d4948445200000001000000010806000000' +
+    '1f15c4890000000d49444154789c6360000002000154a24f5d0000000049454e44ae426082',
+  'hex',
+)
 
 // HR is the refused hat; the other identities add nothing here.
 test.beforeEach(({}, testInfo) => {
@@ -125,6 +131,55 @@ test.describe('Notification Manager', () => {
     await expect(editor.getByTestId('email-template-enabled')).toHaveCount(0)
     await expect(editor.getByLabel('Subject')).toBeDisabled()
   })
+})
+
+test('the message preview carries the company logo and replaces it in place', async ({ page, baseURL }) => {
+  // Administrator: a System Manager may both edit message templates and set
+  // the logo. The brand is the one `send_notification` resolves -- for a
+  // caller with no Employee, the default company -- so pin one for the test.
+  const api = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+  expect((await api.post('/api/method/login', { form: { usr: 'Administrator', pwd: 'admin' } })).ok()).toBeTruthy()
+  // Global Defaults.default_company is what `frappe.defaults` reads.
+  const globals = await (
+    await api.get('/api/method/frappe.client.get_value', {
+      params: { doctype: 'Global Defaults', name: 'Global Defaults', fieldname: 'default_company' },
+    })
+  ).json()
+  const previous = globals.message?.default_company || ''
+  const company =
+    previous ||
+    (await (await api.get('/api/method/frappe.client.get_list', { params: { doctype: 'Company' } })).json())
+      .message[0].name
+  const setDefault = (value: string) =>
+    api.post('/api/method/frappe.client.set_value', {
+      form: { doctype: 'Global Defaults', name: 'Global Defaults', fieldname: 'default_company', value },
+    })
+  if (!previous) expect((await setDefault(company)).ok()).toBeTruthy()
+
+  await page.context().clearCookies()
+  await page.context().addCookies((await api.storageState()).cookies)
+  try {
+    await page.goto('/helixhr/email-templates')
+    await page.getByTestId('email-template-leave_approved').click()
+    const preview = page.getByTestId('email-template-preview')
+    await preview.getByRole('button', { name: 'Update preview' }).click()
+    const logo = preview.getByTestId('company-logo')
+    await expect(logo).toContainText(company)
+    await logo.getByTestId('company-logo-input').setInputFiles({ name: 'logo.png', mimeType: 'image/png', buffer: PNG })
+    await expect(logo.getByTestId('company-logo-status')).toContainText('Logo saved')
+    await expect(logo.getByRole('img')).toHaveAttribute('src', /\/files\/.+\.png$/)
+    const frame = page.frameLocator('iframe[title="Preview of Leave approved"]')
+    await expect(frame.locator('img').first()).toHaveAttribute('src', /\/files\/.+\.png$/)
+
+    await logo.getByRole('button', { name: 'Remove' }).click()
+    await expect(logo.getByTestId('company-logo-status')).toHaveText('Logo removed.')
+    await expect(frame.locator('img')).toHaveCount(0)
+    await expect(frame.getByText(company).first()).toBeVisible()
+  } finally {
+    await api.post('/api/method/helixhr.api.set_company_logo', { form: { company, remove: 1 } })
+    if (!previous) await setDefault('')
+    await api.dispose()
+  }
 })
 
 test('P8-U12 moved to the celebrations group: HR authors the birthday email and switches to a selected audience', async ({ page }, testInfo) => {

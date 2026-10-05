@@ -901,6 +901,13 @@ def _recipient_brand(user):
 	return {"company": company, "logo_url": frappe.utils.get_url(logo) if logo else ""}
 
 
+def message_brand(user):
+	"""`{"company", "logo_url"}` a message to `user` carries: what
+	`send_notification` resolves (their company, else the default's)."""
+	default = _default_context()
+	return {"company": default["company"], "logo_url": default["logo_url"], **_recipient_brand(user)}
+
+
 def send_notification(event_key, recipients, context, reference_doctype=None, reference_name=None):
 	"""Render and queue `event_key` to each recipient (KTD8). One mail per
 	recipient so `recipient_first_name` is theirs. Never raises: a mail
