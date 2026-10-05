@@ -534,10 +534,6 @@ def send_holiday_reminders():
 	also resolves for an active employee of another company is dropped and
 	logged.
 	"""
-	from hrms.utils.holiday_list import (
-		get_assigned_holiday_lists_to_employee_and_company,
-	)
-
 	today = getdate()
 	guard_day = str(today)
 	foreign, foreign_names = _foreign_address_companies()
