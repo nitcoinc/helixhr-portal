@@ -241,10 +241,34 @@ def ensure_hr_manager_user():
 NOTIFICATION_MANAGER_USER = "notification-manager@helixhr.test"
 
 
+EMAIL_ADMIN_USER = "email-admin@helixhr.test"
+
+
+def ensure_email_admin_user():
+	"""A HelixHR Portal Admin login with no Employee record and no other
+	role: owns the Email templates page (theme, message templates,
+	celebrations) and must land there rather than on the not-linked page.
+	Idempotent."""
+	if not frappe.db.exists("User", EMAIL_ADMIN_USER):
+		frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": EMAIL_ADMIN_USER,
+				"first_name": "Email",
+				"last_name": "Admin",
+				"new_password": TEST_PASSWORD,
+				"send_welcome_email": 0,
+				"roles": [{"doctype": "Has Role", "role": "HelixHR Portal Admin"}],
+			}
+		).insert(ignore_permissions=True)
+	return EMAIL_ADMIN_USER
+
+
 def ensure_notification_manager_user():
 	"""A HelixHR Notification Manager login with no Employee record and no
-	other role (plan 2026-10-02-001 U7): the portal's Email templates owner,
-	who must land there rather than on the not-linked page. Idempotent."""
+	other role (plan 2026-10-02-001 U7). The role no longer opens the Email
+	templates page (Portal Admin / System Manager own it); kept as the
+	refused identity. Idempotent."""
 	if not frappe.db.exists("User", NOTIFICATION_MANAGER_USER):
 		frappe.get_doc(
 			{
@@ -681,8 +705,11 @@ def setup_playwright_fixtures():
 	make_test_user_without_employee()
 	# The desk-only portal's identity: HR Manager, no Employee record.
 	ensure_hr_manager_user()
-	# Plan 2026-10-02-001 U7: Notification Manager, no Employee record.
+	# Plan 2026-10-02-001 U7: Notification Manager, no Employee record --
+	# now refused by the Email templates page.
 	ensure_notification_manager_user()
+	# The Email templates owner with no Employee record (Portal Admin).
+	ensure_email_admin_user()
 
 	# So leave.spec.ts can apply for leave and see a real, non-error
 	# "Waiting for ..." status rather than hedging on whichever plain
