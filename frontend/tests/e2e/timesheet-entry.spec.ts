@@ -473,6 +473,62 @@ test.describe.serial('timesheet entry', () => {
 
     await context.close()
   })
+
+  test('a new row offers a real project picker and tells the employee to start there', async ({
+    browser,
+  }: {
+    browser: Browser
+  }) => {
+    // Employees read the borderless "Pick a project" text as "you have no
+    // projects". The picker is a bordered select with an accessible name, an
+    // empty row says where to start, and the task picker waits on a project.
+    // Nothing is saved: the row is dropped with the page.
+    const context = await browser.newContext({
+      storageState: 'tests/.auth/employee.json',
+      viewport: { width: 1280, height: 900 },
+    })
+    const page = await context.newPage()
+    await page.goto(`/helixhr/timesheet/${SOURCE_WEEK}`)
+    const grid = page.getByTestId('week-grid')
+    await grid.getByRole('button', { name: '+ Add a project row' }).click()
+
+    const picker = grid.getByRole('combobox', { name: /^Project for row/ }).last()
+    await expect(picker).toBeVisible()
+    await expect(picker.locator('option:checked')).toHaveText('Choose a project')
+    await expect(picker).toHaveCSS('border-style', 'solid')
+    expect(await picker.evaluate((el) => getComputedStyle(el).borderColor)).not.toBe(
+      'rgba(0, 0, 0, 0)',
+    )
+    await expect(grid.getByTestId('start-here').last()).toHaveText(
+      'Start here: choose a project, then enter hours.',
+    )
+    const task = grid.getByRole('combobox', { name: /^Task for row/ }).last()
+    await expect(task).toBeDisabled()
+
+    await picker.selectOption({ label: PROJECT_NAME })
+    await expect(task).toBeEnabled()
+    await expect(grid.getByTestId('start-here')).toHaveCount(0)
+    await context.close()
+  })
+
+  test('an employee on no project is told so, with a way to ask HR', async ({
+    browser,
+  }: {
+    browser: Browser
+  }) => {
+    const context = await phone(browser)
+    const page = await context.newPage()
+    await page.route('**/api/method/helixhr.api.get_my_projects*', (route) =>
+      route.fulfill({ json: { message: [] } }),
+    )
+    await page.goto(`/helixhr/timesheet/${SOURCE_WEEK}`)
+    const empty = page.getByTestId('no-projects')
+    await expect(empty).toBeVisible()
+    await expect(empty).toContainText("You're not on any project yet")
+    await expect(empty.getByRole('link', { name: 'Ask HR' })).toBeVisible()
+    await expect(page.getByRole('combobox', { name: /^Project for row/ })).toHaveCount(0)
+    await context.close()
+  })
   // Plan 2026-10-05-001 U5 (R1, R3, R4). The month overview opens the week
   // it names, and the pending week's banner offers Recall as the primary
   // action. TARGET_WEEK is Pending Approval after the first test.

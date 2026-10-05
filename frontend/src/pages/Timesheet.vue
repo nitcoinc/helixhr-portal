@@ -723,6 +723,7 @@ const savedLabel = computed(() => {
         <WeekGrid
           :lines="lines"
           :projects="projects.data || []"
+          :projects-loaded="Array.isArray(projects.data)"
           :days="days"
           :selected-date="selectedDate"
           :full-week-hours="fullWeekHours"
