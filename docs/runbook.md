@@ -1415,8 +1415,9 @@ on every status change, silently.
 
 Three of those are new in P2-U9 and judge *values*, not presence:
 
-- **Upload policy** FAILs unless System Settings lists only PDF/PNG/JPG/JPEG/DOCX/XLSX, Max File
-  Size is at most 10 MB, guests cannot upload, and public uploads are restricted to System
+- **Upload policy** FAILs unless System Settings lists only PDF/PNG/JPG/JPEG/DOCX/XLSX/PPTX, Max File
+  Size is at most 20 MB (HR-published documents are the widest portal policy; Frappe's own File
+  checks apply underneath, so a site set to 10 MB or without PPTX refuses those uploads), guests cannot upload, and public uploads are restricted to System
   Managers. The app's own `validate_portal_upload` already refuses anything else on an HR Request;
   this is about every *other* upload the site accepts.
 - **Per-user write limits** re-derives every effective bound, `helixhr_rate_limits` site config
@@ -1552,6 +1553,18 @@ Not a check, but part of going live: to surface a document on the Documents page
 **HelixHR Document Link** (Desk list, HR Manager/System Manager only) with `title`, `url`,
 optional `company` (scopes it to one company; leave blank for all) and `description`. No app
 code change is needed for a new link.
+
+## Documents: uploads, the default-Company trap, and Desk edits
+
+- HR publishes from Portal -> Documents -> Upload document. On a site whose System Settings still
+  say 10 MB / no PPTX (the pre-Documents preflight policy), a 20 MB file or a `.pptx` is refused by
+  Frappe's File controller with its own message. Raise Max File Size to 20 and add `PPTX`.
+- A link created in Desk (or by `frappe.client.insert`) with the Company left empty is pre-filled
+  with the site's **default Company**, so "for everyone" quietly becomes one company's. This is
+  what hid the `P2-U8 handbook` e2e row once a test set a default Company. Clear the field in Desk,
+  or publish from the portal, which always sends it.
+- An uploaded document is a private File attached to its link. Deleting the link from the portal
+  deletes the file; replacing the file or switching to a URL deletes the old one.
 
 ## Request ID prefixes: what HR can set, and what it changes (plan 2026-10-04-002)
 
