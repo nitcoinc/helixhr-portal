@@ -4813,6 +4813,102 @@ def get_my_timesheet_history(limit=12, start=0):
 	}
 
 
+_MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+_MONTH_UNSUBMITTED = (None, "Draft", TIMESHEET_SENT_BACK)
+
+
+@frappe.whitelist()
+def get_my_month(month=None):
+	"""Every Monday..Sunday week that overlaps `month` (YYYY-MM; defaults to
+	this month), for the Timesheet month overview (plan 2026-10-05-001 U5).
+
+	A week with no Timesheet still comes back, as `state` None ("Not
+	started"). The week's Timesheet is `_week_timesheet`'s rule -- newest
+	non-cancelled one whose `start_date` falls inside the week -- applied
+	to one query for the whole span. Expected hours come from the same
+	working-days index the Team tab reads (KTD4), clamped to the
+	employee's joining..relieving span: None when HR Settings has no
+	standard hours ("not measured"), 0 when no working day remains.
+
+	`missing`: the week is over, is not yet sent (Not started, Draft, Sent
+	back), and had at least one working day -- so it holds whether or not
+	expected hours are measured.
+	"""
+	if month in (None, ""):
+		month = str(getdate(user_today()))[:7]
+	if not isinstance(month, str) or not _MONTH_PATTERN.match(month):
+		frappe.throw(_("Month must look like YYYY-MM."), frappe.ValidationError)
+
+	employee = get_current_employee()
+	first = getdate(f"{month}-01")
+	last = get_last_day(first)
+	mondays = []
+	monday = get_week_bounds(first)[0]
+	while monday <= last:
+		mondays.append(monday)
+		monday = add_days(monday, 7)
+	span_start, span_end = mondays[0], add_days(mondays[-1], 6)
+
+	joined, relieved = frappe.db.get_value(
+		"Employee", employee, ["date_of_joining", "relieving_date"]
+	)
+	joined = getdate(joined) if joined else None
+	relieved = getdate(relieved) if relieved else None
+
+	sheets = {}
+	for row in frappe.get_all(
+		"Timesheet",
+		filters={
+			"employee": employee,
+			"start_date": ["between", [str(span_start), str(span_end)]],
+			"docstatus": ["!=", 2],
+		},
+		fields=["name", "start_date", "workflow_state", "total_hours"],
+		order_by="creation desc",
+	):
+		sheets.setdefault(get_week_bounds(row.start_date)[0], row)
+
+	open_changes = set(
+		frappe.get_all(
+			"HelixHR Timesheet Change",
+			filters={
+				"employee": employee,
+				"status": "Open",
+				"timesheet": ["in", [row.name for row in sheets.values()] or [""]],
+			},
+			pluck="timesheet",
+		)
+	)
+
+	index = _working_days_index([employee], span_start, span_end)
+	standard = index["standard"]
+	today = getdate(user_today())
+
+	weeks = []
+	for monday in mondays:
+		sunday = add_days(monday, 6)
+		days = {
+			day
+			for day in _employee_working_days(index, employee, monday, sunday)
+			if (not joined or getdate(day) >= joined) and (not relieved or getdate(day) <= relieved)
+		}
+		sheet = sheets.get(monday)
+		state = sheet.workflow_state if sheet else None
+		weeks.append(
+			{
+				"week_start": str(monday),
+				"week_end": str(sunday),
+				"state": state,
+				"total_hours": flt(sheet.total_hours) if sheet else 0.0,
+				"expected_hours": flt(standard * len(days)) if standard else None,
+				"missing": sunday < today and state in _MONTH_UNSUBMITTED and bool(days),
+				"change_open": bool(sheet and sheet.name in open_changes),
+			}
+		)
+
+	return {"month": month, "weeks": weeks, "full_week_hours": FULL_WEEK_HOURS}
+
+
 @frappe.whitelist()
 def get_timesheet_week_start(name):
 	"""The Monday of the week a Timesheet belongs to.

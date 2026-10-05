@@ -1,5 +1,6 @@
 import hashlib
 import json
+from unittest.mock import patch
 
 import frappe
 from frappe.model.workflow import apply_workflow, get_transitions
@@ -7,10 +8,12 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, get_datetime
 
 from helixhr.api import (
+	get_my_month,
 	get_my_projects,
 	get_my_timesheet_history,
 	get_my_week,
 	get_timesheet_week_start,
+	raise_timesheet_change,
 	recall_my_week,
 	save_my_week,
 	submit_my_week,
@@ -1426,3 +1429,164 @@ class TestRecallMyWeekEndpoint(IntegrationTestCase):
 				expected_state="Pending Approval",
 			)
 		self.assertIn("recalled", str(ctx.exception))
+
+
+class TestGetMyMonth(IntegrationTestCase):
+	"""Plan 2026-10-05-001 U5: the month overview's one read (KTD4)."""
+
+	def setUp(self):
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		frappe.db.set_value("Employee", self.employee_name, "reports_to", self.manager_name)
+		# A month of its own per test, far enough ahead that no other
+		# suite's hashed week lands in it often -- and the Timesheets it
+		# writes are cleaned up in tearDown regardless.
+		digest = int(hashlib.md5(self.id().encode()).hexdigest(), 16)
+		year = 3000 + digest % 900
+		self.month = f"{year}-{1 + digest % 12:02d}"
+		self.project = make_test_project("month", users=[EMPLOYEE_USER])
+		self.standard = frappe.db.get_single_value("HR Settings", "standard_working_hours")
+		frappe.db.set_single_value("HR Settings", "standard_working_hours", 8)
+		self.holiday_list = frappe.db.get_value("Employee", self.employee_name, "holiday_list")
+		frappe.cache.delete(f"helixhr:rate-limit:save_my_week:{EMPLOYEE_USER}")
+		self._purge()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		self._purge()
+		frappe.db.set_single_value("HR Settings", "standard_working_hours", self.standard)
+		frappe.db.set_value("Employee", self.employee_name, "holiday_list", self.holiday_list)
+		frappe.db.set_value("Employee", self.employee_name, "relieving_date", None)
+
+	def _purge(self):
+		first = frappe.utils.getdate(f"{self.month}-01")
+		names = frappe.get_all(
+			"Timesheet",
+			filters={
+				"employee": ["in", [self.employee_name, self.manager_name]],
+				"start_date": ["between", [str(add_days(first, -7)), str(add_days(first, 40))]],
+			},
+			pluck="name",
+		)
+		for name in names:
+			frappe.db.delete("HelixHR Timesheet Change", {"timesheet": name})
+			frappe.db.delete("Timesheet Detail", {"parent": name})
+			frappe.db.delete("Timesheet", name)
+
+	def _month(self, today=None):
+		frappe.set_user(EMPLOYEE_USER)
+		with patch("helixhr.api.user_today", return_value=today or "1999-01-01"):
+			return get_my_month(self.month)["weeks"]
+
+	def _after_month(self):
+		return str(add_days(frappe.utils.getdate(f"{self.month}-01"), 60))
+
+	def _save(self, monday, hours=4):
+		frappe.set_user(EMPLOYEE_USER)
+		row = {"date": str(monday), "project": self.project, "task": "", "hours": hours, "note": "x"}
+		return save_my_week(str(monday), json.dumps([row]))
+
+	def test_an_empty_past_month_is_every_overlapping_monday_not_started_and_missing(self):
+		weeks = self._month(today=self._after_month())
+		self.assertIn(len(weeks), (4, 5, 6))
+		first = frappe.utils.getdate(f"{self.month}-01")
+		self.assertEqual(weeks[0]["week_start"], str(get_week_bounds(first)[0]))
+		for week in weeks:
+			self.assertEqual(frappe.utils.getdate(week["week_start"]).weekday(), 0)
+			self.assertIsNone(week["state"])
+			self.assertTrue(week["missing"])
+			self.assertIsNotNone(week["expected_hours"])
+
+	def test_future_weeks_are_never_missing(self):
+		self.assertFalse(any(week["missing"] for week in self._month(today="1999-01-01")))
+
+	def test_a_week_spanning_two_months_appears_in_both(self):
+		first = frappe.utils.getdate(f"{self.month}-01")
+		last_monday = self._month()[-1]["week_start"]
+		frappe.set_user(EMPLOYEE_USER)
+		next_month = str(add_days(frappe.utils.get_last_day(first), 1))[:7]
+		with patch("helixhr.api.user_today", return_value="1999-01-01"):
+			following = get_my_month(next_month)["weeks"]
+		spans = frappe.utils.getdate(last_monday).month != add_days(frappe.utils.getdate(last_monday), 6).month
+		self.assertEqual(following[0]["week_start"] == last_monday, spans)
+		# March 3566 ends on a Tuesday, so at least one fixed case always spans.
+		with patch("helixhr.api.user_today", return_value="1999-01-01"):
+			self.assertEqual(get_my_month("3566-03")["weeks"][-1]["week_start"], "3566-03-28")
+			self.assertEqual(get_my_month("3566-04")["weeks"][0]["week_start"], "3566-03-28")
+
+	def test_a_week_of_holidays_expects_zero_and_is_not_missing(self):
+		monday = frappe.utils.getdate(self._month()[1]["week_start"])
+		name = f"_Test Month Holidays {self.month}"
+		if not frappe.db.exists("Holiday List", name):
+			frappe.get_doc(
+				{
+					"doctype": "Holiday List",
+					"holiday_list_name": name,
+					"from_date": str(add_days(monday, -40)),
+					"to_date": str(add_days(monday, 40)),
+					"holidays": [
+						{"holiday_date": str(add_days(monday, offset)), "description": "Off"}
+						for offset in range(7)
+					],
+				}
+			).insert(ignore_permissions=True)
+		frappe.db.set_value("Employee", self.employee_name, "holiday_list", name)
+		week = self._month(today=self._after_month())[1]
+		self.assertEqual(week["expected_hours"], 0)
+		self.assertFalse(week["missing"])
+
+	def test_weeks_after_relieving_are_never_missing(self):
+		first_monday = frappe.utils.getdate(self._month()[0]["week_start"])
+		frappe.db.set_value("Employee", self.employee_name, "relieving_date", str(add_days(first_monday, -1)))
+		self.assertFalse(any(week["missing"] for week in self._month(today=self._after_month())))
+
+	def test_no_standard_hours_is_not_measured_but_still_missing(self):
+		frappe.db.set_single_value("HR Settings", "standard_working_hours", 0)
+		week = self._month(today=self._after_month())[0]
+		self.assertIsNone(week["expected_hours"])
+		self.assertTrue(week["missing"])
+
+	def test_states_map_through_and_an_open_change_is_flagged(self):
+		weeks = self._month()
+		draft, pending, sent_back, approved = (frappe.utils.getdate(w["week_start"]) for w in weeks[:4])
+		self._save(draft)
+		pending_name = self._save(pending)
+		apply_workflow({"doctype": "Timesheet", "name": pending_name}, "Submit")
+		sent_name = self._save(sent_back)
+		apply_workflow({"doctype": "Timesheet", "name": sent_name}, "Submit")
+		approved_name = self._save(approved)
+		apply_workflow({"doctype": "Timesheet", "name": approved_name}, "Submit")
+		frappe.set_user(MANAGER_USER)
+		apply_workflow({"doctype": "Timesheet", "name": sent_name}, "Send Back")
+		apply_workflow({"doctype": "Timesheet", "name": approved_name}, "Approve")
+		frappe.set_user(EMPLOYEE_USER)
+		raise_timesheet_change(str(approved), "Forgot Friday")
+
+		weeks = self._month(today=self._after_month())
+		self.assertEqual(
+			[w["state"] for w in weeks[:4]], ["Draft", "Pending Approval", "Sent Back", "Approved"]
+		)
+		self.assertEqual([w["missing"] for w in weeks[:4]], [True, False, True, False])
+		self.assertEqual([w["change_open"] for w in weeks[:4]], [False, False, False, True])
+		self.assertEqual(weeks[0]["total_hours"], 4)
+
+	def test_another_employees_timesheets_never_appear(self):
+		monday = frappe.utils.getdate(self._month()[0]["week_start"])
+		frappe.set_user("Administrator")
+		frappe.get_doc(
+			{
+				"doctype": "Timesheet",
+				"employee": self.manager_name,
+				"time_logs": [
+					{"from_time": f"{monday} 09:00:00", "hours": 3, "project": self.project, "activity_type": None}
+				],
+			}
+		).insert(ignore_permissions=True)
+		week = self._month()[0]
+		self.assertIsNone(week["state"])
+		self.assertEqual(week["total_hours"], 0)
+
+	def test_a_malformed_month_is_refused(self):
+		frappe.set_user(EMPLOYEE_USER)
+		for bad in ("2026-13", "2026-1", "26-01", "2026-01-01", "x"):
+			with self.assertRaises(frappe.ValidationError):
+				get_my_month(bad)
