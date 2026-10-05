@@ -91,6 +91,34 @@ class TestNewEntriesAreSeeded(IntegrationTestCase):
 			self.assertEqual(result["rows"][-1]["_kind"], "total", key)
 
 
+class TestFilterHelp(IntegrationTestCase):
+	"""Plan 2026-10-05-001 U10 (KTD9): help rides in the filter spec."""
+
+	WITH_HELP = frozenset(
+		{
+			("hours_by_project", "include_pending"),
+			("who_is_out", "include_pending"),
+			("project_timesheet", "basis"),
+			("missing_timesheets", "project_members_only"),
+			("headcount", "parameter"),
+			("leave_balance_summary", "date"),
+		}
+	)
+
+	def test_catalog_payload_carries_help_only_where_named(self):
+		access = {"can_export": False}
+		seen = set()
+		for entry in reports.CATALOG:
+			for spec in reports.client_entry(entry, access)["filters"]:
+				pair = (entry["key"], spec["name"])
+				if pair in self.WITH_HELP:
+					self.assertTrue(spec.get("help"), pair)
+					seen.add(pair)
+				else:
+					self.assertNotIn("help", spec, pair)
+		self.assertEqual(seen, self.WITH_HELP)
+
+
 class TestHoursByProjectTaskEmployee(IntegrationTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")

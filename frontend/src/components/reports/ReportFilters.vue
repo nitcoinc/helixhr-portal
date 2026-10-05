@@ -27,6 +27,18 @@ const LABEL_CLASS = 'mb-1 block text-sm text-ink-gray-7'
 const id = useId()
 const panelOpen = ref(false)
 
+// Plan 2026-10-05-001 U10 (R16): an "i" button toggles inline help text
+// that the field also references with aria-describedby. Native button, so
+// click, tap, Enter and Space all work; nothing is hover-only.
+const PERIOD_HELP = 'Pick a preset range, or Custom to set From and To yourself.'
+const INFO_CLASS =
+  'ml-1 inline-flex size-6 cursor-pointer items-center justify-center rounded-full border border-outline-gray-2 text-xs italic text-ink-gray-6 hover:bg-surface-gray-2'
+const helpOpen = ref({})
+const helpId = (name) => `${id}-help-${name}`
+function toggleHelp(name) {
+  helpOpen.value = { ...helpOpen.value, [name]: !helpOpen.value[name] }
+}
+
 const hasRange = computed(
   () =>
     props.entry.filters.some((f) => f.name === 'from_date') && props.entry.filters.some((f) => f.name === 'to_date'),
@@ -127,14 +139,27 @@ function secondGroupOptions() {
       <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <template v-if="hasRange">
           <div>
-            <label
-              :for="`${id}-preset`"
-              :class="LABEL_CLASS"
-            >Period</label>
+            <div class="flex items-center">
+              <label
+                :for="`${id}-preset`"
+                :class="LABEL_CLASS"
+              >Period</label>
+              <button
+                type="button"
+                :class="INFO_CLASS"
+                aria-label="About Period"
+                :aria-expanded="helpOpen['period'] ? 'true' : 'false'"
+                :aria-controls="helpId('period')"
+                @click="toggleHelp('period')"
+              >
+                i
+              </button>
+            </div>
             <select
               :id="`${id}-preset`"
               :value="preset"
               :class="FIELD_CLASS"
+              :aria-describedby="helpId('period')"
               @change="applyPreset($event.target.value)"
             >
               <option
@@ -148,6 +173,13 @@ function secondGroupOptions() {
                 Custom
               </option>
             </select>
+            <p
+              v-show="helpOpen['period']"
+              :id="helpId('period')"
+              class="mt-1 text-xs text-ink-gray-6"
+            >
+              {{ PERIOD_HELP }}
+            </p>
           </div>
           <div
             v-for="name in ['from_date', 'to_date']"
@@ -191,28 +223,64 @@ function secondGroupOptions() {
           />
           <div
             v-else-if="filter.type === 'toggle'"
-            class="flex items-end"
+            class="flex flex-col justify-end"
           >
-            <label class="flex min-h-11 cursor-pointer items-center gap-2 text-sm text-ink-gray-8 sm:min-h-9">
-              <input
-                type="checkbox"
-                class="size-4"
-                :checked="!!modelValue[filter.name]"
-                @change="set(filter.name, $event.target.checked ? 1 : 0)"
+            <div class="flex items-center">
+              <label class="flex min-h-11 cursor-pointer items-center gap-2 text-sm text-ink-gray-8 sm:min-h-9">
+                <input
+                  type="checkbox"
+                  class="size-4"
+                  :checked="!!modelValue[filter.name]"
+                  :aria-describedby="filter.help ? helpId(filter.name) : undefined"
+                  @change="set(filter.name, $event.target.checked ? 1 : 0)"
+                >
+                {{ filter.label }}
+              </label>
+              <button
+                v-if="filter.help"
+                type="button"
+                :class="INFO_CLASS"
+                :aria-label="`About ${filter.label}`"
+                :aria-expanded="helpOpen[filter.name] ? 'true' : 'false'"
+                :aria-controls="helpId(filter.name)"
+                @click="toggleHelp(filter.name)"
               >
-              {{ filter.label }}
-            </label>
+                i
+              </button>
+            </div>
+            <p
+              v-if="filter.help"
+              v-show="helpOpen[filter.name]"
+              :id="helpId(filter.name)"
+              class="mt-1 text-xs text-ink-gray-6"
+            >
+              {{ filter.help }}
+            </p>
           </div>
           <div v-else>
-            <label
-              :for="`${id}-${filter.name}`"
-              :class="LABEL_CLASS"
-            >{{ filter.label }}</label>
+            <div class="flex items-center">
+              <label
+                :for="`${id}-${filter.name}`"
+                :class="LABEL_CLASS"
+              >{{ filter.label }}</label>
+              <button
+                v-if="filter.help"
+                type="button"
+                :class="INFO_CLASS"
+                :aria-label="`About ${filter.label}`"
+                :aria-expanded="helpOpen[filter.name] ? 'true' : 'false'"
+                :aria-controls="helpId(filter.name)"
+                @click="toggleHelp(filter.name)"
+              >
+                i
+              </button>
+            </div>
             <select
               v-if="filter.type === 'select'"
               :id="`${id}-${filter.name}`"
               :value="modelValue[filter.name] || ''"
               :class="FIELD_CLASS"
+              :aria-describedby="filter.help ? helpId(filter.name) : undefined"
               @change="set(filter.name, $event.target.value)"
             >
               <option
@@ -235,8 +303,17 @@ function secondGroupOptions() {
               :type="filter.type === 'month' ? 'month' : 'date'"
               :value="modelValue[filter.name] || ''"
               :class="FIELD_CLASS"
+              :aria-describedby="filter.help ? helpId(filter.name) : undefined"
               @change="set(filter.name, $event.target.value)"
             >
+            <p
+              v-if="filter.help"
+              v-show="helpOpen[filter.name]"
+              :id="helpId(filter.name)"
+              class="mt-1 text-xs text-ink-gray-6"
+            >
+              {{ filter.help }}
+            </p>
           </div>
         </template>
 

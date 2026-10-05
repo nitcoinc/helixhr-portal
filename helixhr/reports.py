@@ -70,7 +70,10 @@ def _this_month():
 	return today()[:7]
 
 
-def _f(name, type, label, maps_to=None, reqd=0, default=None, options=None):
+def _f(name, type, label, maps_to=None, reqd=0, default=None, options=None, help=None):
+	"""One filter spec. ``help`` (plan 2026-10-05-001 U10, KTD9) is shown
+	behind the filter's "i" button; only set it where the label is not
+	self-evident."""
 	return {
 		"name": name,
 		"type": type,
@@ -79,9 +82,17 @@ def _f(name, type, label, maps_to=None, reqd=0, default=None, options=None):
 		"reqd": reqd,
 		"default": default,
 		"options": options,
+		"help": help,
 	}
 
 
+_INCLUDE_PENDING = _f(
+	"include_pending",
+	"toggle",
+	"Include pending approval",
+	default=0,
+	help="Also count timesheets or leave still waiting for approval. Those rows are marked Pending.",
+)
 _EMPLOYEE = _f("employee", "employee", "Employee")
 _DEPARTMENT = _f("department", "department", "Department")
 _FROM = _f("from_date", "date", "From", reqd=1, default=_this_month_start)
@@ -1134,7 +1145,7 @@ CATALOG = (
 			_f("task", "task", "Task"),
 			_FROM,
 			_TO,
-			_f("include_pending", "toggle", "Include pending approval", default=0),
+			_INCLUDE_PENDING,
 		],
 		query=_hours_by_project,
 		default_preset="last_month",
@@ -1152,7 +1163,14 @@ CATALOG = (
 		[
 			_f("project", "project", "Project", reqd=1),
 			_f("month", "month", "Month", reqd=1, default=_this_month),
-			_f("basis", "select", "Hours basis", default="All hours", options=HOURS_BASIS),
+			_f(
+				"basis",
+				"select",
+				"Hours basis",
+				default="All hours",
+				options=HOURS_BASIS,
+				help="All hours counts every approved hour. Billable hours counts only hours marked billable.",
+			),
 		],
 		query=_project_timesheet,
 		extra=_project_timesheet_extra,
@@ -1176,7 +1194,13 @@ CATALOG = (
 			_TO,
 			_EMPLOYEE,
 			_DEPARTMENT,
-			_f("project_members_only", "toggle", "Project members only", default=1),
+			_f(
+				"project_members_only",
+				"toggle",
+				"Project members only",
+				default=1,
+				help="Only list people who are members of at least one project. Turn off to check everyone.",
+			),
 		],
 		query=_missing_timesheets,
 		default_preset="last_month",
@@ -1238,7 +1262,18 @@ CATALOG = (
 		"Leave balance summary",
 		"What are leave balances across the company, one row per person?",
 		"frappe",
-		[_f("date", "date", "As of", reqd=1, default=today), _EMPLOYEE, _DEPARTMENT],
+		[
+			_f(
+				"date",
+				"date",
+				"As of",
+				reqd=1,
+				default=today,
+				help="Balances are worked out as they stood at the end of this day.",
+			),
+			_EMPLOYEE,
+			_DEPARTMENT,
+		],
 		report="Employee Leave Balance Summary",
 		group_by=("department",),
 		default_grants=_HR_USER_RUN,
@@ -1344,7 +1379,7 @@ CATALOG = (
 			_TO,
 			_EMPLOYEE,
 			_DEPARTMENT,
-			_f("include_pending", "toggle", "Include pending approval", default=0),
+			_INCLUDE_PENDING,
 		],
 		query=_who_is_out,
 		default_preset="this_month",
@@ -1367,6 +1402,7 @@ CATALOG = (
 				reqd=1,
 				default="Department",
 				options=("Department", "Designation", "Branch", "Employment Type", "Grade"),
+				help="Which employee field the headcount is split by.",
 			)
 		],
 		report="Employee Analytics",
@@ -1738,6 +1774,7 @@ def client_entry(entry, access):
 				"reqd": spec["reqd"],
 				"default": _client_default(spec),
 				"options": list(spec["options"]) if spec["options"] else None,
+				**({"help": spec["help"]} if spec["help"] else {}),
 			}
 			for spec in entry["filters"]
 		],

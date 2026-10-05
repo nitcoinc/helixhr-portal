@@ -166,6 +166,26 @@ test.describe('hr', () => {
     await expect(page.getByRole('button', { name: 'Open in Frappe' })).toHaveCount(0)
   })
 
+  test('the include-pending help opens from the keyboard and describes the toggle', async ({ page }) => {
+    await page.goto('/helixhr/reports/hours_by_project')
+    const info = page.getByRole('button', { name: 'About Include pending approval' })
+    await info.focus()
+    await expect(info).toBeFocused()
+    await expect(info).toHaveAttribute('aria-expanded', 'false')
+    await page.keyboard.press('Enter')
+    await expect(info).toHaveAttribute('aria-expanded', 'true')
+    const helpId = await info.getAttribute('aria-controls')
+    const help = page.locator(`[id="${helpId}"]`)
+    await expect(help).toBeVisible()
+    await expect(help).toContainText('waiting for approval')
+    await expect(page.getByRole('checkbox', { name: 'Include pending approval' })).toHaveAttribute(
+      'aria-describedby',
+      helpId!,
+    )
+    await page.keyboard.press('Space')
+    await expect(help).toBeHidden()
+  })
+
   test('Custom period keeps the dates and moves focus to From', async ({ page }) => {
     await page.goto('/helixhr/reports/hours_by_project')
     const from = page.getByLabel('From')
