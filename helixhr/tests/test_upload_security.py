@@ -397,6 +397,15 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"end_shift_assignment": (30, 3600),
 			"change_shift_assignment": (30, 3600),
 			"cancel_shift_assignment": (30, 3600),
+			# Plan 2026-10-04-004 U4: the Email Templates page's celebrations
+			# group -- the setup read fans out per (event, company), the
+			# preview renders per keystroke pause, a test send is real mail
+			# (tight, like `send_test_message`), the picker search is a
+			# per-keystroke read.
+			"get_celebration_setup": (60, 60),
+			"preview_celebration": (60, 60),
+			"send_test_celebration": (5, 600),
+			"search_celebration_recipients": (60, 60),
 		}
 		self.assertEqual(utils.RATE_LIMIT_POLICY, expected)
 		self.assertEqual(preflight.check_rate_limits()["status"], preflight.PASS)

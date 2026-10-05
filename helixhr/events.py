@@ -1869,14 +1869,18 @@ def hr_settings_validate(doc, method=None):
 		)
 
 	for event, spec in EVENTS.items():
-		reminder_enabled = frappe.db.get_value(
-			"HelixHR Celebration Reminder", event, "is_enabled"
+		# Per company since plan 2026-10-04-004 U1: any company's enabled row
+		# collides with HRMS's stock send, so the check is now "does any row
+		# for this event send at all".
+		reminder_enabled = frappe.db.exists(
+			"HelixHR Celebration Reminder", {"event": event, "is_enabled": 1}
 		)
 		if reminder_enabled and cint(doc.get(spec["hrms_field"])):
 			frappe.throw(
 				_(
 					"HRMS and HelixHR would both send the {0} email: untick '{1}' in "
-					"HR Settings > Reminders, or disable it on Settings > Celebrations in the portal."
+					"HR Settings > Reminders, or disable it on the portal's Email "
+					"templates page (Celebrations & holidays)."
 				).format(spec["label"].lower(), spec["hrms_label"])
 			)
 

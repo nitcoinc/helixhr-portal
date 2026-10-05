@@ -1,8 +1,11 @@
 import { test, expect, request, type Page } from '@playwright/test'
 
-// Plan 2026-10-02-001 U10: the Email templates page. Runs in the `hr`
-// project; the Notification Manager tests sign in as that identity
-// (seeded by `setup_playwright_fixtures`) on a clean context.
+// Plan 2026-10-02-001 U10; role-sectioned since plan 2026-10-04-004 U5
+// (KTD3): the HR Manager gets the "Celebrations & holidays" group and the
+// Notification Manager keeps the message templates, each served by its own
+// server-gated endpoints. Runs in the `hr` project; the Notification
+// Manager tests sign in as that identity (seeded by
+// `setup_playwright_fixtures`) on a clean context.
 const SITE_HOST = process.env.SITE_HOST || 'test_site'
 const PASSWORD = process.env.TEST_USER_PASSWORD || 'Helixhr-Test-Fixture-2026!'
 
@@ -23,13 +26,15 @@ async function signInAsNotificationManager(page: Page, baseURL: string | undefin
   await page.context().addCookies(state.cookies)
 }
 
-test('HR Manager sees no Email templates entry, and the route redirects Home', async ({ page }) => {
+test('the HR Manager opens the page on the celebrations group only (plan 2026-10-04-004 U5)', async ({ page }) => {
+  // KTD3 inverted P8's assertion: the page is role-sectioned now, and the
+  // HR Manager's own gate is the celebration group's endpoints.
   await page.goto('/helixhr/settings')
-  await expect(page.getByRole('link', { name: 'Settings' }).first()).toBeVisible()
-  await expect(page.getByRole('link', { name: 'Email templates' })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: 'Email templates' }).first()).toBeVisible()
 
   await page.goto('/helixhr/email-templates')
-  await expect(page).toHaveURL(/\/helixhr\/?$/)
+  await expect(page.getByTestId('email-template-group-celebrations')).toBeVisible()
+  await expect(page.getByTestId('email-template-group-messages')).toHaveCount(0)
   await expect(page.getByTestId('email-template-list')).toHaveCount(0)
 })
 
@@ -120,4 +125,78 @@ test.describe('Notification Manager', () => {
     await expect(editor.getByTestId('email-template-enabled')).toHaveCount(0)
     await expect(editor.getByLabel('Subject')).toBeDisabled()
   })
+})
+
+test('P8-U12 moved to the celebrations group: HR authors the birthday email and switches to a selected audience', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'the celebrations group is HR-only')
+
+  await page.goto('/helixhr/email-templates?group=celebrations')
+  await expect(page.getByTestId('email-template-group-celebrations')).toBeVisible()
+  await expect(page.getByTestId('celebration-company-select')).toHaveCount(0, 'one company in scope, no selector')
+
+  await page.getByTestId('email-template-celebration-birthday').click()
+  await page.getByTestId('celebration-edit').click()
+  const form = page.getByTestId('celebration-form')
+  await expect(form).toBeVisible()
+
+  const subject = `E2E birthday subject ${Date.now()}`
+  await form.getByLabel('Send this reminder').check()
+  await form.getByLabel('Subject').fill(subject)
+  await form.getByLabel('Body').fill('Cheers, {{ names }}')
+
+  // Switch to a selected audience and pick one person; the search returns
+  // only the selected company's employees (R12).
+  await form.getByLabel('Send to').selectOption('Selected people')
+  await form.getByLabel('Add a person').fill('Manager')
+  const match = form.getByRole('button', { name: /Manager/ }).first()
+  await expect(match).toBeVisible()
+  await match.click()
+  await expect(form.getByText('Nobody selected yet.')).toHaveCount(0)
+
+  await form.getByRole('button', { name: 'Save' }).click()
+  await expect(form).toBeHidden()
+
+  // Read back from the server, not just the in-memory response.
+  await page.reload()
+  await page.getByTestId('email-template-celebration-birthday').click()
+  await expect(page.getByTestId('celebration-form')).toHaveCount(0)
+  await expect(page.getByRole('tabpanel').or(page.locator('.surface-card')).filter({ hasText: '1 selected' })).toBeVisible()
+
+  await page.getByTestId('celebration-edit').click()
+  await expect(page.getByTestId('celebration-form').getByLabel('Subject')).toHaveValue(subject)
+})
+
+test('the holiday event shows a frequency selector and the birthday one does not (R9)', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'the celebrations group is HR-only')
+
+  await page.goto('/helixhr/email-templates?group=celebrations&event=holiday')
+  await expect(page.getByTestId('email-template-celebration-holiday')).toBeVisible()
+  await page.getByTestId('celebration-edit').click()
+  await expect(page.getByTestId('celebration-form').getByLabel('How often')).toBeVisible()
+
+  await page.getByTestId('email-template-celebration-birthday').click()
+  await page.getByTestId('celebration-edit').click()
+  await expect(page.getByTestId('celebration-form').getByLabel('How often')).toHaveCount(0)
+})
+
+test('/settings/celebrations redirects into the new group (R13)', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'settings is an HR-only screen')
+
+  await page.goto('/helixhr/settings/celebrations')
+  await expect(page).toHaveURL(/group=celebrations/)
+  await expect(page.getByTestId('email-template-group-celebrations')).toBeVisible()
+})
+
+test('switching to Selected people with nobody picked is refused before saving', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'the celebrations group is HR-only')
+
+  await page.goto('/helixhr/email-templates?group=celebrations&event=work_anniversary')
+  await page.getByTestId('celebration-edit').click()
+
+  const form = page.getByTestId('celebration-form')
+  await form.getByLabel('Send to').selectOption('Selected people')
+  await form.getByRole('button', { name: 'Save' }).click()
+
+  await expect(form.getByRole('alert')).toBeVisible()
+  await expect(form).toBeVisible()
 })

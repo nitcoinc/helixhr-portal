@@ -1,16 +1,18 @@
 {
  "actions": [],
  "allow_rename": 0,
- "autoname": "field:event",
+ "autoname": "format:{event}-{company}",
  "creation": "2026-09-20 00:00:00.000000",
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
   "event",
+  "company",
   "is_enabled",
   "email_template",
   "recipient_mode",
-  "recipients"
+  "recipients",
+  "frequency"
  ],
  "fields": [
   {
@@ -18,10 +20,18 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Event",
-   "options": "birthday\nwork_anniversary",
+   "options": "birthday\nwork_anniversary\nholiday",
    "read_only_depends_on": "eval:!doc.__islocal",
-   "reqd": 1,
-   "unique": 1
+   "reqd": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1
   },
   {
    "default": "0",
@@ -50,11 +60,20 @@
    "fieldtype": "Table",
    "label": "Selected Employees",
    "options": "HelixHR Celebration Recipient"
+  },
+  {
+   "depends_on": "eval:doc.event == 'holiday'",
+   "description": "How often the holiday reminder goes out (holiday only): Weekly on Monday, Monthly on the 1st.",
+   "fieldname": "frequency",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Frequency",
+   "options": "\nWeekly\nMonthly"
   }
  ],
  "module": "HelixHR",
  "name": "HelixHR Celebration Reminder",
- "naming_rule": "By fieldname",
+ "naming_rule": "Expression",
  "permissions": [
   {
    "create": 1,

@@ -45,8 +45,11 @@ const NAV = [
   { label: 'Projects', to: '/projects', icon: 'folder', projectsOnly: true, deskOnly: true, group: 'hr' },
   { label: 'Settings', to: '/settings', icon: 'settings', configureOnly: true, deskOnly: true, group: 'admin' },
   // Plan 2026-10-02-001 U10: gated on the boolean `can_manage_notifications`
-  // flag (KTD12), never a role list. HR Manager alone does not see it.
-  { label: 'Email templates', to: '/email-templates', icon: 'notifications', notificationsOnly: true, deskOnly: true, group: 'admin' },
+  // flag (KTD12), never a role list. Plan 2026-10-04-004 U5 / KTD3: the page
+  // becomes role-sectioned, so the flag is `can_edit_email_templates` --
+  // HR Manager now sees it too (the celebrations group), and a caller may
+  // hold either role.
+  { label: 'Email templates', to: '/email-templates', icon: 'notifications', templatesOnly: true, deskOnly: true, group: 'admin' },
   { label: 'Profile', to: '/profile', icon: 'profile', group: 'bottom' },
 ]
 
@@ -75,7 +78,7 @@ const navItems = computed(() =>
       (!item.reportsOnly || session.hasReports) &&
       // A Portal Admin gets Settings (two sections) and Reports (export log).
       (!item.configureOnly || session.canConfigure || session.canAdminPortal) &&
-      (!item.notificationsOnly || session.canManageNotifications) &&
+      (!item.templatesOnly || session.canEditEmailTemplates) &&
       (!item.organisationOnly || session.canSeeOrganisation) &&
       (!item.peopleOnly || session.canSeePeople) &&
       (!item.projectsOnly || session.canSeeProjects) &&

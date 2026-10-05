@@ -1183,35 +1183,57 @@ class TestPreflightCelebrationReminders(IntegrationTestCase):
 	FIELDS = (
 		"helixhr_birthday_template",
 		"helixhr_anniversary_template",
+		"helixhr_holiday_template",
 		"send_birthday_reminders",
 		"send_work_anniversary_reminders",
+		"send_holiday_reminders",
 	)
 	_FIELD_TO_EVENT = MappingProxyType(
-		{"helixhr_birthday_template": "birthday", "helixhr_anniversary_template": "work_anniversary"}
+		{
+			"helixhr_birthday_template": "birthday",
+			"helixhr_anniversary_template": "work_anniversary",
+			"helixhr_holiday_template": "holiday",
+		}
 	)
 	TEMPLATE = "_Test HelixHR Birthday"
 
 	def setUp(self):
 		frappe.set_user("Administrator")
 		from helixhr.tests.test_reminders import _template
+		from helixhr.tests.utils import ensure_test_company
 
+		self.company = ensure_test_company()
 		_template(self.TEMPLATE, "BDAYMARK {{ names }}")
-		for event in ("birthday", "work_anniversary"):
-			if not frappe.db.exists("HelixHR Celebration Reminder", event):
+		for event in ("birthday", "work_anniversary", "holiday"):
+			# Per company since plan 2026-10-04-004 U1: the row this suite
+			# drives is the test company's own.
+			if not frappe.db.get_value(
+				"HelixHR Celebration Reminder", {"event": event, "company": self.company}, "name"
+			):
 				frappe.get_doc(
 					{
 						"doctype": "HelixHR Celebration Reminder",
 						"event": event,
+						"company": self.company,
 						"recipient_mode": "All employees",
+						# A holiday row cannot exist without a cadence (U1).
+						**({"frequency": "Weekly"} if event == "holiday" else {}),
 					}
 				).insert(ignore_permissions=True)
 		self.original = {
 			field: frappe.db.get_single_value("HR Settings", field)
-			for field in ("send_birthday_reminders", "send_work_anniversary_reminders")
+			for field in (
+				"send_birthday_reminders",
+				"send_work_anniversary_reminders",
+				"send_holiday_reminders",
+			)
 		}
 		self.original_reminders = {
 			event: frappe.db.get_value(
-				"HelixHR Celebration Reminder", event, ["is_enabled", "email_template"], as_dict=True
+				"HelixHR Celebration Reminder",
+				{"event": event, "company": self.company},
+				["name", "is_enabled", "email_template"],
+				as_dict=True,
 			)
 			for event in self._FIELD_TO_EVENT.values()
 		}
@@ -1219,26 +1241,29 @@ class TestPreflightCelebrationReminders(IntegrationTestCase):
 
 	def tearDown(self):
 		self._set(self.original)
-		for event, snapshot in self.original_reminders.items():
+		for _event, snapshot in self.original_reminders.items():
 			frappe.db.set_value(
 				"HelixHR Celebration Reminder",
-				event,
+				snapshot.name,
 				{"is_enabled": snapshot.is_enabled, "email_template": snapshot.email_template},
 				update_modified=False,
 			)
-			frappe.clear_document_cache("HelixHR Celebration Reminder", event)
+			frappe.clear_document_cache("HelixHR Celebration Reminder", snapshot.name)
 
 	def _set(self, values):
 		for field, value in values.items():
 			if field in self._FIELD_TO_EVENT:
 				event = self._FIELD_TO_EVENT[field]
+				row = frappe.db.get_value(
+					"HelixHR Celebration Reminder", {"event": event, "company": self.company}, "name"
+				)
 				frappe.db.set_value(
 					"HelixHR Celebration Reminder",
-					event,
+					row,
 					{"email_template": value, "is_enabled": 1 if value else 0},
 					update_modified=False,
 				)
-				frappe.clear_document_cache("HelixHR Celebration Reminder", event)
+				frappe.clear_document_cache("HelixHR Celebration Reminder", row)
 			else:
 				frappe.db.set_single_value("HR Settings", field, value)
 		frappe.clear_document_cache("HR Settings", "HR Settings")
@@ -1278,7 +1303,13 @@ class TestPreflightCelebrationReminders(IntegrationTestCase):
 	def test_helixhr_only_passes_and_names_the_sender(self):
 		from helixhr.preflight import PASS
 
-		self._set({"helixhr_birthday_template": self.TEMPLATE, "helixhr_anniversary_template": self.TEMPLATE})
+		self._set(
+			{
+				"helixhr_birthday_template": self.TEMPLATE,
+				"helixhr_anniversary_template": self.TEMPLATE,
+				"helixhr_holiday_template": self.TEMPLATE,
+			}
+		)
 		result = self._check()
 
 		self.assertEqual(result["status"], PASS)
@@ -1293,6 +1324,104 @@ class TestPreflightCelebrationReminders(IntegrationTestCase):
 		self.assertEqual(result["status"], FAIL)
 		self.assertIn("Work anniversary", result["detail"])
 		self.assertIn("read-only in Desk", result["detail"])
+
+
+class TestPreflightCrossCompanyMailboxes(IntegrationTestCase):
+	"""Plan 2026-10-04-004 U6 / R6: the duplicate-mailbox check.
+
+	The pair is the reported bug's shape: a real employee and a stale
+	active duplicate in another company resolving to one address."""
+
+	@classmethod
+	def setUpClass(cls):
+		from helixhr.tests.utils import ensure_test_company
+
+		cls.company = ensure_test_company()
+
+	def _employee(self, suffix, company, email):
+		from helixhr.tests.utils import make_celebration_employee
+
+		name = make_celebration_employee(
+			f"PREFLIGHT-{suffix}",
+			company,
+			date_of_birth="1990-01-01",
+			date_of_joining="2020-01-01",
+			company_email=email,
+		)
+		self.addCleanup(frappe.db.set_value, "Employee", name, "status", "Left")
+		return name
+
+	def test_two_companies_sharing_an_address_warn_and_name_both(self):
+		from helixhr.preflight import WARN, check_cross_company_mailboxes
+
+		other_company = "_Test Reminders Co B"
+		if not frappe.db.exists("Company", other_company):
+			frappe.get_doc(
+				{
+					"doctype": "Company",
+					"company_name": other_company,
+					"abbr": "TRCB",
+					"default_currency": "USD",
+					"country": "United States",
+				}
+			).insert(ignore_permissions=True)
+			self.addCleanup(
+				frappe.delete_doc, "Company", other_company, force=True, ignore_permissions=True
+			)
+		# Both without a User: the resolution order's first pick is then the
+		# company_email, which is the address the two share.
+		first = self._employee("DUP1", self.company, "shared-preflight@helixhr.test")
+		second = self._employee("DUP2", other_company, "shared-preflight@helixhr.test")
+
+		result = check_cross_company_mailboxes()
+
+		self.assertEqual(result["status"], WARN)
+		self.assertIn("shared-preflight@helixhr.test", result["detail"])
+		self.assertIn(first, result["detail"])
+		self.assertIn(second, result["detail"])
+
+	def test_an_address_shared_within_one_company_passes(self):
+		"""A shared mailbox inside one company is a normal arrangement."""
+		from helixhr.preflight import PASS, check_cross_company_mailboxes
+
+		self._employee("SAMECO1", self.company, "one-company@helixhr.test")
+		self._employee("SAMECO2", self.company, "one-company@helixhr.test")
+
+		result = check_cross_company_mailboxes()
+
+		self.assertEqual(result["status"], PASS)
+		self.assertNotIn("one-company@helixhr.test", result["detail"])
+
+	def test_one_of_the_pair_set_to_left_passes(self):
+		from helixhr.preflight import PASS, WARN, check_cross_company_mailboxes
+
+		other_company = "_Test Reminders Co B"
+		if not frappe.db.exists("Company", other_company):
+			frappe.get_doc(
+				{
+					"doctype": "Company",
+					"company_name": other_company,
+					"abbr": "TRCB",
+					"default_currency": "USD",
+					"country": "United States",
+				}
+			).insert(ignore_permissions=True)
+			self.addCleanup(
+				frappe.delete_doc, "Company", other_company, force=True, ignore_permissions=True
+			)
+		first = self._employee("LEFT1", self.company, "left-pair@helixhr.test")
+		stale = self._employee("LEFT2", other_company, "left-pair@helixhr.test")
+
+		result = check_cross_company_mailboxes()
+		self.assertEqual(result["status"], WARN)
+
+		frappe.db.set_value("Employee", stale, "status", "Left")
+		frappe.clear_document_cache("Employee", stale)
+		result = check_cross_company_mailboxes()
+
+		self.assertEqual(result["status"], PASS)
+		self.assertNotIn("left-pair@helixhr.test", result["detail"])
+		self.assertTrue(first)
 
 
 class TestPreflightMailAndHRQueue(IntegrationTestCase):

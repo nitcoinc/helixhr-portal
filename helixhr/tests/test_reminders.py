@@ -22,7 +22,7 @@ from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
-from frappe.utils import add_days, add_to_date, getdate, now_datetime, today
+from frappe.utils import add_days, add_months, add_to_date, get_first_day, getdate, now_datetime, today
 
 from helixhr import reminders
 from helixhr.events import PENDING_SINCE_FIELD as PENDING_SINCE
@@ -94,6 +94,23 @@ def _template(name, subject):
 	return name
 
 
+def _holiday_template(name, subject, html):
+	if frappe.db.exists("Email Template", name):
+		frappe.db.set_value("Email Template", name, {"subject": subject, "response_html": html})
+		frappe.clear_document_cache("Email Template", name)
+		return name
+	frappe.get_doc(
+		{
+			"doctype": "Email Template",
+			"name": name,
+			"use_html": 1,
+			"subject": subject,
+			"response_html": html,
+		}
+	).insert(ignore_permissions=True)
+	return name
+
+
 def _boom_template(company):
 	"""A template that raises for one company and renders for every other.
 
@@ -138,24 +155,29 @@ class TestCelebrationReminders(IntegrationTestCase):
 		# absent from every list.
 		self.other_month = 1 if self.today.month != 1 else 7
 		self.queued = set()
-		# P8-U10/U11: the picker moved from two HR Settings Custom Fields to
-		# one `HelixHR Celebration Reminder` row per event -- captured and
-		# restored the same way, just against the new doctype.
+		# P8-U10/U11, per company since plan 2026-10-04-004 U1: the picker is
+		# one `HelixHR Celebration Reminder` row per (event, company) --
+		# captured and restored the same way, per company.
 		self.original = {}
 		for field, event in _FIELD_TO_EVENT.items():
-			self._ensure_reminder(event)
-			self.original[field] = frappe.db.get_value(
-				"HelixHR Celebration Reminder", event, ["is_enabled", "email_template", "recipient_mode"], as_dict=True
-			)
-			self._pick(field, None)
+			for company in (COMPANY_A, COMPANY_B):
+				key = (field, company)
+				self._ensure_reminder(event, company)
+				self.original[key] = frappe.db.get_value(
+					"HelixHR Celebration Reminder",
+					{"event": event, "company": company},
+					["name", "is_enabled", "email_template", "recipient_mode"],
+					as_dict=True,
+				)
+				self._pick(field, None, company=company)
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
-		for field, snapshot in self.original.items():
+		for (field, _company), snapshot in self.original.items():
 			event = _FIELD_TO_EVENT[field]
 			frappe.db.set_value(
 				"HelixHR Celebration Reminder",
-				event,
+				snapshot.name,
 				{
 					"is_enabled": snapshot.is_enabled,
 					"email_template": snapshot.email_template,
@@ -163,24 +185,45 @@ class TestCelebrationReminders(IntegrationTestCase):
 				},
 				update_modified=False,
 			)
-			frappe.clear_document_cache("HelixHR Celebration Reminder", event)
+			frappe.clear_document_cache("HelixHR Celebration Reminder", snapshot.name)
+		# KTD8's rerun guard is a Redis key a previous test may have left
+		# behind for today.
+		for company in (COMPANY_A, COMPANY_B):
+			for event in _FIELD_TO_EVENT.values():
+				frappe.cache.delete_value(
+					f"{reminders.CELEBRATION_GUARD_PREFIX}{getdate()}|{event}|{company}"
+				)
 		for row in self.queued:
 			frappe.db.delete("Email Queue Recipient", {"parent": row})
 			frappe.db.delete("Email Queue", {"name": row})
 
-	def _ensure_reminder(self, event):
-		"""This suite runs standalone from `migrate_celebration_reminders`
-		(which normally creates both rows once, on install/migrate) -- a
-		test run against a site that has not migrated since P8-U10 shipped
-		would otherwise fail every test here on a missing row."""
-		if not frappe.db.exists("HelixHR Celebration Reminder", event):
+	def _clear_guard(self, event="birthday", company=COMPANY_A):
+		"""Make the (event, company) pair sendable again today -- for tests
+		that send twice on purpose."""
+		frappe.cache.delete_value(
+			f"{reminders.CELEBRATION_GUARD_PREFIX}{getdate()}|{event}|{company}"
+		)
+
+	def _ensure_reminder(self, event, company):
+		"""This suite runs standalone from the patches (which normally
+		create rows once, on install/migrate) -- a test run against a site
+		that has not migrated since the rows shipped would otherwise fail
+		every test here on a missing row."""
+		if not frappe.db.get_value(
+			"HelixHR Celebration Reminder", {"event": event, "company": company}, "name"
+		):
 			frappe.get_doc(
-				{"doctype": "HelixHR Celebration Reminder", "event": event, "recipient_mode": "All employees"}
+				{
+					"doctype": "HelixHR Celebration Reminder",
+					"event": event,
+					"company": company,
+					"recipient_mode": "All employees",
+				}
 			).insert(ignore_permissions=True)
 
 	# --- fixtures ----------------------------------------------------------
 
-	def _pick(self, field, template):
+	def _pick(self, field, template, company=None):
 		"""Set the picker without going through
 		`HelixHRCelebrationReminder.validate` -- "All employees" always
 		satisfies it regardless of `template`, so the refusal that
@@ -188,18 +231,22 @@ class TestCelebrationReminders(IntegrationTestCase):
 		employees" mode) never fires here; it is asserted on its own
 		below."""
 		event = _FIELD_TO_EVENT[field]
+		company = company or COMPANY_A
 		# `recipient_mode` is forced back to "All employees" here too --
 		# every scenario in this class assumes it except the ones that
 		# explicitly call `_select()` afterwards, and a real site's saved
 		# selection (from HR actually using Settings > Celebrations) must
 		# not silently narrow this suite's own mail-everyone assertions.
+		row = frappe.db.get_value(
+			"HelixHR Celebration Reminder", {"event": event, "company": company}, "name"
+		)
 		frappe.db.set_value(
 			"HelixHR Celebration Reminder",
-			event,
+			row,
 			{"email_template": template, "is_enabled": 1 if template else 0, "recipient_mode": "All employees"},
 			update_modified=False,
 		)
-		frappe.clear_document_cache("HelixHR Celebration Reminder", event)
+		frappe.clear_document_cache("HelixHR Celebration Reminder", row)
 
 	def _stage(self, birthdays=(), anniversaries=(), years=None):
 		"""Re-date every person this suite owns: a birthday or a joining
@@ -257,8 +304,216 @@ class TestCelebrationReminders(IntegrationTestCase):
 		self._stage(birthdays=("A1",), anniversaries=("B1",))
 		added = self._watch_mail()
 
-		self.assertEqual(send_celebration_reminders(), {})
+		result = send_celebration_reminders()
+		self.assertEqual(
+			result,
+			{
+				"birthday": {"companies": 0, "emails": 0, "failed": 0},
+				"work_anniversary": {"companies": 0, "emails": 0, "failed": 0},
+				"holiday": {"companies": 0, "emails": 0, "failed": 0},
+			},
+		)
 		self.assertEqual(added(), [])
+
+	def test_a_company_with_no_row_for_the_event_sends_nothing(self):
+		"""R1: settings are per company, and absent (or disabled) means that
+		company gets nothing -- celebrants in B are not celebrated by A's
+		enabled row, and B's employees are not mailed about them."""
+		self._stage(birthdays=("A1", "B1"))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE, company=COMPANY_A)
+		added = self._watch_mail()
+
+		result = send_celebration_reminders()
+		mails = added()
+
+		self.assertEqual(result["birthday"]["companies"], 1)
+		self.assertEqual(
+			sorted(tuple(mail["recipients"]) for mail in mails),
+			[(self._address("A2"), self._address("A3"))],
+			"only the enabled company is mailed, about its own celebrant",
+		)
+
+	def test_an_employee_with_no_company_is_never_celebrated_or_mailed(self):
+		"""R4: HRMS groups celebrants by company, and a None group is nobody's
+		settings row and nobody's pool. Skipped people are counted in the log."""
+		from unittest.mock import patch
+
+		self._stage(birthdays=("A1",))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		ghost = frappe._dict(
+			name="No Company Employee",
+			image=None,
+			user_id=None,
+			company_email="ghost@" + DOMAIN,
+			personal_email=None,
+		)
+
+		real = reminders.get_employees_having_an_event_today
+		with patch.object(
+			reminders,
+			"get_employees_having_an_event_today",
+			side_effect=lambda event: {None: [ghost], COMPANY_A: real(event).get(COMPANY_A, [])},
+		):
+			added = self._watch_mail()
+			result = send_celebration_reminders()
+
+		self.assertEqual(
+			result["birthday"],
+			{"companies": 1, "emails": 1, "failed": 0},
+			"A1, who has a company, is still celebrated normally",
+		)
+		# A1's mail went out; the ghost is in no pool and hears about nobody.
+		recipients = [r for mail in added() for r in mail["recipients"]]
+		self.assertNotIn("ghost@" + DOMAIN, recipients)
+		logs = frappe.get_all(
+			"Error Log", filters={"method": reminders.NO_COMPANY_LOG_TITLE}, pluck="name"
+		)
+		self.assertTrue(logs, "the skip is counted in the log, not silent")
+		for log in logs:
+			self.addCleanup(frappe.delete_doc, "Error Log", log, force=True, ignore_permissions=True)
+
+	def test_the_celebrant_with_no_user_never_receives_their_own_announcement(self):
+		"""KTD5: HRMS resolves a celebrant's address in two different orders
+		(`user -> personal -> company` for the exclusion, `user -> company ->
+		personal` for the shared-day mail). The pool falls to `company_email`
+		when there is no User, so excluding only the first order's pick mailed
+		a celebrant their own announcement. Both orders are subtracted now."""
+		from unittest.mock import patch
+
+		from helixhr.tests.utils import CELEBRATION_TAG, make_celebration_employee
+
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		# The celebrant: no User, both mail fields set. HRMS's own exclusion
+		# picks `personal_email` first; the pool picks `company_email` when
+		# there is no user_id -- both would have been in the pool.
+		make_celebration_employee(
+			"REM-NOUSER",
+			COMPANY_A,
+			date_of_birth=date(1990, self.today.month, self.today.day),
+			date_of_joining=date(2020, self.other_month, 4),
+		)
+		nouser = frappe.db.get_value(
+			"Employee", {"employee_number": f"{CELEBRATION_TAG}-REM-NOUSER"}, "name"
+		)
+		frappe.db.set_value(
+			"Employee",
+			nouser,
+			{
+				"personal_email": f"nouser-personal@{DOMAIN}",
+				"company_email": f"nouser-company@{DOMAIN}",
+			},
+		)
+		nouser_row = frappe.db.get_value(
+			"Employee", nouser, ["name", "company_email", "personal_email", "user_id"], as_dict=True
+		)
+
+		with patch.object(
+			reminders,
+			"get_employees_having_an_event_today",
+			return_value={COMPANY_A: [dict(nouser_row)]},
+		):
+			added = self._watch_mail()
+			send_celebration_reminders()
+			mails = added()
+
+		recipients = [r for mail in mails for r in mail["recipients"]]
+		self.assertNotIn(
+			nouser_row.company_email, recipients, "their own announcement, via company_email"
+		)
+		self.assertNotIn(
+			nouser_row.personal_email, recipients, "their own announcement, via personal_email"
+		)
+		# The fixture must not leak an extra COMPANY_A address into later
+		# suites' pools.
+		self.addCleanup(frappe.db.set_value, "Employee", nouser, "status", "Left")
+
+	def test_a_duplicate_mailbox_in_another_company_is_dropped_and_logged(self):
+		"""R3 / KTD4, the reported bug: X1 is the real active employee in A;
+		X2 is a stale active duplicate in B with the same address. B's own
+		pool helper happily includes the address; the guard drops it and
+		logs the drop naming both Employee records."""
+		from helixhr.tests.utils import make_celebration_employee
+
+		shared = "shared-mailbox@" + DOMAIN
+		real_one = make_celebration_employee(
+			"REM-DUP-A",
+			COMPANY_A,
+			date_of_birth="1990-01-01",
+			date_of_joining="2020-01-01",
+			company_email=shared,
+		)
+		stale = make_celebration_employee(
+			"REM-DUP-B",
+			COMPANY_B,
+			date_of_birth="1990-01-01",
+			date_of_joining="2020-01-01",
+			company_email=shared,
+		)
+		self._stage(birthdays=("A1",))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		added = self._watch_mail()
+
+		send_celebration_reminders()
+		mails = added()
+
+		recipients = [r for mail in mails for r in mail["recipients"]]
+		self.assertIn(self._address("A2"), recipients)
+		self.assertNotIn(shared, recipients, "the stale duplicate's address is dropped from the pool")
+		logs = frappe.get_all(
+			"Error Log", filters={"method": reminders.CROSS_COMPANY_LOG_TITLE}, pluck="name"
+		)
+		self.assertTrue(logs, "the drop is logged once per run, naming both records")
+		for log in logs:
+			detail = frappe.db.get_value("Error Log", log, "error")
+			self.assertIn(real_one, detail)
+			self.assertIn(stale, detail)
+			self.addCleanup(frappe.delete_doc, "Error Log", log, force=True, ignore_permissions=True)
+		# These two tagged fixtures must not leak a duplicate mailbox into
+		# later suites' pools: both are set to Left, which takes them out of
+		# every pool and every celebration.
+		self.addCleanup(frappe.db.set_value, "Employee", stale, "status", "Left")
+		self.addCleanup(frappe.db.set_value, "Employee", real_one, "status", "Left")
+
+	def test_the_celebration_guard_stops_a_second_run_the_same_day(self):
+		"""KTD8: a hand-run `bench execute` after the scheduler has already
+		been round mails no company twice. Per company, per event, per day."""
+		self._stage(birthdays=("A1",))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		added = self._watch_mail()
+
+		send_celebration_reminders()
+		send_celebration_reminders()
+
+		self.assertEqual(len(added()), 1)
+
+	def test_a_day_after_the_guard_the_mail_sends_again(self):
+		self._stage(birthdays=("A1",))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		added = self._watch_mail()
+
+		send_celebration_reminders()
+		self._clear_guard()
+		send_celebration_reminders()
+
+		self.assertEqual(len(added()), 2)
+
+	def test_a_company_that_received_nothing_is_not_marked(self):
+		"""The guard marks a company only after mail actually went out, so a
+		broken template fixed and hand-run the same morning still delivers."""
+		self._stage(birthdays=("A1",))
+		self._pick("helixhr_birthday_template", "_Test Template That Went Away")
+		send_celebration_reminders()
+
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		added = self._watch_mail()
+		send_celebration_reminders()
+
+		self.assertEqual(len(added()), 1, "the failed morning must not consume the company's send")
+
+	def test_the_celebration_guard_is_registered_as_persistent(self):
+		self.assertIn(
+			f"{reminders.CELEBRATION_GUARD_PREFIX}*", frappe.get_hooks("persistent_cache_keys")
+		)
 
 	def test_one_birthday_mails_everyone_else_in_that_company(self):
 		self._stage(birthdays=("A1",))
@@ -318,6 +573,9 @@ class TestCelebrationReminders(IntegrationTestCase):
 	def test_recipients_never_cross_companies(self):
 		self._stage(birthdays=("A1", "B1"))
 		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		# Both companies' own settings are on here -- the point of this test
+		# is that B's mail names B, not that B is silent (that is R1's test).
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE, company=COMPANY_B)
 		added = self._watch_mail()
 
 		send_celebration_reminders()
@@ -341,6 +599,8 @@ class TestCelebrationReminders(IntegrationTestCase):
 		frappe.clear_document_cache("Company", COMPANY_A)
 		self.addCleanup(frappe.db.set_value, "Company", COMPANY_A, "company_logo", None)
 
+		# The same-day rerun guard would keep the second look silent.
+		self._clear_guard()
 		added = self._watch_mail()
 		send_celebration_reminders()
 		self.assertIn("LOGO:[http", added()[0]["body"])
@@ -378,6 +638,9 @@ class TestCelebrationReminders(IntegrationTestCase):
 		_boom_template(COMPANY_A)
 		self._stage(birthdays=("A1", "B1"))
 		self._pick("helixhr_birthday_template", BOOM_TEMPLATE)
+		# Both companies' settings on, so the failing one is the only
+		# difference between them.
+		self._pick("helixhr_birthday_template", BOOM_TEMPLATE, company=COMPANY_B)
 		added = self._watch_mail()
 		errors = self._errors()
 
@@ -398,16 +661,16 @@ class TestCelebrationReminders(IntegrationTestCase):
 
 		self._stage(birthdays=("A1",), anniversaries=("B1",))
 		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
-		self._pick("helixhr_anniversary_template", ANNIVERSARY_TEMPLATE)
+		self._pick("helixhr_anniversary_template", ANNIVERSARY_TEMPLATE, company=COMPANY_B)
 		added = self._watch_mail()
 		errors = self._errors()
 
 		real = reminders._send_event
 
-		def boom(event, reminder):
+		def boom(event, *args):
 			if event == "birthday":
 				raise RuntimeError("HRMS grouping blew up")
-			return real(event, reminder)
+			return real(event, *args)
 
 		with patch("helixhr.reminders._send_event", side_effect=boom):
 			result = send_celebration_reminders()
@@ -417,21 +680,6 @@ class TestCelebrationReminders(IntegrationTestCase):
 		self.assertEqual(result["work_anniversary"]["emails"], 1)
 		self.assertEqual([mail["recipients"] for mail in mails], [[self._address("B2")]])
 		self.assertEqual(len(errors()), 1)
-
-	def test_a_second_run_on_the_same_day_sends_the_mail_again(self):
-		"""Not a wish -- the documented assumption (`send_celebration_reminders`
-		says so in its docstring). There is no per-(event, company, date)
-		marker, so an operator running the job by hand with `bench execute`
-		after the scheduler has already been round mails the company twice.
-		The test is here so the assumption cannot change silently."""
-		self._stage(birthdays=("A1",))
-		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
-		added = self._watch_mail()
-
-		send_celebration_reminders()
-		send_celebration_reminders()
-
-		self.assertEqual(len(added()), 2)
 
 	def test_the_job_is_registered_as_a_daily_scheduler_event(self):
 		self.assertIn(
@@ -446,15 +694,18 @@ class TestCelebrationReminders(IntegrationTestCase):
 
 		return frappe.db.get_value("Employee", {"employee_number": f"{CELEBRATION_TAG}-REM-{suffix}"}, "name")
 
-	def _select(self, event, *suffixes):
-		frappe.db.set_value(
-			"HelixHR Celebration Reminder", event, "recipient_mode", "Selected employees", update_modified=False
+	def _select(self, event, *suffixes, company=COMPANY_A):
+		row = frappe.db.get_value(
+			"HelixHR Celebration Reminder", {"event": event, "company": company}, "name"
 		)
-		frappe.db.delete("HelixHR Celebration Recipient", {"parent": event})
-		doc = frappe.get_doc("HelixHR Celebration Reminder", event)
+		frappe.db.set_value(
+			"HelixHR Celebration Reminder", row, "recipient_mode", "Selected employees", update_modified=False
+		)
+		frappe.db.delete("HelixHR Celebration Recipient", {"parent": row})
+		doc = frappe.get_doc("HelixHR Celebration Reminder", row)
 		doc.set("recipients", [{"employee": self._employee_id(suffix)} for suffix in suffixes])
 		doc.save(ignore_permissions=True)
-		frappe.clear_document_cache("HelixHR Celebration Reminder", event)
+		frappe.clear_document_cache("HelixHR Celebration Reminder", row)
 
 	def test_selected_employees_mode_only_mails_the_selected_list(self):
 		self._stage(birthdays=("A1",))
@@ -470,18 +721,15 @@ class TestCelebrationReminders(IntegrationTestCase):
 		self.assertNotIn(self._address("A3"), mails[0]["recipients"])
 
 	def test_selected_employees_excludes_a_selected_person_in_another_company(self):
-		self._stage(birthdays=("A1",))
+		"""P8-U11's narrowing is now enforced where the list is picked
+		(plan 2026-10-04-004 U1): the controller refuses a selected person
+		from another company, so the send-time narrowing is a second line,
+		not the only one."""
 		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
-		# B2 is in COMPANY_B, not the celebrating COMPANY_A -- never mailed
-		# for A1's birthday regardless of being on the selected list.
-		self._select("birthday", "A2", "B2")
-		added = self._watch_mail()
-
-		send_celebration_reminders()
-		mails = added()
-
-		self.assertEqual(len(mails), 1)
-		self.assertEqual(mails[0]["recipients"], [self._address("A2")])
+		# B2 is in COMPANY_B, not the celebrating COMPANY_A -- refused at
+		# save instead of silently narrowed at send.
+		with self.assertRaises(frappe.ValidationError):
+			self._select("birthday", "A2", "B2")
 
 	def test_selected_employees_where_a_selected_person_is_celebrating_is_excluded_but_still_hears_about_others(self):
 		self._stage(birthdays=("A1", "A2"))
@@ -519,13 +767,16 @@ class TestCelebrationReminders(IntegrationTestCase):
 
 	def test_switching_back_to_all_employees_does_not_lose_the_saved_selection(self):
 		self._select("birthday", "A2")
-		frappe.db.set_value(
-			"HelixHR Celebration Reminder", "birthday", "recipient_mode", "All employees", update_modified=False
+		row = frappe.db.get_value(
+			"HelixHR Celebration Reminder", {"event": "birthday", "company": COMPANY_A}, "name"
 		)
-		frappe.clear_document_cache("HelixHR Celebration Reminder", "birthday")
+		frappe.db.set_value(
+			"HelixHR Celebration Reminder", row, "recipient_mode", "All employees", update_modified=False
+		)
+		frappe.clear_document_cache("HelixHR Celebration Reminder", row)
 
 		recipients = frappe.get_all(
-			"HelixHR Celebration Recipient", filters={"parent": "birthday"}, pluck="employee"
+			"HelixHR Celebration Recipient", filters={"parent": row}, pluck="employee"
 		)
 		self.assertEqual(recipients, [self._employee_id("A2")])
 
@@ -582,17 +833,26 @@ class TestHRSettingsBothSendersRefusal(IntegrationTestCase):
 
 	def setUp(self):
 		frappe.set_user("Administrator")
+		from helixhr.tests.utils import ensure_test_company
+
+		self.company = ensure_test_company()
 		_template(BIRTHDAY_TEMPLATE, "BDAYMARK {{ names }}")
-		if not frappe.db.exists("HelixHR Celebration Reminder", "birthday"):
+		if not frappe.db.get_value(
+			"HelixHR Celebration Reminder", {"event": "birthday", "company": self.company}, "name"
+		):
 			frappe.get_doc(
 				{
 					"doctype": "HelixHR Celebration Reminder",
 					"event": "birthday",
+					"company": self.company,
 					"recipient_mode": "All employees",
 				}
 			).insert(ignore_permissions=True)
+		self.row = frappe.db.get_value(
+			"HelixHR Celebration Reminder", {"event": "birthday", "company": self.company}, "name"
+		)
 		self.original_reminder = frappe.db.get_value(
-			"HelixHR Celebration Reminder", "birthday", ["is_enabled", "email_template"], as_dict=True
+			"HelixHR Celebration Reminder", self.row, ["is_enabled", "email_template"], as_dict=True
 		)
 		self.original_hrms = {
 			field: frappe.db.get_single_value("HR Settings", field)
@@ -602,11 +862,11 @@ class TestHRSettingsBothSendersRefusal(IntegrationTestCase):
 	def tearDown(self):
 		frappe.db.set_value(
 			"HelixHR Celebration Reminder",
-			"birthday",
+			self.row,
 			{"is_enabled": self.original_reminder.is_enabled, "email_template": self.original_reminder.email_template},
 			update_modified=False,
 		)
-		frappe.clear_document_cache("HelixHR Celebration Reminder", "birthday")
+		frappe.clear_document_cache("HelixHR Celebration Reminder", self.row)
 		for field, value in self.original_hrms.items():
 			frappe.db.set_single_value("HR Settings", field, value)
 		frappe.clear_document_cache("HR Settings", "HR Settings")
@@ -614,11 +874,11 @@ class TestHRSettingsBothSendersRefusal(IntegrationTestCase):
 	def test_a_helixhr_reminder_enabled_with_the_hrms_checkbox_on_is_refused(self):
 		frappe.db.set_value(
 			"HelixHR Celebration Reminder",
-			"birthday",
+			self.row,
 			{"is_enabled": 1, "email_template": BIRTHDAY_TEMPLATE},
 			update_modified=False,
 		)
-		frappe.clear_document_cache("HelixHR Celebration Reminder", "birthday")
+		frappe.clear_document_cache("HelixHR Celebration Reminder", self.row)
 
 		settings = frappe.get_doc("HR Settings")
 		settings.send_birthday_reminders = 1
@@ -633,11 +893,11 @@ class TestHRSettingsBothSendersRefusal(IntegrationTestCase):
 	def test_unticking_the_hrms_checkbox_in_the_same_save_is_accepted(self):
 		frappe.db.set_value(
 			"HelixHR Celebration Reminder",
-			"birthday",
+			self.row,
 			{"is_enabled": 1, "email_template": BIRTHDAY_TEMPLATE},
 			update_modified=False,
 		)
-		frappe.clear_document_cache("HelixHR Celebration Reminder", "birthday")
+		frappe.clear_document_cache("HelixHR Celebration Reminder", self.row)
 
 		settings = frappe.get_doc("HR Settings")
 		settings.send_birthday_reminders = 0
@@ -650,11 +910,11 @@ class TestHRSettingsBothSendersRefusal(IntegrationTestCase):
 	def test_a_disabled_helixhr_reminder_never_refuses_the_hrms_checkbox(self):
 		frappe.db.set_value(
 			"HelixHR Celebration Reminder",
-			"birthday",
+			self.row,
 			{"is_enabled": 0, "email_template": BIRTHDAY_TEMPLATE},
 			update_modified=False,
 		)
-		frappe.clear_document_cache("HelixHR Celebration Reminder", "birthday")
+		frappe.clear_document_cache("HelixHR Celebration Reminder", self.row)
 
 		settings = frappe.get_doc("HR Settings")
 		settings.send_birthday_reminders = 1
@@ -663,10 +923,16 @@ class TestHRSettingsBothSendersRefusal(IntegrationTestCase):
 		self.assertEqual(frappe.db.get_single_value("HR Settings", "send_birthday_reminders"), 1)
 
 	def test_the_two_hrms_checkboxes_are_desk_read_only_fixtures(self):
-		"""P8-KTD8: the affordance for the hazard is never offered in Desk
-		in the first place -- a Property Setter, not just the `validate`
-		refusal above."""
-		for field in ("send_birthday_reminders", "send_work_anniversary_reminders"):
+		"""P8-KTD8, extended to the holiday takeover (plan 2026-10-04-004
+		U3): the affordance for the hazard is never offered in Desk in the
+		first place -- a Property Setter, not just the `validate` refusal
+		above."""
+		for field in (
+			"send_birthday_reminders",
+			"send_work_anniversary_reminders",
+			"send_holiday_reminders",
+			"frequency",
+		):
 			self.assertTrue(
 				frappe.get_meta("HR Settings").get_field(field).read_only,
 				f"{field} is not read-only in Desk",
@@ -716,7 +982,11 @@ class TestCelebrationTemplateSeed(IntegrationTestCase):
 			{"name": "Ada Lovelace", "image": None, "date_of_joining": "2020-01-01"},
 			{"name": "Grace Hopper", "image": None, "date_of_joining": "2019-01-01"},
 		]
-		for spec, event in zip(TEMPLATES, ("birthday", "work_anniversary"), strict=True):
+		celebration_templates = (
+			(next(t for t in TEMPLATES if t["name"] == "HelixHR Birthday Reminder"), "birthday"),
+			(next(t for t in TEMPLATES if t["name"] == "HelixHR Work Anniversary Reminder"), "work_anniversary"),
+		)
+		for spec, event in celebration_templates:
 			template = frappe.get_doc("Email Template", spec["name"])
 			for people in (persons[:1], persons):
 				rendered = _render_restricted(
@@ -724,6 +994,467 @@ class TestCelebrationTemplateSeed(IntegrationTestCase):
 				)
 				self.assertIn("Ada Lovelace", rendered["message"])
 				self.assertTrue(rendered["subject"].strip())
+
+	def test_the_holiday_default_renders_against_its_own_context(self):
+		"""Plan 2026-10-04-004 U3: the holiday template's context is the one
+		`_send_holiday_company` builds -- `employee_name`, `holidays`,
+		`company`, `logo_url`, `portal_url`, `date`, `frequency`."""
+		from helixhr.patches.v1_0.seed_celebration_templates import TEMPLATES
+		from helixhr.reminders import _render_restricted
+
+		spec = next(t for t in TEMPLATES if t["name"] == "HelixHR Holiday Reminder")
+		template = frappe.get_doc("Email Template", spec["name"])
+		rendered = _render_restricted(
+			template,
+			{
+				"employee_name": "Ada Lovelace",
+				"holidays": [{"date": "2026-12-25", "description": "Christmas"}],
+				"company": "_Test Reminders Co A",
+				"logo_url": "",
+				"portal_url": "http://x/helixhr",
+				"date": "2026-12-21",
+				"frequency": "Weekly",
+			},
+			sender=None,
+		)
+		self.assertIn("Ada Lovelace", rendered["message"])
+		self.assertIn("Christmas", rendered["message"])
+		self.assertTrue(rendered["subject"].strip())
+
+	def test_the_tookover_holiday_sender_replaces_hrms_own(self):
+		"""R8: HRMS's `send_reminders_in_advance_weekly/monthly` read the
+		same global checkbox this app now refuses to leave on -- they must
+		never run while HelixHR owns the mail."""
+		from helixhr.patches.v1_0.turn_off_hrms_celebration_senders import execute
+
+		original = {
+			field: frappe.db.get_single_value("HR Settings", field)
+			for field in (
+				"send_birthday_reminders",
+				"send_work_anniversary_reminders",
+				"send_holiday_reminders",
+				"frequency",
+			)
+		}
+		frappe.db.set_single_value("HR Settings", "send_holiday_reminders", 1)
+		frappe.db.set_single_value("HR Settings", "frequency", "Weekly")
+		try:
+			execute()
+			self.assertEqual(frappe.db.get_single_value("HR Settings", "send_holiday_reminders"), 0)
+		finally:
+			for field, value in original.items():
+				frappe.db.set_single_value("HR Settings", field, value)
+			frappe.clear_document_cache("HR Settings", "HR Settings")
+
+
+class TestHolidayReminders(IntegrationTestCase):
+	"""Plan 2026-10-04-004 U3: HelixHR's own per-company holiday reminder,
+	replacing HRMS's hardcoded global one (R7, R8, KTD6, KTD7).
+
+	Dates are pinned to a fixed Monday via `reminders.getdate`, so the
+	Weekly window is Monday..Sunday regardless of which day the suite runs
+	on."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		ensure_test_email_account()
+		_company(COMPANY_A, "TRCA")
+		_company(COMPANY_B, "TRCB")
+		# The holiday context has no `persons`, so this template must not
+		# reuse the celebration marker HTML above.
+		self.holiday_template = _holiday_template(
+			"_Test HelixHR Holiday",
+			"HOLIMARK {{ company }}",
+			"HOLIDAYS:{% for holiday in holidays %}{{ holiday.description }};{% endfor %}"
+			"TO:{{ employee_name }} FREQ:{{ frequency }}",
+		)
+
+		self.today = getdate()
+		# The Monday of this week -- the Weekly send day, whatever today is.
+		# Pushed a week later if it is also the 1st, so the Monthly test's
+		# "plain Monday" premise holds every day of the year.
+		self.monday = add_days(self.today, -self.today.weekday())
+		if self.monday.day == 1:
+			self.monday = add_days(self.monday, 7)
+		self.wednesday = add_days(self.monday, 2)
+		self._getdate_patch = patch.object(reminders, "getdate", return_value=self.monday)
+		self._getdate_patch.start()
+		self.addCleanup(self._getdate_patch.stop)
+		# The rerun guard is keyed on the pinned Monday: clear it before and
+		# after every test, or the alphabetically first test's send disables
+		# every later one's.
+		for company in (COMPANY_A, COMPANY_B):
+			frappe.cache.delete_value(
+				f"{reminders.CELEBRATION_GUARD_PREFIX}{self.monday}|holiday|{company}"
+			)
+			self.addCleanup(
+				frappe.cache.delete_value,
+				f"{reminders.CELEBRATION_GUARD_PREFIX}{self.monday}|holiday|{company}",
+			)
+
+		self.queued = set()
+		self.original = {}
+		for company in (COMPANY_A, COMPANY_B):
+			row = frappe.db.get_value(
+				"HelixHR Celebration Reminder", {"event": "holiday", "company": company}, "name"
+			)
+			if row:
+				self.original[company] = frappe.get_doc("HelixHR Celebration Reminder", row).as_dict()
+				frappe.delete_doc("HelixHR Celebration Reminder", row, force=True, ignore_permissions=True)
+			# A enabled, B not (R1): most tests assert "only A's people are
+			# mailed", so B starts disabled and its own test enables it.
+			frappe.get_doc(
+				{
+					"doctype": "HelixHR Celebration Reminder",
+					"event": "holiday",
+					"company": company,
+					"is_enabled": 1 if company == COMPANY_A else 0,
+					"email_template": self.holiday_template,
+					"recipient_mode": "All employees",
+					"frequency": "Weekly",
+				}
+			).insert(ignore_permissions=True)
+		self.addCleanup(self._restore)
+
+	def _restore(self):
+		frappe.set_user("Administrator")
+		for company in (COMPANY_A, COMPANY_B):
+			row = frappe.db.get_value(
+				"HelixHR Celebration Reminder", {"event": "holiday", "company": company}, "name"
+			)
+			if row:
+				frappe.db.delete("HelixHR Celebration Recipient", {"parent": row})
+				frappe.delete_doc(
+					"HelixHR Celebration Reminder", row, force=True, ignore_permissions=True
+				)
+			if company in self.original:
+				frappe.get_doc(self.original[company]).insert(ignore_permissions=True)
+			else:
+				self.original.setdefault(company, None)
+		frappe.cache.delete_value(
+			f"{reminders.CELEBRATION_GUARD_PREFIX}{self.monday}|holiday|{COMPANY_A}"
+		)
+		frappe.cache.delete_value(
+			f"{reminders.CELEBRATION_GUARD_PREFIX}{self.monday}|holiday|{COMPANY_B}"
+		)
+		for row in self.queued:
+			frappe.db.delete("Email Queue Recipient", {"parent": row})
+			frappe.db.delete("Email Queue", {"name": row})
+
+	def _list(self, name, dates):
+		"""A Holiday List with non-weekly holidays on the given dates (and
+		one weekly-off row, which must never be listed)."""
+		if frappe.db.exists("Holiday List", name):
+			return name
+		frappe.get_doc(
+			{
+				"doctype": "Holiday List",
+				"holiday_list_name": name,
+				"from_date": add_days(self.monday, -300),
+				"to_date": add_days(self.monday, 300),
+				"holidays": [
+					{"holiday_date": str(day), "description": f"Holiday {index}", "weekly_off": 0}
+					for index, day in enumerate(dates)
+				]
+				+ [
+					# A weekly off inside the window: excluded by
+					# `only_non_weekly=True`.
+					{
+						"holiday_date": str(add_days(self.monday, 3)),
+						"description": "Weekly off",
+						"weekly_off": 1,
+					}
+				],
+			}
+		).insert(ignore_permissions=True)
+		return name
+
+	def _employees(self, assignments):
+		"""`{suffix: holiday_list}` -- stage the pool people and assign each
+		one's list. Current HRMS resolves a person's list through submitted
+		`Holiday List Assignment` rows (`get_holiday_list_for_employee`), not
+		the Employee field, so the assignment is what the fixture makes."""
+		for suffix, company in POOL.items():
+			make_celebration_employee(
+				f"REM-{suffix}",
+				company,
+				# No celebrating here -- keep both event dates out of today.
+				date_of_birth=date(1990, self.other_month(), 4),
+				date_of_joining=date(self.today.year - 5, self.other_month(), 4),
+				company_email=self._address(suffix),
+			)
+			list_name = assignments.get(suffix)
+			name = self._employee_id(suffix)
+			if list_name:
+				assignment = frappe.get_doc(
+					{
+						"doctype": "Holiday List Assignment",
+						"assigned_to": name,
+						"holiday_list": list_name,
+						"from_date": add_days(self.monday, -300),
+						"to_date": add_days(self.monday, 300),
+					}
+				)
+				assignment.insert(ignore_permissions=True)
+				assignment.submit()
+				self.addCleanup(
+					frappe.db.delete,
+					"Holiday List Assignment",
+					{"assigned_to": name},
+				)
+
+	def _employee_id(self, suffix):
+		from helixhr.tests.utils import CELEBRATION_TAG
+
+		return frappe.db.get_value(
+			"Employee", {"employee_number": f"{CELEBRATION_TAG}-REM-{suffix}"}, "name"
+		)
+
+	def _address(self, suffix):
+		return f"{suffix.lower()}@{DOMAIN}"
+
+	def other_month(self):
+		return 1 if self.today.month != 1 else 7
+
+	def _watch_mail(self):
+		before = set(frappe.get_all("Email Queue", pluck="name"))
+
+		def added():
+			mails = []
+			for row in sorted(set(frappe.get_all("Email Queue", pluck="name")) - before):
+				recipients = sorted(
+					frappe.get_all("Email Queue Recipient", filters={"parent": row}, pluck="recipient")
+				)
+				if not any(address.endswith(DOMAIN) for address in recipients):
+					continue
+				self.queued.add(row)
+				message = frappe.db.get_value("Email Queue", row, "message")
+				mails.append({"recipients": recipients, **_read(message)})
+			return mails
+
+		return added
+
+	def test_weekly_on_monday_lists_the_holidays_ahead(self):
+		self._list("_Test Holiday List A", (self.wednesday,))
+		self._employees({"A1": "_Test Holiday List A", "A2": "_Test Holiday List A", "A3": None})
+		added = self._watch_mail()
+
+		result = reminders.send_holiday_reminders()
+
+		mails = added()
+		self.assertEqual(result["companies"], 1)
+		self.assertEqual(result["emails"], 1, "one send for the shared holiday set")
+		self.assertEqual(mails[0]["recipients"], [self._address("A1"), self._address("A2")])
+		self.assertIn("HOLIMARK", mails[0]["subject"])
+		self.assertIn("Holiday 0", mails[0]["body"])
+		self.assertNotIn("Weekly off", mails[0]["body"], "weekly-off rows are never listed")
+
+	def test_an_employee_on_a_list_with_nothing_ahead_gets_no_mail(self):
+		self._list("_Test Holiday List Empty", (add_days(self.monday, 100),))
+		self._employees({"A1": "_Test Holiday List Empty", "A2": None, "A3": None})
+		added = self._watch_mail()
+
+		result = reminders.send_holiday_reminders()
+
+		self.assertEqual(result["emails"], 0)
+		self.assertEqual(added(), [])
+
+	def test_two_holiday_lists_in_one_company_mean_two_sends(self):
+		self._list("_Test Holiday List A", (self.wednesday,))
+		self._list("_Test Holiday List B", (add_days(self.monday, 4),))
+		self._employees({"A1": "_Test Holiday List A", "A2": "_Test Holiday List B", "A3": "_Test Holiday List B"})
+		added = self._watch_mail()
+
+		result = reminders.send_holiday_reminders()
+
+		mails = added()
+		self.assertEqual(result["emails"], 2)
+		by_recipient = {tuple(mail["recipients"]): mail for mail in mails}
+		self.assertIn((self._address("A1"),), by_recipient)
+		self.assertEqual(
+			by_recipient[(self._address("A2"), self._address("A3"))]["recipients"],
+			[self._address("A2"), self._address("A3")],
+		)
+
+	def test_a_monthly_company_on_a_plain_monday_sends_nothing(self):
+		frappe.db.set_value(
+			"HelixHR Celebration Reminder",
+			frappe.db.get_value(
+				"HelixHR Celebration Reminder",
+				{"event": "holiday", "company": COMPANY_A},
+				"name",
+			),
+			"frequency",
+			"Monthly",
+		)
+		self._list("_Test Holiday List A", (self.wednesday,))
+		self._employees({"A1": "_Test Holiday List A", "A2": None, "A3": None})
+		added = self._watch_mail()
+
+		result = reminders.send_holiday_reminders()
+
+		self.assertEqual(result["companies"], 0)
+		self.assertEqual(added(), [])
+
+	def test_a_disabled_company_sends_nothing(self):
+		"""R1 for holidays: B's row is off (setUp), B's employees get nothing
+		even though B1 shares A's list."""
+		self._list("_Test Holiday List A", (self.wednesday,))
+		self._employees(
+			{"A1": "_Test Holiday List A", "A2": None, "A3": None, "B1": "_Test Holiday List A"}
+		)
+		added = self._watch_mail()
+
+		reminders.send_holiday_reminders()
+
+		mails = added()
+		recipients = [r for mail in mails for r in mail["recipients"]]
+		self.assertNotIn(self._address("B1"), recipients)
+
+	def test_a_second_run_the_same_day_is_a_no_op(self):
+		"""KTD8: the dated per-company guard covers the holiday sender too."""
+		self._list("_Test Holiday List A", (self.wednesday,))
+		self._employees({"A1": "_Test Holiday List A", "A2": None, "A3": None})
+		added = self._watch_mail()
+
+		reminders.send_holiday_reminders()
+		reminders.send_holiday_reminders()
+
+		self.assertEqual(len(added()), 1)
+
+	def test_the_weekly_window_covers_monday_through_sunday_only(self):
+		"""R7's exclusive bounds: a holiday on the window's first and last
+		day is listed; the following Monday is left to the next mail. Its
+		own list name -- `_list` returns an existing list unchanged, and
+		other tests stage `_Test Holiday List A` with other dates."""
+		self._list(
+			"_Test Holiday List BoundsW",
+			(self.monday, add_days(self.monday, 6), add_days(self.monday, 7)),
+		)
+		self._employees({"A1": "_Test Holiday List BoundsW", "A2": None})
+		added = self._watch_mail()
+
+		reminders.send_holiday_reminders()
+
+		mails = added()
+		self.assertEqual(len(mails), 1)
+		self.assertIn("Holiday 0", mails[0]["body"], "the window's first day is listed")
+		self.assertIn("Holiday 1", mails[0]["body"], "the window's last day is listed")
+		self.assertNotIn("Holiday 2", mails[0]["body"], "the following Monday belongs to the next mail")
+
+	def test_the_monthly_window_covers_the_whole_month_only(self):
+		"""R7's exclusive bounds for the Monthly cadence, pinned to a 1st:
+		the month's last day is listed, the next month's 1st is not."""
+		pinned = get_first_day(add_months(self.monday, 1))
+		self._monthly_patch = patch.object(reminders, "getdate", return_value=pinned)
+		self._monthly_patch.start()
+		self.addCleanup(self._monthly_patch.stop)
+		frappe.cache.delete_value(
+			f"{reminders.CELEBRATION_GUARD_PREFIX}{pinned}|holiday|{COMPANY_A}"
+		)
+		self.addCleanup(
+			frappe.cache.delete_value,
+			f"{reminders.CELEBRATION_GUARD_PREFIX}{pinned}|holiday|{COMPANY_A}",
+		)
+		month_end = add_days(add_months(pinned, 1), -1)
+		self._list(
+			"_Test Holiday List BoundsM", (pinned, month_end, add_days(month_end, 1))
+		)
+		self._employees({"A1": "_Test Holiday List BoundsM", "A2": None})
+		frappe.db.set_value(
+			"HelixHR Celebration Reminder",
+			frappe.db.get_value(
+				"HelixHR Celebration Reminder", {"event": "holiday", "company": COMPANY_A}, "name"
+			),
+			"frequency",
+			"Monthly",
+		)
+		added = self._watch_mail()
+
+		reminders.send_holiday_reminders()
+
+		mails = added()
+		self.assertEqual(len(mails), 1)
+		self.assertIn("Holiday 0", mails[0]["body"], "the 1st itself is listed")
+		self.assertIn("Holiday 1", mails[0]["body"], "the month's last day is listed")
+		self.assertNotIn("Holiday 2", mails[0]["body"], "next month's 1st belongs to next month's mail")
+
+	def test_a_selected_holiday_row_mails_only_its_recipients(self):
+		"""R9 for holidays: the audience is the row's own -- a Selected
+		row mails the picked people, not the whole company."""
+		self._list("_Test Holiday List A", (self.wednesday,))
+		self._employees({"A1": "_Test Holiday List A", "A2": "_Test Holiday List A", "A3": None})
+		row = frappe.db.get_value(
+			"HelixHR Celebration Reminder", {"event": "holiday", "company": COMPANY_A}, "name"
+		)
+		doc = frappe.get_doc("HelixHR Celebration Reminder", row)
+		doc.recipient_mode = "Selected employees"
+		doc.set("recipients", [{"employee": self._employee_id("A1")}])
+		doc.save(ignore_permissions=True)
+		added = self._watch_mail()
+
+		reminders.send_holiday_reminders()
+
+		mails = added()
+		self.assertEqual(len(mails), 1)
+		self.assertEqual(mails[0]["recipients"], [self._address("A1")], "A2 is not a picked recipient")
+
+	def test_a_duplicate_mailbox_in_another_company_is_dropped_from_holiday_mail(self):
+		"""R3 for the holiday sender too: an address that also resolves for
+		another company's active employee is dropped and logged."""
+		from helixhr.tests.utils import make_celebration_employee
+
+		self._list("_Test Holiday List A", (self.wednesday,))
+		self._employees({"A1": "_Test Holiday List A", "A2": "_Test Holiday List A"})
+		shared = self._address("A1")
+		real_one = make_celebration_employee(
+			"REM-HOL-A",
+			COMPANY_A,
+			date_of_birth="1990-01-01",
+			date_of_joining="2020-01-01",
+			company_email=shared,
+		)
+		stale = make_celebration_employee(
+			"REM-HOL-B",
+			COMPANY_B,
+			date_of_birth="1990-01-01",
+			date_of_joining="2020-01-01",
+			company_email=shared,
+		)
+		self.addCleanup(frappe.db.set_value, "Employee", real_one, "status", "Left")
+		self.addCleanup(frappe.db.set_value, "Employee", stale, "status", "Left")
+		added = self._watch_mail()
+
+		reminders.send_holiday_reminders()
+
+		mails = added()
+		recipients = [r for mail in mails for r in mail["recipients"]]
+		self.assertEqual(recipients, [self._address("A2")], "the shared address is dropped")
+		logs = frappe.get_all(
+			"Error Log", filters={"method": reminders.CROSS_COMPANY_LOG_TITLE}, pluck="name"
+		)
+		self.assertTrue(logs, "the drop is logged, naming both records")
+		for log in logs:
+			detail = frappe.db.get_value("Error Log", log, "error")
+			self.assertIn(real_one, detail)
+			self.assertIn(stale, detail)
+			self.addCleanup(frappe.delete_doc, "Error Log", log, force=True, ignore_permissions=True)
+
+	def test_an_hrms_holiday_flag_on_with_an_enabled_row_is_refused(self):
+		frappe.db.set_single_value("HR Settings", "send_holiday_reminders", 1)
+		try:
+			settings = frappe.get_doc("HR Settings")
+			settings.send_holiday_reminders = 1
+			with self.assertRaises(frappe.ValidationError):
+				settings.save()
+		finally:
+			frappe.db.set_single_value("HR Settings", "send_holiday_reminders", 0)
+
+	def test_the_sender_is_registered_as_a_daily_scheduler_event(self):
+		self.assertIn(
+			"helixhr.reminders.send_holiday_reminders",
+			frappe.get_hooks("scheduler_events")["daily"],
+		)
 
 
 class TestOverdueDigests(IntegrationTestCase):

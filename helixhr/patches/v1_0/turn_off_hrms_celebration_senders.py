@@ -1,10 +1,13 @@
-"""Untick HRMS's own birthday and work-anniversary reminder checkboxes.
-
-HelixHR owns both emails (P8-U10), and P8-KTD8 made the two HRMS checkboxes
-read-only in Desk. HRMS ships `send_work_anniversary_reminders` on, so a site
-that never saved the reminder in the portal kept getting HRMS's stock email
-with no way for HR to stop it: disabling on Settings > Celebrations only
-turns off HelixHR's sender. After this, the portal toggle is the only switch.
+"""Untick HRMS's own reminder checkboxes -- birthday, work anniversary
+(P8-U10 / P8-KTD8) and, since plan 2026-10-04-004 U3, the holiday reminder
+(KTD7): HelixHR owns all three emails now, and the HR Settings checkboxes
+are read-only in Desk. HRMS ships `send_work_anniversary_reminders` and
+`send_holiday_reminders` on, so a site that never configured the reminder
+kept getting HRMS's stock email with no way for HR to stop it: disabling in
+the portal only turns off HelixHR's sender. After this, the portal toggle
+is the only switch. This one patch covers the takeover because it loops
+`reminders.EVENTS`, which the holiday event joins; a separate
+`turn_off_hrms_holiday_reminders` patch would be the same loop twice.
 
 Idempotent; also run from `install.after_install` for fresh sites.
 """

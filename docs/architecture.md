@@ -912,50 +912,84 @@ employee to serve six of them.
 
 ## Reminders: beside HRMS, not instead of it
 
-HRMS already emails birthdays and work anniversaries, from a subject, header and
-Jinja file hardcoded in `hrms/controllers/employee_reminders.py`, gated only by
-two HR Settings checkboxes. There is no Email Template record behind it, so the
-copy cannot be changed without editing HRMS — which the next `bench update`
-overwrites, and which P4-R20 forbids outright.
+HRMS already emails birthdays, work anniversaries and holidays, from a subject,
+header and Jinja file hardcoded in `hrms/controllers/employee_reminders.py`,
+gated only by HR Settings checkboxes. There is no Email Template record behind
+it, so the copy cannot be changed without editing HRMS — which the next `bench
+update` overwrites, and which P4-R20 forbids outright.
 
-So `helixhr/reminders.py` registers its **own** daily job in
-`scheduler_events.daily` and runs beside HRMS's. Frappe merges scheduler hooks
+So `helixhr/reminders.py` registers its **own** daily jobs in
+`scheduler_events.daily` and run beside HRMS's. Frappe merges scheduler hooks
 across installed apps and offers no way to remove another app's job, which is
 the whole shape of this design: HelixHR cannot switch HRMS off, so it has to be
 switchable itself and the contradiction has to be refused somewhere.
 
-- **The switch is two Custom Fields on HR Settings**,
-  `helixhr_birthday_template` and `helixhr_anniversary_template`, each a Link to
-  Email Template, sitting in HRMS's own *Reminders* section. Empty means HelixHR
-  sends nothing for that event. `reminders.EVENTS` is the one table pairing each
-  picker with the HRMS checkbox that would send the stock email for the same
-  event, and both the save-time refusal and the preflight line quote from it, so
-  they name the same two fields the form does.
+- **The switch is one `HelixHR Celebration Reminder` row per (event,
+  company)** — birthday, work anniversary and, since plan 2026-10-04-004, the
+  holiday reminder HelixHR takes over from HRMS outright (R7/R8). A company
+  with no row for an event sends nothing for it: absent means disabled. The
+  row's `email_template` is a Link to Email Template, `recipient_mode` is "All
+  employees" ("Everyone in the company") or "Selected employees", and a
+  holiday row carries its own `frequency` (Weekly on Monday for Monday..Sunday,
+  Monthly on the 1st for that month — exclusive bounds, so a boundary day is
+  never listed twice). `reminders.EVENTS` is the one table pairing each event
+  with the HRMS checkbox that would send the stock email for the same event,
+  and both the save-time refusal and the preflight line quote from it. The
+  rows are edited from the Email templates page's "Celebrations & holidays"
+  group — HR Manager per company through `resolve_admin_scope`, the
+  Notification Manager keeps the message templates and does not see the group
+  (KTD2/KTD3).
 - **Two senders for one event is refused where HR creates it.**
-  `events.hr_settings_validate` throws on a save that picks a template while the
-  matching HRMS checkbox is still ticked. `preflight.check_celebration_reminders`
-  FAILs on the same contradiction as the backstop for routes that never reach
-  `validate` — a fixture import, a raw `db_set`, a restored site — because
-  preflight alone would leave a morning of duplicate mail between HR's save and
-  the next operator run.
+  `events.hr_settings_validate` throws on a save that enables a row while the
+  matching HRMS checkbox is still ticked; the takeover patch unticks the
+  checkboxes and the Property Setters leave them Desk-read-only (KTD7/P8-KTD8),
+  so the affordance for the hazard is never offered. `preflight.check_
+  celebration_reminders` FAILs on the same contradiction as the backstop for
+  routes that never reach `validate` — a fixture import, a raw `db_set`, a
+  restored site.
+- **The cross-company guard is a set subtraction, not data hygiene** (R3, KTD4).
+  ERPNext only blocks a duplicate `user_id`; `company_email` and
+  `personal_email` can repeat, and a stale active duplicate in another company
+  puts a person on the wrong list. Before sending, one query builds the map of
+  every address an active employee resolves to, and any pool address that also
+  belongs to another company's active employee is dropped and logged once per
+  run, naming both Employee records. `preflight.check_cross_company_mailboxes`
+  WARNs on the pairs themselves (R6) so HR can set the stale duplicate to Left.
+  The celebrant's own announcement excludes both of HRMS's address fallback
+  orders (KTD5), and employees with no company are never celebrated or mailed,
+  only counted (R4).
+- **The send is idempotent per (event, company, day)** (KTD8): a dated cache
+  key, like the overdue digest's, stops a hand-run `bench execute` after the
+  scheduler's round from mailing every company twice. A company is marked only
+  after mail actually went out, so a broken template fixed the same morning can
+  still be sent by hand.
 - **Who is celebrating, and who hears about it, is HRMS's answer** (P4-KTD12).
   `get_employees_having_an_event_today`, `get_all_employee_emails`,
   `get_employee_email` and `get_sender_email` are imported, never
-  re-implemented, so eligibility cannot drift from HRMS's. If HRMS renames one
-  the module fails to import — loudly, in the scheduler log and in
-  `tests/test_reminders.py` — which is the trade that was made on purpose
-  against a quiet second implementation.
-- **The Jinja context is a small documented contract** (P4-KTD13): `persons`,
-  `names`, `count`, `company`, `logo_url`, `date`, `portal_url`, and nothing
-  else. It is what HR writes templates against, so it lives in
+  re-implemented, so eligibility cannot drift from HRMS's. The holiday list
+  resolution is HRMS's too (`get_holiday_list_for_employee`), which since
+  HRMS 16.17 reads submitted `Holiday List Assignment` rows; the holiday rows
+  themselves are queried here rather than through
+  `get_holidays_for_employee`, because that helper's `weekly_off = False`
+  filter matches nothing under this Frappe — HRMS's own holiday senders have
+  been mailing nobody for a while.
+- **The Jinja context is a small documented contract** (P4-KTD13):
+  `persons`, `names`, `count`, `company`, `logo_url`, `date`, `portal_url` for
+  the celebration events; `employee_name`, `holidays` (date, description),
+  `company`, `logo_url`, `portal_url`, `date`, `frequency` for the holiday
+  one. It is what HR writes templates against, so it lives in
   `docs/deployment.md` rather than only in the code.
-- **The two default templates are seeded by a patch, not shipped as fixtures**
+- **The default templates are seeded by a patch, not shipped as fixtures**
   (P4-KTD11). Fixtures re-import on every migrate and would overwrite HR's
   edits; `patches/v1_0/seed_celebration_templates.py` inserts them only if
-  absent and never sets them on HR Settings — switching on is HR's act. It is
-  also called from `after_install`, because `bench new-site --install-app` marks
-  every patch complete without running it, exactly as `apply_permission_deltas`
-  is.
+  absent and never enables a row — switching on is HR's act. It is also called
+  from `after_install`, because `bench new-site --install-app` marks every
+  patch complete without running it, exactly as `apply_permission_deltas` is.
+
+The split from P8's global one-row-per-event model is
+`patches/v1_0/split_celebration_reminders_by_company.py` (R14): every existing
+setting copied to every company, Selected recipients only to the companies
+they belong to, the global row deleted, idempotent.
 
 Home's "Celebrating this month" card is the cheap half of the same feature and
 shares none of the machinery: `api._get_celebrations` is a projection in the

@@ -43,6 +43,7 @@ def after_install():
 		seed_report_access,
 		seed_request_categories,
 		seed_request_category_prefixes,
+		split_celebration_reminders_by_company,
 		turn_off_hrms_celebration_senders,
 		turn_off_hrms_leave_notification,
 	)
@@ -65,6 +66,11 @@ def after_install():
 	# from it, but keeps the two celebration-related patches in the order
 	# a reader would expect.
 	migrate_celebration_reminders.execute()
+	# Plan 2026-10-04-004 U1: after migrate_celebration_reminders, which it
+	# supersedes -- a fresh install has no rows for either to create, so
+	# both no-op here; on `install-app` over an old site they carry the
+	# legacy settings forward in order.
+	split_celebration_reminders_by_company.execute()
 	turn_off_hrms_celebration_senders.execute()
 	turn_off_hrms_leave_notification.execute()
 	seed_report_access.execute()

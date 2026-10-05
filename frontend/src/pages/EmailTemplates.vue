@@ -1,16 +1,19 @@
 <script setup>
-import { computed, nextTick, reactive, ref } from 'vue'
-import { onBeforeRouteLeave } from 'vue-router'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { createResource, Button, Dialog } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
+import CelebrationEditor from '@/components/templates/CelebrationEditor.vue'
 import { useIsDesktop } from '@/lib/useIsDesktop'
+import { session } from '@/lib/session'
 
-// Plan 2026-10-02-001 U10 (R15, R18). The plan calls this page
-// NotificationSetup.vue; U7 already shipped the route and nav name as Email
-// templates, so the page keeps that one name. Every method behind it is gated
-// server-side by `_assert_can_manage_notifications` -- an HR Manager who
-// reaches the URL gets AsyncState's 'forbidden' region, not the editor.
+// Plan 2026-10-02-001 U10 (R15, R18), role-sectioned since plan
+// 2026-10-04-004 U5 (KTD3): the Notification Manager edits the portal's own
+// message templates; the HR Manager gets the "Celebrations & holidays"
+// group, whose endpoints gate themselves on `_is_hr()` plus
+// `resolve_admin_scope`. The route is open to whoever holds
+// `can_edit_email_templates`; each group's server gate is the real one.
 
 const AUDIENCES = ['Employee', 'Approver', 'HR', 'Route role', 'Security']
 
@@ -218,6 +221,59 @@ const BADGE = {
 }
 const showList = computed(() => isDesktop.value || !selected.value)
 const showEditor = computed(() => !!selected.value)
+
+// --- the group nav (plan 2026-10-04-004 U5, KTD3) ---------------------------
+
+const route = useRoute()
+const router = useRouter()
+
+// A caller with only the celebrations group (an HR Manager who is not a
+// Notification Manager) lands on it; a Notification Manager lands on the
+// message templates.
+const activeGroup = computed(() => {
+  if (route.query.group === 'celebrations') return 'celebrations'
+  if (route.query.group === 'messages') return 'messages'
+  // No group in the URL: the caller's capability decides (an HR-only
+  // manager lands on the celebrations group, not an empty messages one).
+  return defaultGroup.value
+})
+const defaultGroup = computed(() =>
+  session.canManageNotifications ? 'messages' : session.canConfigure ? 'celebrations' : 'messages',
+)
+const showMessagesGroup = computed(() => !!session.canManageNotifications)
+const showCelebrationsGroup = computed(() => !!session.canConfigure)
+
+function chooseGroup(group) {
+  const query = { ...route.query, group }
+  if (group === activeGroup.value) return
+  if (group === 'celebrations') delete query.event
+  else delete query.company
+  router.replace({ query })
+}
+
+// The company lives in the URL (`?company=…`) beside the group.
+const companies = createResource({ url: 'helixhr.api.get_celebration_setup', auto: false })
+const celebrationCompany = computed(() =>
+  typeof route.query.company === 'string' && route.query.company ? route.query.company : null,
+)
+async function ensureCelebrationCompany() {
+  if (celebrationCompany.value) return
+  try {
+    const data = await companies.fetch()
+    const fallback = data?.companies?.[0]
+    if (fallback) router.replace({ query: { ...route.query, company: fallback } })
+  } catch {
+    // The editor's own AsyncState below shows the refusal (an HR Manager
+    // with no Employee record hits this only if the server gate changed).
+  }
+}
+watch(
+  [activeGroup, celebrationCompany],
+  async ([group]) => {
+    if (group === 'celebrations' && !celebrationCompany.value) await ensureCelebrationCompany()
+  },
+  { immediate: true },
+)
 </script>
 
 <template>
@@ -227,7 +283,48 @@ const showEditor = computed(() => !!selected.value)
       subtitle="Edit the wording of every email the portal sends."
     />
 
+    <!-- The group nav: message templates for the Notification Manager,
+         celebrations & holidays for HR (KTD3). -->
+    <div
+      v-if="showCelebrationsGroup"
+      class="mb-4 flex gap-1 border-b border-outline-gray-1"
+      role="tablist"
+      aria-label="Template groups"
+      data-testid="email-template-groups"
+    >
+      <button
+        v-if="showMessagesGroup"
+        type="button"
+        role="tab"
+        class="min-h-11 rounded-t-lg px-3 py-2 text-sm"
+        :class="activeGroup === 'messages' ? 'border-b-2 border-outline-gray-4 font-medium text-ink-gray-9' : 'text-ink-gray-7 hover:text-ink-gray-9'"
+        :aria-selected="activeGroup === 'messages' ? 'true' : 'false'"
+        data-testid="email-template-group-messages"
+        @click="chooseGroup('messages')"
+      >
+        Message templates
+      </button>
+      <button
+        type="button"
+        role="tab"
+        class="min-h-11 rounded-t-lg px-3 py-2 text-sm"
+        :class="activeGroup === 'celebrations' ? 'border-b-2 border-outline-gray-4 font-medium text-ink-gray-9' : 'text-ink-gray-7 hover:text-ink-gray-9'"
+        :aria-selected="activeGroup === 'celebrations' ? 'true' : 'false'"
+        data-testid="email-template-group-celebrations"
+        @click="chooseGroup('celebrations')"
+      >
+        Celebrations &amp; holidays
+      </button>
+    </div>
+
+    <CelebrationEditor
+      v-if="showCelebrationsGroup && activeGroup === 'celebrations' && celebrationCompany"
+      :key="celebrationCompany"
+      :company="celebrationCompany"
+    />
+
     <AsyncState
+      v-else-if="showMessagesGroup"
       section="email-templates"
       :resource="setup"
       :empty="!events.length"

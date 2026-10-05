@@ -1,5 +1,6 @@
-"""P4-KTD11 / P4-R19: the two default Email Templates, seeded once and never
-overwritten.
+"""P4-KTD11 / P4-R19: the default Email Templates, seeded once and never
+overwritten. Plan 2026-10-04-004 U3 adds the holiday reminder's own
+(KTD7), which replaces HRMS's hardcoded wording.
 
 `helixhr.reminders` sends nothing until HR picks a template on HR Settings,
 and HR should not have to write one from scratch to switch the branded email
@@ -52,6 +53,24 @@ def _html(headline, body, line):
 	return _WRAPPER.replace("@HEADLINE@", headline).replace("@BODY@", body).replace("@LINE@", line)
 
 
+# The holiday reminder's context is different -- it is *to* the employee,
+# about their own upcoming non-weekly holidays (`reminders
+# .send_holiday_reminders`'s `_send_holiday_company`), not about a
+# celebrant.
+_HOLIDAY_HTML = """<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+ color:#1f2933;line-height:1.5;max-width:520px">
+{%- if logo_url %}
+ <img src="{{ logo_url }}" alt="{{ company }}" style="max-height:40px;margin-bottom:20px">
+{%- endif %}
+ <p style="font-size:20px;font-weight:600;margin:0 0 12px">{{ employee_name }}, your upcoming holidays</p>
+ <ul style="margin:0 0 16px;padding-left:20px">
+ {%- for holiday in holidays %}
+  <li>{{ holiday.date }} &middot; {{ holiday.description }}</li>
+ {%- endfor %}</ul>
+ <p style="margin:0"><a href="{{ portal_url }}" style="color:#1f6feb">Open HelixHR</a></p>
+ <p style="margin:24px 0 0;font-size:12px;color:#9aa5b1">{{ company }} &middot; {{ date }}</p>
+</div>"""
+
 TEMPLATES = (
 	{
 		"name": "HelixHR Birthday Reminder",
@@ -65,6 +84,13 @@ TEMPLATES = (
 			"Do say something to {{ names }}.",
 			line="{{ person.name }}",
 		),
+	},
+	{
+		# Plan 2026-10-04-004 U3: replaces HRMS's own hardcoded holiday
+		# reminder, which no template backed and no wording could change.
+		"name": "HelixHR Holiday Reminder",
+		"subject": "Holidays ahead at {{ company }}",
+		"response_html": _HOLIDAY_HTML,
 	},
 	{
 		"name": "HelixHR Work Anniversary Reminder",
@@ -81,6 +107,9 @@ TEMPLATES = (
 		),
 	},
 )
+
+
+
 
 
 def execute():

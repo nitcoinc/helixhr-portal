@@ -410,12 +410,16 @@ has_permission = {
 # `events.hr_settings_validate` and preflight guard against.
 # Plan 2026-10-02-001 U11 / KTD13: the overdue digest's dated rerun guard
 # must survive `clear-cache` and `bench migrate`; it expires on its own.
-persistent_cache_keys = ["helixhr-overdue-digest|*"]
+# Plan 2026-10-04-004 U1: the same guard, per (event, company, day), for
+# the celebration senders -- per-company settings multiply the blast radius
+# of a hand-run `bench execute`.
+persistent_cache_keys = ["helixhr-overdue-digest|*", "helixhr-celebration|*"]
 
 scheduler_events = {
 	"daily": [
 		"helixhr.tasks.null_stale_checkin_coordinates",
 		"helixhr.reminders.send_celebration_reminders",
+		"helixhr.reminders.send_holiday_reminders",
 		"helixhr.reminders.send_overdue_digests",
 	],
 	# Off by default -- helixhr.telemetry.send_ping is a no-op until an

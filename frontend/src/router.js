@@ -172,18 +172,29 @@ const routes = [
     // the portal) rather than only via in-page tabs. `get_portal_config` is
     // the server's own gate -- an employee hitting this route directly gets
     // AsyncState's 'forbidden' region, not a client-side redirect.
-    path: '/settings/:section(categories|leave-types|holiday-lists|shift-types|celebrations|report-access|portal-roles)',
+    path: '/settings/:section(categories|leave-types|holiday-lists|shift-types|report-access|portal-roles)',
     name: 'SettingsSection',
     meta: { deskOnly: true },
     component: () => import('@/pages/Settings.vue'),
     props: true,
   },
   {
+    // Plan 2026-10-04-004 U5 / R13: the Settings page's celebrations section
+    // moved to the Email templates page's own group; the old URL lands there.
+    path: '/settings/celebrations',
+    name: 'SettingsCelebrations',
+    redirect: () => ({ name: 'EmailTemplates', query: { group: 'celebrations' } }),
+  },
+  {
     // Plan 2026-10-02-001 U7. The page is U10's; every method behind it is
     // the server's own gate, same posture as /settings above.
     path: '/email-templates',
     name: 'EmailTemplates',
-    meta: { deskOnly: true, notificationsOnly: true },
+    // Plan 2026-10-04-004 U5 / KTD3: the route gate is the bootstrap flag
+    // `can_edit_email_templates` (Notification Manager, HR Manager or System
+    // Manager) -- never a role list, and each group's endpoints keep their
+    // own server gate.
+    meta: { deskOnly: true, templatesOnly: true },
     component: () => import('@/pages/EmailTemplates.vue'),
   },
   {
@@ -309,8 +320,10 @@ router.beforeEach(async (to) => {
 
   // Plan 2026-10-02-001 U10: a caller without `can_manage_notifications`
   // (an HR Manager, say) is sent Home rather than shown a refusal. The
-  // server's guard is still the real gate.
-  if (to.meta.notificationsOnly && !session.canManageNotifications && session.status !== 'unavailable') {
+  // server's guard is still the real gate. Since plan 2026-10-04-004 U5 the
+  // page itself is open to `can_edit_email_templates` -- the flag the nav
+  // item reads -- so the two can never disagree.
+  if (to.meta.templatesOnly && !session.canEditEmailTemplates && session.status !== 'unavailable') {
     return { name: 'Dashboard' }
   }
 
@@ -327,7 +340,7 @@ router.beforeEach(async (to) => {
   // A Notification Manager with no Desk role (plan 2026-10-02-001 U7) has
   // one page in the portal, so every route lands on Email templates.
   if (session.status === 'desk-only') {
-    if (session.canManageNotifications && !session.deskUrl) {
+    if (session.canEditEmailTemplates && !session.deskUrl) {
       return to.name === 'EmailTemplates' ? true : { name: 'EmailTemplates' }
     }
     return to.meta.deskOnly ? true : { name: 'Dashboard' }

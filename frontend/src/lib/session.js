@@ -136,6 +136,10 @@ function apply(boot) {
   state.canHandleRequests = !!boot?.can_handle_requests
   state.canConfigure = !!boot?.can_configure
   state.canManageNotifications = !!boot?.can_manage_notifications
+  // Plan 2026-10-04-004 U5: the Email templates page opens for the
+  // Notification Manager *or* the HR Manager / System Manager (KTD3) --
+  // either role reaches the page; each group's endpoints gate themselves.
+  state.canEditEmailTemplates = !!boot?.can_edit_email_templates
   state.canSeeOrganisation = !!boot?.can_see_organisation
   state.canSeePeople = !!boot?.can_see_people
   state.canSeeProjects = !!boot?.can_see_projects

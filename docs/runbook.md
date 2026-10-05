@@ -412,6 +412,60 @@ current value, or a `personal_email` change in the last 72 h) shows inline. Ever
 comment on the request. Open decision: the Employee's own Version log shows the changed bank
 field after Done.
 
+## Celebrations and holidays: operator notes (plan 2026-10-04-004)
+
+**Where it is configured.** Portal → Email templates → "Celebrations & holidays",
+per company per event. The Settings page's old Celebrations tab redirects there.
+Each company decides its own birthday, anniversary and holiday mail; a company
+with no enabled row sends nothing.
+
+**After the migrate that ships this**: the split patch copied whatever was
+configured globally to every company (R14). Open the group and switch off every
+company that should not receive mail -- the copy is faithful, including "send
+to selected people", narrowed per company. HRMS's own holiday reminder is
+unticked by the same migrate (`send_holiday_reminders`, and its frequency
+selector is read-only now); both are preflight FAILs if ever on.
+
+**A celebration email went to the wrong company.** Almost always a duplicate
+mailbox: two active Employee records in different companies that resolve to one
+address (ERPNext only blocks a duplicate `user_id`). The sender drops such
+addresses at send time and logs them once per run; preflight "Cross-company
+mailboxes" WARNs and names both records. Find every pair with:
+
+```sql
+SELECT resolved, COUNT(*) AS employees, GROUP_CONCAT(name, ' (', company, ')' SEPARATOR ' | ') AS records
+FROM (
+  SELECT name, company,
+         COALESCE(NULLIF(user_id, ''), NULLIF(company_email, ''), NULLIF(personal_email, '')) AS resolved
+  FROM `tabEmployee`
+  WHERE status = 'Active'
+) t
+WHERE resolved IS NOT NULL
+GROUP BY resolved
+HAVING COUNT(DISTINCT company) > 1;
+```
+
+Fix is data: set the stale duplicate to **Left**. Sharing one address *within*
+one company is fine and is not warned.
+
+**No celebration or holiday mail this morning.** Check in order: the row for
+that (event, company) enabled with a template that still exists (preflight
+FAILs and names it otherwise); a default outgoing Email Account; for the
+holiday reminder, the row's frequency against today (Weekly sends only on
+Monday, Monthly only on the 1st -- nothing on any other day is by design); the
+Error Log for `HelixHR celebration reminders` / `HelixHR holiday reminders`
+(one swallowed render failure per company, the other companies unaffected);
+`HelixHR celebrations skipped for want of a company` counts employees with no
+company who were therefore skipped.
+
+**A same-day rerun sends nothing.** Deliberate (KTD8): the job writes a dated
+guard key per (event, company) after mail actually went out -- kept through
+`clear-cache`, expiring after 36 h -- so `bench execute
+helixhr.reminders.send_celebration_reminders` after the scheduler's round mails
+no company twice. A company whose send *failed* (broken template, no account)
+is not marked, so fixing the cause and running the job by hand the same morning
+still delivers.
+
 ## Employee gets locked/HR-only fields from more than one place (U5 follow-up)
 
 `helixhr/fixtures/property_setter.json`'s permlevel pass only queried the `DocField` doctype,
