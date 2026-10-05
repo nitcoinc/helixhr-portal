@@ -121,20 +121,31 @@ fixtures = [
 		# Manager" and "Pending HR" are the attendance request's two
 		# pending steps (P3-KTD6). "Sent Back" is P4-KTD1: it carries the
 		# recoverable meaning "Rejected" used to carry on both workflows,
-		# which frees "Rejected" to mean a final no. States before the
+		# which frees "Rejected" to mean a final no. "Cancelled" is plan
+		# 2026-10-04-003 KTD2: HR's exit from an Approved week, the one
+		# docstatus-2 state on the Timesheet workflow. States before the
 		# Workflows that link to them.
 		"dt": "Workflow State",
 		"filters": [
 			[
 				"name",
 				"in",
-				["Draft", "Pending Approval", "Pending Manager", "Pending HR", "Sent Back", "Waiting on Employee"],
+				[
+					"Draft",
+					"Pending Approval",
+					"Pending Manager",
+					"Pending HR",
+					"Sent Back",
+					"Waiting on Employee",
+					"Cancelled",
+				],
 			]
 		],
 	},
 	# Timesheet Approval (KTD7) and Attendance Request Approval (P3-KTD6),
 	# each carrying the four outcomes of P4-KTD1 (Timesheet has three --
-	# P4-KTD2).
+	# P4-KTD2), plus Recall and Cancel on the timesheet (plan
+	# 2026-10-04-003 U1).
 	#
 	# Why every HR Manager transition keeps `allow_self_approval: 1` and a
 	# `user_id != frappe.session.user` condition instead (P4-R8): Frappe's
@@ -148,7 +159,9 @@ fixtures = [
 	# `events.attendance_request_before_submit` ask it again on the raw
 	# `frappe.client.submit` route the fixture never sees. The Employee-role
 	# (line manager) transitions keep `allow_self_approval: 0`, where `owner`
-	# genuinely is the employee.
+	# genuinely is the employee -- with one exception, `Recall`, where
+	# `allow_self_approval: 1` is what lets the employee move their own week
+	# and the condition is what keeps it from anybody else (KTD1).
 	{
 		"dt": "Workflow",
 		"filters": [["document_type", "in", ["Timesheet", "Attendance Request", "HR Request"]]],
@@ -156,10 +169,15 @@ fixtures = [
 	{
 		# Likewise "Approve" and "Reject" already exist as shared Workflow
 		# Action Master records; "Submit", "Edit", "Send Back" and
-		# "Send to HR" are this app's own.
+		# "Send to HR" are this app's own. "Recall" and "Cancel" are plan
+		# 2026-10-04-003 U1 (R5, KTD2).
 		"dt": "Workflow Action Master",
 		"filters": [
-			["name", "in", ["Submit", "Edit", "Send Back", "Send to HR", "Pick up", "Need info", "Done"]]
+			[
+				"name",
+				"in",
+				["Submit", "Edit", "Send Back", "Send to HR", "Pick up", "Need info", "Done", "Recall", "Cancel"],
+			]
 		],
 	},
 	# P4-KTD7a: `helixhr_decision_reason` on the two workflow kinds, at
@@ -187,6 +205,12 @@ doc_events = {
 		"on_update": "helixhr.events.timesheet_on_update",
 		"before_submit": "helixhr.events.timesheet_before_submit",
 		# Plan 2026-10-02-001 U4: `helixhr_pending_since`, on save and db_set.
+		"on_change": "helixhr.events.stamp_pending_since",
+	},
+	# Plan 2026-10-04-003 U3: the change request's arrival notice, and the
+	# same pending-since stamp the other approval kinds carry.
+	"HelixHR Timesheet Change": {
+		"after_insert": "helixhr.events.timesheet_change_after_insert",
 		"on_change": "helixhr.events.stamp_pending_since",
 	},
 	"File": {

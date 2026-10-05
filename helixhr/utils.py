@@ -322,6 +322,58 @@ NOTIFICATION_EVENTS = {
 			"{% if decision_note %}<p>Note: {{ decision_note }}</p>{% endif %}"
 		),
 	},
+	"timesheet_recalled": {
+		"label": "Week recalled",
+		"audience": "Approver",
+		"variables": {
+			"employee_name": _LEAVE_VARIABLES["employee_name"],
+			"week_label": ("The week", "5 to 11 Oct 2026"),
+		},
+		"subject": "{{ employee_name }} recalled their week: {{ week_label }}",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>{{ employee_name }} took back their timesheet for {{ week_label }} before you decided it."
+			" It is no longer waiting for you.</p>"
+		),
+	},
+	"timesheet_change_requested": {
+		"label": "Change request on an approved week",
+		"audience": "Approver",
+		"variables": {
+			"employee_name": _LEAVE_VARIABLES["employee_name"],
+			"week_label": ("The week", "5 to 11 Oct 2026"),
+			"comment": ("What the employee asked to change", "Tuesday should be 6 hours, not 2"),
+			"action_url": _LEAVE_VARIABLES["action_url"],
+		},
+		"subject": "Change request: {{ employee_name }}, {{ week_label }}",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>{{ employee_name }} asked to change their approved timesheet for {{ week_label }}:</p>"
+			"<p>“{{ comment }}”</p>"
+		),
+		"action_label": "Review request",
+	},
+	"timesheet_change_decided": {
+		"label": "Change request decided",
+		"audience": "Employee",
+		"variables": {
+			"week_label": ("The week", "5 to 11 Oct 2026"),
+			"state": ("What happened to it", "accepted"),
+			**_DECISION,
+		},
+		"subject": "Your change request for {{ week_label }} was {{ state }}",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"{% if state == 'accepted' %}"
+			"<p>{{ approver_name }} accepted your change request for {{ week_label }}."
+			" The week is back with you as a draft -- edit it and send it again.</p>"
+			"{% else %}"
+			"<p>{{ approver_name }} declined your change request for {{ week_label }}."
+			" The week stays as it was.</p>"
+			"{% if decision_note %}<p>Note: {{ decision_note }}</p>{% endif %}"
+			"{% endif %}"
+		),
+	},
 	"attendance_for_hr": {
 		"label": "Attendance request waiting for HR",
 		"audience": "HR",
@@ -1245,7 +1297,15 @@ def portal_home_page(user=None):
 RATE_LIMIT_POLICY = {
 	"update_my_profile": (20, 60),
 	"save_my_week": (30, 60),
+	# Plan 2026-10-04-003 U2: recall is a rare correction, not a loop.
+	"recall_my_week": (10, 60),
+	# U3: a change request mails its approver, and a withdraw is rare.
+	"raise_timesheet_change": (10, 3600),
+	"withdraw_timesheet_change": (10, 3600),
 	"act_on_approval": (30, 60),
+	# Plan 2026-10-04-003 U6: one batch call stands in for up to 60 single
+	# decisions, so it is bounded tighter than the per-item path, not looser.
+	"approve_clean_items": (10, 60),
 	"get_overdue_approvals": (60, 60),
 	"apply_for_leave": (20, 3600),
 	"withdraw_my_leave": (20, 3600),
@@ -1266,6 +1326,11 @@ RATE_LIMIT_POLICY = {
 	"download_my_payslip": (10, 60),
 	"get_directory": (60, 60),
 	"get_my_team_week": (60, 60),
+	# Plan 2026-10-04-003 U4: the timesheets half of the Team page and the
+	# one report's read-only week -- both fan out per report like the leave
+	# week above, so they are bounded the same way.
+	"get_my_team_timesheets": (60, 60),
+	"get_team_member_week": (60, 60),
 	"get_organisation_view": (60, 60),
 	"search_people": (60, 60),
 	"get_person": (60, 60),

@@ -39,7 +39,7 @@ scoped to their own Employee record has no HR queue (P4-R11).
 import os
 
 import frappe
-from frappe.utils import cint
+from frappe.utils import cint, flt
 
 from helixhr.patches.v1_0.apply_permission_deltas import DELTAS
 from helixhr.utils import (
@@ -861,6 +861,11 @@ def check_fixtures():
 		("Workflow Action Master", "Pick up"),
 		("Workflow Action Master", "Need info"),
 		("Workflow Action Master", "Done"),
+		# Plan 2026-10-04-003 U1: Recall and Cancel, and the Cancelled state
+		# they need (same Link/ignore_links reason as the rows above).
+		("Workflow State", "Cancelled"),
+		("Workflow Action Master", "Recall"),
+		("Workflow Action Master", "Cancel"),
 		("Activity Type", "General"),
 		("Notification", "HelixHR Timesheet Status Changed"),
 		("Notification", "HelixHR Leave Status Changed"),
@@ -935,6 +940,22 @@ def check_hrms_leave_notification():
 	return _result("HRMS leave notification", PASS, "off; HelixHR sends leave email")
 
 
+def check_standard_working_hours():
+	"""Plan 2026-10-04-003 KTD7: the queue's "hours off" flag measures a
+	week against `HR Settings.standard_working_hours`. Unset, the flag
+	stays off -- never wrong, just quiet -- so this is a WARN and says what
+	went quiet rather than failing a site that measures hours another way."""
+	value = flt(frappe.db.get_single_value("HR Settings", "standard_working_hours"))
+	if not value:
+		return _result(
+			"Standard working hours",
+			WARN,
+			"HR Settings has no standard working hours, so the approval queue's "
+			"hours flag stays off -- set it to measure weeks against a full one",
+		)
+	return _result("Standard working hours", PASS, f"{value} hours a day")
+
+
 def check_hr_request_workflow_state_order():
 	"""P5-KTD4: `Open` must be `states[0]` on the `HR Request Handling`
 	workflow, or every `create_my_request` throws -- `HR Request.status`
@@ -954,6 +975,47 @@ def check_hr_request_workflow_state_order():
 			f"states[0] is {states[0].state if states else 'missing'}, not Open -- every new request will throw",
 		)
 	return _result("HR Request workflow state order", PASS, "Open is states[0]")
+
+
+def check_timesheet_workflow_state_order():
+	"""Plan 2026-10-04-003 U1 / KTD2: the Timesheet workflow's state order is
+	load-bearing the same way the HR Request one is, with two extra edges.
+
+	`Workflow.on_update` backfills a null `workflow_state` by *state order*:
+	docstatus-0 rows take the first state, docstatus-1 rows the first state
+	with doc_status 1, so `Draft` must stay `states[0]` and `Approved` the
+	first doc_status-1 state -- reordering the fixture silently re-stamps
+	every legacy row's state. `Cancelled` must be present as the one
+	docstatus-2 state and last in the list, because the fixture is
+	append-only by design (an insert in the middle would shift what the
+	backfill picks)."""
+	if not frappe.db.exists("Workflow", "Timesheet Approval"):
+		return _result("Timesheet workflow state order", WARN, "Timesheet Approval workflow not installed")
+	workflow = frappe.get_doc("Workflow", "Timesheet Approval")
+	states = workflow.states
+	names = [row.state for row in states]
+	if not names or names[0] != "Draft":
+		return _result(
+			"Timesheet workflow state order",
+			FAIL,
+			f"states[0] is {names[0] if names else 'missing'}, not Draft -- legacy rows would backfill into a pending state",
+		)
+	first_submitted = next((row for row in states if str(row.doc_status) == "1"), None)
+	if not first_submitted or first_submitted.state != "Approved":
+		return _result(
+			"Timesheet workflow state order",
+			FAIL,
+			f"the first doc_status 1 state is {first_submitted.state if first_submitted else 'missing'}, not Approved",
+		)
+	if "Cancelled" not in names:
+		return _result("Timesheet workflow state order", FAIL, "Cancelled state is missing")
+	if names[-1] != "Cancelled":
+		return _result(
+			"Timesheet workflow state order",
+			FAIL,
+			f"Cancelled is {names.index('Cancelled') + 1} of {len(names)}, not last -- the fixture is append-only",
+		)
+	return _result("Timesheet workflow state order", PASS, "Draft first, Approved first submitted, Cancelled last")
 
 
 def check_profile_correction_category():
@@ -1589,7 +1651,9 @@ CHECKS = [
 	check_retired_request_notifications,
 	check_retired_hr_email_notifications,
 	check_hrms_leave_notification,
+	check_standard_working_hours,
 	check_hr_request_workflow_state_order,
+	check_timesheet_workflow_state_order,
 	check_request_category_routes,
 	check_request_category_prefixes,
 	check_profile_correction_category,

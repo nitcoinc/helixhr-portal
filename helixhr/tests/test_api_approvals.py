@@ -4,7 +4,7 @@ import json
 import frappe
 from frappe.model.workflow import apply_workflow
 from frappe.tests import IntegrationTestCase
-from frappe.utils import add_days, add_to_date, getdate, now_datetime, today
+from frappe.utils import add_days, add_to_date, flt, getdate, now_datetime, today
 
 from helixhr.api import (
 	_allowed_actions,
@@ -431,7 +431,7 @@ class TestApprovalQueueAndEvidence(IntegrationTestCase):
 		self.assertIn(timesheet, names)
 		self.assertNotIn(leave.name, names)
 		kinds = {row["name"]: row["count"] for row in result["counts"]["kinds"]}
-		self.assertEqual(list(kinds), ["leave", "timesheet", "attendance", "request"])
+		self.assertEqual(list(kinds), ["leave", "timesheet", "attendance", "request", "change"])
 		self.assertEqual(result["total"], kinds["timesheet"])
 		self.assertGreaterEqual(kinds["leave"], 1)
 		with self.assertRaises(frappe.ValidationError):
@@ -1327,11 +1327,19 @@ class TestAttendanceRequestApprovals(IntegrationTestCase):
 		# feed yet -- its whole queue is `_hr_request_summaries`, reached
 		# through `_APPROVAL_KINDS["HR Request"]["hr_queue"]` rather than
 		# either tuple below (P5-U6; the receipts feed is explicitly deferred
-		# in the plan's Deferred to Follow-Up Work). The three doctypes that
-		# do have both must still each have exactly one entry.
+		# in the plan's Deferred to Follow-Up Work). The doctypes that do have
+		# both must still each have exactly one entry. HelixHR Timesheet
+		# Change (plan 2026-10-04-003 U3) joins the line-manager half with a
+		# queue collector of its own; it has no "recently decided" receipt on
+		# purpose -- the employee already hears every accept and decline
+		# through `timesheet_change_decided`, and the request's own record
+		# carries the outcome (R21).
 		line_manager_doctypes = doctypes - {"HR Request"}
 		self.assertEqual(len(api._APPROVAL_SUMMARY_COLLECTORS), len(line_manager_doctypes))
-		self.assertEqual(len(api._DECIDED_COLLECTORS), len(line_manager_doctypes))
+		self.assertEqual(
+			len(api._DECIDED_COLLECTORS),
+			len(line_manager_doctypes - {"HelixHR Timesheet Change"}),
+		)
 		# Each kind's "already decided" sentence names its own record type.
 		self.assertEqual(
 			len({kind["open_message"] for kind in api._APPROVAL_KINDS.values()}), len(doctypes)
@@ -2340,3 +2348,348 @@ class TestHrOverdueTab(IntegrationTestCase):
 			[(g["owner_name"], len(g["items"])) for g in result["groups"]],
 			[(g["owner_name"], len(g["items"])) for g in summary],
 		)
+
+
+class TestBulkApproval(IntegrationTestCase):
+	"""Plan 2026-10-04-003 U6 (R17, R18): `approve_clean_items`.
+
+	The batch re-authorizes every item through `_decide_one`, re-checks each
+	concurrency token, and recomputes the R16 flags on the server before
+	approving -- so "clean" is the server's judgement, never the browser's.
+	One refused item never stops the rest (R18)."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.standard = frappe.db.get_single_value("HR Settings", "standard_working_hours")
+		frappe.db.set_single_value("HR Settings", "standard_working_hours", 8)
+
+		self.employee_name, self.employee_user, self.manager_name, self.manager_user = (
+			make_test_employee_and_manager()
+		)
+		self.company = frappe.db.get_value("Employee", self.employee_name, "company")
+		frappe.db.set_value("Employee", self.employee_name, "reports_to", self.manager_name)
+		self.second_name = make_test_user("bulk-second@helixhr.test", self.company, reports_to=self.manager_name)
+
+		digest = int(hashlib.md5(self.id().encode()).hexdigest(), 16)
+		self.digest = digest
+		# The leave half runs on this test's own employee: the batch commits
+		# per item (R18), so whatever it does persists, and a shared fixture
+		# employee's balance is the last place that should land.
+		self.leave_name = make_test_user(f"bulk-leave-{digest % 10000}@helixhr.test", self.company)
+		self.leave_user = frappe.db.get_value("Employee", self.leave_name, "user_id")
+		frappe.db.set_value("Employee", self.leave_name, "reports_to", self.manager_name)
+		# HRMS's own access check for the approve path reads the *Employee
+		# record's* leave approver, not the application's -- name the manager
+		# there the way HR does on a real site.
+		frappe.db.set_value("Employee", self.leave_name, "leave_approver", self.manager_user)
+		self.monday = get_week_bounds(add_days(today(), (digest % 200) + 50))[0]
+		list_name = "_Test Bulk Week"
+		if frappe.db.exists("Holiday List", list_name):
+			frappe.delete_doc("Holiday List", list_name, force=1, ignore_permissions=True)
+		self.holiday_list = (
+			frappe.get_doc(
+				{
+					"doctype": "Holiday List",
+					"holiday_list_name": list_name,
+					"from_date": "2019-01-01",
+					"to_date": "2049-12-31",
+					"holidays": [
+						{
+							"holiday_date": add_days(self.monday, 5),
+							"weekly_off": 1,
+							"description": "weekly off",
+						},
+						{
+							"holiday_date": add_days(self.monday, 6),
+							"weekly_off": 1,
+							"description": "weekly off",
+						},
+					],
+				}
+			)
+			.insert(ignore_permissions=True)
+			.name
+		)
+		for employee in (self.employee_name, self.second_name, self.leave_name):
+			frappe.db.set_value("Employee", employee, "holiday_list", self.holiday_list)
+		# A dedicated allocation window wide enough for the dates below,
+		# which sit years ahead on purpose: this test's leaves must never
+		# share dates with any other suite's (the overlap flag counts the
+		# whole company's leaves on the same days). This test's leave starts
+		# clean every run -- the leaves go before their allocations, which an
+		# existing application would refuse to release -- and earlier runs'
+		# allocations go too, because two overlapping windows are refused.
+		for name in frappe.get_all(
+			"Leave Application", filters={"employee": self.leave_name}, pluck="name"
+		):
+			doc = frappe.get_doc("Leave Application", name)
+			if doc.docstatus == 1:
+				doc.flags.ignore_permissions = True
+				doc.cancel()
+			frappe.delete_doc("Leave Application", name, force=1, ignore_permissions=True)
+		for name in frappe.get_all(
+			"Leave Allocation", filters={"employee": self.leave_name}, pluck="name"
+		):
+			doc = frappe.get_doc("Leave Allocation", name)
+			if doc.docstatus == 1:
+				doc.flags.ignore_permissions = True
+				doc.cancel()
+			frappe.delete_doc("Leave Allocation", name, force=1, ignore_permissions=True)
+		if not frappe.db.exists(
+			"Leave Allocation",
+			{
+				"employee": self.leave_name,
+				"leave_type": "Casual Leave",
+				"from_date": str(today()),
+				"to_date": str(add_days(today(), 1400)),
+			},
+		):
+			frappe.get_doc(
+				{
+					"doctype": "Leave Allocation",
+					"employee": self.leave_name,
+					"leave_type": "Casual Leave",
+					"from_date": str(today()),
+					"to_date": str(add_days(today(), 1400)),
+					"new_leaves_allocated": 60,
+				}
+			).insert(ignore_permissions=True).submit()
+		# The batch commits per item, so approved leave permanently consumes
+		# the shared fixture employee's balance. Top the allocation up to a
+		# working level rather than incrementing it forever: an allocation
+		# larger than its own period refuses to save, and earlier runs have
+		# already pushed this one around (the runbook's balance-baseline
+		# note). The document's own save keeps the ledger with it.
+		allocation = frappe.db.get_value(
+			"Leave Allocation",
+			{"employee": self.employee_name, "leave_type": "Casual Leave", "docstatus": 1},
+			"name",
+		)
+		if allocation and flt(frappe.db.get_value("Leave Allocation", allocation, "new_leaves_allocated")) < 30:
+			allocation_doc = frappe.get_doc("Leave Allocation", allocation)
+			allocation_doc.new_leaves_allocated = 30
+			allocation_doc.save(ignore_permissions=True)
+		# Open leave from earlier runs would trip HRMS's pending-balance
+		# check for every later request; this test's leave starts clean.
+		for name in frappe.get_all(
+			"Leave Application",
+			filters={"employee": self.leave_name, "status": "Open", "docstatus": 0},
+			pluck="name",
+		):
+			frappe.delete_doc("Leave Application", name, force=1, ignore_permissions=True)
+		self.project = self._project()
+		# Weeks from earlier runs persist and a Pending Approval week refuses
+		# edits; this test's week starts empty every run.
+		for employee in (self.employee_name, self.second_name, self.manager_name):
+			for name in frappe.get_all(
+				"Timesheet",
+				filters={
+					"employee": employee,
+					"start_date": ["between", [str(self.monday), str(add_days(self.monday, 6))]],
+				},
+				pluck="name",
+			):
+				doc = frappe.get_doc("Timesheet", name)
+				if doc.docstatus == 1:
+					doc.flags.ignore_permissions = True
+					doc.cancel()
+				frappe.delete_doc("Timesheet", name, force=1, ignore_permissions=True)
+
+		# The batch commits per item (R18); give it a committed baseline so
+		# a refused item's rollback cannot eat the fixtures -- the same
+		# pattern the test framework itself uses at class setup.
+		frappe.db.commit()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		frappe.db.set_single_value("HR Settings", "standard_working_hours", self.standard)
+		frappe.db.commit()
+
+	def _project(self):
+		name = frappe.db.get_value("Project", {"project_name": "_Test Bulk Project"}, "name")
+		if not name:
+			name = (
+				frappe.get_doc(
+					{"doctype": "Project", "project_name": "_Test Bulk Project", "company": self.company}
+				)
+				.insert(ignore_permissions=True)
+				.name
+			)
+		for user in (self.employee_user, "bulk-second@helixhr.test", self.manager_user):
+			if not frappe.db.exists("User Permission", {"user": user, "allow": "Project", "for_value": name}):
+				frappe.get_doc(
+					{"doctype": "User Permission", "user": user, "allow": "Project", "for_value": name}
+				).insert(ignore_permissions=True)
+		return name
+
+	def _clean_week(self, employee, user, hours=8):
+		frappe.set_user(user)
+		rows = [
+			{"date": str(add_days(self.monday, offset)), "project": self.project, "task": "", "hours": hours, "note": ""}
+			for offset in range(5)
+		]
+		name = save_my_week(str(self.monday), json.dumps(rows))
+		apply_workflow({"doctype": "Timesheet", "name": name}, "Submit")
+		return name, frappe.db.get_value("Timesheet", name, ["modified", "workflow_state"], as_dict=True)
+
+	def _clean_leave(self, offset):
+		user, employee = self.leave_user, self.leave_name
+		frappe.set_user(user)
+		# Dates unique to this test: the overlap flag counts any other
+		# employee's leave on the same days, so two runs or two tests sharing
+		# dates would flag each other through no fault of the endpoint.
+		start = 700 + (self.digest % 40) * 25 + offset * 3
+		doc = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": employee,
+				"leave_type": "Casual Leave",
+				"from_date": str(add_days(today(), start)),
+				"to_date": str(add_days(today(), start + 1)),
+				"description": "bulk",
+				"leave_approver": self.manager_user,
+			}
+		)
+		doc.insert()
+		return doc.name, frappe.db.get_value("Leave Application", doc.name, ["modified", "status"], as_dict=True)
+
+	def _items(self, *entries):
+		return [
+			{
+				"doctype": doctype,
+				"name": name,
+				"expected_modified": str(row.modified),
+				"expected_state": row.workflow_state if hasattr(row, "workflow_state") else row.status,
+			}
+			for doctype, name, row in entries
+		]
+
+	def _call(self, items, user=None):
+		frappe.set_user(user or self.manager_user)
+		from helixhr.api import approve_clean_items
+
+		return approve_clean_items(json.dumps(items))
+
+	def test_a_mixed_batch_approves_every_clean_item(self):
+		week_one, week_one_row = self._clean_week(self.employee_name, self.employee_user)
+		week_two, week_two_row = self._clean_week(self.second_name, "bulk-second@helixhr.test")
+		leave_one, leave_one_row = self._clean_leave(0)
+		leave_two, leave_two_row = self._clean_leave(10)
+
+		# A refused item's per-item rollback undoes everything since the
+		# last commit; give the batch a committed baseline, the way the
+		# framework itself does at class setup.
+		frappe.db.commit()
+		results = self._call(
+			self._items(
+				("Timesheet", week_one, week_one_row),
+				("Timesheet", week_two, week_two_row),
+				("Leave Application", leave_one, leave_one_row),
+				("Leave Application", leave_two, leave_two_row),
+			)
+		)
+
+		self.assertEqual([row["ok"] for row in results], [True, True, True, True])
+		for name in (week_one, week_two):
+			self.assertEqual(
+				frappe.db.get_value("Timesheet", name, ["workflow_state", "docstatus"], as_dict=True).workflow_state,
+				"Approved",
+			)
+		for name in (leave_one, leave_two):
+			self.assertEqual(frappe.db.get_value("Leave Application", name, "status"), "Approved")
+
+	def test_a_flagged_item_is_refused_and_the_rest_still_approve(self):
+		"""The server recomputes the flags (KTD6): a short week reads
+		"needs a look" at decide time, whatever the browser sent."""
+		clean, _row = self._clean_week(self.employee_name, self.employee_user)
+		frappe.set_user(self.employee_user)
+		apply_workflow({"doctype": "Timesheet", "name": clean}, "Recall")
+		save_my_week(
+			str(self.monday),
+			json.dumps(
+				[
+					{"date": str(add_days(self.monday, offset)), "project": self.project, "task": "", "hours": 2, "note": ""}
+					for offset in range(5)
+				]
+			),
+		)
+		apply_workflow({"doctype": "Timesheet", "name": clean}, "Submit")
+		flagged_row = frappe.db.get_value("Timesheet", clean, ["modified", "workflow_state"], as_dict=True)
+
+		leave, leave_row = self._clean_leave(20)
+		frappe.db.commit()
+		results = self._call(
+			self._items(
+				("Timesheet", clean, flagged_row),
+				("Leave Application", leave, leave_row),
+			)
+		)
+
+		self.assertFalse(results[0]["ok"])
+		self.assertIn("needs a look", results[0]["message"])
+		self.assertTrue(results[1]["ok"])
+		self.assertEqual(frappe.db.get_value("Timesheet", clean, "workflow_state"), "Pending Approval")
+
+	def test_a_stale_item_is_refused_and_the_rest_still_approve(self):
+		clean, _row = self._clean_week(self.employee_name, self.employee_user)
+		leave, leave_row = self._clean_leave(30)
+		frappe.db.commit()
+
+		results = self._call(
+			self._items(
+				("Timesheet", clean, frappe._dict(modified="2000-01-01 00:00:00", workflow_state="Pending Approval")),
+				("Leave Application", leave, leave_row),
+			)
+		)
+
+		self.assertFalse(results[0]["ok"])
+		self.assertTrue(results[1]["ok"])
+		self.assertEqual(frappe.db.get_value("Timesheet", clean, "workflow_state"), "Pending Approval")
+
+	def test_change_requests_are_never_batchable(self):
+		results = self._call(
+			[
+				{
+					"doctype": "HelixHR Timesheet Change",
+					"name": "whatever",
+					"expected_modified": "2000-01-01 00:00:00",
+					"expected_state": "Open",
+				}
+			]
+		)
+		self.assertFalse(results[0]["ok"])
+
+	def test_another_managers_report_is_refused(self):
+		from helixhr.tests.utils import OTHER_MANAGER_USER
+
+		week, week_row = self._clean_week(self.employee_name, self.employee_user)
+		frappe.db.commit()
+		results = self._call(self._items(("Timesheet", week, week_row)), user=OTHER_MANAGER_USER)
+		self.assertFalse(results[0]["ok"])
+		self.assertEqual(frappe.db.get_value("Timesheet", week, "workflow_state"), "Pending Approval")
+
+	def test_the_managers_own_week_is_refused(self):
+		frappe.set_user("Administrator")
+		manager_employee = self.manager_name
+		frappe.db.set_value("Employee", self.manager_name, "reports_to", self.employee_name)
+		week, week_row = self._clean_week(manager_employee, self.manager_user)
+		frappe.db.set_value("Employee", self.manager_name, "reports_to", None)
+		frappe.db.commit()
+
+		results = self._call(self._items(("Timesheet", week, week_row)))
+		self.assertFalse(results[0]["ok"])
+
+	def test_more_than_sixty_items_is_refused_before_any_work(self):
+		before = frappe.db.count("Timesheet", {"workflow_state": "Approved"})
+		items = [
+			{
+				"doctype": "Timesheet",
+				"name": f"TS-{index:05d}",
+				"expected_modified": "2000-01-01 00:00:00",
+				"expected_state": "Pending Approval",
+			}
+			for index in range(61)
+		]
+		with self.assertRaises(frappe.ValidationError):
+			self._call(items)
+		self.assertEqual(frappe.db.count("Timesheet", {"workflow_state": "Approved"}), before)

@@ -17,7 +17,7 @@
    "fieldtype": "Select",
    "in_list_view": 1,
    "label": "Message",
-   "options": "leave_submitted\nleave_for_hr\nleave_approved\nleave_rejected\nleave_sent_back\nleave_cancelled\ntimesheet_for_hr\ntimesheet_decided\nattendance_for_hr\nattendance_decided\nrequest_arrival\nrequest_status_changed\nrequest_reply\napproval_overdue_digest\nhr_overdue_summary\nbank_change_requested\nbank_change_applied",
+   "options": "leave_submitted\nleave_for_hr\nleave_approved\nleave_rejected\nleave_sent_back\nleave_cancelled\ntimesheet_for_hr\ntimesheet_decided\ntimesheet_recalled\ntimesheet_change_requested\ntimesheet_change_decided\nattendance_for_hr\nattendance_decided\nrequest_arrival\nrequest_status_changed\nrequest_reply\napproval_overdue_digest\nhr_overdue_summary\nbank_change_requested\nbank_change_applied",
    "reqd": 1,
    "unique": 1
   },

@@ -570,6 +570,19 @@ class TestPermissionDeltas(IntegrationTestCase):
 		`submit`."""
 		self.assertEqual(_rule("Timesheet", "Employee").submit, 1)
 
+	def test_employee_self_service_cannot_cancel_or_amend_a_timesheet(self):
+		"""Plan 2026-10-04-003 KTD2 / U1. HRMS gives Employee Self Service
+		`cancel` and `amend` on Timesheet; with the Cancelled workflow state
+		installed, Desk's own Cancel button hides behind
+		`can_cancel_document`, but `frappe.client.cancel` only ever asked the
+		DocPerm -- an employee could still cancel an approved week raw. The
+		deltas close both rights; the workflow's Cancel transition is the
+		only route left."""
+		rule = _rule("Timesheet", "Employee Self Service")
+		self.assertIsNotNone(rule, "Employee Self Service lost its Timesheet rule entirely")
+		self.assertEqual(frappe.utils.cint(rule.cancel), 0)
+		self.assertEqual(frappe.utils.cint(rule.amend), 0)
+
 	def test_the_employee_role_cannot_create_edit_or_delete_punches(self):
 		"""P3-KTD13 / P3-R7a: the portal method is the only way an employee
 		writes an Employee Checkin; `read` stays for the Attendance page."""
@@ -698,11 +711,17 @@ _TIMESHEET_EDGES = frozenset(
 		("Pending Approval", "Approve", "Approved", _MANAGER),
 		("Pending Approval", "Send Back", "Sent Back", _MANAGER),
 		("Pending Approval", "Send to HR", "Pending HR", _MANAGER),
+		# Plan 2026-10-04-003 U1 (R5): the employee takes a still-pending week
+		# back before the manager has decided.
+		("Pending Approval", "Recall", "Draft", _MANAGER),
 		("Pending Approval", "Approve", "Approved", _HR),
 		("Pending Approval", "Send Back", "Sent Back", _HR),
 		("Pending HR", "Approve", "Approved", _HR),
 		("Pending HR", "Send Back", "Sent Back", _HR),
 		("Sent Back", "Edit", "Draft", _MANAGER),
+		# Plan 2026-10-04-003 U1 (KTD2): HR's exit from Approved, through the
+		# workflow so the Desk Cancel button hides behind `can_cancel_document`.
+		("Approved", "Cancel", "Cancelled", _HR),
 	}
 )
 _HR_REQUEST_EDGES = frozenset(
@@ -762,10 +781,13 @@ class TestApprovalWorkflowFixtures(IntegrationTestCase):
 		self.assertEqual(self._edges(workflow), _TIMESHEET_EDGES)
 		self.assertEqual(
 			[row.state for row in workflow.states],
-			["Draft", "Pending Approval", "Pending HR", "Approved", "Sent Back"],
+			["Draft", "Pending Approval", "Pending HR", "Approved", "Sent Back", "Cancelled"],
 		)
 		# P4-KTD2: no terminal reject on a week, in either pending state.
 		self.assertNotIn("Reject", {t.action for t in workflow.transitions})
+		# Plan 2026-10-04-003 KTD2: Cancelled is terminal too -- nothing
+		# leads out of it; the amended copy starts at Draft instead.
+		self.assertEqual([t for t in workflow.transitions if t.state == "Cancelled"], [])
 
 	def test_the_hr_request_workflow_matches_the_table(self):
 		workflow = self._workflow("HR Request Handling")
@@ -795,6 +817,36 @@ class TestApprovalWorkflowFixtures(IntegrationTestCase):
 				first_per_docstatus.setdefault(str(row.doc_status), row.state)
 			self.assertEqual(first_per_docstatus["0"], "Draft", msg=name)
 			self.assertEqual(first_per_docstatus["1"], "Approved", msg=name)
+
+	def test_cancelled_is_the_only_docstatus_two_state_on_the_timesheet(self):
+		"""Plan 2026-10-04-003 KTD2. `Workflow.on_update` backfills a null
+		`workflow_state` by docstatus, so the one docstatus-2 state must be
+		Cancelled and it must be the one the Cancel transition lands on --
+		and it must be appended, never inserted, so existing rows keep the
+		states they already had."""
+		workflow = self._workflow("Timesheet Approval")
+		two = [(row.state, row.doc_status) for row in workflow.states if str(row.doc_status) == "2"]
+		self.assertEqual(two, [("Cancelled", "2")])
+		self.assertEqual(workflow.states[-1].state, "Cancelled")
+
+	def test_recall_keys_on_the_employee_not_the_owner_role(self):
+		"""Plan 2026-10-04-003 KTD1. The Recall transition must be the
+		employee's own move: the condition asks whether the week's Employee
+		points at the session user, and `allow_self_approval` is 1 only
+		because Frappe's own check keys on `doc.owner` -- without it the
+		employee could not recall their own week. A manager who also holds
+		Employee fails the condition, so Recall is never theirs."""
+		workflow = self._workflow("Timesheet Approval")
+		recall = [t for t in workflow.transitions if t.action == "Recall"]
+		self.assertEqual(len(recall), 1)
+		recall = recall[0]
+		self.assertEqual((recall.state, recall.next_state), ("Pending Approval", "Draft"))
+		self.assertEqual(recall.allowed, _MANAGER)
+		self.assertEqual(frappe.utils.cint(recall.allow_self_approval), 1)
+		self.assertIn(
+			'frappe.db.get_value("Employee", doc.employee, "user_id") == frappe.session.user',
+			recall.condition or "",
+		)
 
 	def test_every_hr_transition_refuses_the_requesters_own_record(self):
 		"""P4-R8. Frappe's own `allow_self_approval` guard is owner-based, and

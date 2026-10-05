@@ -426,8 +426,10 @@ test that asserts real data comes back, not just that the key exists.
 ## Timesheet approval workflow
 
 Shipped as a Workflow fixture on Timesheet with states Draft, Pending Approval,
-Pending HR, Approved, Sent Back and actions Submit, Approve, Send Back, Send to
-HR, Edit. The portal never shows those words; `docs/design-system.md` maps them
+Pending HR, Approved, Sent Back, Cancelled and actions Submit, Recall, Approve,
+Send Back, Send to HR, Edit, Cancel (Recall and Cancelled are plan
+2026-10-04-003; see that section below). The portal never shows those words;
+`docs/design-system.md` maps them
 ("Waiting for Priya", "Sent back", "Waiting for HR").
 `events.timesheet_on_update` shares a Pending Approval timesheet with the
 approver's User via DocShare (`submit=1` — the Approve transition on this
@@ -751,6 +753,67 @@ is stated verbatim on the fixture rather than defaulted, because `Role.on_update
 promotes any `desk_access: 1` holder to System User the moment the role is
 saved, which is both a Desk door and a billable seat this role must not open.
 
+
+## Recall, cancelled weeks and change requests (plan 2026-10-04-003)
+
+The timesheet workflow gained two moves and one state, appended — never
+reordered, because `Workflow.on_update` backfills a null `workflow_state` by
+*state order* and preflight's `check_timesheet_workflow_state_order` holds
+that line.
+
+- **Recall** (`Pending Approval → Draft`, role Employee) is the employee's
+  own move. The condition asks whether the week's Employee points at the
+  session user; `allow_self_approval: 1` is needed only because Frappe's own
+  check keys on `doc.owner` (KTD1). The portal wraps it in
+  `recall_my_week` — employee-row lock, stored-state guard, the
+  `expected_modified` token — and clears the manager's arrival bell on the
+  way out. A manager deciding from a stale screen is told "the employee
+  recalled this week", not "already decided" (`_assert_still_open`).
+- **Cancelled** is the one docstatus-2 state, reached by an HR-only **Cancel**
+  transition off Approved. Because a docstatus-2 state exists and a
+  transition reaches it, `can_cancel_document` answers false: Desk's raw
+  Cancel button disappears and the workflow is the one route. HRMS hands
+  Employee Self Service `cancel` and `amend` on Timesheet, which
+  `frappe.client.cancel` would honour behind the workflow's back —
+  `apply_permission_deltas` removes both. A cancelled week reads
+  **"Cancelled"** in the decided-list receipts, including weeks cancelled in
+  Desk before the state existed (those keep `workflow_state = "Approved"` at
+  docstatus 2; the receipt keys on docstatus).
+- **Change requests** are their own DocType, `HelixHR Timesheet Change`
+  (KTD3) — an approved week is docstatus 1 and immutable, so state on it
+  would need allow-on-submit fields and could not keep the history of
+  several requests. It carries no Employee DocPerm at all: every read and
+  write is a projection that authorizes first, the app's "projections, not
+  permissions" shape. Raise requires a comment of at least ten characters;
+  at most one open request exists per week; the approver is the *stamped*
+  `approver_user`, kept current by `employee_on_update` when `reports_to`
+  changes, and an employee who has left auto-withdraws their open request
+  (KTD10). With no manager the request routes to HR, scoped by
+  `resolve_admin_scope` like every other administrative read.
+- **Accept** (KTD4) runs inside one `as_administrator()` transaction after
+  the HelixHR gate: lock the change row and the week, re-check the locks
+  (KTD5: a submitted Sales Invoice carrying the week, the week's own
+  `salary_slip`, or a submitted Salary Slip over its dates — the employee
+  sees the reason *before* writing a comment), set the Cancelled state and
+  cancel, then amend a Draft copy **owned by the employee** with the old
+  decision reason cleared. An amend run as the manager would hand them a
+  week they could never resend — the self-approval check keys on `owner`.
+  Decline requires a reason and leaves the week Approved.
+- **The queue is lanes, not a page** (KTD8, R19): timesheet and leave
+  collectors read 150 deep, the 25-row page is gone for them, a 200 hard
+  cap stands behind everything, and `get_my_approvals` returns `people` —
+  one group per employee, oldest waiting first. Every pending timesheet and
+  leave row ships `flags` and `needs_look` computed on the server (KTD7):
+  the display and `approve_clean_items`' per-item re-check cannot disagree.
+  Expected hours are `HR Settings.standard_working_hours` × working days
+  (holiday-list days and approved leave removed); with no standard hours the
+  hours flag stays off and preflight WARNs.
+- **Bulk approval exists, guarded** (KTD6) — it reverses the documented
+  no-bulk decision from P2-U7. `approve_clean_items` takes up to 60
+  Timesheet/Leave items, re-authorizes each through the same `_decide_one`
+  path as a single decision, re-checks each concurrency token, **recomputes
+  the flags per item**, and refuses anything flagged. Each item commits on
+  its own, so one refusal never undoes an approval (R18).
 
 ## Punch derivation, and why the portal method is the only create route
 

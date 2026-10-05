@@ -342,6 +342,8 @@ _KIND_LABELS = {
 	"timesheet": "Timesheet",
 	"attendance": "Attendance request",
 	"request": "Request",
+	# Plan 2026-10-04-003 U3.
+	"change": "Change request",
 }
 
 
@@ -514,6 +516,25 @@ def collect_overdue(today=None):
 			owners = _mailable(_role_holders(row.routed_to_role))
 			owner_name = row.routed_to_role or "No owner"
 		add("request", "HR Request", row, row.subject, row.creation, owners, owner_name, sla, "request")
+
+	# Plan 2026-10-04-003 U3: an open change request waits on its stamped
+	# approver (or HR, when it routed there) the same way every other kind
+	# waits, so it joins the same digest.
+	for row in frappe.get_all(
+		"HelixHR Timesheet Change",
+		filters={"status": "Open", PENDING_SINCE: ["<", cutoff]},
+		fields=["name", "employee", "employee_name", "week_start", "approver_user", PENDING_SINCE],
+		order_by=f"{PENDING_SINCE} asc",
+		limit=_OVERDUE_FETCH,
+	):
+		if not is_overdue(row.get(PENDING_SINCE), today, threshold):
+			continue
+		if row.approver_user:
+			owners, owner_name = _user_owner(row.approver_user)
+		else:
+			owners, owner_name = hr_owned()
+		title = f"Change request, {format_date(row.week_start, _date_format())}"
+		add("change", "HelixHR Timesheet Change", row, title, row.get(PENDING_SINCE), owners, owner_name, threshold, "change")
 
 	items.sort(key=lambda item: -item["age_days"])
 	return items

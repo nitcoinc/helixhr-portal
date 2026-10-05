@@ -305,7 +305,14 @@ class TestPerUserRateLimits(IntegrationTestCase):
 		expected = {
 			"update_my_profile": (20, 60),
 			"save_my_week": (30, 60),
+			# Plan 2026-10-04-003 U2: recall is a rare correction, not a loop.
+			"recall_my_week": (10, 60),
+			# U3: a change request mails its approver; a withdraw is rare.
+			"raise_timesheet_change": (10, 3600),
+			"withdraw_timesheet_change": (10, 3600),
 			"act_on_approval": (30, 60),
+			# Plan 2026-10-04-003 U6: one batch stands in for 60 decisions.
+			"approve_clean_items": (10, 60),
 			"get_overdue_approvals": (60, 60),
 			"apply_for_leave": (20, 3600),
 			"withdraw_my_leave": (20, 3600),
@@ -321,6 +328,10 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"download_my_payslip": (10, 60),
 			"get_directory": (60, 60),
 			"get_my_team_week": (60, 60),
+			# Plan 2026-10-04-003 U4: the timesheets half and the read-only
+			# member week, bounded like the leave week they sit beside.
+			"get_my_team_timesheets": (60, 60),
+			"get_team_member_week": (60, 60),
 			"search_people": (60, 60),
 			"get_person": (60, 60),
 			"get_report_link": (60, 60),
