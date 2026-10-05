@@ -149,6 +149,16 @@ export function uploadCompanyLogo(file, { company }) {
   return uploadFile('helixhr.api.set_company_logo', file, { company })
 }
 
+/** Documents: create or edit an HR document carrying an uploaded file
+ * (`helixhr.api.save_document_link`); resolves to the saved row. Empty
+ * params are left out rather than sent as the string "null". */
+export function saveDocumentWithFile(file, params) {
+  const fields = Object.fromEntries(
+    Object.entries(params).filter(([, value]) => value !== null && value !== undefined),
+  )
+  return uploadFile('helixhr.api.save_document_link', file, fields)
+}
+
 /**
  * A write that must survive the page unloading immediately after it is
  * sent -- `fetch`'s own `keepalive` flag, which frappe-ui's resourceFetcher

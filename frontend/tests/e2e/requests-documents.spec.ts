@@ -104,10 +104,13 @@ async function removeRequest(api: APIRequestContext, name: string) {
 
 async function seedDocumentLink(
   api: APIRequestContext,
-  fields: { title: string; url: string; description?: string; company?: string },
+  fields: { title: string; url: string; description?: string; company?: string; category?: string },
 ) {
+  // `company: ''`, not omitted: an omitted Link field takes the site's
+  // default Company, which turns a "for everyone" link into one company's
+  // (the stray-default drift that once hid the handbook below).
   const created = await api.post('/api/method/frappe.client.insert', {
-    data: { doc: JSON.stringify({ doctype: 'HelixHR Document Link', ...fields }) },
+    data: { doc: JSON.stringify({ doctype: 'HelixHR Document Link', company: '', ...fields }) },
   })
   expect(created.ok(), await created.text()).toBeTruthy()
   return (await created.json())?.message?.name as string
@@ -359,7 +362,7 @@ test.describe('employee', () => {
     }
   })
 
-  // ── Documents: grouping, search, and where a link is about to send you ─
+  // ── Documents: tabs, buckets, search, and where a link is about to send you ─
   test('documents are grouped, searchable, and say where each link goes', async ({
     page,
     baseURL,
@@ -383,40 +386,47 @@ test.describe('employee', () => {
         title: everyone,
         url: 'https://example.com/policies/handbook.pdf',
         description: 'Working hours, conduct, benefits',
+        category: 'General',
       })
       mineName = await seedDocumentLink(api, {
         title: mine,
         url: 'https://intranet.example.com/holidays',
         description: 'Public and company holidays',
         company: companyName,
+        category: 'General',
       })
 
-      await page.goto('/helixhr/documents')
+      await page.goto('/helixhr/documents?tab=general')
       await expect(page.getByRole('heading', { name: 'Documents' })).toBeVisible()
+      await expect(page.getByRole('tab', { name: /^General \(\d+\)$/ })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      )
 
-      // The two scopes P2-R19 enforces, made visible as the two groups.
-      await expect(page.getByRole('heading', { name: 'For everyone' })).toBeVisible()
-      await expect(page.getByRole('heading', { name: companyName })).toBeVisible()
-
-      // The host, and the type derived from the address.
+      // Dated today by default, so both sit in the "Today" bucket, and each
+      // says in words which scope (P2-R19) it belongs to.
+      await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible()
       const handbook = page.getByRole('link', { name: new RegExp(everyone) })
       await expect(handbook).toContainText('example.com')
       await expect(handbook).toContainText('PDF')
+      await expect(handbook).toContainText('For everyone')
       await expect(handbook).toHaveAttribute('target', '_blank')
       await expect(handbook).toHaveAttribute('rel', /noopener/)
-      await expect(page.getByRole('link', { name: new RegExp(mine) })).toContainText(
-        'intranet.example.com',
-      )
+      const holidays = page.getByRole('link', { name: new RegExp(mine) })
+      await expect(holidays).toContainText('intranet.example.com')
+      await expect(holidays).toContainText('Your company')
 
-      // Search narrows both groups at once, and a search that matches nothing
-      // is not the empty catalogue (P2-R2).
+      // Search narrows the list, and a search that matches nothing is not
+      // the empty catalogue (P2-R2).
       await page.getByLabel('Search').fill('holiday')
-      await expect(page.getByRole('link', { name: new RegExp(mine) })).toBeVisible()
-      await expect(page.getByRole('link', { name: new RegExp(everyone) })).toHaveCount(0)
+      await expect(holidays).toBeVisible()
+      await expect(handbook).toHaveCount(0)
 
       await page.getByLabel('Search').fill('nothing matches this at all')
       await expect(page.locator('[data-testid="documents-no-match"]')).toContainText('Ask HR')
       await expect(page.locator('[data-async-state="documents:empty"]')).toHaveCount(0)
+      // A plain employee gets no publishing controls.
+      await expect(page.getByTestId('documents-upload')).toHaveCount(0)
     } finally {
       await removeDocumentLink(api, everyoneName)
       await removeDocumentLink(api, mineName)
@@ -554,6 +564,69 @@ test.describe('employee', () => {
       await removeRequest(api, name)
       await itApi.dispose()
       await employeeApi.dispose()
+      await api.dispose()
+    }
+  })
+})
+
+// The `hr` Playwright project only runs the HR-screen specs, so this one
+// runs in the employee project and signs HR in as a second context.
+test.describe('documents publishing', () => {
+  test.beforeEach(async ({}, testInfo) => {
+    test.skip(testInfo.project.name !== 'employee', 'runs once, as employee plus an HR context')
+  })
+
+  test('HR uploads a PDF to Important and an employee opens it from the right bucket', async ({
+    page,
+    browser,
+    baseURL,
+  }) => {
+    const api = await admin(baseURL!)
+    const title = `Docs upload ${Date.now()}`
+    const hrContext = await browser.newContext({ storageState: 'tests/.auth/hr.json' })
+    try {
+      const hr = await hrContext.newPage()
+      await hr.goto('/helixhr/documents')
+      await hr.getByTestId('documents-upload').click()
+      const editor = hr.getByTestId('document-editor')
+      await editor.getByLabel('Title').fill(title)
+      await expect(editor.getByLabel('Category')).toHaveValue('Important')
+      await editor.getByLabel('File', { exact: true }).setInputFiles({
+        name: 'policy.pdf',
+        mimeType: 'application/pdf',
+        buffer: SAFE_PDF,
+      })
+      await editor.getByRole('button', { name: 'Upload', exact: true }).click()
+      await expect(editor).toBeHidden()
+      await expect(hr.getByRole('link', { name: new RegExp(title) })).toBeVisible()
+
+      await page.goto('/helixhr/documents')
+      await expect(page.getByRole('tab', { name: /^Important \(\d+\)$/ })).toHaveAttribute(
+        'aria-selected',
+        'true',
+      )
+      const link = page.getByRole('region', { name: 'Today' }).getByRole('link', { name: new RegExp(title) })
+      await expect(link).toContainText('File · PDF')
+      await expect(page.getByTestId('documents-upload')).toHaveCount(0)
+
+      // The file is private: the employee's own session downloads it.
+      const href = (await link.getAttribute('href'))!
+      expect(href).toMatch(/^\/private\/files\//)
+      const download = await page.request.get(href)
+      expect(download.status()).toBe(200)
+      expect((await download.body()).subarray(0, 5).toString()).toBe('%PDF-')
+    } finally {
+      await hrContext.close()
+      const found = await api.get('/api/method/frappe.client.get_list', {
+        params: {
+          doctype: 'HelixHR Document Link',
+          filters: JSON.stringify({ title }),
+          limit_page_length: 0,
+        },
+      })
+      for (const row of (await found.json()).message || []) {
+        await api.post('/api/method/helixhr.api.delete_document_link', { data: { name: row.name } })
+      }
       await api.dispose()
     }
   })
