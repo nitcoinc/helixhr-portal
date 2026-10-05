@@ -626,6 +626,36 @@ def _mail_address(employee):
 	return None
 
 
+def _assigned_holiday_lists(employees, company, today):
+	"""One employee's holiday list, resolved for the whole company in one
+	query, from HRMS's own helpers (P4-KTD12). HRMS renamed the batch
+	helpers over version-16 -- 16.17 ships
+	`get_assigned_holiday_lists_to_employee_and_company`, the version-16
+	tip moved to `get_holiday_list_assignments` plus
+	`resolve_holiday_list_assignment` -- so both shapes are supported,
+	with the employee's assignment keeping precedence over the company's,
+	as `get_holiday_list_for_employee` resolves it."""
+	from hrms.utils import holiday_list as hl
+
+	batch = getattr(hl, "get_assigned_holiday_lists_to_employee_and_company", None)
+	if batch:
+		assigned = batch([*employees, company], today, today)
+		resolved = {}
+		for employee in employees:
+			ranges = assigned.get(employee) or assigned.get(company)
+			resolved[employee] = ranges[0]["holiday_list"] if ranges else None
+		return resolved
+	assignments = hl.get_holiday_list_assignments([*employees, company])
+	company_assignments = assignments.get(company, [])
+	resolved = {}
+	for employee in employees:
+		assignment = hl.resolve_holiday_list_assignment(
+			assignments.get(employee, []), company_assignments, today
+		)
+		resolved[employee] = assignment.holiday_list if assignment else None
+	return resolved
+
+
 def _send_holiday_company(row, today, foreign, foreign_names, dropped):
 	"""One company's holiday reminder: every active employee's own list,
 	grouped by the holidays ahead in the window.
@@ -641,10 +671,6 @@ def _send_holiday_company(row, today, foreign, foreign_names, dropped):
 	weekly/monthly senders have been mailing nobody for a while, which is
 	one more reason the takeover is happening. The explicit `weekly_off: 0`
 	is the same intent, stated so it actually runs."""
-	from hrms.utils.holiday_list import (
-		get_assigned_holiday_lists_to_employee_and_company,
-	)
-
 	start, end = _holiday_window(row.frequency, today)
 	employees = frappe.get_all(
 		"Employee", filters={"status": "Active", "company": row.company}, pluck="name"
@@ -660,14 +686,11 @@ def _send_holiday_company(row, today, foreign, foreign_names, dropped):
 			)
 		)
 		employees = [employee for employee in employees if employee in picked]
-	assigned = get_assigned_holiday_lists_to_employee_and_company(
-		[*employees, row.company], today, today
-	)
+	assigned = _assigned_holiday_lists(employees, row.company, today)
 	group_holidays = {}
 	groups = {}
 	for employee in employees:
-		ranges = assigned.get(employee) or assigned.get(row.company)
-		holiday_list = ranges[0]["holiday_list"] if ranges else None
+		holiday_list = assigned.get(employee)
 		if not holiday_list:
 			continue
 		if holiday_list not in group_holidays:
