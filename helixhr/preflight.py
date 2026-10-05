@@ -1234,7 +1234,9 @@ def check_holiday_list_coverage():
 
 def check_celebration_reminders():
 	"""P4-R18 / P4-KTD10: a site must not be left sending two emails for the
-	same event.
+	same event. Settings are per company since plan 2026-10-04-004 U1, so
+	the check is per (event, company) row: any company's enabled row
+	collides with HRMS's stock send.
 
 	Frappe merges `scheduler_events` across apps and offers no way to remove
 	HRMS's daily reminder job, so HRMS's stock email keeps going out while
@@ -1246,32 +1248,44 @@ def check_celebration_reminders():
 
 	A picked template that does not exist is the other FAIL: the job logs it
 	and sends nothing, so the event goes quiet with no other sign. Neither
-	sender on for an event is a WARN and not a FAIL -- a site may not want
+	sender on anywhere is a WARN and not a FAIL -- a site may not want
 	the email at all -- and either one on is a PASS naming which one sends.
 	"""
 	from helixhr.reminders import EVENTS
 
 	problems, notes, quiet = [], [], []
 	for event, spec in EVENTS.items():
-		row = frappe.db.get_value(
-			"HelixHR Celebration Reminder", event, ["is_enabled", "email_template"], as_dict=True
+		rows = frappe.get_all(
+			"HelixHR Celebration Reminder",
+			filters={"event": event},
+			fields=["company", "is_enabled", "email_template"],
+			order_by="company asc",
 		)
-		enabled = bool(row and row.is_enabled and row.email_template)
-		template = row.email_template if row else None
 		hrms_on = cint(_hr_setting(spec["hrms_field"]))
+		enabled = [row for row in rows if row.is_enabled and row.email_template]
+		bad = False
 		if enabled and hrms_on:
+			companies = ", ".join(row.company for row in enabled)
 			problems.append(
-				f"{spec['label']}: both HRMS and HelixHR would send -- untick "
-				f"'{spec['hrms_label']}' in HR Settings or disable it on Settings > Celebrations"
+				f"{spec['label']} ({companies}): both HRMS and HelixHR would send -- untick "
+				f"'{spec['hrms_label']}' in HR Settings or disable it on the portal's "
+				"Email templates page"
 			)
-		elif enabled and not frappe.db.exists("Email Template", template):
-			problems.append(
-				f"{spec['label']}: names Email Template '{template}', which does not exist -- "
-				"nothing is sent"
-			)
-		elif enabled:
-			notes.append(f"{spec['label']}: HelixHR sends '{template}'")
-		elif hrms_on:
+			bad = True
+		for row in enabled:
+			if not frappe.db.exists("Email Template", row.email_template):
+				problems.append(
+					f"{spec['label']} ({row.company}): names Email Template "
+					f"'{row.email_template}', which does not exist -- nothing is sent"
+				)
+				bad = True
+			elif not bad:
+				notes.append(f"{spec['label']} ({row.company}): HelixHR sends '{row.email_template}'")
+		if not enabled and not hrms_on:
+			# No company has this event on, and HRMS's checkbox is off: the
+			# email is simply not wanted, which is a choice and not a defect.
+			quiet.append(f"{spec['label']}: nobody sends")
+		elif not enabled and hrms_on:
 			# Desk has the HRMS checkbox read-only (P8-KTD8), so HR cannot
 			# stop this mail anywhere -- the portal toggle only governs
 			# HelixHR's own sender.
@@ -1279,8 +1293,6 @@ def check_celebration_reminders():
 				f"{spec['label']}: HRMS still sends its stock email and its checkbox is "
 				"read-only in Desk -- run `bench migrate` (turn_off_hrms_celebration_senders)"
 			)
-		else:
-			quiet.append(f"{spec['label']}: nobody sends")
 
 	if problems:
 		return _result("Celebration reminders", FAIL, "; ".join(problems))

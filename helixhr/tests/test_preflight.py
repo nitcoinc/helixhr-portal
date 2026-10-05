@@ -1194,14 +1194,21 @@ class TestPreflightCelebrationReminders(IntegrationTestCase):
 	def setUp(self):
 		frappe.set_user("Administrator")
 		from helixhr.tests.test_reminders import _template
+		from helixhr.tests.utils import ensure_test_company
 
+		self.company = ensure_test_company()
 		_template(self.TEMPLATE, "BDAYMARK {{ names }}")
 		for event in ("birthday", "work_anniversary"):
-			if not frappe.db.exists("HelixHR Celebration Reminder", event):
+			# Per company since plan 2026-10-04-004 U1: the row this suite
+			# drives is the test company's own.
+			if not frappe.db.get_value(
+				"HelixHR Celebration Reminder", {"event": event, "company": self.company}, "name"
+			):
 				frappe.get_doc(
 					{
 						"doctype": "HelixHR Celebration Reminder",
 						"event": event,
+						"company": self.company,
 						"recipient_mode": "All employees",
 					}
 				).insert(ignore_permissions=True)
@@ -1211,7 +1218,10 @@ class TestPreflightCelebrationReminders(IntegrationTestCase):
 		}
 		self.original_reminders = {
 			event: frappe.db.get_value(
-				"HelixHR Celebration Reminder", event, ["is_enabled", "email_template"], as_dict=True
+				"HelixHR Celebration Reminder",
+				{"event": event, "company": self.company},
+				["name", "is_enabled", "email_template"],
+				as_dict=True,
 			)
 			for event in self._FIELD_TO_EVENT.values()
 		}
@@ -1219,26 +1229,29 @@ class TestPreflightCelebrationReminders(IntegrationTestCase):
 
 	def tearDown(self):
 		self._set(self.original)
-		for event, snapshot in self.original_reminders.items():
+		for _event, snapshot in self.original_reminders.items():
 			frappe.db.set_value(
 				"HelixHR Celebration Reminder",
-				event,
+				snapshot.name,
 				{"is_enabled": snapshot.is_enabled, "email_template": snapshot.email_template},
 				update_modified=False,
 			)
-			frappe.clear_document_cache("HelixHR Celebration Reminder", event)
+			frappe.clear_document_cache("HelixHR Celebration Reminder", snapshot.name)
 
 	def _set(self, values):
 		for field, value in values.items():
 			if field in self._FIELD_TO_EVENT:
 				event = self._FIELD_TO_EVENT[field]
+				row = frappe.db.get_value(
+					"HelixHR Celebration Reminder", {"event": event, "company": self.company}, "name"
+				)
 				frappe.db.set_value(
 					"HelixHR Celebration Reminder",
-					event,
+					row,
 					{"email_template": value, "is_enabled": 1 if value else 0},
 					update_modified=False,
 				)
-				frappe.clear_document_cache("HelixHR Celebration Reminder", event)
+				frappe.clear_document_cache("HelixHR Celebration Reminder", row)
 			else:
 				frappe.db.set_single_value("HR Settings", field, value)
 		frappe.clear_document_cache("HR Settings", "HR Settings")

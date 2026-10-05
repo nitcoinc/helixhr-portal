@@ -8056,18 +8056,18 @@ _CELEBRATION_DEFAULT_TEMPLATES = {
 }
 
 
-def _celebration_reminder_projection(event):
+def _celebration_reminder_projection(event, company):
 	from helixhr.reminders import EVENTS
 
 	spec = EVENTS[event]
-	reminder = None
-	if frappe.db.exists("HelixHR Celebration Reminder", event):
-		reminder = frappe.db.get_value(
-			"HelixHR Celebration Reminder",
-			event,
-			["is_enabled", "email_template", "recipient_mode"],
-			as_dict=True,
-		)
+	# Settings are per company since plan 2026-10-04-004 U1 -- one row per
+	# (event, company), absent meaning disabled.
+	reminder = frappe.db.get_value(
+		"HelixHR Celebration Reminder",
+		{"event": event, "company": company},
+		["name", "is_enabled", "email_template", "recipient_mode"],
+		as_dict=True,
+	)
 
 	subject = body = None
 	use_html = True
@@ -8082,7 +8082,7 @@ def _celebration_reminder_projection(event):
 	if reminder:
 		recipients = frappe.get_all(
 			"HelixHR Celebration Recipient",
-			filters={"parent": event},
+			filters={"parent": reminder.name, "parenttype": "HelixHR Celebration Reminder"},
 			fields=["employee", "employee_name"],
 			order_by="idx asc",
 		)
@@ -8099,10 +8099,27 @@ def _celebration_reminder_projection(event):
 	}
 
 
+def _celebration_company(user=None):
+	"""The company the celebration settings are read and written for when
+	the caller does not name one: their own active Employee's company.
+	Interim (plan 2026-10-04-004 U1/U4): the settings page's section reads
+	the caller's company until the Email Templates group replaces it."""
+	from helixhr.utils import session_company
+
+	company = session_company(user or frappe.session.user)
+	if not company:
+		companies = frappe.get_all("Company", pluck="name")
+		if len(companies) == 1:
+			return companies[0]
+		frappe.throw(_("Pick the company to configure."))
+	return company
+
+
 def _portal_celebration_config():
 	from helixhr.reminders import EVENTS
 
-	return {event: _celebration_reminder_projection(event) for event in EVENTS}
+	company = _celebration_company()
+	return {event: _celebration_reminder_projection(event, company) for event in EVENTS}
 
 
 # The documented context every celebration template renders against
@@ -8120,15 +8137,12 @@ CELEBRATION_TEMPLATE_TOKENS = (
 
 
 @frappe.whitelist(methods=["POST"])
-def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode="All employees", recipients=None):
+def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode="All employees", recipients=None, company=None):
 	"""HR writes the birthday/work-anniversary email and picks its audience
-	from the portal (P8-U12 / P8-R5, P8-R6).
-
-	Writes two documents: the Email Template the reminder links to (created
-	under the seeded default name on first save, edited by name afterwards
-	-- never a second template per event), and the `HelixHR Celebration
-	Reminder` row itself. Both go through `_assert_config_write`, exactly
-	as every other config save in this module does.
+	from the portal (P8-U12 / P8-R5, P8-R6). Per company since plan
+	2026-10-04-004 U1: `company` names whose setting this is -- the
+	caller's own company when omitted, as the settings page's section
+	does until the Email Templates group replaces it (U4).
 
 	`subject`/`body` are compiled with `validate_template` before anything
 	is written (P8-U12's own test scenario: a Jinja syntax error is refused
@@ -8156,11 +8170,16 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 	validate_template(subject, restrict_globals=True)
 	validate_template(body, restrict_globals=True)
 
-	if frappe.db.exists("HelixHR Celebration Reminder", event):
-		reminder = frappe.get_doc("HelixHR Celebration Reminder", event)
+	company = company or _celebration_company()
+	reminder = frappe.db.get_value(
+		"HelixHR Celebration Reminder", {"event": event, "company": company}, "name"
+	)
+	if reminder:
+		reminder = frappe.get_doc("HelixHR Celebration Reminder", reminder)
 	else:
 		reminder = frappe.new_doc("HelixHR Celebration Reminder")
 		reminder.event = event
+		reminder.company = company
 
 	template_name = reminder.email_template or _CELEBRATION_DEFAULT_TEMPLATES[event]
 	if frappe.db.exists("Email Template", template_name):
@@ -8200,7 +8219,7 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 	# `events.hr_settings_validate` is not re-run over unrelated fields.
 	frappe.db.set_single_value("HR Settings", EVENTS[event]["hrms_field"], 0)
 
-	return _celebration_reminder_projection(event)
+	return _celebration_reminder_projection(event, company)
 
 
 @frappe.whitelist(methods=["POST"])

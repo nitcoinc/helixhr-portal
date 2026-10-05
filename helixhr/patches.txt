@@ -84,3 +84,6 @@ helixhr.patches.v1_0.seed_request_category_prefixes
 # HRMS grants by default and `frappe.client.cancel` would otherwise honour
 # behind the workflow's back.
 helixhr.patches.v1_0.apply_permission_deltas #2026-10-04 U1 Employee Self Service cancel/amend off Timesheet
+# Plan 2026-10-04-004 U1: P8's global one-row-per-event celebration settings
+# become one row per (event, company); settings copied to every company (R14).
+helixhr.patches.v1_0.split_celebration_reminders_by_company
