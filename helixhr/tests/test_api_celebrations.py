@@ -51,12 +51,35 @@ class TestCelebrationEndpoints(IntegrationTestCase):
 		frappe.set_user("Administrator")
 		from helixhr.api import save_celebration_reminder
 
+		# A save edits the *seeded* Email Template by name (P8-U12's rule, one
+		# template per event, never a second) -- so whatever the tests write
+		# into the shipped defaults is snapshot-and-restored, the same shape
+		# `test_celebration_reminder_doctype.py` takes.
+		self.template_snapshots = {}
+		for name in (
+			"HelixHR Birthday Reminder",
+			"HelixHR Work Anniversary Reminder",
+			"HelixHR Holiday Reminder",
+		):
+			if frappe.db.exists("Email Template", name):
+				doc = frappe.get_doc("Email Template", name)
+				self.template_snapshots[name] = {
+					field: doc.get(field) for field in ("subject", "response_html", "response", "use_html")
+				}
+
 		# The anchored HR Manager's own company, configured once for the
 		# class: every endpoint test below reads or tries to write it.
 		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
 		save_celebration_reminder(
 			event="birthday", subject="Happy birthday {{ names }}", body="Cheers", is_enabled=1
 		)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		for name, snapshot in self.template_snapshots.items():
+			doc = frappe.get_doc("Email Template", name)
+			doc.update(snapshot)
+			doc.save(ignore_permissions=True)
 
 	def test_an_hr_manager_reads_and_saves_their_own_company(self):
 		from helixhr.api import get_celebration_setup, save_celebration_reminder
