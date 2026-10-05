@@ -1,6 +1,6 @@
 <script setup>
 import Avatar from '@/components/Avatar.vue'
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
@@ -153,6 +153,24 @@ const reasonFor = ref('')
 // smaller field rather than borrowing the required one above.
 const noteOpen = ref(false)
 const note = ref('')
+// Plan 2026-10-05-001 U3 (KTD2). Accept cancels an approved week and
+// reopens it for the employee, so it never fires on one click: the first
+// click opens this confirm, and only its own button carries the decision.
+const confirmAccept = ref(false)
+const acceptCancel = ref(null)
+watch(confirmAccept, async (open) => {
+  if (!open) return
+  // Cancel takes the initial focus, after the dialog's own focus trap has
+  // placed it on the first tabbable element.
+  await nextTick()
+  requestAnimationFrame(() => acceptCancel.value?.$el?.focus?.())
+})
+
+function closeAcceptConfirm() {
+  if (acting.value) return
+  confirmAccept.value = false
+  actionError.value = ''
+}
 
 // P4-R1 / P4-KTD6. The outcomes the *server* says are legal for this record
 // and this approver. The screen renders exactly this list: a button that is
@@ -165,6 +183,7 @@ function may(action) {
 }
 
 function clearDecisionSurfaces() {
+  confirmAccept.value = false
   reason.value = ''
   reasonError.value = ''
   reasonFor.value = ''
@@ -205,6 +224,12 @@ function openReason(action) {
     reasonError.value = ''
     reasonFor.value = action
   }
+}
+
+function closeReason() {
+  reason.value = ''
+  reasonError.value = ''
+  reasonFor.value = ''
 }
 
 function openNote() {
@@ -261,7 +286,7 @@ const reasonPlaceholder = computed(() =>
  * opens its optional note the same way, so every outcome that carries words
  * is confirmed once. Approve carries none and goes straight through.
  */
-async function decide(action) {
+async function decide(action, { confirmed = false } = {}) {
   const item = selected.value
   // Double-tap protection is here rather than only on `:disabled`: a second
   // pointerdown can land before Vue has flushed the disabled attribute
@@ -271,6 +296,12 @@ async function decide(action) {
   // stale detail behind a slow reload must not be able to fire an outcome the
   // server would refuse anyway.
   if (!may(action)) return
+
+  if (action === 'Accept' && !confirmed) {
+    actionError.value = ''
+    confirmAccept.value = true
+    return
+  }
 
   let comment
   if (action === 'Send Back' || action === 'Reject' || action === 'Need info' || action === 'Decline') {
@@ -1339,6 +1370,16 @@ function dismissBulkResult() {
                           >
                             {{ reasonError }}
                           </p>
+                          <!-- Plan 2026-10-05-001 U3: closing the reason puts the other
+                               outcomes (Accept among them) back. -->
+                          <Button
+                            class="mt-2"
+                            variant="subtle"
+                            data-testid="reason-cancel"
+                            @click="closeReason"
+                          >
+                            Cancel
+                          </Button>
                         </div>
 
                         <!-- Send to HR is a routing act, so its words are a note
@@ -1364,7 +1405,7 @@ function dismissBulkResult() {
                            cancels the approved week and returns an editable
                            copy; Decline is the final no, with a reason. -->
                           <Button
-                            v-if="may('Accept')"
+                            v-if="may('Accept') && reasonFor !== 'Decline'"
                             variant="solid"
                             theme="green"
                             :loading="acting === selected.name"
@@ -1922,6 +1963,16 @@ function dismissBulkResult() {
               >
                 {{ reasonError }}
               </p>
+              <!-- Plan 2026-10-05-001 U3: closing the reason puts the other
+                   outcomes (Accept among them) back. -->
+              <Button
+                class="mt-2"
+                variant="subtle"
+                data-testid="reason-cancel"
+                @click="closeReason"
+              >
+                Cancel
+              </Button>
             </div>
 
             <div
@@ -2022,7 +2073,7 @@ function dismissBulkResult() {
                    the approved week and returns an editable copy to the
                    employee. -->
               <Button
-                v-if="may('Accept')"
+                v-if="may('Accept') && reasonFor !== 'Decline'"
                 variant="solid"
                 theme="green"
                 :loading="acting === selected.name"
@@ -2107,6 +2158,53 @@ function dismissBulkResult() {
             @click="runBulk"
           >
             Approve {{ bulkSelected.length }}
+          </Button>
+        </div>
+      </template>
+    </Dialog>
+
+    <!-- Plan 2026-10-05-001 U3: the change request's Accept, confirmed.
+         Errors stay inside the dialog so the manager reads them where they
+         clicked; the confirm stays disabled while the decision is in flight. -->
+    <Dialog
+      :model-value="confirmAccept"
+      :options="{ title: 'Accept this change request?' }"
+      @update:model-value="(value) => !value && closeAcceptConfirm()"
+    >
+      <template #body-content>
+        <p class="text-sm text-ink-gray-7">
+          This cancels the approved week and reopens it for
+          {{ selected?.employee_name || 'the employee' }} to edit.
+        </p>
+        <p
+          v-if="actionError"
+          class="surface-alert mt-3 p-3 text-sm"
+          role="alert"
+          data-testid="accept-confirm-error"
+        >
+          {{ actionError }}
+        </p>
+      </template>
+      <template #actions>
+        <div class="flex justify-end gap-2">
+          <Button
+            ref="acceptCancel"
+            variant="subtle"
+            :disabled="!!acting"
+            data-testid="accept-cancel"
+            @click="closeAcceptConfirm"
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="solid"
+            theme="green"
+            :loading="!!acting"
+            :disabled="!!acting"
+            data-testid="accept-confirm"
+            @click="decide('Accept', { confirmed: true })"
+          >
+            Accept and reopen
           </Button>
         </div>
       </template>

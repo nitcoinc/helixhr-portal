@@ -588,3 +588,93 @@ test('the Requests page gains a To work on tab for a routed worker', async ({ pa
     await admin.dispose()
   }
 })
+
+// Plan 2026-10-05-001 U3. A change request's Accept cancels an approved week
+// and reopens it, so it never fires on one click, and it is out of reach
+// while the manager is writing a Decline.
+async function loginAs(baseURL: string, usr: string) {
+  const api = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+  await api.post('/api/method/login', { form: { usr, pwd: PASSWORD } })
+  return api
+}
+
+async function seedChangeRequest(baseURL: string, weeksBack: number) {
+  const { name, monday } = await seedPendingWeek(baseURL, weeksBack)
+  const manager = await loginAs(baseURL, 'manager@helixhr.test')
+  const approved = await manager.post('/api/method/frappe.model.workflow.apply_workflow', {
+    form: { doc: JSON.stringify({ doctype: 'Timesheet', name }), action: 'Approve' },
+  })
+  expect(approved.ok(), await approved.text()).toBeTruthy()
+  await manager.dispose()
+
+  const employee = await loginAs(baseURL, EMPLOYEE)
+  const raised = await employee.post('/api/method/helixhr.api.raise_timesheet_change', {
+    form: { week_start: monday, comment: 'Tuesday should be six hours, not two' },
+  })
+  expect(raised.ok(), await raised.text()).toBeTruthy()
+  const change = (await raised.json()).message.name
+  await employee.dispose()
+  return { timesheet: name, monday, change }
+}
+
+async function changeStatus(baseURL: string, change: string) {
+  const admin = await adminContext(baseURL)
+  const status = await getValue(admin, 'HelixHR Timesheet Change', { name: change }, 'status')
+  await admin.dispose()
+  return status
+}
+
+test('Decline hides Accept, and cancelling the reason brings it back', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'manager', 'this is the manager capability shape')
+  test.setTimeout(60000)
+  const baseURL = process.env.BASE_URL || 'http://localhost:8080'
+  const { timesheet, change } = await seedChangeRequest(baseURL, 9)
+
+  await page.goto(`/helixhr/approvals/change/${change}`)
+  const panel = page.getByTestId('approval-detail')
+  await expect(panel.getByTestId('accept')).toBeVisible({ timeout: 10000 })
+
+  await panel.getByTestId('decline').click()
+  await expect(panel.getByTestId('accept')).toHaveCount(0)
+  await panel.getByTestId('reason-cancel').click()
+  await expect(panel.getByTestId('accept')).toBeVisible()
+
+  await panel.getByTestId('decline').click()
+  await panel.getByTestId('decision-reason').getByRole('textbox').fill('The hours match the project record.')
+  await panel.getByTestId('decline').click()
+  await expect.poll(() => changeStatus(baseURL, change), { timeout: 10000 }).toBe('Declined')
+
+  const admin = await adminContext(baseURL)
+  expect(await getValue(admin, 'Timesheet', { name: timesheet }, 'workflow_state')).toBe('Approved')
+  await admin.dispose()
+})
+
+test('Accept needs a confirm: cancel leaves it open, confirm reopens the week', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'manager', 'this is the manager capability shape')
+  test.setTimeout(60000)
+  const baseURL = process.env.BASE_URL || 'http://localhost:8080'
+  const { timesheet, monday, change } = await seedChangeRequest(baseURL, 11)
+
+  await page.goto(`/helixhr/approvals/change/${change}`)
+  const panel = page.getByTestId('approval-detail')
+  await panel.getByTestId('accept').click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByText(/cancels the approved week and reopens it/)).toBeVisible()
+  await expect(dialog.getByTestId('accept-cancel')).toBeFocused()
+
+  await dialog.getByTestId('accept-cancel').click()
+  await expect(dialog).toHaveCount(0)
+  expect(await changeStatus(baseURL, change)).toBe('Open')
+
+  await panel.getByTestId('accept').click()
+  await page.getByRole('dialog').getByTestId('accept-confirm').click()
+  await expect.poll(() => changeStatus(baseURL, change), { timeout: 10000 }).toBe('Accepted')
+
+  const admin = await adminContext(baseURL)
+  expect(await getValue(admin, 'Timesheet', { name: timesheet }, 'docstatus')).toBe(2)
+  await admin.dispose()
+  const employee = await loginAs(baseURL, EMPLOYEE)
+  const week = await employee.get(`/api/method/helixhr.api.get_my_week?week_start=${monday}`)
+  expect((await week.json()).message.timesheet.workflow_state).toBe('Draft')
+  await employee.dispose()
+})
