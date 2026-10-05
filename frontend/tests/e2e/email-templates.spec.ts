@@ -208,6 +208,68 @@ test('one company logo sits atop the page; each template may opt out of it', asy
   }
 })
 
+test('the email header colour: a preset and a custom hex update the live preview', async ({ page, baseURL }) => {
+  // Same setup as the logo test: Administrator, a pinned default company.
+  const api = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+  expect((await api.post('/api/method/login', { form: { usr: 'Administrator', pwd: 'admin' } })).ok()).toBeTruthy()
+  const globals = await (
+    await api.get('/api/method/frappe.client.get_value', {
+      params: { doctype: 'Global Defaults', name: 'Global Defaults', fieldname: 'default_company' },
+    })
+  ).json()
+  const previous = globals.message?.default_company || ''
+  const company =
+    previous ||
+    (await (await api.get('/api/method/frappe.client.get_list', { params: { doctype: 'Company' } })).json())
+      .message[0].name
+  const setDefault = (value: string) =>
+    api.post('/api/method/frappe.client.set_value', {
+      form: { doctype: 'Global Defaults', name: 'Global Defaults', fieldname: 'default_company', value },
+    })
+  if (!previous) expect((await setDefault(company)).ok()).toBeTruthy()
+  await api.post('/api/method/helixhr.api.set_email_header_color', { form: { company, color: '' } })
+
+  await page.context().clearCookies()
+  await page.context().addCookies((await api.storageState()).cookies)
+  try {
+    await page.goto('/helixhr/email-templates')
+    const control = page.getByTestId('email-header-color')
+    const preview = control.getByTestId('email-header-preview')
+    await expect(preview).toHaveAttribute('data-bg', '#FFFFFF')
+    await expect(preview).toHaveAttribute('data-fg', '#1F2328')
+
+    await control.getByRole('radio', { name: 'Navy' }).check({ force: true })
+    await expect(preview).toHaveAttribute('data-bg', '#0B2545')
+    await expect(preview).toHaveAttribute('data-fg', '#FFFFFF')
+    await control.getByRole('button', { name: 'Save colour' }).click()
+    await expect(control.getByTestId('email-header-status')).toHaveText('Header colour saved.')
+
+    await control.getByRole('radio', { name: 'Custom' }).check({ force: true })
+    const hex = control.getByTestId('email-header-custom')
+    await hex.fill('#12')
+    await expect(control.getByText('Use a 6-digit hex code like #0B2545.')).toBeVisible()
+    await expect(control.getByRole('button', { name: 'Save colour' })).toBeDisabled()
+    await hex.fill('#F5D76E')
+    await expect(preview).toHaveAttribute('data-bg', '#F5D76E')
+    await expect(preview).toHaveAttribute('data-fg', '#1F2328')
+    await control.getByRole('button', { name: 'Save colour' }).click()
+    await expect(control.getByTestId('email-header-status')).toHaveText('Header colour saved.')
+
+    // The message preview renders the same header strip.
+    await page.getByTestId('email-template-leave_approved').click()
+    const frame = page.frameLocator('iframe[title="Preview of Leave approved"]')
+    await expect(frame.locator('div[style*="background:#f5d76e"]')).toHaveCount(1)
+
+    await control.getByRole('button', { name: 'Reset to white' }).click()
+    await expect(control.getByTestId('email-header-status')).toHaveText('Header reset to white.')
+    await expect(preview).toHaveAttribute('data-bg', '#FFFFFF')
+  } finally {
+    await api.post('/api/method/helixhr.api.set_email_header_color', { form: { company, color: '' } })
+    if (!previous) await setDefault('')
+    await api.dispose()
+  }
+})
+
 test('P8-U12 moved to the celebrations group: HR authors the birthday email and switches to a selected audience', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'hr', 'the celebrations group is HR-only')
 

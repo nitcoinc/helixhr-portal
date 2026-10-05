@@ -495,6 +495,14 @@ branded with the *recipient's* company logo, falling back to the default
 company only for a user with no active Employee. A mail with no logo shows
 the company name instead of an image.
 
+**Email header colour.** Below the logo control, `set_email_header_color`
+(same gate) writes `Company.helixhr_email_header_color` (custom field
+fixture; `#rrggbb` or empty = white). `helixhr_layout.html` paints the
+header strip with it; text is white or `#1f2328` by WCAG relative luminance
+(`utils.email_header_colors`). The value is re-validated at render, so a
+bad value set in Desk renders white, never raw CSS. A transparent logo on a
+dark header needs a light version; the control hints at this.
+
 **"This template failed when it was last sent" (plan 2026-10-05-001 U13).**
 A customised portal message template raised on real data and the default
 wording went out. The banner reads the newest `HelixHR message template

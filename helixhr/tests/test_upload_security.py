@@ -410,6 +410,7 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"reset_celebration_template": (30, 3600),
 			# U12.
 			"set_company_logo": (20, 3600),
+			"set_email_header_color": (20, 3600),
 			# Documents.
 			"save_document_link": (30, 3600),
 			"delete_document_link": (30, 3600),

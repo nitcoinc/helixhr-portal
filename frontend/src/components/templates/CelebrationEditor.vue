@@ -273,6 +273,7 @@ defineExpose({ setup })
     <CompanyLogoControl
       :company="props.company"
       :logo-url="setup.data?.logo_url || ''"
+      :header-color="setup.data?.header_color || ''"
       @changed="setup.reload()"
     />
 

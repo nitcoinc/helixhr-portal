@@ -184,7 +184,12 @@ async function refreshPreview() {
     const result = await previewResource.submit(payload())
     preview.html = result.html
     preview.subject = result.subject
-    brand.value = { company: result.company, logo_url: result.logo_url, can_set_logo: result.can_set_logo }
+    brand.value = {
+      company: result.company,
+      logo_url: result.logo_url,
+      header_color: result.header_color,
+      can_set_logo: result.can_set_logo,
+    }
   } catch (error) {
     preview.html = ''
     preview.error = messageOf(error, 'Something went wrong.')
@@ -376,6 +381,7 @@ watch(
         class="mb-5"
         :company="brand.company"
         :logo-url="brand.logo_url"
+        :header-color="brand.header_color || ''"
         :editable="brand.can_set_logo"
         @changed="onLogoChanged"
       />

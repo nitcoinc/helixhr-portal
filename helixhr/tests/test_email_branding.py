@@ -72,12 +72,18 @@ class TestEmailBranding(IntegrationTestCase):
 			name: frappe.db.get_value("Company", name, "company_logo")
 			for name in (self.company, OTHER_COMPANY, self.hr_company)
 		}
+		self.header_colors = {
+			name: frappe.db.get_value("Company", name, "helixhr_email_header_color")
+			for name in (self.company, OTHER_COMPANY, self.hr_company)
+		}
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
 		frappe.local.request = None
 		for name, logo in self.logos.items():
 			frappe.db.set_value("Company", name, "company_logo", logo)
+		for name, color in self.header_colors.items():
+			frappe.db.set_value("Company", name, "helixhr_email_header_color", color)
 
 	def _upload(self, file_name, content, company=None):
 		from helixhr.api import set_company_logo
@@ -207,7 +213,7 @@ class TestEmailBranding(IntegrationTestCase):
 		save_message_template("leave_submitted", hide_logo=1)
 		html = self._send_leave_submitted()
 		self.assertNotIn("<img", html)
-		self.assertIn(f"<strong style=\"font-size:16px;\">{OTHER_COMPANY}</strong>", html)
+		self.assertIn(f'<strong style="font-size:16px;color:#1f2328;">{OTHER_COMPANY}</strong>', html)
 		event = next(e for e in get_notification_setup()["events"] if e["key"] == "leave_submitted")
 		self.assertEqual(event["state"], "Default")
 		self.assertTrue(event["hide_logo"])
@@ -245,3 +251,81 @@ class TestEmailBranding(IntegrationTestCase):
 			self.assertIn("_branding_b_logo.png", with_logo)
 			self.assertNotIn("_branding_b_logo.png", without)
 			self.assertNotIn("<img src=", without.split("Ada Lovelace")[0])
+
+	# --- the per-company email header colour ----------------------------------
+
+	def test_header_color_accepts_hex_or_empty_and_refuses_anything_else(self):
+		from helixhr.api import set_email_header_color
+
+		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+		self.assertEqual(set_email_header_color(color="#0B2545")["header_color"], "#0b2545")
+		self.assertEqual(
+			frappe.db.get_value("Company", self.hr_company, "helixhr_email_header_color"), "#0b2545"
+		)
+		for bad in ("0B2545", "#0B25", "#0B25456", "#GGGGGG", "red", "#000;background:url(x)", "#fff"):
+			with self.subTest(bad=bad), self.assertRaises(frappe.ValidationError):
+				set_email_header_color(color=bad)
+		self.assertEqual(
+			frappe.db.get_value("Company", self.hr_company, "helixhr_email_header_color"), "#0b2545"
+		)
+		self.assertEqual(set_email_header_color(color="")["header_color"], "#ffffff")
+		self.assertFalse(frappe.db.get_value("Company", self.hr_company, "helixhr_email_header_color"))
+
+	def test_header_color_for_another_company_or_by_an_employee_is_refused(self):
+		from helixhr.api import set_email_header_color
+
+		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+		with self.assertRaises(frappe.PermissionError):
+			set_email_header_color(company=OTHER_COMPANY, color="#0B2545")
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.PermissionError):
+			set_email_header_color(color="#0B2545")
+		frappe.set_user("Administrator")
+		self.assertEqual(
+			frappe.db.get_value("Company", OTHER_COMPANY, "helixhr_email_header_color"),
+			self.header_colors[OTHER_COMPANY],
+		)
+
+	def test_foreground_follows_wcag_luminance(self):
+		from helixhr.utils import email_header_colors
+
+		for bg, fg in (
+			("#FFFFFF", "#1f2328"),
+			("#0B2545", "#ffffff"),
+			("#2B2D33", "#ffffff"),
+			("#0F4C5C", "#ffffff"),
+			("#6D1A36", "#ffffff"),
+			("#3E4C59", "#ffffff"),
+			("#F5D76E", "#1f2328"),
+			("#999999", "#1f2328"),
+		):
+			with self.subTest(bg=bg):
+				self.assertEqual(email_header_colors(bg)["header_fg"], fg)
+		# Empty or invalid falls back to white with dark text.
+		for raw in ("", None, "javascript:1", "#000;x"):
+			self.assertEqual(email_header_colors(raw), {"header_bg": "#ffffff", "header_fg": "#1f2328"})
+
+	def test_layout_paints_the_header_and_never_injects_a_raw_value(self):
+		frappe.db.set_value("Company", OTHER_COMPANY, "company_logo", None)
+		frappe.db.set_value("Company", OTHER_COMPANY, "helixhr_email_header_color", "#0b2545")
+		html = self._send_leave_submitted()
+		self.assertIn("background:#0b2545;color:#ffffff;", html)
+		self.assertIn(f'<strong style="font-size:16px;color:#ffffff;">{OTHER_COMPANY}</strong>', html)
+
+		# A value written past the endpoint is ignored at render.
+		frappe.db.set_value(
+			"Company", OTHER_COMPANY, "helixhr_email_header_color", '#000;"><script>x</script>'
+		)
+		html = self._send_leave_submitted()
+		self.assertNotIn("<script>x", html)
+		self.assertIn("background:#ffffff;color:#1f2328;", html)
+
+	def test_a_celebration_carries_the_header_color(self):
+		from helixhr.reminders import _context, _render_restricted
+
+		frappe.db.set_value("Company", OTHER_COMPANY, "helixhr_email_header_color", "#6d1a36")
+		template = frappe._dict(use_html=1, subject="Hi", response_html="<p>Happy birthday, {{ names }}!</p>")
+		context = _context([{"name": "Ada Lovelace", "image": None}], OTHER_COMPANY, "birthday")
+		message = _render_restricted(template, context, None, include_logo=False)["message"]
+		self.assertIn("background:#6d1a36;color:#ffffff;", message)
+		self.assertIn(f'color:#ffffff;">{OTHER_COMPANY}</strong>', message)

@@ -4,8 +4,10 @@
     clients drop <style> blocks. -#}
 <div style="background:#f4f5f7;padding:24px 12px;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1f2328;">
   <div style="max-width:600px;margin:0 auto;background:#ffffff;border-radius:8px;overflow:hidden;border:1px solid #e3e5e8;">
-    <div style="padding:20px 24px;border-bottom:1px solid #e3e5e8;">
-      {% if logo_url %}<img src="{{ logo_url }}" alt="{{ company }}" style="max-height:36px;">{% else %}<strong style="font-size:16px;">{{ company or "HelixHR" }}</strong>{% endif %}
+    {#- header_bg / header_fg come from helixhr.utils.email_header_colors: always
+        a validated #rrggbb, never a raw stored string. -#}
+    <div style="background:{{ header_bg or '#ffffff' }};color:{{ header_fg or '#1f2328' }};padding:20px 24px;border-bottom:1px solid {{ (header_bg or '#ffffff') if header_fg == '#ffffff' else '#e3e5e8' }};">
+      {% if logo_url %}<img src="{{ logo_url }}" alt="{{ company }}" style="max-height:36px;">{% else %}<strong style="font-size:16px;color:{{ header_fg or '#1f2328' }};">{{ company or "HelixHR" }}</strong>{% endif %}
     </div>
     <div style="padding:24px;font-size:14px;line-height:1.55;">
       <h1 style="font-size:18px;line-height:1.3;margin:0 0 16px;">{{ subject }}</h1>

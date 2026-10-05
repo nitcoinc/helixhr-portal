@@ -1,5 +1,6 @@
 import io
 import os
+import re
 import zipfile
 from contextlib import contextmanager
 from urllib.parse import quote
@@ -774,6 +775,51 @@ def _layout_template():
 	return cached
 
 
+# The email header strip's background: `Company.helixhr_email_header_color`,
+# a `#RRGGBB` hex or empty (white). Checked on save and again at render, so
+# a value written past the endpoint never reaches a `style` attribute.
+EMAIL_HEADER_COLOR_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+EMAIL_HEADER_DEFAULT_BG = "#ffffff"
+EMAIL_HEADER_DARK_FG = "#1f2328"
+
+
+def valid_email_header_color(color):
+	"""`color` normalised to lower-case `#rrggbb`, or "" for empty/invalid."""
+	color = (color or "").strip()
+	return color.lower() if EMAIL_HEADER_COLOR_RE.match(color) else ""
+
+
+def _relative_luminance(color):
+	"""WCAG 2.x relative luminance of a valid `#rrggbb`."""
+
+	def channel(hex_pair):
+		value = int(hex_pair, 16) / 255
+		return value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4
+
+	r, g, b = (channel(color[i : i + 2]) for i in (1, 3, 5))
+	return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def email_header_colors(color):
+	"""`{"header_bg", "header_fg"}` for the layout: the saved colour (white
+	when empty or invalid) and whichever of white / #1f2328 has the higher
+	WCAG contrast ratio against it."""
+	bg = valid_email_header_color(color) or EMAIL_HEADER_DEFAULT_BG
+	lum = _relative_luminance(bg)
+	white_contrast = 1.05 / (lum + 0.05)
+	dark_contrast = (lum + 0.05) / (_relative_luminance(EMAIL_HEADER_DARK_FG) + 0.05)
+	return {
+		"header_bg": bg,
+		"header_fg": "#ffffff" if white_contrast > dark_contrast else EMAIL_HEADER_DARK_FG,
+	}
+
+
+def company_email_header_colors(company):
+	"""`email_header_colors` for `company`'s saved header colour."""
+	color = frappe.db.get_value("Company", company, "helixhr_email_header_color") if company else ""
+	return email_header_colors(color)
+
+
 def _default_context():
 	company = frappe.defaults.get_global_default("company") or ""
 	logo = frappe.db.get_value("Company", company, "company_logo") if company else None
@@ -856,6 +902,7 @@ def render_message(event_key, context, source=None):
 			"action_url": action_url,
 			"action_label": event.get("action_label") or _("Open HelixHR"),
 			**{name: body_ctx[name] for name in ("company", "logo_url", "portal_url")},
+			**company_email_header_colors(context.get("company")),
 		},
 	)
 	return {"subject": subject, "content": content, "html": html}
@@ -909,6 +956,7 @@ def render_celebration_email(subject, body, context, include_logo=True):
 			"action_url": plain.get("portal_url"),
 			"action_label": _("Open HelixHR"),
 			**{name: plain.get(name) or "" for name in ("company", "logo_url", "portal_url")},
+			**company_email_header_colors(plain.get("company")),
 		},
 	)
 	return {"subject": rendered_subject, "message": html}
@@ -930,7 +978,9 @@ def message_brand(user):
 	"""`{"company", "logo_url"}` a message to `user` carries: what
 	`send_notification` resolves (their company, else the default's)."""
 	default = _default_context()
-	return {"company": default["company"], "logo_url": default["logo_url"], **_recipient_brand(user)}
+	brand = {"company": default["company"], "logo_url": default["logo_url"], **_recipient_brand(user)}
+	brand["header_color"] = company_email_header_colors(brand["company"])["header_bg"]
+	return brand
 
 
 def send_notification(event_key, recipients, context, reference_doctype=None, reference_name=None):
@@ -1509,6 +1559,7 @@ RATE_LIMIT_POLICY = {
 	"reset_celebration_template": (30, 3600),
 	# U12: a logo changes rarely; bounded like the photo upload.
 	"set_company_logo": (20, 3600),
+	"set_email_header_color": (20, 3600),
 	# Documents: occasional HR writes; a save may carry a 20 MB upload.
 	"save_document_link": (30, 3600),
 	"delete_document_link": (30, 3600),

@@ -91,6 +91,7 @@ from helixhr.utils import (
 	admin_scope_employee_filters,
 	as_administrator,
 	can_admin_portal,
+	company_email_header_colors,
 	employee_in_admin_scope,
 	event_variables,
 	get_manager_user,
@@ -112,6 +113,7 @@ from helixhr.utils import (
 	sample_context,
 	send_notification,
 	session_company,
+	valid_email_header_color,
 	validate_message_template,
 	validate_portal_upload,
 )
@@ -8276,7 +8278,12 @@ def _message_logo_brand():
 	except frappe.PermissionError:
 		frappe.clear_last_message()
 		can_set_logo = False
-	return {"company": brand["company"], "logo_url": brand["logo_url"], "can_set_logo": can_set_logo}
+	return {
+		"company": brand["company"],
+		"logo_url": brand["logo_url"],
+		"header_color": brand["header_color"],
+		"can_set_logo": can_set_logo,
+	}
 
 
 def _last_template_fallback(event_key, row):
@@ -8798,6 +8805,26 @@ def set_company_logo(company=None, remove=0):
 	return {"company": company, "logo_url": doc.file_url}
 
 
+@frappe.whitelist(methods=["POST"])
+def set_email_header_color(company=None, color=None):
+	"""The background of the email header strip for `company` --
+	`Company.helixhr_email_header_color`, beside the logo. `color` is a
+	`#RRGGBB` hex, or empty for the default white. Same gate as
+	`set_company_logo`."""
+	rate_limit_per_user("set_email_header_color")
+	company = company or _celebration_company()
+	_assert_can_set_company_logo(company)
+	if not frappe.db.exists("Company", company):
+		frappe.throw(_("That company does not exist."))
+	color = (color or "").strip()
+	if color and not valid_email_header_color(color):
+		frappe.throw(_("Enter the colour as a hex code like #0B2545."))
+	color = valid_email_header_color(color)
+	# `db.set_value`: as for the logo, the gate above is the authorisation.
+	frappe.db.set_value("Company", company, "helixhr_email_header_color", color or None)
+	return {"company": company, "header_color": company_email_header_colors(company)["header_bg"]}
+
+
 @frappe.whitelist()
 def get_celebration_setup(company=None):
 	"""Plan 2026-10-04-004 U4 (R9, R10): the Email Templates page's
@@ -8829,6 +8856,7 @@ def get_celebration_setup(company=None):
 		"template_tokens": CELEBRATION_TEMPLATE_TOKENS,
 		# U12: the logo every email for this company carries.
 		"logo_url": (frappe.db.get_value("Company", company, "company_logo") or "") if company else "",
+		"header_color": company_email_header_colors(company)["header_bg"] if company else "",
 	}
 
 
