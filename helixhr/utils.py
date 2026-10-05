@@ -1408,7 +1408,16 @@ RATE_LIMIT_POLICY = {
 	"get_person_form_options": (60, 60),
 	"save_person": (30, 3600),
 	# P8-U12: an occasional administrative write, like the config saves above.
+	# Plan 2026-10-04-004 U4: the Email Templates page's celebrations group --
+	# the setup read fans out per (event, company); preview renders per
+	# keystroke pause like the message-template preview; a test send is real
+	# mail, so it gets `send_test_message`'s tight bound; the picker search
+	# is a per-keystroke read like `search_people`.
 	"save_celebration_reminder": (30, 3600),
+	"get_celebration_setup": (60, 60),
+	"preview_celebration": (60, 60),
+	"send_test_celebration": (5, 600),
+	"search_celebration_recipients": (60, 60),
 	# Plan 2026-09-30-001 U2. Each re-encodes an image, so bounded like the
 	# attachment writes. The photo GET is deliberately not listed: a page
 	# loads one per avatar.

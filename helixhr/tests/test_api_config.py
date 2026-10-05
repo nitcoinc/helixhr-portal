@@ -197,12 +197,24 @@ class TestConfigApi(IntegrationTestCase):
 	def test_get_portal_config_returns_a_celebrations_projection_per_event(self):
 		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
 		config = get_portal_config()
-		self.assertEqual(set(config["celebrations"]), {"birthday", "work_anniversary"})
-		for event in ("birthday", "work_anniversary"):
+		# Holiday joined in plan 2026-10-04-004 U3; each row carries the
+		# per-company row's own `frequency` since U1.
+		self.assertEqual(set(config["celebrations"]), {"birthday", "work_anniversary", "holiday"})
+		for event in ("birthday", "work_anniversary", "holiday"):
 			row = config["celebrations"][event]
 			self.assertEqual(
 				set(row),
-				{"event", "label", "is_enabled", "recipient_mode", "subject", "body", "use_html", "recipients"},
+				{
+					"event",
+					"label",
+					"is_enabled",
+					"recipient_mode",
+					"frequency",
+					"subject",
+					"body",
+					"use_html",
+					"recipients",
+				},
 			)
 		self.assertIn("company", config["celebration_template_tokens"])
 		self.assertIn("portal_url", config["celebration_template_tokens"])

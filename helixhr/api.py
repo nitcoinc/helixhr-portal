@@ -608,6 +608,12 @@ def get_portal_bootstrap():
 		# Plan 2026-10-02-001 U7 / KTD12: the Email templates page. A boolean,
 		# never a role list; System Manager may open it too (R14).
 		"can_manage_notifications": _can_manage_notifications(frappe.session.user),
+		# Plan 2026-10-04-004 U4 / KTD3: the page becomes role-sectioned --
+		# HR Manager sees the "Celebrations & holidays" group, the Notification
+		# Manager the message templates. Each group's endpoints keep their own
+		# server gate; this only decides whether the nav item renders.
+		"can_edit_email_templates": _can_manage_notifications(frappe.session.user)
+		or _is_hr(frappe.session.user),
 		# P6-U4: same shape again -- `search_people` and `get_person` are
 		# gated by `resolve_admin_scope`, which grants a scope to exactly
 		# the roles `_is_hr` names, so the nav item and the server's gate
@@ -8053,6 +8059,8 @@ def save_shift_type(name, **fields):
 _CELEBRATION_DEFAULT_TEMPLATES = {
 	"birthday": "HelixHR Birthday Reminder",
 	"work_anniversary": "HelixHR Work Anniversary Reminder",
+	# Plan 2026-10-04-004 U3: the seeded holiday default, reused by name.
+	"holiday": "HelixHR Holiday Reminder",
 }
 
 
@@ -8065,7 +8073,7 @@ def _celebration_reminder_projection(event, company):
 	reminder = frappe.db.get_value(
 		"HelixHR Celebration Reminder",
 		{"event": event, "company": company},
-		["name", "is_enabled", "email_template", "recipient_mode"],
+		["name", "is_enabled", "email_template", "recipient_mode", "frequency"],
 		as_dict=True,
 	)
 
@@ -8092,6 +8100,7 @@ def _celebration_reminder_projection(event, company):
 		"label": spec["label"],
 		"is_enabled": bool(reminder and reminder.is_enabled),
 		"recipient_mode": reminder.recipient_mode if reminder else "All employees",
+		"frequency": reminder.frequency if reminder else ("Weekly" if event == "holiday" else None),
 		"subject": subject,
 		"body": body,
 		"use_html": use_html,
@@ -8137,7 +8146,7 @@ CELEBRATION_TEMPLATE_TOKENS = (
 
 
 @frappe.whitelist(methods=["POST"])
-def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode="All employees", recipients=None, company=None):
+def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode="All employees", recipients=None, company=None, frequency=None):
 	"""HR writes the birthday/work-anniversary email and picks its audience
 	from the portal (P8-U12 / P8-R5, P8-R6). Per company since plan
 	2026-10-04-004 U1: `company` names whose setting this is -- the
@@ -8163,6 +8172,13 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 		recipients = frappe.parse_json(recipients)
 	recipients = recipients or []
 
+	company = company or _celebration_company()
+	_assert_company_in_admin_scope(company)
+	# The cadence is the row's own for `holiday` (U1); the controller
+	# refuses a holiday row without one and ignores the field elsewhere.
+	if event == "holiday" and frequency not in ("Weekly", "Monthly"):
+		frequency = "Weekly"
+
 	subject = (subject or "").strip()
 	body = body or ""
 	from frappe.utils.jinja import validate_template
@@ -8170,7 +8186,6 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 	validate_template(subject, restrict_globals=True)
 	validate_template(body, restrict_globals=True)
 
-	company = company or _celebration_company()
 	reminder = frappe.db.get_value(
 		"HelixHR Celebration Reminder", {"event": event, "company": company}, "name"
 	)
@@ -8210,6 +8225,7 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 	reminder.email_template = template.name
 	reminder.is_enabled = cint(is_enabled)
 	reminder.recipient_mode = recipient_mode
+	reminder.frequency = frequency
 	reminder.set("recipients", [{"employee": row} for row in recipients])
 	reminder.save()
 	# The portal owns this event: HRMS's own checkbox is read-only in Desk
@@ -8220,6 +8236,166 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 	frappe.db.set_single_value("HR Settings", EVENTS[event]["hrms_field"], 0)
 
 	return _celebration_reminder_projection(event, company)
+
+
+@frappe.whitelist()
+def get_celebration_setup(company=None):
+	"""Plan 2026-10-04-004 U4 (R9, R10): the Email Templates page's
+	"Celebrations & holidays" group in one call -- every event's setting
+	for `company`, the template-token reference, and the companies this
+	caller may configure. HR Manager and System Manager only (KTD3): a
+	company-anchored HR Manager sees only companies in their admin scope
+	(P6-R6, through `resolve_admin_scope`), so the company selector never
+	offers one they cannot save."""
+	from helixhr.reminders import EVENTS
+
+	rate_limit_per_user("get_celebration_setup")
+	if not _is_hr():
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	company = company or _celebration_company()
+	_assert_company_in_admin_scope(company)
+
+	return {
+		"company": company,
+		"companies": _companies_in_admin_scope(),
+		"events": {event: _celebration_reminder_projection(event, company) for event in EVENTS},
+		"template_tokens": CELEBRATION_TEMPLATE_TOKENS,
+	}
+
+
+def _assert_company_in_admin_scope(company):
+	"""KTD3: the celebration group's server gate, per company. An HR
+	Manager / System Manager anchored to an Employee is scoped to their own
+	company (P6-R6); a Desk-only one may configure any company; anyone else
+	is refused before anything is read."""
+	from helixhr.utils import resolve_admin_scope
+
+	scope = resolve_admin_scope(frappe.session.user)
+	if scope["kind"] == "unscoped":
+		return
+	if scope["kind"] == "company" and company == scope["company"]:
+		return
+	frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+
+
+def _companies_in_admin_scope():
+	"""The company selector's options: everything for an unscoped caller,
+	the one company for an anchored one."""
+	from helixhr.utils import resolve_admin_scope
+
+	scope = resolve_admin_scope(frappe.session.user)
+	if scope["kind"] == "company":
+		return [scope["company"]]
+	return frappe.get_all("Company", pluck="name", order_by="company_name asc")
+
+
+def _celebration_sample_context(event, company, frequency=None):
+	"""The preview and test-send render against the same context the real
+	send builds (`reminders._context` for the two celebration events, the
+	holiday sender's own shape for `holiday`), with one sample person."""
+	from frappe.utils import add_days, format_date
+
+	from helixhr.reminders import _context, _date_format, _logo_url
+
+	if event == "holiday":
+		today = getdate()
+		return {
+			"employee_name": "Ada Lovelace",
+			"holidays": [
+				{
+					"date": format_date(add_days(today, 3), _date_format()),
+					"description": "Company Holiday",
+				}
+			],
+			"company": company,
+			"logo_url": _logo_url(company),
+			"portal_url": get_url("/helixhr"),
+			"date": format_date(today, _date_format()),
+			"frequency": frequency or "Weekly",
+		}
+	return _context(
+		[{"name": "Ada Lovelace", "image": None, "date_of_joining": "2020-01-01"}],
+		company,
+		event,
+	)
+
+
+def _celebration_draft(event, company, subject, body, frequency=None):
+	"""Compile then render an unsaved draft with the event's sample context
+	-- the same refusal a save would give (P8-U12's compile check), the
+	same restriction the real render runs under (P8-KTD7)."""
+	from frappe.utils.jinja import validate_template
+
+	validate_template(subject or "", restrict_globals=True)
+	validate_template(body or "", restrict_globals=True)
+	context = _celebration_sample_context(event, company, frequency)
+	return {
+		"subject": frappe.render_template(subject or "", context, restrict_globals=True),
+		"html": frappe.render_template(body or "", context, restrict_globals=True),
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+def preview_celebration(event, subject, body, company=None):
+	"""R11: the draft as the email would look, rendered with the selected
+	company's own name and logo. The client shows `html` only in a
+	sandboxed iframe (KTD11)."""
+	from helixhr.reminders import EVENTS
+
+	rate_limit_per_user("preview_celebration")
+	if not _is_hr():
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	if event not in EVENTS:
+		frappe.throw(_("That reminder is not offered here."))
+	company = company or _celebration_company()
+	_assert_company_in_admin_scope(company)
+	rendered = _celebration_draft(event, company, subject, body)
+	return {"subject": rendered["subject"], "html": rendered["html"]}
+
+
+@frappe.whitelist(methods=["POST"])
+def send_test_celebration(event, subject, body, company=None):
+	"""R11: send the draft to the caller's own address only -- never a
+	recipient the caller names, the same rule `send_test_message` holds."""
+	from helixhr.reminders import EVENTS
+
+	rate_limit_per_user("send_test_celebration")
+	if not _is_hr():
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	if event not in EVENTS:
+		frappe.throw(_("That reminder is not offered here."))
+	company = company or _celebration_company()
+	_assert_company_in_admin_scope(company)
+	rendered = _celebration_draft(event, company, subject, body)
+	email = frappe.db.get_value("User", frappe.session.user, "email")
+	if not email:
+		frappe.throw(_("Your account has no email address to send the test to."))
+	frappe.sendmail(
+		recipients=[email],
+		subject=_("[Test] {0}").format(rendered["subject"]),
+		message=rendered["html"],
+	)
+
+
+@frappe.whitelist()
+def search_celebration_recipients(company, query=""):
+	"""R12: the selected-people picker searches employees of the selected
+	company only, within the editor's scope -- active, name matching."""
+	rate_limit_per_user("search_celebration_recipients")
+	if not _is_hr():
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	_assert_company_in_admin_scope(company)
+
+	filters = {"status": "Active", "company": company}
+	if (query or "").strip():
+		filters["employee_name"] = ["like", f"%{query.strip()}%"]
+	return frappe.get_all(
+		"Employee",
+		filters=filters,
+		fields=["name", "employee_name", "image"],
+		order_by="employee_name asc",
+		limit=20,
+	)
 
 
 @frappe.whitelist(methods=["POST"])
