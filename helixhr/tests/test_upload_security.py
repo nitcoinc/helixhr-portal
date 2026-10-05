@@ -406,6 +406,8 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"preview_celebration": (60, 60),
 			"send_test_celebration": (5, 600),
 			"search_celebration_recipients": (60, 60),
+			# Plan 2026-10-05-001 U11.
+			"reset_celebration_template": (30, 3600),
 		}
 		self.assertEqual(utils.RATE_LIMIT_POLICY, expected)
 		self.assertEqual(preflight.check_rate_limits()["status"], preflight.PASS)

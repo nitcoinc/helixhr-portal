@@ -849,6 +849,46 @@ def render_message(event_key, context, source=None):
 	return {"subject": subject, "content": content, "html": html}
 
 
+def _self_branded(body):
+	"""KTD11 + review fold-in: a body that is already a whole document, or
+	that prints the logo itself (the P4 seeded templates and HR edits of
+	them), is not wrapped in the layout again -- one logo, never two."""
+	lowered = (body or "").lower()
+	return "<html" in lowered or "<body" in lowered or "logo_url" in lowered
+
+
+def render_celebration_email(subject, body, context):
+	"""Celebration and holiday mail (plan 2026-10-05-001 U11): HR's Email
+	Template subject and body through the same sandbox as the portal's
+	message templates -- empty globals, StrictUndefined, plain-data context
+	-- so a template can neither call `frappe.*` nor read another record.
+	A body-only template is wrapped in the branded layout (KTD11).
+
+	Returns `{"subject", "message"}`. Raises on a bad template; callers
+	decide whether that is a refusal (save, preview) or a logged skip (send).
+	"""
+	from markupsafe import Markup
+
+	body_env, subject_env = _template_envs()
+	plain = {str(key): _plain(value) for key, value in (context or {}).items()}
+	rendered_subject = " ".join(_run(_compile(subject_env, subject or ""), _subject_values(plain)).split())
+	content = _run(_compile(body_env, body or ""), _escape_values(plain)) if body else ""
+	if _self_branded(body):
+		return {"subject": rendered_subject, "message": content}
+	html = _run(
+		_layout_template(),
+		{
+			"subject": rendered_subject,
+			"core": None,
+			"content": Markup(content),
+			"action_url": plain.get("portal_url"),
+			"action_label": _("Open HelixHR"),
+			**{name: plain.get(name) or "" for name in ("company", "logo_url", "portal_url")},
+		},
+	)
+	return {"subject": rendered_subject, "message": html}
+
+
 def send_notification(event_key, recipients, context, reference_doctype=None, reference_name=None):
 	"""Render and queue `event_key` to each recipient (KTD8). One mail per
 	recipient so `recipient_first_name` is theirs. Never raises: a mail
@@ -1418,6 +1458,8 @@ RATE_LIMIT_POLICY = {
 	"preview_celebration": (60, 60),
 	"send_test_celebration": (5, 600),
 	"search_celebration_recipients": (60, 60),
+	# Plan 2026-10-05-001 U11: an occasional administrative write, like the save.
+	"reset_celebration_template": (30, 3600),
 	# Plan 2026-09-30-001 U2. Each re-encodes an image, so bounded like the
 	# attachment writes. The photo GET is deliberately not listed: a page
 	# loads one per avatar.

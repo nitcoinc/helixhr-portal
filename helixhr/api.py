@@ -8226,15 +8226,10 @@ def save_shift_type(name, **fields):
 # rather than creating a second template per event on first save.
 # ---------------------------------------------------------------------------
 
-# The seeded default template each event's reminder starts out linked to
-# (`patches/v1_0/seed_celebration_templates.py`) -- reused by name so a
-# first save edits that template rather than creating a duplicate.
-_CELEBRATION_DEFAULT_TEMPLATES = {
-	"birthday": "HelixHR Birthday Reminder",
-	"work_anniversary": "HelixHR Work Anniversary Reminder",
-	# Plan 2026-10-04-004 U3: the seeded holiday default, reused by name.
-	"holiday": "HelixHR Holiday Reminder",
-}
+# Plan 2026-10-05-001 U11 (KTD12): each (event, company) sends from its own
+# Email Template, `reminders.celebration_template_name` -- the shared seeded
+# names are no longer written by a save, so one company's edit never
+# reaches another's mail.
 
 
 def _celebration_reminder_projection(event, company):
@@ -8250,7 +8245,12 @@ def _celebration_reminder_projection(event, company):
 		as_dict=True,
 	)
 
-	subject = body = None
+	from helixhr.reminders import CELEBRATION_DEFAULTS
+
+	# No row or no template yet: the editor opens on the shipped default,
+	# never blank (U11).
+	subject = CELEBRATION_DEFAULTS[event]["subject"]
+	body = CELEBRATION_DEFAULTS[event]["body"]
 	use_html = True
 	template_name = reminder.email_template if reminder else None
 	if template_name and frappe.db.exists("Email Template", template_name):
@@ -8319,12 +8319,11 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 	caller's own company when omitted, as the settings page's section
 	does until the Email Templates group replaces it (U4).
 
-	`subject`/`body` are compiled with `validate_template` before anything
-	is written (P8-U12's own test scenario: a Jinja syntax error is refused
-	at save time, not at 8am the next morning) -- `restrict_globals=True`,
-	the same restriction `reminders._render_restricted` renders with, so a
-	template that only compiles under the *unrestricted* globals still
-	fails here rather than only at send time.
+	`subject`/`body` are rendered against the event's sample context in
+	HelixHR's sandbox before anything is written (P8-U12's own test
+	scenario: a bad template is refused at save time, not at 8am the next
+	morning) -- the same sandbox `reminders._render_restricted` sends with
+	(plan 2026-10-05-001 U11).
 	"""
 	from helixhr.reminders import EVENTS
 
@@ -8351,10 +8350,7 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 
 	subject = (subject or "").strip()
 	body = body or ""
-	from frappe.utils.jinja import validate_template
-
-	validate_template(subject, restrict_globals=True)
-	validate_template(body, restrict_globals=True)
+	_render_celebration_or_throw(event, company, subject, body, frequency)
 
 	reminder = frappe.db.get_value(
 		"HelixHR Celebration Reminder", {"event": event, "company": company}, "name"
@@ -8366,24 +8362,18 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 		reminder.event = event
 		reminder.company = company
 
-	template_name = reminder.email_template or _CELEBRATION_DEFAULT_TEMPLATES[event]
-	if frappe.db.exists("Email Template", template_name):
-		template = frappe.get_doc("Email Template", template_name)
-	else:
-		template = frappe.new_doc("Email Template")
-		template.name = template_name
-		template.use_html = 1
+	template = _company_celebration_template(event, company)
 
 	# `ignore_permissions=True`, not `_assert_config_write` (KTD8's own
 	# framing, reused): Email Template is a shared core doctype used across
 	# the whole site, not one this app owns -- granting HR Manager a real
 	# DocPerm on it would let them edit or delete *any* Email Template, not
-	# just the two celebration ones. `_is_hr()` above is the real
-	# authorisation boundary here, and `template_name` is never caller
-	# input -- it only ever resolves to one of the two names in
-	# `_CELEBRATION_DEFAULT_TEMPLATES` or a reminder's own already-saved
-	# `email_template`, so there is no doctype this write can reach outside
-	# the two celebration templates.
+	# just the celebration ones. `_is_hr()` plus the company scope check
+	# above are the real authorisation boundary here, and the template name
+	# is never caller input -- it is always
+	# `reminders.celebration_template_name(event, company)` (U11: never the
+	# shared seeded name, so a company created after the clone patch still
+	# gets its own copy).
 	template.subject = subject
 	if template.use_html:
 		template.response_html = body
@@ -8405,6 +8395,58 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 	# `events.hr_settings_validate` is not re-run over unrelated fields.
 	frappe.db.set_single_value("HR Settings", EVENTS[event]["hrms_field"], 0)
 
+	return _celebration_reminder_projection(event, company)
+
+
+def _company_celebration_template(event, company):
+	"""The (event, company) Email Template, or a new unsaved one under its
+	per-company name (U11)."""
+	from helixhr.reminders import celebration_template_name
+
+	name = celebration_template_name(event, company)
+	if frappe.db.exists("Email Template", name):
+		return frappe.get_doc("Email Template", name)
+	template = frappe.new_doc("Email Template")
+	template.name = name
+	template.use_html = 1
+	return template
+
+
+@frappe.whitelist(methods=["POST"])
+def reset_celebration_template(event, company=None):
+	"""Back to the shipped default wording for the caller's company only
+	(U11): the default is written into that company's own Email Template and
+	the row, if any, is pointed at it. System Manager or an in-scope HR
+	Manager (`_celebration_gate`). The Info comment names the actor, like
+	`reset_message_template`."""
+	from helixhr.reminders import CELEBRATION_DEFAULTS
+
+	company = _celebration_gate(event, "reset_celebration_template", company)
+	default = CELEBRATION_DEFAULTS[event]
+	template = _company_celebration_template(event, company)
+	template.subject = default["subject"]
+	template.use_html = 1
+	template.response_html = default["body"]
+	# Same reasoning as `save_celebration_reminder`: the gate above is the
+	# boundary, and the name is derived, never caller input.
+	template.save(ignore_permissions=True)
+
+	reminder = frappe.db.get_value(
+		"HelixHR Celebration Reminder", {"event": event, "company": company}, "name"
+	)
+	if reminder:
+		frappe.db.set_value("HelixHR Celebration Reminder", reminder, "email_template", template.name)
+	frappe.get_doc(
+		{
+			"doctype": "Comment",
+			"comment_type": "Info",
+			"reference_doctype": "Email Template",
+			"reference_name": template.name,
+			"content": _("{0} reset this email template to the default").format(
+				frappe.utils.get_fullname(frappe.session.user)
+			),
+		}
+	).insert(ignore_permissions=True)
 	return _celebration_reminder_projection(event, company)
 
 
@@ -8503,19 +8545,24 @@ def _celebration_draft(event, company, subject, body, frequency=None):
 	same restriction the real render runs under (P8-KTD7). A holiday draft
 	with no cadence given renders against the saved row's own cadence, so
 	the preview shows what this row will actually mail (R11)."""
-	from frappe.utils.jinja import validate_template
-
-	validate_template(subject or "", restrict_globals=True)
-	validate_template(body or "", restrict_globals=True)
 	if not frequency:
 		frequency = frappe.db.get_value(
 			"HelixHR Celebration Reminder", {"event": event, "company": company}, "frequency"
 		)
+	rendered = _render_celebration_or_throw(event, company, subject, body, frequency)
+	return {"subject": rendered["subject"], "html": rendered["message"]}
+
+
+def _render_celebration_or_throw(event, company, subject, body, frequency=None):
+	"""Render a draft against the event's sample context in the HelixHR
+	sandbox (U11); any failure is a refusal naming why, not a stack trace."""
+	from helixhr.utils import render_celebration_email
+
 	context = _celebration_sample_context(event, company, frequency)
-	return {
-		"subject": frappe.render_template(subject or "", context, restrict_globals=True),
-		"html": frappe.render_template(body or "", context, restrict_globals=True),
-	}
+	try:
+		return render_celebration_email(subject or "", body or "", context)
+	except Exception as exc:
+		frappe.throw(_("This template cannot be used: {0}").format(exc), title=_("Template not valid"))
 
 
 def _celebration_gate(event, endpoint, company=None):

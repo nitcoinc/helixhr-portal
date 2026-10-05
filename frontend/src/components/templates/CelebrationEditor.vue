@@ -161,6 +161,29 @@ async function submit() {
   }
 }
 
+// --- reset to the shipped default (plan 2026-10-05-001 U11) ----------------
+//
+// Server-side for the selected company only; the editor then reopens on the
+// default text so HR sees what came back.
+const resetResource = createResource({ url: 'helixhr.api.reset_celebration_template', method: 'POST' })
+
+async function resetToDefault() {
+  const event = editing.value
+  if (!event) return
+  const message =
+    'Replace this email with the default wording for ' + props.company + '? ' +
+    'Any edits you have not saved will be lost.'
+  if (!window.confirm(message)) return
+  formError.value = ''
+  try {
+    await resetResource.submit({ event, company: props.company })
+    await setup.reload()
+    edit(event)
+  } catch (error) {
+    formError.value = error?.messages?.[0] || 'Could not reset that. Please try again.'
+  }
+}
+
 // --- preview and test send (R11) -------------------------------------------
 
 const preview = reactive({ html: '', subject: '', error: '' })
@@ -460,6 +483,14 @@ defineExpose({ setup })
             @click="sendTest"
           >
             Send me a test
+          </Button>
+          <Button
+            variant="ghost"
+            :loading="resetResource.loading"
+            data-testid="celebration-reset"
+            @click="resetToDefault"
+          >
+            Reset to default
           </Button>
           <Button
             variant="ghost"

@@ -502,7 +502,7 @@ class TestSaveCelebrationReminder(IntegrationTestCase):
 
 		self.assertEqual(frappe.db.get_single_value("HR Settings", "send_birthday_reminders"), 0)
 
-	def test_first_save_creates_the_seeded_template_name_not_a_second_one(self):
+	def test_first_save_creates_the_companys_own_template_not_a_second_one(self):
 		from helixhr.api import save_celebration_reminder
 
 		frappe.set_user(self.hr_user)
@@ -510,7 +510,11 @@ class TestSaveCelebrationReminder(IntegrationTestCase):
 			event="birthday", subject="Happy birthday {{ names }}", body="Cheers", is_enabled=1
 		)
 		self.assertEqual(result["subject"], "Happy birthday {{ names }}")
-		self.assertTrue(frappe.db.exists("Email Template", "HelixHR Birthday Reminder"))
+		# U11 (plan 2026-10-05-001): the per-company name, never the shared one.
+		from helixhr.reminders import celebration_template_name
+
+		template = celebration_template_name("birthday", self.company)
+		self.assertTrue(frappe.db.exists("Email Template", template))
 
 		# A second save edits the same template, not a new one.
 		save_celebration_reminder(
@@ -523,7 +527,7 @@ class TestSaveCelebrationReminder(IntegrationTestCase):
 			1,
 		)
 		self.assertEqual(
-			frappe.db.get_value("Email Template", "HelixHR Birthday Reminder", "subject"),
+			frappe.db.get_value("Email Template", template, "subject"),
 			"Edited subject",
 		)
 

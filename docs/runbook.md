@@ -466,6 +466,28 @@ no company twice. A company whose send *failed* (broken template, no account)
 is not marked, so fixing the cause and running the job by hand the same morning
 still delivers.
 
+**Per-company templates (plan 2026-10-05-001 U11).** Each (event, company)
+sends from its own Email Template, `HelixHR Birthday Reminder - <Company>`
+(and the anniversary / holiday equivalents). The migrate that ships this runs
+`clone_celebration_templates_per_company`: every row gets its company's copy
+of what it sent before, except text still identical to the old seeded default,
+which becomes the new body-only default. The shared templates stay but nothing
+reads them. Verify after migrate:
+
+```sql
+SELECT event, company, email_template FROM `tabHelixHR Celebration Reminder`;
+-- every email_template ends in " - <company>"
+```
+
+Rendering is the HelixHR sandbox now (no `frappe.*`, unknown variables
+raise): an old custom template that called `frappe.db...` stops sending and
+logs under `HelixHR celebration reminders` -- open it in the editor, which
+refuses it with the reason, and fix or "Reset to default". A body-only
+template is wrapped in the branded layout; one containing `<html`, `<body`
+or `logo_url` is sent as is. **Editing or resetting a template does not
+lift the 36 h rerun guard**: a company already mailed today is not mailed
+again by a hand-run job after the fix.
+
 ## Employee gets locked/HR-only fields from more than one place (U5 follow-up)
 
 `helixhr/fixtures/property_setter.json`'s permlevel pass only queried the `DocField` doctype,
