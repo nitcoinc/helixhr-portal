@@ -27,6 +27,7 @@ const NAV = [
   { label: 'Notifications', to: '/notifications', icon: 'notifications', badge: true, group: 'pinned' },
   { label: 'Leave', to: '/leave', icon: 'leave', primary: true, group: 'work' },
   { label: 'Timesheet', to: '/timesheet', icon: 'timesheet', primary: true, group: 'work' },
+  { label: 'My projects', to: '/my-projects', icon: 'folder', group: 'work' },
   { label: 'Attendance', to: '/attendance', icon: 'attendance', group: 'work' },
   { label: 'Requests', to: '/requests', icon: 'requests', primary: true, group: 'work' },
   { label: 'Payslips', to: '/payslips', icon: 'wallet', group: 'pay' },

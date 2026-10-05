@@ -4925,6 +4925,15 @@ def get_timesheet_week_start(name):
 	return str(get_week_bounds(start)[0])
 
 
+def _my_project_names(user):
+	"""Projects `user` belongs to: a Project Users row or a User Permission
+	on Project. The one membership rule `get_my_projects` and
+	`get_my_project_overview` share."""
+	return set(frappe.get_all("Project User", filters={"user": user}, pluck="parent")) | set(
+		frappe.get_all("User Permission", filters={"user": user, "allow": "Project"}, pluck="for_value")
+	)
+
+
 @frappe.whitelist()
 def get_my_projects():
 	"""Open Projects the session user may book time on -- Project Users
@@ -4935,15 +4944,7 @@ def get_my_projects():
 	(P2-R22). It used to be one Task query per project, so an employee on
 	a dozen projects paid a dozen round trips to fill a dropdown.
 	"""
-	user = frappe.session.user
-
-	project_names = set(
-		frappe.get_all("Project User", filters={"user": user}, pluck="parent")
-	) | set(
-		frappe.get_all(
-			"User Permission", filters={"user": user, "allow": "Project"}, pluck="for_value"
-		)
-	)
+	project_names = _my_project_names(frappe.session.user)
 	if not project_names:
 		return []
 
@@ -4976,6 +4977,86 @@ def get_my_projects():
 		project["tasks"] = tasks_by_project.get(project.name, [])
 	return projects
 
+
+@frappe.whitelist()
+def get_my_project_overview():
+	"""The My projects page (plan 2026-10-05-001 U6): each Open project the
+	caller belongs to (same rule as `get_my_projects`), with its customer,
+	the caller's own open Tasks (assigned to them) and the caller's own
+	hours this calendar month. A sibling read so the timesheet dropdown's
+	payload stays as it is. No cost or billing fields, by design.
+
+	Ordered by my hours this month, highest first, then by name."""
+	user = frappe.session.user
+	employee = _my_employee()
+	project_names = _my_project_names(user)
+	if not project_names:
+		return []
+
+	projects = frappe.get_all(
+		"Project",
+		filters={"name": ["in", list(project_names)], "status": "Open"},
+		fields=["name", "project_name", "customer", "status"],
+	)
+	if not projects:
+		return []
+	names = [project.name for project in projects]
+
+	tasks_by_project = {}
+	for task in frappe.get_all(
+		"Task",
+		filters={
+			"project": ["in", names],
+			"status": ["not in", ["Cancelled", "Completed", "Template"]],
+			# `_assign` is Frappe's JSON list of assignees; the quotes keep
+			# one user id from matching inside another.
+			"_assign": ["like", f'%"{user}"%'],
+		},
+		fields=["name", "subject", "project", "status", "exp_end_date"],
+		order_by="subject",
+	):
+		tasks_by_project.setdefault(task.project, []).append(
+			{"name": task.name, "subject": task.subject, "status": task.status, "due": task.exp_end_date}
+		)
+
+	month_start = get_first_day(user_today())
+	month_end = get_last_day(user_today())
+	hours_by_project = {}
+	timesheets = frappe.get_all(
+		"Timesheet",
+		filters={
+			"employee": employee,
+			"docstatus": ["<", 2],
+			"start_date": ["<=", month_end],
+			"end_date": [">=", month_start],
+		},
+		pluck="name",
+	)
+	if timesheets:
+		for row in frappe.get_all(
+			"Timesheet Detail",
+			filters={
+				"parent": ["in", timesheets],
+				"project": ["in", names],
+				"from_time": ["between", [month_start, month_end]],
+			},
+			fields=["project", "hours"],
+		):
+			hours_by_project[row.project] = flt(hours_by_project.get(row.project)) + flt(row.hours)
+
+	result = [
+		{
+			"name": project.name,
+			"project_name": project.project_name,
+			"customer": project.customer,
+			"status": project.status,
+			"tasks": tasks_by_project.get(project.name, []),
+			"hours_this_month": flt(hours_by_project.get(project.name), 2),
+		}
+		for project in projects
+	]
+	result.sort(key=lambda row: (-row["hours_this_month"], (row["project_name"] or "").lower()))
+	return result
 
 def _bookable_tasks_by_project():
 	"""`{project: {task ids}}` for the session user -- the allow-list both

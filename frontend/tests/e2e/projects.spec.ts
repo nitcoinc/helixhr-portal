@@ -20,7 +20,7 @@ test.describe('hr', () => {
     // U15: the HR section starts collapsed on a first visit.
     const hrSection = page.getByRole('button', { name: 'HR', exact: true })
     if ((await hrSection.getAttribute('aria-expanded')) === 'false') await hrSection.click()
-    await expect(page.getByRole('link', { name: 'Projects' })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Projects', exact: true })).toBeVisible()
 
     await page.goto('/helixhr/projects')
     await expect(page.getByRole('heading', { name: 'Projects' })).toBeVisible()
@@ -108,8 +108,26 @@ test('an employee identity has no Projects nav item, and a direct hit is refused
   test.skip(!testInfo.project.name.startsWith('employee'), 'covered by the hr branch above')
 
   await page.goto('/helixhr/')
-  await expect(page.getByRole('link', { name: 'Projects' })).toHaveCount(0)
+  // exact: "My projects" (plan 2026-10-05-001 U6) is every employee's.
+  await expect(page.getByRole('link', { name: 'Projects', exact: true })).toHaveCount(0)
 
   await page.goto('/helixhr/projects')
   await expect(page.locator('[data-async-state="projects:forbidden"]')).toBeVisible()
+})
+
+// Plan 2026-10-05-001 U6: any linked employee reaches My projects from the nav.
+test('an employee reaches My projects from the nav and sees cards or the empty state', async ({
+  page,
+}, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith('employee'), 'My projects is the employee view')
+
+  await page.goto('/helixhr/')
+  await page.getByRole('link', { name: 'My projects', exact: true }).first().click()
+  await expect(page).toHaveURL(/\/helixhr\/my-projects$/)
+  await expect(page.getByRole('heading', { name: 'My projects' })).toBeVisible()
+  const cards = page.getByTestId('my-project-card')
+  const empty = page.locator('[data-async-state="my-projects:empty"]')
+  await expect(cards.first().or(empty)).toBeVisible()
+  // No money on this page, ever.
+  await expect(page.getByText(/billable|billing|cost/i)).toHaveCount(0)
 })

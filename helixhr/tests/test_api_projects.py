@@ -924,3 +924,104 @@ class TestWriteProjectUsersSessionSafety(IntegrationTestCase):
 		self.assertEqual(cached["data"]["user"], self.dm_user)
 		self.assertEqual(cached["sid"], session.sid)
 		frappe.cache.hdel("session", session.sid)
+
+
+# --- plan 2026-10-05-001 U6: get_my_project_overview -------------------------
+
+
+class TestGetMyProjectOverview(IntegrationTestCase):
+	"""The My projects page's read: the caller's Open projects, their own
+	open tasks, their own hours this month, and nothing about money."""
+
+	def setUp(self):
+		from helixhr.tests.test_api_timesheet import make_test_project as make_permitted_project
+		from helixhr.tests.utils import EMPLOYEE_USER, MANAGER_USER
+
+		frappe.set_user("Administrator")
+		self.employee, self.user, self.other_employee, self.other_user = make_test_employee_and_manager()
+		self.assertEqual((self.user, self.other_user), (EMPLOYEE_USER, MANAGER_USER))
+		self.alpha = make_permitted_project("U6 Overview Alpha", users=[self.user, self.other_user])
+		self.beta = make_permitted_project("U6 Overview Beta", users=[self.user])
+		self.done = make_permitted_project("U6 Overview Done", users=[self.user])
+		frappe.db.set_value("Project", self.done, "status", "Completed")
+
+		self.my_task = self._task(self.alpha, "U6 mine", self.user)
+		self.their_task = self._task(self.alpha, "U6 theirs", self.other_user)
+		self._task(self.alpha, "U6 mine but closed", self.user, status="Completed")
+
+		self._log(self.employee, self.beta, 3)
+		self._log(self.other_employee, self.alpha, 7)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _task(self, project, subject, assignee, status="Open"):
+		name = frappe.db.get_value("Task", {"project": project, "subject": subject}, "name")
+		if not name:
+			name = frappe.get_doc(
+				{"doctype": "Task", "project": project, "subject": subject, "status": status}
+			).insert(ignore_permissions=True).name
+		frappe.db.set_value("Task", name, "_assign", frappe.as_json([assignee]))
+		return name
+
+	def _log(self, employee, project, hours):
+		from frappe.utils import get_datetime, nowdate
+
+		doc = frappe.get_doc(
+			{
+				"doctype": "Timesheet",
+				"employee": employee,
+				"company": TEST_COMPANY,
+				"start_date": nowdate(),
+				"end_date": nowdate(),
+				"time_logs": [
+					{
+						"activity_type": None,
+						"from_time": get_datetime(f"{nowdate()} 09:00:00"),
+						"hours": hours,
+						"project": project,
+					}
+				],
+			}
+		)
+		doc.flags.ignore_validate = True
+		doc.insert(ignore_permissions=True)
+
+	def _overview(self, user=None):
+		from helixhr.api import get_my_project_overview
+
+		frappe.set_user(user or self.user)
+		return {row["name"]: row for row in get_my_project_overview()}
+
+	def test_open_projects_with_my_open_tasks_only(self):
+		rows = self._overview()
+		self.assertIn(self.alpha, rows)
+		self.assertIn(self.beta, rows)
+		self.assertNotIn(self.done, rows)
+		self.assertEqual([t["name"] for t in rows[self.alpha]["tasks"]], [self.my_task])
+
+	def test_only_my_hours_are_summed_and_ordered_highest_first(self):
+		overview = self._overview()
+		self.assertEqual(overview[self.alpha]["hours_this_month"], 0)
+		self.assertGreaterEqual(overview[self.beta]["hours_this_month"], 3)
+		ordered = list(overview)
+		self.assertLess(ordered.index(self.beta), ordered.index(self.alpha))
+
+	def test_no_costing_or_billing_keys(self):
+		for row in self._overview().values():
+			self.assertFalse({k for k in row if "bill" in k or "cost" in k or "rate" in k})
+
+	def test_a_user_with_no_projects_gets_an_empty_list(self):
+		from frappe.utils import random_string
+
+		user = f"u6-noprojects-{random_string(6).lower()}@helixhr.test"
+		make_test_user(user, ensure_test_company())
+		self.assertEqual(self._overview(user), {})
+
+	def test_timesheet_dropdown_payload_is_unchanged(self):
+		from helixhr.api import get_my_projects
+
+		frappe.set_user(self.user)
+		alpha = next(p for p in get_my_projects() if p["name"] == self.alpha)
+		self.assertEqual(set(alpha), {"name", "project_name", "billable", "tasks"})
+		self.assertEqual({tuple(t) for t in alpha["tasks"]}, {("name", "subject")})
