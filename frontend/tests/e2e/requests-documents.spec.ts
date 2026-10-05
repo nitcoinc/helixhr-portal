@@ -88,6 +88,18 @@ async function hrReplies(api: APIRequestContext, name: string, note: string) {
 async function removeRequest(api: APIRequestContext, name: string) {
   if (!name) return
   await api.post('/api/method/frappe.client.delete', { data: { doctype: 'HR Request', name } })
+  // Deleting the newest request reverts its naming series, so the next one
+  // reuses this name: drop its notifications too or they attach to it.
+  const logs = await api.get('/api/method/frappe.client.get_list', {
+    params: {
+      doctype: 'Notification Log',
+      filters: JSON.stringify({ document_type: 'HR Request', document_name: name }),
+      limit_page_length: 0,
+    },
+  })
+  for (const log of (await logs.json()).message || []) {
+    await api.post('/api/method/frappe.client.delete', { data: { doctype: 'Notification Log', name: log.name } })
+  }
 }
 
 async function seedDocumentLink(

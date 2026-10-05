@@ -202,6 +202,10 @@ test('P8-U12 moved to the celebrations group: HR authors the birthday email and 
   // Switch to a selected audience and pick one person; the search returns
   // only the selected company's employees (R12).
   await form.getByLabel('Send to').selectOption('Selected people')
+  // A rerun finds the last run's pick saved, and a picked person drops out
+  // of the search: clear the list so the pick below is always fresh.
+  const picked = form.getByRole('listitem').getByRole('button', { name: 'Remove' })
+  while (await picked.count()) await picked.first().click()
   await form.getByLabel('Add a person').fill('Manager')
   const match = form.getByRole('button', { name: /Manager/ }).first()
   await expect(match).toBeVisible()
