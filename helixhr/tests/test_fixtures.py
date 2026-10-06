@@ -313,7 +313,7 @@ class TestStrictPermissionParity(IntegrationTestCase):
 					"attached_to_name": name,
 					"is_private": 1,
 				}
-			).insert().name
+			).insert(ignore_permissions=True).name
 		records["File"] = file_name
 		frappe.set_user("Administrator")
 
@@ -1022,4 +1022,3 @@ class TestApprovalWorkflowFixtures(IntegrationTestCase):
 		frappe.set_user("Administrator")
 		frappe.db.set_value("Timesheet", name, "docstatus", 0)
 		frappe.delete_doc("Timesheet", name, force=True, ignore_permissions=True)
-

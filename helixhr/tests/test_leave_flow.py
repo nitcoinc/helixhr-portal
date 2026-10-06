@@ -475,6 +475,11 @@ class TestPortalLeaveApi(IntegrationTestCase):
 			get_my_leave_detail(other.name)
 
 	def test_the_list_is_bounded_and_reports_the_true_total(self):
+		# Earlier methods deliberately leave submitted Casual Leave records on
+		# this shared employee. Make this test's three pending applications
+		# independent of their spent balance.
+		allocation = ensure_leave_allocation(self.employee_name, "Casual Leave", 30)
+		frappe.db.set_value("Leave Allocation", allocation, "new_leaves_allocated", 30)
 		frappe.set_user(EMPLOYEE_USER)
 		for offset in (106, 110, 114):
 			self._apply(offset)

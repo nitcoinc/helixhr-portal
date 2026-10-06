@@ -114,9 +114,11 @@ class TestHoursByProject(IntegrationTestCase):
 		self.other_task = _ensure_task(self.member_project, f"_Test U8 Other Task {method_name}")
 
 		# A distinct day per method: ERPNext's overlap check spans every
-		# Timesheet of the shared fixture employees.
+		# Timesheet of the shared fixture employees. Keep the range in line
+		# with the other Timesheet suites; the earlier 3,000-day range collided
+		# with queue-fixture weeks on CI.
 		digest = int(hashlib.md5(self.id().encode()).hexdigest(), 16)
-		self.today = str(add_days(frappe.utils.today(), digest % 3000))
+		self.today = str(add_days(frappe.utils.today(), digest % 200000))
 		self.window = {"from_date": self.today, "to_date": self.today}
 
 	def tearDown(self):
