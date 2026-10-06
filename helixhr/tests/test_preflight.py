@@ -1482,3 +1482,32 @@ class TestPreflightMailAndHRQueue(IntegrationTestCase):
 
 		self.assertEqual(result["status"], WARN)
 		self.assertIn(user, result["detail"])
+
+
+class TestReportAccessHrLockout(IntegrationTestCase):
+	"""(review fix) the access matrix has no second door for HR Manager: the
+	permission delta removes the DocPerm, and preflight catches a re-grant."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+
+	def test_passes_after_the_permission_delta(self):
+		self.assertEqual(preflight.check_report_access_hr_lockout()["status"], preflight.PASS)
+
+	def test_a_regranted_write_fails(self):
+		source = (
+			"Custom DocPerm"
+			if frappe.db.exists("Custom DocPerm", {"parent": "HelixHR Report Access"})
+			else "DocPerm"
+		)
+		real_get_all = preflight.frappe.get_all
+
+		def leaking_get_all(doctype, *args, **kwargs):
+			if doctype == source:
+				return [frappe._dict(write=1, create=0, delete=0)]
+			return real_get_all(doctype, *args, **kwargs)
+
+		with patch.object(preflight.frappe, "get_all", side_effect=leaking_get_all):
+			result = preflight.check_report_access_hr_lockout()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("apply_permission_deltas", result["detail"])

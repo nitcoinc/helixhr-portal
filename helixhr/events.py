@@ -10,6 +10,7 @@ from helixhr.utils import (
 	DOCUMENT_KIND_MESSAGE,
 	DOCUMENT_MAX_BYTES,
 	DOCUMENT_POLICY,
+	GRACE_DEFAULT,
 	PHOTO_KIND_MESSAGE,
 	PHOTO_MAX_BYTES,
 	PHOTO_POLICY,
@@ -766,7 +767,7 @@ def backdated_grace_days():
 	"""N from the HelixHR Leave Rules Single, default 1 when unset; a
 	negative value reads as 0."""
 	value = leave_rule_stored("backdated_grace_days")
-	return max(cint(1 if value is None else value), 0)
+	return max(cint(GRACE_DEFAULT if value is None else value), 0)
 
 
 def _backdated_exempt(user=None):

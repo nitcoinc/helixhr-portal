@@ -1155,6 +1155,12 @@ def send_notification(event_key, recipients, context, reference_doctype=None, re
 			frappe.log_error(frappe.get_traceback(), f"HelixHR {event_key} mail failed")
 
 
+# Plan 2026-10-06-001 U1: the backdated grace rule's default, in one place.
+# The Single's JSON field carries `"default": "1"` for Frappe's own form
+# rendering; this constant is what `events.backdated_grace_days` and the
+# doctype's `validate()` both read, so a future default change is made once.
+GRACE_DEFAULT = 1
+
 # The named, deliberately short field sets P5-KTD12 hands to the portal's
 # configuration screens -- not every permlevel-0 field the underlying HRMS
 # doctype ships. Each is written into the plan itself; this is not an

@@ -205,6 +205,12 @@ test('U2: HR edits the backdated leave rule and sees it after a reload', async (
 
     await page.reload()
     await expect(page.getByLabel('Working days back')).toHaveValue('2')
+
+    // The server's refusal reaches the form (review fix: this branch had no
+    // coverage). 400 is outside the doctype's 0-365 range.
+    await page.getByLabel('Working days back').fill('400')
+    await page.getByTestId('settings-leave-rules').getByRole('button', { name: 'Save' }).click()
+    await expect(page.getByRole('alert')).toContainText('between 0 and 365')
   } finally {
     await callMethod(admin, 'helixhr.api.save_leave_rules', {
       backdated_grace_days: original.backdated_grace_days,

@@ -1646,6 +1646,35 @@ def check_portal_admin_role():
 	return result
 
 
+def check_report_access_hr_lockout():
+	"""Plan 2026-10-06-001 U3 / R6: the access matrix is Portal Admin / System
+	Manager only, and `_assert_report_access_admin` is the portal gate. HR
+	Manager holding `write`/`create`/`delete` on `HelixHR Report Access` is a
+	second, quieter door -- a direct `/api/resource/HelixHR Report Access/<key>`
+	write would change the matrix off the endpoint entirely. The permission
+	delta removes it; this catches a re-grant by a later fixture or a Desk edit.
+
+	Reads whichever permission table Frappe actually honours: Custom DocPerm
+	once `setup_custom_perms` has run for the doctype (standard rows linger but
+	are ignored), DocPerm before that."""
+	doctype = "HelixHR Report Access"
+	source = "Custom DocPerm" if frappe.db.exists("Custom DocPerm", {"parent": doctype}) else "DocPerm"
+	granted = frappe.get_all(
+		source,
+		filters={"parent": doctype, "role": "HR Manager"},
+		fields=["write", "create", "delete"],
+	)
+	if any(row.write or row.create or row.delete for row in granted):
+		return _result(
+			"Report access HR lockout",
+			FAIL,
+			f"HR Manager holds write on {doctype} ({source}) -- a direct /api/resource write would "
+			"bypass the Portal Admin / System Manager gate; re-run "
+			"helixhr.patches.v1_0.apply_permission_deltas",
+		)
+	return _result("Report access HR lockout", PASS, f"HR Manager holds no write on {doctype}")
+
+
 def _fixture_roles():
 	"""Every role `helixhr/fixtures/role.json` ships -- the one list, so a new
 	portal role is guarded without editing this module."""
@@ -1711,6 +1740,7 @@ CHECKS = [
 	check_notification_manager_role,
 	check_report_manager_role,
 	check_portal_admin_role,
+	check_report_access_hr_lockout,
 	check_signup_disabled,
 	check_password_login,
 	check_entra,

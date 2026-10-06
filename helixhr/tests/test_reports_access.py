@@ -485,6 +485,14 @@ class TestReportAccessMatrix(IntegrationTestCase):
 		self.assertTrue(rows[PROJECT_KEY]["dm_allowed"])
 		self.assertFalse(rows[COMPANY_ONLY_KEY]["dm_allowed"])
 
+	def test_system_manager_is_allowed(self):
+		"""The one non-Portal-Admin allowed role has a positive path too."""
+		from helixhr.api import get_report_access
+
+		_, system_manager = _make_role_user("matrix-system-manager@helixhr.test", "System Manager")
+		rows = self._as(system_manager, get_report_access)
+		self.assertTrue(rows)
+
 	def test_hr_manager_has_no_docperm_on_the_matrix(self):
 		"""Review fix (security, plan U3): the portal gate is not the only
 		door. A standard DocPerm would let HR Manager write the matrix through

@@ -1,5 +1,5 @@
 <script setup>
-import { reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { createResource, FormControl, Button } from 'frappe-ui'
 
 // Plan 2026-10-06-001 U2 (R1, R2). The backdated leave rule used to live in
@@ -20,6 +20,15 @@ watch(
   },
   { immediate: true },
 )
+
+// A stored role that has since been disabled is absent from the picker's
+// list; include it anyway, so the select shows what is actually saved
+// instead of falling back to "None" while the old role stays in effect.
+const roleOptions = computed(() => {
+  const roles = rules.data?.roles || []
+  const selected = form.backdated_exempt_role
+  return selected && !roles.includes(selected) ? [selected, ...roles] : roles
+})
 
 const save = createResource({ url: 'helixhr.api.save_leave_rules', method: 'POST' })
 
@@ -94,7 +103,7 @@ async function submit() {
             None
           </option>
           <option
-            v-for="role in rules.data?.roles || []"
+            v-for="role in roleOptions"
             :key="role"
             :value="role"
           >

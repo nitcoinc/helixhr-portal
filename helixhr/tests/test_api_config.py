@@ -25,6 +25,7 @@ from helixhr.api import (
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	HR_MANAGER_EMPLOYEE_USER,
+	_make_role_user,
 	ensure_email_admin_user,
 	ensure_holiday_list_assignment,
 	ensure_leave_allocation,
@@ -694,6 +695,22 @@ class TestLeaveRules(IntegrationTestCase):
 					self._as(self.hr_manager, save_leave_rules, 1, role)
 			roles = self._as(self.hr_manager, get_leave_rules)["roles"]
 			self.assertFalse(set(roles) & {"All", "Guest", "Desk User"})
+
+	def test_omitting_a_field_leaves_it_unchanged(self):
+		with leave_rules(grace_days=1, exempt_role="Employee"):
+			self._as(self.hr_manager, save_leave_rules, 3, None)
+			read = self._as(self.hr_manager, get_leave_rules)
+			self.assertEqual(read["backdated_grace_days"], 3)
+			self.assertEqual(read["backdated_exempt_role"], "Employee")
+			self._as(self.hr_manager, save_leave_rules, None, "")
+			read = self._as(self.hr_manager, get_leave_rules)
+			self.assertEqual(read["backdated_grace_days"], 3)
+			self.assertEqual(read["backdated_exempt_role"], "")
+
+	def test_system_manager_is_allowed(self):
+		_, system_manager = _make_role_user("settings-system-manager@helixhr.test", "System Manager")
+		with leave_rules(grace_days=1):
+			self.assertEqual(self._as(system_manager, get_leave_rules)["backdated_grace_days"], 1)
 
 	def test_the_effective_default_shows_when_unset(self):
 		"""Review fix: an unset Single must show the rule's real default (1),
