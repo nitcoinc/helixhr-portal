@@ -8,7 +8,7 @@ from frappe.utils import add_days, today
 from helixhr import preflight
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
-	ensure_notification_manager_user,
+	ensure_email_admin_user,
 	make_test_employee_and_manager,
 	suspend_chart_of_account_fixtures,
 )
@@ -142,8 +142,9 @@ class TestPreflight(IntegrationTestCase):
 		self.assertEqual(result["status"], preflight.FAIL)
 		self.assertIn("hook", result["detail"])
 
-	def test_notification_manager_role_warns_when_nobody_holds_it(self):
-		"""Plan 2026-10-02-001 U7."""
+	def test_portal_admin_role_warns_when_nobody_holds_it(self):
+		"""The Portal Admin owns the email theme and templates now; with no
+		holder only System Manager can edit them."""
 		real_get_all = frappe.get_all
 
 		def _no_holders(doctype, *args, **kwargs):
@@ -152,10 +153,16 @@ class TestPreflight(IntegrationTestCase):
 			return real_get_all(doctype, *args, **kwargs)
 
 		with patch.object(preflight.frappe, "get_all", side_effect=_no_holders):
-			result = preflight.check_notification_manager_role()
+			result = preflight.check_portal_admin_role()
 		self.assertEqual(result["status"], preflight.WARN)
+		self.assertIn("email templates", result["detail"])
 
-		ensure_notification_manager_user()
+		ensure_email_admin_user()
+		self.assertEqual(preflight.check_portal_admin_role()["status"], preflight.PASS)
+
+	def test_notification_manager_role_stays_portal_only(self):
+		"""Plan 2026-10-02-001 U7; it no longer owns templates, so holders
+		are not checked."""
 		self.assertEqual(preflight.check_notification_manager_role()["status"], preflight.PASS)
 
 		real_get_value = frappe.db.get_value

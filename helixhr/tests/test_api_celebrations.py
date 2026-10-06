@@ -1,5 +1,6 @@
 """Plan 2026-10-04-004 U4: the Email Templates page's "Celebrations &
-holidays" group -- scoped endpoints for per-company celebration settings.
+holidays" group -- Portal Admin / System Manager endpoints for per-company
+celebration settings.
 
 `test_celebration_reminder_doctype.py` covers the doctype and the save
 path's doctype-level rules; `test_reminders.py` covers the senders. This
@@ -11,11 +12,13 @@ import frappe
 from frappe.tests import IntegrationTestCase
 
 from helixhr.tests.utils import (
+	EMAIL_ADMIN_USER,
 	EMPLOYEE_USER,
 	HR_MANAGER_EMPLOYEE_USER,
 	HR_MANAGER_USER,
 	NOTIFICATION_MANAGER_USER,
 	ensure_baseline_company,
+	ensure_email_admin_user,
 	ensure_hr_manager_user,
 	ensure_notification_manager_user,
 	ensure_test_company,
@@ -43,11 +46,17 @@ def _company(name, abbr):
 
 
 class TestCelebrationEndpoints(IntegrationTestCase):
+	"""Portal Admin / System Manager edit any company's celebration mail; HR
+	roles and the Notification Manager are refused."""
+
 	@classmethod
 	def setUpClass(cls):
-		ensure_test_company()
+		cls.company = ensure_test_company()
 		_company(OTHER_COMPANY, "TRCB")
 		make_test_hr_manager_employee()
+		ensure_hr_manager_user()
+		ensure_notification_manager_user()
+		ensure_email_admin_user()
 		cls.employee, *_ = make_test_employee_and_manager()
 
 	def setUp(self):
@@ -70,11 +79,13 @@ class TestCelebrationEndpoints(IntegrationTestCase):
 					field: doc.get(field) for field in ("subject", "response_html", "response", "use_html")
 				}
 
-		# The anchored HR Manager's own company, configured once for the
-		# class: every endpoint test below reads or tries to write it.
-		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
+		frappe.set_user(EMAIL_ADMIN_USER)
 		save_celebration_reminder(
-			event="birthday", subject="Happy birthday {{ names }}", body="Cheers", is_enabled=1
+			event="birthday",
+			subject="Happy birthday {{ names }}",
+			body="Cheers",
+			is_enabled=1,
+			company=self.company,
 		)
 
 	def tearDown(self):
@@ -84,133 +95,87 @@ class TestCelebrationEndpoints(IntegrationTestCase):
 			doc.update(snapshot)
 			doc.save(ignore_permissions=True)
 
-	def test_an_hr_manager_reads_and_saves_their_own_company(self):
+	def test_a_portal_admin_reads_and_saves_any_company(self):
+		"""No DocPerm at all, yet the save lands: the gate is the role check
+		and the writes run with `ignore_permissions`."""
 		from helixhr.api import get_celebration_setup, save_celebration_reminder
 
-		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
-		company = frappe.db.get_value("Employee", {"user_id": HR_MANAGER_EMPLOYEE_USER}, "company")
-
-		setup = get_celebration_setup(company)
-		self.assertEqual(setup["company"], company)
-		self.assertEqual(setup["companies"], [company], "a scoped HR Manager sees one company")
+		frappe.set_user(EMAIL_ADMIN_USER)
+		setup = get_celebration_setup(self.company)
+		self.assertEqual(setup["company"], self.company)
+		self.assertIn(OTHER_COMPANY, setup["companies"])
 		self.assertIn("company", setup["template_tokens"])
+		self.assertNotIn("logo_url", setup)
 		self.assertEqual(set(setup["events"]), {"birthday", "work_anniversary", "holiday"})
 		self.assertEqual(setup["events"]["birthday"]["subject"], "Happy birthday {{ names }}")
 
-		result = save_celebration_reminder(
-			event="birthday",
-			subject="Edited subject",
-			body="Cheers",
-			is_enabled=1,
-			company=company,
-		)
-		self.assertEqual(result["subject"], "Edited subject")
-
-	def test_an_scoped_hr_manager_cannot_save_another_companys_row(self):
-		from helixhr.api import save_celebration_reminder
-
-		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
-		with self.assertRaises(frappe.PermissionError):
-			save_celebration_reminder(
-				event="birthday",
-				subject="X",
-				body="Y",
-				is_enabled=1,
-				company=OTHER_COMPANY,
+		for company in (self.company, OTHER_COMPANY):
+			result = save_celebration_reminder(
+				event="birthday", subject="Edited subject", body="Cheers", is_enabled=0, company=company
 			)
+			self.assertEqual(result["subject"], "Edited subject")
 
-	def test_a_scoped_hr_manager_cannot_read_or_search_another_company(self):
-		from helixhr.api import get_celebration_setup, search_celebration_recipients
-
-		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
-		with self.assertRaises(frappe.PermissionError):
-			get_celebration_setup(OTHER_COMPANY)
-		with self.assertRaises(frappe.PermissionError):
-			search_celebration_recipients(OTHER_COMPANY, query="a")
-
-	def test_an_unscoped_caller_may_edit_any_company(self):
-		from helixhr.api import get_celebration_setup, save_celebration_reminder
-
-		# `ensure_hr_manager_user` is the Desk-only persona: no Employee
-		# record, so `resolve_admin_scope` is unscoped (P3-KTD7).
-		ensure_hr_manager_user()
-		frappe.set_user(HR_MANAGER_USER)
-		for company in (frappe.db.get_value("Company", {"name": ["!=", ""]}, "name"), OTHER_COMPANY):
-			setup = get_celebration_setup(company)
-			self.assertEqual(setup["company"], company)
-		result = save_celebration_reminder(
-			event="birthday", subject="Unscoped edit", body="Y", is_enabled=0, company=OTHER_COMPANY
-		)
-		self.assertEqual(result["subject"], "Unscoped edit")
-
-	def test_an_unscoped_caller_with_no_default_company_gets_none_and_the_choice(self):
-		"""KTD3 on a multi-company site: a Desk-only HR Manager with no
-		Employee record has no company to default to -- the setup answers
-		with `company: None` plus the companies they may configure, and the
-		page's company selector takes it from there (the old throw left the
-		page blank with the refusal swallowed)."""
+	def test_a_portal_admin_with_no_default_company_gets_none_and_the_choice(self):
+		"""On a multi-company site an editor with no Employee record has no
+		company to default to -- the setup answers with `company: None` plus
+		the companies, and the page's company selector takes it from there."""
 		from helixhr.api import get_celebration_setup
 
-		ensure_test_company()
 		ensure_baseline_company()
-		ensure_hr_manager_user()
-		frappe.set_user(HR_MANAGER_USER)
-
+		frappe.set_user(EMAIL_ADMIN_USER)
 		setup = get_celebration_setup()
 		self.assertIsNone(setup["company"])
 		self.assertGreaterEqual(len(setup["companies"]), 2)
 
-	def test_a_notification_manager_without_hr_is_refused_everywhere(self):
-		"""KTD2/KTD3: the celebration group is HR's; the Notification Manager
-		keeps the message templates and does not see this group."""
+	def test_hr_roles_and_the_notification_manager_are_refused_everywhere(self):
 		from helixhr.api import (
 			get_celebration_setup,
 			preview_celebration,
+			reset_celebration_template,
 			save_celebration_reminder,
 			search_celebration_recipients,
 			send_test_celebration,
 		)
 
-		ensure_notification_manager_user()
-		frappe.set_user(NOTIFICATION_MANAGER_USER)
-		for call in (
-			lambda: get_celebration_setup(ensure_test_company()),
+		company = self.company
+		calls = (
+			lambda: get_celebration_setup(company),
 			lambda: save_celebration_reminder(
-				event="birthday", subject="x", body="y", is_enabled=1
+				event="birthday", subject="x", body="y", is_enabled=1, company=company
 			),
-			lambda: preview_celebration(event="birthday", subject="x", body="y"),
-			lambda: send_test_celebration(event="birthday", subject="x", body="y"),
-			lambda: search_celebration_recipients(ensure_test_company(), query="a"),
-		):
-			with self.assertRaises(frappe.PermissionError):
-				call()
+			lambda: preview_celebration(event="birthday", subject="x", body="y", company=company),
+			lambda: send_test_celebration(event="birthday", subject="x", body="y", company=company),
+			lambda: search_celebration_recipients(company, query="a"),
+			lambda: reset_celebration_template(event="birthday", company=company),
+		)
+		for user in (HR_MANAGER_EMPLOYEE_USER, HR_MANAGER_USER, NOTIFICATION_MANAGER_USER, EMPLOYEE_USER):
+			frappe.set_user(user)
+			for call in calls:
+				with self.subTest(user=user), self.assertRaises(frappe.PermissionError):
+					call()
 
-	def test_a_plain_employee_is_refused(self):
-		from helixhr.api import get_celebration_setup
+	def test_an_unknown_company_is_refused(self):
+		from helixhr.api import save_celebration_reminder
 
-		frappe.set_user(EMPLOYEE_USER)
-		with self.assertRaises(frappe.PermissionError):
-			get_celebration_setup(ensure_test_company())
+		frappe.set_user(EMAIL_ADMIN_USER)
+		with self.assertRaises(frappe.ValidationError):
+			save_celebration_reminder(
+				event="birthday", subject="X", body="Y", is_enabled=1, company="_No Such Company"
+			)
 
 	def test_the_recipient_search_returns_only_the_companys_employees(self):
 		from helixhr.api import search_celebration_recipients
 
-		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
-		company = frappe.db.get_value("Employee", {"user_id": HR_MANAGER_EMPLOYEE_USER}, "company")
-		rows = search_celebration_recipients(company, query="")
+		frappe.set_user(EMAIL_ADMIN_USER)
+		rows = search_celebration_recipients(self.company, query="")
 		self.assertTrue(rows)
 		for row in rows:
-			self.assertEqual(
-				frappe.db.get_value("Employee", row["name"], "company"), company
-			)
+			self.assertEqual(frappe.db.get_value("Employee", row["name"], "company"), self.company)
 
 	def test_the_preview_renders_the_selected_companys_name(self):
 		from helixhr.api import preview_celebration
 
-		# An unscoped caller, so the preview can name a company the test
-		# does not own fixtures for.
-		ensure_hr_manager_user()
-		frappe.set_user(HR_MANAGER_USER)
+		frappe.set_user(EMAIL_ADMIN_USER)
 		rendered = preview_celebration(
 			event="birthday",
 			subject="Hello {{ company }}",
@@ -225,28 +190,26 @@ class TestCelebrationEndpoints(IntegrationTestCase):
 
 		from helixhr.api import send_test_celebration
 
-		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
-		company = frappe.db.get_value("Employee", {"user_id": HR_MANAGER_EMPLOYEE_USER}, "company")
+		frappe.set_user(EMAIL_ADMIN_USER)
 		calls = []
 		with patch("frappe.sendmail", side_effect=lambda **kwargs: calls.append(kwargs)):
 			send_test_celebration(
-				event="birthday", subject="Hi {{ names }}", body="Cheers", company=company
+				event="birthday", subject="Hi {{ names }}", body="Cheers", company=self.company
 			)
 
 		self.assertEqual(len(calls), 1)
-		self.assertEqual(calls[0]["recipients"], [HR_MANAGER_EMPLOYEE_USER])
+		self.assertEqual(calls[0]["recipients"], [EMAIL_ADMIN_USER])
 
 	def test_a_holiday_save_carries_the_frequency(self):
 		from helixhr.api import save_celebration_reminder
 
-		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
-		company = frappe.db.get_value("Employee", {"user_id": HR_MANAGER_EMPLOYEE_USER}, "company")
+		frappe.set_user(EMAIL_ADMIN_USER)
 		result = save_celebration_reminder(
 			event="holiday",
 			subject="Holidays at {{ company }}",
 			body="Enjoy",
 			is_enabled=1,
-			company=company,
+			company=self.company,
 			frequency="Monthly",
 		)
 		self.assertEqual(result["frequency"], "Monthly")
@@ -266,15 +229,13 @@ class TestCelebrationEndpoints(IntegrationTestCase):
 
 class TestPerCompanyCelebrationTemplates(IntegrationTestCase):
 	"""Plan 2026-10-05-001 U11: one Email Template per (event, company), the
-	HelixHR sandbox render with the layout wrap, reset, and the clone patch."""
+	HelixHR sandbox render with the theme wrap, reset, and the clone patch."""
 
 	@classmethod
 	def setUpClass(cls):
-		ensure_test_company()
+		cls.company = ensure_test_company()
 		_company(OTHER_COMPANY, "TRCB")
-		make_test_hr_manager_employee()
-		ensure_hr_manager_user()
-		cls.company = frappe.db.get_value("Employee", {"user_id": HR_MANAGER_EMPLOYEE_USER}, "company")
+		ensure_email_admin_user()
 
 	def setUp(self):
 		frappe.set_user("Administrator")
@@ -292,7 +253,7 @@ class TestPerCompanyCelebrationTemplates(IntegrationTestCase):
 	def test_saving_one_companys_template_leaves_the_other_unchanged(self):
 		from helixhr.api import save_celebration_reminder
 
-		frappe.set_user(HR_MANAGER_USER)
+		frappe.set_user(EMAIL_ADMIN_USER)
 		save_celebration_reminder(event="birthday", subject="B text", body="B body", company=OTHER_COMPANY)
 		save_celebration_reminder(event="birthday", subject="A text", body="A body", company=self.company)
 
@@ -303,29 +264,18 @@ class TestPerCompanyCelebrationTemplates(IntegrationTestCase):
 		)
 		self.assertNotEqual(row, "HelixHR Birthday Reminder", "never the shared seeded name")
 
-	def test_reset_restores_the_default_for_the_callers_company_only(self):
+	def test_reset_restores_the_default_for_that_company_only(self):
 		from helixhr.api import reset_celebration_template, save_celebration_reminder
 		from helixhr.reminders import CELEBRATION_DEFAULTS
 
-		frappe.set_user(HR_MANAGER_USER)
+		frappe.set_user(EMAIL_ADMIN_USER)
 		save_celebration_reminder(event="holiday", subject="Other kept", body="x", company=OTHER_COMPANY)
-		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
 		save_celebration_reminder(event="holiday", subject="Mine edited", body="x", company=self.company)
 
 		result = reset_celebration_template(event="holiday", company=self.company)
 		self.assertEqual(result["subject"], CELEBRATION_DEFAULTS["holiday"]["subject"])
 		self.assertEqual(result["body"], CELEBRATION_DEFAULTS["holiday"]["body"])
 		self.assertEqual(self._template("holiday", OTHER_COMPANY).subject, "Other kept")
-
-	def test_reset_from_another_companys_hr_manager_is_refused(self):
-		from helixhr.api import reset_celebration_template
-
-		frappe.set_user(HR_MANAGER_EMPLOYEE_USER)
-		with self.assertRaises(frappe.PermissionError):
-			reset_celebration_template(event="birthday", company=OTHER_COMPANY)
-		frappe.set_user(EMPLOYEE_USER)
-		with self.assertRaises(frappe.PermissionError):
-			reset_celebration_template(event="birthday", company=self.company)
 
 	def test_a_company_with_no_row_shows_the_default_text(self):
 		from helixhr.api import _celebration_reminder_projection
@@ -348,7 +298,7 @@ class TestPerCompanyCelebrationTemplates(IntegrationTestCase):
 
 		from helixhr.api import save_celebration_reminder
 
-		frappe.set_user(HR_MANAGER_USER)
+		frappe.set_user(EMAIL_ADMIN_USER)
 		with self.assertRaises(frappe.ValidationError):
 			save_celebration_reminder(
 				event="birthday",
@@ -359,8 +309,10 @@ class TestPerCompanyCelebrationTemplates(IntegrationTestCase):
 
 	def test_a_body_only_template_is_wrapped_and_a_self_branded_one_is_not(self):
 		from helixhr.patches.v1_0.seed_celebration_templates import TEMPLATES
-		from helixhr.utils import render_celebration_email
+		from helixhr.utils import EMAIL_THEME, render_celebration_email
 
+		frappe.db.set_single_value(EMAIL_THEME, "logo", "/files/acme-logo.png")
+		self.addCleanup(frappe.db.set_single_value, EMAIL_THEME, "logo", "")
 		context = {
 			"company": "Acme",
 			"logo_url": "https://hr.example.com/files/acme-logo.png",
@@ -371,16 +323,22 @@ class TestPerCompanyCelebrationTemplates(IntegrationTestCase):
 			"date": "2026-10-05",
 		}
 		wrapped = render_celebration_email("Hi {{ names }}", "<p>Cheers</p>", context)["message"]
-		self.assertEqual(wrapped.count("acme-logo.png"), 1, "the layout carries the logo")
+		self.assertEqual(wrapped.count("acme-logo.png"), 1, "the theme carries the logo")
+		self.assertIn('embed="/files/acme-logo.png"', wrapped)
 		self.assertIn("<p>Cheers</p>", wrapped)
+		preview = render_celebration_email("Hi", "<p>Cheers</p>", context, embed_logo=False)["message"]
+		self.assertIn('src="/files/acme-logo.png"', preview)
+		self.assertNotIn("embed=", preview)
 
 		full = render_celebration_email("S", "<html><body>Mine</body></html>", context)["message"]
 		self.assertEqual(full, "<html><body>Mine</body></html>", "a full document is never wrapped")
 
-		# An HR edit of the old seeded fragment prints the logo itself: one <img>, not two.
+		# An HR edit of the old seeded fragment prints the logo itself: one
+		# <img>, not two -- and on a send it is embedded, not linked.
 		edited = TEMPLATES[0]["response_html"].replace("Do say something", "Say hello")
 		message = render_celebration_email("S", edited, context)["message"]
 		self.assertEqual(message.count("acme-logo.png"), 1)
+		self.assertIn('embed="/files/acme-logo.png"', message)
 
 	def test_the_clone_patch_copies_per_company_preserving_custom_text_and_is_idempotent(self):
 		from helixhr.patches.v1_0 import clone_celebration_templates_per_company as patch

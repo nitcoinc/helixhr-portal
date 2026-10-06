@@ -5,16 +5,14 @@ import { createResource, Button, Dialog } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import CelebrationEditor from '@/components/templates/CelebrationEditor.vue'
-import CompanyLogoControl from '@/components/templates/CompanyLogoControl.vue'
+import EmailThemeEditor from '@/components/templates/EmailThemeEditor.vue'
 import { useIsDesktop } from '@/lib/useIsDesktop'
-import { session } from '@/lib/session'
 
-// Plan 2026-10-02-001 U10 (R15, R18), role-sectioned since plan
-// 2026-10-04-004 U5 (KTD3): the Notification Manager edits the portal's own
-// message templates; the HR Manager gets the "Celebrations & holidays"
-// group, whose endpoints gate themselves on `_is_hr()` plus
-// `resolve_admin_scope`. The route is open to whoever holds
-// `can_edit_email_templates`; each group's server gate is the real one.
+// Plan 2026-10-02-001 U10 (R15, R18): every email the portal sends, in three
+// groups -- the shared theme, the message templates, and celebrations &
+// holidays. Portal Admin and System Manager only: the route is open to
+// `can_edit_email_templates`, and every endpoint behind it checks the same
+// predicate server-side.
 
 const AUDIENCES = ['Employee', 'Approver', 'HR', 'Route role', 'Security']
 
@@ -36,28 +34,12 @@ const groups = computed(() => {
 
 const selectedKey = ref('')
 const selected = computed(() => events.value.find((e) => e.key === selectedKey.value) || null)
-// `include_logo`: this template's opt-out of the company-wide logo (the
-// logo itself is set once, at the top of the group).
+// `include_logo`: this template's opt-out of the theme's logo (the logo
+// itself is set once, on the Theme tab).
 const draft = reactive({ subject: '', body: '', is_enabled: true, include_logo: true })
 const errors = reactive({ subject: '', body: '', general: '' })
 const status = ref('')
 const preview = reactive({ html: '', subject: '', error: '' })
-// The company-wide logo every message template carries: the caller's
-// company, as `send_notification` resolves it. Seeded by the setup call and
-// refreshed by every preview, so a logo change never reloads the page (and
-// the control's own "Logo saved" status survives).
-const brand = ref(null)
-watch(
-  () => setup.data?.brand,
-  (value) => {
-    if (value) brand.value = value
-  },
-  { immediate: true },
-)
-function onLogoChanged() {
-  if (selected.value) refreshPreview()
-  else setup.reload()
-}
 
 const dirty = computed(() => {
   const event = selected.value
@@ -184,12 +166,6 @@ async function refreshPreview() {
     const result = await previewResource.submit(payload())
     preview.html = result.html
     preview.subject = result.subject
-    brand.value = {
-      company: result.company,
-      logo_url: result.logo_url,
-      header_color: result.header_color,
-      can_set_logo: result.can_set_logo,
-    }
   } catch (error) {
     preview.html = ''
     preview.error = messageOf(error, 'Something went wrong.')
@@ -279,27 +255,14 @@ const showEditor = computed(() => !!selected.value)
 const route = useRoute()
 const router = useRouter()
 
-// A caller with only the celebrations group (an HR Manager who is not a
-// Notification Manager) lands on it; a Notification Manager lands on the
-// message templates.
-const activeGroup = computed(() => {
-  if (route.query.group === 'celebrations') return 'celebrations'
-  if (route.query.group === 'messages') return 'messages'
-  // No group in the URL: the caller's capability decides (an HR-only
-  // manager lands on the celebrations group, not an empty messages one).
-  return defaultGroup.value
-})
-const defaultGroup = computed(() =>
-  session.canManageNotifications ? 'messages' : session.canConfigure ? 'celebrations' : 'messages',
-)
-const showMessagesGroup = computed(() => !!session.canManageNotifications)
-const showCelebrationsGroup = computed(() => !!session.canConfigure)
+const GROUPS = ['theme', 'messages', 'celebrations']
+const activeGroup = computed(() => (GROUPS.includes(route.query.group) ? route.query.group : 'messages'))
 
 function chooseGroup(group) {
   const query = { ...route.query, group }
   if (group === activeGroup.value) return
-  if (group === 'celebrations') delete query.event
-  else delete query.company
+  if (group !== 'messages') delete query.event
+  if (group !== 'celebrations') delete query.company
   router.replace({ query })
 }
 
@@ -312,7 +275,8 @@ async function ensureCelebrationCompany() {
   if (celebrationCompany.value) return
   try {
     const data = await companies.fetch()
-    const fallback = data?.companies?.[0]
+    // The caller's own company when they have one, else the first listed.
+    const fallback = data?.company || data?.companies?.[0]
     if (fallback) router.replace({ query: { ...route.query, company: fallback } })
   } catch {
     // The editor's own AsyncState below shows the refusal (an HR Manager
@@ -335,56 +299,41 @@ watch(
       subtitle="Edit the wording of every email the portal sends."
     />
 
-    <!-- The group nav: message templates for the Notification Manager,
-         celebrations & holidays for HR (KTD3). -->
+    <!-- The group nav: the shared theme, message templates, celebrations. -->
     <div
-      v-if="showCelebrationsGroup"
-      class="mb-4 flex gap-1 border-b border-outline-gray-1"
+      class="mb-4 flex gap-1 overflow-x-auto border-b border-outline-gray-1"
       role="tablist"
       aria-label="Template groups"
       data-testid="email-template-groups"
     >
       <button
-        v-if="showMessagesGroup"
+        v-for="group in [
+          { key: 'theme', label: 'Theme' },
+          { key: 'messages', label: 'Message templates' },
+          { key: 'celebrations', label: 'Celebrations & holidays' },
+        ]"
+        :key="group.key"
         type="button"
         role="tab"
-        class="min-h-11 rounded-t-lg px-3 py-2 text-sm"
-        :class="activeGroup === 'messages' ? 'border-b-2 border-outline-gray-4 font-medium text-ink-gray-9' : 'text-ink-gray-7 hover:text-ink-gray-9'"
-        :aria-selected="activeGroup === 'messages' ? 'true' : 'false'"
-        data-testid="email-template-group-messages"
-        @click="chooseGroup('messages')"
+        class="min-h-11 shrink-0 rounded-t-lg px-3 py-2 text-sm"
+        :class="activeGroup === group.key ? 'border-b-2 border-outline-gray-4 font-medium text-ink-gray-9' : 'text-ink-gray-7 hover:text-ink-gray-9'"
+        :aria-selected="activeGroup === group.key ? 'true' : 'false'"
+        :data-testid="`email-template-group-${group.key}`"
+        @click="chooseGroup(group.key)"
       >
-        Message templates
-      </button>
-      <button
-        type="button"
-        role="tab"
-        class="min-h-11 rounded-t-lg px-3 py-2 text-sm"
-        :class="activeGroup === 'celebrations' ? 'border-b-2 border-outline-gray-4 font-medium text-ink-gray-9' : 'text-ink-gray-7 hover:text-ink-gray-9'"
-        :aria-selected="activeGroup === 'celebrations' ? 'true' : 'false'"
-        data-testid="email-template-group-celebrations"
-        @click="chooseGroup('celebrations')"
-      >
-        Celebrations &amp; holidays
+        {{ group.label }}
       </button>
     </div>
 
+    <EmailThemeEditor v-if="activeGroup === 'theme'" />
+
     <CelebrationEditor
-      v-if="showCelebrationsGroup && activeGroup === 'celebrations' && celebrationCompany"
+      v-else-if="activeGroup === 'celebrations' && celebrationCompany"
       :key="celebrationCompany"
       :company="celebrationCompany"
     />
 
-    <template v-else-if="showMessagesGroup">
-      <CompanyLogoControl
-        v-if="brand?.company"
-        class="mb-5"
-        :company="brand.company"
-        :logo-url="brand.logo_url"
-        :header-color="brand.header_color || ''"
-        :editable="brand.can_set_logo"
-        @changed="onLogoChanged"
-      />
+    <template v-else-if="activeGroup === 'messages'">
       <AsyncState
         section="email-templates"
         :resource="setup"

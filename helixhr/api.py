@@ -72,11 +72,13 @@ from helixhr.helixhr.doctype.helixhr_timesheet_change.helixhr_timesheet_change i
 # `hr_request.get_permission_query_conditions` cannot drift apart.
 from helixhr.helixhr.doctype.hr_request.hr_request import _WORKER_ROLES as _ROUTED_WORKER_ROLES
 from helixhr.utils import (
+	EMAIL_THEME,
 	HOLIDAY_LIST_EDITABLE_FIELDS,
 	LEAVE_TYPE_EDITABLE_FIELDS,
 	MANAGED_PORTAL_ROLES,
 	NOTIFICATION_EVENTS,
 	PERSON_EDITABLE_FIELDS,
+	PORTAL_ADMIN_ROLE,
 	PROFILE_CORRECTABLE_FIELDS,
 	PROFILE_CORRECTION_CATEGORY,
 	PROFILE_EDITABLE_FIELDS,
@@ -86,12 +88,13 @@ from helixhr.utils import (
 	PROFILE_SECTION_TABLES,
 	PROFILE_USER_LINK_FIELDS,
 	SHIFT_TYPE_EDITABLE_FIELDS,
+	THEME_PLACEHOLDERS,
 	UPLOAD_MAX_BYTES,
 	TemplateRejected,
 	admin_scope_employee_filters,
 	as_administrator,
 	can_admin_portal,
-	company_email_header_colors,
+	email_theme,
 	employee_in_admin_scope,
 	event_variables,
 	get_manager_user,
@@ -113,7 +116,8 @@ from helixhr.utils import (
 	sample_context,
 	send_notification,
 	session_company,
-	valid_email_header_color,
+	validate_email_theme,
+	validate_logo_upload,
 	validate_message_template,
 	validate_portal_upload,
 )
@@ -609,15 +613,10 @@ def get_portal_bootstrap():
 		# so the nav item and the server's own gate can never disagree --
 		# same shape as `can_configure` just above.
 		"can_see_organisation": _is_hr(frappe.session.user),
-		# Plan 2026-10-02-001 U7 / KTD12: the Email templates page. A boolean,
-		# never a role list; System Manager may open it too (R14).
-		"can_manage_notifications": _can_manage_notifications(frappe.session.user),
-		# Plan 2026-10-04-004 U4 / KTD3: the page becomes role-sectioned --
-		# HR Manager sees the "Celebrations & holidays" group, the Notification
-		# Manager the message templates. Each group's endpoints keep their own
-		# server gate; this only decides whether the nav item renders.
-		"can_edit_email_templates": _can_manage_notifications(frappe.session.user)
-		or _is_hr(frappe.session.user),
+		# The Email templates page (theme, message templates, celebrations &
+		# holidays): Portal Admin and System Manager only -- the predicate
+		# every endpoint behind the page enforces. A boolean, never a role list.
+		"can_edit_email_templates": _can_edit_email_templates(frappe.session.user),
 		# P6-U4: same shape again -- `search_people` and `get_person` are
 		# gated by `resolve_admin_scope`, which grants a scope to exactly
 		# the roles `_is_hr` names, so the nav item and the server's gate
@@ -2788,14 +2787,15 @@ def _holds_routed_role(user=None):
 	return bool(set(frappe.get_roles(user)) & _ROUTED_WORKER_ROLES)
 
 
-NOTIFICATION_MANAGER = "HelixHR Notification Manager"
-
-
-def _can_manage_notifications(user=None):
-	"""Whether the caller owns portal email wording (plan 2026-10-02-001 R14):
-	the Notification Manager or System Manager -- never HR Manager alone."""
+def _can_edit_email_templates(user=None):
+	"""Whether the caller owns every portal email -- the shared theme, the
+	message templates and the celebration / holiday mail: HelixHR Portal
+	Admin or System Manager. HR roles and the Notification Manager are
+	refused (the page is portal configuration, not HR data)."""
 	user = user or frappe.session.user
-	return bool(set(frappe.get_roles(user)) & {NOTIFICATION_MANAGER, "System Manager"})
+	if user == "Administrator":
+		return True
+	return bool(set(frappe.get_roles(user)) & {PORTAL_ADMIN_ROLE, "System Manager"})
 
 
 def _initials(full_name):
@@ -7412,7 +7412,7 @@ def get_my_documents():
 def _can_manage_documents(user=None):
 	"""Whether `save_document_link` would accept *some* company from this
 	caller: HR, and either System Manager or holding an admin scope -- the
-	same rule as `_assert_can_set_company_logo`, asked without a company."""
+	same rule as `_assert_can_manage_document`, asked without a company."""
 	user = user or frappe.session.user
 	if not _is_hr(user):
 		return False
@@ -7422,10 +7422,13 @@ def _can_manage_documents(user=None):
 
 
 def _assert_can_manage_document(company):
-	"""The publish gate per company, reused from the logo upload: HR only;
-	an anchored HR Manager for their own company (so never a global, blank
-	company row), a System Manager for any."""
-	_assert_can_set_company_logo(company or None)
+	"""The publish gate per company: HR only; an anchored HR Manager for
+	their own company (so never a global, blank company row), a System
+	Manager for any."""
+	if not _is_hr():
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	if "System Manager" not in frappe.get_roles():
+		_assert_company_in_admin_scope(company or None)
 
 
 @frappe.whitelist()
@@ -8208,10 +8211,10 @@ def save_request_category(name, **fields):
 # --- Email templates page (plan 2026-10-02-001 U10, R15, R18) --------------
 
 
-def _assert_can_manage_notifications():
-	"""The one gate every Email templates method calls first (R14): the
-	Notification Manager or System Manager. HR Manager alone is refused."""
-	if not _can_manage_notifications():
+def _assert_can_edit_email_templates():
+	"""The one gate every Email templates method calls first: Portal Admin
+	or System Manager (`_can_edit_email_templates`). HR Manager is refused."""
+	if not _can_edit_email_templates():
 		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
 
 
@@ -8225,7 +8228,7 @@ def _message_event(template_key):
 def get_notification_setup():
 	"""Every portal email event with its state (Off / Default / Custom, KTD7),
 	wording, defaults and variable reference -- the whole page in one call."""
-	_assert_can_manage_notifications()
+	_assert_can_edit_email_templates()
 	rate_limit_per_user("get_notification_setup")
 	saved = {
 		row.template_key: row
@@ -8255,7 +8258,7 @@ def get_notification_setup():
 				"default_subject": event["subject"],
 				"default_body": event["body"],
 				"custom_wording": custom_wording,
-				# The per-template logo opt-out; the logo itself is company-wide.
+				# The per-template logo opt-out; the logo itself is the theme's.
 				"hide_logo": bool(row and row.hide_logo),
 				"last_fallback": _last_template_fallback(key, row),
 				"variables": [
@@ -8264,26 +8267,7 @@ def get_notification_setup():
 				],
 			}
 		)
-	return {"events": events, "subject_max": _TEMPLATE_SUBJECT_MAX, "brand": _message_logo_brand()}
-
-
-def _message_logo_brand():
-	"""The company-wide logo the message templates render with (the
-	caller's company, as `send_notification` resolves it) and whether this
-	caller may replace it (`set_company_logo`'s own gate)."""
-	brand = message_brand(frappe.session.user)
-	try:
-		_assert_can_set_company_logo(brand["company"])
-		can_set_logo = bool(brand["company"])
-	except frappe.PermissionError:
-		frappe.clear_last_message()
-		can_set_logo = False
-	return {
-		"company": brand["company"],
-		"logo_url": brand["logo_url"],
-		"header_color": brand["header_color"],
-		"can_set_logo": can_set_logo,
-	}
+	return {"events": events, "subject_max": _TEMPLATE_SUBJECT_MAX}
 
 
 def _last_template_fallback(event_key, row):
@@ -8322,7 +8306,7 @@ def save_message_template(template_key, subject=None, body=None, is_enabled=None
 
 	`hide_logo` alone (no subject/body) on a default-wording message keeps a
 	wording-less row that carries just the opt-out."""
-	_assert_can_manage_notifications()
+	_assert_can_edit_email_templates()
 	rate_limit_per_user("save_message_template")
 	_message_event(template_key)
 
@@ -8332,7 +8316,6 @@ def save_message_template(template_key, subject=None, body=None, is_enabled=None
 		doc = frappe.new_doc("HelixHR Message Template")
 		doc.template_key = template_key
 
-	_assert_config_write(doc)
 	if subject is not None:
 		subject = subject.strip()
 		if len(subject) > _TEMPLATE_SUBJECT_MAX:
@@ -8346,7 +8329,10 @@ def save_message_template(template_key, subject=None, body=None, is_enabled=None
 		doc.is_enabled = cint(is_enabled)
 	if hide_logo is not None:
 		doc.hide_logo = cint(hide_logo)
-	doc.save()
+	# The gate above is the authorisation: Portal Admin holds no DocPerm
+	# (preflight enforces), so the doctype's own `validate()` still runs but
+	# its permission check is skipped.
+	doc.save(ignore_permissions=True)
 	return {
 		"template_key": doc.template_key,
 		"subject": doc.subject,
@@ -8362,7 +8348,7 @@ def reset_message_template(template_key):
 	comment names the actor (R18a); it is written after the delete because
 	`delete_doc` removes the row's own comments, so its link is not checked
 	-- the next save recreates the row under the same name."""
-	_assert_can_manage_notifications()
+	_assert_can_edit_email_templates()
 	rate_limit_per_user("reset_message_template")
 	_message_event(template_key)
 	if frappe.db.exists("HelixHR Message Template", template_key):
@@ -8374,8 +8360,8 @@ def reset_message_template(template_key):
 				{"subject": None, "body": None, "is_enabled": 1},
 			)
 		else:
-			# The Notification Manager has no delete DocPerm on purpose -- Desk
-			# delete stays System Manager's. The guard above is this path's gate.
+			# Portal Admin has no DocPerm on purpose -- Desk delete stays
+			# System Manager's. The guard above is this path's gate.
 			frappe.delete_doc("HelixHR Message Template", template_key, ignore_permissions=True)
 		frappe.get_doc(
 			{
@@ -8391,7 +8377,7 @@ def reset_message_template(template_key):
 	return {"template_key": template_key, "state": "Default"}
 
 
-def _render_draft(template_key, subject, body, hide_logo=0):
+def _render_draft(template_key, subject, body, hide_logo=0, embed_logo=True):
 	"""Validate then render an unsaved draft with the event's sample data.
 	A refusal is the same sentence a save would give (R17)."""
 	event = _message_event(template_key)
@@ -8406,7 +8392,10 @@ def _render_draft(template_key, subject, body, hide_logo=0):
 	# default company's -- never the sample's placeholder logo address.
 	context = {**sample_context(template_key), **message_brand(frappe.session.user)}
 	return render_message(
-		template_key, context, source={"subject": subject, "body": body, "hide_logo": cint(hide_logo)}
+		template_key,
+		context,
+		source={"subject": subject, "body": body, "hide_logo": cint(hide_logo)},
+		embed_logo=embed_logo,
 	)
 
 
@@ -8415,19 +8404,175 @@ def preview_message_template(template_key, subject=None, body=None, hide_logo=0)
 	"""The draft as the email would look, with sample data. The client shows
 	`html` only in a sandboxed iframe (KTD11). `hide_logo` is the editor's
 	unsaved "Include company logo" checkbox, inverted."""
-	_assert_can_manage_notifications()
+	_assert_can_edit_email_templates()
 	rate_limit_per_user("preview_message_template")
-	message = _render_draft(template_key, subject or "", body or "", hide_logo)
-	return {"subject": message["subject"], "html": message["html"], **_message_logo_brand()}
+	message = _render_draft(template_key, subject or "", body or "", hide_logo, embed_logo=False)
+	return {"subject": message["subject"], "html": message["html"]}
 
 
 @frappe.whitelist(methods=["POST"])
 def send_test_message(template_key, subject=None, body=None, hide_logo=0):
 	"""Send the draft, with sample data, to the caller's own address only --
 	never a recipient the caller names."""
-	_assert_can_manage_notifications()
+	_assert_can_edit_email_templates()
 	rate_limit_per_user("send_test_message")
 	message = _render_draft(template_key, subject or "", body or "", hide_logo)
+	email = frappe.db.get_value("User", frappe.session.user, "email")
+	if not email:
+		frappe.throw(_("Your account has no email address to send the test to."))
+	frappe.sendmail(
+		recipients=[email],
+		subject=_("[Test] {0}").format(message["subject"]),
+		message=message["html"],
+	)
+	return {"sent_to": email}
+
+
+# --- Shared email theme (`HelixHR Email Theme`) ------------------------------
+#
+# One look for every email the portal sends. Same gate as the templates;
+# Portal Admin holds no DocPerm, so writes go through `ignore_permissions`
+# behind that gate while the doctype's own `validate()` still runs.
+
+_THEME_SAMPLE_EVENT = "leave_approved"
+
+
+def _theme_draft(brand_color=None, footer_text=None, use_custom_code=None, theme_code=None):
+	"""The saved theme with the editor's unsaved values over it, validated
+	-- a refusal is the sentence a save would give."""
+	theme = email_theme(
+		{
+			"brand_color": brand_color,
+			"footer_text": footer_text,
+			"use_custom_code": use_custom_code,
+			"theme_code": theme_code,
+		}
+	)
+	try:
+		validate_email_theme(theme)
+	except TemplateRejected as exc:
+		frappe.throw(str(exc), title=_("Theme not valid"))
+	return theme
+
+
+def _theme_sample_message(theme, embed_logo):
+	"""A real message (Leave approved, sample data) inside `theme`."""
+	context = {**sample_context(_THEME_SAMPLE_EVENT), **message_brand(frappe.session.user)}
+	return render_message(
+		_THEME_SAMPLE_EVENT,
+		context,
+		source={"subject": None, "body": None, "hide_logo": 0},
+		embed_logo=embed_logo,
+		theme=theme,
+	)
+
+
+def _theme_projection():
+	theme = email_theme()
+	return {
+		"logo": theme.logo,
+		"brand_color": (theme.brand_color or "").upper(),
+		"footer_text": theme.footer_text,
+		"use_custom_code": theme.use_custom_code,
+		"theme_code": theme.theme_code,
+		"placeholders": list(THEME_PLACEHOLDERS),
+		"preview_html": _theme_sample_message(theme, embed_logo=False)["html"],
+	}
+
+
+@frappe.whitelist()
+def get_email_theme():
+	"""The Theme tab in one call: the saved fields and a preview."""
+	_assert_can_edit_email_templates()
+	rate_limit_per_user("get_email_theme")
+	return _theme_projection()
+
+
+@frappe.whitelist(methods=["POST"])
+def preview_email_theme(brand_color=None, footer_text=None, use_custom_code=None, theme_code=None):
+	"""The unsaved theme around a sample message. The client shows `html`
+	only in a sandboxed iframe (KTD11); the logo is linked, not embedded."""
+	_assert_can_edit_email_templates()
+	rate_limit_per_user("preview_email_theme")
+	theme = _theme_draft(brand_color, footer_text, use_custom_code, theme_code)
+	return {"html": _theme_sample_message(theme, embed_logo=False)["html"]}
+
+
+@frappe.whitelist(methods=["POST"])
+def save_email_theme(brand_color=None, footer_text=None, use_custom_code=None, theme_code=None):
+	"""Save the theme's colour, footer and custom code (the logo has its own
+	upload). The doctype's `validate()` refuses a bad colour, missing
+	`{{ content }}` or anything the sandbox does not allow."""
+	_assert_can_edit_email_templates()
+	rate_limit_per_user("save_email_theme")
+	doc = frappe.get_doc(EMAIL_THEME)
+	doc.brand_color = (brand_color or "").strip()
+	doc.footer_text = footer_text or ""
+	doc.use_custom_code = cint(use_custom_code)
+	doc.theme_code = theme_code or ""
+	doc.save(ignore_permissions=True)
+	return _theme_projection()
+
+
+@frappe.whitelist(methods=["POST"])
+def reset_email_theme():
+	"""Back to the default look: colour, footer and custom code cleared. The
+	logo stays (it has its own Remove)."""
+	_assert_can_edit_email_templates()
+	rate_limit_per_user("reset_email_theme")
+	doc = frappe.get_doc(EMAIL_THEME)
+	doc.brand_color = ""
+	doc.footer_text = ""
+	doc.use_custom_code = 0
+	doc.theme_code = ""
+	doc.save(ignore_permissions=True)
+	return _theme_projection()
+
+
+@frappe.whitelist(methods=["POST"])
+def upload_email_theme_logo(remove=0):
+	"""Upload, replace or remove the theme logo. The upload is
+	`frappe.request.files["file"]`: PNG, JPEG or WebP by signature, at most
+	2 MB (`validate_logo_upload`), stored public -- the preview loads it by
+	URL; sent mail carries it as an inline attachment."""
+	_assert_can_edit_email_templates()
+	rate_limit_per_user("upload_email_theme_logo")
+	doc = frappe.get_doc(EMAIL_THEME)
+	if cint(remove):
+		doc.logo = ""
+		doc.save(ignore_permissions=True)
+		return _theme_projection()
+
+	upload = (getattr(frappe.request, "files", None) or {}).get("file")
+	if upload is None:
+		frappe.throw(_("No file came through. Pick the file again."))
+	file_name = os.path.basename(upload.filename or "").strip()
+	content = upload.stream.read()
+	extension = validate_logo_upload(file_name, content)
+	file_doc = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": f"email-theme-logo{extension}",
+			"content": content,
+			"attached_to_doctype": EMAIL_THEME,
+			"attached_to_name": EMAIL_THEME,
+			"attached_to_field": "logo",
+			"is_private": 0,
+		}
+	).insert(ignore_permissions=True)
+	doc.logo = file_doc.file_url
+	doc.save(ignore_permissions=True)
+	return _theme_projection()
+
+
+@frappe.whitelist(methods=["POST"])
+def send_email_theme_test(brand_color=None, footer_text=None, use_custom_code=None, theme_code=None):
+	"""Send the sample message in the unsaved theme to the caller's own
+	address only, with the logo embedded as a real send would."""
+	_assert_can_edit_email_templates()
+	rate_limit_per_user("send_email_theme_test")
+	theme = _theme_draft(brand_color, footer_text, use_custom_code, theme_code)
+	message = _theme_sample_message(theme, embed_logo=True)
 	email = frappe.db.get_value("User", frappe.session.user, "email")
 	if not email:
 		frappe.throw(_("Your account has no email address to send the test to."))
@@ -8627,9 +8772,8 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 	"""
 	from helixhr.reminders import EVENTS
 
+	_assert_can_edit_email_templates()
 	rate_limit_per_user("save_celebration_reminder")
-	if not _is_hr():
-		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
 	if event not in EVENTS:
 		frappe.throw(_("That reminder is not offered here."))
 
@@ -8638,7 +8782,7 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 	recipients = recipients or []
 
 	company = company or _celebration_company()
-	_assert_company_in_admin_scope(company)
+	_assert_template_company(company)
 	# The cadence is the row's own for `holiday` (U1); the controller
 	# refuses a holiday row without one and ignores the field elsewhere.
 	# A wrong value is refused, mirroring the controller -- a silent
@@ -8666,10 +8810,9 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 
 	# `ignore_permissions=True`, not `_assert_config_write` (KTD8's own
 	# framing, reused): Email Template is a shared core doctype used across
-	# the whole site, not one this app owns -- granting HR Manager a real
-	# DocPerm on it would let them edit or delete *any* Email Template, not
-	# just the celebration ones. `_is_hr()` plus the company scope check
-	# above are the real authorisation boundary here, and the template name
+	# the whole site, not one this app owns, and the Portal Admin holds no
+	# DocPerm at all (preflight enforces). `_assert_can_edit_email_templates`
+	# above is the real authorisation boundary here, and the template name
 	# is never caller input -- it is always
 	# `reminders.celebration_template_name(event, company)` (U11: never the
 	# shared seeded name, so a company created after the clone patch still
@@ -8681,14 +8824,14 @@ def save_celebration_reminder(event, subject, body, is_enabled=0, recipient_mode
 		template.response = body
 	template.save(ignore_permissions=True)
 
-	_assert_config_write(reminder)
 	reminder.email_template = template.name
 	reminder.is_enabled = cint(is_enabled)
 	reminder.recipient_mode = recipient_mode
 	reminder.frequency = frequency
 	reminder.hide_logo = cint(hide_logo)
 	reminder.set("recipients", [{"employee": row} for row in recipients])
-	reminder.save()
+	# Same boundary as the template above; the controller's validate runs.
+	reminder.save(ignore_permissions=True)
 	# The portal owns this event: HRMS's own checkbox is read-only in Desk
 	# (P8-KTD8), so HR has no way to untick it. Leaving it on means HRMS's
 	# daily job keeps sending its stock email even after HR disables the
@@ -8717,8 +8860,8 @@ def _company_celebration_template(event, company):
 def reset_celebration_template(event, company=None):
 	"""Back to the shipped default wording for the caller's company only
 	(U11): the default is written into that company's own Email Template and
-	the row, if any, is pointed at it. System Manager or an in-scope HR
-	Manager (`_celebration_gate`). The Info comment names the actor, like
+	the row, if any, is pointed at it. Portal Admin or System Manager
+	(`_celebration_gate`). The Info comment names the actor, like
 	`reset_message_template`."""
 	from helixhr.reminders import CELEBRATION_DEFAULTS
 
@@ -8751,113 +8894,41 @@ def reset_celebration_template(event, company=None):
 	return _celebration_reminder_projection(event, company)
 
 
-def _assert_can_set_company_logo(company):
-	"""`set_company_logo`'s gate: HR only; an anchored HR Manager for their
-	own company, a System Manager for any."""
-	if not _is_hr():
-		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
-	if "System Manager" not in frappe.get_roles():
-		_assert_company_in_admin_scope(company)
-
-
-@frappe.whitelist(methods=["POST"])
-def set_company_logo(company=None, remove=0):
-	"""Plan 2026-10-05-001 U12 (KTD10): upload, replace or remove the logo
-	every email for `company` carries -- `Company.company_logo`, no new
-	setting. HR only; an anchored HR Manager for their own company, a
-	System Manager for any (review fold-in). The upload is
-	`frappe.request.files["file"]`: PNG, JPEG or WebP by signature, at most
-	2 MB, stored public (mail clients load it without a session) and
-	attached to the Company."""
-	from helixhr.utils import validate_logo_upload
-
-	rate_limit_per_user("set_company_logo")
-	company = company or _celebration_company()
-	_assert_can_set_company_logo(company)
-	if not frappe.db.exists("Company", company):
-		frappe.throw(_("That company does not exist."))
-
-	if cint(remove):
-		# `db.set_value`: HR Manager has no write DocPerm on Company, and
-		# the gate above is this path's authorisation, as for the templates.
-		frappe.db.set_value("Company", company, "company_logo", None)
-		return {"company": company, "logo_url": ""}
-
-	upload = (getattr(frappe.request, "files", None) or {}).get("file")
-	if upload is None:
-		frappe.throw(_("No file came through. Pick the file again."))
-	file_name = os.path.basename(upload.filename or "").strip()
-	content = upload.stream.read()
-	extension = validate_logo_upload(file_name, content)
-	doc = frappe.get_doc(
-		{
-			"doctype": "File",
-			"file_name": f"{frappe.scrub(company)}-logo{extension}",
-			"content": content,
-			"attached_to_doctype": "Company",
-			"attached_to_name": company,
-			"attached_to_field": "company_logo",
-			"is_private": 0,
-		}
-	)
-	doc.insert(ignore_permissions=True)
-	frappe.db.set_value("Company", company, "company_logo", doc.file_url)
-	return {"company": company, "logo_url": doc.file_url}
-
-
-@frappe.whitelist(methods=["POST"])
-def set_email_header_color(company=None, color=None):
-	"""The background of the email header strip for `company` --
-	`Company.helixhr_email_header_color`, beside the logo. `color` is a
-	`#RRGGBB` hex, or empty for the default white. Same gate as
-	`set_company_logo`."""
-	rate_limit_per_user("set_email_header_color")
-	company = company or _celebration_company()
-	_assert_can_set_company_logo(company)
-	if not frappe.db.exists("Company", company):
-		frappe.throw(_("That company does not exist."))
-	color = (color or "").strip()
-	if color and not valid_email_header_color(color):
-		frappe.throw(_("Enter the colour as a hex code like #0B2545."))
-	color = valid_email_header_color(color)
-	# `db.set_value`: as for the logo, the gate above is the authorisation.
-	frappe.db.set_value("Company", company, "helixhr_email_header_color", color or None)
-	return {"company": company, "header_color": company_email_header_colors(company)["header_bg"]}
-
-
 @frappe.whitelist()
 def get_celebration_setup(company=None):
 	"""Plan 2026-10-04-004 U4 (R9, R10): the Email Templates page's
 	"Celebrations & holidays" group in one call -- every event's setting
 	for `company`, the template-token reference, and the companies this
-	caller may configure. HR Manager and System Manager only (KTD3): a
-	company-anchored HR Manager sees only companies in their admin scope
-	(P6-R6, through `resolve_admin_scope`), so the company selector never
-	offers one they cannot save."""
+	caller may configure. Portal Admin and System Manager only, for any
+	company: email is portal configuration, not company HR data."""
 	from helixhr.reminders import EVENTS
 
+	_assert_can_edit_email_templates()
 	rate_limit_per_user("get_celebration_setup")
-	if not _is_hr():
-		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
 	try:
 		company = company or _celebration_company()
 	except frappe.ValidationError:
-		# A Desk-only HR Manager on a multi-company site has no single
+		# An editor with no Employee on a multi-company site has no single
 		# company to default to (KTD3): hand the choice to the caller
 		# instead of refusing -- the editor renders its company selector
 		# from `companies`.
 		company = None
-	_assert_company_in_admin_scope(company)
+	if company:
+		_assert_template_company(company)
 
 	return {
 		"company": company,
-		"companies": _companies_in_admin_scope(),
+		"companies": frappe.get_all("Company", pluck="name", order_by="company_name asc"),
 		"events": {event: _celebration_reminder_projection(event, company) for event in EVENTS},
 		"template_tokens": CELEBRATION_TEMPLATE_TOKENS,
-		# U12: the logo every email for this company carries.
-		"logo_url": (frappe.db.get_value("Company", company, "company_logo") or "") if company else "",
-		"header_color": company_email_header_colors(company)["header_bg"] if company else "",
 	}
+
+
+def _assert_template_company(company):
+	"""The celebration group's company argument: any existing company (the
+	gate above is role-only, not company-scoped)."""
+	if not company or not frappe.db.exists("Company", company):
+		frappe.throw(_("That company does not exist."))
 
 
 def _assert_company_in_admin_scope(company):
@@ -8917,7 +8988,7 @@ def _celebration_sample_context(event, company, frequency=None):
 	)
 
 
-def _celebration_draft(event, company, subject, body, frequency=None, hide_logo=0):
+def _celebration_draft(event, company, subject, body, frequency=None, hide_logo=0, embed_logo=True):
 	"""Compile then render an unsaved draft with the event's sample context
 	-- the same refusal a save would give (P8-U12's compile check), the
 	same restriction the real render runs under (P8-KTD7). A holiday draft
@@ -8928,36 +8999,39 @@ def _celebration_draft(event, company, subject, body, frequency=None, hide_logo=
 			"HelixHR Celebration Reminder", {"event": event, "company": company}, "frequency"
 		)
 	rendered = _render_celebration_or_throw(
-		event, company, subject, body, frequency, include_logo=not cint(hide_logo)
+		event, company, subject, body, frequency, include_logo=not cint(hide_logo), embed_logo=embed_logo
 	)
 	return {"subject": rendered["subject"], "html": rendered["message"]}
 
 
-def _render_celebration_or_throw(event, company, subject, body, frequency=None, include_logo=True):
+def _render_celebration_or_throw(
+	event, company, subject, body, frequency=None, include_logo=True, embed_logo=True
+):
 	"""Render a draft against the event's sample context in the HelixHR
 	sandbox (U11); any failure is a refusal naming why, not a stack trace."""
 	from helixhr.utils import render_celebration_email
 
 	context = _celebration_sample_context(event, company, frequency)
 	try:
-		return render_celebration_email(subject or "", body or "", context, include_logo=include_logo)
+		return render_celebration_email(
+			subject or "", body or "", context, include_logo=include_logo, embed_logo=embed_logo
+		)
 	except Exception as exc:
 		frappe.throw(_("This template cannot be used: {0}").format(exc), title=_("Template not valid"))
 
 
 def _celebration_gate(event, endpoint, company=None):
-	"""The two draft endpoints' shared gate: rate-limited, HR only, a known
-	event, and a company inside the caller's admin scope. Returns the
+	"""The draft endpoints' shared gate: Portal Admin or System Manager,
+	rate-limited, a known event and an existing company. Returns the
 	resolved company."""
 	from helixhr.reminders import EVENTS
 
+	_assert_can_edit_email_templates()
 	rate_limit_per_user(endpoint)
-	if not _is_hr():
-		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
 	if event not in EVENTS:
 		frappe.throw(_("That reminder is not offered here."))
 	company = company or _celebration_company()
-	_assert_company_in_admin_scope(company)
+	_assert_template_company(company)
 	return company
 
 
@@ -8967,7 +9041,7 @@ def preview_celebration(event, subject, body, company=None, hide_logo=0):
 	company's own name and logo. The client shows `html` only in a
 	sandboxed iframe (KTD11)."""
 	company = _celebration_gate(event, "preview_celebration", company)
-	rendered = _celebration_draft(event, company, subject, body, hide_logo=hide_logo)
+	rendered = _celebration_draft(event, company, subject, body, hide_logo=hide_logo, embed_logo=False)
 	return {"subject": rendered["subject"], "html": rendered["html"]}
 
 
@@ -8991,10 +9065,9 @@ def send_test_celebration(event, subject, body, company=None, hide_logo=0):
 def search_celebration_recipients(company, query=""):
 	"""R12: the selected-people picker searches employees of the selected
 	company only, within the editor's scope -- active, name matching."""
+	_assert_can_edit_email_templates()
 	rate_limit_per_user("search_celebration_recipients")
-	if not _is_hr():
-		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
-	_assert_company_in_admin_scope(company)
+	_assert_template_company(company)
 
 	filters = {"status": "Active", "company": company}
 	if (query or "").strip():

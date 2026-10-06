@@ -45,11 +45,8 @@ const NAV = [
   { label: 'Organisation', to: '/organisation', icon: 'organisation', organisationOnly: true, deskOnly: true, group: 'hr' },
   { label: 'Projects', to: '/projects', icon: 'folder', projectsOnly: true, deskOnly: true, group: 'hr' },
   { label: 'Settings', to: '/settings', icon: 'settings', configureOnly: true, deskOnly: true, group: 'admin' },
-  // Plan 2026-10-02-001 U10: gated on the boolean `can_manage_notifications`
-  // flag (KTD12), never a role list. Plan 2026-10-04-004 U5 / KTD3: the page
-  // becomes role-sectioned, so the flag is `can_edit_email_templates` --
-  // HR Manager now sees it too (the celebrations group), and a caller may
-  // hold either role.
+  // Gated on the boolean `can_edit_email_templates` (Portal Admin or System
+  // Manager), never a role list; HR roles do not see it.
   { label: 'Email templates', to: '/email-templates', icon: 'notifications', templatesOnly: true, deskOnly: true, group: 'admin' },
   { label: 'Profile', to: '/profile', icon: 'profile', group: 'bottom' },
 ]

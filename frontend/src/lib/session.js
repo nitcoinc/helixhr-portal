@@ -50,7 +50,6 @@ const state = reactive({
    * `helixhr.api.get_portal_config` itself enforces server-side, so the nav
    * item and the server's own gate can never disagree. */
   canConfigure: false,
-  canManageNotifications: false,
   /** P5-U15: gates the Organisation nav item. Mirrors the exact predicate
    * `helixhr.api.get_organisation_view` itself enforces server-side, so the
    * nav item and the server's own gate can never disagree. */
@@ -138,10 +137,8 @@ function apply(boot) {
   state.canWorkRequests = !!boot?.can_work_requests
   state.canHandleRequests = !!boot?.can_handle_requests
   state.canConfigure = !!boot?.can_configure
-  state.canManageNotifications = !!boot?.can_manage_notifications
-  // Plan 2026-10-04-004 U5: the Email templates page opens for the
-  // Notification Manager *or* the HR Manager / System Manager (KTD3) --
-  // either role reaches the page; each group's endpoints gate themselves.
+  // The Email templates page: Portal Admin or System Manager only, the same
+  // predicate every endpoint behind the page enforces.
   state.canEditEmailTemplates = !!boot?.can_edit_email_templates
   state.canSeeOrganisation = !!boot?.can_see_organisation
   state.canSeePeople = !!boot?.can_see_people
@@ -164,9 +161,9 @@ function apply(boot) {
     today: state.today,
   })
   if (employee?.name) state.status = 'ready'
-  // Plan 2026-10-02-001 U7: a Notification Manager has no Desk, but the
-  // Email templates page is scoped by role, not by Employee.
-  else if (state.deskUrl || state.canManageNotifications) state.status = 'desk-only'
+  // A Portal Admin with no Employee has no Desk, but the Email templates
+  // page is scoped by role, not by Employee.
+  else if (state.deskUrl || state.canEditEmailTemplates) state.status = 'desk-only'
   else state.status = 'not-linked'
 }
 

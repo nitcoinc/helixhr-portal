@@ -329,7 +329,7 @@ test('an IT Team identity is refused the same way, with no Desk-bound link visib
 // Plan 2026-10-04-001 U5/U6: export, the export log, the access matrix, and
 // the report tiers. HR User, Delivery Manager and Report Manager are seeded by
 // `setup_playwright_fixtures` and signed in here on a clean context, the same
-// way email-templates.spec.ts signs in its Notification Manager.
+// way email-templates.spec.ts signs in its Portal Admin.
 const SITE_HOST = process.env.SITE_HOST || 'test_site'
 const PASSWORD = process.env.TEST_USER_PASSWORD || 'Helixhr-Test-Fixture-2026!'
 const HR_USER = 'hr-user@helixhr.test'

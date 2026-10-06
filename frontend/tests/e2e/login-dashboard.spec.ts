@@ -192,15 +192,16 @@ test.describe('HR Manager with no Employee record', () => {
   })
 })
 
-test.describe('Notification Manager with no Employee record', () => {
-  // Plan 2026-10-02-001 U7: a portal-only role with no Desk lands on Email
-  // templates, never on the not-linked page.
+test.describe('Portal Admin with no Employee record', () => {
+  // A portal-only role with no Desk lands on Email templates, never on the
+  // not-linked page (`email-admin@helixhr.test`, seeded by
+  // setup_playwright_fixtures).
   test.use({ storageState: { cookies: [], origins: [] } })
 
   test('lands on Email templates from any route', async ({ page, baseURL }) => {
     const api = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
     const login = await api.post('/api/method/login', {
-      form: { usr: 'notification-manager@helixhr.test', pwd: PASSWORD },
+      form: { usr: 'email-admin@helixhr.test', pwd: PASSWORD },
     })
     expect(login.ok()).toBeTruthy()
     const storageState = await api.storageState()

@@ -447,10 +447,12 @@ class TestSaveCelebrationReminder(IntegrationTestCase):
 
 	def setUp(self):
 		frappe.set_user("Administrator")
-		from helixhr.tests.utils import EMPLOYEE_USER, HR_MANAGER_EMPLOYEE_USER
+		from helixhr.tests.utils import EMPLOYEE_USER, make_test_portal_admin
 
 		self.company = frappe.db.get_value("Employee", self.employee, "company")
-		self.hr_user = HR_MANAGER_EMPLOYEE_USER
+		# The Email templates owner: a Portal Admin anchored to this company,
+		# so a save without `company` resolves to it.
+		_, self.hr_user = make_test_portal_admin(self.company)
 		self.employee_user = EMPLOYEE_USER
 
 		self.snapshot = None

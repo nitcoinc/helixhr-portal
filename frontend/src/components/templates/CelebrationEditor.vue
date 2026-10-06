@@ -8,7 +8,6 @@ import { computed, reactive, ref, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { createResource, FormControl, Button } from 'frappe-ui'
 import { session } from '@/lib/session'
-import CompanyLogoControl from '@/components/templates/CompanyLogoControl.vue'
 
 const props = defineProps({
   company: { type: String, required: true },
@@ -54,7 +53,7 @@ const form = reactive({
   is_enabled: false,
   recipient_mode: 'All employees',
   frequency: 'Weekly',
-  // This reminder's opt-out of the company-wide logo above.
+  // This reminder's opt-out of the shared theme's logo (Theme tab).
   include_logo: true,
   recipients: /** @type {{name: string, employee_name: string}[]} */ ([]),
 })
@@ -269,13 +268,6 @@ defineExpose({ setup })
         @update:model-value="(value) => router.replace({ query: { ...route.query, company: value, event: 'birthday' } })"
       />
     </div>
-
-    <CompanyLogoControl
-      :company="props.company"
-      :logo-url="setup.data?.logo_url || ''"
-      :header-color="setup.data?.header_color || ''"
-      @changed="setup.reload()"
-    />
 
     <div
       class="flex gap-1 overflow-x-auto"

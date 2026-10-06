@@ -161,8 +161,8 @@ A HelixHR Document Link is either an uploaded **file** or a web **url** (the con
 neither), with a `category` (Important / General) and a `published_on` date (defaults to today;
 the `backfill_document_link_dates` patch gave older rows General and their creation date).
 
-- **Who publishes.** `save_document_link` / `delete_document_link` reuse the company-logo gate
-  (`_assert_can_set_company_logo`): HR only; an anchored HR Manager for their own company, never a
+- **Who publishes.** `save_document_link` / `delete_document_link` gate on
+  `_assert_can_manage_document`: HR only; an anchored HR Manager for their own company, never a
   global (blank-company) row; a System Manager for any. An edit checks the row's current company
   too, so a row can't be pulled across companies. The bootstrap's `can_manage_documents` only
   decides whether the controls render.
@@ -967,9 +967,8 @@ switchable itself and the contradiction has to be refused somewhere.
   with the HRMS checkbox that would send the stock email for the same event,
   and both the save-time refusal and the preflight line quote from it. The
   rows are edited from the Email templates page's "Celebrations & holidays"
-  group — HR Manager per company through `resolve_admin_scope`, the
-  Notification Manager keeps the message templates and does not see the group
-  (KTD2/KTD3).
+  group — Portal Admin or System Manager, for any company (the page is
+  portal configuration; HR roles are refused).
 - **Two senders for one event is refused where HR creates it.**
   `events.hr_settings_validate` throws on a save that enables a row while the
   matching HRMS checkbox is still ticked; the takeover patch unticks the
@@ -1101,12 +1100,14 @@ an hour is refused, so the bypass is never the thing under test.
 | HR Manager | decide Manager-stage leave **in the approver's place** when the approver is on approved leave today or the request is overdue (admin scope only). Row tagged "Approver on leave" / "Overdue with approver". | `get_my_approvals` adds the rows with `hr_reason`; `_leave_allowed_actions` |
 | HR Manager | see the **Overdue** tab (`get_overdue_approvals`), grouped by owner | same collector as the digest, `resolve_admin_scope` |
 | HR Manager | review, Reveal (logged, comment written) and apply a bank-detail correction on Done | `reveal_correction_value`, `events` correction block |
-| `HelixHR Notification Manager` (or System Manager) | edit, preview, test-send, switch off and reset portal email templates | `_assert_can_manage_notifications`; bootstrap flag `can_manage_notifications` |
+| `HelixHR Portal Admin` (or System Manager) | everything on the Email templates page: the shared theme, message templates (edit, preview, test-send, switch off, reset) and celebration / holiday mail | `_assert_can_edit_email_templates`; bootstrap flag `can_edit_email_templates` |
 
-The Notification Manager is a portal-only fixture Role (`desk_access 0`) with
-write on `HelixHR Message Template` only; HR Manager lost that DocPerm. It has
-no DocPerm on `Notification` or `Email Template`. A holder with no Employee
-lands on `/email-templates`.
+The Portal Admin holds **no DocPerm** (preflight FAILs on one), so every
+endpoint behind the page checks the role and then writes with
+`ignore_permissions` while the doctype's own `validate()` still runs. HR
+Manager, HR User and `HelixHR Notification Manager` are refused (the
+Notification Manager role still exists, portal-only, but no longer opens the
+page). A Portal Admin with no Employee lands on `/email-templates`.
 
 When HR decides for the approver, the audit line is an **Info** comment
 ("Decided by HR for ...") plus a Notification Log to the approver. It is Info,
@@ -1158,6 +1159,44 @@ core sentence; the row's body is only an extra paragraph. The preview renders
 server-side with sample values into a sandboxed iframe (`srcdoc`, empty
 `sandbox`), never `v-html`.
 
+#### The shared email theme (`HelixHR Email Theme`)
+
+One Single doctype wraps **every** email -- message templates, celebration and
+holiday mail -- so the admin never restyles templates one by one. Edited on
+the Email templates page's Theme tab (`get_email_theme`, `preview_email_theme`,
+`save_email_theme`, `upload_email_theme_logo`, `reset_email_theme`,
+`send_email_theme_test`). `utils.wrap_in_theme` does the wrapping:
+
+- **Default theme** (`use_custom_code` off): `templates/emails/helixhr_layout.html`,
+  driven by `logo`, `brand_color` (`^#[0-9A-Fa-f]{6}$`, empty = white; header
+  text white or `#1f2328` by WCAG luminance, `email_header_colors`) and
+  `footer_text` (may use `{{ company }}`, `{{ portal_url }}`; empty keeps the
+  default line).
+- **Custom theme code**: the admin's full HTML wrapper, rendered in the same
+  sandbox as the templates (never `frappe.render_template`). Placeholders:
+  `{{ content }}` (required -- the message, already rendered),
+  `{{ logo }}` (the `<img>`, or the company name when a template opts out),
+  `{{ company }}`, `{{ subject }}`, `{{ portal_url }}`, `{{ brand_color }}`.
+  Anything else is refused at save, as are calls, `set`, includes. Validated
+  on save by rendering sample data; if it still fails at send time the
+  default theme renders and `HelixHR email theme failed` is logged.
+- **Logo, embedded.** Sent mail carries `<img embed="/files/...">`; Frappe's
+  `email_body.replace_filename_with_cid` turns it into an inline attachment
+  (`Content-ID`, `src="cid:..."`). A linked logo (`get_url(...)`) used the
+  site's internal host name, which mail clients could not reach. The preview
+  (browser) gets `src="/files/..."` instead (`embed_logo=False`). The logo is
+  stored public (`valid_theme_logo` accepts `/files/` only) so the preview can
+  load it; a self-branded celebration body's `<img src="{{ logo_url }}">` is
+  rewritten to `embed=` on send too.
+- **Per template**, "Include company logo" (`hide_logo`) still applies:
+  `{{ logo }}` prints the company name.
+
+Patch `migrate_email_theme` replaced the per-company controls: a single
+distinct `Company.helixhr_email_header_color` became `brand_color`, the
+default company's public `company_logo` became `logo` (theme values are never
+overwritten), and the Custom Field was deleted. `Company.company_logo` itself
+is ERPNext's and is untouched.
+
 #### Template variable reference
 
 Every event also gets the shared variables:
@@ -1166,7 +1205,7 @@ Every event also gets the shared variables:
 |---|---|---|
 | `company` | company name | `HelixHR Demo Ltd` |
 | `portal_url` | link to the portal | `https://hr.example.com/helixhr` |
-| `logo_url` | company logo (may be empty) | `https://hr.example.com/files/logo.png` |
+| `logo_url` | the theme logo, absolute (may be empty) | `https://hr.example.com/files/logo.png` |
 | `recipient_first_name` | first name of the recipient | `Priya` |
 
 | Event key | Audience | Extra variables |
@@ -1407,8 +1446,8 @@ position is that Desk owns HR administration and the portal does not
 re-implement HRMS rules -- the routed-requests plan (phase 5) partly reverses
 that, deliberately and within bounds: HR now configures request categories
 and routing (`HelixHR Request Category`), the wording of the portal's own
-notifications (`HelixHR Message Template` -- since plan 2026-10-02-001 owned
-by the `HelixHR Notification Manager` role, not HR, and rendered as Jinja in
+notifications (`HelixHR Message Template` -- owned by the
+`HelixHR Portal Admin` role (or System Manager), not HR, and rendered as Jinja in
 HelixHR's own sandbox, **never** `frappe.render_template`; see *Portal email*),
 and a
 **named, deliberately short** field set on three HRMS masters (Leave Type,

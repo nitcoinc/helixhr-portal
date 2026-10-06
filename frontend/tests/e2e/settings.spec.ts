@@ -173,7 +173,7 @@ test("changing a category's routed role changes where the next request goes", as
 test('message text left Settings for the Email templates page (plan 2026-10-02-001 U10)', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'hr', 'settings is an HR-only screen')
 
-  // R14: wording belongs to the HelixHR Notification Manager, on its own page.
+  // Wording belongs to the Email templates page (Portal Admin / System Manager).
   await page.goto('/helixhr/settings')
   await expect(page.getByTestId('settings-tab-categories')).toBeVisible()
   await expect(page.getByTestId('settings-tab-templates')).toHaveCount(0)

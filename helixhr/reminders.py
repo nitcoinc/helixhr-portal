@@ -549,11 +549,14 @@ def _context(persons, company, event):
 
 
 def _logo_url(company):
-	"""Absolute, because an email is read outside the site. Empty for a
-	Company with no logo -- the default templates guard on it, and so should
-	HR's."""
-	logo = frappe.db.get_value("Company", company, "company_logo")
-	return get_url(logo) if logo else ""
+	"""The shared email theme's logo, absolute (`utils.theme_logo_url`) --
+	the same for every company since the theme replaced per-company logos.
+	Empty when the theme has none -- the default templates guard on it, and
+	so should HR's. A self-branded body's `<img src>` of it is turned into an
+	inline attachment on send (`utils.render_celebration_email`)."""
+	from helixhr.utils import theme_logo_url
+
+	return theme_logo_url()
 
 
 def _date_format():

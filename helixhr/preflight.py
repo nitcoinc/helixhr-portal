@@ -1572,9 +1572,9 @@ NOTIFICATION_MANAGER = "HelixHR Notification Manager"
 
 
 def check_notification_manager_role():
-	"""Plan 2026-10-02-001 U7: the Notification Manager stays portal-only, and
-	WARNs while no enabled user holds it -- then only System Manager can edit
-	portal email wording, which is a gap rather than a fault."""
+	"""Plan 2026-10-02-001 U7: the Notification Manager stays portal-only.
+	It no longer owns email templates (Portal Admin / System Manager do, see
+	`check_portal_admin_role`), so who holds it is not checked."""
 	role = frappe.db.get_value("Role", NOTIFICATION_MANAGER, ["desk_access", "is_custom"], as_dict=True)
 	problems = []
 	if not role:
@@ -1586,17 +1586,7 @@ def check_notification_manager_role():
 			problems.append("is_custom must be 0")
 	if problems:
 		return _result("Notification Manager role", FAIL, "; ".join(problems) + " -- run bench migrate")
-
-	holders = frappe.get_all(
-		"Has Role", filters={"role": NOTIFICATION_MANAGER, "parenttype": "User"}, pluck="parent"
-	)
-	if not holders or not frappe.db.exists("User", {"name": ("in", holders), "enabled": 1}):
-		return _result(
-			"Notification Manager role",
-			WARN,
-			"no enabled user holds it -- grant it in Desk (User > Roles) so someone owns email templates",
-		)
-	return _result("Notification Manager role", PASS, "portal-only role held by an enabled user")
+	return _result("Notification Manager role", PASS, "portal-only role")
 
 
 REPORT_MANAGER = "HelixHR Report Manager"
@@ -1638,8 +1628,19 @@ def check_portal_admin_role():
 	"""The Portal Admin stays portal-only with no DocPerm at all that reaches
 	report, export or write. It needs none: its endpoints (access matrix,
 	export log, portal roles) gate themselves and save with
-	``ignore_permissions``."""
-	return _no_grant_portal_role(PORTAL_ADMIN, "Portal Admin role")
+	``ignore_permissions``. WARNs while no enabled user holds it: then only
+	System Manager can edit the portal's email theme and templates."""
+	result = _no_grant_portal_role(PORTAL_ADMIN, "Portal Admin role")
+	if result["status"] != PASS:
+		return result
+	holders = frappe.get_all("Has Role", filters={"role": PORTAL_ADMIN, "parenttype": "User"}, pluck="parent")
+	if not holders or not frappe.db.exists("User", {"name": ("in", holders), "enabled": 1}):
+		return _result(
+			"Portal Admin role",
+			WARN,
+			"no enabled user holds it -- grant it in Desk (User > Roles) so someone owns email templates",
+		)
+	return result
 
 
 def _fixture_roles():

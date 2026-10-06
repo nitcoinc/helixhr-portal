@@ -143,10 +143,10 @@ export function uploadMyPhoto(file) {
   return uploadFile('helixhr.api.upload_my_photo', file, {})
 }
 
-/** Plan 2026-10-05-001 U12: set or replace a company's email logo
- * (`helixhr.api.set_company_logo`); resolves to `{ company, logo_url }`. */
-export function uploadCompanyLogo(file, { company }) {
-  return uploadFile('helixhr.api.set_company_logo', file, { company })
+/** Set or replace the shared email theme's logo
+ * (`helixhr.api.upload_email_theme_logo`); resolves to the theme. */
+export function uploadEmailThemeLogo(file) {
+  return uploadFile('helixhr.api.upload_email_theme_logo', file, {})
 }
 
 /** Documents: create or edit an HR document carrying an uploaded file

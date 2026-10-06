@@ -196,10 +196,9 @@ const routes = [
     // the server's own gate, same posture as /settings above.
     path: '/email-templates',
     name: 'EmailTemplates',
-    // Plan 2026-10-04-004 U5 / KTD3: the route gate is the bootstrap flag
-    // `can_edit_email_templates` (Notification Manager, HR Manager or System
-    // Manager) -- never a role list, and each group's endpoints keep their
-    // own server gate.
+    // The route gate is the bootstrap flag `can_edit_email_templates`
+    // (Portal Admin or System Manager) -- never a role list; every endpoint
+    // behind the page checks the same predicate.
     meta: { deskOnly: true, templatesOnly: true },
     component: () => import('@/pages/EmailTemplates.vue'),
   },
@@ -324,11 +323,9 @@ router.beforeEach(async (to) => {
 
   await ensureBootstrap()
 
-  // Plan 2026-10-02-001 U10: a caller without `can_manage_notifications`
+  // Plan 2026-10-02-001 U10: a caller without `can_edit_email_templates`
   // (an HR Manager, say) is sent Home rather than shown a refusal. The
-  // server's guard is still the real gate. Since plan 2026-10-04-004 U5 the
-  // page itself is open to `can_edit_email_templates` -- the flag the nav
-  // item reads -- so the two can never disagree.
+  // server's guard is still the real gate; the nav item reads the same flag.
   if (to.meta.templatesOnly && !session.canEditEmailTemplates && session.status !== 'unavailable') {
     return { name: 'Dashboard' }
   }
@@ -343,8 +340,8 @@ router.beforeEach(async (to) => {
   // An HR or System Manager with no Employee record: the pages whose
   // server methods are scoped by role (`meta.deskOnly`), and Home. Every
   // other page reads "my" records and would only fail.
-  // A Notification Manager with no Desk role (plan 2026-10-02-001 U7) has
-  // one page in the portal, so every route lands on Email templates.
+  // A Portal Admin with no Employee and no Desk role has one page in the
+  // portal, so every route lands on Email templates.
   if (session.status === 'desk-only') {
     if (session.canEditEmailTemplates && !session.deskUrl) {
       return to.name === 'EmailTemplates' ? true : { name: 'EmailTemplates' }
