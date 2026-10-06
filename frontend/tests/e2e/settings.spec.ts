@@ -185,3 +185,31 @@ test('the celebrations section left Settings for the Email templates page (plan 
   await page.goto('/helixhr/settings')
   await expect(page.getByTestId('settings-tab-celebrations')).toHaveCount(0)
 })
+
+test('U2: HR edits the backdated leave rule and sees it after a reload', async ({ page, baseURL }, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'the Leave rules tab is HR-only')
+  if (!baseURL) throw new Error('BASE_URL is required')
+
+  // Put the rule back exactly as it was; this suite shares one site.
+  const admin = await loginAs(baseURL, 'Administrator', 'admin')
+  const original = await callMethod(admin, 'helixhr.api.get_leave_rules', {})
+
+  try {
+    await page.goto('/helixhr/settings')
+    await page.getByTestId('settings-tab-leave-rules').click()
+    await expect(page.getByTestId('settings-leave-rules')).toBeVisible()
+
+    await page.getByLabel('Working days back').fill('2')
+    await page.getByTestId('settings-leave-rules').getByRole('button', { name: 'Save' }).click()
+    await expect(page.getByText('Saved.')).toBeVisible()
+
+    await page.reload()
+    await expect(page.getByLabel('Working days back')).toHaveValue('2')
+  } finally {
+    await callMethod(admin, 'helixhr.api.save_leave_rules', {
+      backdated_grace_days: original.backdated_grace_days,
+      backdated_exempt_role: original.backdated_exempt_role,
+    })
+    await admin.dispose()
+  }
+})

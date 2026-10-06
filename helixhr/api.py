@@ -44,6 +44,7 @@ from helixhr.events import (
 	HR_REQUEST_OPEN,
 	HR_REQUEST_REJECTED,
 	HR_REQUEST_WAITING_ON_EMPLOYEE,
+	LEAVE_RULES_DOCTYPE,
 	LEAVE_STAGE_HR,
 	PENDING_SINCE_FIELD,
 	PENDING_STATE,
@@ -8604,6 +8605,54 @@ def save_leave_type(name, **fields):
 	_apply_allowed_fields(doc, fields, LEAVE_TYPE_EDITABLE_FIELDS, skip_on_update=("leave_type_name",))
 	doc.save()
 	return {"name": doc.name, **{field: doc.get(field) for field in LEAVE_TYPE_EDITABLE_FIELDS}}
+
+
+# --- Leave rules (plan 2026-10-06-001 U2, R1, R2) --------------------------
+#
+# The backdated leave rule lives in the HelixHR Leave Rules Single (U1); HR
+# edits it here instead of through site config. Gated on `_is_hr()`, the same
+# predicate `can_configure` and `get_portal_config` use and the audience Leave
+# types already has, then written with `ignore_permissions` -- the Single
+# grants HR Manager no DocPerm on purpose (it is edited from the portal, not
+# from Desk; the shape KTD3 gives the admin-only endpoints, applied to HR).
+
+
+def _leave_rules_projection():
+	doc = frappe.get_single(LEAVE_RULES_DOCTYPE)
+	return {
+		"backdated_grace_days": cint(doc.backdated_grace_days),
+		"backdated_exempt_role": doc.backdated_exempt_role or "",
+		# Existing, enabled roles for the tab's picker. The Single's own Link
+		# validation is the real gate that a saved role exists.
+		"roles": frappe.get_all("Role", filters={"disabled": 0}, pluck="name", order_by="name asc"),
+	}
+
+
+@frappe.whitelist()
+def get_leave_rules():
+	"""The backdated leave rule, for the Settings Leave rules tab."""
+	rate_limit_per_user("get_leave_rules")
+	if not _is_hr(frappe.session.user):
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	return _leave_rules_projection()
+
+
+@frappe.whitelist(methods=["POST"])
+def save_leave_rules(backdated_grace_days=None, backdated_exempt_role=None):
+	"""Save the backdated leave rule. The 0-365 bound and the exempt role's
+	existence are validated by the doctype's own `validate()`, so a Desk save
+	is held to the same rules as this one."""
+	rate_limit_per_user("save_leave_rules")
+	if not _is_hr(frappe.session.user):
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	doc = frappe.get_single(LEAVE_RULES_DOCTYPE)
+	if backdated_grace_days is not None:
+		doc.backdated_grace_days = cint(backdated_grace_days)
+	if backdated_exempt_role is not None:
+		doc.backdated_exempt_role = (backdated_exempt_role or "").strip()
+	doc.flags.ignore_permissions = True
+	doc.save()
+	return _leave_rules_projection()
 
 
 @frappe.whitelist(methods=["POST"])

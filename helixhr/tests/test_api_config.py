@@ -8,12 +8,14 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, today
 
 from helixhr.api import (
+	get_leave_rules,
 	get_notification_setup,
 	get_portal_bootstrap,
 	get_portal_config,
 	preview_message_template,
 	reset_message_template,
 	save_holiday_list,
+	save_leave_rules,
 	save_leave_type,
 	save_message_template,
 	save_request_category,
@@ -27,8 +29,10 @@ from helixhr.tests.utils import (
 	ensure_holiday_list_assignment,
 	ensure_leave_allocation,
 	ensure_notification_manager_user,
+	leave_rules,
 	make_test_employee_and_manager,
 	make_test_hr_manager_employee,
+	make_test_hr_user,
 )
 
 
@@ -634,3 +638,49 @@ class TestNotificationSetupApi(IntegrationTestCase):
 		finally:
 			frappe.flags.helixhr_enforce_rate_limits = False
 			frappe.cache.delete(_rate_limit_key("send_test_message", frappe.session.user))
+
+
+class TestLeaveRules(IntegrationTestCase):
+	"""Plan 2026-10-06-001 U2: the Settings Leave rules tab's endpoints.
+	Gated like the Leave types endpoints (HR Manager / System Manager); the
+	bounds and the exempt role's existence live on the Single's validate()."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		_, self.hr_manager = make_test_hr_manager_employee()
+		_, self.hr_user = make_test_hr_user()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _as(self, user, fn, *args, **kwargs):
+		frappe.set_user(user)
+		try:
+			return fn(*args, **kwargs)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_hr_manager_saves_and_reads_back(self):
+		with leave_rules(grace_days=1):
+			saved = self._as(self.hr_manager, save_leave_rules, 2, "")
+			self.assertEqual(saved["backdated_grace_days"], 2)
+			read = self._as(self.hr_manager, get_leave_rules)
+		self.assertEqual(read["backdated_grace_days"], 2)
+
+	def test_out_of_range_is_refused(self):
+		with leave_rules(grace_days=1):
+			for bad in (-1, 400):
+				with self.assertRaises(frappe.ValidationError):
+					self._as(self.hr_manager, save_leave_rules, bad, "")
+
+	def test_a_nonexistent_role_is_refused(self):
+		with leave_rules(grace_days=1):
+			with self.assertRaises(frappe.ValidationError):
+				self._as(self.hr_manager, save_leave_rules, 1, "No Such Role")
+
+	def test_hr_user_and_employee_are_refused(self):
+		for user in (self.hr_user, EMPLOYEE_USER):
+			with self.assertRaises(frappe.PermissionError):
+				self._as(user, get_leave_rules)
+			with self.assertRaises(frappe.PermissionError):
+				self._as(user, save_leave_rules, 1, "")

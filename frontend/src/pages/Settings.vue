@@ -8,6 +8,7 @@ import CategoriesSection from '@/components/settings/CategoriesSection.vue'
 import LeaveTypesSection from '@/components/settings/LeaveTypesSection.vue'
 import HolidayListsSection from '@/components/settings/HolidayListsSection.vue'
 import ShiftTypesSection from '@/components/settings/ShiftTypesSection.vue'
+import LeaveRulesSection from '@/components/settings/LeaveRulesSection.vue'
 import ReportAccessSection from '@/components/settings/ReportAccessSection.vue'
 import PortalRolesSection from '@/components/settings/PortalRolesSection.vue'
 import { session } from '@/lib/session'
@@ -36,6 +37,9 @@ const ALL_SECTIONS = [
   { key: 'leave-types', label: 'Leave types' },
   { key: 'holiday-lists', label: 'Holiday lists' },
   { key: 'shift-types', label: 'Shift types' },
+  // Plan 2026-10-06-001 U2: the backdated leave rule, owned by the same
+  // audience as Leave types (`can_configure`).
+  { key: 'leave-rules', label: 'Leave rules' },
   // Plan 2026-10-04-004 U5: celebrations moved to the Email templates
   // page's own group; /settings/celebrations redirects there.
   { key: 'report-access', label: 'Report access' },
@@ -142,6 +146,7 @@ function reload() {
           :shift-types="config.data?.shift_types || []"
           @saved="reload"
         />
+        <LeaveRulesSection v-else-if="activeSection === 'leave-rules'" />
         <ReportAccessSection v-else-if="activeSection === 'report-access'" />
         <PortalRolesSection v-else-if="activeSection === 'portal-roles'" />
       </div>

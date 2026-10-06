@@ -1686,6 +1686,10 @@ RATE_LIMIT_POLICY = {
 	"save_leave_type": (30, 3600),
 	"save_holiday_list": (30, 3600),
 	"save_shift_type": (30, 3600),
+	# Plan 2026-10-06-001 U2: the Leave rules tab. Same shape as the config
+	# reads and saves above.
+	"get_leave_rules": (60, 60),
+	"save_leave_rules": (30, 3600),
 	# P8-U7/U8/U9. `get_person_form_options` fans out across several Link
 	# doctypes plus a scoped employee list, the same reason `get_person`
 	# itself is bounded above; `save_person` is an occasional
