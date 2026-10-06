@@ -111,3 +111,7 @@ helixhr.patches.v1_0.migrate_email_theme
 # Also called from `install.py`, because `--install-app` marks patches
 # complete without running them.
 helixhr.patches.v1_0.migrate_backdated_leave_rules
+# Plan 2026-10-06-001 U3: same module, new deltas -- removes HR Manager's
+# standard DocPerm on HelixHR Report Access, so the new Portal Admin /
+# System Manager gate cannot be bypassed through `/api/resource`.
+helixhr.patches.v1_0.apply_permission_deltas #2026-10-06 U3 HR Manager off Report Access

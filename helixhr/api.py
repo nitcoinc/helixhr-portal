@@ -6,6 +6,7 @@ from urllib.parse import quote
 
 import frappe
 from frappe import _
+from frappe.permissions import AUTOMATIC_ROLES
 from frappe.utils import (
 	add_days,
 	add_to_date,
@@ -60,6 +61,7 @@ from helixhr.events import (
 	_approver_user,
 	_enabled_users_with_role,
 	_is_hr,
+	backdated_grace_days,
 	backdated_leave_earliest,
 	backdated_leave_reason,
 	leave_overdraw,
@@ -2793,11 +2795,12 @@ def _can_edit_email_templates(user=None):
 	"""Whether the caller owns every portal email -- the shared theme, the
 	message templates and the celebration / holiday mail: HelixHR Portal
 	Admin or System Manager. HR roles and the Notification Manager are
-	refused (the page is portal configuration, not HR data)."""
-	user = user or frappe.session.user
-	if user == "Administrator":
-		return True
-	return bool(set(frappe.get_roles(user)) & {PORTAL_ADMIN_ROLE, "System Manager"})
+	refused (the page is portal configuration, not HR data).
+
+	Plan 2026-10-06-001 U3 narrowed `can_admin_portal` to exactly this role
+	set, so the two predicates are now one -- delegated rather than
+	duplicated, so a future role-set change is made once."""
+	return can_admin_portal(user)
 
 
 def _initials(full_name):
@@ -8621,11 +8624,20 @@ def save_leave_type(name, **fields):
 def _leave_rules_projection():
 	doc = frappe.get_single(LEAVE_RULES_DOCTYPE)
 	return {
-		"backdated_grace_days": cint(doc.backdated_grace_days),
+		# The effective value, not the raw field: an unset Single must show the
+		# rule's real default (1), not the 0 `get_single_value` casts an unset
+		# Int to.
+		"backdated_grace_days": backdated_grace_days(),
 		"backdated_exempt_role": doc.backdated_exempt_role or "",
-		# Existing, enabled roles for the tab's picker. The Single's own Link
-		# validation is the real gate that a saved role exists.
-		"roles": frappe.get_all("Role", filters={"disabled": 0}, pluck="name", order_by="name asc"),
+		# Enabled roles for the tab's picker. `AUTOMATIC_ROLES` (All, Guest,
+		# Desk User, Administrator) is excluded -- exempting one would exempt
+		# every user -- and the doctype's validate() refuses them too.
+		"roles": frappe.get_all(
+			"Role",
+			filters={"disabled": 0, "name": ["not in", list(AUTOMATIC_ROLES)]},
+			pluck="name",
+			order_by="name asc",
+		),
 	}
 
 
@@ -10569,7 +10581,8 @@ _PORTAL_ROLE_RESULTS = 20
 
 
 def _assert_portal_admin():
-	"""Portal Admin / HR Manager / System Manager with a non-empty scope."""
+	"""Portal Admin / System Manager with a non-empty scope (HR Manager and
+	HR User are refused since plan 2026-10-06-001 U3)."""
 	user = frappe.session.user
 	scope = resolve_portal_admin_scope(user) if can_admin_portal(user) else {"kind": "none"}
 	if scope["kind"] == "none":

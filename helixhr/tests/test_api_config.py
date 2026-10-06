@@ -684,3 +684,26 @@ class TestLeaveRules(IntegrationTestCase):
 				self._as(user, get_leave_rules)
 			with self.assertRaises(frappe.PermissionError):
 				self._as(user, save_leave_rules, 1, "")
+
+	def test_an_automatic_role_is_refused_and_not_offered(self):
+		"""Review fix: `All` / `Guest` / `Desk User` are automatic, so
+		exempting one would exempt every user and switch the rule off."""
+		with leave_rules(grace_days=1):
+			for role in ("All", "Guest", "Desk User"):
+				with self.assertRaises(frappe.ValidationError):
+					self._as(self.hr_manager, save_leave_rules, 1, role)
+			roles = self._as(self.hr_manager, get_leave_rules)["roles"]
+			self.assertFalse(set(roles) & {"All", "Guest", "Desk User"})
+
+	def test_the_effective_default_shows_when_unset(self):
+		"""Review fix: an unset Single must show the rule's real default (1),
+		not the 0 a raw single read would report."""
+		from helixhr.events import leave_rule_stored
+
+		original = leave_rule_stored("backdated_grace_days")
+		frappe.db.delete("Singles", {"doctype": "HelixHR Leave Rules", "field": "backdated_grace_days"})
+		try:
+			self.assertEqual(self._as(self.hr_manager, get_leave_rules)["backdated_grace_days"], 1)
+		finally:
+			if original is not None:
+				frappe.db.set_single_value("HelixHR Leave Rules", "backdated_grace_days", original)

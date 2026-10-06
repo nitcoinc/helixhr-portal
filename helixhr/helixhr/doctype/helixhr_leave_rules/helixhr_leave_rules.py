@@ -4,6 +4,7 @@
 import frappe
 from frappe import _
 from frappe.model.document import Document
+from frappe.permissions import AUTOMATIC_ROLES
 from frappe.utils import cint
 
 
@@ -21,3 +22,13 @@ class HelixHRLeaveRules(Document):
 			frappe.throw(_("Grace days must be between 0 and 365."))
 		self.backdated_grace_days = grace
 		self.backdated_exempt_role = (self.backdated_exempt_role or "").strip()
+		# Frappe hands every user `All`/`Guest` and every system user `Desk
+		# User`, so exempting one of those would exempt everyone and switch
+		# the rule off site-wide -- a real hazard now that HR picks the role
+		# from a dropdown rather than an operator typing it.
+		if self.backdated_exempt_role in AUTOMATIC_ROLES:
+			frappe.throw(
+				_("{0} is not a role that can be exempted -- it would exempt every user.").format(
+					self.backdated_exempt_role
+				)
+			)

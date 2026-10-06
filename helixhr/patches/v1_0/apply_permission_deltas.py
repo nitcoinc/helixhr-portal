@@ -194,6 +194,18 @@ DELTAS = {
 	# for every other role that resolves a project scope (HR Manager's
 	# "company" branch), just not for a role with no base grant to reach
 	# them through in the first place.
+	#
+	# Plan 2026-10-06-001 U3: the access matrix is Portal Admin / System
+	# Manager only now, and the portal gate is `_assert_report_access_admin`.
+	# HR Manager's standard DocPerm here is a second door: a direct
+	# `/api/resource/HelixHR Report Access/<key>` write would change the
+	# matrix off the endpoint's own check. Removed rather than narrowed, the
+	# same reasoning as Delivery Manager on Project above -- nothing HR does
+	# through the portal needs this perm, and Portal Admin writes with
+	# `ignore_permissions` behind its own gate.
+	"HelixHR Report Access": (
+		(("HR Manager", 0, 0), {"read": 0, "write": 0, "create": 0, "delete": 0}),
+	),
 }
 
 

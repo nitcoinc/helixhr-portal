@@ -484,3 +484,11 @@ class TestReportAccessMatrix(IntegrationTestCase):
 		self.assertEqual(set(rows), {entry["key"] for entry in reports.CATALOG})
 		self.assertTrue(rows[PROJECT_KEY]["dm_allowed"])
 		self.assertFalse(rows[COMPANY_ONLY_KEY]["dm_allowed"])
+
+	def test_hr_manager_has_no_docperm_on_the_matrix(self):
+		"""Review fix (security, plan U3): the portal gate is not the only
+		door. A standard DocPerm would let HR Manager write the matrix through
+		`/api/resource/HelixHR Report Access/<key>`, off the endpoint entirely;
+		`apply_permission_deltas` removes it."""
+		self.assertFalse(frappe.has_permission("HelixHR Report Access", "write", user=self.hr_manager))
+		self.assertFalse(frappe.has_permission("HelixHR Report Access", "create", user=self.hr_manager))

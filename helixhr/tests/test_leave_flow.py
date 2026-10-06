@@ -1169,6 +1169,17 @@ class TestBackdatedGrace(IntegrationTestCase):
 		with self._conf(grace_days=1, exempt_role="Employee"):
 			self.assertTrue(self._apply(-10)["name"])
 
+	def test_zero_days_still_blocks_a_backdated_start(self):
+		"""0 is a real value, not "unset": nothing may start before today."""
+		frappe.set_user(EMPLOYEE_USER)
+		with self._conf(grace_days=0):
+			self.assertEqual(backdated_grace_days(), 0)
+			with (
+				patch("helixhr.api._holiday_dates", return_value=None),
+				self.assertRaises(frappe.ValidationError),
+			):
+				self._apply(-1)
+
 	def test_an_unrelated_edit_on_an_old_open_request_does_not_trigger_the_rule(self):
 		frappe.set_user(EMPLOYEE_USER)
 		with self._conf(grace_days=30):
@@ -1249,3 +1260,42 @@ class TestBackdatedLeaveRulesPatch(IntegrationTestCase):
 		self.assertIsNone(leave_rule_stored("backdated_grace_days"))
 		# And the rule still reads the documented default of 1.
 		self.assertEqual(backdated_grace_days(), 1)
+
+	def test_an_out_of_range_grace_is_clamped_not_fatal(self):
+		"""Review fix: the old reader tolerated any value, so migrate must not
+		abort on one (`doc.save()` validation would have thrown)."""
+		from helixhr.patches.v1_0.migrate_backdated_leave_rules import execute
+
+		self._unset()
+		with patch.dict(frappe.conf, {"helixhr_backdated_leave_grace_days": 400}):
+			execute()
+		self.assertEqual(frappe.db.get_single_value(self.SINGLE, "backdated_grace_days"), 365)
+
+		self._unset()
+		with patch.dict(frappe.conf, {"helixhr_backdated_leave_grace_days": -5}):
+			execute()
+		self.assertEqual(frappe.db.get_single_value(self.SINGLE, "backdated_grace_days"), 0)
+
+	def test_a_deleted_exempt_role_is_skipped_not_fatal(self):
+		from helixhr.events import leave_rule_stored
+		from helixhr.patches.v1_0.migrate_backdated_leave_rules import execute
+
+		self._unset()
+		with patch.dict(frappe.conf, {"helixhr_backdated_leave_exempt_role": "No Such Role"}):
+			execute()
+		self.assertIsNone(leave_rule_stored("backdated_exempt_role"))
+
+	def test_a_role_only_config_is_not_reapplied_over_an_edit(self):
+		"""Review fix: the guard must key on both fields, or a config with only
+		the exempt role re-applies it over a later HR edit on the next run."""
+		from helixhr.events import leave_rule_stored
+		from helixhr.patches.v1_0.migrate_backdated_leave_rules import execute
+
+		self._unset()
+		with patch.dict(frappe.conf, {"helixhr_backdated_leave_exempt_role": "HR User"}):
+			execute()
+		self.assertEqual(leave_rule_stored("backdated_exempt_role"), "HR User")
+		frappe.db.set_single_value(self.SINGLE, "backdated_exempt_role", "IT Team")
+		with patch.dict(frappe.conf, {"helixhr_backdated_leave_exempt_role": "HR User"}):
+			execute()
+		self.assertEqual(leave_rule_stored("backdated_exempt_role"), "IT Team")

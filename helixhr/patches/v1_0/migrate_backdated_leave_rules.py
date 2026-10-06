@@ -16,20 +16,29 @@ EXEMPT_KEY = "helixhr_backdated_leave_exempt_role"
 
 
 def execute():
-	# Raw read: an unset Int reads as 0 through `get_single_value`, which
-	# would hide the "never set" state this guard exists to detect.
-	if leave_rule_stored("backdated_grace_days") is not None:
+	# Raw reads: an unset Int reads as 0 through `get_single_value`, which
+	# would hide the "never set" state this guard exists to detect. Guard on
+	# both fields, so a config that carried only the exempt role is not
+	# re-applied over a later HR edit on the next run.
+	grace_set = leave_rule_stored("backdated_grace_days") is not None
+	role_set = bool((leave_rule_stored("backdated_exempt_role") or "").strip())
+	if grace_set or role_set:
 		return
 	grace = frappe.conf.get(GRACE_KEY)
 	role = (frappe.conf.get(EXEMPT_KEY) or "").strip()
 	if grace is None and not role:
-		# Nothing to carry over. Saving here would materialise the Single's
-		# own default and make a later run look already-migrated.
+		# Nothing to carry over -- do not materialise the Single's default.
 		return
-	doc = frappe.get_single("HelixHR Leave Rules")
+	values = {}
 	if grace is not None:
-		doc.backdated_grace_days = cint(grace)
-	if role:
-		doc.backdated_exempt_role = role
-	doc.flags.ignore_permissions = True
-	doc.save()
+		# Clamp: the old reader tolerated any value (a negative one read as 0,
+		# and it had no upper bound), so migrate must not fail on one.
+		values["backdated_grace_days"] = min(max(cint(grace), 0), 365)
+	if role and frappe.db.exists("Role", role):
+		values["backdated_exempt_role"] = role
+	if not values:
+		return
+	# `set_single_value`, not `doc.save()`: a legacy role that was deleted, or
+	# an out-of-range grace, would otherwise abort `bench migrate` on Link or
+	# validation. Preflight still reports a missing exempt role.
+	frappe.db.set_single_value("HelixHR Leave Rules", values)

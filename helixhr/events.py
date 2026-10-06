@@ -1,6 +1,7 @@
 import frappe
 from frappe import _
 from frappe.model import no_value_fields
+from frappe.permissions import AUTOMATIC_ROLES
 from frappe.utils import add_days, cint, flt, formatdate, getdate
 
 from helixhr.helixhr.doctype.hr_request.hr_request import request_belongs_to_session
@@ -778,7 +779,11 @@ def _backdated_exempt(user=None):
 	extra = (leave_rule_stored("backdated_exempt_role") or "").strip()
 	if extra:
 		exempt.add(extra)
-	return bool(exempt & set(frappe.get_roles(user)))
+	# Drop the automatic roles (`All`, `Guest`, `Desk User`, `Administrator`)
+	# Frappe appends to every user. Belt and braces with the doctype's
+	# validate(): a value written behind the API (`db.set_single_value`) must
+	# not exempt the whole site.
+	return bool(exempt & (set(frappe.get_roles(user)) - set(AUTOMATIC_ROLES)))
 
 
 def backdated_leave_earliest(employee, as_of=None):
