@@ -1,0 +1,47 @@
+{
+ "actions": [],
+ "creation": "2026-10-06 00:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "backdated_grace_days",
+  "backdated_exempt_role"
+ ],
+ "fields": [
+  {
+   "default": "1",
+   "description": "How many working days back an employee may start leave (0 to 365). HR Manager is always unlimited, whatever this says.",
+   "fieldname": "backdated_grace_days",
+   "fieldtype": "Int",
+   "label": "Backdated leave grace, in working days"
+  },
+  {
+   "description": "A second role that may start leave any number of days back, in addition to HR Manager. Leave empty for none.",
+   "fieldname": "backdated_exempt_role",
+   "fieldtype": "Link",
+   "label": "Backdated exempt role",
+   "options": "Role"
+  }
+ ],
+ "issingle": 1,
+ "modified": "2026-10-06 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "HelixHR",
+ "name": "HelixHR Leave Rules",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

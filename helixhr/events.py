@@ -735,15 +735,36 @@ def _refuse_pending_overdraw(doc):
 		frappe.throw(result["reason"], title=_("Not enough leave"))
 
 
-# R6: how far back an employee may start leave, in working days. Site config,
-# not a Single (P5-KTD3); preflight shows the effective value.
-BACKDATED_GRACE_DAYS_KEY = "helixhr_backdated_leave_grace_days"
-BACKDATED_EXEMPT_ROLE_KEY = "helixhr_backdated_leave_exempt_role"
+# R6: how far back an employee may start leave, in working days. Stored in
+# the HelixHR Leave Rules Single (plan 2026-10-06-001 U1), editable from
+# portal Settings' Leave rules tab instead of site config; preflight shows
+# the effective value. `patches/v1_0/migrate_backdated_leave_rules` carried
+# the old site-config values here on migrate.
+LEAVE_RULES_DOCTYPE = "HelixHR Leave Rules"
+
+
+def leave_rule_stored(fieldname):
+	"""The raw stored value of one HelixHR Leave Rules field, or None when
+	the Single has no row.
+
+	`frappe.db.get_single_value` casts an unset Int to 0, which cannot tell
+	"0 working days" from "never set" -- and the rule's default depends on
+	that difference. Reading the row directly keeps 0 a real choice.
+
+	A plain SQL read, not `frappe.db.get_value`: that helper orders by the
+	doctype's meta sort field ("creation"), which `tabSingles` does not
+	have."""
+	rows = frappe.db.sql(
+		"select value from tabSingles where doctype=%s and field=%s",
+		(LEAVE_RULES_DOCTYPE, fieldname),
+	)
+	return rows[0][0] if rows else None
 
 
 def backdated_grace_days():
-	"""N from site config, default 1; a negative value reads as 0."""
-	value = frappe.conf.get(BACKDATED_GRACE_DAYS_KEY)
+	"""N from the HelixHR Leave Rules Single, default 1 when unset; a
+	negative value reads as 0."""
+	value = leave_rule_stored("backdated_grace_days")
 	return max(cint(1 if value is None else value), 0)
 
 
@@ -754,7 +775,7 @@ def _backdated_exempt(user=None):
 	if user == "Administrator":
 		return True
 	exempt = {"HR Manager"}
-	extra = (frappe.conf.get(BACKDATED_EXEMPT_ROLE_KEY) or "").strip()
+	extra = (leave_rule_stored("backdated_exempt_role") or "").strip()
 	if extra:
 		exempt.add(extra)
 	return bool(exempt & set(frappe.get_roles(user)))

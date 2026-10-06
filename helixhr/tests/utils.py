@@ -401,6 +401,31 @@ def set_report_access(report_key, **flags):
 		)
 
 
+@contextmanager
+def leave_rules(grace_days=1, exempt_role=None):
+	"""The HelixHR Leave Rules Single, set for the ``with`` block and
+	restored after (plan 2026-10-06-001 U1).
+
+	Stands in for the old ``patch.dict(frappe.conf, {"helixhr_backdated_leave_*"})``
+	helper: the rule now reads the Single, so tests that used to patch the two
+	site-config keys set the stored values instead. Restored explicitly because
+	IntegrationTestCase rolls back once per class, not per test method."""
+	from helixhr.events import leave_rule_stored as stored
+
+	doctype = "HelixHR Leave Rules"
+	# Raw read: `get_single_value` turns an unset Int into 0, so a restore
+	# based on it would freeze grace at 0 instead of unset.
+	original = stored("backdated_grace_days")
+	original_role = stored("backdated_exempt_role")
+	frappe.db.set_single_value(doctype, "backdated_grace_days", grace_days)
+	frappe.db.set_single_value(doctype, "backdated_exempt_role", exempt_role or "")
+	try:
+		yield
+	finally:
+		frappe.db.set_single_value(doctype, "backdated_grace_days", original)
+		frappe.db.set_single_value(doctype, "backdated_exempt_role", original_role)
+
+
 def make_test_project(company, name, members=()):
 	"""A Project for the permission and scope tests, with `members` (Frappe
 	user ids) added to its `Project User` child table -- the same field

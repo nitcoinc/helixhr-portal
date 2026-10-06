@@ -25,6 +25,7 @@ from helixhr.tests.utils import (
 	ensure_hr_manager_user,
 	ensure_leave_allocation,
 	ensure_leave_approver_role,
+	leave_rules,
 	make_test_employee_and_manager,
 )
 
@@ -1117,8 +1118,11 @@ class TestBackdatedGrace(IntegrationTestCase):
 	def tearDown(self):
 		frappe.set_user("Administrator")
 
-	def _conf(self, **values):
-		return patch.dict(frappe.conf, {f"helixhr_backdated_leave_{k}": v for k, v in values.items()})
+	def _conf(self, grace_days=1, exempt_role=None):
+		"""The HelixHR Leave Rules Single the rule now reads (plan
+		2026-10-06-001 U1), set for the `with` block. Same call shape the
+		old site-config helper had."""
+		return leave_rules(grace_days=grace_days, exempt_role=exempt_role)
 
 	def _apply(self, offset):
 		day = add_days(today(), offset)
@@ -1146,8 +1150,8 @@ class TestBackdatedGrace(IntegrationTestCase):
 			self.assertTrue(backdated_leave_reason(self.employee_name, "2026-09-26", monday))
 
 	def test_grace_defaults_to_one_day(self):
-		with patch.dict(frappe.conf):
-			frappe.conf.pop("helixhr_backdated_leave_grace_days", None)
+		# Unset in the Single -- no stored value -- reads as 1.
+		with patch("helixhr.events.leave_rule_stored", return_value=None):
 			self.assertEqual(backdated_grace_days(), 1)
 
 	# --- insert, edit, approve -----------------------------------------------
@@ -1198,3 +1202,50 @@ class TestBackdatedGrace(IntegrationTestCase):
 			result = get_leave_day_count("Casual Leave", day, day)
 		self.assertEqual(result["earliest_start"], str(add_days(today(), -1)))
 		self.assertIn("Leave can start no earlier than", result["blocked_reason"])
+
+
+class TestBackdatedLeaveRulesPatch(IntegrationTestCase):
+	"""U1/KTD2, R4: the two site-config values carry into the HelixHR Leave
+	Rules Single once, and a rerun never overwrites an HR edit."""
+
+	SINGLE = "HelixHR Leave Rules"
+
+	def _unset(self):
+		frappe.db.set_single_value(self.SINGLE, "backdated_grace_days", None)
+		frappe.db.set_single_value(self.SINGLE, "backdated_exempt_role", None)
+
+	def test_the_patch_copies_site_config_into_the_single(self):
+		from helixhr.patches.v1_0.migrate_backdated_leave_rules import execute
+
+		self._unset()
+		with patch.dict(
+			frappe.conf,
+			{"helixhr_backdated_leave_grace_days": 4, "helixhr_backdated_leave_exempt_role": "HR User"},
+		):
+			execute()
+		self.assertEqual(frappe.db.get_single_value(self.SINGLE, "backdated_grace_days"), 4)
+		self.assertEqual(frappe.db.get_single_value(self.SINGLE, "backdated_exempt_role"), "HR User")
+
+	def test_a_second_run_keeps_an_hr_edit(self):
+		from helixhr.patches.v1_0.migrate_backdated_leave_rules import execute
+
+		self._unset()
+		with patch.dict(frappe.conf, {"helixhr_backdated_leave_grace_days": 4}):
+			execute()
+		frappe.db.set_single_value(self.SINGLE, "backdated_grace_days", 7)
+		with patch.dict(frappe.conf, {"helixhr_backdated_leave_grace_days": 4}):
+			execute()
+		self.assertEqual(frappe.db.get_single_value(self.SINGLE, "backdated_grace_days"), 7)
+
+	def test_no_config_leaves_the_single_unset(self):
+		from helixhr.events import leave_rule_stored
+		from helixhr.patches.v1_0.migrate_backdated_leave_rules import execute
+
+		self._unset()
+		with patch.dict(frappe.conf) as conf:
+			conf.pop("helixhr_backdated_leave_grace_days", None)
+			conf.pop("helixhr_backdated_leave_exempt_role", None)
+			execute()
+		self.assertIsNone(leave_rule_stored("backdated_grace_days"))
+		# And the rule still reads the documented default of 1.
+		self.assertEqual(backdated_grace_days(), 1)

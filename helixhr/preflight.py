@@ -262,7 +262,7 @@ def check_backdated_leave_grace():
 	every validate and so would block an approver submitting a late request.
 	Both on at once is a FAIL, as is an exempt role that does not exist. The
 	PASS detail shows the effective N."""
-	from helixhr.events import BACKDATED_EXEMPT_ROLE_KEY, backdated_grace_days
+	from helixhr.events import backdated_grace_days, leave_rule_stored
 
 	problems = []
 	if frappe.utils.cint(_hr_setting("restrict_backdated_leave_application")):
@@ -270,9 +270,12 @@ def check_backdated_leave_grace():
 			"HR Settings restrict_backdated_leave_application is on -- it would block approvers"
 			" submitting late requests; turn it off, the HelixHR grace rule covers backdating"
 		)
-	role = (frappe.conf.get(BACKDATED_EXEMPT_ROLE_KEY) or "").strip()
+	# Plan 2026-10-06-001 U1: the exempt role now lives in the HelixHR Leave
+	# Rules Single, set from the Settings Leave rules tab; a role can be
+	# deleted in Desk after it was chosen, so this still checks.
+	role = (leave_rule_stored("backdated_exempt_role") or "").strip()
 	if role and not frappe.db.exists("Role", role):
-		problems.append(f"{BACKDATED_EXEMPT_ROLE_KEY} names a role that does not exist: {role}")
+		problems.append(f"the Leave rules exempt role does not exist: {role}")
 	if problems:
 		return _result("Backdated leave grace", FAIL, "; ".join(problems))
 	grace = backdated_grace_days()

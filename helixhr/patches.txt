@@ -105,3 +105,9 @@ helixhr.patches.v1_0.backfill_document_link_dates
 # carries a single company colour and the default company's logo into the
 # theme, then deletes the Company.helixhr_email_header_color Custom Field.
 helixhr.patches.v1_0.migrate_email_theme
+# Plan 2026-10-06-001 U1 / KTD2: carries the backdated leave rule's two
+# site-config values into the new HelixHR Leave Rules Single. Idempotent --
+# a rerun never overwrites an HR edit from the Settings Leave rules tab.
+# Also called from `install.py`, because `--install-app` marks patches
+# complete without running them.
+helixhr.patches.v1_0.migrate_backdated_leave_rules

@@ -9,6 +9,7 @@ from helixhr import preflight
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	ensure_email_admin_user,
+	leave_rules,
 	make_test_employee_and_manager,
 	suspend_chart_of_account_fixtures,
 )
@@ -513,7 +514,7 @@ class TestPreflightP2U1(IntegrationTestCase):
 		self.assertIn("restrict_backdated_leave_application", result["detail"])
 
 	def test_a_missing_backdated_exempt_role_fails(self):
-		with patch.dict(frappe.conf, {"helixhr_backdated_leave_exempt_role": "No Such Role"}):
+		with leave_rules(grace_days=1, exempt_role="No Such Role"):
 			result = self._with_hr_setting(
 				"restrict_backdated_leave_application", 0, preflight.check_backdated_leave_grace
 			)
@@ -521,10 +522,7 @@ class TestPreflightP2U1(IntegrationTestCase):
 		self.assertIn("No Such Role", result["detail"])
 
 	def test_backdated_grace_passes_and_shows_the_effective_days(self):
-		with patch.dict(
-			frappe.conf,
-			{"helixhr_backdated_leave_grace_days": 2, "helixhr_backdated_leave_exempt_role": "HR User"},
-		):
+		with leave_rules(grace_days=2, exempt_role="HR User"):
 			result = self._with_hr_setting(
 				"restrict_backdated_leave_application", 0, preflight.check_backdated_leave_grace
 			)
