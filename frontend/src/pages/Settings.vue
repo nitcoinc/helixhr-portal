@@ -45,8 +45,21 @@ const ALL_SECTIONS = [
   { key: 'report-access', label: 'Report access' },
   { key: 'portal-roles', label: 'Portal roles' },
 ]
+// Plan 2026-10-06-001 U3 (KTD4, R5): the tab list derives from the two
+// flags. HR sees the HR sections, Portal Admin sees the admin sections, and
+// someone holding both roles (System Manager is both) sees both. A caller
+// with neither still receives the full list, so what they meet is the
+// server's refusal, never a client-side redirect.
+const HR_SECTIONS = ['categories', 'leave-types', 'holiday-lists', 'shift-types', 'leave-rules']
 const PORTAL_SECTIONS = ['report-access', 'portal-roles']
-const SECTIONS = portalOnly ? ALL_SECTIONS.filter((tab) => PORTAL_SECTIONS.includes(tab.key)) : ALL_SECTIONS
+const SECTIONS =
+  !session.canConfigure && !session.canAdminPortal
+    ? ALL_SECTIONS
+    : ALL_SECTIONS.filter(
+        (tab) =>
+          (session.canConfigure && HR_SECTIONS.includes(tab.key)) ||
+          (session.canAdminPortal && PORTAL_SECTIONS.includes(tab.key)),
+      )
 const DEFAULT_SECTION = SECTIONS[0].key
 
 const activeSection = computed(() =>

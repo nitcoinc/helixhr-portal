@@ -1454,9 +1454,14 @@ def resolve_portal_admin_scope(user):
 	"""Which employees ``user`` may administer *portal settings* for -- the
 	export log rows and the role holders -- in `resolve_admin_scope`'s shape.
 
-	HR Manager / System Manager get exactly `resolve_admin_scope`'s answer.
-	A Portal Admin gets its Active Employee anchor's company, or ``"none"``
-	without one: unlike the Desk-only HR persona, it is never unscoped."""
+	A System Manager gets exactly `resolve_admin_scope`'s answer. A Portal
+	Admin gets its Active Employee anchor's company, or ``"none"`` without
+	one: unlike the Desk-only HR persona, it is never unscoped.
+
+	Since plan 2026-10-06-001 U3 the only callers are Portal Admin, System
+	Manager and Administrator -- `can_admin_portal` refuses HR Manager now --
+	but the HR Manager branch below stays, because the scope a role resolves
+	to is independent of who is allowed to ask."""
 	if user == "Administrator":
 		return {"kind": "unscoped", "company": None}
 	roles = set(frappe.get_roles(user))
@@ -1470,11 +1475,16 @@ def resolve_portal_admin_scope(user):
 
 
 def can_admin_portal(user):
-	"""Portal Admin, HR Manager, System Manager or Administrator -- the callers
-	of the access matrix, export log and portal-role endpoints."""
+	"""Portal Admin, System Manager or Administrator -- the callers of the
+	access matrix, export log and portal-role endpoints.
+
+	HR Manager and HR User are refused (plan 2026-10-06-001 U3, R5/R6):
+	administering the portal is a portal-configuration job, not an HR-data
+	one. `resolve_portal_admin_scope` still answers for a System Manager the
+	same way it always did."""
 	if user == "Administrator":
 		return True
-	return bool(set(frappe.get_roles(user)) & (_ADMIN_UNSCOPED_ROLES | {PORTAL_ADMIN_ROLE}))
+	return bool(set(frappe.get_roles(user)) & {PORTAL_ADMIN_ROLE, "System Manager"})
 
 
 def resolve_report_access(user, report_key):

@@ -137,10 +137,11 @@ function applyView(query) {
   run()
 }
 
-// U5: the export log tab on the catalog page, for HR Manager / System
-// Manager / Portal Admin -- `canAdminPortal` is the same `can_admin_portal`
-// predicate `get_export_log` enforces. A Portal Admin with no report role has
-// an empty catalog, so the log is all this page shows them.
+// U5: the export log tab on the catalog page, for System Manager / Portal
+// Admin -- `canAdminPortal` is the same `can_admin_portal` predicate
+// `get_export_log` enforces. HR Manager is refused since plan 2026-10-06-001
+// U3. A Portal Admin with no report role has an empty catalog, so the log is
+// all this page shows them.
 const showExportLog = computed(() => session.canAdminPortal)
 const tabs = computed(() =>
   catalog.value.length

@@ -21,6 +21,7 @@ from helixhr.tests.utils import (
 	ensure_test_company,
 	make_test_hr_manager_employee,
 	make_test_hr_user,
+	make_test_portal_admin,
 	make_test_report_manager,
 	make_test_user,
 	set_report_access,
@@ -328,16 +329,18 @@ class TestRequestExport(IntegrationTestCase):
 				_as("Administrator", request_export, KEY, "csv")
 		self.assertIn("Narrow the filters", str(caught.exception))
 
-	def test_export_log_is_hr_manager_only(self):
+	def test_export_log_is_portal_admin_only(self):
 		_, report_manager = make_test_report_manager()
 		set_report_access(KEY, hr_user_run=1, hr_user_export=1)
 		out = _as(self.hr_user, request_export, KEY, "csv")
-		for user in (self.hr_user, report_manager):
+		_, hr_manager = make_test_hr_manager_employee()
+		# HR Manager joins the refused set in plan 2026-10-06-001 U3 (R6).
+		for user in (self.hr_user, report_manager, hr_manager):
 			with self.assertRaises(frappe.PermissionError):
 				_as(user, get_export_log)
 
-		_, hr_manager = make_test_hr_manager_employee()
-		page = _as(hr_manager, get_export_log, page_length=200)
+		_, portal_admin = make_test_portal_admin()
+		page = _as(portal_admin, get_export_log, page_length=200)
 		row = next(row for row in page["rows"] if row.name == out["export"])
 		self.assertEqual(row.owner, self.hr_user)
 		self.assertNotIn("file", row)

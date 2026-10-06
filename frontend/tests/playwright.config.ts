@@ -86,6 +86,17 @@ export default defineConfig({
       dependencies: ['setup'],
       testMatch: /(approvals|organisation|people|reports)\.spec\.ts/,
     },
+    // Plan 2026-10-06-001 U3. The Portal Admin identity (`make_test_portal_admin`,
+    // seeded by setup_playwright_fixtures): Report access and Portal roles are
+    // its sections now, and it sees none of the HR ones. Scoped to
+    // settings.spec.ts, the only page whose audience changed -- HR remains the
+    // refused hat there.
+    {
+      name: 'portal-admin',
+      use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/portal-admin.json' },
+      dependencies: ['setup'],
+      testMatch: /settings\.spec\.ts/,
+    },
     // P2-U9 step 9. Mobile WebKit is the second mandatory browser: it is the
     // only engine on iOS, it is where a coarse pointer, a real safe-area
     // inset and Safari's own overlay behaviour actually live, and every

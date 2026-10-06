@@ -380,6 +380,9 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"save_leave_type": (30, 3600),
 			"save_holiday_list": (30, 3600),
 			"save_shift_type": (30, 3600),
+			# Plan 2026-10-06-001 U2: the Leave rules tab.
+			"get_leave_rules": (60, 60),
+			"save_leave_rules": (30, 3600),
 			# P8-U7/U8/U9.
 			"get_person_form_options": (60, 60),
 			"save_person": (30, 3600),

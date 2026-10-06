@@ -119,6 +119,8 @@ class TestPortalAdminSeesNoHrData(IntegrationTestCase):
 		self.assertFalse(boot["can_see_people"])
 		_, hr_user = make_test_hr_user()
 		self.assertFalse(_as(hr_user, get_portal_bootstrap)["can_admin_portal"])
+		# Plan 2026-10-06-001 U3: HR Manager is refused alongside HR User.
+		self.assertFalse(_as(ensure_hr_manager_user(), get_portal_bootstrap)["can_admin_portal"])
 
 	def test_edits_the_access_matrix(self):
 		rows = _as(self.user, get_report_access)
@@ -219,10 +221,15 @@ class TestPortalRoleManagement(IntegrationTestCase):
 			with self.assertRaises(frappe.PermissionError):
 				_as(user, get_portal_role_holders)
 
-	def test_hr_manager_may_manage_too(self):
-		_as(ensure_hr_manager_user(), set_portal_role, self.other_target, "IT Team", 1)
-		self.assertIn("IT Team", _roles(OTHER_COMPANY_TARGET))
-		_as(ensure_hr_manager_user(), set_portal_role, self.other_target, "IT Team", 0)
+	def test_hr_manager_is_refused_too(self):
+		"""Plan 2026-10-06-001 U3 (R5/R6): administering portal settings moved
+		to Portal Admin and System Manager; HR Manager no longer holds it."""
+		hr_manager = ensure_hr_manager_user()
+		with self.assertRaises(frappe.PermissionError):
+			_as(hr_manager, set_portal_role, self.other_target, "IT Team", 1)
+		with self.assertRaises(frappe.PermissionError):
+			_as(hr_manager, get_portal_role_holders)
+		self.assertNotIn("IT Team", _roles(OTHER_COMPANY_TARGET))
 
 
 class TestPortalAdminPreflight(IntegrationTestCase):

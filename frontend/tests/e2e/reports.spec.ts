@@ -358,7 +358,7 @@ test.describe('export', () => {
     test.skip(testInfo.project.name !== 'hr', 'HR Manager exports; tiers are below')
   })
 
-  test('CSV export downloads a named file and lands in the export log', async ({ page }) => {
+  test('CSV export downloads a named file and lands in the export log', async ({ page, baseURL }) => {
     await page.goto(LEDGER_URL)
     await expect(page.locator('table').getByRole('cell', { name: 'Casual Leave' }).first()).toBeVisible()
 
@@ -369,6 +369,10 @@ test.describe('export', () => {
     ])
     expect(download.suggestedFilename()).toMatch(/^helixhr_leave_ledger_2000-01-01_2100-01-01_\d{8}T\d{4}\.csv$/)
 
+    // The export log is Portal Admin / System Manager only now (plan
+    // 2026-10-06-001 U3, R6); HR Manager still runs the export, so sign in
+    // as the Portal Admin to read the row back.
+    await signInAs(page, baseURL, PORTAL_ADMIN)
     await page.goto('/helixhr/reports')
     await page.getByRole('button', { name: 'Export log' }).click()
     await expect(page.getByTestId('export-log-row').first()).toContainText('Leave ledger')
@@ -402,11 +406,11 @@ test.describe('report tiers', () => {
     await expect(page.getByRole('button', { name: 'Open in Frappe' })).toHaveCount(0)
   })
 
-  test('HR Manager grants HR User export in Settings; HR User sees it after reload', async ({
+  test('Portal Admin grants HR User export in Settings; HR User sees it after reload', async ({
     page,
     baseURL,
   }) => {
-    const admin = await apiAs(baseURL, HR_MANAGER)
+    const admin = await apiAs(baseURL, PORTAL_ADMIN)
     const restore = async (flags: object) => {
       const response = await admin.post('/api/method/helixhr.api.save_report_access', {
         data: { rows: [{ key: 'leave_ledger', ...flags }] },
@@ -421,7 +425,7 @@ test.describe('report tiers', () => {
       await expect(exportButton).toBeDisabled()
       await expect(exportButton).toHaveAccessibleDescription(/not export it/)
 
-      await signInAs(page, baseURL, HR_MANAGER)
+      await signInAs(page, baseURL, PORTAL_ADMIN)
       await page.goto('/helixhr/settings/report-access')
       const cell = page.getByRole('checkbox', { name: 'Leave ledger: HR User export' })
       await cell.check()
@@ -445,7 +449,11 @@ test.describe('report tiers', () => {
   test('HR Manager shares a saved view; HR User applies it', async ({ page, baseURL }) => {
     const label = `E2E shared ${Date.now()}`
     const admin = await apiAs(baseURL, HR_MANAGER)
-    const grant = await admin.post('/api/method/helixhr.api.save_report_access', {
+    // The grant is a Portal Admin action since plan 2026-10-06-001 U3;
+    // `admin` stays HR Manager for the saved-view cleanup below, which is
+    // not portal-admin work.
+    const portalAdmin = await apiAs(baseURL, PORTAL_ADMIN)
+    const grant = await portalAdmin.post('/api/method/helixhr.api.save_report_access', {
       data: { rows: [{ key: 'leave_ledger', hr_user_run: 1, hr_user_export: 0 }] },
     })
     expect(grant.ok()).toBeTruthy()
@@ -476,6 +484,7 @@ test.describe('report tiers', () => {
           await admin.post('/api/method/helixhr.api.delete_report_view', { data: { name: view.name } })
         }
       }
+      await portalAdmin.dispose()
       await admin.dispose()
     }
   })
@@ -483,7 +492,7 @@ test.describe('report tiers', () => {
   // HelixHR Portal Admin: Settings with only Report access + Portal roles,
   // Reports with only the export log, and no HR data.
   test('a Portal Admin manages portal roles and reads the export log, nothing more', async ({ page, baseURL }) => {
-    const admin = await apiAs(baseURL, HR_MANAGER)
+    const admin = await apiAs(baseURL, PORTAL_ADMIN)
     const holders = await admin.post('/api/method/helixhr.api.get_portal_role_holders', {
       data: { query: 'hr-user' },
     })

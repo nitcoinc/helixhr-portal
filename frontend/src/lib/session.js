@@ -63,9 +63,9 @@ const state = reactive({
   /** Plan 2026-10-04-001 U4: gates the Reports nav item. True when
    * `get_report_catalog` would list at least one entry for this caller. */
   canRunReports: false,
-  /** Portal Admin, HR Manager or System Manager: the access matrix, export
-   * log and Portal roles. Mirrors `can_admin_portal`, which those endpoints
-   * enforce. */
+  /** Portal Admin or System Manager (HR is refused since plan 2026-10-06-001
+   * U3): the access matrix, export log and Portal roles. Mirrors
+   * `can_admin_portal`, which those endpoints enforce. */
   canAdminPortal: false,
   /** Documents: the upload / edit / delete controls. Mirrors
    * `save_document_link`'s own gate, which is the real one. */

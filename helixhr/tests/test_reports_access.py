@@ -16,6 +16,7 @@ from helixhr.tests.utils import (
 	make_test_delivery_manager,
 	make_test_hr_manager_employee,
 	make_test_hr_user,
+	make_test_portal_admin,
 	make_test_project,
 	make_test_user,
 	make_test_user_without_employee,
@@ -411,14 +412,16 @@ class TestReportAccessPreflight(IntegrationTestCase):
 
 
 class TestReportAccessMatrix(IntegrationTestCase):
-	"""U6: `get_report_access` / `save_report_access`, HR Manager and System
-	Manager only, all-or-nothing batches, and immediate effect."""
+	"""U6: `get_report_access` / `save_report_access`, Portal Admin and System
+	Manager only (HR Manager is refused since plan 2026-10-06-001 U3),
+	all-or-nothing batches, and immediate effect."""
 
 	def setUp(self):
 		frappe.set_user("Administrator")
 		self.company = ensure_test_company()
 		_, self.hr_manager = make_test_hr_manager_employee()
 		_, self.hr_user = make_test_hr_user()
+		_, self.portal_admin = make_test_portal_admin()
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
@@ -434,24 +437,25 @@ class TestReportAccessMatrix(IntegrationTestCase):
 		from helixhr.api import get_report_catalog, run_report, save_report_access
 
 		self._as(
-			self.hr_manager,
+			self.portal_admin,
 			save_report_access,
 			[{"key": COMPANY_ONLY_KEY, "hr_user_run": 1, "hr_user_export": 1}],
 		)
 		catalog = {e["key"]: e for e in self._as(self.hr_user, get_report_catalog)}
 		self.assertTrue(catalog[COMPANY_ONLY_KEY]["can_export"])
 
-		self._as(self.hr_manager, save_report_access, [{"key": COMPANY_ONLY_KEY, "hr_user_run": 0}])
+		self._as(self.portal_admin, save_report_access, [{"key": COMPANY_ONLY_KEY, "hr_user_run": 0}])
 		self.assertNotIn(COMPANY_ONLY_KEY, {e["key"] for e in self._as(self.hr_user, get_report_catalog)})
 		with self.assertRaises(frappe.PermissionError):
 			self._as(self.hr_user, run_report, COMPANY_ONLY_KEY)
 
-	def test_hr_user_and_report_manager_are_refused(self):
+	def test_non_admin_roles_are_refused(self):
 		from helixhr.api import get_report_access, save_report_access
 		from helixhr.tests.utils import make_test_report_manager
 
 		_, report_manager = make_test_report_manager()
-		for user in (self.hr_user, report_manager):
+		# HR Manager joins the refused set in plan 2026-10-06-001 U3 (R6).
+		for user in (self.hr_user, report_manager, self.hr_manager):
 			with self.assertRaises(frappe.PermissionError):
 				self._as(user, save_report_access, [{"key": COMPANY_ONLY_KEY, "hr_user_run": 1}])
 			with self.assertRaises(frappe.PermissionError):
@@ -468,7 +472,7 @@ class TestReportAccessMatrix(IntegrationTestCase):
 		):
 			with self.assertRaises(frappe.ValidationError):
 				self._as(
-					self.hr_manager, save_report_access, [{"key": COMPANY_ONLY_KEY, "hr_user_run": 1}, bad]
+					self.portal_admin, save_report_access, [{"key": COMPANY_ONLY_KEY, "hr_user_run": 1}, bad]
 				)
 			self.assertEqual(frappe.db.get_value("HelixHR Report Access", COMPANY_ONLY_KEY, "hr_user_run"), 0)
 
@@ -476,7 +480,7 @@ class TestReportAccessMatrix(IntegrationTestCase):
 		from helixhr import reports
 		from helixhr.api import get_report_access
 
-		rows = {row["key"]: row for row in self._as(self.hr_manager, get_report_access)}
+		rows = {row["key"]: row for row in self._as(self.portal_admin, get_report_access)}
 		self.assertEqual(set(rows), {entry["key"] for entry in reports.CATALOG})
 		self.assertTrue(rows[PROJECT_KEY]["dm_allowed"])
 		self.assertFalse(rows[COMPANY_ONLY_KEY]["dm_allowed"])

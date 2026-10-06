@@ -632,9 +632,10 @@ def get_portal_bootstrap():
 		# `get_report_catalog` would list at least one entry -- the same
 		# `resolve_report_access` answer `run_report` enforces.
 		"can_run_reports": _can_run_reports(frappe.session.user),
-		# Portal Admin (and HR Manager / System Manager): the access matrix,
-		# the export log and the portal-role section -- `can_admin_portal`
-		# is the predicate each of those endpoints enforces.
+		# Portal Admin and System Manager: the access matrix, the export log
+		# and the portal-role section -- `can_admin_portal` is the predicate
+		# each of those endpoints enforces. HR Manager is refused since plan
+		# 2026-10-06-001 U3 (R5/R6).
 		"can_admin_portal": can_admin_portal(frappe.session.user),
 		# Documents: the upload/edit/delete controls -- `save_document_link`'s
 		# own gate, asked without a company.
@@ -10161,9 +10162,10 @@ def download_export(token):
 
 @frappe.whitelist()
 def get_export_log(start=0, page_length=50):
-	"""HR Manager / System Manager / Portal Admin: who exported what, newest
-	first -- metadata only, never a file. A company-scoped caller sees its
-	company's rows; a caller whose scope resolves to none sees no rows."""
+	"""System Manager / Portal Admin: who exported what, newest first --
+	metadata only, never a file. A company-scoped caller sees its company's
+	rows; a caller whose scope resolves to none sees no rows. HR Manager is
+	refused since plan 2026-10-06-001 U3 (R6)."""
 	rate_limit_per_user("get_export_log")
 	if not can_admin_portal(frappe.session.user):
 		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)

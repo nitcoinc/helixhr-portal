@@ -213,3 +213,28 @@ test('U2: HR edits the backdated leave rule and sees it after a reload', async (
     await admin.dispose()
   }
 })
+
+test('U3: Report access and Portal roles are Portal Admin only', async ({ page }, testInfo) => {
+  if (testInfo.project.name === 'portal-admin') {
+    await page.goto('/helixhr/settings')
+    // Its two sections, and none of the HR ones (the tab list derives from
+    // the flags, KTD4/R5).
+    await expect(page.getByTestId('settings-tab-report-access')).toBeVisible()
+    await expect(page.getByTestId('settings-tab-portal-roles')).toBeVisible()
+    await expect(page.getByTestId('settings-tab-categories')).toHaveCount(0)
+    await expect(page.getByTestId('settings-tab-leave-rules')).toHaveCount(0)
+    await page.getByTestId('settings-tab-portal-roles').click()
+    await expect(page.getByTestId('settings-tab-portal-roles')).toHaveAttribute('aria-current', 'page')
+    return
+  }
+
+  test.skip(testInfo.project.name !== 'hr', 'covered by the portal-admin branch above')
+
+  // An HR Manager keeps the HR sections and no longer sees the two admin
+  // tabs (R5).
+  await page.goto('/helixhr/settings')
+  await expect(page.getByTestId('settings-tab-categories')).toBeVisible()
+  await expect(page.getByTestId('settings-tab-leave-rules')).toBeVisible()
+  await expect(page.getByTestId('settings-tab-report-access')).toHaveCount(0)
+  await expect(page.getByTestId('settings-tab-portal-roles')).toHaveCount(0)
+})

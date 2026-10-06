@@ -20,9 +20,12 @@ const IDENTITIES = [
   // of its own -- routed-request scoping (P5-U5) needs a real employee to
   // resolve a company from, the same as every other identity here.
   { user: 'it-team@helixhr.test', storageState: 'tests/.auth/it.json' },
+  // Plan 2026-10-06-001 U3. Portal Admin: the portal-only role that owns
+  // Report access and Portal roles now that HR Manager does not.
+  { user: 'portal-admin@helixhr.test', storageState: 'tests/.auth/portal-admin.json' },
 ]
 
-setup('authenticate as employee, manager, HR and IT', async ({ baseURL }) => {
+setup('authenticate as employee, manager, HR, IT and Portal Admin', async ({ baseURL }) => {
   const context = await request.newContext({
     baseURL,
     extraHTTPHeaders: { Host: SITE_HOST },
