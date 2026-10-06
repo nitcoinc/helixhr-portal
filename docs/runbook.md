@@ -342,9 +342,11 @@ An employee may start leave up to N **working** days in the past (holiday-list d
 skipped, so "sick Friday, applied Monday" fits N=1). With no resolvable holiday list the walk
 counts calendar days instead. "Today" is `getdate()` in the system timezone.
 
-- Site config, not a Single: `helixhr_backdated_leave_grace_days` (default `1`) and
-  `helixhr_backdated_leave_exempt_role` (optional). HR Manager and that role are unlimited.
-  `bench --site <site> set-config -p helixhr_backdated_leave_grace_days 2`.
+- Stored in the `HelixHR Leave Rules` Single and edited from `/settings → Leave rules`
+  (HR Manager and System Manager): grace days `0`–`365` (default `1`) plus an optional exempt
+  role. HR Manager and that role are unlimited. The old `helixhr_backdated_leave_grace_days` /
+  `helixhr_backdated_leave_exempt_role` site-config values were carried into the Single once by
+  patch `migrate_backdated_leave_rules`; there is no site-config key to set any more.
 - The rule (`events._refuse_backdated_past_grace`) runs on insert and on a From-date change
   only. An approver submitting a late request, or any other edit, is never blocked.
 - Keep HR Settings `restrict_backdated_leave_application` **off**. HRMS checks the session
@@ -363,9 +365,11 @@ counts calendar days instead. "Today" is `getdate()` in the system timezone.
 
 | Key | Default | Set with |
 |---|---|---|
-| `helixhr_backdated_leave_grace_days` | `1` | `bench --site <site> set-config -p helixhr_backdated_leave_grace_days 2` |
-| `helixhr_backdated_leave_exempt_role` | unset | `bench --site <site> set-config helixhr_backdated_leave_exempt_role "<Role>"` (role must exist) |
 | `helixhr_approval_overdue_days` | `2` (calendar days) | `bench --site <site> set-config -p helixhr_approval_overdue_days 3` |
+
+The backdated grace rule is **no longer a site-config key**: it lives in the `HelixHR Leave
+Rules` Single, edited in `/settings → Leave rules`. Preflight's "Backdated leave grace" line
+still reports the effective N and FAILs on a deleted exempt role.
 
 **Must stay off in HR Settings:** `send_leave_notification` (HRMS's own leave mail;
 duplicates HelixHR's; install turns it off and HR Settings refuses re-enabling it) and

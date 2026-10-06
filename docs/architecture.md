@@ -1121,10 +1121,11 @@ on the employee's leave row (8fe512d).
 - **Max consecutive days** is HRMS's own Leave Type field, now editable in
   `/settings → Leave types`.
 - **Backdated grace** replaces HRMS's `restrict_backdated_leave_application`:
-  `helixhr_backdated_leave_grace_days` working days (default 1), exempt for HR
-  Manager and `helixhr_backdated_leave_exempt_role`. Insert and From-date
-  change only, so approvers are never blocked. HRMS's flag must stay **off**;
-  preflight FAILs otherwise. Runbook has the troubleshooting.
+  the `HelixHR Leave Rules` Single's grace days (working days, default 1),
+  edited in `/settings → Leave rules`, exempt for HR Manager and the Single's
+  optional role. Insert and From-date change only, so approvers are never
+  blocked. HRMS's flag must stay **off**; preflight FAILs otherwise. Runbook
+  has the troubleshooting.
 
 ### Portal email: one sandboxed template system (reverses P4-KTD9, reads P5-KTD11)
 
@@ -1338,7 +1339,8 @@ KTD4 — not because of a line count.
   an app bar plus a five-item bottom tab bar below that, with a "More" dialog
   for the rest. Approvals appears only when the bootstrap says `can_approve`
   (now true for a routed-role holder with anything queued, not only HR);
-  Settings appears only on `can_configure` (HR); Organisation only on
+  Settings appears on `can_configure` (HR sections) or `can_admin_portal`
+  (Report access + Portal roles); Organisation only on
   `can_see_organisation` (HR Manager / System Manager, company-scoped,
   read-only). Every nav gate is a bootstrap boolean, never a role list --
   the frontend carries no role names of its own, and the server enforces the
@@ -1425,12 +1427,13 @@ entry in `AppShell.vue`, a whitelisted method in `api.py` if `frappe.client`
 cannot express the read within the user's permissions, a Python test for that
 method that asserts real data, and one clicked navigation in the e2e suite.
 
-Adding a setting: prefer site config read in `www/helixhr.py`'s `boot` (as
-`helixhr_hr_contact` is) over a new Single doctype, and add a line to
-`preflight.py` so the value is checked on every deploy. Current examples:
-`helixhr_backdated_leave_grace_days`, `helixhr_backdated_leave_exempt_role`
-and `helixhr_approval_overdue_days` (read in `events.py` / `utils.py`, each
-reported by preflight).
+Adding a setting: an operator-owned value stays site config read in
+`www/helixhr.py`'s `boot` (as `helixhr_hr_contact` is), with a line in
+`preflight.py` so it is checked on every deploy -- `helixhr_approval_overdue_days`
+(read in `utils.py`) is the current example. A value HR should edit without
+bench access gets a Single and a Settings tab instead, validated on the
+doctype: `HelixHR Leave Rules` (`/settings → Leave rules`) and
+`HelixHR Email Theme` are the two.
 
 Adding a portal email: an entry in `utils.NOTIFICATION_EVENTS` (variables with
 description and sample, default subject and body), a send from the doc event
@@ -1520,10 +1523,11 @@ exports them itself (CSV, Excel, PDF), inside one bound and one access model:
   `can_admin_portal`), reads the export log, and grants or removes only the
   four portal-only roles (`MANAGED_PORTAL_ROLES`: Report Manager, Delivery
   Manager, Notification Manager, IT Team) through
-  `get_portal_role_holders` / `set_portal_role`. HR Manager and System
-  Manager may call all of these too. Scope is
-  `resolve_portal_admin_scope`: HR keeps `resolve_admin_scope`'s answer; a
-  Portal Admin gets its Active Employee's company, or none. A target must be
+  `get_portal_role_holders` / `set_portal_role`. System Manager may call all
+  of these too; HR Manager and HR User are refused (plan 2026-10-06-001 U3).
+  Scope is `resolve_portal_admin_scope`: a System Manager keeps
+  `resolve_admin_scope`'s answer; a Portal Admin gets its Active Employee's
+  company, or none. A target must be
   an Active Employee with a User in that scope, never the caller; the User is
   saved through `doc.save()` (a Role Profile that re-derives roles is
   refused) and an Info comment on the User records the change. A Portal
