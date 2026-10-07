@@ -75,13 +75,59 @@ def _approver_user(employee):
 	one grant that survives that refusal (P2-U7 step 6, from the other
 	side).
 	"""
-	reports_to = frappe.db.get_value("Employee", employee, "reports_to")
+	return _manager_login(frappe.db.get_value("Employee", employee, "reports_to"))
+
+
+def _manager_login(reports_to):
+	"""`_approver_user` for a `reports_to` value already in hand -- the
+	Employee `validate` hook has to answer for the unsaved value on the doc,
+	which the database does not have yet (an insert has no row at all)."""
+	return _resolve_manager(reports_to, _manager_row(reports_to))[0]
+
+
+def approver_problem(reports_to):
+	"""Why `_manager_login(reports_to)` names nobody, for the people who
+	have to fix it (plan 2026-10-07-001 R7): `no_manager`,
+	`manager_not_active` or `manager_no_login`; None when there is a usable
+	manager."""
+	return _resolve_manager(reports_to, _manager_row(reports_to))[1]
+
+
+def _manager_row(reports_to):
 	if not reports_to:
 		return None
-	manager = frappe.db.get_value("Employee", reports_to, ["user_id", "status"], as_dict=True)
+	return frappe.db.get_value("Employee", reports_to, ["user_id", "status"], as_dict=True)
+
+
+def _resolve_manager(reports_to, manager):
+	"""(login, problem) for one reporting line -- exactly one is None."""
+	if not reports_to:
+		return None, "no_manager"
 	if not manager or manager.status != "Active":
-		return None
-	return manager.user_id
+		return None, "manager_not_active"
+	if not manager.user_id:
+		return None, "manager_no_login"
+	return manager.user_id, None
+
+
+# Plan 2026-10-07-001 R1. The three HRMS approver fields, all derived from
+# `reports_to` -- one rule for every request type instead of HRMS's own
+# per-field value with a Department-approver fallback.
+APPROVER_FIELDS = ("leave_approver", "expense_approver", "shift_request_approver")
+
+# Plan 2026-10-07-001 R4. Where each HRMS request keeps its approver, and
+# what "still waiting on that approver" means for it. Leave in the HR stage
+# is HR's and never moves.
+PENDING_APPROVER_REQUESTS = (
+	(
+		"Leave Application",
+		"leave_approver",
+		{"docstatus": 0, "status": "Open", "helixhr_stage": ["in", ["", None, "Manager"]]},
+		"leave request",
+	),
+	("Shift Request", "approver", {"docstatus": 0, "status": "Draft"}, "shift request"),
+	("Expense Claim", "expense_approver", {"docstatus": 0, "approval_status": "Draft"}, "expense claim"),
+)
 
 
 def _notify_manager_of_arrival(doctype, doc, manager_user, subject):
@@ -465,7 +511,8 @@ def employee_on_update(doc, method=None):
 	if not before:
 		return
 
-	if before.reports_to != doc.reports_to:
+	approvers_changed = any(before.get(field) != doc.get(field) for field in APPROVER_FIELDS)
+	if before.reports_to != doc.reports_to or approvers_changed:
 		_reconcile_pending_documents(doc.name)
 		# Plan 2026-10-04-003 KTD10: open change requests follow the new
 		# manager the same way. `approver_user` is the single answer for who
@@ -475,8 +522,7 @@ def employee_on_update(doc, method=None):
 
 	if before.user_id != doc.user_id or before.status != doc.status:
 		for report in frappe.get_all("Employee", filters={"reports_to": doc.name}, pluck="name"):
-			_reconcile_pending_documents(report)
-			_repoint_change_requests(report)
+			rederive_approvers(report)
 
 	# P3-U4 step 2a / P3-KTD15 / P3-R28. Somebody who has left has no
 	# purpose left for their punch coordinates to serve, so they go now
@@ -498,6 +544,103 @@ def employee_on_update(doc, method=None):
 			frappe.db.set_value("HelixHR Timesheet Change", name, "status", "Withdrawn")
 
 
+def employee_validate(doc, method=None):
+	"""Plan 2026-10-07-001 R1/R2. The three approver fields are never typed:
+	they are the Active `reports_to` manager's login, or empty when there is
+	no usable manager (HRMS then falls back to the Department approver, and
+	the Approvers cleanup and preflight list the employee).
+
+	`validate`, because Desk, `save_person`, data import and every
+	`doc.save()` pass through it, and HRMS's `update_approver_role` grants
+	the Leave/Expense Approver roles at `on_update`, after it. Frappe v16
+	runs `validate_higher_perm_levels` before the `validate` hooks, so a
+	saver without permlevel 1 cannot have these values reset either."""
+	login = _manager_login(doc.reports_to)
+	for field in APPROVER_FIELDS:
+		doc.set(field, login)
+
+
+def rederive_approvers(employee):
+	"""`employee_validate` plus everything `employee_on_update` does after
+	it, without a full Employee save -- for a direct report whose *manager's*
+	record changed (login or status), and for the Portal Admin's Approvers
+	cleanup. Idempotent: an employee already in line changes nothing.
+
+	A full save reruns ERPNext's `update_user` / `update_user_status`, which
+	can re-enable a login HR disabled, and one report failing validation
+	would roll back the manager's own save. So: write the three fields,
+	grant the roles HRMS's `on_update` would have granted, and move what is
+	waiting."""
+	from hrms.overrides.employee_master import update_approver_role
+
+	login = _approver_user(employee)
+	frappe.db.set_value("Employee", employee, dict.fromkeys(APPROVER_FIELDS, login), update_modified=False)
+	update_approver_role(frappe._dict(leave_approver=login, expense_approver=login))
+	_reconcile_pending_documents(employee)
+	_repoint_change_requests(employee)
+
+
+def approver_drift(employee_filters):
+	"""Plan 2026-10-07-001 R6/R7/R8. Every Active employee matching
+	`employee_filters` whose approvers are not in line with `reports_to` --
+	a stored approver field, or a pending leave/shift/expense request,
+	naming somebody other than the derived manager login -- or who has no
+	usable manager at all.
+
+	One row each: `employee`, `employee_name`, `manager_name`, `current`
+	(the three stored fields), `derived`, `problem` (`approver_problem`'s
+	vocabulary or None), `moving` (pending requests per doctype that a
+	`rederive_approvers` would move) and `will_change`."""
+	employees = frappe.get_all(
+		"Employee",
+		filters={"status": "Active", **employee_filters},
+		fields=["name", "employee_name", "reports_to", *APPROVER_FIELDS],
+		order_by="employee_name asc",
+	)
+	if not employees:
+		return []
+	managers = {
+		row.name: row
+		for row in frappe.get_all(
+			"Employee",
+			filters={"name": ["in", list({row.reports_to for row in employees if row.reports_to})]},
+			fields=["name", "employee_name", "user_id", "status"],
+		)
+	}
+	names = [row.name for row in employees]
+	pending = {}
+	for doctype, field, filters, _label in PENDING_APPROVER_REQUESTS:
+		for request in frappe.get_all(
+			doctype, filters={"employee": ["in", names], **filters}, fields=["employee", field]
+		):
+			pending.setdefault(request.employee, []).append((doctype, request.get(field) or None))
+
+	rows = []
+	for row in employees:
+		manager = managers.get(row.reports_to)
+		derived, problem = _resolve_manager(row.reports_to, manager)
+		current = {field: row.get(field) or None for field in APPROVER_FIELDS}
+		moving = {}
+		for doctype, approver in pending.get(row.name, ()):
+			if approver != derived:
+				moving[doctype] = moving.get(doctype, 0) + 1
+		will_change = bool(moving) or any(value != derived for value in current.values())
+		if will_change or problem:
+			rows.append(
+				{
+					"employee": row.name,
+					"employee_name": row.employee_name,
+					"manager_name": manager.employee_name if manager else None,
+					"current": current,
+					"derived": derived,
+					"problem": problem,
+					"moving": moving,
+					"will_change": will_change,
+				}
+			)
+	return rows
+
+
 def _repoint_change_requests(employee):
 	"""KTD10: point every open change request at whoever may act now --
 	the new manager, or nobody (which is how "routes to HR" is stored)."""
@@ -512,8 +655,9 @@ def _repoint_change_requests(employee):
 
 def _reconcile_pending_documents(employee):
 	"""Point everything `employee` has waiting at whoever may act on it now
-	-- pending weeks (P2-U7) and pending attendance requests (P3-R18), which
-	are the same defect on two doctypes."""
+	-- pending weeks (P2-U7), pending attendance requests (P3-R18) and,
+	since plan 2026-10-07-001, pending leave, shift and expense requests,
+	which are the same defect on five doctypes."""
 	manager_user = _approver_user(employee)
 	for name in frappe.get_all(
 		"Timesheet",
@@ -531,6 +675,30 @@ def _reconcile_pending_documents(employee):
 		# new manager's Approve is the submit, so a reassignment that moved a
 		# read/write-only share would hand them a request they cannot decide.
 		_reconcile_share("Attendance Request", name, employee, manager_user, submit=1)
+
+	# Plan 2026-10-07-001 R4/R5. The HRMS requests keep their approver in a
+	# field of their own, so only the ones naming somebody else move. A
+	# `db_set`, not a save: a save reruns balance, overlap and backdated
+	# validation, which can refuse an old request for reasons that have
+	# nothing to do with who decides it. Nobody to move to (no usable
+	# manager) clears the approver and the share and tells nobody.
+	employee_name = None
+	for doctype, field, filters, label in PENDING_APPROVER_REQUESTS:
+		for row in frappe.get_all(
+			doctype, filters={"employee": employee, **filters}, fields=["name", field]
+		):
+			if (row.get(field) or None) == manager_user:
+				continue
+			values = {field: manager_user}
+			if doctype == "Leave Application":
+				values["leave_approver_name"] = frappe.utils.get_fullname(manager_user) if manager_user else None
+			frappe.db.set_value(doctype, row.name, values)
+			_reconcile_share(doctype, row.name, employee, manager_user, submit=1)
+			if manager_user:
+				employee_name = employee_name or frappe.db.get_value("Employee", employee, "employee_name")
+				_notify_manager_of_arrival(
+					doctype, row, manager_user, _("{0}'s {1} moved to you").format(employee_name, _(label))
+				)
 
 
 def timesheet_before_submit(doc, method=None):

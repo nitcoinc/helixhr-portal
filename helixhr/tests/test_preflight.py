@@ -563,6 +563,26 @@ class TestPreflightP2U1(IntegrationTestCase):
 		finally:
 			frappe.delete_doc("Leave Application", leave.name, force=True, ignore_permissions=True)
 
+	def test_an_approver_written_around_the_save_fails_until_the_cleanup_runs(self):
+		"""Plan 2026-10-07-001 R8. A long-lived site carries other drift, so
+		this asserts on the one employee it bends, not on a site-wide PASS."""
+		from helixhr.events import rederive_approvers
+
+		frappe.db.set_value("Employee", self.employee_name, "leave_approver", "Administrator")
+		self.addCleanup(rederive_approvers, self.employee_name)
+		result = preflight.check_approvers_follow_reports_to()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("Settings > Approvers", result["detail"])
+		with patch("helixhr.events.approver_drift", return_value=[{"employee": self.employee_name, "will_change": True}]):
+			self.assertIn(self.employee_name, preflight.check_approvers_follow_reports_to()["detail"])
+
+	def test_an_employee_without_a_usable_manager_warns(self):
+		row = {"employee": self.employee_name, "will_change": False, "problem": "manager_no_login"}
+		with patch("helixhr.events.approver_drift", return_value=[row]):
+			result = preflight.check_approvers_follow_reports_to()
+		self.assertEqual(result["status"], preflight.WARN)
+		self.assertIn(self.employee_name, result["detail"])
+
 	def test_a_javascript_document_link_written_before_the_rule_is_a_fail(self):
 		"""P2-R19: the doctype validates on save and nothing revalidates a
 		row that is never saved again, so a link written before that rule

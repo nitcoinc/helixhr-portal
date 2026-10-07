@@ -355,6 +355,8 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"save_report_access": (30, 3600),
 			"get_portal_role_holders": (60, 60),
 			"set_portal_role": (30, 3600),
+			"get_approver_cleanup": (60, 60),
+			"apply_approver_cleanup": (10, 3600),
 			"get_dashboard": (60, 60),
 			"get_my_approvals": (60, 60),
 			# Plan 2026-10-04-002 U3: the "To work on" tab polls like the queue.

@@ -687,6 +687,46 @@ notification carries it. Send to HR takes an optional note. Every outcome is
 still refused if the record moved since the approver read it (the
 `expected_modified` / `expected_state` contract).
 
+### Approvers follow Reports to (plan 2026-10-07-001)
+
+Leave, expense and shift requests use HRMS's own approver fields
+(`Employee.leave_approver`, `expense_approver`, `shift_request_approver`), and
+HRMS falls back to the first Department Approver when `leave_approver` is
+empty. Department approvers never receive the Leave Approver role, which is the
+root of the 2026-10-07 "Only Leave Applications with status 'Approved' and
+'Rejected' can be submitted" bug. So the three fields are no longer typed:
+
+- **Derived on every save.** `events.employee_validate` sets all three to
+  `_manager_login(doc.reports_to)`, the same Active-manager rule as
+  `_approver_user`, read from the unsaved doc so an insert works too. With no
+  usable manager (none, not Active, or no `user_id`) all three are cleared.
+  HRMS's `update_approver_role` runs at `on_update`, after `validate`, so the
+  manager gets Leave Approver and Expense Approver. The fields are `read_only`
+  in Desk (Property Setter) and absent from `save_person`. There is no override.
+- **A manager's own change cascades.** When a manager's `user_id` or `status`
+  changes, `employee_on_update` runs `rederive_approvers` on each direct report.
+  It writes the fields and grants the roles without saving the report: a full
+  save reruns ERPNext's `update_user` / `update_user_status` (which can
+  re-enable a disabled login), and one failing report would roll back the
+  manager's save. ERPNext refuses `Left` while Active people report to someone,
+  so the cascade in practice is Inactive, Suspended or a new login.
+- **Pending requests move.** `_reconcile_pending_documents` now also covers
+  Leave Applications (Open, `docstatus` 0, manager stage), Shift Requests
+  (Draft) and Expense Claims (approval Draft). A row naming another approver is
+  moved with `db_set` (a save would rerun balance, overlap and backdated
+  checks), reshared with `submit=1` through `_reconcile_share`, and the new
+  approver gets one Notification Log. With nobody to move to, the approver and
+  share are cleared and nobody is told: those requests wait for HR to fix the
+  reporting line. HR-stage leave never moves.
+- **Cleanup and drift.** `events.approver_drift` lists Active employees whose
+  stored approvers or pending requests disagree with Reports to, plus anyone
+  with no usable manager. The Portal Admin's Settings > Approvers previews it
+  in two groups ("Will change", "Needs HR attention") and applies
+  `rederive_approvers` per person, scope-checked and committed per row
+  (`get_approver_cleanup` / `apply_approver_cleanup`).
+  `preflight.check_approvers_follow_reports_to` FAILs on drift and WARNs on
+  people with no usable manager and on approvers missing their role.
+
 ### The fourth kind: routed requests
 
 `HR Request` joined the queue as a fourth kind, and it does not fit the

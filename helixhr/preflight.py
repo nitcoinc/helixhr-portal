@@ -304,6 +304,54 @@ def check_unsubmitted_approved_leave():
 	return _result("Approved-but-unsubmitted leave", PASS, "none")
 
 
+def check_approvers_follow_reports_to():
+	"""Plan 2026-10-07-001 R8. Every Employee save derives the leave,
+	expense and shift approvers from `reports_to`, so drift here means
+	something wrote around the save (SQL, a `db_set` backfill, a site from
+	before the rule): a FAIL, fixed from the portal's Settings > Approvers.
+
+	WARNs, once in line: employees with no usable manager (their requests
+	fall back to the HRMS Department approver, or nobody), and approvers
+	missing the HRMS role their approval needs."""
+	from helixhr.events import approver_drift
+
+	name = "Approvers follow Reports to"
+	rows = approver_drift({})
+	drift = [row["employee"] for row in rows if row["will_change"]]
+	if drift:
+		return _result(
+			name,
+			FAIL,
+			f"{len(drift)} employee(s) have an approver or pending request out of line with Reports to "
+			"-- apply the portal's Settings > Approvers cleanup: " + ", ".join(drift[:5]),
+		)
+
+	warnings = []
+	orphaned = [row["employee"] for row in rows if row["problem"]]
+	if orphaned:
+		warnings.append(
+			f"{len(orphaned)} employee(s) have no usable manager (none, not active, or no login): "
+			+ ", ".join(orphaned[:5])
+		)
+	for field, role in (("leave_approver", "Leave Approver"), ("expense_approver", "Expense Approver")):
+		approvers = frappe.get_all(
+			"Employee", filters={"status": "Active", field: ["is", "set"]}, pluck=field, distinct=True
+		)
+		holders = set(
+			frappe.get_all(
+				"Has Role", filters={"parenttype": "User", "role": role, "parent": ["in", approvers]}, pluck="parent"
+			)
+			if approvers
+			else ()
+		)
+		missing = sorted(set(approvers) - holders)
+		if missing:
+			warnings.append(f"{len(missing)} {field.replace('_', ' ')}(s) lack the {role} role: " + ", ".join(missing[:5]))
+	if warnings:
+		return _result(name, WARN, "; ".join(warnings))
+	return _result(name, PASS, "every Active employee's approvers are their Reports to manager")
+
+
 def check_document_link_urls():
 	"""P2-R19: every stored document link is a plain HTTP(S) address.
 
@@ -1732,6 +1780,7 @@ CHECKS = [
 	check_self_leave_approval_blocked,
 	check_backdated_leave_grace,
 	check_unsubmitted_approved_leave,
+	check_approvers_follow_reports_to,
 	check_document_link_urls,
 	check_portal_landing,
 	check_employee_open_fields,

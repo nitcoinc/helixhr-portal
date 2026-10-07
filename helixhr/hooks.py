@@ -222,7 +222,10 @@ doc_events = {
 	# holding write and submit on a week that is no longer theirs.
 	# Plan 2026-09-30-001 R6: `before_save` hides a private photo from
 	# ERPNext's Employee -> User image sync; `on_update` puts it back.
+	# Plan 2026-10-07-001: `validate` derives the three approver fields from
+	# `reports_to`, so leave, shift and expense follow the same manager.
 	"Employee": {
+		"validate": "helixhr.events.employee_validate",
 		"before_save": "helixhr.events.employee_before_save",
 		"on_update": "helixhr.events.employee_on_update",
 	},
