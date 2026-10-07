@@ -224,23 +224,22 @@ class TestHRRequest(IntegrationTestCase):
 			).insert()
 
 	def test_private_upload_to_own_request_succeeds(self):
+		"""Employees attach through the session-scoped portal endpoint.
+
+		They intentionally lack generic ``write`` on HR Request, so Frappe's
+		generic File insert must not become an alternate upload path.
+		"""
+		from helixhr.api import attach_to_my_request
+
 		frappe.set_user(EMPLOYEE_USER)
 		doc = self._make_request()
+		frappe.local.request = with_uploaded_file("letter.pdf")
+		try:
+			file_doc = attach_to_my_request(doc.name)
+		finally:
+			frappe.local.request = None
 
-		file_doc = frappe.get_doc(
-			{
-				"doctype": "File",
-				"file_name": "letter.pdf",
-				"content": SAFE_PDF_BASE64,
-					"decode": 1,
-				"attached_to_doctype": "HR Request",
-				"attached_to_name": doc.name,
-				"is_private": 1,
-			}
-		)
-		file_doc.insert()
-
-		self.assertEqual(file_doc.is_private, 1)
+		self.assertEqual(file_doc["is_private"], 1)
 
 	def test_hr_changes_status_and_note_in_desk(self):
 		frappe.set_user(EMPLOYEE_USER)

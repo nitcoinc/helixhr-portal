@@ -147,6 +147,12 @@ class TestEmailTheme(IntegrationTestCase):
 		self.assertIn(f'<img embed="{logo}"', html)
 		self.assertNotIn(frappe.utils.get_url(logo), html.split("<h1")[0])
 
+		# This builds an Email Queue row locally; the account's SMTP host is
+		# deliberately unreachable, so CI proves Frappe's MIME conversion
+		# without delivering an email.
+		from helixhr.tests.utils import ensure_test_email_account
+
+		ensure_test_email_account()
 		frappe.sendmail(recipients=[OTHER_USER], subject="Theme embed probe", message=html)
 		queued = frappe.get_last_doc("Email Queue")
 		self.assertIn("Content-ID", queued.message)

@@ -75,6 +75,14 @@ class TestEmployeePermlevel(IntegrationTestCase):
 
 		self.assertEqual(frappe.db.get_value("Employee", self.employee_name, "leave_approver"), original)
 
+	def test_hrms_job_offer_link_is_locked_when_present(self):
+		"""Newer HRMS v16 versions add job_offer to Employee; self-service
+		must not gain write access to that HR-owned link by default.
+		"""
+		field = frappe.get_meta("Employee").get_field("job_offer")
+		if field:
+			self.assertEqual(field.permlevel, 1)
+
 	def test_employee_a_cannot_change_employee_b(self):
 		frappe.set_user(EMPLOYEE_USER)
 		with self.assertRaises(frappe.PermissionError):
