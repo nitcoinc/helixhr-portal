@@ -186,6 +186,22 @@ function may(action) {
   return actions.value.includes(action)
 }
 
+/**
+ * Which outcome buttons are drawn. While a reason or the HR note is open,
+ * only the button that confirms it stays (plus the surface's Cancel): four
+ * buttons under a half-written reason read as four live choices, and a tap
+ * on another one would silently discard the draft.
+ */
+function shown(action) {
+  const armed = reasonFor.value || (noteOpen.value ? 'Send to HR' : '')
+  return may(action) && (!armed || armed === action)
+}
+
+function closeNote() {
+  note.value = ''
+  noteOpen.value = false
+}
+
 function clearDecisionSurfaces() {
   confirmAccept.value = false
   reason.value = ''
@@ -1399,6 +1415,14 @@ function dismissBulkResult() {
                             label="Anything HR should know? (optional)"
                             placeholder="Why this needs HR"
                           />
+                          <Button
+                            class="mt-2"
+                            variant="subtle"
+                            data-testid="note-cancel"
+                            @click="closeNote"
+                          >
+                            Cancel
+                          </Button>
                         </div>
 
                         <div
@@ -1409,7 +1433,7 @@ function dismissBulkResult() {
                            cancels the approved week and returns an editable
                            copy; Decline is the final no, with a reason. -->
                           <Button
-                            v-if="may('Accept') && reasonFor !== 'Decline'"
+                            v-if="shown('Accept')"
                             variant="solid"
                             theme="green"
                             :loading="acting === selected.name"
@@ -1420,7 +1444,7 @@ function dismissBulkResult() {
                             Accept
                           </Button>
                           <Button
-                            v-if="may('Approve')"
+                            v-if="shown('Approve')"
                             variant="solid"
                             theme="green"
                             :loading="acting === selected.name"
@@ -1430,7 +1454,7 @@ function dismissBulkResult() {
                             {{ approveLabel }}
                           </Button>
                           <Button
-                            v-if="may('Pick up')"
+                            v-if="shown('Pick up')"
                             variant="solid"
                             theme="green"
                             :loading="acting === selected.name"
@@ -1441,7 +1465,7 @@ function dismissBulkResult() {
                             Pick up
                           </Button>
                           <Button
-                            v-if="may('Done')"
+                            v-if="shown('Done')"
                             variant="solid"
                             theme="green"
                             :loading="acting === selected.name"
@@ -1452,7 +1476,7 @@ function dismissBulkResult() {
                             Done
                           </Button>
                           <Button
-                            v-if="may('Need info')"
+                            v-if="shown('Need info')"
                             variant="outline"
                             class="decision-tone decision-tone--return"
                             :disabled="acting === selected.name"
@@ -1462,7 +1486,7 @@ function dismissBulkResult() {
                             Need info
                           </Button>
                           <Button
-                            v-if="may('Send Back')"
+                            v-if="shown('Send Back')"
                             variant="outline"
                             class="decision-tone decision-tone--return"
                             :disabled="acting === selected.name"
@@ -1472,7 +1496,7 @@ function dismissBulkResult() {
                             Send back
                           </Button>
                           <Button
-                            v-if="may('Reject')"
+                            v-if="shown('Reject')"
                             variant="outline"
                             class="decision-tone decision-tone--final"
                             :disabled="acting === selected.name"
@@ -1484,7 +1508,7 @@ function dismissBulkResult() {
                           <!-- R12: a decline is a final no with a reason; the
                            week stays as it was. -->
                           <Button
-                            v-if="may('Decline')"
+                            v-if="shown('Decline')"
                             variant="outline"
                             class="decision-tone decision-tone--final"
                             :disabled="acting === selected.name"
@@ -1494,7 +1518,7 @@ function dismissBulkResult() {
                             Decline
                           </Button>
                           <Button
-                            v-if="may('Send to HR')"
+                            v-if="shown('Send to HR')"
                             variant="outline"
                             class="decision-tone decision-tone--handover"
                             :disabled="acting === selected.name"
@@ -1993,6 +2017,14 @@ function dismissBulkResult() {
                 label="Anything HR should know? (optional)"
                 placeholder="Why this needs HR"
               />
+              <Button
+                class="mt-2"
+                variant="subtle"
+                data-testid="note-cancel"
+                @click="closeNote"
+              >
+                Cancel
+              </Button>
             </div>
 
             <!-- P4-R1. Exactly the outcomes the server allows, in one order
@@ -2006,7 +2038,7 @@ function dismissBulkResult() {
               data-testid="decision-actions"
             >
               <Button
-                v-if="may('Send to HR')"
+                v-if="shown('Send to HR')"
                 variant="outline"
                 class="decision-tone decision-tone--handover"
                 :disabled="acting === selected.name"
@@ -2016,7 +2048,7 @@ function dismissBulkResult() {
                 Send to HR
               </Button>
               <Button
-                v-if="may('Reject')"
+                v-if="shown('Reject')"
                 variant="outline"
                 class="decision-tone decision-tone--final"
                 :disabled="acting === selected.name"
@@ -2028,7 +2060,7 @@ function dismissBulkResult() {
               <!-- R12: a decline is a final no with a reason; the week stays
                    as it was. -->
               <Button
-                v-if="may('Decline')"
+                v-if="shown('Decline')"
                 variant="outline"
                 class="decision-tone decision-tone--final"
                 :disabled="acting === selected.name"
@@ -2038,7 +2070,7 @@ function dismissBulkResult() {
                 Decline
               </Button>
               <Button
-                v-if="may('Need info')"
+                v-if="shown('Need info')"
                 variant="outline"
                 class="decision-tone decision-tone--return"
                 :disabled="acting === selected.name"
@@ -2048,7 +2080,7 @@ function dismissBulkResult() {
                 Need info
               </Button>
               <Button
-                v-if="may('Send Back')"
+                v-if="shown('Send Back')"
                 variant="outline"
                 class="decision-tone decision-tone--return"
                 :disabled="acting === selected.name"
@@ -2058,7 +2090,7 @@ function dismissBulkResult() {
                 Send back
               </Button>
               <Button
-                v-if="may('Pick up')"
+                v-if="shown('Pick up')"
                 variant="solid"
                 theme="green"
                 :loading="acting === selected.name"
@@ -2069,7 +2101,7 @@ function dismissBulkResult() {
                 Pick up
               </Button>
               <Button
-                v-if="may('Done')"
+                v-if="shown('Done')"
                 variant="solid"
                 theme="green"
                 :loading="acting === selected.name"
@@ -2083,7 +2115,7 @@ function dismissBulkResult() {
                    the approved week and returns an editable copy to the
                    employee. -->
               <Button
-                v-if="may('Accept') && reasonFor !== 'Decline'"
+                v-if="shown('Accept')"
                 variant="solid"
                 theme="green"
                 :loading="acting === selected.name"
@@ -2094,7 +2126,7 @@ function dismissBulkResult() {
                 Accept
               </Button>
               <Button
-                v-if="may('Approve')"
+                v-if="shown('Approve')"
                 variant="solid"
                 theme="green"
                 :loading="acting === selected.name"
