@@ -479,7 +479,19 @@ class TestPortalLeaveApi(IntegrationTestCase):
 		# this shared employee. Make this test's three pending applications
 		# independent of their spent balance.
 		allocation = ensure_leave_allocation(self.employee_name, "Casual Leave", 30)
-		frappe.db.set_value("Leave Allocation", allocation, "new_leaves_allocated", 30)
+		frappe.db.set_value(
+			"Leave Allocation",
+			allocation,
+			{"new_leaves_allocated": 30, "total_leaves_allocated": 30},
+		)
+		# HRMS calculates balance from ledger entries; editing the allocation
+		# total alone does not update its already-posted ledger row.
+		for entry in frappe.get_all(
+			"Leave Ledger Entry",
+			filters={"transaction_type": "Leave Allocation", "transaction_name": allocation},
+			pluck="name",
+		):
+			frappe.db.set_value("Leave Ledger Entry", entry, "leaves", 30)
 		frappe.set_user(EMPLOYEE_USER)
 		# Other leave suites use offsets through 290 (and 96+ even offsets in
 		# approval tests), so keep this bounded-list fixture in a separate window.
