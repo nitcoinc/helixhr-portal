@@ -72,7 +72,7 @@ test.describe('hr', () => {
     await expect(dialog).toBeHidden()
   })
 
-  test('P8-U9: setting an approver persists and shows the resolved name', async ({ page }) => {
+  test('P8-U9: approvers follow the manager, with no approver pickers', async ({ page }) => {
     await page.goto('/helixhr/people')
     await page.getByLabel('Search').fill(COLLEAGUE_NAME)
     await page.getByRole('button', { name: new RegExp(COLLEAGUE_NAME) }).first().click()
@@ -81,6 +81,9 @@ test.describe('hr', () => {
     await page.getByTestId('person-edit-approvers').click()
     const dialog = page.getByRole('dialog')
     await expect(dialog.getByRole('heading', { name: 'Edit approvers and shift' })).toBeVisible()
+    // Plan 2026-10-07-001: only the manager is editable; the approvers follow it.
+    await expect(dialog.getByLabel('Leave approver')).toHaveCount(0)
+    await expect(dialog.getByText('Leave, expense and shift approvals follow the manager.')).toBeVisible()
 
     // The manager picker offers themself among the options (any active
     // employee in their own company, per get_person_form_options) --
@@ -98,7 +101,11 @@ test.describe('hr', () => {
 
     await page.getByRole('button', { name: 'Save' }).click()
     await expect(dialog).toBeHidden()
-    await expect(page.getByText(chosenName)).toBeVisible()
+    await expect(page.getByText(chosenName).first()).toBeVisible()
+    // Either the approvers follow the new manager, or the card says why not.
+    await expect(
+      page.getByText(/approvers follow the manager|^No approver:/).first(),
+    ).toBeVisible()
   })
 
   test('a search nobody matches names it plainly', async ({ page }) => {

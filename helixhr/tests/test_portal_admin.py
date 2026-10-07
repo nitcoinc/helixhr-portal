@@ -9,6 +9,8 @@ from frappe.tests import IntegrationTestCase
 
 from helixhr import preflight
 from helixhr.api import (
+	apply_approver_cleanup,
+	get_approver_cleanup,
 	get_export_log,
 	get_person,
 	get_portal_bootstrap,
@@ -25,6 +27,7 @@ from helixhr.tests.utils import (
 	ensure_baseline_company,
 	ensure_hr_manager_user,
 	ensure_test_company,
+	ensure_test_gender,
 	make_test_hr_manager_employee,
 	make_test_hr_user,
 	make_test_portal_admin,
@@ -230,6 +233,133 @@ class TestPortalRoleManagement(IntegrationTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			_as(hr_manager, get_portal_role_holders)
 		self.assertNotIn("IT Team", _roles(OTHER_COMPANY_TARGET))
+
+
+CLEANUP_MANAGER = "cleanup-manager@helixhr.test"
+CLEANUP_EMPLOYEE = "cleanup-employee@helixhr.test"
+
+
+class TestApproverCleanup(IntegrationTestCase):
+	"""Plan 2026-10-07-001 U4: the Portal Admin previews and applies the
+	"approvers follow Reports to" cleanup, inside their company only."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		_, self.admin = make_test_portal_admin()
+		self.manager = make_test_user(CLEANUP_MANAGER, self.company)
+		self.employee = make_test_user(CLEANUP_EMPLOYEE, self.company)
+		self._report_to(self.manager)
+		self.other_target = make_test_user(OTHER_COMPANY_TARGET, ensure_baseline_company())
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _report_to(self, manager):
+		doc = frappe.get_doc("Employee", self.employee)
+		doc.reports_to = manager
+		doc.save(ignore_permissions=True)
+
+	def _row(self, preview, group):
+		return next((row for row in preview[group] if row["employee"] == self.employee), None)
+
+	def _pending_leave(self, approver):
+		"""A raw pending leave row -- the preview and the move only read it."""
+		name = frappe.generate_hash(length=10)
+		frappe.db.bulk_insert(
+			"Leave Application",
+			["name", "employee", "company", "docstatus", "status", "leave_approver"],
+			[(name, self.employee, self.company, 0, "Open", approver)],
+		)
+		return name
+
+	def test_a_portal_admin_previews_and_applies_the_fix(self):
+		frappe.db.set_value("Employee", self.employee, "leave_approver", self.admin)
+		leave = self._pending_leave(self.admin)
+
+		row = self._row(_as(self.admin, get_approver_cleanup), "will_change")
+		self.assertEqual(row["current"]["leave_approver"], self.admin)
+		self.assertEqual(row["derived"], CLEANUP_MANAGER)
+		self.assertEqual(row["moving"], {"Leave Application": 1})
+		self.assertIsNone(row["problem"])
+
+		self.assertEqual(_as(self.admin, apply_approver_cleanup, [self.employee]), [{"employee": self.employee, "ok": True}])
+		self.assertEqual(frappe.db.get_value("Employee", self.employee, "leave_approver"), CLEANUP_MANAGER)
+		self.assertEqual(frappe.db.get_value("Leave Application", leave, "leave_approver"), CLEANUP_MANAGER)
+		self.assertIsNone(self._row(_as(self.admin, get_approver_cleanup), "will_change"))
+
+	def test_a_request_out_of_line_is_listed_even_when_the_employee_is_not(self):
+		leave = self._pending_leave(self.admin)
+
+		row = self._row(_as(self.admin, get_approver_cleanup), "will_change")
+		self.assertEqual(row["current"]["leave_approver"], CLEANUP_MANAGER)
+		self.assertEqual(row["moving"], {"Leave Application": 1})
+
+		_as(self.admin, apply_approver_cleanup, [self.employee])
+		self.assertEqual(frappe.db.get_value("Leave Application", leave, "leave_approver"), CLEANUP_MANAGER)
+
+	def test_a_manager_without_a_login_needs_hr_attention(self):
+		orphan = frappe.db.get_value("Employee", {"employee_number": "_Test Cleanup Orphan Manager"})
+		if not orphan:
+			orphan = (
+				frappe.get_doc(
+					{
+						"doctype": "Employee",
+						"employee_number": "_Test Cleanup Orphan Manager",
+						"first_name": "Cleanup Orphan",
+						"company": self.company,
+						"date_of_birth": "1990-01-01",
+						"date_of_joining": "2020-01-01",
+						"gender": ensure_test_gender(),
+						"status": "Active",
+					}
+				)
+				.insert(ignore_permissions=True)
+				.name
+			)
+		self._report_to(orphan)
+		frappe.db.set_value("Employee", self.employee, "leave_approver", CLEANUP_MANAGER)
+
+		row = self._row(_as(self.admin, get_approver_cleanup), "will_change")
+		self.assertEqual(row["problem"], "manager_no_login")
+		self.assertIsNone(row["derived"])
+
+		_as(self.admin, apply_approver_cleanup, [self.employee])
+		self.assertIsNone(frappe.db.get_value("Employee", self.employee, "leave_approver"))
+		row = self._row(_as(self.admin, get_approver_cleanup), "needs_attention")
+		self.assertEqual(row["problem"], "manager_no_login")
+
+	def test_out_of_company_is_hidden_and_refused(self):
+		frappe.db.set_value("Employee", self.other_target, "leave_approver", self.admin)
+		preview = _as(self.admin, get_approver_cleanup)
+		listed = {row["employee"] for group in preview.values() for row in group}
+		self.assertNotIn(self.other_target, listed)
+
+		# Refused alike whether or not the id exists. (A refused row rolls
+		# back, so the drift set above is gone by now -- nothing to compare.)
+		result = _as(self.admin, apply_approver_cleanup, [self.other_target, "no-such-employee"])
+		self.assertEqual([row["ok"] for row in result], [False, False])
+		self.assertEqual(result[0]["message"], result[1]["message"])
+
+	def test_an_empty_or_oversized_batch_is_refused_and_a_json_string_works(self):
+		for bad in ([], [self.employee] * 201):
+			with self.assertRaises(frappe.ValidationError):
+				_as(self.admin, apply_approver_cleanup, bad)
+		result = _as(self.admin, apply_approver_cleanup, f'["{self.employee}"]')
+		self.assertEqual(result, [{"employee": self.employee, "ok": True}])
+
+	def test_one_refused_row_does_not_stop_the_rest(self):
+		frappe.db.set_value("Employee", self.employee, "leave_approver", self.admin)
+		result = _as(self.admin, apply_approver_cleanup, [self.other_target, self.employee])
+		self.assertEqual([row["ok"] for row in result], [False, True])
+		self.assertEqual(frappe.db.get_value("Employee", self.employee, "leave_approver"), CLEANUP_MANAGER)
+
+	def test_hr_manager_and_plain_employee_are_refused(self):
+		for user in (ensure_hr_manager_user(), CLEANUP_EMPLOYEE):
+			with self.assertRaises(frappe.PermissionError):
+				_as(user, get_approver_cleanup)
+			with self.assertRaises(frappe.PermissionError):
+				_as(user, apply_approver_cleanup, [self.employee])
 
 
 class TestPortalAdminPreflight(IntegrationTestCase):

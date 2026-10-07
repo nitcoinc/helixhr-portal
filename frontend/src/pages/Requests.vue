@@ -951,6 +951,7 @@ const timeline = computed(() => {
               <Button
                 v-if="may('Need info')"
                 variant="outline"
+                class="decision-tone decision-tone--return"
                 :disabled="workActing === workSelected.name"
                 data-testid="need-info"
                 @click="openReason('Need info')"
@@ -960,7 +961,7 @@ const timeline = computed(() => {
               <Button
                 v-if="may('Reject')"
                 variant="outline"
-                theme="red"
+                class="decision-tone decision-tone--final"
                 :disabled="workActing === workSelected.name"
                 data-testid="reject"
                 @click="openReason('Reject')"

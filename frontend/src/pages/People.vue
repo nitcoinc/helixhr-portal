@@ -112,14 +112,16 @@ const CARD_FIELDS = {
     'final_confirmation_date',
     'status',
   ],
-  approvers: [
-    'reports_to',
-    'leave_approver',
-    'expense_approver',
-    'shift_request_approver',
-    'default_shift',
-    'holiday_list',
-  ],
+  // The three approvers are not here: they follow `reports_to` on the
+  // server (plan 2026-10-07-001) and are never typed.
+  approvers: ['reports_to', 'default_shift', 'holiday_list'],
+}
+
+// Why the approvers are empty, keyed by `get_person`'s `approver_problem`.
+const APPROVER_PROBLEM_TEXT = {
+  no_manager: 'No approver: no manager is set. Pick a manager to route leave, expense and shift requests.',
+  manager_not_active: "No approver: the manager isn't active. Pick an active manager, or reactivate them.",
+  manager_no_login: 'No approver: the manager has no portal login. Link a user to their employee record in Desk.',
 }
 
 // Employee.status's own Select options (erpnext/setup/doctype/employee/
@@ -141,9 +143,6 @@ const form = reactive({
   final_confirmation_date: '',
   status: '',
   reports_to: '',
-  leave_approver: '',
-  expense_approver: '',
-  shift_request_approver: '',
   default_shift: '',
   holiday_list: '',
 })
@@ -186,12 +185,6 @@ function openEdit(card) {
     final_confirmation_date: profile.value.final_confirmation_date || '',
     status: profile.value.status || '',
     reports_to: profile.value.reports_to || '',
-    // The picker's own values are employee ids, never logins -- the
-    // `_employee` id backing each approver's User value, not the value
-    // `save_person` actually writes to Employee (KTD5).
-    leave_approver: profile.value.leave_approver_employee || '',
-    expense_approver: profile.value.expense_approver_employee || '',
-    shift_request_approver: profile.value.shift_request_approver_employee || '',
     default_shift: profile.value.default_shift || '',
     holiday_list: profile.value.holiday_list || '',
   })
@@ -476,6 +469,19 @@ async function submitEdit() {
               class="mt-3 text-sm text-ink-gray-6"
             >
               A dated shift assignment in Desk is currently overriding the default shift above.
+            </p>
+            <p
+              v-if="APPROVER_PROBLEM_TEXT[profile.approver_problem]"
+              class="surface-alert mt-3 p-3 text-sm"
+              data-testid="person-approver-problem"
+            >
+              {{ APPROVER_PROBLEM_TEXT[profile.approver_problem] }}
+            </p>
+            <p
+              v-else
+              class="mt-3 text-sm text-ink-gray-6"
+            >
+              Leave, expense and shift approvers follow the manager.
             </p>
           </section>
 
@@ -806,78 +812,9 @@ async function submitEdit() {
                     {{ option.employee_name }}
                   </option>
                 </select>
-              </div>
-              <div>
-                <label
-                  for="person-edit-leave-approver"
-                  class="text-sm text-ink-gray-7"
-                >
-                  Leave approver
-                </label>
-                <select
-                  id="person-edit-leave-approver"
-                  v-model="form.leave_approver"
-                  class="mt-1 block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
-                >
-                  <option value="">
-                    None
-                  </option>
-                  <option
-                    v-for="option in formOptions.data?.people || []"
-                    :key="option.name"
-                    :value="option.name"
-                  >
-                    {{ option.employee_name }}
-                  </option>
-                </select>
-              </div>
-              <div>
-                <label
-                  for="person-edit-expense-approver"
-                  class="text-sm text-ink-gray-7"
-                >
-                  Expense approver
-                </label>
-                <select
-                  id="person-edit-expense-approver"
-                  v-model="form.expense_approver"
-                  class="mt-1 block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
-                >
-                  <option value="">
-                    None
-                  </option>
-                  <option
-                    v-for="option in formOptions.data?.people || []"
-                    :key="option.name"
-                    :value="option.name"
-                  >
-                    {{ option.employee_name }}
-                  </option>
-                </select>
-              </div>
-              <div>
-                <label
-                  for="person-edit-shift-request-approver"
-                  class="text-sm text-ink-gray-7"
-                >
-                  Shift request approver
-                </label>
-                <select
-                  id="person-edit-shift-request-approver"
-                  v-model="form.shift_request_approver"
-                  class="mt-1 block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
-                >
-                  <option value="">
-                    None
-                  </option>
-                  <option
-                    v-for="option in formOptions.data?.people || []"
-                    :key="option.name"
-                    :value="option.name"
-                  >
-                    {{ option.employee_name }}
-                  </option>
-                </select>
+                <p class="mt-1 text-xs text-ink-gray-5">
+                  Leave, expense and shift approvals follow the manager. Requests waiting on the old manager move to the new one.
+                </p>
               </div>
               <div>
                 <label

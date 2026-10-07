@@ -1328,6 +1328,31 @@ the row to Failed with an `error`; nothing re-queues it automatically.
 **HR Settings → Standard Working Hours** is set. Set it; nothing in the
 portal can default it.
 
+## Approvers follow Reports to: after deploying (plan 2026-10-07-001)
+
+Leave, expense and shift approvers are now always the person's Reports to
+manager. They are recalculated on every Employee save, but records saved before
+this change keep their old values until something saves them. After deploying:
+
+1. Run preflight. `Approvers follow Reports to` FAILs while anyone is out of line.
+2. Sign in to the portal as a Portal Admin (or System Manager) and open
+   **Settings > Approvers**. "Will change" lists who would change and how many
+   waiting requests move with them. Select everyone and apply. Only the new
+   approvers are notified. A row that fails keeps its message and stays selected;
+   apply again.
+3. "Needs HR attention" lists people nobody can approve for:
+   - `No manager set`: set Reports to.
+   - `Manager not active`: pick an active manager, or reactivate the manager.
+   - `Manager has no login`: link a User to the manager's Employee record.
+
+   Their waiting requests keep their current approver, so HR can still decide
+   them. New leave falls back to the Department approver. If
+   `leave_approver_mandatory_in_leave_application` is on, new leave from these
+   people is refused.
+
+The one-department-per-manager workaround is no longer needed for routing.
+Departments are untouched. Restructuring them is separate work.
+
 ## Go-live checklist
 
 How the portal is exposed, which host names serve what, how employees are kept

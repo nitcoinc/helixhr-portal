@@ -1212,12 +1212,9 @@ PERSON_EDITABLE_FIELDS = {
 		"final_confirmation_date",
 		"status",
 	),
-	# The three approver fields are Link-to-User -- `save_person` accepts
-	# employee ids like every other portal picker and resolves each to
-	# `Employee.user_id` itself (KTD5), so this list names the Employee
-	# doctype fieldnames a caller may set, not the User values actually
-	# written.
-	"approvers": ("reports_to", "leave_approver", "expense_approver", "shift_request_approver"),
+	# Plan 2026-10-07-001: only `reports_to`. The three HRMS approver
+	# fields follow it in `events.employee_validate` and are never typed.
+	"approvers": ("reports_to",),
 	# `default_shift` (KTD4): a dated Shift Assignment is Desk-only, on
 	# purpose -- this is the one field HRMS's own `get_employee_shift`
 	# falls back to, so the change is visible everywhere the portal
@@ -1673,6 +1670,10 @@ RATE_LIMIT_POLICY = {
 	# an occasional administrative grant.
 	"get_portal_role_holders": (60, 60),
 	"set_portal_role": (30, 3600),
+	# Plan 2026-10-07-001 U4: the Approvers cleanup -- a preview read and a
+	# rare batch apply.
+	"get_approver_cleanup": (60, 60),
+	"apply_approver_cleanup": (10, 3600),
 	# Reads that fan out (the home page and the approvals queue each run
 	# several queries) or that answer for one record by name -- bounded so
 	# a scripted walk over sequential record ids is a flood the limiter

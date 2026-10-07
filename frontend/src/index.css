@@ -289,6 +289,37 @@ a,
 }
 
 /*
+ * DECISION TONES (Approvals action row). Approve stays the one solid brand
+ * button; the other outcomes get a tinted fill so none of them reads as plain
+ * text. Convention: blue hands over (Send to HR), amber is the recoverable no
+ * (Send back, Need info), red is the final no (Reject, Decline). Raw blue on
+ * purpose -- frappe-ui's `blue` theme is the brand green here. Ink >= 5.28:1
+ * on its tint, border >= 3.7:1 on the card. Two classes so they outrank
+ * frappe-ui's single-class utilities; `:not(:disabled)` keeps its disabled look.
+ */
+.decision-tone.decision-tone--handover:not(:disabled) {
+  color: #1f4fa8; /* 6.45 */
+  background-color: #e4ecfb;
+  border: 1px solid #5b7fc7;
+}
+
+.decision-tone.decision-tone--return:not(:disabled) {
+  color: #7a4f00; /* 6.23 */
+  background-color: #fdefc9;
+  border: 1px solid #a87612;
+}
+
+.decision-tone.decision-tone--final:not(:disabled) {
+  color: #a8351a; /* 5.28 */
+  background-color: #f6e2dc;
+  border: 1px solid #c46a52;
+}
+
+.decision-tone:not(:disabled):hover {
+  filter: brightness(0.96);
+}
+
+/*
  * TYPE ROLES (docs/design-system.md, "Typography").
  *
  * The six roles existed in the document and nowhere in the code, so pages

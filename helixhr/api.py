@@ -38,6 +38,7 @@ from hrms.hr.doctype.leave_application.leave_application import get_employee_lea
 from hrms.utils.holiday_list import get_holiday_list_for_employee
 
 from helixhr.events import (
+	APPROVER_FIELDS,
 	DECISION_REASON_FIELD,
 	HR_REPLY_SUBJECT_PREFIX,
 	HR_REQUEST_DONE,
@@ -61,10 +62,13 @@ from helixhr.events import (
 	_approver_user,
 	_enabled_users_with_role,
 	_is_hr,
+	approver_drift,
+	approver_problem,
 	backdated_grace_days,
 	backdated_leave_earliest,
 	backdated_leave_reason,
 	leave_overdraw,
+	rederive_approvers,
 )
 from helixhr.helixhr.doctype.helixhr_timesheet_change.helixhr_timesheet_change import (
 	comment_problem,
@@ -1692,21 +1696,20 @@ def _leave_names_in_hr_stage(names):
 
 def _line_manager_filter(employee):
 	"""The `employee` filter for the two workflow collectors, and None when
-	this caller has no line-manager queue at all.
+	this caller has no line-manager queue at all: their direct, Active
+	reports, by `reports_to`, for every caller.
 
-	For an ordinary manager it is "anybody but me": the DocShare
-	`events.timesheet_on_update` / `attendance_request_on_update` grants,
-	plus the nested-set User Permission a manager holds over their reports,
-	are what narrow the answer to their own people.
-
-	An HR Manager has native read on every Timesheet and Attendance Request
-	in the company, so the same filter would answer with the whole company's
-	backlog rather than with their own reports (P4-KTD7, P4-R11). Their
-	line-manager half is therefore narrowed by `reports_to` explicitly; the
-	HR half of their queue is a separate collector.
+	It used to be "anybody but me" for an ordinary manager, trusting native
+	read to narrow it. Native read is wider than the decision: Employee is a
+	nested set, so a skip-level manager reads every descendant's Timesheet
+	and Attendance Request, while `_may_act_on_timesheet` /
+	`_may_act_on_attendance_request` accept only the direct manager. Those
+	rows were listed and then refused with "That request isn't here." The
+	leave detail's overlap count reads with `ignore_permissions`, so there
+	"anybody but me" counted the whole company. An HR Manager reads the
+	whole company natively; their HR half is a separate collector (P4-KTD7,
+	P4-R11).
 	"""
-	if not _is_hr():
-		return ["!=", employee]
 	# No limit, deliberately: this is a *filter*, not a page of rows. The
 	# per-collector `limit=_QUEUE_FETCH` on the reads below is the real bound,
 	# and capping the reports list here instead made the requests of anybody
@@ -7040,15 +7043,18 @@ def _act_on_leave_application(doc, action):
 	application consumes nothing, and HRMS's own on_submit refuses any
 	status but Approved/Rejected anyway.
 
-	No `ignore_permissions`: the caller has already been authorized above,
-	and the submit itself runs under the grant HRMS sets up natively --
-	Employee is a nested set, so a manager's own User Permission covers
-	their reports' records, and the Leave Approver role HRMS auto-grants
-	when `Employee.leave_approver` is set carries submit at permlevel 0.
-	An approver who is not in the reporting line instead gets the
-	`submit=1` DocShare hrms.hr.utils.share_doc_with_approver creates on
-	every save. See docs/architecture.md and
-	test_the_approvers_submit_grant_is_native.
+	`ignore_permissions` on the write, because the native grant is not
+	enough. HRMS's `status` is permlevel 1, writable only by Leave Approver,
+	HR User and HR Manager, and HRMS grants Leave Approver only to a user
+	named on `Employee.leave_approver`. A Department approver -- the
+	fallback `get_employee_leave_approver` resolves -- holds just the
+	`submit=1` DocShare `hrms.hr.utils.share_doc_with_approver` creates, so
+	Frappe silently reset `status` to Open on save: Approve and Reject died
+	in HRMS's on_submit and Send Back needed a write the share never gave.
+	The bypass is safe here only because `_decide_one` has already locked,
+	authorized and state-checked this exact record; the helixhr
+	`before_submit` / `validate` guards and every HRMS validation still run.
+	See test_an_approver_without_the_leave_approver_role_can_still_decide.
 
 	P4-U2 gives the same function the other three outcomes. Send back is
 	unchanged; Reject is the *submitted* twin of it -- HRMS's own on_submit
@@ -7058,6 +7064,7 @@ def _act_on_leave_application(doc, action):
 	`helixhr_stage`, which is permlevel 1, so it goes through `db_set` after
 	the authorization `act_on_approval` has already done (P4-KTD4).
 	"""
+	doc.flags.ignore_permissions = True
 	if action == "Approve":
 		doc.status = "Approved"
 		doc.submit()
@@ -9796,7 +9803,8 @@ def _employee_for_user(user):
 
 def _person_profile(employee):
 	"""Identity, manager, employment status and joining date, plus the
-	overview/joining/approver/shift fields P8-U8/U9 make editable -- the
+	overview/joining/manager/shift fields P8-U8/U9 make editable and the
+	approvers that follow the manager -- the
 	part of the person view that is not one of the portal's other existing
 	readers. Every field here is permlevel 0 (KTD3)."""
 	fields = [
@@ -9823,16 +9831,11 @@ def _person_profile(employee):
 	data["manager_name"] = (
 		frappe.db.get_value("Employee", data.reports_to, "employee_name") if data.reports_to else None
 	)
-	# `*_employee` is what the edit form's picker pre-selects (its own
-	# values are employee ids, never logins); `*_name` is what the
-	# read-only card renders.
-	data["leave_approver_employee"], data["leave_approver_name"] = _employee_for_user(data.leave_approver)
-	data["expense_approver_employee"], data["expense_approver_name"] = _employee_for_user(
-		data.expense_approver
-	)
-	data["shift_request_approver_employee"], data["shift_request_approver_name"] = _employee_for_user(
-		data.shift_request_approver
-	)
+	for field in APPROVER_FIELDS:
+		data[f"{field}_name"] = _employee_for_user(data[field])[1]
+	# Plan 2026-10-07-001 R7: the approvers follow `reports_to`, so when
+	# they are empty the card says which part of the reporting line to fix.
+	data["approver_problem"] = approver_problem(data.reports_to)
 	return data
 
 
@@ -10704,6 +10707,71 @@ def set_portal_role(employee, role, enabled):
 	)[0]
 
 
+# --- Approvers cleanup (plan 2026-10-07-001 U4) ------------------------------
+
+_APPROVER_CLEANUP_MAX = 200
+
+
+@frappe.whitelist()
+def get_approver_cleanup():
+	"""The Approvers cleanup preview, for a Portal Admin's scope: who
+	`events.approver_drift` finds out of line, in two groups.
+
+	`will_change` -- a stored approver or a pending request names somebody
+	other than the Reports to manager; applying fixes it (and clears the
+	approver when there is no usable manager, which the row's `problem`
+	says). `needs_attention` -- already in line, but with no usable manager,
+	so only a change to the reporting line helps; not selectable."""
+	rate_limit_per_user("get_approver_cleanup")
+	scope = _assert_portal_admin()
+	rows = approver_drift(admin_scope_employee_filters(scope) or {})
+	return {
+		"will_change": [row for row in rows if row["will_change"]],
+		"needs_attention": [row for row in rows if not row["will_change"]],
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+def apply_approver_cleanup(employees):
+	"""Bring each named employee's approvers and pending requests in line
+	with Reports to (`events.rederive_approvers`), one at a time.
+
+	Each id is re-checked against the caller's scope -- the same refusal
+	whether or not it exists -- and each one commits on its own, so a
+	failure never undoes the rest (`approve_clean_items`' R18 shape). The
+	writes skip DocPerm: Portal Admin holds none on Employee, and the gate
+	plus the scope check above are the permission, as in `set_portal_role`.
+	Idempotent, so a stale preview can only ever re-apply the rule."""
+	rate_limit_per_user("apply_approver_cleanup")
+	scope = _assert_portal_admin()
+	if isinstance(employees, str):
+		employees = json.loads(employees)
+	if not isinstance(employees, list) or not employees:
+		frappe.throw(_("Pick at least one person."))
+	if len(employees) > _APPROVER_CLEANUP_MAX:
+		frappe.throw(_("Fix up to {0} people at once.").format(_APPROVER_CLEANUP_MAX))
+
+	results = []
+	for employee in employees:
+		try:
+			if not isinstance(employee, str) or not employee_in_admin_scope(employee, scope):
+				frappe.throw(_("You are not authorised to change this person."), frappe.PermissionError)
+			rederive_approvers(employee)
+			frappe.db.commit()
+			results.append({"employee": employee, "ok": True})
+		except Exception as exc:
+			frappe.db.rollback()
+			# Our own refusals are worded for the screen; anything else is
+			# logged, not echoed (it can carry internals or other logins).
+			if isinstance(exc, frappe.ValidationError | frappe.PermissionError):
+				message = frappe.utils.strip_html(str(exc)).strip()
+			else:
+				frappe.log_error(title="Approvers cleanup failed", reference_doctype="Employee", reference_name=employee if isinstance(employee, str) else None)
+				message = ""
+			results.append({"employee": employee, "ok": False, "message": message or _("This one could not be fixed.")})
+	return results
+
+
 @frappe.whitelist()
 def get_person(employee):
 	"""Everything HR asks about a person, on one screen (P6-R2): leave
@@ -10765,25 +10833,18 @@ def get_person(employee):
 # `employee_in_admin_scope` pair `get_person` already uses.
 # ---------------------------------------------------------------------------
 
-_PERSON_APPROVER_FIELDS = ("leave_approver", "expense_approver", "shift_request_approver")
-
-_PERSON_APPROVER_LABELS = {
-	"leave_approver": "leave approver",
-	"expense_approver": "expense approver",
-	"shift_request_approver": "shift request approver",
-}
-
 _PERSON_ALL_EDITABLE_FIELDS = tuple(
 	field for group in PERSON_EDITABLE_FIELDS.values() for field in group
 )
 
 
 def _validate_reports_to(employee_id, scope):
-	"""`reports_to` is Link-to-Employee, unlike the three approver fields
-	below -- the chosen manager's own id is exactly the value stored, once
-	it is confirmed to exist and to fall inside the caller's own admin
-	scope (the same "picker's options are the caller's own reach" rule
-	KTD5 applies to project members)."""
+	"""`reports_to` is Link-to-Employee -- the chosen manager's own id is
+	exactly the value stored, once it is confirmed to exist and to fall
+	inside the caller's own admin scope (the same "picker's options are the
+	caller's own reach" rule KTD5 applies to project members). The three
+	approver fields follow it in `events.employee_validate` (plan
+	2026-10-07-001), so they are not editable here."""
 	if not employee_id:
 		return None
 	if not employee_in_admin_scope(employee_id, scope):
@@ -10793,39 +10854,18 @@ def _validate_reports_to(employee_id, scope):
 	return employee_id
 
 
-def _resolve_approver_user(employee_id, scope, field_label):
-	"""An approver, named the way every portal picker names a person -- by
-	Employee, never by login -- resolved to `Employee.user_id` (KTD5).
-	Refused, by name, for a chosen person outside the caller's admin scope,
-	who does not exist, or who has no linked user to hold the approval."""
-	if not employee_id:
-		return None
-	if not employee_in_admin_scope(employee_id, scope):
-		frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
-	row = frappe.db.get_value("Employee", employee_id, ["employee_name", "user_id"], as_dict=True)
-	if not row:
-		frappe.throw(_("{0} isn't an employee here.").format(employee_id))
-	if not row.user_id:
-		frappe.throw(
-			_("{0} has no linked user, so they can't be set as {1}.").format(
-				row.employee_name, field_label
-			)
-		)
-	return row.user_id
-
-
 @frappe.whitelist()
 def get_person_form_options(employee):
 	"""The option lists the person-view edit cards need, in one call
 	(P8-U7): Designation, Department, Branch, Employment Type, Employee
 	Grade, Shift Type and Holiday List, plus a company-scoped employee
-	list for the reporting-manager and the three approver pickers.
+	list for the reporting-manager picker.
 
 	Scoped exactly like `get_person` -- a caller outside their admin scope,
 	or a target outside it, is refused before anything is read. Department
 	narrows to the target's own company; the employee list narrows there
-	too, so the pickers this call feeds never offer someone outside the
-	target's own company as a manager or approver.
+	too, so the picker this call feeds never offers someone outside the
+	target's own company as a manager.
 	"""
 	rate_limit_per_user("get_person_form_options")
 	scope = resolve_admin_scope(frappe.session.user)
@@ -10863,8 +10903,8 @@ def get_person_form_options(employee):
 
 @frappe.whitelist(methods=["POST"])
 def save_person(employee, **fields):
-	"""Edit a person's overview, joining details, approvers and default
-	shift from the portal (P8-R3) -- the write surface `PERSON_EDITABLE_FIELDS`
+	"""Edit a person's overview, joining details, reporting manager and
+	default shift from the portal (P8-R3) -- the write surface `PERSON_EDITABLE_FIELDS`
 	names, no wider (KTD3): every field is permlevel 0, and anything else
 	in `fields` is silently ignored, the same rule `_apply_allowed_fields`
 	already applies to every other config write in this module.
@@ -10885,11 +10925,6 @@ def save_person(employee, **fields):
 	resolved = dict(fields)
 	if "reports_to" in fields:
 		resolved["reports_to"] = _validate_reports_to(fields["reports_to"], scope)
-	for field in _PERSON_APPROVER_FIELDS:
-		if field in fields:
-			resolved[field] = _resolve_approver_user(
-				fields[field], scope, _PERSON_APPROVER_LABELS[field]
-			)
 
 	_apply_allowed_fields(doc, resolved, _PERSON_ALL_EDITABLE_FIELDS)
 	doc.save()

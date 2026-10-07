@@ -237,21 +237,26 @@ approver at `submit=1`:
 and inserts the application straight into stage HR, so the manager never sees
 it and the employee reads "Waiting for HR" from the moment they send it.
 
-**Submit permission path (decided, and tested):** the portal calls `doc.submit()`
-with **no `ignore_permissions`**, after its own approver/HR check. The grant is
-already there natively:
+**Submit permission path (revised 2026-10-07, tested):** the portal writes the
+decision with **`ignore_permissions`**, after `_decide_one` has locked,
+authorized and state-checked the record. The native grant covers *submit* but
+not the decision itself:
 
-- Employee is a nested set, so a manager's own User Permission on their Employee
-  record covers every Employee below them — and therefore their reports' Leave
-  Applications.
-- HRMS auto-grants the **Leave Approver** role whenever `Employee.leave_approver`
-  is set through a real save, and that role carries `submit` at permlevel 0.
-- An approver *outside* the reporting line instead gets the `submit=1` DocShare
-  that `hrms.hr.utils.share_doc_with_approver` creates on every save.
+- HRMS's `status` is **permlevel 1**, writable only by Leave Approver, HR User
+  and HR Manager. A write without that level is silently reset to the stored
+  value (`Document.validate_higher_perm_levels`).
+- HRMS auto-grants **Leave Approver** only when `Employee.leave_approver` is set
+  through a real save. A **Department approver** — the fallback
+  `get_employee_leave_approver` resolves — never gets the role, only the
+  `submit=1` DocShare `hrms.hr.utils.share_doc_with_approver` creates.
+- Without the bypass that approver's Approve/Reject reached HRMS's `on_submit`
+  with `status` back at Open ("Only Leave Applications with status 'Approved'
+  and 'Rejected' can be submitted"), and Send Back needed a write the share
+  never gave.
 
-`test_api_approvals.TestLeaveApprovalIsNative.test_the_approvers_submit_grant_is_native`
-asserts that grant exists, so an upstream change that removes it fails here
-rather than in production.
+The helixhr `before_submit` / `validate` guards and every HRMS validation still
+run. `TestLeaveApprovalIsNative.test_an_approver_without_the_leave_approver_role_can_still_decide`
+covers Approve, Reject and Send Back for an approver without the role.
 
 Two HR Settings carry rules the portal must not re-implement, and
 `preflight.py` FAILs without them: `leave_approver_mandatory_in_leave_application`
@@ -681,6 +686,48 @@ kinds and to a Comment on leave, *before* the transition so the employee's
 notification carries it. Send to HR takes an optional note. Every outcome is
 still refused if the record moved since the approver read it (the
 `expected_modified` / `expected_state` contract).
+
+### Approvers follow Reports to (plan 2026-10-07-001)
+
+Leave, expense and shift requests use HRMS's own approver fields
+(`Employee.leave_approver`, `expense_approver`, `shift_request_approver`), and
+HRMS falls back to the first Department Approver when `leave_approver` is
+empty. Department approvers never receive the Leave Approver role, which is the
+root of the 2026-10-07 "Only Leave Applications with status 'Approved' and
+'Rejected' can be submitted" bug. So the three fields are no longer typed:
+
+- **Derived on every save.** `events.employee_validate` sets all three to
+  `_manager_login(doc.reports_to)`, the same Active-manager rule as
+  `_approver_user`, read from the unsaved doc so an insert works too. With no
+  usable manager (none, not Active, or no `user_id`) all three are cleared.
+  HRMS's `update_approver_role` runs at `on_update`, after `validate`, so the
+  manager gets Leave Approver and Expense Approver. The fields are `read_only`
+  in Desk (Property Setter) and absent from `save_person`. There is no override.
+- **A manager's own change cascades.** When a manager's `user_id` or `status`
+  changes, `employee_on_update` runs `rederive_approvers` on each direct report.
+  It also runs for any report whose stored approvers don't match the manager's
+  login, because ERPNext's Create User `db_set`s `user_id` before saving. It
+  writes the fields and grants missing roles without saving the report: a full
+  save reruns ERPNext's `update_user` / `update_user_status` (which can
+  re-enable a disabled login), and one failing report would roll back the
+  manager's save. ERPNext refuses `Left` while Active people report to someone,
+  so the cascade in practice is Inactive, Suspended or a new login.
+- **Pending requests move.** `_reconcile_pending_documents` now also covers
+  Leave Applications (Open, `docstatus` 0, manager stage), Shift Requests
+  (Draft) and Expense Claims (approval Draft). A row naming another approver is
+  moved with `db_set` (a save would rerun balance, overlap and backdated
+  checks), reshared with `submit=1` through `_reconcile_share`, and the new
+  approver gets one Notification Log. With nobody to move to, nothing moves: HRMS refuses to decide a leave
+  with no approver while "Leave Approver mandatory" is on, so the request keeps
+  its approver and HR can still decide it. HR-stage leave never moves.
+- **Cleanup and drift.** `events.approver_drift` lists Active employees whose
+  stored approvers or pending requests disagree with Reports to, plus anyone
+  with no usable manager. The Portal Admin's Settings > Approvers previews it
+  in two groups ("Will change", "Needs HR attention") and applies
+  `rederive_approvers` per person, scope-checked and committed per row
+  (`get_approver_cleanup` / `apply_approver_cleanup`).
+  `preflight.check_approvers_follow_reports_to` FAILs on drift and WARNs on
+  people with no usable manager and on approvers missing their role.
 
 ### The fourth kind: routed requests
 

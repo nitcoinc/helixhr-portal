@@ -227,6 +227,7 @@ test('U3: Report access and Portal roles are Portal Admin only', async ({ page }
     // the flags, KTD4/R5).
     await expect(page.getByTestId('settings-tab-report-access')).toBeVisible()
     await expect(page.getByTestId('settings-tab-portal-roles')).toBeVisible()
+    await expect(page.getByTestId('settings-tab-approvers')).toBeVisible()
     await expect(page.getByTestId('settings-tab-categories')).toHaveCount(0)
     await expect(page.getByTestId('settings-tab-leave-rules')).toHaveCount(0)
     await page.getByTestId('settings-tab-portal-roles').click()
@@ -243,4 +244,27 @@ test('U3: Report access and Portal roles are Portal Admin only', async ({ page }
   await expect(page.getByTestId('settings-tab-leave-rules')).toBeVisible()
   await expect(page.getByTestId('settings-tab-report-access')).toHaveCount(0)
   await expect(page.getByTestId('settings-tab-portal-roles')).toHaveCount(0)
+  await expect(page.getByTestId('settings-tab-approvers')).toHaveCount(0)
+})
+
+test('plan 2026-10-07-001 U4: the Approvers cleanup previews in two groups', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'portal-admin', 'the Approvers tab is Portal Admin only')
+
+  await page.goto('/helixhr/settings/approvers')
+  await expect(page.getByTestId('settings-tab-approvers')).toHaveAttribute('aria-current', 'page')
+  await expect(page.getByRole('heading', { name: /^Will change \(\d+\)$/ })).toBeVisible()
+  await expect(page.getByRole('heading', { name: /^Needs HR attention \(\d+\)$/ })).toBeVisible()
+
+  // Nothing applies until a person is picked and the confirm step is passed.
+  const fix = page.getByTestId('approvers-fix')
+  if (await fix.count()) {
+    await expect(fix).toBeDisabled()
+    await page.getByRole('checkbox', { name: /^Fix / }).first().check()
+    await fix.click()
+    await expect(page.getByTestId('approvers-confirm')).toBeVisible()
+    await page.getByRole('button', { name: 'Cancel' }).click()
+    await expect(page.getByTestId('approvers-confirm')).toHaveCount(0)
+  } else {
+    await expect(page.getByTestId('approvers-in-line')).toBeVisible()
+  }
 })

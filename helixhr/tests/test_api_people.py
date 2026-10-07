@@ -305,12 +305,10 @@ class TestGetPerson(IntegrationTestCase):
 				"default_shift",
 				"holiday_list",
 				"manager_name",
-				"leave_approver_employee",
 				"leave_approver_name",
-				"expense_approver_employee",
 				"expense_approver_name",
-				"shift_request_approver_employee",
 				"shift_request_approver_name",
+				"approver_problem",
 			},
 		)
 
@@ -551,9 +549,8 @@ class TestDeskLinks(IntegrationTestCase):
 
 
 def _make_employee_without_user(company, employee_number):
-	"""An Employee with no `user_id` at all -- the case `save_person` must
-	refuse the whole call over, naming this employee, when chosen as an
-	approver. Mirrors `test_api_projects.py`'s own helper of the same
+	"""An Employee with no `user_id` at all -- as a manager they leave
+	their reports with no approver, which `get_person` names. Mirrors `test_api_projects.py`'s own helper of the same
 	shape and reason -- built locally rather than shared, since each
 	file's scope is its own module plus the fixture."""
 	from helixhr.tests.utils import ensure_test_gender
@@ -651,29 +648,35 @@ class TestSavePerson(IntegrationTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			save_person(self.colleague, reports_to=self.other_company_employee)
 
-	def test_setting_and_clearing_an_approver_persists_the_resolved_user(self):
+	# Plan 2026-10-07-001: the three approvers follow Reports to.
+
+	def test_a_typed_approver_is_ignored_and_the_managers_login_is_stored(self):
 		frappe.set_user(self.hr_user)
-		result = save_person(self.colleague, leave_approver=self.manager)
+		result = save_person(self.colleague, leave_approver=self.hr_employee, expense_approver=self.orphan)
 		self.assertEqual(result["leave_approver"], self.manager_user)
-		self.assertEqual(result["leave_approver_employee"], self.manager)
-		self.assertEqual(result["leave_approver_name"], frappe.db.get_value("Employee", self.manager, "employee_name"))
-		self.assertEqual(frappe.db.get_value("Employee", self.colleague, "leave_approver"), self.manager_user)
+		self.assertEqual(result["expense_approver"], self.manager_user)
+		self.assertIsNone(result["approver_problem"])
 
-		cleared = save_person(self.colleague, leave_approver="")
-		self.assertIsNone(cleared["leave_approver"])
-		self.assertIsNone(cleared["leave_approver_employee"])
-
-	def test_an_approver_with_no_linked_user_is_refused_and_named(self):
+	def test_changing_reports_to_moves_all_three_approvers(self):
 		frappe.set_user(self.hr_user)
-		orphan_name = frappe.db.get_value("Employee", self.orphan, "employee_name")
-		with self.assertRaises(frappe.ValidationError) as caught:
-			save_person(self.colleague, expense_approver=self.orphan)
-		self.assertIn(orphan_name, str(caught.exception))
+		self.addCleanup(self._restore_manager)
+		result = save_person(self.colleague, reports_to=self.hr_employee)
+		for field in ("leave_approver", "expense_approver", "shift_request_approver"):
+			self.assertEqual(result[field], self.hr_user, field)
+		self.assertEqual(result["leave_approver_name"], frappe.db.get_value("Employee", self.hr_employee, "employee_name"))
 
-	def test_an_approver_outside_admin_scope_is_refused(self):
+	def test_a_manager_with_no_login_leaves_no_approver_and_says_why(self):
 		frappe.set_user(self.hr_user)
-		with self.assertRaises(frappe.PermissionError):
-			save_person(self.colleague, shift_request_approver=self.other_company_employee)
+		self.addCleanup(self._restore_manager)
+		result = save_person(self.colleague, reports_to=self.orphan)
+		self.assertIsNone(result["leave_approver"])
+		self.assertEqual(result["approver_problem"], "manager_no_login")
+
+	def _restore_manager(self):
+		frappe.set_user("Administrator")
+		doc = frappe.get_doc("Employee", self.colleague)
+		doc.reports_to = self.manager
+		doc.save(ignore_permissions=True)
 
 	def test_setting_default_shift_persists(self):
 		if not frappe.db.exists("Shift Type", "_Test U7 Shift"):
