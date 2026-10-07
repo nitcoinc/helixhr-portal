@@ -481,7 +481,9 @@ class TestPortalLeaveApi(IntegrationTestCase):
 		allocation = ensure_leave_allocation(self.employee_name, "Casual Leave", 30)
 		frappe.db.set_value("Leave Allocation", allocation, "new_leaves_allocated", 30)
 		frappe.set_user(EMPLOYEE_USER)
-		for offset in (106, 110, 114):
+		# Other leave suites use offsets through 290 (and 96+ even offsets in
+		# approval tests), so keep this bounded-list fixture in a separate window.
+		for offset in (310, 320, 330):
 			self._apply(offset)
 
 		payload = get_my_leave(limit=2)
