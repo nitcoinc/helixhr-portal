@@ -226,12 +226,25 @@ class TestPendingRequestsMove(_ApproverCase):
 			self.assertEqual(frappe.db.get_value(doctype, name, field), MANAGER_A, name)
 			self.assertEqual(_arrivals(MANAGER_B, doctype, name), 0, name)
 
-	def test_moving_to_no_usable_manager_clears_the_share_and_tells_nobody(self):
+	def test_with_no_usable_manager_a_pending_leave_keeps_its_approver(self):
+		"""HRMS refuses to decide a leave with no approver while "Leave
+		Approver mandatory" is on, so nothing moves to nobody."""
 		name = self._pending_leave()
 		told = frappe.db.count("Notification Log", {"document_name": name})
 
 		self._report_to(None)
 
-		self.assertIsNone(frappe.db.get_value("Leave Application", name, "leave_approver"))
-		self.assertEqual(_shared_users("Leave Application", name), [])
+		self.assertEqual(set(_approvers(self.employee).values()), {None})
+		self.assertEqual(frappe.db.get_value("Leave Application", name, "leave_approver"), MANAGER_A)
 		self.assertEqual(frappe.db.count("Notification Log", {"document_name": name}), told)
+
+	def test_create_user_on_the_manager_reaches_reports(self):
+		"""ERPNext's Create User `db_set`s `user_id` before saving, so the
+		save's before/after diff never shows the change."""
+		frappe.db.set_value("Employee", self.manager_b, "user_id", None)
+		self._report_to(self.manager_b)
+		self.assertEqual(set(_approvers(self.employee).values()), {None})
+
+		frappe.db.set_value("Employee", self.manager_b, "user_id", MANAGER_B)
+		frappe.get_doc("Employee", self.manager_b).save(ignore_permissions=True)
+		self.assertEqual(set(_approvers(self.employee).values()), {MANAGER_B})

@@ -10761,8 +10761,14 @@ def apply_approver_cleanup(employees):
 			results.append({"employee": employee, "ok": True})
 		except Exception as exc:
 			frappe.db.rollback()
-			message = frappe.utils.strip_html(str(exc)).strip() or _("This one could not be fixed.")
-			results.append({"employee": employee, "ok": False, "message": message})
+			# Our own refusals are worded for the screen; anything else is
+			# logged, not echoed (it can carry internals or other logins).
+			if isinstance(exc, frappe.ValidationError | frappe.PermissionError):
+				message = frappe.utils.strip_html(str(exc)).strip()
+			else:
+				frappe.log_error(title="Approvers cleanup failed", reference_doctype="Employee", reference_name=employee if isinstance(employee, str) else None)
+				message = ""
+			results.append({"employee": employee, "ok": False, "message": message or _("This one could not be fixed.")})
 	return results
 
 

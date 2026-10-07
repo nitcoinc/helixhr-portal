@@ -705,7 +705,9 @@ root of the 2026-10-07 "Only Leave Applications with status 'Approved' and
   in Desk (Property Setter) and absent from `save_person`. There is no override.
 - **A manager's own change cascades.** When a manager's `user_id` or `status`
   changes, `employee_on_update` runs `rederive_approvers` on each direct report.
-  It writes the fields and grants the roles without saving the report: a full
+  It also runs for any report whose stored approvers don't match the manager's
+  login, because ERPNext's Create User `db_set`s `user_id` before saving. It
+  writes the fields and grants missing roles without saving the report: a full
   save reruns ERPNext's `update_user` / `update_user_status` (which can
   re-enable a disabled login), and one failing report would roll back the
   manager's save. ERPNext refuses `Left` while Active people report to someone,
@@ -715,9 +717,9 @@ root of the 2026-10-07 "Only Leave Applications with status 'Approved' and
   (Draft) and Expense Claims (approval Draft). A row naming another approver is
   moved with `db_set` (a save would rerun balance, overlap and backdated
   checks), reshared with `submit=1` through `_reconcile_share`, and the new
-  approver gets one Notification Log. With nobody to move to, the approver and
-  share are cleared and nobody is told: those requests wait for HR to fix the
-  reporting line. HR-stage leave never moves.
+  approver gets one Notification Log. With nobody to move to, nothing moves: HRMS refuses to decide a leave
+  with no approver while "Leave Approver mandatory" is on, so the request keeps
+  its approver and HR can still decide it. HR-stage leave never moves.
 - **Cleanup and drift.** `events.approver_drift` lists Active employees whose
   stored approvers or pending requests disagree with Reports to, plus anyone
   with no usable manager. The Portal Admin's Settings > Approvers previews it

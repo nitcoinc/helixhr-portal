@@ -1345,7 +1345,8 @@ this change keep their old values until something saves them. After deploying:
    - `Manager not active`: pick an active manager, or reactivate the manager.
    - `Manager has no login`: link a User to the manager's Employee record.
 
-   Until then HRMS falls back to the Department approver for leave. If
+   Their waiting requests keep their current approver, so HR can still decide
+   them. New leave falls back to the Department approver. If
    `leave_approver_mandatory_in_leave_application` is on, new leave from these
    people is refused.
 

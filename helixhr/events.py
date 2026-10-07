@@ -520,9 +520,17 @@ def employee_on_update(doc, method=None):
 		# decision that is no longer theirs.
 		_repoint_change_requests(doc.name)
 
-	if before.user_id != doc.user_id or before.status != doc.status:
-		for report in frappe.get_all("Employee", filters={"reports_to": doc.name}, pluck="name"):
-			rederive_approvers(report)
+	# Plan 2026-10-07-001 R3. A report is re-derived when this manager's
+	# login or status changed, and also whenever its stored approvers do not
+	# match this manager's login -- ERPNext's "Create User" writes `user_id`
+	# with `db_set` before its save, so the before/after diff never sees it.
+	manager_changed = before.user_id != doc.user_id or before.status != doc.status
+	login = _manager_login(doc.name)
+	for report in frappe.get_all(
+		"Employee", filters={"reports_to": doc.name}, fields=["name", *APPROVER_FIELDS]
+	):
+		if manager_changed or any((report.get(field) or None) != login for field in APPROVER_FIELDS):
+			rederive_approvers(report.name)
 
 	# P3-U4 step 2a / P3-KTD15 / P3-R28. Somebody who has left has no
 	# purpose left for their punch coordinates to serve, so they go now
@@ -575,7 +583,9 @@ def rederive_approvers(employee):
 
 	login = _approver_user(employee)
 	frappe.db.set_value("Employee", employee, dict.fromkeys(APPROVER_FIELDS, login), update_modified=False)
-	update_approver_role(frappe._dict(leave_approver=login, expense_approver=login))
+	# `add_roles` saves the User every time; a team of N would save it N times.
+	if login and not {"Leave Approver", "Expense Approver"} <= set(frappe.get_roles(login)):
+		update_approver_role(frappe._dict(leave_approver=login, expense_approver=login))
 	_reconcile_pending_documents(employee)
 	_repoint_change_requests(employee)
 
@@ -585,7 +595,8 @@ def approver_drift(employee_filters):
 	`employee_filters` whose approvers are not in line with `reports_to` --
 	a stored approver field, or a pending leave/shift/expense request,
 	naming somebody other than the derived manager login -- or who has no
-	usable manager at all.
+	usable manager at all. With no usable manager, pending requests are not
+	out of line: they keep their approver (see `_reconcile_pending_documents`).
 
 	One row each: `employee`, `employee_name`, `manager_name`, `current`
 	(the three stored fields), `derived`, `problem` (`approver_problem`'s
@@ -622,7 +633,7 @@ def approver_drift(employee_filters):
 		current = {field: row.get(field) or None for field in APPROVER_FIELDS}
 		moving = {}
 		for doctype, approver in pending.get(row.name, ()):
-			if approver != derived:
+			if derived and approver != derived:
 				moving[doctype] = moving.get(doctype, 0) + 1
 		will_change = bool(moving) or any(value != derived for value in current.values())
 		if will_change or problem:
@@ -681,24 +692,28 @@ def _reconcile_pending_documents(employee):
 	# `db_set`, not a save: a save reruns balance, overlap and backdated
 	# validation, which can refuse an old request for reasons that have
 	# nothing to do with who decides it. Nobody to move to (no usable
-	# manager) clears the approver and the share and tells nobody.
+	# manager) moves nothing: HRMS refuses to decide a leave with no
+	# approver while "Leave Approver mandatory" is on, so the request keeps
+	# its approver and HR can still decide it. The employee is listed under
+	# the Approvers cleanup's "Needs HR attention".
+	if not manager_user:
+		return
 	employee_name = None
 	for doctype, field, filters, label in PENDING_APPROVER_REQUESTS:
 		for row in frappe.get_all(
 			doctype, filters={"employee": employee, **filters}, fields=["name", field]
 		):
-			if (row.get(field) or None) == manager_user:
+			if row.get(field) == manager_user:
 				continue
 			values = {field: manager_user}
 			if doctype == "Leave Application":
-				values["leave_approver_name"] = frappe.utils.get_fullname(manager_user) if manager_user else None
+				values["leave_approver_name"] = frappe.utils.get_fullname(manager_user)
 			frappe.db.set_value(doctype, row.name, values)
 			_reconcile_share(doctype, row.name, employee, manager_user, submit=1)
-			if manager_user:
-				employee_name = employee_name or frappe.db.get_value("Employee", employee, "employee_name")
-				_notify_manager_of_arrival(
-					doctype, row, manager_user, _("{0}'s {1} moved to you").format(employee_name, _(label))
-				)
+			employee_name = employee_name or frappe.db.get_value("Employee", employee, "employee_name")
+			_notify_manager_of_arrival(
+				doctype, row, manager_user, _("{0}'s {1} moved to you").format(employee_name, _(label))
+			)
 
 
 def timesheet_before_submit(doc, method=None):

@@ -341,6 +341,19 @@ class TestApproverCleanup(IntegrationTestCase):
 		self.assertEqual([row["ok"] for row in result], [False, False])
 		self.assertEqual(result[0]["message"], result[1]["message"])
 
+	def test_an_empty_or_oversized_batch_is_refused_and_a_json_string_works(self):
+		for bad in ([], [self.employee] * 201):
+			with self.assertRaises(frappe.ValidationError):
+				_as(self.admin, apply_approver_cleanup, bad)
+		result = _as(self.admin, apply_approver_cleanup, f'["{self.employee}"]')
+		self.assertEqual(result, [{"employee": self.employee, "ok": True}])
+
+	def test_one_refused_row_does_not_stop_the_rest(self):
+		frappe.db.set_value("Employee", self.employee, "leave_approver", self.admin)
+		result = _as(self.admin, apply_approver_cleanup, [self.other_target, self.employee])
+		self.assertEqual([row["ok"] for row in result], [False, True])
+		self.assertEqual(frappe.db.get_value("Employee", self.employee, "leave_approver"), CLEANUP_MANAGER)
+
 	def test_hr_manager_and_plain_employee_are_refused(self):
 		for user in (ensure_hr_manager_user(), CLEANUP_EMPLOYEE):
 			with self.assertRaises(frappe.PermissionError):
