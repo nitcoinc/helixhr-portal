@@ -1454,6 +1454,7 @@ function dismissBulkResult() {
                           <Button
                             v-if="may('Need info')"
                             variant="outline"
+                            class="decision-tone decision-tone--return"
                             :disabled="acting === selected.name"
                             data-testid="need-info"
                             @click="decide('Need info')"
@@ -1463,6 +1464,7 @@ function dismissBulkResult() {
                           <Button
                             v-if="may('Send Back')"
                             variant="outline"
+                            class="decision-tone decision-tone--return"
                             :disabled="acting === selected.name"
                             data-testid="send-back"
                             @click="decide('Send Back')"
@@ -1472,7 +1474,7 @@ function dismissBulkResult() {
                           <Button
                             v-if="may('Reject')"
                             variant="outline"
-                            theme="red"
+                            class="decision-tone decision-tone--final"
                             :disabled="acting === selected.name"
                             data-testid="reject"
                             @click="decide('Reject')"
@@ -1484,7 +1486,7 @@ function dismissBulkResult() {
                           <Button
                             v-if="may('Decline')"
                             variant="outline"
-                            theme="red"
+                            class="decision-tone decision-tone--final"
                             :disabled="acting === selected.name"
                             data-testid="decline"
                             @click="decide('Decline')"
@@ -1493,7 +1495,8 @@ function dismissBulkResult() {
                           </Button>
                           <Button
                             v-if="may('Send to HR')"
-                            variant="ghost"
+                            variant="outline"
+                            class="decision-tone decision-tone--handover"
                             :disabled="acting === selected.name"
                             data-testid="send-to-hr"
                             @click="decide('Send to HR')"
@@ -2004,7 +2007,8 @@ function dismissBulkResult() {
             >
               <Button
                 v-if="may('Send to HR')"
-                variant="ghost"
+                variant="outline"
+                class="decision-tone decision-tone--handover"
                 :disabled="acting === selected.name"
                 data-testid="send-to-hr"
                 @click="decide('Send to HR')"
@@ -2014,7 +2018,7 @@ function dismissBulkResult() {
               <Button
                 v-if="may('Reject')"
                 variant="outline"
-                theme="red"
+                class="decision-tone decision-tone--final"
                 :disabled="acting === selected.name"
                 data-testid="reject"
                 @click="decide('Reject')"
@@ -2026,7 +2030,7 @@ function dismissBulkResult() {
               <Button
                 v-if="may('Decline')"
                 variant="outline"
-                theme="red"
+                class="decision-tone decision-tone--final"
                 :disabled="acting === selected.name"
                 data-testid="decline"
                 @click="decide('Decline')"
@@ -2036,6 +2040,7 @@ function dismissBulkResult() {
               <Button
                 v-if="may('Need info')"
                 variant="outline"
+                class="decision-tone decision-tone--return"
                 :disabled="acting === selected.name"
                 data-testid="need-info"
                 @click="decide('Need info')"
@@ -2045,6 +2050,7 @@ function dismissBulkResult() {
               <Button
                 v-if="may('Send Back')"
                 variant="outline"
+                class="decision-tone decision-tone--return"
                 :disabled="acting === selected.name"
                 data-testid="send-back"
                 @click="decide('Send Back')"

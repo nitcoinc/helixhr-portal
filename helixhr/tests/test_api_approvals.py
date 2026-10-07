@@ -316,6 +316,12 @@ class TestApprovalQueueAndEvidence(IntegrationTestCase):
 
 	# helpers
 
+	def _set_reports_to(self, employee, manager):
+		frappe.set_user("Administrator")
+		doc = frappe.get_doc("Employee", employee)
+		doc.reports_to = manager
+		doc.save(ignore_permissions=True)
+
 	def _other(self, user):
 		from helixhr.tests.utils import make_test_user
 
@@ -416,6 +422,23 @@ class TestApprovalQueueAndEvidence(IntegrationTestCase):
 		self.assertNotIn(name, queued)
 		with self.assertRaises(frappe.PermissionError):
 			get_approval_detail("timesheet", name)
+
+	def test_a_skip_level_manager_is_not_queued_a_grand_reports_week(self):
+		"""Native read reaches every descendant (Employee is a nested set),
+		but only the direct manager may decide. The queue used to be "anybody
+		but me" and so listed the week to the manager's own manager, whose
+		click then failed with "That request isn't here"."""
+		timesheet = self._pending_timesheet()
+		skip_level = self._other(self.SECOND_MANAGER)
+		# A real save: the nested set (and so native read) only moves on one.
+		self._set_reports_to(self.manager_name, skip_level)
+		self.addCleanup(self._set_reports_to, self.manager_name, None)
+
+		frappe.set_user(self.SECOND_MANAGER)
+		self.assertNotIn(timesheet, [row["name"] for row in get_my_approvals()["pending"]])
+
+		frappe.set_user(MANAGER_USER)
+		self.assertIn(timesheet, [row["name"] for row in get_my_approvals()["pending"]])
 
 	# P2-U7 scenario 2
 
@@ -948,6 +971,49 @@ class TestLeaveApprovalIsNative(IntegrationTestCase):
 			"Leave Approver" in roles or shared,
 			"neither the native Leave Approver role nor an HRMS DocShare grants submit",
 		)
+
+	def test_an_approver_without_the_leave_approver_role_can_still_decide(self):
+		"""HRMS's `status` is permlevel 1, writable only by Leave Approver /
+		HR User / HR Manager, and HRMS grants Leave Approver only to users
+		named on `Employee.leave_approver`. A Department approver -- what
+		`get_employee_leave_approver` falls back to -- never gets it, yet
+		passes the portal check and holds submit through the DocShare. Before
+		the fix Frappe silently reset `status` to Open on save, so Approve and
+		Reject failed with "Only Leave Applications with status 'Approved'
+		and 'Rejected' can be submitted" and Send Back saved nothing."""
+		self.addCleanup(lambda: frappe.get_doc("User", MANAGER_USER).add_roles("Leave Approver"))
+		for action, status, docstatus in (
+			("Approve", "Approved", 1),
+			("Reject", "Rejected", 1),
+			("Send Back", "Rejected", 0),
+		):
+			leave = self._pending_leave()
+			# A direct delete, not `remove_roles`: HRMS re-adds the role on
+			# User save while an Employee names this user, which is exactly
+			# what a Department approver lacks.
+			frappe.db.delete("Has Role", {"parent": MANAGER_USER, "role": "Leave Approver"})
+			frappe.clear_cache(user=MANAGER_USER)
+			# The submit-only share HRMS gives an approver without the role.
+			frappe.share.add_docshare(
+				"Leave Application",
+				leave.name,
+				MANAGER_USER,
+				submit=1,
+				flags={"ignore_share_permission": True},
+			)
+			frappe.set_user(MANAGER_USER)
+			self.assertNotIn("Leave Approver", frappe.get_roles())
+			act_on_approval(
+				"Leave Application",
+				leave.name,
+				action,
+				comment=None if action == "Approve" else "no",
+				**token("Leave Application", leave.name),
+			)
+			frappe.set_user("Administrator")
+			row = frappe.db.get_value("Leave Application", leave.name, ["status", "docstatus"], as_dict=True)
+			self.assertEqual((row.status, row.docstatus), (status, docstatus), action)
+			self._clear_leave_on(self.leave_date)
 
 	def test_hr_manager_can_approve_a_leave_they_are_not_the_approver_of(self):
 		"""The error copy promises "or HR", and `_assert_may_act_on` lets HR

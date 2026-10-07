@@ -237,21 +237,26 @@ approver at `submit=1`:
 and inserts the application straight into stage HR, so the manager never sees
 it and the employee reads "Waiting for HR" from the moment they send it.
 
-**Submit permission path (decided, and tested):** the portal calls `doc.submit()`
-with **no `ignore_permissions`**, after its own approver/HR check. The grant is
-already there natively:
+**Submit permission path (revised 2026-10-07, tested):** the portal writes the
+decision with **`ignore_permissions`**, after `_decide_one` has locked,
+authorized and state-checked the record. The native grant covers *submit* but
+not the decision itself:
 
-- Employee is a nested set, so a manager's own User Permission on their Employee
-  record covers every Employee below them — and therefore their reports' Leave
-  Applications.
-- HRMS auto-grants the **Leave Approver** role whenever `Employee.leave_approver`
-  is set through a real save, and that role carries `submit` at permlevel 0.
-- An approver *outside* the reporting line instead gets the `submit=1` DocShare
-  that `hrms.hr.utils.share_doc_with_approver` creates on every save.
+- HRMS's `status` is **permlevel 1**, writable only by Leave Approver, HR User
+  and HR Manager. A write without that level is silently reset to the stored
+  value (`Document.validate_higher_perm_levels`).
+- HRMS auto-grants **Leave Approver** only when `Employee.leave_approver` is set
+  through a real save. A **Department approver** — the fallback
+  `get_employee_leave_approver` resolves — never gets the role, only the
+  `submit=1` DocShare `hrms.hr.utils.share_doc_with_approver` creates.
+- Without the bypass that approver's Approve/Reject reached HRMS's `on_submit`
+  with `status` back at Open ("Only Leave Applications with status 'Approved'
+  and 'Rejected' can be submitted"), and Send Back needed a write the share
+  never gave.
 
-`test_api_approvals.TestLeaveApprovalIsNative.test_the_approvers_submit_grant_is_native`
-asserts that grant exists, so an upstream change that removes it fails here
-rather than in production.
+The helixhr `before_submit` / `validate` guards and every HRMS validation still
+run. `TestLeaveApprovalIsNative.test_an_approver_without_the_leave_approver_role_can_still_decide`
+covers Approve, Reject and Send Back for an approver without the role.
 
 Two HR Settings carry rules the portal must not re-implement, and
 `preflight.py` FAILs without them: `leave_approver_mandatory_in_leave_application`
