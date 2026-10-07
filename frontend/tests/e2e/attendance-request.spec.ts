@@ -310,11 +310,19 @@ test.describe('manager', () => {
     await panel.getByTestId('send-back').click()
     await expect(page.getByText('Say what should change before sending it back.')).toBeVisible()
 
+    // While the reason is open only its own button is drawn, so the other
+    // outcomes cannot read as live choices under a half-written reason.
+    await expect(panel.getByTestId('reject')).toHaveCount(0)
+    await expect(panel.getByTestId('send-to-hr')).toHaveCount(0)
+    await expect(panel.getByRole('button', { name: /^Approve 1 day$/ })).toHaveCount(0)
+
     // P4-U4. Switching outcomes empties and relabels the field: a sentence
     // written to ask for a change must never be submittable as the
     // justification for a terminal no.
     const reasonBox = panel.getByTestId('decision-reason')
     await reasonBox.getByRole('textbox').fill('add the Friday hours')
+    await panel.getByTestId('reason-cancel').click()
+    await expect(panel.getByTestId('reject')).toBeVisible()
     await panel.getByTestId('reject').click()
     await expect(reasonBox).toContainText('Reject with a reason')
     await expect(reasonBox.getByRole('textbox')).toHaveValue('')
@@ -353,6 +361,7 @@ test.describe('manager', () => {
     })
     expect(changed.ok(), await changed.text()).toBeTruthy()
 
+    await panel.getByTestId('reason-cancel').click()
     await panel.getByTestId('send-to-hr').click()
     await panel.getByTestId('send-to-hr').click()
     await expect(page.getByRole('alert').filter({ hasText: /Reload/ })).toBeVisible({
