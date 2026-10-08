@@ -2,7 +2,7 @@ from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
-from frappe.utils import add_days, getdate, today
+from frappe.utils import add_days, formatdate, getdate, today
 
 from helixhr.api import (
 	_act_on_leave_application,
@@ -1194,7 +1194,9 @@ class TestBackdatedGrace(IntegrationTestCase):
 			frappe.db.set_value("Company", company, "helixhr_time_zone", "Asia/Kolkata", update_modified=False)
 			self.assertEqual(backdated_leave_earliest(self.employee_name), getdate("2026-10-08"))
 			self.assertIsNone(backdated_leave_reason(self.employee_name, "2026-10-08"))
-			self.assertIn("2026", backdated_leave_reason(self.employee_name, "2026-10-07") or "")
+			self.assertIn(
+				formatdate("2026-10-08"), backdated_leave_reason(self.employee_name, "2026-10-07") or ""
+			)
 
 	def test_grace_defaults_to_one_day(self):
 		# Unset in the Single -- no stored value -- reads as 1.

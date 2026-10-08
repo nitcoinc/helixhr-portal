@@ -483,7 +483,10 @@ failed before the first mail) the claim is released, so fixing the cause lets
 the next tick deliver the same day. If some mail went out before a failure,
 the day stays claimed -- a retry would mail those people again -- and the Error
 Log says so. Failures and skips are logged once per company per day, not on
-every tick. To deliberately resend today, clear **Last sent on** for that row.
+every tick. A form save never moves **Last sent on** backwards (the later date wins), so to
+deliberately resend today clear it from the bench: `bench --site <site> execute
+frappe.db.set_value --args '["HelixHR Celebration Reminder", "<row>",
+"last_sent_on", null]'`.
 
 **Per-company templates (plan 2026-10-05-001 U11).** Each (event, company)
 sends from its own Email Template, `HelixHR Birthday Reminder - <Company>`

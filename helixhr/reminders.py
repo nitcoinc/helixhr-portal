@@ -211,7 +211,10 @@ def send_celebration_reminders():
 		# Keyword arguments on purpose: `log_error`'s positional hack
 		# swaps a single-line first argument into the title, and one
 		# dropped address is a single line.
-		_log_once(f"cross-company|{getdate()}", title=CROSS_COMPANY_LOG_TITLE, message="\n".join(dropped))
+		# Keyed by what was dropped, not the system date: companies on other
+		# clocks send at other hours and drop other addresses.
+		message = "\n".join(dropped)
+		_log_once(f"cross-company|{_digest(message)}", title=CROSS_COMPANY_LOG_TITLE, message=message)
 	if skipped_no_company:
 		# R4: an employee with no company is never celebrated and never
 		# mailed; the day's first tick says how many were skipped.
@@ -281,27 +284,27 @@ def _send_event(event, foreign, foreign_names, dropped):
 			)
 			failed += 1
 			continue
-		claimed, previous = _claim(reminder.name, day)
-		if not claimed:
-			continue
-
-		companies += 1
-		template = frappe.get_doc("Email Template", reminder.email_template)
-		sender = get_sender_email()
-		selected = (
-			[
-				row.employee
-				for row in frappe.get_all(
-					"HelixHR Celebration Recipient",
-					filters={"parent": reminder.name, "parenttype": REMINDER_DOCTYPE},
-					fields=["employee"],
-				)
-			]
-			if reminder.recipient_mode == "Selected employees"
-			else None
-		)
 		progress = {"emails": 0}
+		claimed, previous = False, None
 		try:
+			claimed, previous = _claim(reminder.name, day)
+			if not claimed:
+				continue
+			companies += 1
+			template = frappe.get_doc("Email Template", reminder.email_template)
+			sender = get_sender_email()
+			selected = (
+				[
+					row.employee
+					for row in frappe.get_all(
+						"HelixHR Celebration Recipient",
+						filters={"parent": reminder.name, "parenttype": REMINDER_DOCTYPE},
+						fields=["employee"],
+					)
+				]
+				if reminder.recipient_mode == "Selected employees"
+				else None
+			)
 			_send_company(
 				template,
 				sender,
@@ -318,18 +321,18 @@ def _send_event(event, foreign, foreign_names, dropped):
 			)
 		except Exception:
 			failed += 1
+			if claimed and not progress["emails"]:
+				_release(reminder.name, previous)
 			_log_once(
 				f"failed|{day}|{event}|{company}",
 				f"The {event} celebration reminder for '{company}' failed -- Email Template "
-				f"'{template.name}' was not sent to "
+				f"'{reminder.email_template}' was not sent to "
 				+ ("everyone in" if progress["emails"] else "anyone in")
 				+ " that company. The other companies and the other event are unaffected."
 				f"\n\n{frappe.get_traceback()}",
 				"HelixHR celebration reminders",
 			)
 		emails += progress["emails"]
-		if not progress["emails"]:
-			_release(reminder.name, previous)
 
 	return {"companies": companies, "emails": emails, "failed": failed}, skipped
 
@@ -362,21 +365,43 @@ def _celebrants(event, company, day):
 def _claim(name, day):
 	"""Claim (reminder row, local day) before sending. One conditional
 	UPDATE: it changes the row only while `last_sent_on` is empty or
-	earlier, and MariaDB's row lock makes a second worker's UPDATE wait and
-	then change nothing. Returns `(claimed, previous)` -- `previous` is what
-	`_release` puts back."""
+	earlier, so of two workers racing for the row exactly one changes it.
+	Committed at once: `frappe.sendmail` queues without committing, so an
+	uncommitted claim would hold the row lock across every company's send
+	and make an overlapping run time out instead of skipping. The cost is
+	deliberate -- a worker killed after the claim leaves that company
+	unmailed for the day rather than mailed twice. Returns
+	`(claimed, previous)` -- `previous` is what `_release` puts back."""
 	previous = frappe.db.get_value(REMINDER_DOCTYPE, name, "last_sent_on")
 	frappe.db.sql(
 		f"""update `tab{REMINDER_DOCTYPE}` set last_sent_on = %(day)s
 		where name = %(name)s and (last_sent_on is null or last_sent_on < %(day)s)""",
 		{"day": day, "name": name},
 	)
-	return bool(frappe.db.sql("select row_count()")[0][0]), previous
+	claimed = bool(frappe.db.sql("select row_count()")[0][0])
+	_commit()
+	return claimed, previous
+
+
+def _digest(text):
+	import hashlib
+
+	return hashlib.sha1(text.encode()).hexdigest()
 
 
 def _release(name, previous):
-	"""Undo a claim that sent nothing, so the next tick can try again."""
+	"""Undo a claim whose send raised before any mail went out, so the next
+	tick can try again. A run that simply had nobody to mail keeps its claim:
+	there is nothing more to send today."""
 	frappe.db.set_value(REMINDER_DOCTYPE, name, "last_sent_on", previous, update_modified=False)
+	_commit()
+
+
+def _commit():
+	"""Commit the claim, except under tests: a test relies on its rollback,
+	and the row lock this releases only matters between real workers."""
+	if not frappe.flags.in_test:
+		frappe.db.commit()
 
 
 def _log_once(key, message, title):
@@ -387,8 +412,10 @@ def _log_once(key, message, title):
 	key = f"{CELEBRATION_GUARD_PREFIX}log|{key}"
 	if frappe.cache.get_value(key):
 		return
-	frappe.cache.set_value(key, 1, expires_in_sec=CELEBRATION_GUARD_SECONDS)
 	frappe.log_error(title=title, message=message)
+	# After the log, not before: a key set ahead of a log that never lands
+	# would silence the failure for the rest of the day.
+	frappe.cache.set_value(key, 1, expires_in_sec=CELEBRATION_GUARD_SECONDS)
 
 
 def _foreign_address_companies():
@@ -703,16 +730,18 @@ def send_holiday_reminders():
 			)
 			result["failed"] += 1
 			continue
-		claimed, previous = _claim(row.name, today)
-		if not claimed:
-			continue
-
 		progress = {"emails": 0}
+		claimed, previous = False, None
 		try:
+			claimed, previous = _claim(row.name, today)
+			if not claimed:
+				continue
 			_send_holiday_company(row, today, foreign, foreign_names, dropped, progress=progress)
 			result["companies"] += 1
 		except Exception:
 			result["failed"] += 1
+			if claimed and not progress["emails"]:
+				_release(row.name, previous)
 			_log_once(
 				f"failed|{today}|holiday|{company}",
 				f"The holiday reminder for '{company}' failed -- Email Template "
@@ -722,11 +751,10 @@ def send_holiday_reminders():
 				"HelixHR holiday reminders",
 			)
 		result["emails"] += progress["emails"]
-		if not progress["emails"]:
-			_release(row.name, previous)
 
 	if dropped:
-		_log_once(f"cross-company|holiday|{getdate()}", title=CROSS_COMPANY_LOG_TITLE, message="\n".join(dropped))
+		message = "\n".join(dropped)
+		_log_once(f"cross-company|{_digest(message)}", title=CROSS_COMPANY_LOG_TITLE, message=message)
 	return result
 
 

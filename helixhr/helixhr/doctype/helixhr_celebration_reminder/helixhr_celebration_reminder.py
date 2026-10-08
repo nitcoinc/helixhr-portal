@@ -19,10 +19,21 @@ options are the same three keys.
 import frappe
 from frappe import _
 from frappe.model.document import Document
+from frappe.utils import getdate
 
 
 class HelixHRCelebrationReminder(Document):
 	def validate(self):
+		# Plan 2026-10-08-001 U2: `last_sent_on` is claimed by the scheduler
+		# with a raw UPDATE that leaves `modified` alone, so a form opened
+		# before the claim saves cleanly -- and would write the older date
+		# back, letting the next tick mail the company again. The later of
+		# the two dates always wins.
+		if not self.is_new():
+			stored = frappe.db.get_value(self.doctype, self.name, "last_sent_on")
+			if stored and (not self.last_sent_on or getdate(stored) > getdate(self.last_sent_on)):
+				self.last_sent_on = stored
+
 		# A reminder that can reach nobody is a misconfiguration, not a
 		# valid state (P8-U10): `recipient_mode` naming "Selected employees"
 		# is HR's own statement of intent to hand-pick a list, so an empty

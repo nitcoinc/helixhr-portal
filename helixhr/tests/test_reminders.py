@@ -531,6 +531,7 @@ class TestCelebrationReminders(IntegrationTestCase):
 
 	def _company_zone(self, company, zone):
 		before = frappe.db.get_value("Company", company, "helixhr_time_zone")
+
 		self.addCleanup(
 			frappe.db.set_value, "Company", company, "helixhr_time_zone", before, update_modified=False
 		)
@@ -645,9 +646,33 @@ class TestCelebrationReminders(IntegrationTestCase):
 		added = self._watch_mail()
 
 		send_celebration_reminders()
+		self.assertEqual(self._last_sent(), getdate(), "the claim is on the row, not in Redis")
 		frappe.cache.delete_keys(f"{reminders.CELEBRATION_GUARD_PREFIX}*")
 		send_celebration_reminders()
 
+		self.assertEqual(len(added()), 1)
+
+	def test_a_stale_form_save_never_moves_the_claim_back(self):
+		"""HR opened the row before the tick claimed it, then saved."""
+		row = frappe.db.get_value("HelixHR Celebration Reminder", {"event": "birthday", "company": COMPANY_A})
+		stale = frappe.get_doc("HelixHR Celebration Reminder", row)
+		reminders._claim(row, getdate())
+
+		stale.save(ignore_permissions=True)
+
+		self.assertEqual(self._last_sent(), getdate())
+
+	def test_a_failure_before_the_first_mail_releases_the_day(self):
+		self._stage(birthdays=("A1",))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		added = self._watch_mail()
+
+		with patch.object(reminders, "get_sender_email", side_effect=RuntimeError("no account")):
+			failed = send_celebration_reminders()
+		self.assertEqual(failed["birthday"]["failed"], 1)
+		self.assertIsNone(self._last_sent(), "nothing went out, so the next tick may try again")
+
+		send_celebration_reminders()
 		self.assertEqual(len(added()), 1)
 
 	def test_a_missing_template_logs_once_across_ticks(self):
