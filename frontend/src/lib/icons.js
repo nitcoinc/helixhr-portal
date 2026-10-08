@@ -36,6 +36,7 @@ export const icons = {
   signOut: ['M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4', 'm16 17 5-5-5-5', 'M21 12H9'],
   chevronLeft: ['m15 18-6-6 6-6'],
   chevronRight: ['m9 18 6-6-6-6'],
+  chevronDown: ['m6 9 6 6 6-6'],
   // P3-U1 step 2: Payslips, Holidays, Directory/Team, and the pin a punch
   // with location wears in the day sheet.
   wallet: [
