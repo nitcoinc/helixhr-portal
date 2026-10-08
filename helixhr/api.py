@@ -826,7 +826,7 @@ _CELEBRATION_FIELDS = ("name", "employee_name", "date_of_birth", "date_of_joinin
 
 
 def _celebration_projection(row, event_date, today):
-	"""One card row: who, which day, and whether that day is today.
+	"""One card row: who, which day, and whether that day is today or past.
 
 	Deliberately no `date`, no `year`, no `age`. `day` and `month` are
 	integers the client formats in the reader's own locale (`formatDayMonth`
@@ -842,6 +842,8 @@ def _celebration_projection(row, event_date, today):
 		"day": event_date.day,
 		"month": event_date.month,
 		"is_today": event_date.day == today.day,
+		# Already over this month: the card draws it last and dimmed.
+		"is_past": event_date.day < today.day,
 	}
 
 
@@ -888,9 +890,13 @@ def _get_celebrations(employee, today):
 
 
 def _ordered_celebrations(entries):
-	"""Today first, then up the month. Someone reading the card today wants
-	today's names at the top; the rest of the month is a reminder."""
-	return sorted(entries, key=lambda entry: (not entry["is_today"], entry["day"]))
+	"""Today first, then the rest of the month still to come, then the days
+	already past. Someone reading the card wants today's names and who is
+	next at the top; the card shows five rows, so past days must not push an
+	upcoming one out of sight."""
+	return sorted(
+		entries, key=lambda entry: (0 if entry["is_today"] else 2 if entry["is_past"] else 1, entry["day"])
+	)
 
 
 def _open_leave(employee):

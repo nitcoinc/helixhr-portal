@@ -212,10 +212,45 @@ class TestHelixHRCelebrations(IntegrationTestCase):
 
 	def _assert_card_order(self, entries):
 		"""The whole list, however many rows the company has: today first,
-		then up the month."""
+		then the rest of the month still to come, then the days already past."""
 		self.assertEqual(
-			entries, sorted(entries, key=lambda row: (not row["is_today"], row["day"]))
+			entries,
+			sorted(
+				entries,
+				key=lambda row: (0 if row["is_today"] else 2 if row["is_past"] else 1, row["day"]),
+			),
 		)
+
+	def test_upcoming_days_come_before_past_ones_and_past_rows_are_marked(self):
+		on_the_20th = date(self.today.year, self.today.month, 20)
+		seeded = {
+			day: make_celebration_employee(
+				f"BDAY-ORDER-{day}", self.company, self._this_month(day), self._joined_elsewhere()
+			)
+			for day in (2, 20, 25, 28)
+		}
+
+		birthdays = _get_celebrations(self.anchor, on_the_20th)["birthdays"]
+
+		self.assertEqual(
+			self._mine(birthdays, seeded.values()), [seeded[20], seeded[25], seeded[28], seeded[2]]
+		)
+		self._assert_card_order(birthdays)
+		past = {row["employee"]: row["is_past"] for row in birthdays}
+		self.assertEqual(
+			[past[seeded[day]] for day in (2, 20, 25, 28)], [True, False, False, False]
+		)
+
+	def test_on_the_first_nobody_is_past(self):
+		first = date(self.today.year, self.today.month, 1)
+		make_celebration_employee(
+			"BDAY-FIRST-OF", self.company, self._this_month(15), self._joined_elsewhere()
+		)
+
+		birthdays = _get_celebrations(self.anchor, first)["birthdays"]
+
+		self.assertTrue(birthdays)
+		self.assertFalse(any(row["is_past"] for row in birthdays))
 
 	def test_birthdays_this_month_only_in_day_order_and_with_no_year_or_age(self):
 		late = make_celebration_employee(
@@ -239,7 +274,9 @@ class TestHelixHRCelebrations(IntegrationTestCase):
 
 		birthdays = self._celebrations()["birthdays"]
 
-		self.assertEqual(self._mine(birthdays, [early, late, last_month, no_dob]), [early, late])
+		# Day 5 is past from the 6th on, and past days sort after upcoming ones.
+		expected = [late, early] if 5 < self.today.day <= 12 else [early, late]
+		self.assertEqual(self._mine(birthdays, [early, late, last_month, no_dob]), expected)
 		self._assert_card_order(birthdays)
 		self.assertTrue(all(row["month"] == self.today.month for row in birthdays))
 		# P4-KTD14: the projection is the privacy boundary. No birth year, no
@@ -248,7 +285,16 @@ class TestHelixHRCelebrations(IntegrationTestCase):
 		for row in birthdays:
 			self.assertEqual(
 				set(row),
-				{"employee", "employee_name", "initials", "photo_url", "day", "month", "is_today"},
+				{
+					"employee",
+					"employee_name",
+					"initials",
+					"photo_url",
+					"day",
+					"month",
+					"is_today",
+					"is_past",
+				},
 			)
 			self.assertNotIn(1990, row.values())
 			self.assertNotIn(self.today.year - 1990, row.values())

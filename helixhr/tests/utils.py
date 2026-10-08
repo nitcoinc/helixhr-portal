@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 from datetime import date
+from unittest.mock import patch
 
 import frappe
 
@@ -2196,3 +2197,18 @@ def ensure_showcase_fixtures():
 	ids = {"employee": employee, "manager": manager, "hr_user": SHOWCASE_HR_USER}
 	print(f"PERSON_ID={employee}")
 	return ids
+
+
+@contextmanager
+def clock_at(instant):
+	"""Plan 2026-10-08-001: pin "now" for the company-clock helpers
+	(`helixhr.utils.company_today`) to one timezone-aware `instant`, seen from
+	whichever zone asks. The bench has no freezegun, and these helpers read
+	the clock only through `frappe.utils.get_datetime_in_timezone`."""
+	from zoneinfo import ZoneInfo
+
+	with patch(
+		"frappe.utils.get_datetime_in_timezone",
+		side_effect=lambda zone: instant.astimezone(ZoneInfo(zone)),
+	):
+		yield

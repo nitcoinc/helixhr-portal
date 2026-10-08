@@ -996,8 +996,8 @@ gated only by HR Settings checkboxes. There is no Email Template record behind
 it, so the copy cannot be changed without editing HRMS — which the next `bench
 update` overwrites, and which P4-R20 forbids outright.
 
-So `helixhr/reminders.py` registers its **own** daily jobs in
-`scheduler_events.daily` and run beside HRMS's. Frappe merges scheduler hooks
+So `helixhr/reminders.py` registers its **own** jobs -- on the hour and
+half hour in `scheduler_events.cron` since plan 2026-10-08-001 -- and runs beside HRMS's. Frappe merges scheduler hooks
 across installed apps and offers no way to remove another app's job, which is
 the whole shape of this design: HelixHR cannot switch HRMS off, so it has to be
 switchable itself and the contradiction has to be refused somewhere.
@@ -1035,13 +1035,24 @@ switchable itself and the contradiction has to be refused somewhere.
   The celebrant's own announcement excludes both of HRMS's address fallback
   orders (KTD5), and employees with no company are never celebrated or mailed,
   only counted (R4).
-- **The send is idempotent per (event, company, day)** (KTD8): a dated cache
-  key, like the overdue digest's, stops a hand-run `bench execute` after the
-  scheduler's round from mailing every company twice. A company is marked only
-  after mail actually went out, so a broken template fixed the same morning can
-  still be sent by hand.
-- **Who is celebrating, and who hears about it, is HRMS's answer** (P4-KTD12).
-  `get_employees_having_an_event_today`, `get_all_employee_emails`,
+- **Each company on its own clock** (plan 2026-10-08-001). `Company.helixhr_time_zone`
+  (blank: the system zone) decides the company's date through
+  `utils.company_today` -- the one resolver the reminders and the backdated
+  grace rule share. A half-hour tick lands on every company's own midnight
+  (whole- and half-hour zones) and retries a failed send 30 minutes later; a
+  tick with nobody due is one query (`_due`) and stops before reading any
+  employee, and celebrants are selected for *its* date by
+  `reminders._celebrants` (HRMS's rule, with the date as a parameter).
+- **The send is idempotent per (event, company, local day)**: the row's
+  `last_sent_on` is claimed by one conditional UPDATE before sending
+  (`_claim`), so concurrent ticks, a hand-run, a Redis restart or
+  `clear-cache` never mail a company twice. Released when nothing went out (a
+  broken template fixed the same morning still delivers); kept once any mail
+  did, because a retry would mail those people again. Failures are logged
+  once per company per day (`_log_once`), not on every tick.
+- **Who hears about it is HRMS's answer** (P4-KTD12); who is celebrating
+  follows HRMS's rule on the company's date (above).
+  `get_all_employee_emails`,
   `get_employee_email` and `get_sender_email` are imported, never
   re-implemented, so eligibility cannot drift from HRMS's. The holiday list
   resolution is HRMS's too (`get_holiday_list_for_employee`), which since
@@ -1171,7 +1182,8 @@ on the employee's leave row (8fe512d).
   the `HelixHR Leave Rules` Single's grace days (working days, default 1),
   edited in `/settings → Leave rules`, exempt for HR Manager and the Single's
   optional role. Insert and From-date change only, so approvers are never
-  blocked. HRMS's flag must stay **off**; preflight FAILs otherwise. Runbook
+  blocked. The window counts back from the employee's company date
+  (`utils.employee_company_today`, plan 2026-10-08-001 U3). HRMS's flag must stay **off**; preflight FAILs otherwise. Runbook
   has the troubleshooting.
 
 ### Portal email: one sandboxed template system (reverses P4-KTD9, reads P5-KTD11)

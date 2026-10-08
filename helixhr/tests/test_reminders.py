@@ -151,6 +151,9 @@ class TestCelebrationReminders(IntegrationTestCase):
 		ensure_test_email_account()
 		_company(COMPANY_A, "TRCA")
 		_company(COMPANY_B, "TRCB")
+		# `reminders._log_once` keeps one dated key per logged failure; a
+		# test that expects the log line must not find an earlier test's.
+		frappe.cache.delete_keys(f"{reminders.CELEBRATION_GUARD_PREFIX}log|*")
 		_template(BIRTHDAY_TEMPLATE, "BDAYMARK {{ names }}")
 		_template(ANNIVERSARY_TEMPLATE, "ANNIVMARK {{ names }}")
 
@@ -174,6 +177,7 @@ class TestCelebrationReminders(IntegrationTestCase):
 					as_dict=True,
 				)
 				self._pick(field, None, company=company)
+				self._clear_guard(event, company)
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
@@ -190,13 +194,11 @@ class TestCelebrationReminders(IntegrationTestCase):
 				update_modified=False,
 			)
 			frappe.clear_document_cache("HelixHR Celebration Reminder", snapshot.name)
-		# KTD8's rerun guard is a Redis key a previous test may have left
-		# behind for today.
+		# The rerun guard is the row's `last_sent_on` (plan 2026-10-08-001
+		# U2), and `sendmail` commits it along with the mail.
 		for company in (COMPANY_A, COMPANY_B):
 			for event in _FIELD_TO_EVENT.values():
-				frappe.cache.delete_value(
-					f"{reminders.CELEBRATION_GUARD_PREFIX}{getdate()}|{event}|{company}"
-				)
+				self._clear_guard(event, company)
 		for row in self.queued:
 			frappe.db.delete("Email Queue Recipient", {"parent": row})
 			frappe.db.delete("Email Queue", {"name": row})
@@ -204,8 +206,12 @@ class TestCelebrationReminders(IntegrationTestCase):
 	def _clear_guard(self, event="birthday", company=COMPANY_A):
 		"""Make the (event, company) pair sendable again today -- for tests
 		that send twice on purpose."""
-		frappe.cache.delete_value(
-			f"{reminders.CELEBRATION_GUARD_PREFIX}{getdate()}|{event}|{company}"
+		frappe.db.set_value(
+			"HelixHR Celebration Reminder",
+			{"event": event, "company": company},
+			"last_sent_on",
+			None,
+			update_modified=False,
 		)
 
 	def _ensure_reminder(self, event, company):
@@ -338,8 +344,8 @@ class TestCelebrationReminders(IntegrationTestCase):
 		)
 
 	def test_an_employee_with_no_company_is_never_celebrated_or_mailed(self):
-		"""R4: HRMS groups celebrants by company, and a None group is nobody's
-		settings row and nobody's pool. Skipped people are counted in the log."""
+		"""R4: a celebrant with no company is nobody's settings row and
+		nobody's pool. Skipped people are counted in the log."""
 		from unittest.mock import patch
 
 		self._stage(birthdays=("A1",))
@@ -352,11 +358,11 @@ class TestCelebrationReminders(IntegrationTestCase):
 			personal_email=None,
 		)
 
-		real = reminders.get_employees_having_an_event_today
+		real = reminders._celebrants
 		with patch.object(
 			reminders,
-			"get_employees_having_an_event_today",
-			side_effect=lambda event: {None: [ghost], COMPANY_A: real(event).get(COMPANY_A, [])},
+			"_celebrants",
+			side_effect=lambda event, company, day: [ghost] if company is None else real(event, company, day),
 		):
 			added = self._watch_mail()
 			result = send_celebration_reminders()
@@ -413,8 +419,10 @@ class TestCelebrationReminders(IntegrationTestCase):
 
 		with patch.object(
 			reminders,
-			"get_employees_having_an_event_today",
-			return_value={COMPANY_A: [dict(nouser_row)]},
+			"_celebrants",
+			side_effect=lambda event, company, day: (
+				[dict(nouser_row)] if event == "birthday" and company == COMPANY_A else []
+			),
 		):
 			added = self._watch_mail()
 			send_celebration_reminders()
@@ -518,6 +526,228 @@ class TestCelebrationReminders(IntegrationTestCase):
 		self.assertIn(
 			f"{reminders.CELEBRATION_GUARD_PREFIX}*", frappe.get_hooks("persistent_cache_keys")
 		)
+
+	# --- plan 2026-10-08-001 U2: each company's own midnight ---------------
+
+	def _company_zone(self, company, zone):
+		before = frappe.db.get_value("Company", company, "helixhr_time_zone")
+
+		self.addCleanup(
+			frappe.db.set_value, "Company", company, "helixhr_time_zone", before, update_modified=False
+		)
+		frappe.db.set_value("Company", company, "helixhr_time_zone", zone, update_modified=False)
+
+	def _born(self, suffix, day):
+		"""Re-date one pool person's birthday to `day` (year 1990)."""
+		from helixhr.tests.utils import make_celebration_employee
+
+		make_celebration_employee(
+			f"REM-{suffix}",
+			POOL[suffix],
+			date_of_birth=date(1990, day.month, day.day),
+			date_of_joining=date(2015, self.other_month, 4),
+			company_email=self._address(suffix),
+		)
+
+	def _at(self, instant):
+		"""The system zone is Chicago and "now" is `instant`, for the block."""
+		from contextlib import ExitStack
+
+		from helixhr.tests.utils import clock_at
+
+		stack = ExitStack()
+		stack.enter_context(patch("frappe.utils.get_system_timezone", return_value="America/Chicago"))
+		stack.enter_context(clock_at(instant))
+		return stack
+
+	def _last_sent(self, company=COMPANY_A, event="birthday"):
+		value = frappe.db.get_value(
+			"HelixHR Celebration Reminder", {"event": event, "company": company}, "last_sent_on"
+		)
+		return getdate(value) if value else None
+
+	def _ist_birthday_on_nov_1(self):
+		self._stage()
+		self._company_zone(COMPANY_A, "Asia/Kolkata")
+		self._born("A1", date(2026, 11, 1))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+
+	def test_an_ist_company_is_mailed_just_after_its_own_midnight(self):
+		from datetime import UTC, datetime
+
+		self._ist_birthday_on_nov_1()
+		added = self._watch_mail()
+		# 2026-10-31 13:40 CDT is 00:10 IST on Nov 1.
+		with self._at(datetime(2026, 10, 31, 18, 40, tzinfo=UTC)):
+			result = send_celebration_reminders()
+
+		self.assertEqual(result["birthday"]["emails"], 1)
+		self.assertEqual([mail["recipients"] for mail in added()], [[self._address("A2"), self._address("A3")]])
+		self.assertEqual(self._last_sent(), date(2026, 11, 1))
+
+	def test_before_the_companys_midnight_nothing_is_sent_about_tomorrow(self):
+		from datetime import UTC, datetime
+
+		self._ist_birthday_on_nov_1()
+		added = self._watch_mail()
+		# 2026-10-31 13:20 CDT is 23:50 IST on Oct 31.
+		with self._at(datetime(2026, 10, 31, 18, 20, tzinfo=UTC)):
+			send_celebration_reminders()
+
+		self.assertEqual(added(), [])
+		self.assertIsNone(self._last_sent())
+
+	def test_the_next_day_is_sent_even_while_the_system_date_matches_the_last_claim(self):
+		"""The review's catch: on Nov 1 at 13:40 CST it is 01:10 IST on Nov 2.
+		The system date (Nov 1) equals the previous claim, and the IST
+		company is still due its Nov 2 mail."""
+		from datetime import UTC, datetime
+
+		self._stage()
+		self._company_zone(COMPANY_A, "Asia/Kolkata")
+		self._born("A1", date(2026, 11, 2))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		frappe.db.set_value(
+			"HelixHR Celebration Reminder",
+			{"event": "birthday", "company": COMPANY_A},
+			"last_sent_on",
+			"2026-11-01",
+			update_modified=False,
+		)
+		added = self._watch_mail()
+		with self._at(datetime(2026, 11, 1, 19, 40, tzinfo=UTC)):
+			send_celebration_reminders()
+
+		self.assertEqual(len(added()), 1)
+		self.assertEqual(self._last_sent(), date(2026, 11, 2))
+
+	def test_two_zones_in_one_tick_each_get_their_own_date(self):
+		from datetime import UTC, datetime
+
+		self._stage()
+		self._company_zone(COMPANY_A, "Asia/Kolkata")
+		self._company_zone(COMPANY_B, None)
+		self._born("A1", date(2026, 11, 1))
+		self._born("B1", date(2026, 11, 1))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE, company=COMPANY_A)
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE, company=COMPANY_B)
+		added = self._watch_mail()
+		with self._at(datetime(2026, 10, 31, 18, 40, tzinfo=UTC)):
+			send_celebration_reminders()
+
+		recipients = [r for mail in added() for r in mail["recipients"]]
+		self.assertIn(self._address("A2"), recipients, "IST is on Nov 1: A1's birthday")
+		self.assertNotIn(self._address("B2"), recipients, "Chicago is still on Oct 31")
+		self.assertIsNone(self._last_sent(COMPANY_B))
+
+	def test_the_claim_survives_losing_the_cache(self):
+		self._stage(birthdays=("A1",))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		added = self._watch_mail()
+
+		send_celebration_reminders()
+		self.assertEqual(self._last_sent(), getdate(), "the claim is on the row, not in Redis")
+		frappe.cache.delete_keys(f"{reminders.CELEBRATION_GUARD_PREFIX}*")
+		send_celebration_reminders()
+
+		self.assertEqual(len(added()), 1)
+
+	def test_a_stale_form_save_never_moves_the_claim_back(self):
+		"""HR opened the row before the tick claimed it, then saved."""
+		row = frappe.db.get_value("HelixHR Celebration Reminder", {"event": "birthday", "company": COMPANY_A})
+		stale = frappe.get_doc("HelixHR Celebration Reminder", row)
+		reminders._claim(row, getdate())
+
+		stale.save(ignore_permissions=True)
+
+		self.assertEqual(self._last_sent(), getdate())
+
+	def test_a_failure_before_the_first_mail_releases_the_day(self):
+		self._stage(birthdays=("A1",))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		added = self._watch_mail()
+
+		with patch.object(reminders, "get_sender_email", side_effect=RuntimeError("no account")):
+			failed = send_celebration_reminders()
+		self.assertEqual(failed["birthday"]["failed"], 1)
+		self.assertIsNone(self._last_sent(), "nothing went out, so the next tick may try again")
+
+		send_celebration_reminders()
+		self.assertEqual(len(added()), 1)
+
+	def test_a_missing_template_logs_once_across_ticks(self):
+		self._stage(birthdays=("A1",))
+		self._pick("helixhr_birthday_template", "_Test Template That Went Away")
+		errors = self._errors()
+
+		send_celebration_reminders()
+		send_celebration_reminders()
+
+		self.assertEqual(len(errors()), 1)
+		self.assertIsNone(self._last_sent(), "nothing went out, so the day is not used up")
+
+	def test_a_failure_after_some_mail_keeps_the_claim(self):
+		"""The pool mail went out, then the shared-day mail raised. A retry
+		would mail the pool again, so the day stays claimed."""
+		self._stage(birthdays=("A1", "A2"))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		added = self._watch_mail()
+		errors = self._errors()
+		real = reminders._send
+		calls = []
+
+		def second_raises(*args, **kwargs):
+			calls.append(1)
+			if len(calls) == 2:
+				raise RuntimeError("shared-day render failed")
+			return real(*args, **kwargs)
+
+		with patch.object(reminders, "_send", side_effect=second_raises):
+			first = send_celebration_reminders()
+		send_celebration_reminders()
+
+		self.assertEqual(first["birthday"]["failed"], 1)
+		self.assertEqual(len(added()), 1, "the pool mail, once; no retry")
+		self.assertEqual(self._last_sent(), getdate())
+		self.assertEqual(len(errors()), 1)
+
+	def test_a_day_is_claimed_once(self):
+		"""Two ticks (or a tick and a hand-run) racing for the same row: the
+		conditional UPDATE lets exactly one of them have the day."""
+		row = frappe.db.get_value("HelixHR Celebration Reminder", {"event": "birthday", "company": COMPANY_A})
+		first, _ = reminders._claim(row, getdate())
+		second, _ = reminders._claim(row, getdate())
+		self.assertEqual((first, second), (True, False))
+		later, _ = reminders._claim(row, add_days(getdate(), 1))
+		self.assertTrue(later, "the next day is claimable")
+
+	def test_the_deploy_patch_carries_todays_send_onto_the_row(self):
+		from helixhr.patches.v1_0 import seed_reminder_last_sent_on
+
+		key = f"{reminders.CELEBRATION_GUARD_PREFIX}{getdate()}|birthday|{COMPANY_A}"
+		frappe.cache.set_value(key, 1)
+		self.addCleanup(frappe.cache.delete_value, key)
+
+		seed_reminder_last_sent_on.execute()
+
+		self.assertEqual(self._last_sent(), getdate())
+		self.assertIsNone(self._last_sent(COMPANY_B), "no key, no claim")
+
+	def test_a_tick_with_nobody_due_reads_no_employees(self):
+		"""The half-hour ticks between midnights must cost one small query,
+		not a scan of every employee for the cross-company guard."""
+		self._stage(birthdays=("A1",))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		send_celebration_reminders()
+
+		with patch.object(reminders, "_foreign_address_companies") as scan:
+			result = send_celebration_reminders()
+		scan.assert_not_called()
+		self.assertEqual(result["birthday"], {"companies": 0, "emails": 0, "failed": 0})
+
+	def test_the_email_date_is_the_companys_date(self):
+		context = reminders._context([], COMPANY_A, "birthday", date(2026, 11, 1))
+		self.assertEqual(context["date"], frappe.utils.format_date(date(2026, 11, 1), reminders._date_format()))
 
 	def test_one_birthday_mails_everyone_else_in_that_company(self):
 		self._stage(birthdays=("A1",))
@@ -686,11 +916,15 @@ class TestCelebrationReminders(IntegrationTestCase):
 		self.assertEqual([mail["recipients"] for mail in mails], [[self._address("B2")]])
 		self.assertEqual(len(errors()), 1)
 
-	def test_the_job_is_registered_as_a_daily_scheduler_event(self):
+	def test_the_job_ticks_every_half_hour_and_the_digest_stays_daily(self):
+		"""Plan 2026-10-08-001 U2: a half-hour tick reaches every company's
+		own midnight; the site-wide digest keeps its daily slot."""
+		events = frappe.get_hooks("scheduler_events")
 		self.assertIn(
-			"helixhr.reminders.send_celebration_reminders",
-			frappe.get_hooks("scheduler_events")["daily"],
+			"helixhr.reminders.send_celebration_reminders", events["cron"]["0,30 * * * *"]
 		)
+		self.assertNotIn("helixhr.reminders.send_celebration_reminders", events["daily"])
+		self.assertIn("helixhr.reminders.send_overdue_digests", events["daily"])
 
 	# --- P8-U11: "Selected employees" recipient mode ------------------------
 
@@ -1056,7 +1290,7 @@ class TestHolidayReminders(IntegrationTestCase):
 	"""Plan 2026-10-04-004 U3: HelixHR's own per-company holiday reminder,
 	replacing HRMS's hardcoded global one (R7, R8, KTD6, KTD7).
 
-	Dates are pinned to a fixed Monday via `reminders.getdate`, so the
+	Dates are pinned to a fixed Monday via `reminders.company_today`, so the
 	Weekly window is Monday..Sunday regardless of which day the suite runs
 	on."""
 
@@ -1065,6 +1299,9 @@ class TestHolidayReminders(IntegrationTestCase):
 		ensure_test_email_account()
 		_company(COMPANY_A, "TRCA")
 		_company(COMPANY_B, "TRCB")
+		# `reminders._log_once` keeps one dated key per logged failure; a
+		# test that expects the log line must not find an earlier test's.
+		frappe.cache.delete_keys(f"{reminders.CELEBRATION_GUARD_PREFIX}log|*")
 		# The holiday context has no `persons`, so this template must not
 		# reuse the celebration marker HTML above.
 		self.holiday_template = _holiday_template(
@@ -1082,20 +1319,12 @@ class TestHolidayReminders(IntegrationTestCase):
 		if self.monday.day == 1:
 			self.monday = add_days(self.monday, 7)
 		self.wednesday = add_days(self.monday, 2)
-		self._getdate_patch = patch.object(reminders, "getdate", return_value=self.monday)
-		self._getdate_patch.start()
-		self.addCleanup(self._getdate_patch.stop)
-		# The rerun guard is keyed on the pinned Monday: clear it before and
-		# after every test, or the alphabetically first test's send disables
-		# every later one's.
-		for company in (COMPANY_A, COMPANY_B):
-			frappe.cache.delete_value(
-				f"{reminders.CELEBRATION_GUARD_PREFIX}{self.monday}|holiday|{company}"
-			)
-			self.addCleanup(
-				frappe.cache.delete_value,
-				f"{reminders.CELEBRATION_GUARD_PREFIX}{self.monday}|holiday|{company}",
-			)
+		# Each company's date comes from `company_today` (plan 2026-10-08-001
+		# U2), the one seam that pins it. The rerun guard is the row's
+		# `last_sent_on`, and every test below starts from a fresh row.
+		self._today_patch = patch.object(reminders, "company_today", return_value=self.monday)
+		self._today_patch.start()
+		self.addCleanup(self._today_patch.stop)
 
 		self.queued = set()
 		self.original = {}
@@ -1136,12 +1365,6 @@ class TestHolidayReminders(IntegrationTestCase):
 				frappe.get_doc(self.original[company]).insert(ignore_permissions=True)
 			else:
 				self.original.setdefault(company, None)
-		frappe.cache.delete_value(
-			f"{reminders.CELEBRATION_GUARD_PREFIX}{self.monday}|holiday|{COMPANY_A}"
-		)
-		frappe.cache.delete_value(
-			f"{reminders.CELEBRATION_GUARD_PREFIX}{self.monday}|holiday|{COMPANY_B}"
-		)
 		for row in self.queued:
 			frappe.db.delete("Email Queue Recipient", {"parent": row})
 			frappe.db.delete("Email Queue", {"name": row})
@@ -1327,6 +1550,26 @@ class TestHolidayReminders(IntegrationTestCase):
 
 		self.assertEqual(len(added()), 1)
 
+	def test_a_weekly_row_sends_on_its_own_monday(self):
+		"""Plan 2026-10-08-001 U2: the send day is judged on the company's
+		date. When the company's clock says Sunday nothing is sent and no
+		claim is written; on its Monday it sends."""
+		self._list("_Test Holiday List A", (self.wednesday,))
+		self._employees({"A1": "_Test Holiday List A", "A2": None, "A3": None})
+		added = self._watch_mail()
+
+		with patch.object(reminders, "company_today", return_value=add_days(self.monday, -1)):
+			reminders.send_holiday_reminders()
+		self.assertEqual(added(), [])
+		self.assertIsNone(
+			frappe.db.get_value(
+				"HelixHR Celebration Reminder", {"event": "holiday", "company": COMPANY_A}, "last_sent_on"
+			)
+		)
+
+		reminders.send_holiday_reminders()
+		self.assertEqual(len(added()), 1)
+
 	def test_the_weekly_window_covers_monday_through_sunday_only(self):
 		"""R7's exclusive bounds: a holiday on the window's first and last
 		day is listed; the following Monday is left to the next mail. Its
@@ -1351,16 +1594,9 @@ class TestHolidayReminders(IntegrationTestCase):
 		"""R7's exclusive bounds for the Monthly cadence, pinned to a 1st:
 		the month's last day is listed, the next month's 1st is not."""
 		pinned = get_first_day(add_months(self.monday, 1))
-		self._monthly_patch = patch.object(reminders, "getdate", return_value=pinned)
+		self._monthly_patch = patch.object(reminders, "company_today", return_value=pinned)
 		self._monthly_patch.start()
 		self.addCleanup(self._monthly_patch.stop)
-		frappe.cache.delete_value(
-			f"{reminders.CELEBRATION_GUARD_PREFIX}{pinned}|holiday|{COMPANY_A}"
-		)
-		self.addCleanup(
-			frappe.cache.delete_value,
-			f"{reminders.CELEBRATION_GUARD_PREFIX}{pinned}|holiday|{COMPANY_A}",
-		)
 		month_end = add_days(add_months(pinned, 1), -1)
 		self._list(
 			"_Test Holiday List BoundsM", (pinned, month_end, add_days(month_end, 1))
@@ -1455,11 +1691,10 @@ class TestHolidayReminders(IntegrationTestCase):
 		finally:
 			frappe.db.set_single_value("HR Settings", "send_holiday_reminders", 0)
 
-	def test_the_sender_is_registered_as_a_daily_scheduler_event(self):
-		self.assertIn(
-			"helixhr.reminders.send_holiday_reminders",
-			frappe.get_hooks("scheduler_events")["daily"],
-		)
+	def test_the_sender_ticks_every_half_hour(self):
+		events = frappe.get_hooks("scheduler_events")
+		self.assertIn("helixhr.reminders.send_holiday_reminders", events["cron"]["0,30 * * * *"])
+		self.assertNotIn("helixhr.reminders.send_holiday_reminders", events["daily"])
 
 
 class TestOverdueDigests(IntegrationTestCase):

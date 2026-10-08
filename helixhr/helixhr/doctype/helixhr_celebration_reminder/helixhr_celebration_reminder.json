@@ -13,7 +13,8 @@
   "recipient_mode",
   "recipients",
   "frequency",
-  "hide_logo"
+  "hide_logo",
+  "last_sent_on"
  ],
  "fields": [
   {
@@ -77,6 +78,14 @@
    "fieldname": "hide_logo",
    "fieldtype": "Check",
    "label": "Hide company logo"
+  },
+  {
+   "description": "The company-local date this reminder last went out. Set by the scheduler before sending, so it is sent at most once a day.",
+   "fieldname": "last_sent_on",
+   "fieldtype": "Date",
+   "label": "Last sent on",
+   "no_copy": 1,
+   "read_only": 1
   }
  ],
  "module": "HelixHR",

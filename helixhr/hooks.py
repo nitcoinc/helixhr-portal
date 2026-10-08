@@ -224,6 +224,10 @@ doc_events = {
 	# ERPNext's Employee -> User image sync; `on_update` puts it back.
 	# Plan 2026-10-07-001: `validate` derives the three approver fields from
 	# `reports_to`, so leave, shift and expense follow the same manager.
+	# Plan 2026-10-08-001 U1: a company's own time zone must be a real one.
+	"Company": {
+		"validate": "helixhr.events.company_validate",
+	},
 	"Employee": {
 		"validate": "helixhr.events.employee_validate",
 		"before_save": "helixhr.events.employee_before_save",
@@ -421,10 +425,19 @@ persistent_cache_keys = ["helixhr-overdue-digest|*", "helixhr-celebration|*"]
 scheduler_events = {
 	"daily": [
 		"helixhr.tasks.null_stale_checkin_coordinates",
-		"helixhr.reminders.send_celebration_reminders",
-		"helixhr.reminders.send_holiday_reminders",
 		"helixhr.reminders.send_overdue_digests",
 	],
+	# Plan 2026-10-08-001 U2: on the hour and half hour, so each company is
+	# mailed at *its own* midnight (whole- and half-hour zones: Chicago, IST)
+	# and a failed send retries 30 minutes later. A tick with nobody due is
+	# one small query (`reminders._due`); each send is claimed once per
+	# company-local day on the reminder row.
+	"cron": {
+		"0,30 * * * *": [
+			"helixhr.reminders.send_celebration_reminders",
+			"helixhr.reminders.send_holiday_reminders",
+		],
+	},
 	# Off by default -- helixhr.telemetry.send_ping is a no-op until an
 	# operator sets both helixhr_telemetry_enabled and helixhr_telemetry_url
 	# (docs/deployment.md).

@@ -21,8 +21,9 @@ const props = defineProps({
   anniversaries: { type: Array, default: () => [] },
 })
 
-/** Rows shown before the disclosure appears. The server sorts today-first and
- * then by day, so the five kept are the five most relevant, not an arbitrary
+/** Rows shown before the disclosure appears. The server sorts today first,
+ * then the days still to come, then the days already past (`is_past`, drawn
+ * dimmed), so the five kept are the five most relevant, not an arbitrary
  * five. */
 const VISIBLE_ROWS = 5
 
@@ -96,13 +97,19 @@ function when(person) {
           >
             <Avatar
               class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-xs font-bold text-ink-green-3"
+              :class="person.is_past ? 'opacity-60' : ''"
               :photo-url="person.photo_url"
               :initials="person.initials"
               :size="32"
             />
 
             <span class="min-w-0 flex-1">
-              <span class="block truncate text-sm font-medium text-ink-gray-9">
+              <!-- A day already over is dimmed, not hidden: ink-gray-6 still
+                   reads at AA on the card surface. -->
+              <span
+                class="block truncate text-sm font-medium"
+                :class="person.is_past ? 'text-ink-gray-6' : 'text-ink-gray-9'"
+              >
                 {{ person.employee_name }}
               </span>
               <span class="block truncate text-xs text-ink-gray-5">

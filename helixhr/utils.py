@@ -1155,6 +1155,45 @@ def send_notification(event_key, recipients, context, reference_doctype=None, re
 			frappe.log_error(frappe.get_traceback(), f"HelixHR {event_key} mail failed")
 
 
+# Plan 2026-10-08-001 U1: a company's own clock. A server whose System
+# Settings zone is America/Chicago can run a company in Asia/Kolkata, and that
+# company's reminders and backdated-leave grace must follow *its* midnight.
+# These three helpers are the only place a company's date is worked out, so
+# the reminder jobs and the grace rule cannot disagree -- and the one seam a
+# test freezes.
+
+
+def is_time_zone(value):
+	"""True for an IANA zone name Python can load (`Asia/Kolkata`)."""
+	from zoneinfo import available_timezones
+
+	return bool(value) and value in available_timezones()
+
+
+def company_time_zone(company):
+	"""`Company.helixhr_time_zone`, else the System Settings zone. A value
+	written behind `company_validate` that does not load falls back too;
+	preflight WARNs about it."""
+	from frappe.utils import get_system_timezone
+
+	zone = (frappe.db.get_value("Company", company, "helixhr_time_zone") or "").strip() if company else ""
+	return zone if is_time_zone(zone) else get_system_timezone()
+
+
+def company_today(company):
+	"""Today's date on `company`'s own clock."""
+	from frappe.utils import get_datetime_in_timezone
+
+	return get_datetime_in_timezone(company_time_zone(company)).date()
+
+
+def employee_company_today(employee):
+	"""Today's date on the clock of `employee`'s company; the system date for
+	an employee with no company."""
+	company = frappe.db.get_value("Employee", employee, "company") if employee else None
+	return company_today(company)
+
+
 # Plan 2026-10-06-001 U1: the backdated grace rule's default, in one place.
 # The Single's JSON field carries `"default": "1"` for Frappe's own form
 # rendering; this constant is what `events.backdated_grace_days` and the

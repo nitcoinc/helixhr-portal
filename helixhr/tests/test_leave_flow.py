@@ -2,7 +2,7 @@ from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
-from frappe.utils import add_days, getdate, today
+from frappe.utils import add_days, formatdate, getdate, today
 
 from helixhr.api import (
 	_act_on_leave_application,
@@ -1167,6 +1167,36 @@ class TestBackdatedGrace(IntegrationTestCase):
 			self.assertEqual(backdated_leave_earliest(self.employee_name, monday), getdate("2026-09-27"))
 			self.assertIsNone(backdated_leave_reason(self.employee_name, "2026-09-27", monday))
 			self.assertTrue(backdated_leave_reason(self.employee_name, "2026-09-26", monday))
+
+	def test_the_window_counts_from_the_employees_company_date(self):
+		"""Plan 2026-10-08-001 U3: 2026-10-09 01:00 UTC is 20:00 CDT on the
+		8th in Chicago but 06:30 IST on the 9th. An IST company's employee
+		counts one day back from the 9th."""
+		from datetime import UTC, datetime
+
+		from helixhr.tests.utils import clock_at
+
+		company = frappe.db.get_value("Employee", self.employee_name, "company")
+		before = frappe.db.get_value("Company", company, "helixhr_time_zone")
+		self.addCleanup(
+			frappe.db.set_value, "Company", company, "helixhr_time_zone", before, update_modified=False
+		)
+		frappe.set_user(EMPLOYEE_USER)
+		with (
+			self._conf(grace_days=1),
+			patch("helixhr.api._holiday_dates", return_value=None),
+			patch("frappe.utils.get_system_timezone", return_value="America/Chicago"),
+			clock_at(datetime(2026, 10, 9, 1, 0, tzinfo=UTC)),
+		):
+			frappe.db.set_value("Company", company, "helixhr_time_zone", None, update_modified=False)
+			self.assertEqual(backdated_leave_earliest(self.employee_name), getdate("2026-10-07"))
+
+			frappe.db.set_value("Company", company, "helixhr_time_zone", "Asia/Kolkata", update_modified=False)
+			self.assertEqual(backdated_leave_earliest(self.employee_name), getdate("2026-10-08"))
+			self.assertIsNone(backdated_leave_reason(self.employee_name, "2026-10-08"))
+			self.assertIn(
+				formatdate("2026-10-08"), backdated_leave_reason(self.employee_name, "2026-10-07") or ""
+			)
 
 	def test_grace_defaults_to_one_day(self):
 		# Unset in the Single -- no stored value -- reads as 1.

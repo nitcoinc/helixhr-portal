@@ -975,16 +975,19 @@ def backdated_leave_earliest(employee, as_of=None):
 	when the session user is exempt. Shared by the validate rule and the
 	leave preview so the two cannot disagree.
 
-	Walks back N working days from `as_of` (default `getdate()`, the system
-	timezone's today), skipping the employee's holiday-list dates. With no
+	Walks back N working days from `as_of` -- by default the employee's own
+	company date (plan 2026-10-08-001 U3), so an IST employee on a server
+	whose system zone is America/Chicago is not a day short every IST
+	morning -- skipping the employee's holiday-list dates. With no
 	resolvable holiday list `_holiday_dates` answers None and the walk counts
 	calendar days instead -- stricter, never looser.
 	"""
 	if _backdated_exempt():
 		return None
 	from helixhr.api import _holiday_dates
+	from helixhr.utils import employee_company_today
 
-	today = getdate(as_of)
+	today = getdate(as_of) if as_of else employee_company_today(employee)
 	grace = backdated_grace_days()
 	# Generous window: a long holiday run still resolves in one lookup.
 	holidays = _holiday_dates(employee, add_days(today, -(grace * 3 + 31)), today) or set()
@@ -2050,6 +2053,21 @@ def attendance_request_on_trash(doc, method=None):
 
 
 # HR Settings (P4-U6 / P4-R18 / P4-KTD10) ------------------------------------
+
+
+def company_validate(doc, method=None):
+	"""Plan 2026-10-08-001 U1: refuse a time zone Python cannot load. Left
+	alone, a typo (`Asia/Kolkatta`) would silently mean the system zone and
+	this company's reminders would go out at the wrong midnight."""
+	from helixhr.utils import is_time_zone
+
+	doc.helixhr_time_zone = (doc.get("helixhr_time_zone") or "").strip()
+	if doc.helixhr_time_zone and not is_time_zone(doc.helixhr_time_zone):
+		frappe.throw(
+			_("Time Zone {0} is not a known time zone. Use a name like Asia/Kolkata or America/Chicago.").format(
+				frappe.bold(doc.helixhr_time_zone)
+			)
+		)
 
 
 def hr_settings_validate(doc, method=None):

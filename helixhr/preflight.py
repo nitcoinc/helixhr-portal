@@ -287,6 +287,31 @@ def check_backdated_leave_grace():
 	)
 
 
+def check_company_time_zones():
+	"""Plan 2026-10-08-001 U1: every company's effective clock, which decides
+	when its reminders go out and where its backdated grace counts from. A
+	stored zone Python cannot load is a WARN: it silently means the system
+	zone."""
+	from frappe.utils import get_system_timezone
+
+	from helixhr.utils import is_time_zone
+
+	system = get_system_timezone()
+	shown, bad = [], []
+	for company in frappe.get_all("Company", fields=["name", "helixhr_time_zone"], order_by="name asc"):
+		zone = (company.helixhr_time_zone or "").strip()
+		if zone and not is_time_zone(zone):
+			bad.append(f"{company.name} ({zone})")
+		shown.append(f"{company.name}: {zone if zone and is_time_zone(zone) else system + ' (system)'}")
+	if bad:
+		return _result(
+			"Company time zones",
+			WARN,
+			"not a known time zone, so the system zone is used: " + ", ".join(bad),
+		)
+	return _result("Company time zones", PASS, "; ".join(shown) or "no companies")
+
+
 def check_unsubmitted_approved_leave():
 	"""P2-R10 / P2-U1 step 4: rows the pre-P2-U1 portal marked Approved
 	without submitting. They consumed no balance and wrote no ledger entry,
@@ -1779,6 +1804,7 @@ CHECKS = [
 	check_leave_approver_mandatory,
 	check_self_leave_approval_blocked,
 	check_backdated_leave_grace,
+	check_company_time_zones,
 	check_unsubmitted_approved_leave,
 	check_approvers_follow_reports_to,
 	check_document_link_urls,

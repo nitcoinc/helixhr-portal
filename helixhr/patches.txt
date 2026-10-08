@@ -118,3 +118,6 @@ helixhr.patches.v1_0.migrate_backdated_leave_rules
 # standard DocPerm on HelixHR Report Access, so the new Portal Admin /
 # System Manager gate cannot be bypassed through `/api/resource`.
 helixhr.patches.v1_0.apply_permission_deltas #2026-10-06 U3 HR Manager off Report Access
+# Plan 2026-10-08-001 U2: reminders claim `last_sent_on` instead of a Redis key;
+# carry today's sends over so deploy day mails nobody twice.
+helixhr.patches.v1_0.seed_reminder_last_sent_on
