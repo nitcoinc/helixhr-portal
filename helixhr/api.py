@@ -8561,17 +8561,25 @@ def upload_email_theme_logo(remove=0):
 	file_name = os.path.basename(upload.filename or "").strip()
 	content = upload.stream.read()
 	extension = validate_logo_upload(file_name, content)
-	file_doc = frappe.get_doc(
-		{
-			"doctype": "File",
-			"file_name": f"email-theme-logo{extension}",
-			"content": content,
-			"attached_to_doctype": EMAIL_THEME,
-			"attached_to_name": EMAIL_THEME,
-			"attached_to_field": "logo",
-			"is_private": 0,
-		}
-	).insert(ignore_permissions=True)
+	# The logo must be public (mail clients and the preview load it by URL),
+	# and preflight requires System Settings' "only System Managers upload
+	# public files". That rule checks the session user even under
+	# `ignore_permissions`, so a Portal Admin was refused with a bare
+	# PermissionError. The gate above and `validate_logo_upload` have already
+	# decided this upload, so only this one insert runs as Administrator --
+	# every other public upload on the site stays locked.
+	with as_administrator():
+		file_doc = frappe.get_doc(
+			{
+				"doctype": "File",
+				"file_name": f"email-theme-logo{extension}",
+				"content": content,
+				"attached_to_doctype": EMAIL_THEME,
+				"attached_to_name": EMAIL_THEME,
+				"attached_to_field": "logo",
+				"is_private": 0,
+			}
+		).insert(ignore_permissions=True)
 	doc.logo = file_doc.file_url
 	doc.save(ignore_permissions=True)
 	return _theme_projection()
