@@ -122,6 +122,20 @@ class TestEmailTheme(IntegrationTestCase):
 		self.assertEqual(upload_email_theme_logo(remove=1)["logo"], "")
 		self.assertFalse(frappe.db.get_single_value(EMAIL_THEME, "logo"))
 
+	def test_the_logo_uploads_while_public_uploads_are_locked_to_system_managers(self):
+		"""Production's case: preflight requires System Settings'
+		`only_allow_system_managers_to_upload_public_files`, which refused a
+		Portal Admin's logo with a bare PermissionError."""
+		field = "only_allow_system_managers_to_upload_public_files"
+		before = frappe.db.get_single_value("System Settings", field)
+		self.addCleanup(frappe.db.set_single_value, "System Settings", field, before)
+		frappe.db.set_single_value("System Settings", field, 1)
+
+		frappe.set_user(EMAIL_ADMIN_USER)
+		result = self._upload("logo.png", _png())
+		self.assertTrue(result["logo"].startswith("/files/"), result["logo"])
+		self.assertEqual(frappe.session.user, EMAIL_ADMIN_USER, "the caller is restored")
+
 	def test_svg_mismatched_and_oversized_uploads_are_refused(self):
 		frappe.set_user(EMAIL_ADMIN_USER)
 		svg = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'

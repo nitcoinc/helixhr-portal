@@ -222,21 +222,39 @@ onUnmounted(() => {
             class="space-y-0.5"
             :class="group.label || group.id === 'bottom' ? 'mt-2' : ''"
           >
+            <!-- A collapsed group must read as "there is more in here": HR
+                 could not find Settings inside a closed Admin. So the header
+                 is a visible control (hover surface, down-chevron that flips),
+                 and while closed it counts what it holds and names it in the
+                 tooltip. -->
             <button
               v-if="group.collapsible"
               type="button"
-              class="flex w-full cursor-pointer items-center justify-between rounded-md px-3 py-1 text-xs font-semibold uppercase tracking-wide text-blue-200 hover:text-white"
+              class="flex w-full cursor-pointer items-center justify-between gap-2 rounded-md px-3 py-1 text-xs font-semibold uppercase tracking-wide text-blue-200 hover:bg-white/10 hover:text-white"
               :aria-expanded="isOpen(group)"
               :aria-controls="`nav-group-${group.id}`"
+              :title="isOpen(group) ? `Hide ${group.label}` : `Show ${group.items.map((item) => item.label).join(', ')}`"
+              data-testid="nav-group-toggle"
               @click="toggleGroup(group)"
             >
-              {{ group.label }}
+              <span class="flex items-center gap-2">
+                {{ group.label }}
+                <!-- Visual only: the accessible name stays the group's own
+                     word, and the tooltip already lists what is inside. -->
+                <span
+                  v-if="!isOpen(group)"
+                  aria-hidden="true"
+                  class="rounded-full bg-white/15 px-1.5 text-[11px] font-semibold normal-case tracking-normal text-white"
+                >
+                  <span class="tabular">{{ group.items.length }}</span>
+                </span>
+              </span>
               <span
                 class="transition-transform"
-                :class="isOpen(group) ? 'rotate-90' : ''"
+                :class="isOpen(group) ? 'rotate-180' : ''"
               >
                 <Icon
-                  name="chevronRight"
+                  name="chevronDown"
                   size="h-3.5 w-3.5"
                 />
               </span>
