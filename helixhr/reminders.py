@@ -153,7 +153,7 @@ def celebration_template_name(event, company):
 # the reminder row's own `last_sent_on`, claimed with one conditional UPDATE
 # before anything is sent (`_claim`). It used to be a Redis key, which a
 # Redis restart or eviction drops -- harmless for a once-a-day job, a
-# same-day resend for one that ticks every 15 minutes. The dated keys under
+# same-day resend for one that ticks every half hour. The dated keys under
 # this prefix now only stop a failure being logged on every tick
 # (`_log_once`); kept through `clear-cache` and `bench migrate` by
 # `hooks.persistent_cache_keys`, they expire a day and a half later.
@@ -165,8 +165,9 @@ NO_COMPANY_LOG_TITLE = "HelixHR celebrations skipped for want of a company"
 
 
 def send_celebration_reminders():
-	"""Every 15 minutes (`hooks.scheduler_events["cron"]`, plan 2026-10-08-001
-	U2). Idle until HR enables the reminder and picks a template for the
+	"""On the hour and half hour (`hooks.scheduler_events["cron"]`, plan
+	2026-10-08-001 U2). A tick with no company due -- nearly all of them --
+	is one small query and returns (`_due`). Idle until HR enables the reminder and picks a template for the
 	event, per company (P4-R17), so an install ships sending nothing.
 
 	Each company is mailed on its *own* clock (`utils.company_today`): the
@@ -188,10 +189,12 @@ def send_celebration_reminders():
 	edit away). Every swallowed error goes to the scheduler log via
 	`frappe.log_error` -- it must surface somewhere, not vanish.
 	"""
+	sent = {event: {"companies": 0, "emails": 0, "failed": 0} for event in EVENTS}
+	if not _due([event for event in EVENTS if event != "holiday"]):
+		return sent
 	foreign, foreign_names = _foreign_address_companies()
 	dropped = []
 	skipped_no_company = 0
-	sent = {}
 	for event in EVENTS:
 		try:
 			result, skipped = _send_event(event, foreign, foreign_names, dropped)
@@ -337,6 +340,29 @@ def _send_event(event, foreign, foreign_names, dropped):
 	return {"companies": companies, "emails": emails, "failed": failed}, skipped
 
 
+def _due(events):
+	"""Whether any enabled reminder row for `events` has not yet sent for
+	its company's current date (and, for a holiday row, today is its send
+	day). One read of the reminder rows -- a handful -- so the ticks between
+	midnights cost almost nothing; only a due tick goes on to read every
+	employee for the cross-company guard."""
+	today = {}
+	for row in frappe.get_all(
+		REMINDER_DOCTYPE,
+		filters={"event": ["in", events], "is_enabled": 1, "email_template": ["is", "set"]},
+		fields=["event", "company", "frequency", "last_sent_on"],
+	):
+		if row.company not in today:
+			today[row.company] = company_today(row.company)
+		day = today[row.company]
+		if row.last_sent_on and getdate(row.last_sent_on) >= day:
+			continue
+		if row.event == "holiday" and not _is_holiday_send_day(row.frequency, day):
+			continue
+		return True
+	return False
+
+
 def _celebrants(event, company, day):
 	"""Active employees of `company` (None: those with no company) whose
 	birthday or joining anniversary falls on `day` -- HRMS's own rule from
@@ -406,8 +432,8 @@ def _commit():
 
 def _log_once(key, message, title):
 	"""`frappe.log_error`, at most once per `key`. The reminders tick every
-	15 minutes, and a skip or a failure that is not claimed would otherwise
-	write the same Error Log row up to 96 times a day. The key is a dated
+	half hour, and a skip or a failure that is not claimed would otherwise
+	write the same Error Log row up to 48 times a day. The key is a dated
 	persistent cache key; losing it costs one repeated log line, never mail."""
 	key = f"{CELEBRATION_GUARD_PREFIX}log|{key}"
 	if frappe.cache.get_value(key):
@@ -674,8 +700,8 @@ def _date_format():
 
 
 def send_holiday_reminders():
-	"""Every 15 minutes (`hooks.scheduler_events["cron"]`, plan 2026-10-08-001
-	U2), on each company's own clock, replacing HRMS's own
+	"""On the hour and half hour (`hooks.scheduler_events["cron"]`, plan
+	2026-10-08-001 U2), on each company's own clock, replacing HRMS's own
 	`send_reminders_in_advance_weekly` / `..._monthly` (R8): each company
 	with an enabled `holiday` row gets the reminder on its own cadence --
 	Weekly rows send on Monday for Monday..Sunday, Monthly rows on the 1st
@@ -698,6 +724,8 @@ def send_holiday_reminders():
 	same cross-company address guard (R3): an address that also resolves for
 	an active employee of another company is dropped and logged.
 	"""
+	if not _due(["holiday"]):
+		return {"companies": 0, "emails": 0, "failed": 0}
 	foreign, foreign_names = _foreign_address_companies()
 	dropped = []
 

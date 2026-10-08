@@ -465,7 +465,8 @@ Error Log for `HelixHR celebration reminders` / `HelixHR holiday reminders`
 company who were therefore skipped.
 
 **When the mail goes out, and a same-day rerun (plan 2026-10-08-001).** Both
-senders tick every 15 minutes (`scheduler_events["cron"]`). Each company is
+senders tick on the hour and half hour (`scheduler_events["cron"]`); a tick
+with no company due is one small query and stops there. Each company is
 mailed on the first tick after midnight in *its own* time zone -- Desk →
 Company → **Time Zone** (`helixhr_time_zone`, an IANA name such as
 `Asia/Kolkata`; blank means System Settings' zone) -- about the people

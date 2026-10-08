@@ -733,6 +733,18 @@ class TestCelebrationReminders(IntegrationTestCase):
 		self.assertEqual(self._last_sent(), getdate())
 		self.assertIsNone(self._last_sent(COMPANY_B), "no key, no claim")
 
+	def test_a_tick_with_nobody_due_reads_no_employees(self):
+		"""The half-hour ticks between midnights must cost one small query,
+		not a scan of every employee for the cross-company guard."""
+		self._stage(birthdays=("A1",))
+		self._pick("helixhr_birthday_template", BIRTHDAY_TEMPLATE)
+		send_celebration_reminders()
+
+		with patch.object(reminders, "_foreign_address_companies") as scan:
+			result = send_celebration_reminders()
+		scan.assert_not_called()
+		self.assertEqual(result["birthday"], {"companies": 0, "emails": 0, "failed": 0})
+
 	def test_the_email_date_is_the_companys_date(self):
 		context = reminders._context([], COMPANY_A, "birthday", date(2026, 11, 1))
 		self.assertEqual(context["date"], frappe.utils.format_date(date(2026, 11, 1), reminders._date_format()))
@@ -904,12 +916,12 @@ class TestCelebrationReminders(IntegrationTestCase):
 		self.assertEqual([mail["recipients"] for mail in mails], [[self._address("B2")]])
 		self.assertEqual(len(errors()), 1)
 
-	def test_the_job_ticks_every_15_minutes_and_the_digest_stays_daily(self):
-		"""Plan 2026-10-08-001 U2: a quarter-hour tick reaches every
-		company's own midnight; the site-wide digest keeps its daily slot."""
+	def test_the_job_ticks_every_half_hour_and_the_digest_stays_daily(self):
+		"""Plan 2026-10-08-001 U2: a half-hour tick reaches every company's
+		own midnight; the site-wide digest keeps its daily slot."""
 		events = frappe.get_hooks("scheduler_events")
 		self.assertIn(
-			"helixhr.reminders.send_celebration_reminders", events["cron"]["*/15 * * * *"]
+			"helixhr.reminders.send_celebration_reminders", events["cron"]["0,30 * * * *"]
 		)
 		self.assertNotIn("helixhr.reminders.send_celebration_reminders", events["daily"])
 		self.assertIn("helixhr.reminders.send_overdue_digests", events["daily"])
@@ -1679,9 +1691,9 @@ class TestHolidayReminders(IntegrationTestCase):
 		finally:
 			frappe.db.set_single_value("HR Settings", "send_holiday_reminders", 0)
 
-	def test_the_sender_ticks_every_15_minutes(self):
+	def test_the_sender_ticks_every_half_hour(self):
 		events = frappe.get_hooks("scheduler_events")
-		self.assertIn("helixhr.reminders.send_holiday_reminders", events["cron"]["*/15 * * * *"])
+		self.assertIn("helixhr.reminders.send_holiday_reminders", events["cron"]["0,30 * * * *"])
 		self.assertNotIn("helixhr.reminders.send_holiday_reminders", events["daily"])
 
 

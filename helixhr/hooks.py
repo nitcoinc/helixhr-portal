@@ -427,12 +427,13 @@ scheduler_events = {
 		"helixhr.tasks.null_stale_checkin_coordinates",
 		"helixhr.reminders.send_overdue_digests",
 	],
-	# Plan 2026-10-08-001 U2: every 15 minutes, so each company is mailed
-	# within a quarter hour of *its own* midnight (IST's :30 and Nepal's :45
-	# included). Each send is claimed once per company-local day on the
-	# reminder row, so the extra ticks send nothing twice.
+	# Plan 2026-10-08-001 U2: on the hour and half hour, so each company is
+	# mailed at *its own* midnight (whole- and half-hour zones: Chicago, IST)
+	# and a failed send retries 30 minutes later. A tick with nobody due is
+	# one small query (`reminders._due`); each send is claimed once per
+	# company-local day on the reminder row.
 	"cron": {
-		"*/15 * * * *": [
+		"0,30 * * * *": [
 			"helixhr.reminders.send_celebration_reminders",
 			"helixhr.reminders.send_holiday_reminders",
 		],

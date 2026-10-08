@@ -996,8 +996,8 @@ gated only by HR Settings checkboxes. There is no Email Template record behind
 it, so the copy cannot be changed without editing HRMS — which the next `bench
 update` overwrites, and which P4-R20 forbids outright.
 
-So `helixhr/reminders.py` registers its **own** jobs -- every 15 minutes
-in `scheduler_events.cron` since plan 2026-10-08-001 -- and runs beside HRMS's. Frappe merges scheduler hooks
+So `helixhr/reminders.py` registers its **own** jobs -- on the hour and
+half hour in `scheduler_events.cron` since plan 2026-10-08-001 -- and runs beside HRMS's. Frappe merges scheduler hooks
 across installed apps and offers no way to remove another app's job, which is
 the whole shape of this design: HelixHR cannot switch HRMS off, so it has to be
 switchable itself and the contradiction has to be refused somewhere.
@@ -1038,8 +1038,10 @@ switchable itself and the contradiction has to be refused somewhere.
 - **Each company on its own clock** (plan 2026-10-08-001). `Company.helixhr_time_zone`
   (blank: the system zone) decides the company's date through
   `utils.company_today` -- the one resolver the reminders and the backdated
-  grace rule share. A 15-minute tick reaches every company within a quarter
-  hour of its own midnight, and celebrants are selected for *its* date by
+  grace rule share. A half-hour tick lands on every company's own midnight
+  (whole- and half-hour zones) and retries a failed send 30 minutes later; a
+  tick with nobody due is one query (`_due`) and stops before reading any
+  employee, and celebrants are selected for *its* date by
   `reminders._celebrants` (HRMS's rule, with the date as a parameter).
 - **The send is idempotent per (event, company, local day)**: the row's
   `last_sent_on` is claimed by one conditional UPDATE before sending
