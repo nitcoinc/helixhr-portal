@@ -2052,6 +2052,21 @@ def attendance_request_on_trash(doc, method=None):
 # HR Settings (P4-U6 / P4-R18 / P4-KTD10) ------------------------------------
 
 
+def company_validate(doc, method=None):
+	"""Plan 2026-10-08-001 U1: refuse a time zone Python cannot load. Left
+	alone, a typo (`Asia/Kolkatta`) would silently mean the system zone and
+	this company's reminders would go out at the wrong midnight."""
+	from helixhr.utils import is_time_zone
+
+	doc.helixhr_time_zone = (doc.get("helixhr_time_zone") or "").strip()
+	if doc.helixhr_time_zone and not is_time_zone(doc.helixhr_time_zone):
+		frappe.throw(
+			_("Time Zone {0} is not a known time zone. Use a name like Asia/Kolkata or America/Chicago.").format(
+				frappe.bold(doc.helixhr_time_zone)
+			)
+		)
+
+
 def hr_settings_validate(doc, method=None):
 	"""Refuse the save that would leave a site sending two emails for the
 	same event.

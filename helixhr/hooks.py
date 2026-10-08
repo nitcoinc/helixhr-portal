@@ -224,6 +224,10 @@ doc_events = {
 	# ERPNext's Employee -> User image sync; `on_update` puts it back.
 	# Plan 2026-10-07-001: `validate` derives the three approver fields from
 	# `reports_to`, so leave, shift and expense follow the same manager.
+	# Plan 2026-10-08-001 U1: a company's own time zone must be a real one.
+	"Company": {
+		"validate": "helixhr.events.company_validate",
+	},
 	"Employee": {
 		"validate": "helixhr.events.employee_validate",
 		"before_save": "helixhr.events.employee_before_save",
