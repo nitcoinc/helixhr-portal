@@ -434,7 +434,7 @@ selector is read-only now); both are preflight FAILs if ever on.
 **A celebration email went to the wrong company.** Almost always a duplicate
 mailbox: two active Employee records in different companies that resolve to one
 address (ERPNext only blocks a duplicate `user_id`). The sender drops such
-addresses at send time and logs them once per run; preflight "Cross-company
+addresses at send time and logs them once a day; preflight "Cross-company
 mailboxes" WARNs and names both records. Find every pair with:
 
 ```sql
@@ -453,7 +453,8 @@ HAVING COUNT(DISTINCT company) > 1;
 Fix is data: set the stale duplicate to **Left**. Sharing one address *within*
 one company is fine and is not warned.
 
-**No celebration or holiday mail this morning.** Check in order: the row for
+**No celebration or holiday mail this morning.** Check in order: the company's
+Time Zone (mail follows *its* midnight) and the row's Last sent on; the row for
 that (event, company) enabled with a template that still exists (preflight
 FAILs and names it otherwise); a default outgoing Email Account; for the
 holiday reminder, the row's frequency against today (Weekly sends only on
@@ -463,13 +464,26 @@ Error Log for `HelixHR celebration reminders` / `HelixHR holiday reminders`
 `HelixHR celebrations skipped for want of a company` counts employees with no
 company who were therefore skipped.
 
-**A same-day rerun sends nothing.** Deliberate (KTD8): the job writes a dated
-guard key per (event, company) after mail actually went out -- kept through
-`clear-cache`, expiring after 36 h -- so `bench execute
-helixhr.reminders.send_celebration_reminders` after the scheduler's round mails
-no company twice. A company whose send *failed* (broken template, no account)
-is not marked, so fixing the cause and running the job by hand the same morning
-still delivers.
+**When the mail goes out, and a same-day rerun (plan 2026-10-08-001).** Both
+senders tick every 15 minutes (`scheduler_events["cron"]`). Each company is
+mailed on the first tick after midnight in *its own* time zone -- Desk →
+Company → **Time Zone** (`helixhr_time_zone`, an IANA name such as
+`Asia/Kolkata`; blank means System Settings' zone) -- about the people
+celebrating on its own date. Preflight "Company time zones" lists every
+company's effective zone and WARNs on a value Python cannot load. Set the zone
+for any company that does not work in the server's zone, or its mail arrives at
+the server's midnight instead.
+
+The send is claimed before anything goes out: the reminder row's read-only
+**Last sent on** becomes that company's date (one conditional UPDATE, so two
+ticks or a hand-run never both win). A second tick, `bench execute
+helixhr.reminders.send_celebration_reminders`, a Redis restart or `clear-cache`
+mails no company twice. If *nothing* went out (missing template, a render that
+failed before the first mail) the claim is released, so fixing the cause lets
+the next tick deliver the same day. If some mail went out before a failure,
+the day stays claimed -- a retry would mail those people again -- and the Error
+Log says so. Failures and skips are logged once per company per day, not on
+every tick. To deliberately resend today, clear **Last sent on** for that row.
 
 **Per-company templates (plan 2026-10-05-001 U11).** Each (event, company)
 sends from its own Email Template, `HelixHR Birthday Reminder - <Company>`

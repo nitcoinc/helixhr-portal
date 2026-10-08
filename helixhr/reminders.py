@@ -67,11 +67,11 @@ from frappe.utils import add_days, add_months, cint, comma_sep, format_date, get
 from hrms.controllers.employee_reminders import (
 	get_all_employee_emails,
 	get_employee_email,
-	get_employees_having_an_event_today,
 	get_sender_email,
 )
 
 from helixhr.events import PENDING_SINCE_FIELD as PENDING_SINCE
+from helixhr.utils import company_today
 
 # One row per (event, company) since plan 2026-10-04-004 U1 -- named
 # `{event}-{company}` by the doctype's own autoname: the words HR reads on
@@ -149,32 +149,38 @@ def celebration_template_name(event, company):
 	return f"{CELEBRATION_DEFAULTS[event]['template']} - {company}"
 
 
-# KTD8: the once-per-(event, company, day) rerun guard, one dated cache key
-# like the overdue digest's -- per-company settings multiply the blast radius
-# of a hand-run `bench execute` after the scheduler has already been round.
-# Kept through `clear-cache` and `bench migrate` by
-# `hooks.persistent_cache_keys`; expires a day and a half later.
+# Plan 2026-10-08-001 U2: the once-per-(event, company, day) rerun guard is
+# the reminder row's own `last_sent_on`, claimed with one conditional UPDATE
+# before anything is sent (`_claim`). It used to be a Redis key, which a
+# Redis restart or eviction drops -- harmless for a once-a-day job, a
+# same-day resend for one that ticks every 15 minutes. The dated keys under
+# this prefix now only stop a failure being logged on every tick
+# (`_log_once`); kept through `clear-cache` and `bench migrate` by
+# `hooks.persistent_cache_keys`, they expire a day and a half later.
 CELEBRATION_GUARD_PREFIX = "helixhr-celebration|"
 CELEBRATION_GUARD_SECONDS = 36 * 60 * 60
+REMINDER_DOCTYPE = "HelixHR Celebration Reminder"
 CROSS_COMPANY_LOG_TITLE = "HelixHR cross-company mailboxes"
 NO_COMPANY_LOG_TITLE = "HelixHR celebrations skipped for want of a company"
 
 
 def send_celebration_reminders():
-	"""Daily (`hooks.scheduler_events`). Idle until HR enables the reminder
-	and picks a template for the event, per company (P4-R17), so an install
-	ships sending nothing.
+	"""Every 15 minutes (`hooks.scheduler_events["cron"]`, plan 2026-10-08-001
+	U2). Idle until HR enables the reminder and picks a template for the
+	event, per company (P4-R17), so an install ships sending nothing.
 
-	No commit of its own: `frappe.sendmail` commits the Email Queue row it
-	writes, and the rerun guard is a Redis key.
+	Each company is mailed on its *own* clock (`utils.company_today`): the
+	first tick after midnight in its time zone sends about the people
+	celebrating on its local date. A company with no time zone set follows
+	the system zone, exactly as the old daily job did.
 
-	Idempotent per (event, company, day) now (KTD8): a second run on the
-	same day sends nothing a company already received. This became worth the
-	machinery the old docstring declined when settings went per company --
-	the double-send a hand-run would cause is no longer one company's mail,
-	it is every company's. A marker is written only after a company actually
-	received mail, so a company whose template was broken this morning and
-	fixed this afternoon can still be mailed by hand today.
+	Idempotent per (event, company, local day): the row's `last_sent_on` is
+	claimed before sending (`_claim`), so a second tick -- or a hand-run, or
+	a second worker -- sends nothing a company already received. A claim is
+	released when nothing at all went out, so a company whose template was
+	broken this morning and fixed this afternoon is still mailed today; once
+	some mail went out it stands, because a retry would mail those people
+	again.
 
 	Failure is isolated per event and, inside `_send_event`, per company: one
 	template that raises while rendering must not cost the other event its
@@ -205,11 +211,12 @@ def send_celebration_reminders():
 		# Keyword arguments on purpose: `log_error`'s positional hack
 		# swaps a single-line first argument into the title, and one
 		# dropped address is a single line.
-		frappe.log_error(title=CROSS_COMPANY_LOG_TITLE, message="\n".join(dropped))
+		_log_once(f"cross-company|{getdate()}", title=CROSS_COMPANY_LOG_TITLE, message="\n".join(dropped))
 	if skipped_no_company:
 		# R4: an employee with no company is never celebrated and never
-		# mailed; the run says how many were skipped.
-		frappe.log_error(
+		# mailed; the day's first tick says how many were skipped.
+		_log_once(
+			f"no-company|{getdate()}",
 			title=NO_COMPANY_LOG_TITLE,
 			message=f"{skipped_no_company} active employee(s) with no company were not celebrated "
 			"and received no celebration mail -- give them a company on their Employee record.",
@@ -217,20 +224,10 @@ def send_celebration_reminders():
 	return sent
 
 
-def _row(event, company):
-	"""The (event, company) reminder row's own fields, or None -- and
-	absent means disabled (R1)."""
-	return frappe.db.get_value(
-		"HelixHR Celebration Reminder",
-		{"event": event, "company": company},
-		["name", "is_enabled", "email_template", "recipient_mode", "hide_logo"],
-		as_dict=True,
-	)
-
-
 def _send_event(event, foreign, foreign_names, dropped):
-	"""Every company with somebody celebrating `event` today, each sent
-	only that company's own setting (R1): no enabled row, no mail.
+	"""Every company with an enabled row for `event` and somebody
+	celebrating on its own local date, each sent only that company's own
+	setting (R1): no enabled row, no mail.
 
 	Recipients are HRMS's own set arithmetic when `recipient_mode` is "All
 	employees" (P4-R16): every active employee in that company, minus the
@@ -247,39 +244,45 @@ def _send_event(event, foreign, foreign_names, dropped):
 	template (P4-KTD13), so a render that raises -- an undefined filter, an
 	attribute the context does not carry -- is a realistic morning, and it
 	must cost that company its mail and nothing else. The error goes to the
-	scheduler log, the same way the missing-template case below does.
+	scheduler log once per (company, day), the same way the missing-template
+	case below does.
 
 	Returns `(result, skipped)` -- the per-event counts plus how many
 	celebrants have no company (R4), counted once per run by the caller.
 	"""
-	grouped = get_employees_having_an_event_today(event) or {}
-	skipped = len(grouped.get(None, ()))
+	skipped = len(_celebrants(event, None, getdate()))
 
 	emails = 0
 	failed = 0
 	companies = 0
-	today = str(getdate())
-	for company, persons in grouped.items():
-		# R4: a celebrant with no company belongs to no settings row and no
-		# pool, so there is nothing to read and nobody to mail.
-		if not company:
+	for reminder in frappe.get_all(
+		REMINDER_DOCTYPE,
+		filters={"event": event, "is_enabled": 1, "email_template": ["is", "set"]},
+		fields=["name", "company", "email_template", "recipient_mode", "hide_logo", "last_sent_on"],
+	):
+		company = reminder.company
+		day = company_today(company)
+		# Cheap pre-check; `_claim` below is the one that decides.
+		if reminder.last_sent_on and getdate(reminder.last_sent_on) >= day:
 			continue
-		if frappe.cache.get_value(f"{CELEBRATION_GUARD_PREFIX}{today}|{event}|{company}"):
-			continue
-		reminder = _row(event, company)
-		if not reminder or not reminder.is_enabled or not reminder.email_template:
+		persons = _celebrants(event, company, day)
+		if not persons:
 			continue
 		if not frappe.db.exists("Email Template", reminder.email_template):
 			# `preflight.check_celebration_reminders` FAILs on this. The job says
 			# so in the scheduler log and carries on with the other companies rather
 			# than dying half way through the morning.
-			frappe.log_error(
+			_log_once(
+				f"missing-template|{day}|{event}|{company}",
 				title="HelixHR celebration reminders",
 				message=f"The {event} reminder for '{company}' picks Email Template "
 				f"'{reminder.email_template}', but no such template exists -- nothing "
 				"was sent for that company.",
 			)
 			failed += 1
+			continue
+		claimed, previous = _claim(reminder.name, day)
+		if not claimed:
 			continue
 
 		companies += 1
@@ -290,15 +293,16 @@ def _send_event(event, foreign, foreign_names, dropped):
 				row.employee
 				for row in frappe.get_all(
 					"HelixHR Celebration Recipient",
-					filters={"parent": reminder.name, "parenttype": "HelixHR Celebration Reminder"},
+					filters={"parent": reminder.name, "parenttype": REMINDER_DOCTYPE},
 					fields=["employee"],
 				)
 			]
 			if reminder.recipient_mode == "Selected employees"
 			else None
 		)
+		progress = {"emails": 0}
 		try:
-			sent_here = _send_company(
+			_send_company(
 				template,
 				sender,
 				persons,
@@ -309,24 +313,82 @@ def _send_event(event, foreign, foreign_names, dropped):
 				foreign_names,
 				dropped,
 				include_logo=not reminder.hide_logo,
+				day=day,
+				progress=progress,
 			)
-			emails += sent_here
-			if sent_here:
-				frappe.cache.set_value(
-					f"{CELEBRATION_GUARD_PREFIX}{today}|{event}|{company}",
-					1,
-					expires_in_sec=CELEBRATION_GUARD_SECONDS,
-				)
 		except Exception:
 			failed += 1
-			frappe.log_error(
+			_log_once(
+				f"failed|{day}|{event}|{company}",
 				f"The {event} celebration reminder for '{company}' failed -- Email Template "
-				f"'{template.name}' was not sent to that company. The other companies and the "
-				f"other event are unaffected.\n\n{frappe.get_traceback()}",
+				f"'{template.name}' was not sent to "
+				+ ("everyone in" if progress["emails"] else "anyone in")
+				+ " that company. The other companies and the other event are unaffected."
+				f"\n\n{frappe.get_traceback()}",
 				"HelixHR celebration reminders",
 			)
+		emails += progress["emails"]
+		if not progress["emails"]:
+			_release(reminder.name, previous)
 
 	return {"companies": companies, "emails": emails, "failed": failed}, skipped
+
+
+def _celebrants(event, company, day):
+	"""Active employees of `company` (None: those with no company) whose
+	birthday or joining anniversary falls on `day` -- HRMS's own rule from
+	`get_employees_having_an_event_today` (same day and month, an earlier
+	year), with the date as a parameter: HRMS's helper reads the system
+	date, which is not this company's date when it keeps its own time zone.
+	Same row shape as HRMS's, so the send path below is unchanged."""
+	column = {"birthday": "date_of_birth", "work_anniversary": "date_of_joining"}.get(event)
+	if not column:
+		# `holiday` shares the reminder doctype but has its own sender.
+		return []
+	return frappe.db.sql(
+		f"""select personal_email, company, company_email, user_id,
+			employee_name as name, image, date_of_joining
+		from `tabEmployee`
+		where status = 'Active'
+			and day(`{column}`) = %(day)s and month(`{column}`) = %(month)s
+			and year(`{column}`) < %(year)s
+			and {"company = %(company)s" if company else "ifnull(company, '') = ''"}
+		order by employee_name asc""",
+		{"day": day.day, "month": day.month, "year": day.year, "company": company},
+		as_dict=True,
+	)
+
+
+def _claim(name, day):
+	"""Claim (reminder row, local day) before sending. One conditional
+	UPDATE: it changes the row only while `last_sent_on` is empty or
+	earlier, and MariaDB's row lock makes a second worker's UPDATE wait and
+	then change nothing. Returns `(claimed, previous)` -- `previous` is what
+	`_release` puts back."""
+	previous = frappe.db.get_value(REMINDER_DOCTYPE, name, "last_sent_on")
+	frappe.db.sql(
+		f"""update `tab{REMINDER_DOCTYPE}` set last_sent_on = %(day)s
+		where name = %(name)s and (last_sent_on is null or last_sent_on < %(day)s)""",
+		{"day": day, "name": name},
+	)
+	return bool(frappe.db.sql("select row_count()")[0][0]), previous
+
+
+def _release(name, previous):
+	"""Undo a claim that sent nothing, so the next tick can try again."""
+	frappe.db.set_value(REMINDER_DOCTYPE, name, "last_sent_on", previous, update_modified=False)
+
+
+def _log_once(key, message, title):
+	"""`frappe.log_error`, at most once per `key`. The reminders tick every
+	15 minutes, and a skip or a failure that is not claimed would otherwise
+	write the same Error Log row up to 96 times a day. The key is a dated
+	persistent cache key; losing it costs one repeated log line, never mail."""
+	key = f"{CELEBRATION_GUARD_PREFIX}log|{key}"
+	if frappe.cache.get_value(key):
+		return
+	frappe.cache.set_value(key, 1, expires_in_sec=CELEBRATION_GUARD_SECONDS)
+	frappe.log_error(title=title, message=message)
 
 
 def _foreign_address_companies():
@@ -408,13 +470,29 @@ def _pool_employee(recipients, address, company):
 
 
 def _send_company(
-	template, sender, persons, company, event, selected, foreign, foreign_names, dropped, include_logo=True
+	template,
+	sender,
+	persons,
+	company,
+	event,
+	selected,
+	foreign,
+	foreign_names,
+	dropped,
+	include_logo=True,
+	day=None,
+	progress=None,
 ):
 	"""`selected` is `None` for "All employees" mode -- every active
 	employee's own address, HRMS's own helper (P4-R16) -- or the
 	`recipients` child table's employee ids for "Selected employees" mode,
 	narrowed to `company` before resolving addresses (P8-U11) so a person
-	selected in another company is never mailed for this one."""
+	selected in another company is never mailed for this one.
+
+	`day` is the company's own date (plan 2026-10-08-001 U2). `progress`,
+	when passed, counts mail as it goes out, so a caller whose send raised
+	half way still knows whether anything was sent."""
+	progress = progress if progress is not None else {"emails": 0}
 	emails = 0
 	celebrating = _celebrating_addresses(persons)
 
@@ -432,7 +510,8 @@ def _send_company(
 		sorted(set(pool) - celebrating), company, foreign, foreign_names, dropped
 	)
 	if recipients:
-		emails += _send(template, sender, recipients, persons, company, event, include_logo)
+		emails += _send(template, sender, recipients, persons, company, event, include_logo, day)
+		progress["emails"] += 1
 
 	# The shared-day email is between celebrants about each other -- who
 	# hears about *them* (the pool above) is what `recipient_mode` scopes,
@@ -452,7 +531,8 @@ def _send_company(
 			)
 			others = [other for other in persons if other is not person]
 			if own:
-				emails += _send(template, sender, own, others, company, event, include_logo)
+				emails += _send(template, sender, own, others, company, event, include_logo, day)
+				progress["emails"] += 1
 	return emails
 
 
@@ -472,8 +552,8 @@ def _celebrating_addresses(persons):
 	return addresses
 
 
-def _send(template, sender, recipients, persons, company, event, include_logo=True):
-	rendered = _render_restricted(template, _context(persons, company, event), sender, include_logo)
+def _send(template, sender, recipients, persons, company, event, include_logo=True, day=None):
+	rendered = _render_restricted(template, _context(persons, company, event, day), sender, include_logo)
 	frappe.sendmail(
 		sender=sender,
 		recipients=recipients,
@@ -501,7 +581,7 @@ def _render_restricted(template, context, sender, include_logo=True):
 	return render_celebration_email(template.subject, body, context, include_logo=include_logo)
 
 
-def _context(persons, company, event):
+def _context(persons, company, event, day=None):
 	"""The documented contract HR writes the template against (P4-KTD13).
 
 	`persons` (each `name`, `first_name`, `image_url`, plus `years` on an
@@ -510,10 +590,10 @@ def _context(persons, company, event):
 	list; a template that reads anything outside it is reading something this
 	job does not promise to keep.
 
-	`getdate()` is the site's time zone, the clock HRMS's own job uses, so
-	both jobs agree on which day it is.
+	`day` is the company's own date (plan 2026-10-08-001 U2); without one,
+	the system date.
 	"""
-	today = getdate()
+	today = getdate(day) if day else getdate()
 	people = []
 	for person in persons:
 		entry = {
@@ -567,7 +647,8 @@ def _date_format():
 
 
 def send_holiday_reminders():
-	"""Daily (`hooks.scheduler_events`), replacing HRMS's own
+	"""Every 15 minutes (`hooks.scheduler_events["cron"]`, plan 2026-10-08-001
+	U2), on each company's own clock, replacing HRMS's own
 	`send_reminders_in_advance_weekly` / `..._monthly` (R8): each company
 	with an enabled `holiday` row gets the reminder on its own cadence --
 	Weekly rows send on Monday for Monday..Sunday, Monthly rows on the 1st
@@ -586,13 +667,10 @@ def send_holiday_reminders():
 	`employee_name` is therefore the group's names, comma-separated -- for
 	the usual single-person group it reads exactly as HR writes it.
 
-	The same per-(event, company, day) rerun guard as the celebrations
-	(KTD8), and the same cross-company address guard (R3): an address that
-	also resolves for an active employee of another company is dropped and
-	logged.
+	The same claimed `last_sent_on` as the celebrations (`_claim`), and the
+	same cross-company address guard (R3): an address that also resolves for
+	an active employee of another company is dropped and logged.
 	"""
-	today = getdate()
-	guard_day = str(today)
 	foreign, foreign_names = _foreign_address_companies()
 	dropped = []
 
@@ -600,45 +678,55 @@ def send_holiday_reminders():
 	for row in frappe.get_all(
 		"HelixHR Celebration Reminder",
 		filters={"event": "holiday", "is_enabled": 1},
-		fields=["name", "company", "email_template", "frequency", "recipient_mode", "hide_logo"],
+		fields=[
+			"name",
+			"company",
+			"email_template",
+			"frequency",
+			"recipient_mode",
+			"hide_logo",
+			"last_sent_on",
+		],
 	):
 		company = row.company
+		today = company_today(company)
 		if not _is_holiday_send_day(row.frequency, today):
 			continue
-		if frappe.cache.get_value(
-			f"{CELEBRATION_GUARD_PREFIX}{guard_day}|holiday|{company}"
-		):
+		if row.last_sent_on and getdate(row.last_sent_on) >= today:
 			continue
 		if not frappe.db.exists("Email Template", row.email_template):
-			frappe.log_error(
+			_log_once(
+				f"missing-template|{today}|holiday|{company}",
 				title="HelixHR holiday reminders",
 				message=f"The holiday reminder for '{company}' picks Email Template "
 				f"'{row.email_template}', but no such template exists -- nothing was sent.",
 			)
 			result["failed"] += 1
 			continue
+		claimed, previous = _claim(row.name, today)
+		if not claimed:
+			continue
 
+		progress = {"emails": 0}
 		try:
-			emails = _send_holiday_company(row, today, foreign, foreign_names, dropped)
+			_send_holiday_company(row, today, foreign, foreign_names, dropped, progress=progress)
 			result["companies"] += 1
-			result["emails"] += emails
-			if emails:
-				frappe.cache.set_value(
-					f"{CELEBRATION_GUARD_PREFIX}{guard_day}|holiday|{company}",
-					1,
-					expires_in_sec=CELEBRATION_GUARD_SECONDS,
-				)
 		except Exception:
 			result["failed"] += 1
-			frappe.log_error(
+			_log_once(
+				f"failed|{today}|holiday|{company}",
 				f"The holiday reminder for '{company}' failed -- Email Template "
-				f"'{row.email_template}' was not sent to that company. The other "
-				f"companies are unaffected.\n\n{frappe.get_traceback()}",
+				f"'{row.email_template}' was not sent to "
+				+ ("everyone in" if progress["emails"] else "anyone in")
+				+ f" that company. The other companies are unaffected.\n\n{frappe.get_traceback()}",
 				"HelixHR holiday reminders",
 			)
+		result["emails"] += progress["emails"]
+		if not progress["emails"]:
+			_release(row.name, previous)
 
 	if dropped:
-		frappe.log_error(title=CROSS_COMPANY_LOG_TITLE, message="\n".join(dropped))
+		_log_once(f"cross-company|holiday|{getdate()}", title=CROSS_COMPANY_LOG_TITLE, message="\n".join(dropped))
 	return result
 
 
@@ -709,7 +797,7 @@ def _assigned_holiday_lists(employees, company, today):
 	return resolved
 
 
-def _send_holiday_company(row, today, foreign, foreign_names, dropped):
+def _send_holiday_company(row, today, foreign, foreign_names, dropped, progress=None):
 	"""One company's holiday reminder: every active employee's own list,
 	grouped by the holidays ahead in the window.
 
@@ -813,6 +901,8 @@ def _send_holiday_company(row, today, foreign, foreign_names, dropped):
 			reference_doctype="Employee",
 		)
 		emails += 1
+		if progress is not None:
+			progress["emails"] += 1
 	return emails
 
 

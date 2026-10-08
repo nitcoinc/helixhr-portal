@@ -425,10 +425,18 @@ persistent_cache_keys = ["helixhr-overdue-digest|*", "helixhr-celebration|*"]
 scheduler_events = {
 	"daily": [
 		"helixhr.tasks.null_stale_checkin_coordinates",
-		"helixhr.reminders.send_celebration_reminders",
-		"helixhr.reminders.send_holiday_reminders",
 		"helixhr.reminders.send_overdue_digests",
 	],
+	# Plan 2026-10-08-001 U2: every 15 minutes, so each company is mailed
+	# within a quarter hour of *its own* midnight (IST's :30 and Nepal's :45
+	# included). Each send is claimed once per company-local day on the
+	# reminder row, so the extra ticks send nothing twice.
+	"cron": {
+		"*/15 * * * *": [
+			"helixhr.reminders.send_celebration_reminders",
+			"helixhr.reminders.send_holiday_reminders",
+		],
+	},
 	# Off by default -- helixhr.telemetry.send_ping is a no-op until an
 	# operator sets both helixhr_telemetry_enabled and helixhr_telemetry_url
 	# (docs/deployment.md).
