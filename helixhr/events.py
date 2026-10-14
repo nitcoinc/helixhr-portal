@@ -554,6 +554,8 @@ def employee_on_update(doc, method=None):
 	# Plan 2026-10-14-001 KTD9 / R16. A cross-company grant belongs to this
 	# login, in this company, while Active. Any of the three changing
 	# switches it off; `active_company_grant` already ignores it meanwhile.
+	if doc.user_id and doc.user_id != before.user_id:
+		_disable_grant_saved_elsewhere(doc)
 	if before.user_id:
 		reason = None
 		if before.user_id != doc.user_id:
@@ -566,6 +568,26 @@ def employee_on_update(doc, method=None):
 			from helixhr.utils import disable_company_access
 
 			disable_company_access(before.user_id, reason)
+
+
+def employee_after_insert(doc, method=None):
+	"""Plan 2026-10-14-001 R16: an HRMS Employee Transfer that creates a new
+	employee ID moves the login to a new record without saving the old one
+	through `employee_on_update` first."""
+	if doc.user_id:
+		_disable_grant_saved_elsewhere(doc)
+
+
+def _disable_grant_saved_elsewhere(doc):
+	"""Switch off the login's grant when it was saved against another
+	Employee: the login now belongs to ``doc``."""
+	saved_for = frappe.db.get_value(
+		"HelixHR Company Access", {"user": doc.user_id, "enabled": 1}, "employee"
+	)
+	if saved_for and saved_for != doc.name:
+		from helixhr.utils import disable_company_access
+
+		disable_company_access(doc.user_id, _("the login moved to employee {0}").format(doc.name))
 
 
 def employee_validate(doc, method=None):
