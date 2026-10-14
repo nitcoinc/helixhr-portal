@@ -194,3 +194,15 @@ class TestOffboardingHook(_Grants):
 		doc.save(ignore_permissions=True)
 		self.assertEqual(self._grant(user).enabled, 0)
 		self.assertIn(self.other, self._grant(user).disabled_reason)
+
+	def test_transfer_to_a_new_employee_disables(self):
+		employee, user = self._holder("transfer")
+		old = frappe.get_doc("Employee", employee)
+		# An HRMS Employee Transfer moves the login to a new record
+		# without saving the old one first (plan 2026-10-14-001 R16).
+		frappe.db.set_value("Employee", employee, "user_id", None)
+		new = frappe.copy_doc(old)
+		new.user_id = user
+		new.insert(ignore_permissions=True)
+		self.assertEqual(self._grant(user).enabled, 0)
+		self.assertIn(new.name, self._grant(user).disabled_reason)

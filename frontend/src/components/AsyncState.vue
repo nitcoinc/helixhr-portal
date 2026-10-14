@@ -177,7 +177,9 @@ function retry() {
       </Button>
     </div>
 
-    <!-- Forbidden. No Retry: nothing about trying again changes the answer. -->
+    <!-- Forbidden. No Retry: nothing about trying again changes the answer --
+         except a Reload, which re-reads access (plan 2026-10-14-001 R17: a
+         revoked grant shows here until the next bootstrap picks it up). -->
     <div
       v-else-if="state === 'forbidden'"
       class="surface-card p-4"
@@ -187,8 +189,18 @@ function retry() {
         You don't have access to this
       </p>
       <p class="mt-1 text-sm text-ink-gray-6">
-        If you think that's wrong, ask HR to check your access.
+        If your access just changed, reload to pick it up. If you think
+        that's wrong, ask HR to check your access.
       </p>
+      <Button
+        v-if="props.resource"
+        class="mt-3"
+        variant="outline"
+        :loading="isLoading"
+        @click="retry"
+      >
+        Reload
+      </Button>
     </div>
 
     <!-- Empty, and only ever reached after a *successful* response. Names
