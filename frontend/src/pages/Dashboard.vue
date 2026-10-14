@@ -19,7 +19,7 @@ const adminAreas = computed(() =>
     { label: 'People', to: '/people', icon: 'peopleSearch', show: session.canSeePeople },
     { label: 'Organisation', to: '/organisation', icon: 'organisation', show: session.canSeeOrganisation },
     { label: 'Projects', to: '/projects', icon: 'folder', show: session.canSeeProjects },
-    { label: 'Reports', to: '/reports', icon: 'reports', show: session.canSeePeople },
+    { label: 'Reports', to: '/reports', icon: 'reports', show: session.canRunReports },
     { label: 'Settings', to: '/settings', icon: 'settings', show: session.canConfigure || session.canAdminPortal },
   ].filter((area) => area.show),
 )

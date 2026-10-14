@@ -81,7 +81,7 @@ const navItems = computed(() =>
       (!item.peopleOnly || session.canSeePeople) &&
       (!item.projectsOnly || session.canSeeProjects) &&
       (!item.runReportsOnly || session.canRunReports || session.canAdminPortal) &&
-      (!item.rosterOnly || session.status !== 'desk-only' || session.canSeePeople) &&
+      (!item.rosterOnly || session.status !== 'desk-only' || session.canRosterEveryone) &&
       (session.status !== 'desk-only' || item.deskOnly),
   ),
 )

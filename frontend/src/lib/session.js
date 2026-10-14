@@ -54,11 +54,15 @@ const state = reactive({
    * `helixhr.api.get_organisation_view` itself enforces server-side, so the
    * nav item and the server's own gate can never disagree. */
   canSeeOrganisation: false,
-  /** P6-U4: gates the People nav item. Mirrors `resolve_admin_scope`'s own
-   * gate on `search_people`/`get_person`. */
+  /** P6-U4: gates the People nav item. Mirrors `resolve_read_scope`'s own
+   * gate on `search_people`/`get_person` (an All-data company access grant
+   * widens it, plan 2026-10-14-001). */
   canSeePeople: false,
-  /** P7-U5: gates the Projects nav item. Mirrors `resolve_project_scope`'s own
-   * gate on `search_projects`/`get_project`. */
+  /** Roster's "Everyone" mode. Mirrors `resolve_admin_scope`, which
+   * `get_roster_week` enforces: a company access grant never opens it. */
+  canRosterEveryone: false,
+  /** P7-U5: gates the Projects nav item. Mirrors `resolve_project_read_scope`'s
+   * own gate on `search_projects`/`get_project`. */
   canSeeProjects: false,
   /** Plan 2026-10-04-001 U4: gates the Reports nav item. True when
    * `get_report_catalog` would list at least one entry for this caller. */
@@ -142,6 +146,7 @@ function apply(boot) {
   state.canEditEmailTemplates = !!boot?.can_edit_email_templates
   state.canSeeOrganisation = !!boot?.can_see_organisation
   state.canSeePeople = !!boot?.can_see_people
+  state.canRosterEveryone = !!boot?.can_roster_everyone
   state.canSeeProjects = !!boot?.can_see_projects
   state.canRunReports = !!boot?.can_run_reports
   state.canAdminPortal = !!boot?.can_admin_portal

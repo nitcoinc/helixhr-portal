@@ -36,6 +36,10 @@ const projects = createResource({
 
 const query = ref('')
 const rows = computed(() => projects.data?.projects || [])
+// Plan 2026-10-14-001 KTD4: a company access grant reads projects but never
+// changes them. Both flags mirror the gates `create_project`, `save_task`
+// and `set_project_members` enforce; hiding is only to not offer a refusal.
+const canCreate = computed(() => !!projects.data?.can_create)
 const filteredRows = computed(() => {
   const needle = query.value.trim().toLowerCase()
   if (!needle) return rows.value
@@ -47,7 +51,9 @@ const emptyTitle = computed(() =>
 const emptyBody = computed(() =>
   query.value.trim()
     ? 'Try a different name.'
-    : 'Create a project to start assigning tasks and people.',
+    : canCreate.value
+      ? 'Create a project to start assigning tasks and people.'
+      : 'There are no projects for you to see yet.',
 )
 
 function openProject(project) {
@@ -131,6 +137,7 @@ const detail = createResource({
   makeParams: () => ({ project: props.project }),
   auto: false,
 })
+const canEdit = computed(() => !!detail.data?.can_edit)
 
 watch(
   () => props.project,
@@ -332,6 +339,13 @@ async function removeMember(member) {
           v-if="detail.data"
           class="space-y-6"
         >
+          <p
+            v-if="!canEdit"
+            class="text-sm text-ink-gray-6"
+            data-testid="project-view-only"
+          >
+            View only. This project is outside the ones you manage, so it can't be changed here.
+          </p>
           <section class="surface-card elev-1 grid grid-cols-1 gap-4 p-4 sm:grid-cols-2 lg:grid-cols-6">
             <div>
               <p class="text-sm text-ink-gray-6">
@@ -431,14 +445,22 @@ async function removeMember(member) {
                 </template>
                 <template v-else>
                   <button
+                    v-if="canEdit"
                     type="button"
                     class="min-w-0 flex-1 truncate text-left text-sm font-medium text-ink-gray-9"
                     @click="startRename(task)"
                   >
                     {{ task.subject }}
                   </button>
+                  <span
+                    v-else
+                    class="min-w-0 flex-1 truncate text-sm font-medium text-ink-gray-9"
+                  >
+                    {{ task.subject }}
+                  </span>
                   <span class="shrink-0 text-sm text-ink-gray-5">{{ task.status }}</span>
                   <Button
+                    v-if="canEdit"
                     variant="ghost"
                     @click="closeTask(task)"
                   >
@@ -462,7 +484,10 @@ async function removeMember(member) {
               {{ taskError }}
             </p>
 
-            <div class="mt-4 flex flex-wrap items-center gap-2">
+            <div
+              v-if="canEdit"
+              class="mt-4 flex flex-wrap items-center gap-2"
+            >
               <input
                 v-model="newTaskSubject"
                 type="text"
@@ -511,7 +536,7 @@ async function removeMember(member) {
                   {{ member.employee_name }}
                 </span>
                 <Button
-                  v-if="member.employee"
+                  v-if="member.employee && canEdit"
                   variant="ghost"
                   @click="removeMember(member)"
                 >
@@ -534,7 +559,10 @@ async function removeMember(member) {
               {{ memberError }}
             </p>
 
-            <div class="mt-4">
+            <div
+              v-if="canEdit"
+              class="mt-4"
+            >
               <FormControl
                 v-model="memberQuery"
                 type="text"
@@ -602,7 +630,7 @@ async function removeMember(member) {
       >
         <template #actions>
           <Button
-            v-if="!showCreateForm"
+            v-if="!showCreateForm && canCreate"
             variant="solid"
             theme="blue"
             @click="startCreate"

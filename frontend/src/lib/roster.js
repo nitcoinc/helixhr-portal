@@ -6,15 +6,16 @@
 const MODE_LABELS = { mine: 'Mine', team: 'My team', hr: 'Everyone' }
 
 /** The modes this session holds, in order, from the bootstrap flags the nav
- * already gates on: `hasReports` for Team, `canSeePeople` (the
- * `resolve_admin_scope` mirror) for HR. A desk-only session has no Employee,
+ * already gates on: `hasReports` for Team, `canRosterEveryone` (the
+ * `resolve_admin_scope` mirror) for HR -- never `canSeePeople`, which a
+ * read-only company access grant also opens. A desk-only session has no Employee,
  * so it has no "mine" and no "team" either. */
 export function rosterModes(session) {
   const deskOnly = session?.status === 'desk-only'
   const modes = []
   if (!deskOnly) modes.push('mine')
   if (!deskOnly && session?.hasReports) modes.push('team')
-  if (session?.canSeePeople) modes.push('hr')
+  if (session?.canRosterEveryone) modes.push('hr')
   return modes.map((value) => ({ value, label: MODE_LABELS[value] }))
 }
 
