@@ -328,6 +328,8 @@ class TestSearchAndGetProject(IntegrationTestCase):
 			"expected_end_date",
 			"tasks",
 			"members",
+			# Plan 2026-10-14-001 KTD4: whether the caller may change it.
+			"can_edit",
 		}
 		self.assertEqual(set(result.keys()), expected_keys)
 		for forbidden in (

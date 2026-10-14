@@ -176,7 +176,7 @@ class TestOrganisationView(IntegrationTestCase):
 		payload = self._view()
 		self.assertEqual(
 			set(payload.keys()),
-			{"company", "headcount", "on_leave_today", "queues", "celebrations"},
+			{"company", "companies", "headcount", "on_leave_today", "queues", "celebrations"},
 		)
 		self.assertEqual(
 			set(payload["queues"].keys()), {"leave", "timesheet", "attendance", "request"}
