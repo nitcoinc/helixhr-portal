@@ -121,3 +121,6 @@ helixhr.patches.v1_0.apply_permission_deltas #2026-10-06 U3 HR Manager off Repor
 # Plan 2026-10-08-001 U2: reminders claim `last_sent_on` instead of a Redis key;
 # carry today's sends over so deploy day mails nobody twice.
 helixhr.patches.v1_0.seed_reminder_last_sent_on
+# Plan 2026-10-14-001 U9: fill `exporter_company` on HelixHR Report Export
+# rows from each owner's Employee, so the export log can filter on it.
+helixhr.patches.v1_0.backfill_export_exporter_company

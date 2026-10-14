@@ -10062,6 +10062,21 @@ def _runnable_reports(user):
 
 
 def _can_run_reports(user):
+	from helixhr.utils import (
+		DELIVERY_MANAGER_ROLE,
+		HR_USER_ROLE,
+		REPORT_MANAGER_ROLE,
+		active_company_grant,
+	)
+
+	# Most callers hold no report tier at all; answer them without resolving
+	# every catalog entry (two lookups each) on every bootstrap.
+	if (
+		resolve_admin_scope(user)["kind"] == "none"
+		and not set(frappe.get_roles(user)) & {REPORT_MANAGER_ROLE, HR_USER_ROLE, DELIVERY_MANAGER_ROLE}
+		and not active_company_grant(user)
+	):
+		return False
 	return any(True for _pair in _runnable_reports(user))
 
 
@@ -10176,6 +10191,9 @@ def request_export(report_key, format, filters=None, group_by=None, sort=None, h
 		"report_label": entry["label"],
 		"format": format,
 		"company": access["company"],
+		"exporter_company": frappe.db.get_value(  # plan 2026-10-14-001 KTD12/U9
+			"Employee", {"user_id": frappe.session.user, "status": "Active"}, "company"
+		),
 		"row_count": total_rows,
 		"filters": json.dumps(result["filters"], sort_keys=True, default=str),
 		"group_by": ", ".join(result["groups_applied"]),
@@ -10229,9 +10247,10 @@ def download_export(token):
 @frappe.whitelist()
 def get_export_log(start=0, page_length=50):
 	"""System Manager / Portal Admin: who exported what, newest first --
-	metadata only, never a file. A company-scoped caller sees its company's
-	rows; a caller whose scope resolves to none sees no rows. HR Manager is
-	refused since plan 2026-10-06-001 U3 (R6)."""
+	metadata only, never a file. A company-scoped caller sees rows whose
+	data company or exporter company is in their grant reach; a caller
+	whose scope resolves to none sees no rows. HR Manager is refused
+	since plan 2026-10-06-001 U3 (R6)."""
 	rate_limit_per_user("get_export_log")
 	if not can_admin_portal(frappe.session.user):
 		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
@@ -10241,10 +10260,16 @@ def get_export_log(start=0, page_length=50):
 	scope = resolve_portal_admin_scope(frappe.session.user)
 	if scope["kind"] == "none":
 		return {"rows": [], "has_more": False}
-	filters = {"company": scope["company"]} if scope["kind"] == "company" else {}
+	filters, or_filters = {}, None
+	if scope["kind"] == "company":
+		from helixhr.utils import grantable_companies
+
+		reach = grantable_companies(frappe.session.user) or [scope["company"]]
+		or_filters = [["company", "in", reach], ["exporter_company", "in", reach]]
 	rows = frappe.get_all(
 		"HelixHR Report Export",
 		filters=filters,
+		or_filters=or_filters,
 		fields=[
 			"name",
 			"owner",
@@ -10256,6 +10281,7 @@ def get_export_log(start=0, page_length=50):
 			"status",
 			"row_count",
 			"company",
+			"exporter_company",
 			"filters",
 			"group_by",
 		],
@@ -10351,11 +10377,10 @@ def download_report_export(export):
 	)
 	if not row or row.owner != frappe.session.user or row.status != "Ready" or not row.file:
 		frappe.throw(_(_EXPORT_GONE), frappe.PermissionError)
-	from helixhr.utils import resolve_report_access
+	from helixhr.utils import can_export_report
 
 	# R15: the right to this company's data is re-checked at download time.
-	access = resolve_report_access(frappe.session.user, row.report_key, row.company)
-	if not access["can_export"] or access["company_removed"]:
+	if not can_export_report(frappe.session.user, row.report_key, row.company):
 		frappe.throw(_(_EXPORT_GONE), frappe.PermissionError)
 	file_name = frappe.db.get_value(
 		"File", {"file_url": row.file, "attached_to_doctype": "HelixHR Report Export", "attached_to_name": export}
@@ -10821,7 +10846,7 @@ def _company_access_rows(reach, users=None):
 	rows = []
 	for grant in grants:
 		named = companies.get(grant.name, [])
-		touched = {*named, grant.home_company} - {None}
+		touched = _grant_reach_needed(named, grant)
 		if not touched & reach:
 			continue
 		rows.append(
@@ -10842,13 +10867,24 @@ def _company_access_rows(reach, users=None):
 	return rows
 
 
+def _grant_reach_needed(companies, grant):
+	"""The companies a grantor must reach to see or change ``grant``: the
+	ones it names, plus the holder's home company while the grant is
+	enabled. A disabled grant (say, after a transfer) no longer pins the old
+	home, so the new company's Portal Admin can take it over."""
+	return {*companies, *([grant.home_company] if grant.enabled and grant.home_company else [])}
+
+
 def _editable_grant(user, reach, modified):
 	"""The existing grant on ``user`` once the caller may change it (R4), or
-	None when there is none. ``modified`` must match what the caller saw."""
+	None when there is none. ``modified`` must match what the caller saw --
+	for an edit of a grant somebody has since deleted, too."""
 	if not frappe.db.exists("HelixHR Company Access", user):
+		if modified:
+			frappe.throw(_("This person's company access changed since you opened it. Reload and try again."))
 		return None
 	doc = frappe.get_doc("HelixHR Company Access", user)
-	touched = {row.company for row in doc.companies} | ({doc.home_company} - {None})
+	touched = _grant_reach_needed([row.company for row in doc.companies], doc)
 	if not touched <= set(reach):
 		frappe.throw(_(_COMPANY_ACCESS_REFUSED), frappe.PermissionError)
 	if not modified or str(doc.modified) != str(modified):
@@ -10864,17 +10900,11 @@ def _assert_not_own_grant(user):
 
 
 def _comment_company_access(user, message):
-	"""Record the change on the User, and drop any Ready export file the
-	holder could no longer request (R15)."""
-	from helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export import (
-		expire_unreachable_exports,
-	)
-
+	"""Record the change on the User. The grant's own `on_update` /
+	`after_delete` clear the holder's cache and expire their exports."""
 	frappe.get_doc("User", user).add_comment(
 		"Info", f"{frappe.utils.get_fullname(frappe.session.user)} {message}"
 	)
-	frappe.clear_cache(user=user)
-	expire_unreachable_exports(user)
 
 
 @frappe.whitelist()

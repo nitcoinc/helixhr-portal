@@ -10,6 +10,7 @@ from frappe.tests import IntegrationTestCase
 from helixhr import reports
 from helixhr.api import (
 	download_report_export,
+	get_export_log,
 	get_report_catalog,
 	request_export,
 	run_report,
@@ -24,6 +25,7 @@ from helixhr.tests.utils import (
 	make_test_delivery_manager,
 	make_test_hr_manager_employee,
 	make_test_hr_user,
+	make_test_portal_admin,
 	make_test_user,
 	set_report_access,
 )
@@ -291,3 +293,77 @@ class TestRevokedExports(IntegrationTestCase):
 		frappe.db.set_value("HelixHR Company Access", GRANT_HOLDER_USER, "allow_export", 0)
 		with self.assertRaises(frappe.PermissionError):
 			_as(GRANT_HOLDER_USER, download_report_export, export)
+
+
+class TestExportLogReach(_GrantReports):
+	"""Plan 2026-10-14-001 U9/KTD12. The export row records the picked
+	(data) company and the exporter's home company; the log lists a row
+	when either is in the Portal Admin's reach."""
+
+	def _grant_holder_export(self):
+		make_test_company_grant(GRANT_HOLDER_USER, [self.other], level="Reports only", allow_export=1)
+		return _as(
+			GRANT_HOLDER_USER, request_export, DIRECTORY, "csv", filters={"company": self.other}
+		)["export"]
+
+	def _make_portal_admin(self, user, company):
+		from helixhr.tests.utils import make_test_user
+
+		make_test_user(user, company)
+		doc = frappe.get_doc("User", user)
+		if "HelixHR Portal Admin" not in [row.role for row in doc.roles]:
+			doc.append_roles("HelixHR Portal Admin")
+			doc.save(ignore_permissions=True)
+			frappe.clear_cache(user=user)
+		return user
+
+	def test_row_records_data_company_and_exporter_company(self):
+		name = self._grant_holder_export()
+		row = frappe.db.get_value(
+			"HelixHR Report Export", name, ["company", "exporter_company"], as_dict=True
+		)
+		self.assertEqual((row.company, row.exporter_company), (self.other, self.company))
+
+	def test_fingerprint_covers_the_company(self):
+		from helixhr.api import _export_fingerprint
+
+		home_hash = _export_fingerprint(DIRECTORY, "csv", {"company": self.company}, [], None, None)
+		other_hash = _export_fingerprint(DIRECTORY, "csv", {"company": self.other}, [], None, None)
+		self.assertNotEqual(home_hash, other_hash)
+
+	def test_log_lists_a_row_on_either_side_of_the_reach(self):
+		name = self._grant_holder_export()
+		_, admin_a = make_test_portal_admin()
+		admin_b = self._make_portal_admin("grant-admin-b@helixhr.test", self.other)
+		# Exporter side: an admin reaching only the holder's home company.
+		rows_a = _as(admin_a, get_export_log, page_length=200)["rows"]
+		seen = next(row for row in rows_a if row.name == name)
+		self.assertEqual(seen.exporter_company, self.company)
+		# Data side: an admin reaching only the exported company.
+		names_b = [row.name for row in _as(admin_b, get_export_log, page_length=200)["rows"]]
+		self.assertIn(name, names_b)
+
+	def test_log_hides_a_row_on_neither_side(self):
+		doc = frappe.get_doc("User", self.foreign)
+		doc.append_roles("HR User")
+		doc.save(ignore_permissions=True)
+		frappe.clear_cache(user=self.foreign)
+		set_report_access(DIRECTORY, hr_user_run=1, hr_user_export=1)
+		other_only = _as(self.foreign, request_export, DIRECTORY, "csv")["export"]
+		_, admin_a = make_test_portal_admin()
+		names = [row.name for row in _as(admin_a, get_export_log, page_length=200)["rows"]]
+		self.assertNotIn(other_only, names)
+
+	def test_backfill_patch_fills_and_is_idempotent(self):
+		from helixhr.patches.v1_0 import backfill_export_exporter_company
+
+		name = self._grant_holder_export()
+		frappe.db.set_value("HelixHR Report Export", name, "exporter_company", None)
+		backfill_export_exporter_company.execute()
+		self.assertEqual(
+			frappe.db.get_value("HelixHR Report Export", name, "exporter_company"), self.company
+		)
+		backfill_export_exporter_company.execute()
+		self.assertEqual(
+			frappe.db.get_value("HelixHR Report Export", name, "exporter_company"), self.company
+		)
