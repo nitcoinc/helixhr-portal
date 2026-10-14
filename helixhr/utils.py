@@ -1357,6 +1357,8 @@ def admin_scope_employee_filters(scope):
 		return {}
 	if scope["kind"] == "company":
 		return {"company": scope["company"]}
+	if scope["kind"] == "companies":
+		return {"company": ["in", scope["companies"]]}
 	return None
 
 
@@ -1369,6 +1371,8 @@ def employee_in_admin_scope(employee, scope):
 		return bool(frappe.db.exists("Employee", employee))
 	if scope["kind"] == "company":
 		return bool(frappe.db.exists("Employee", {"name": employee, "company": scope["company"]}))
+	if scope["kind"] == "companies":
+		return bool(frappe.db.exists("Employee", {"name": employee, "company": ["in", scope["companies"]]}))
 	return False
 
 
@@ -1435,6 +1439,18 @@ def project_scope_filters(scope):
 		if not projects:
 			return None
 		return {"name": ["in", projects]}
+	if scope["kind"] == "companies":
+		# A read scope (plan 2026-10-14-001): granted companies, plus a
+		# Delivery Manager's assigned projects when ``user`` is set.
+		if not scope.get("user"):
+			return {"company": ["in", scope["companies"]]}
+		assigned = frappe.get_all("Project User", filters={"user": scope["user"]}, pluck="parent")
+		names = frappe.get_all(
+			"Project",
+			or_filters={"company": ["in", scope["companies"]], "name": ["in", assigned or [""]]},
+			pluck="name",
+		)
+		return {"name": ["in", names]} if names else None
 	return None
 
 
@@ -1454,6 +1470,12 @@ def project_in_scope(project, scope):
 		return bool(frappe.db.exists("Project", {"name": project, "company": scope["company"]}))
 	if scope["kind"] == "assigned":
 		return bool(frappe.db.exists("Project User", {"parent": project, "user": scope["user"]}))
+	if scope["kind"] == "companies":
+		if frappe.db.exists("Project", {"name": project, "company": ["in", scope["companies"]]}):
+			return True
+		return bool(
+			scope.get("user") and frappe.db.exists("Project User", {"parent": project, "user": scope["user"]})
+		)
 	return False
 
 
@@ -1529,16 +1551,179 @@ def can_admin_portal(user):
 	return bool(set(frappe.get_roles(user)) & {PORTAL_ADMIN_ROLE, "System Manager"})
 
 
-def resolve_report_access(user, report_key):
-	"""Who may run and export one catalog report, and over what (KTD5).
+# --- Cross-company read grants (plan 2026-10-14-001) ------------------------
+#
+# A grant widens what its holder may READ, never what they may change. The
+# two resolvers above stay the answer for every REST permission hook and
+# every write or approve gate (KTD1); `resolve_read_scope` and
+# `resolve_project_read_scope` are called only by read sites, which must
+# then read server-side (`frappe.get_all`, which ignores permissions) because
+# the holder's own self User Permission still bounds a permission-aware read.
 
-	Returns ``{"tier", "scope", "can_run", "can_export", "export_scope"}``.
-	``scope`` / ``export_scope`` use `resolve_admin_scope`'s vocabulary
-	(``unscoped`` / ``company`` / ``assigned`` / ``none``) and are each the
-	widest scope among the tiers granting that right on THIS report -- an HR
-	User + Delivery Manager running a Delivery-Manager-only report gets
-	project scope, not company scope. Export callers must use
-	``export_scope``, which can be narrower than ``scope``.
+COMPANY_ACCESS_ALL = "All data"
+COMPANY_ACCESS_REPORTS = "Reports only"
+
+
+def active_company_grant(user):
+	"""``user``'s enabled grant as ``{level, companies, allow_export,
+	home_company}``, or None.
+
+	A grant applies only to the Employee and company it was saved against,
+	and only while that Employee is Active (R16). The `employee_on_update`
+	hook disables it when either changes; this check covers the moment
+	before the hook runs and any `db_set` that skips it."""
+	if not user or user in ("Administrator", "Guest"):
+		return None
+	grant = frappe.db.get_value(
+		"HelixHR Company Access",
+		{"user": user, "enabled": 1},
+		["name", "employee", "home_company", "level", "allow_export"],
+		as_dict=True,
+	)
+	if not grant:
+		return None
+	anchor = frappe.db.get_value("Employee", {"user_id": user}, ["name", "status", "company"], as_dict=True)
+	if (
+		not anchor
+		or anchor.status != "Active"
+		or anchor.name != grant.employee
+		or anchor.company != grant.home_company
+	):
+		return None
+	companies = frappe.get_all(
+		"HelixHR Company Access Company",
+		filters={"parent": grant.name, "parenttype": "HelixHR Company Access"},
+		pluck="company",
+		order_by="idx asc",
+	)
+	return {
+		"level": grant.level,
+		"companies": companies,
+		"allow_export": bool(grant.allow_export),
+		"home_company": anchor.company,
+	}
+
+
+def disable_company_access(user, reason):
+	"""Switch off ``user``'s enabled grant, recording ``reason`` on it and as
+	an Info comment on the User. Re-enabling is a fresh decision by a grantor
+	(KTD9), never automatic. Returns whether a grant was disabled."""
+	name = frappe.db.get_value("HelixHR Company Access", {"user": user, "enabled": 1})
+	if not name:
+		return False
+	doc = frappe.get_doc("HelixHR Company Access", name)
+	doc.enabled = 0
+	doc.disabled_reason = reason
+	doc.flags.ignore_permissions = True
+	doc.save()
+	frappe.get_doc("User", user).add_comment(
+		"Info", _("HelixHR company access was disabled: {0}").format(reason)
+	)
+	return True
+
+
+def grantable_companies(user):
+	"""Which companies ``user`` may name in a grant, or None when they may not
+	grant at all (KTD3, user decision 2026-10-14).
+
+	System Manager and Administrator: every company. Portal Admin: their
+	Active home company plus each company named in their own User
+	Permissions on Company that apply to Company itself. A row that applies
+	to every doctype is ignored: ERPNext creates those as a side effect of
+	"Create User Permission" on Employee and never removes them on a
+	transfer, so they say nothing about a deliberate grant of reach."""
+	if user == "Administrator" or "System Manager" in frappe.get_roles(user):
+		return frappe.get_all("Company", pluck="name", order_by="name asc")
+	if PORTAL_ADMIN_ROLE not in frappe.get_roles(user):
+		return None
+	home = _active_anchor_company(user)
+	if not home:
+		return None
+	extra = frappe.get_all(
+		"User Permission",
+		filters={
+			"user": user,
+			"allow": "Company",
+			"apply_to_all_doctypes": 0,
+			"applicable_for": "Company",
+		},
+		pluck="for_value",
+	)
+	return list(dict.fromkeys([home, *sorted(extra)]))
+
+
+def _widen_by_companies(scope, companies, user=None):
+	"""``scope`` plus read access to ``companies``. One company stays the
+	``"company"`` kind so single-company callers see no new shape; more
+	become ``{"kind": "companies", "companies": [...]}``. ``user`` keeps a
+	Delivery Manager's assigned projects in a project read scope."""
+	if scope["kind"] == "unscoped" or not companies:
+		return scope
+	names = list(dict.fromkeys(([scope["company"]] if scope["kind"] == "company" else []) + companies))
+	if user is None and len(names) == 1:
+		return {"kind": "company", "company": names[0]}
+	widened = {"kind": "companies", "companies": names}
+	if user is not None:
+		widened["user"] = user
+	return widened
+
+
+def resolve_read_scope(user):
+	"""Which employees ``user`` may READ: `resolve_admin_scope` widened by an
+	All-data grant. People, Organisation and photos use this; `can_edit` and
+	every write keep using `resolve_admin_scope` (KTD4)."""
+	admin = resolve_admin_scope(user)
+	if admin["kind"] == "unscoped":
+		return admin
+	grant = active_company_grant(user)
+	if not grant or grant["level"] != COMPANY_ACCESS_ALL:
+		return admin
+	return _widen_by_companies(admin, grant["companies"])
+
+
+def resolve_project_read_scope(user):
+	"""Which projects ``user`` may READ: `resolve_project_scope` widened by an
+	All-data grant. A Delivery Manager keeps their assigned projects too."""
+	scope = resolve_project_scope(user)
+	if scope["kind"] == "unscoped":
+		return scope
+	grant = active_company_grant(user)
+	if not grant or grant["level"] != COMPANY_ACCESS_ALL:
+		return scope
+	return _widen_by_companies(scope, grant["companies"], user=user if scope["kind"] == "assigned" else None)
+
+
+def read_companies(scope):
+	"""The company names a read scope covers, or None for every company."""
+	if scope["kind"] == "unscoped":
+		return None
+	if scope["kind"] == "company":
+		return [scope["company"]]
+	return list(scope.get("companies") or [])
+
+
+def resolve_report_access(user, report_key, company=None):
+	"""Who may run and export one catalog report, for which company, and over
+	what (KTD5; per company since plan 2026-10-14-001 KTD6).
+
+	Returns ``{"tier", "scope", "can_run", "can_export", "export_scope",
+	"company", "companies", "company_removed"}``. Access is decided per
+	company: the existing tiers apply to the caller's home company (every
+	company for an unscoped caller), and a company access grant adds the
+	companies it names. ``company`` picks one of them; the other keys then
+	describe that company alone, and every scope is single-company, so the
+	engines never see more than one.
+
+	``scope`` / ``export_scope`` use `resolve_admin_scope`'s vocabulary and
+	are each the widest scope among the tiers granting that right on THIS
+	report in THIS company -- an HR User + Delivery Manager running a
+	Delivery-Manager-only report gets project scope, not company scope.
+	Export callers must use ``export_scope``, which can be narrower.
+
+	A ``company`` the caller may not use falls back to the default company
+	with ``company_removed`` set (R14): home when it is allowed, else the
+	site default for an unscoped caller, else the first allowed company.
+	``companies`` lists ``{company, can_export}`` per allowed company.
 
 	An unknown key and a denied key return the identical answer (R22).
 	"""
@@ -1550,22 +1735,24 @@ def resolve_report_access(user, report_key):
 		"can_run": False,
 		"can_export": False,
 		"export_scope": {"kind": "none"},
+		"company": None,
+		"companies": [],
+		"company_removed": False,
 	}
 	entry = get_entry(report_key)
 	if not entry:
 		return denied
 
 	roles = set(frappe.get_roles(user))
-	grants = []  # (tier, scope, can_export)
+	grants = []  # (tier, scope, can_export) for the home company
 
 	admin = resolve_admin_scope(user)
 	if admin["kind"] != "none":
 		grants.append(("admin", admin, True))
 
-	if REPORT_MANAGER_ROLE in roles:
-		company = _active_anchor_company(user)
-		if company:
-			grants.append(("report_manager", {"kind": "company", "company": company}, True))
+	home = _active_anchor_company(user)
+	if REPORT_MANAGER_ROLE in roles and home:
+		grants.append(("report_manager", {"kind": "company", "company": home}, True))
 
 	matrix = None
 	if roles & {HR_USER_ROLE, DELIVERY_MANAGER_ROLE}:
@@ -1576,35 +1763,80 @@ def resolve_report_access(user, report_key):
 			as_dict=True,
 		)
 
-	if matrix and HR_USER_ROLE in roles and matrix.hr_user_run:
-		company = _active_anchor_company(user)
-		if company:
-			grants.append(
-				("hr_user", {"kind": "company", "company": company}, bool(matrix.hr_user_export))
-			)
+	if matrix and HR_USER_ROLE in roles and matrix.hr_user_run and home:
+		grants.append(("hr_user", {"kind": "company", "company": home}, bool(matrix.hr_user_export)))
 
 	if matrix and DELIVERY_MANAGER_ROLE in roles and matrix.dm_run and "project" in entry["scopes"]:
 		# Same offboarding rule as `resolve_project_scope`: an Employee that
 		# exists but is not Active narrows to nothing.
 		status = frappe.db.get_value("Employee", {"user_id": user}, "status")
 		if not status or status == "Active":
-			grants.append(("delivery_manager", {"kind": "assigned", "user": user}, bool(matrix.dm_export)))
+			scope = {"kind": "assigned", "user": user}
+			if home:
+				scope["company"] = home
+			grants.append(("delivery_manager", scope, bool(matrix.dm_export)))
 
-	if not grants:
+	# One company's tier list each. An unscoped caller's tiers apply to every
+	# company, narrowed to that company (one company per run, KTD11).
+	by_company = {}
+	unscoped = any(grant[1]["kind"] == "unscoped" for grant in grants)
+	if unscoped:
+		for name in frappe.get_all("Company", pluck="name", order_by="name asc"):
+			by_company[name] = [("admin", {"kind": "company", "company": name}, True)]
+	elif grants:
+		by_company[grants[0][1].get("company") or home] = grants
+
+	# KTD8: a grant at either level runs every company-scoped catalog report
+	# for its companies; its own flag decides export.
+	grant = None if unscoped else active_company_grant(user)
+	if grant and "company" in entry["scopes"]:
+		for name in grant["companies"]:
+			by_company.setdefault(name, []).append(
+				("grant", {"kind": "company", "company": name}, grant["allow_export"])
+			)
+	if not by_company:
 		return denied
+
+	if home in by_company:
+		default = home
+	elif unscoped and frappe.defaults.get_global_default("company") in by_company:
+		default = frappe.defaults.get_global_default("company")
+	else:
+		default = next(iter(by_company))
+	picked = company if isinstance(company, str) and company in by_company else default
 
 	def widest(candidates):
 		return max(candidates, key=lambda grant: _SCOPE_RANK[grant[1]["kind"]], default=None)
 
-	run_grant = widest(grants)
-	export_grant = widest([grant for grant in grants if grant[2]])
+	def answer(tiers):
+		run_grant = widest(tiers)
+		export_grant = widest([grant for grant in tiers if grant[2]])
+		return run_grant, export_grant
+
+	companies = []
+	for name, tiers in by_company.items():
+		if name:
+			companies.append({"company": name, "can_export": answer(tiers)[1] is not None})
+	run_grant, export_grant = answer(by_company[picked])
 	return {
 		"tier": run_grant[0],
 		"scope": run_grant[1],
 		"can_run": True,
 		"can_export": export_grant is not None,
 		"export_scope": export_grant[1] if export_grant else {"kind": "none"},
+		"company": picked,
+		"companies": companies,
+		"company_removed": company not in (None, "") and picked != company,
 	}
+
+
+def can_export_report(user, report_key, company=None, access=None):
+	"""Whether ``user`` may still export ``report_key`` for ``company`` --
+	the re-check every deferred export action makes (R15): the background
+	job, the download, and expiring files after a grant narrows. A company
+	the caller may not use is a no, never the default company's yes."""
+	access = access or resolve_report_access(user, report_key, company)
+	return access["can_export"] and not access["company_removed"]
 
 
 def portal_home_page(user=None):
@@ -1709,6 +1941,13 @@ RATE_LIMIT_POLICY = {
 	# an occasional administrative grant.
 	"get_portal_role_holders": (60, 60),
 	"set_portal_role": (30, 3600),
+	# Plan 2026-10-14-001 U2: company access grants -- the Settings list, a
+	# holder search per keystroke pause, and rare administrative writes.
+	"get_company_access": (60, 60),
+	"search_company_access_targets": (60, 60),
+	"save_company_access": (30, 3600),
+	"revoke_company_access": (30, 3600),
+	"delete_company_access": (30, 3600),
 	# Plan 2026-10-07-001 U4: the Approvers cleanup -- a preview read and a
 	# rare batch apply.
 	"get_approver_cleanup": (60, 60),

@@ -31,6 +31,7 @@ import frappe
 def after_install():
 	from helixhr.patches.v1_0 import (
 		apply_permission_deltas,
+		backfill_export_exporter_company,
 		clone_celebration_templates_per_company,
 		migrate_backdated_leave_rules,
 		migrate_celebration_reminders,
@@ -79,6 +80,7 @@ def after_install():
 	turn_off_hrms_celebration_senders.execute()
 	turn_off_hrms_leave_notification.execute()
 	seed_report_access.execute()
+	backfill_export_exporter_company.execute()
 	# Plan 2026-10-06-001 U1: carries any `helixhr_backdated_leave_*` site
 	# config into the HelixHR Leave Rules Single. A no-op on a fresh site --
 	# there is no config to copy -- and the only path that carries it over on

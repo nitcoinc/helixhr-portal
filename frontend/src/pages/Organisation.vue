@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { createResource } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
@@ -8,16 +8,27 @@ import Celebrations from '@/components/Celebrations.vue'
 // P5-U15 / P5-R20, P5-R23. Management's read-only snapshot of the
 // organisation: counts, backlog ages, and nothing per person.
 //
-// `get_organisation_view` is the whole authorization story here (`_is_hr()`,
-// the same predicate `can_see_organisation` mirrors in the bootstrap) -- a
-// non-HR caller hitting this page directly gets AsyncState's 'forbidden'
-// region below, not a client-side redirect. There is no action anywhere on
-// this page: it reads one resource and draws it, on purpose (P5-R20's "grants
-// no power to act").
+// `get_organisation_view` is the whole authorization story here (its read
+// scope, the same predicate `can_see_organisation` mirrors in the bootstrap)
+// -- a caller without one hitting this page directly gets AsyncState's
+// 'forbidden' region below, not a client-side redirect. There is no action
+// anywhere on this page: it reads one resource and draws it, on purpose
+// (P5-R20's "grants no power to act").
+//
+// Plan 2026-10-14-001 U6: a company access holder may read more than one
+// company; the picker shows one at a time, from the server's own list.
+const company = ref('')
 const view = createResource({
   url: 'helixhr.api.get_organisation_view',
+  makeParams: () => (company.value ? { company: company.value } : {}),
   auto: true,
 })
+const companies = computed(() => view.data?.companies || [])
+
+function pickCompany(value) {
+  company.value = value
+  view.reload()
+}
 
 const QUEUE_LABELS = {
   leave: 'Leave',
@@ -55,6 +66,33 @@ function ageLabel(days) {
       title="Organisation"
       subtitle="A read-only view of your company -- counts, never names, and nothing to act on here."
     />
+
+    <div
+      v-if="companies.length > 1"
+      class="mb-4 max-w-xs"
+    >
+      <label
+        for="organisation-company"
+        class="text-sm text-ink-gray-6"
+      >
+        Company
+      </label>
+      <select
+        id="organisation-company"
+        :value="view.data?.company"
+        class="mt-1 block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
+        data-testid="organisation-company"
+        @change="pickCompany($event.target.value)"
+      >
+        <option
+          v-for="name in companies"
+          :key="name"
+          :value="name"
+        >
+          {{ name }}
+        </option>
+      </select>
+    </div>
 
     <AsyncState
       section="organisation"

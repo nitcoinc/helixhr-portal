@@ -72,6 +72,9 @@ function defaults(item) {
   for (const spec of item.filters) {
     if (spec.default !== null && spec.default !== undefined && spec.default !== '') values[spec.name] = spec.default
   }
+  // Plan 2026-10-14-001 U10: a caller offered several companies starts on
+  // the default one; a single-company caller sends none, exactly as before.
+  if (item.companies?.length > 1) values.company = item.company || item.companies[0].company
   const range = item.default_preset ? presetRange(item.default_preset, today()) : null
   return range ? { ...values, ...range } : values
 }
@@ -110,6 +113,16 @@ function run() {
     sort: sort.value,
   })
 }
+
+// Plan 2026-10-14-001 U10: export rights and the Desk hand-off follow the
+// picked company. The Desk link is offered for the default company only.
+const pickedCompany = computed(() =>
+  entry.value?.companies?.find((option) => option.company === filters.value.company) || null,
+)
+const canExport = computed(() => (pickedCompany.value ? !!pickedCompany.value.can_export : !!entry.value?.can_export))
+const canOpenInDesk = computed(
+  () => !!entry.value?.can_open_in_desk && (!filters.value.company || filters.value.company === entry.value.company),
+)
 
 // U5: an export is the screen's own query (hidden columns left out).
 const exportQuery = computed(() => ({
@@ -208,17 +221,20 @@ const isEmpty = computed(
 )
 
 const removedLabels = computed(() =>
-  (result.value?.filters_removed || []).map(
+  (result.value?.filters_removed || []).filter((name) => name !== 'company').map(
     (name) => entry.value?.filters.find((spec) => spec.name === name)?.label || name,
   ),
 )
+// R14: a company the caller may not use falls back to the default company
+// rather than emptying the run, so it gets its own sentence.
+const companyRemoved = computed(() => (result.value?.filters_removed || []).includes('company'))
 
 // --- the secondary Desk link (System User with admin scope only) ------------
 const openError = ref('')
 const opening = ref(false)
 
 async function openInDesk() {
-  if (!entry.value?.can_open_in_desk) return
+  if (!canOpenInDesk.value) return
   openError.value = ''
   opening.value = true
   try {
@@ -319,11 +335,11 @@ async function openInDesk() {
             />
             <ExportMenu
               :report-key="entry.key"
-              :can-export="entry.can_export"
+              :can-export="canExport"
               :query="exportQuery"
             />
             <button
-              v-if="entry.can_open_in_desk"
+              v-if="canOpenInDesk"
               type="button"
               class="-my-2 inline-flex min-h-11 cursor-pointer items-center text-sm text-blue-700 underline underline-offset-2"
               :disabled="opening"
@@ -375,6 +391,13 @@ async function openInDesk() {
             role="status"
           >
             {{ removedLabels.join(', ') }}: outside what you can report on, so nothing is shown.
+          </p>
+          <p
+            v-if="companyRemoved"
+            class="surface-inset mb-3 p-3 text-sm text-ink-gray-7"
+            role="status"
+          >
+            Company: outside what you can report on, so this shows {{ result.filters?.company || 'your own company' }} instead.
           </p>
           <p
             v-if="runMessage"

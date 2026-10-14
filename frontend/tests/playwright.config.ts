@@ -67,7 +67,7 @@ export default defineConfig({
       // Plan 2026-10-02-001 U10: email-templates.spec.ts -- HR is the refused
       // hat; the Notification Manager signs in inside the spec itself, the
       // same way login-dashboard.spec.ts does, since it has no Employee.
-      testMatch: /(approvals|settings|organisation|people|reports|projects|roster|navigation|email-templates)\.spec\.ts/,
+      testMatch: /(approvals|settings|organisation|people|reports|reports-company|company-access|projects|roster|navigation|email-templates)\.spec\.ts/,
     },
     // P5-U11. The routed-worker identity: `IT Team`, portal-only
     // (desk_access: 0), which never reaches Desk and works only the requests
@@ -95,7 +95,7 @@ export default defineConfig({
       name: 'portal-admin',
       use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/portal-admin.json' },
       dependencies: ['setup'],
-      testMatch: /settings\.spec\.ts/,
+      testMatch: /(settings|company-access)\.spec\.ts/,
     },
     // P2-U9 step 9. Mobile WebKit is the second mandatory browser: it is the
     // only engine on iOS, it is where a coarse pointer, a real safe-area

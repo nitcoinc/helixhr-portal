@@ -1549,9 +1549,18 @@ exports them itself (CSV, Excel, PDF), inside one bound and one access model:
   scopes, PDF layout); adding one is a release. Who may run or export it is
   one `HelixHR Report Access` record per report key (track_changes on),
   edited by HR in Settings; a missing record means deny.
-- **One resolver (KTD5, KTD6).** `resolve_report_access(user, report_key)`
-  returns tier, scope, `can_run`, `can_export` and `export_scope`; every
-  report endpoint consumes it and exports use `export_scope`. Scope is
+- **One resolver (KTD5, KTD6).** `resolve_report_access(user, report_key,
+  company=None)` returns tier, scope, `can_run`, `can_export` and
+  `export_scope` for one company, plus `companies` (every company the caller
+  may run it for, each with its own export right) and `company_removed`;
+  every report endpoint consumes it, through `api._report_access`, and
+  exports use `export_scope`. Access is decided per company (plan
+  2026-10-14-001): the tiers below apply to the home company, an unscoped
+  caller gets every company one at a time, and a company access grant adds
+  its companies. A company the caller may not use falls back to the default
+  with `company` in `filters_removed`; exports refuse it. The company rides
+  in the result's filters, so export fingerprints, the background job, the
+  download and saved views all re-check it. Scope is
   resolved per report from only the tiers that grant run/export on that key,
   reusing `resolve_admin_scope` and `resolve_project_scope`. Report Manager
   and HR User need an Active Employee anchor whose company is their scope;
@@ -1595,6 +1604,51 @@ exports them itself (CSV, Excel, PDF), inside one bound and one access model:
   `can_admin_portal` drives the Settings (Report access + Portal roles only)
   and Reports (Export log only) nav entries.
 
+### Cross-company read grants (plan 2026-10-14-001)
+
+Every administrative read was scoped to one company: the caller's Active
+Employee's. A **company access grant** (`HelixHR Company Access`, one per
+User, System Manager DocPerm only, track_changes on) lets a portal user read
+other companies' data. **Grants are read-only.**
+
+- **Two levels.** *All data* opens People, Organisation, Projects and
+  Reports for the named companies. *Reports only* opens every non-deny-listed
+  company-scoped catalog report for them. At both levels the grant's
+  `allow_export` decides export, not the HelixHR Report Access matrix.
+- **A second resolver, never a wider first one.** `resolve_read_scope` and
+  `resolve_project_read_scope` widen `resolve_admin_scope` /
+  `resolve_project_scope` for read sites only, returning a `companies` kind
+  when more than one company applies. The original two resolvers still
+  answer every REST permission hook and every write, approve and roster
+  gate, so a grant reaches no `/api/resource` document and no write. Reads
+  return `can_edit` (person, project) and `can_create` (projects) from the
+  write resolvers. Roster's "Everyone" mode has its own bootstrap flag,
+  `can_roster_everyone`.
+- **Grant reads run server-side.** Holders keep their self User Permission
+  under strict mode. That is still the boundary for every permission-aware
+  read, so reads behind the read resolver use `frappe.get_all` (which ignores
+  permissions). The person view's leave balances run inside
+  `as_administrator()`, because HRMS's `get_leave_details` checks the session
+  user.
+- **Grant authority (reverses plan 2026-10-06-001 U3's "Portal Admin is
+  config, not HR data" for this one capability).** `grantable_companies`:
+  System Manager and Administrator may grant any company. A Portal Admin may
+  grant only its Active home company plus the companies in its own User
+  Permissions on Company whose Applicable For is Company. Apply-to-all rows
+  are ignored: ERPNext creates them as a side effect of "Create User
+  Permission" and never removes them on a transfer. No one may grant,
+  edit or revoke their own grant, and a Portal Admin edits only grants whose
+  every company is in its reach. Every change comments on the holder's User
+  and clears their cache. The Portal Admin itself still sees no HR data
+  through its role.
+- **Lifecycle.** A grant applies only to the Employee and company it was
+  saved against, while that Employee is Active (`active_company_grant`).
+  `employee_on_update` disables it on a status, login or company change,
+  and re-enabling it is a fresh save. Disabling or narrowing a grant
+  expires the holder's Ready export files they can no longer request.
+  Preflight "Company access grants" lists every enabled grant and WARNs on
+  ones that no longer apply or are held by a Portal Admin.
+
 Desk access to HRMS reports is unchanged and still governed by Frappe's own
 Report roles and DocPerms, not by this matrix: granting a report here gives
 no Desk access, and a Desk role gives no portal report. A System User still
@@ -1614,7 +1668,7 @@ roster keeps the same rules as every other HR surface here:
   every Active employee in `resolve_admin_scope` (`hr`). A mode the caller
   does not hold is a `PermissionError`, never a silent downgrade; the page
   offers only the modes the bootstrap flags say it holds (`hasReports`,
-  `canSeePeople`), and `can_edit` is true only in `hr` mode with Shift
+  `canRosterEveryone`), and `can_edit` is true only in `hr` mode with Shift
   Assignment `create`.
 - **Writes run the doc lifecycle.** `assign_shift` inserts and submits
   through HRMS's controller, so its overlap and same-day validation run;

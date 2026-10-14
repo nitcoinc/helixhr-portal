@@ -106,7 +106,7 @@ class TestFilterHelp(IntegrationTestCase):
 	)
 
 	def test_catalog_payload_carries_help_only_where_named(self):
-		access = {"can_export": False}
+		access = {"can_export": False, "company": None, "companies": []}
 		seen = set()
 		for entry in reports.CATALOG:
 			for spec in reports.client_entry(entry, access)["filters"]:

@@ -1797,6 +1797,59 @@ def check_no_timesheet_report_permission():
 	)
 
 
+def check_company_access_grants():
+	"""Plan 2026-10-14-001 R18: every enabled cross-company read grant, by
+	holder. WARN on a grant that no longer applies (the holder is not Active,
+	or moved Employee or company since it was saved), one naming a company
+	that no longer exists, and one held by a Portal Admin -- two Portal Admins
+	with reach into the same companies can grant each other. FAIL when the
+	doctype gains a DocPerm beyond System Manager: Portal Admin writes
+	through its own gated endpoints, and a role DocPerm would let anybody
+	holding it edit grants over REST."""
+	label = "Company access grants"
+	extra = set()
+	for doctype in ("DocPerm", "Custom DocPerm"):
+		extra |= set(frappe.get_all(doctype, filters={"parent": "HelixHR Company Access"}, pluck="role"))
+	extra -= {"System Manager"}
+	if extra:
+		return _result(label, FAIL, f"DocPerm beyond System Manager: {', '.join(sorted(extra))}")
+
+	grants = frappe.get_all(
+		"HelixHR Company Access",
+		filters={"enabled": 1},
+		fields=["name", "user", "employee", "home_company", "level"],
+		order_by="user asc",
+	)
+	if not grants:
+		return _result(label, PASS, "no enabled grants")
+	known = set(frappe.get_all("Company", pluck="name"))
+	listed, problems = [], []
+	for grant in grants:
+		named = frappe.get_all(
+			"HelixHR Company Access Company",
+			filters={"parenttype": "HelixHR Company Access", "parent": grant.name},
+			pluck="company",
+			order_by="idx asc",
+		)
+		listed.append(f"{grant.user} ({grant.level}: {', '.join(named)})")
+		anchor = frappe.db.get_value(
+			"Employee", {"user_id": grant.user}, ["name", "status", "company"], as_dict=True
+		)
+		if not anchor or anchor.status != "Active":
+			problems.append(f"{grant.user}: holder is not Active, so the grant does not apply")
+		elif anchor.name != grant.employee or anchor.company != grant.home_company:
+			problems.append(f"{grant.user}: holder moved since the grant was saved, so it does not apply")
+		unknown = [company for company in named if company not in known]
+		if unknown:
+			problems.append(f"{grant.user}: names unknown companies {', '.join(unknown)}")
+		if PORTAL_ADMIN in frappe.get_roles(grant.user):
+			problems.append(f"{grant.user}: holds Portal Admin -- check who granted it")
+	detail = f"{len(grants)} enabled: {'; '.join(listed)}"
+	if problems:
+		return _result(label, WARN, f"{'; '.join(problems)}. {detail}")
+	return _result(label, PASS, detail)
+
+
 CHECKS = [
 	check_strict_user_permissions,
 	check_employee_user_permissions,
@@ -1816,6 +1869,7 @@ CHECKS = [
 	check_report_manager_role,
 	check_portal_admin_role,
 	check_report_access_hr_lockout,
+	check_company_access_grants,
 	check_signup_disabled,
 	check_password_login,
 	check_entra,

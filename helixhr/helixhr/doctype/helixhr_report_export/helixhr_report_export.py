@@ -33,12 +33,33 @@ class HelixHRReportExport(Document):
 			pluck="name",
 		)
 		for name in stale:
-			for file_name in frappe.get_all(
-				"File",
-				filters={"attached_to_doctype": "HelixHR Report Export", "attached_to_name": name},
-				pluck="name",
-			):
-				frappe.delete_doc("File", file_name, ignore_permissions=True, force=True)
-			frappe.db.set_value("HelixHR Report Export", name, {"file": None, "status": "Expired"})
+			expire_export(name)
 
 		frappe.db.delete(table, filters=(table.creation < (Now() - Interval(days=days))))
+
+
+def expire_export(name):
+	"""Delete one export's attached file and mark the row Expired."""
+	for file_name in frappe.get_all(
+		"File",
+		filters={"attached_to_doctype": "HelixHR Report Export", "attached_to_name": name},
+		pluck="name",
+	):
+		frappe.delete_doc("File", file_name, ignore_permissions=True, force=True)
+	frappe.db.set_value("HelixHR Report Export", name, {"file": None, "status": "Expired"})
+
+
+def expire_unreachable_exports(user):
+	"""Plan 2026-10-14-001 R15: after ``user``'s access narrows, expire every
+	Ready background export of theirs they could no longer request. The
+	download endpoint refuses them anyway; this removes the private File
+	itself, which `/private/files` would otherwise still serve its owner."""
+	from helixhr.utils import can_export_report
+
+	for row in frappe.get_all(
+		"HelixHR Report Export",
+		filters={"owner": user, "status": "Ready", "file": ["is", "set"]},
+		fields=["name", "report_key", "company"],
+	):
+		if not can_export_report(user, row.report_key, row.company):
+			expire_export(row.name)

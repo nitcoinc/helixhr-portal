@@ -11,14 +11,17 @@ describe('rosterModes', () => {
     expect(values({ status: 'ready', hasReports: true })).toEqual(['mine', 'team'])
   })
   it('adds everyone for an admin scope', () => {
-    expect(values({ status: 'ready', hasReports: true, canSeePeople: true })).toEqual([
+    expect(values({ status: 'ready', hasReports: true, canRosterEveryone: true })).toEqual([
       'mine',
       'team',
       'hr',
     ])
   })
+  it('does not add everyone for a read-only company access grant', () => {
+    expect(values({ status: 'ready', canSeePeople: true })).toEqual(['mine'])
+  })
   it('gives a desk-only session nothing but everyone', () => {
-    expect(values({ status: 'desk-only', hasReports: true, canSeePeople: true })).toEqual(['hr'])
+    expect(values({ status: 'desk-only', hasReports: true, canRosterEveryone: true })).toEqual(['hr'])
     expect(values({ status: 'desk-only' })).toEqual([])
   })
 })

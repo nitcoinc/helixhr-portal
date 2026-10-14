@@ -355,6 +355,12 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"save_report_access": (30, 3600),
 			"get_portal_role_holders": (60, 60),
 			"set_portal_role": (30, 3600),
+			# Plan 2026-10-14-001 U2: company access grants.
+			"get_company_access": (60, 60),
+			"search_company_access_targets": (60, 60),
+			"save_company_access": (30, 3600),
+			"revoke_company_access": (30, 3600),
+			"delete_company_access": (30, 3600),
 			"get_approver_cleanup": (60, 60),
 			"apply_approver_cleanup": (10, 3600),
 			"get_dashboard": (60, 60),

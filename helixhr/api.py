@@ -79,6 +79,8 @@ from helixhr.helixhr.doctype.helixhr_timesheet_change.helixhr_timesheet_change i
 # `hr_request.get_permission_query_conditions` cannot drift apart.
 from helixhr.helixhr.doctype.hr_request.hr_request import _WORKER_ROLES as _ROUTED_WORKER_ROLES
 from helixhr.utils import (
+	COMPANY_ACCESS_ALL,
+	COMPANY_ACCESS_REPORTS,
 	EMAIL_THEME,
 	HOLIDAY_LIST_EDITABLE_FIELDS,
 	LEAVE_TYPE_EDITABLE_FIELDS,
@@ -101,11 +103,13 @@ from helixhr.utils import (
 	admin_scope_employee_filters,
 	as_administrator,
 	can_admin_portal,
+	disable_company_access,
 	email_theme,
 	employee_in_admin_scope,
 	event_variables,
 	get_manager_user,
 	get_week_bounds,
+	grantable_companies,
 	has_custom_wording,
 	is_photo_content,
 	mask_identifier,
@@ -116,10 +120,13 @@ from helixhr.utils import (
 	project_in_scope,
 	project_scope_filters,
 	rate_limit_per_user,
+	read_companies,
 	render_message,
 	resolve_admin_scope,
 	resolve_portal_admin_scope,
+	resolve_project_read_scope,
 	resolve_project_scope,
+	resolve_read_scope,
 	sample_context,
 	send_notification,
 	session_company,
@@ -481,7 +488,8 @@ def remove_my_photo(**kwargs):
 
 
 def _may_see_photo(employee):
-	"""R3: the owner; HR within admin scope (any status); an Active
+	"""R3: the owner; HR within admin scope, or a company access holder
+	within their read scope (any status); an Active
 	colleague in the caller's own company (the Directory rule)."""
 	target = frappe.db.get_value("Employee", employee, ["company", "status", "user_id"], as_dict=True)
 	if not target:
@@ -489,7 +497,7 @@ def _may_see_photo(employee):
 	user = frappe.session.user
 	if target.user_id and target.user_id == user:
 		return True
-	if employee_in_admin_scope(employee, resolve_admin_scope(user)):
+	if employee_in_admin_scope(employee, resolve_read_scope(user)):
 		return True
 	if target.status != "Active":
 		return False
@@ -617,23 +625,26 @@ def get_portal_bootstrap():
 		# Manager need not be anybody's employee for Settings to make sense.
 		"can_configure": _is_hr(frappe.session.user),
 		# P5-U15: the same predicate `get_organisation_view` itself enforces,
-		# so the nav item and the server's own gate can never disagree --
-		# same shape as `can_configure` just above.
-		"can_see_organisation": _is_hr(frappe.session.user),
+		# so the nav item and the server's own gate can never disagree. Since
+		# plan 2026-10-14-001 that is the read scope, which an All-data
+		# company access grant widens.
+		"can_see_organisation": resolve_read_scope(frappe.session.user)["kind"] != "none",
 		# The Email templates page (theme, message templates, celebrations &
 		# holidays): Portal Admin and System Manager only -- the predicate
 		# every endpoint behind the page enforces. A boolean, never a role list.
 		"can_edit_email_templates": _can_edit_email_templates(frappe.session.user),
 		# P6-U4: same shape again -- `search_people` and `get_person` are
-		# gated by `resolve_admin_scope`, which grants a scope to exactly
-		# the roles `_is_hr` names, so the nav item and the server's gate
-		# agree by construction.
-		"can_see_people": resolve_admin_scope(frappe.session.user)["kind"] != "none",
-		# P7-U5: same shape as `can_see_people` just above -- `search_projects`
-		# and `get_project` are gated by `resolve_project_scope`, which grants a
-		# scope to exactly the callers this flag names, so the nav item and the
+		# gated by `resolve_read_scope` (`resolve_admin_scope` widened by an
+		# All-data grant, plan 2026-10-14-001), so the nav item and the
 		# server's gate agree by construction.
-		"can_see_projects": resolve_project_scope(frappe.session.user)["kind"] != "none",
+		"can_see_people": resolve_read_scope(frappe.session.user)["kind"] != "none",
+		# Roster's "Everyone" mode stays on `resolve_admin_scope`: a grant is
+		# read-only and never opens the roster (KTD11).
+		"can_roster_everyone": resolve_admin_scope(frappe.session.user)["kind"] != "none",
+		# P7-U5: same shape as `can_see_people` just above -- `search_projects`
+		# and `get_project` are gated by `resolve_project_read_scope`, so the
+		# nav item and the server's gate agree by construction.
+		"can_see_projects": resolve_project_read_scope(frappe.session.user)["kind"] != "none",
 		# Plan 2026-10-04-001 U4: the Reports nav item. True when
 		# `get_report_catalog` would list at least one entry -- the same
 		# `resolve_report_access` answer `run_report` enforces.
@@ -847,16 +858,17 @@ def _celebration_projection(row, event_date, today):
 	}
 
 
-def _get_celebrations(employee, today):
-	"""This month's birthdays and work anniversaries in the caller's own
-	company, today's first and then by day.
+def _get_celebrations(employee, today, company=None):
+	"""This month's birthdays and work anniversaries in ``employee``'s
+	company (or ``company``, for the Organisation view), today's first and
+	then by day.
 
 	An employee whose record carries no company gets empty lists rather
 	than an error, exactly as `get_directory` does -- "we cannot tell which
 	company you are in" is a thing for HR to fix, and the card simply does
 	not appear.
 	"""
-	company = frappe.db.get_value("Employee", employee, "company")
+	company = company or frappe.db.get_value("Employee", employee, "company")
 	if not company:
 		return {"birthdays": [], "anniversaries": []}
 
@@ -9743,15 +9755,16 @@ def _people_search_projection(row):
 
 @frappe.whitelist()
 def search_people(query=None, start=0, limit=None):
-	"""A bounded page of active employees this caller may administer,
-	matched by name, employee number or work email (P6-R1, P6-R8).
+	"""A bounded page of active employees this caller may read, matched by
+	name, employee number or work email (P6-R1, P6-R8), across every company
+	their read scope covers; each row names its company.
 
 	Refused server-side, before any row is read, for anyone
-	`resolve_admin_scope` does not grant a scope to (P6-R6, P6-R13) --
+	`resolve_read_scope` does not grant a scope to (P6-R6, P6-R13) --
 	`PermissionError`, the same as every other admin-only read in this file.
 	"""
 	rate_limit_per_user("search_people")
-	scope = resolve_admin_scope(frappe.session.user)
+	scope = resolve_read_scope(frappe.session.user)
 	if scope["kind"] == "none":
 		frappe.throw(_("You are not authorised to look up other people."), frappe.PermissionError)
 
@@ -9971,6 +9984,27 @@ def get_report_link(report, employee=None):
 _REPORT_NOT_OFFERED = "That report is not offered here."
 
 
+def _report_access(report_key, company=None, right="can_run"):
+	"""`resolve_report_access` for the session user and the requested
+	``company`` (plan 2026-10-14-001 KTD6), refused uniformly unless it
+	grants ``right``. Every report endpoint resolves the company here, at
+	the boundary, and nowhere else."""
+	from helixhr.utils import resolve_report_access
+
+	access = resolve_report_access(frappe.session.user, report_key, company)
+	if not access[right]:
+		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
+	return access
+
+
+def _requested_company(filters):
+	"""The ``company`` a report request names, if any."""
+	from helixhr import reports
+
+	raw = reports._parse(filters, {})
+	return raw.get("company") if isinstance(raw, dict) else None
+
+
 @frappe.whitelist()
 def run_report(report_key, filters=None, group_by=None, sort=None, **kwargs):
 	"""Run one catalog report for the screen (R8, R9, R22).
@@ -9978,8 +10012,10 @@ def run_report(report_key, filters=None, group_by=None, sort=None, **kwargs):
 	Access comes from `resolve_report_access` alone: an unknown key, a
 	deny-listed report and a report this caller may not run all get the same
 	refusal. `filters` is allowlisted against the entry's filter specs,
-	company is forced to the caller's scope, and entity filters must be plain
-	in-scope strings (see `reports.resolve_filters`). Anything else in the
+	``filters.company`` must be a company this caller may run the report for
+	(else it is listed in ``filters_removed`` and the default company runs),
+	and entity filters must be plain in-scope strings (see
+	`reports.resolve_filters`). Anything else in the
 	request -- including a key naming a user to run as -- lands in
 	``**kwargs`` and is never read.
 
@@ -9989,14 +10025,14 @@ def run_report(report_key, filters=None, group_by=None, sort=None, **kwargs):
 	group boundary; ``totals`` and the trailing total row cover every row.
 	"""
 	from helixhr import reports
-	from helixhr.utils import resolve_report_access
 
 	rate_limit_per_user("run_report")
-	access = resolve_report_access(frappe.session.user, report_key)
-	if not access["can_run"]:
-		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
+	access = _report_access(report_key, _requested_company(filters))
 
 	result = reports.run(report_key, access["scope"], filters, group_by, sort)
+	if access["company_removed"]:
+		# R14: the company fell back rather than emptying the run.
+		result["filters_removed"] = [*result["filters_removed"], "company"]
 	rows, truncated = reports.cap_rows(result["shaped"]["rows"])
 	return {
 		"columns": result["columns"],
@@ -10026,6 +10062,21 @@ def _runnable_reports(user):
 
 
 def _can_run_reports(user):
+	from helixhr.utils import (
+		DELIVERY_MANAGER_ROLE,
+		HR_USER_ROLE,
+		REPORT_MANAGER_ROLE,
+		active_company_grant,
+	)
+
+	# Most callers hold no report tier at all; answer them without resolving
+	# every catalog entry (two lookups each) on every bootstrap.
+	if (
+		resolve_admin_scope(user)["kind"] == "none"
+		and not set(frappe.get_roles(user)) & {REPORT_MANAGER_ROLE, HR_USER_ROLE, DELIVERY_MANAGER_ROLE}
+		and not active_company_grant(user)
+	):
+		return False
 	return any(True for _pair in _runnable_reports(user))
 
 
@@ -10054,14 +10105,16 @@ def search_report_options(report_key, filter, query=None, value=None, context=No
 	most `reports.OPTIONS_LIMIT` results; a query under two characters
 	returns nothing. ``value`` resolves one chosen value's label (URL load).
 	``context`` carries a dependent picker's parent, e.g. ``{"project"}``
-	for tasks."""
+	for tasks, and the picked ``company``."""
 	from helixhr import reports
-	from helixhr.utils import resolve_report_access
 
 	rate_limit_per_user("search_report_options")
-	access = resolve_report_access(frappe.session.user, report_key)
-	if not access["can_run"]:
-		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
+	parsed = frappe.parse_json(context) if isinstance(context, str) and context else context
+	company = parsed.get("company") if isinstance(parsed, dict) else None
+	access = _report_access(report_key, company)
+	if access["company_removed"]:
+		# Options for a company the caller may not use: none, never home's.
+		return []
 	return reports.search_options(
 		reports.get_entry(report_key), filter, access["scope"], query=query, value=value, context=context
 	)
@@ -10109,11 +10162,11 @@ def request_export(report_key, format, filters=None, group_by=None, sort=None, h
 	filters" sentence.
 	"""
 	from helixhr import reports
-	from helixhr.utils import resolve_report_access
 
 	rate_limit_per_user("request_export")
-	access = resolve_report_access(frappe.session.user, report_key)
-	if not access["can_export"]:
+	access = _report_access(report_key, _requested_company(filters), right="can_export")
+	if access["company_removed"]:
+		# A file is never silently another company's data.
 		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
 	if format not in reports.EXPORT_FORMATS:
 		frappe.throw(_("Choose CSV, Excel or PDF."))
@@ -10137,8 +10190,10 @@ def request_export(report_key, format, filters=None, group_by=None, sort=None, h
 		"report_key": report_key,
 		"report_label": entry["label"],
 		"format": format,
-		"company": scope.get("company")
-		or (reports._scope_company(scope, raw) if scope["kind"] == "unscoped" else None),
+		"company": access["company"],
+		"exporter_company": frappe.db.get_value(  # plan 2026-10-14-001 KTD12/U9
+			"Employee", {"user_id": frappe.session.user, "status": "Active"}, "company"
+		),
 		"row_count": total_rows,
 		"filters": json.dumps(result["filters"], sort_keys=True, default=str),
 		"group_by": ", ".join(result["groups_applied"]),
@@ -10192,9 +10247,10 @@ def download_export(token):
 @frappe.whitelist()
 def get_export_log(start=0, page_length=50):
 	"""System Manager / Portal Admin: who exported what, newest first --
-	metadata only, never a file. A company-scoped caller sees its company's
-	rows; a caller whose scope resolves to none sees no rows. HR Manager is
-	refused since plan 2026-10-06-001 U3 (R6)."""
+	metadata only, never a file. A company-scoped caller sees rows whose
+	data company or exporter company is in their grant reach; a caller
+	whose scope resolves to none sees no rows. HR Manager is refused
+	since plan 2026-10-06-001 U3 (R6)."""
 	rate_limit_per_user("get_export_log")
 	if not can_admin_portal(frappe.session.user):
 		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
@@ -10204,10 +10260,16 @@ def get_export_log(start=0, page_length=50):
 	scope = resolve_portal_admin_scope(frappe.session.user)
 	if scope["kind"] == "none":
 		return {"rows": [], "has_more": False}
-	filters = {"company": scope["company"]} if scope["kind"] == "company" else {}
+	filters, or_filters = {}, None
+	if scope["kind"] == "company":
+		from helixhr.utils import grantable_companies
+
+		reach = grantable_companies(frappe.session.user) or [scope["company"]]
+		or_filters = [["company", "in", reach], ["exporter_company", "in", reach]]
 	rows = frappe.get_all(
 		"HelixHR Report Export",
 		filters=filters,
+		or_filters=or_filters,
 		fields=[
 			"name",
 			"owner",
@@ -10219,6 +10281,7 @@ def get_export_log(start=0, page_length=50):
 			"status",
 			"row_count",
 			"company",
+			"exporter_company",
 			"filters",
 			"group_by",
 		],
@@ -10304,12 +10367,20 @@ def download_report_export(export):
 	rate_limit_per_user("download_export")
 	row = (
 		frappe.db.get_value(
-			"HelixHR Report Export", export, ["owner", "status", "file", "file_name", "format"], as_dict=True
+			"HelixHR Report Export",
+			export,
+			["owner", "status", "file", "file_name", "format", "report_key", "company"],
+			as_dict=True,
 		)
 		if isinstance(export, str)
 		else None
 	)
 	if not row or row.owner != frappe.session.user or row.status != "Ready" or not row.file:
+		frappe.throw(_(_EXPORT_GONE), frappe.PermissionError)
+	from helixhr.utils import can_export_report
+
+	# R15: the right to this company's data is re-checked at download time.
+	if not can_export_report(frappe.session.user, row.report_key, row.company):
 		frappe.throw(_(_EXPORT_GONE), frappe.PermissionError)
 	file_name = frappe.db.get_value(
 		"File", {"file_url": row.file, "attached_to_doctype": "HelixHR Report Export", "attached_to_name": export}
@@ -10343,14 +10414,14 @@ _VIEW_QUERY_MAX = 4000
 _VIEW_LABEL_MAX = 80
 
 
-def _viewer_company(user, scope):
-	"""The company a view is shared within: the scope's company, else the
-	caller's Active Employee's (project-scoped tiers). None when unscoped."""
-	if scope["kind"] == "unscoped":
+def _viewer_company(user):
+	"""The company a view is shared within: the caller's Active Employee's --
+	never a company reached through a grant, so a holder's shared view is
+	not published into another company (plan 2026-10-14-001). None for an
+	unscoped caller, who sees every shared view."""
+	if resolve_admin_scope(user)["kind"] == "unscoped":
 		return None
-	return scope.get("company") or frappe.db.get_value(
-		"Employee", {"user_id": user, "status": "Active"}, "company"
-	)
+	return frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "company")
 
 
 def _clean_view_query(entry, query):
@@ -10369,7 +10440,8 @@ def _clean_view_query(entry, query):
 			continue
 		if len(value) > _VIEW_VALUE_MAX:
 			frappe.throw(_("Invalid view."))
-		if key in filter_names:
+		if key in filter_names or key == "company":
+			# A saved company is re-checked on every run (R14).
 			clean[key] = value
 		elif key in ("group", "hide"):
 			fields = value.split(",")
@@ -10389,15 +10461,6 @@ def _clean_view_query(entry, query):
 	return clean
 
 
-def _view_access(report_key):
-	from helixhr.utils import resolve_report_access
-
-	access = resolve_report_access(frappe.session.user, report_key)
-	if not access["can_run"]:
-		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
-	return access
-
-
 def _can_delete_view(view, user):
 	if view.owner == user:
 		return True
@@ -10413,11 +10476,11 @@ def list_report_views(report_key):
 	their company. A report the caller can no longer run lists nothing (the
 	views are kept, not deleted)."""
 	rate_limit_per_user("list_report_views")
-	access = _view_access(report_key)
+	_report_access(report_key)
 	user = frappe.session.user
-	company = _viewer_company(user, access["scope"])
+	company = _viewer_company(user)
 	shared = {"visibility": "Shared", "report_key": report_key}
-	if access["scope"]["kind"] != "unscoped":
+	if resolve_admin_scope(user)["kind"] != "unscoped":
 		if not company:
 			shared = None
 		else:
@@ -10452,7 +10515,7 @@ def save_report_view(report_key, label, query=None, visibility="Private", name=N
 	from helixhr import reports
 
 	rate_limit_per_user("save_report_view")
-	access = _view_access(report_key)
+	_report_access(report_key)
 	user = frappe.session.user
 	label = (label or "").strip() if isinstance(label, str) else ""
 	if not label or len(label) > _VIEW_LABEL_MAX:
@@ -10479,7 +10542,7 @@ def save_report_view(report_key, label, query=None, visibility="Private", name=N
 			"label": label,
 			"visibility": visibility,
 			"query": json.dumps(clean, sort_keys=True),
-			"company": _viewer_company(user, access["scope"]),
+			"company": _viewer_company(user),
 		}
 	)
 	doc.save(ignore_permissions=True)
@@ -10721,6 +10784,256 @@ def set_portal_role(employee, role, enabled):
 	)[0]
 
 
+# --- Company access grants (plan 2026-10-14-001 U2, R2-R6) -------------------
+#
+# A Portal Admin or System Manager gives a portal user read access to other
+# companies. Who may grant which company is `grantable_companies` (KTD3).
+# The doctype holds a System Manager DocPerm only; these endpoints are the
+# Portal Admin's gate, exactly as `save_report_access` is.
+
+_COMPANY_ACCESS_LEVELS = (COMPANY_ACCESS_ALL, COMPANY_ACCESS_REPORTS)
+_COMPANY_ACCESS_REFUSED = "You are not authorised to change this person's company access."
+
+
+def _company_access_reach():
+	user = frappe.session.user
+	reach = grantable_companies(user) if can_admin_portal(user) else None
+	if not reach:
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	return reach
+
+
+def _company_access_rows(reach, users=None):
+	"""Grants the caller may see -- any named or home company in ``reach`` --
+	each with ``can_edit``: every one of its companies in reach, and not the
+	caller's own."""
+	filters = {"user": ["in", users]} if users else {}
+	grants = frappe.get_all(
+		"HelixHR Company Access",
+		filters=filters,
+		fields=[
+			"name",
+			"user",
+			"employee",
+			"home_company",
+			"level",
+			"allow_export",
+			"enabled",
+			"disabled_reason",
+			"modified",
+		],
+		order_by="modified desc",
+	)
+	if not grants:
+		return []
+	companies = {}
+	for row in frappe.get_all(
+		"HelixHR Company Access Company",
+		filters={"parenttype": "HelixHR Company Access", "parent": ["in", [g.name for g in grants]]},
+		fields=["parent", "company"],
+		order_by="idx asc",
+	):
+		companies.setdefault(row.parent, []).append(row.company)
+	names = dict(
+		frappe.get_all(
+			"Employee",
+			filters={"name": ["in", [g.employee for g in grants if g.employee]]},
+			fields=["name", "employee_name"],
+			as_list=True,
+		)
+	)
+	reach = set(reach)
+	rows = []
+	for grant in grants:
+		named = companies.get(grant.name, [])
+		touched = _grant_reach_needed(named, grant)
+		if not touched & reach:
+			continue
+		rows.append(
+			{
+				"user": grant.user,
+				"employee": grant.employee,
+				"employee_name": names.get(grant.employee) or grant.user,
+				"home_company": grant.home_company,
+				"level": grant.level,
+				"companies": named,
+				"allow_export": bool(grant.allow_export),
+				"enabled": bool(grant.enabled),
+				"disabled_reason": grant.disabled_reason,
+				"modified": str(grant.modified),
+				"can_edit": grant.user != frappe.session.user and touched <= reach,
+			}
+		)
+	return rows
+
+
+def _grant_reach_needed(companies, grant):
+	"""The companies a grantor must reach to see or change ``grant``: the
+	ones it names, plus the holder's home company while the grant is
+	enabled. A disabled grant (say, after a transfer) no longer pins the old
+	home, so the new company's Portal Admin can take it over."""
+	return {*companies, *([grant.home_company] if grant.enabled and grant.home_company else [])}
+
+
+def _editable_grant(user, reach, modified):
+	"""The existing grant on ``user`` once the caller may change it (R4), or
+	None when there is none. ``modified`` must match what the caller saw --
+	for an edit of a grant somebody has since deleted, too."""
+	if not frappe.db.exists("HelixHR Company Access", user):
+		if modified:
+			frappe.throw(_("This person's company access changed since you opened it. Reload and try again."))
+		return None
+	doc = frappe.get_doc("HelixHR Company Access", user)
+	touched = _grant_reach_needed([row.company for row in doc.companies], doc)
+	if not touched <= set(reach):
+		frappe.throw(_(_COMPANY_ACCESS_REFUSED), frappe.PermissionError)
+	if not modified or str(doc.modified) != str(modified):
+		frappe.throw(_("This person's company access changed since you opened it. Reload and try again."))
+	return doc
+
+
+def _assert_not_own_grant(user):
+	if not isinstance(user, str) or not user or user in ("Administrator", "Guest"):
+		frappe.throw(_(_COMPANY_ACCESS_REFUSED), frappe.PermissionError)
+	if user == frappe.session.user:
+		frappe.throw(_("You can't change your own company access."), frappe.PermissionError)
+
+
+def _comment_company_access(user, message):
+	"""Record the change on the User. The grant's own `on_update` /
+	`after_delete` clear the holder's cache and expire their exports."""
+	frappe.get_doc("User", user).add_comment(
+		"Info", f"{frappe.utils.get_fullname(frappe.session.user)} {message}"
+	)
+
+
+@frappe.whitelist()
+def get_company_access():
+	"""The grants the caller may see, the companies they may grant, and the
+	two levels. Names and companies only -- no HR data."""
+	rate_limit_per_user("get_company_access")
+	reach = _company_access_reach()
+	return {
+		"grantable": reach,
+		"levels": list(_COMPANY_ACCESS_LEVELS),
+		"rows": _company_access_rows(reach),
+	}
+
+
+@frappe.whitelist()
+def search_company_access_targets(query=None):
+	"""Active employees with a User in a company the caller may grant, other
+	than the caller (2+ characters). Name, id, user and company only."""
+	rate_limit_per_user("search_company_access_targets")
+	reach = _company_access_reach()
+	query = query.strip() if isinstance(query, str) else ""
+	if len(query) < 2:
+		return []
+	like = f"%{query[:80]}%"
+	return frappe.get_all(
+		"Employee",
+		filters={
+			"status": "Active",
+			"user_id": ["not in", [frappe.session.user, "Administrator", "Guest"]],
+			"company": ["in", reach],
+		},
+		or_filters={"employee_name": ["like", like], "name": ["like", like]},
+		fields=["name as employee", "employee_name", "user_id as user", "company"],
+		order_by="employee_name asc",
+		limit=_PORTAL_ROLE_RESULTS,
+	)
+
+
+@frappe.whitelist(methods=["POST"])
+def save_company_access(user, level, companies, allow_export=0, modified=None):
+	"""Create or replace ``user``'s grant, and enable it (R3-R6).
+
+	Refused: the caller's own User, a target that is not an Active Employee
+	with this login in a company the caller may grant, any company outside
+	that reach, and an existing grant naming a company outside it. Editing
+	an existing grant needs the ``modified`` the caller last saw."""
+	rate_limit_per_user("save_company_access")
+	reach = _company_access_reach()
+	_assert_not_own_grant(user)
+	target = frappe.db.get_value(
+		"Employee", {"user_id": user}, ["name", "status", "company"], as_dict=True
+	)
+	if not target or target.status != "Active" or target.company not in reach:
+		frappe.throw(_(_COMPANY_ACCESS_REFUSED), frappe.PermissionError)
+	if level not in _COMPANY_ACCESS_LEVELS:
+		frappe.throw(_("Choose a level."))
+	companies = frappe.parse_json(companies) if isinstance(companies, str) else companies
+	if (
+		not isinstance(companies, list)
+		or not companies
+		or not all(isinstance(company, str) for company in companies)
+	):
+		frappe.throw(_("Choose at least one company."))
+	for company in companies:
+		if company not in reach:
+			frappe.throw(_("You can't grant access to {0}.").format(company), frappe.PermissionError)
+
+	doc = _editable_grant(user, reach, modified)
+	if doc is None:
+		doc = frappe.new_doc("HelixHR Company Access")
+		doc.user = user
+	doc.update(
+		{
+			"employee": target.name,
+			"home_company": target.company,
+			"level": level,
+			"allow_export": 1 if allow_export in (1, True, "1", "true") else 0,
+			"enabled": 1,
+			"disabled_reason": None,
+		}
+	)
+	doc.set("companies", [{"company": company} for company in companies])
+	# The caller holds no DocPerm here (KTD2); the checks above are the gate.
+	doc.flags.ignore_permissions = True
+	doc.save()
+	_comment_company_access(
+		user,
+		_("set HelixHR company access to {0} for {1}{2}").format(
+			_(level),
+			", ".join(companies),
+			_(", with export") if doc.allow_export else "",
+		),
+	)
+	return _company_access_rows(reach, [user])[0]
+
+
+@frappe.whitelist(methods=["POST"])
+def revoke_company_access(user, modified=None):
+	"""Switch ``user``'s grant off; the row stays for history and can be
+	saved again later, which re-runs every check."""
+	rate_limit_per_user("revoke_company_access")
+	reach = _company_access_reach()
+	_assert_not_own_grant(user)
+	doc = _editable_grant(user, reach, modified)
+	if doc is None:
+		frappe.throw(_(_COMPANY_ACCESS_REFUSED), frappe.PermissionError)
+	if doc.enabled:
+		disable_company_access(
+			user, _("{0} switched it off").format(frappe.utils.get_fullname(frappe.session.user))
+		)
+	return _company_access_rows(reach, [user])[0]
+
+
+@frappe.whitelist(methods=["POST"])
+def delete_company_access(user, modified=None):
+	"""Delete ``user``'s grant outright. Its version history stays on the
+	Deleted Document, and the User keeps an Info comment."""
+	rate_limit_per_user("delete_company_access")
+	reach = _company_access_reach()
+	_assert_not_own_grant(user)
+	doc = _editable_grant(user, reach, modified)
+	if doc is None:
+		frappe.throw(_(_COMPANY_ACCESS_REFUSED), frappe.PermissionError)
+	frappe.delete_doc("HelixHR Company Access", doc.name, ignore_permissions=True)
+	_comment_company_access(user, _("removed HelixHR company access"))
+	return {"user": user, "deleted": True}
+
+
 # --- Approvers cleanup (plan 2026-10-07-001 U4) ------------------------------
 
 _APPROVER_CLEANUP_MAX = 200
@@ -10793,19 +11106,23 @@ def get_person(employee):
 	assigned shift and holiday list, the reporting manager, the joining date
 	and employment status.
 
-	Resolved through `resolve_admin_scope` before anything else is read
-	(P6-R6): a caller who may not administer `employee` is refused before
-	any record is touched, and the refusal is the same `PermissionError`
-	whether or not the employee exists (P6-R8) -- it never discloses which.
+	Resolved through `resolve_read_scope` before anything else is read
+	(P6-R6): a caller who may not read `employee` is refused before any
+	record is touched, and the refusal is the same `PermissionError` whether
+	or not the employee exists (P6-R8) -- it never discloses which.
 
 	Read-only (P6-R3): no field above Employee permlevel 0, no leave
 	*reason*, no check-in *coordinates* -- a faster route to what HR already
 	reaches in Desk through the roles it holds, never a wider one (P6-R5).
+	``can_edit`` is false for someone reached only through a company access
+	grant (plan 2026-10-14-001 KTD4): every edit endpoint refuses them too.
 	"""
 	rate_limit_per_user("get_person")
-	scope = resolve_admin_scope(frappe.session.user)
+	user = frappe.session.user
+	scope = resolve_read_scope(user)
 	if scope["kind"] == "none" or not employee_in_admin_scope(employee, scope):
 		frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
+	can_edit = employee_in_admin_scope(employee, resolve_admin_scope(user))
 
 	missing = object()
 	failed = []
@@ -10820,9 +11137,18 @@ def get_person(employee):
 	today = user_today()
 	month_start, month_end = str(get_first_day(today)), str(get_last_day(today))
 
+	def leave_balances():
+		# HRMS's `get_leave_details` checks the session user's read on the
+		# Employee, which a company access holder's own self User Permission
+		# refuses under strict mode (plan 2026-10-14-001 KTD5). The gate above
+		# has already decided; this section alone is read as Administrator,
+		# because `_requests_summary` keys its unread flags on the caller.
+		with as_administrator():
+			return _leave_balances(employee)
+
 	return {
 		"employee": section("employee", lambda: _person_profile(employee)),
-		"leave_balances": section("leave_balances", lambda: _leave_balances(employee)),
+		"leave_balances": section("leave_balances", leave_balances),
 		"attendance": section(
 			"attendance", lambda: _attendance_month_summary(employee, month_start, month_end)
 		),
@@ -10833,8 +11159,10 @@ def get_person(employee):
 		),
 		# None for a caller who cannot reach Desk at all (P6-R12) -- the
 		# frontend never has to be trusted to hide this on its own, since
-		# no other method in this plan hands out this employee's Desk URL.
-		"desk_url": get_url_to_form("Employee", employee) if _can_open_desk(frappe.session.user) else None,
+		# no other method in this plan hands out this employee's Desk URL --
+		# and for someone outside the caller's admin scope.
+		"desk_url": get_url_to_form("Employee", employee) if can_edit and _can_open_desk(user) else None,
+		"can_edit": can_edit,
 		"failed_sections": failed,
 	}
 
@@ -11008,11 +11336,29 @@ def search_projects():
 
 	No `query`/paging parameters -- unlike `search_people`'s employee search,
 	a project list is small enough per caller (a company, or one person's
-	memberships) that a page control would be UI the plan never asked for."""
+	memberships) that a page control would be UI the plan never asked for.
+
+	Since plan 2026-10-14-001 the list is `resolve_project_read_scope`'s --
+	an All-data company access grant adds every project in its companies --
+	and each row says whether the caller may change it (``can_edit``, from
+	`resolve_project_scope`, which every project write still enforces).
+	``can_create`` mirrors `create_project`'s own gate."""
 	rate_limit_per_user("search_projects")
-	scope = resolve_project_scope(frappe.session.user)
+	user = frappe.session.user
+	scope = resolve_project_read_scope(user)
 	if scope["kind"] == "none":
 		frappe.throw(_("You are not authorised to view projects here."), frappe.PermissionError)
+
+	write = resolve_project_scope(user)
+	if write["kind"] == "assigned":
+		assigned = set(frappe.get_all("Project User", filters={"user": user}, pluck="parent"))
+
+	def can_edit(row):
+		if write["kind"] == "unscoped":
+			return True
+		if write["kind"] == "company":
+			return row.company == write["company"]
+		return write["kind"] == "assigned" and row.name in assigned
 
 	filters = project_scope_filters(scope)
 	projects = []
@@ -11024,7 +11370,7 @@ def search_projects():
 			order_by="project_name asc",
 			ignore_permissions=True,
 		)
-		projects = [_project_search_projection(row) for row in rows]
+		projects = [{**_project_search_projection(row), "can_edit": can_edit(row)} for row in rows]
 
 	# P8-U2: the create form's own option lists, read in the same call so
 	# the page that hosts it needs no second request. `company` mirrors
@@ -11036,6 +11382,7 @@ def search_projects():
 	employee_info = get_current_employee_info()
 	return {
 		"projects": projects,
+		"can_create": write["kind"] != "none",
 		"project_types": frappe.get_all("Project Type", pluck="name", order_by="name asc"),
 		"priority_options": _project_priority_options(),
 		"company": employee_info.get("company") if employee_info else None,
@@ -11106,13 +11453,14 @@ def get_project(project):
 	whole-document read would carry all of it regardless of what this
 	function goes on to return.
 
-	Resolved through `resolve_project_scope` before anything else is read:
-	a caller outside their scope is refused with `_PROJECT_NOT_FOUND`, the
-	same message a nonexistent project id gets, so this can never become an
-	oracle for which project ids exist.
+	Resolved through `resolve_project_read_scope` before anything else is
+	read: a caller outside their scope is refused with `_PROJECT_NOT_FOUND`,
+	the same message a nonexistent project id gets, so this can never become
+	an oracle for which project ids exist. ``can_edit`` is the write scope's
+	answer (plan 2026-10-14-001 KTD4).
 	"""
 	rate_limit_per_user("get_project")
-	scope = resolve_project_scope(frappe.session.user)
+	scope = resolve_project_read_scope(frappe.session.user)
 	if scope["kind"] == "none" or not project_in_scope(project, scope):
 		frappe.throw(_(_PROJECT_NOT_FOUND), frappe.PermissionError)
 
@@ -11129,6 +11477,7 @@ def get_project(project):
 		"expected_end_date": data.expected_end_date,
 		"tasks": _project_open_tasks(project),
 		"members": _project_members(project),
+		"can_edit": project_in_scope(project, resolve_project_scope(frappe.session.user)),
 	}
 
 
@@ -12389,27 +12738,36 @@ def _on_leave_today(company, today):
 
 
 @frappe.whitelist()
-def get_organisation_view():
-	"""A read-only snapshot of the caller's own company (P5-R20): headcount,
-	how many people are out today, each queue's backlog and its age, and
-	this month's celebrations.
+def get_organisation_view(company=None):
+	"""A read-only snapshot of one company (P5-R20): headcount, how many
+	people are out today, each queue's backlog and its age, and this month's
+	celebrations.
 
-	Gated on `_is_hr()` -- the same predicate `can_configure` and
-	`get_portal_config` already use (P5-U14) -- because this is company-wide
-	read, not a manager's own team. No new role and no new permission delta:
-	P5-U15's whole point is that HR Manager and System Manager already have
-	the read this method projects.
+	Gated on `resolve_read_scope` -- HR Manager and System Manager, plus a
+	holder of an All-data company access grant (plan 2026-10-14-001 U6) --
+	because this is company-wide read, not a manager's own team. ``company``
+	picks one of the companies that scope covers (``companies``); it
+	defaults to the caller's own, and anything else is refused the same way
+	as a company that does not exist.
 	"""
 	rate_limit_per_user("get_organisation_view")
-	if not _is_hr():
+	scope = resolve_read_scope(frappe.session.user)
+	if scope["kind"] == "none":
 		frappe.throw(_("Only HR may see the organisation view."), frappe.PermissionError)
 
-	company = _caller_company()
-	employee = (get_current_employee_info() or {}).get("name")
+	companies = read_companies(scope) or frappe.get_all("Company", pluck="name", order_by="company_name asc")
+	home = session_company(frappe.session.user)
+	if not home and scope["kind"] == "unscoped":
+		home = frappe.db.get_single_value("Global Defaults", "default_company")
+	if company in (None, ""):
+		company = home if home in companies else companies[0]
+	elif company not in companies:
+		frappe.throw(_("That company is not available here."), frappe.PermissionError)
 	today = user_today()
 
 	return {
 		"company": company,
+		"companies": companies,
 		"headcount": _headcount(company),
 		"on_leave_today": _on_leave_today(company, today),
 		"queues": {
@@ -12423,9 +12781,7 @@ def get_organisation_view():
 			)
 			for queue in _ORGANISATION_QUEUES
 		},
-		"celebrations": (
-			_get_celebrations(employee, getdate(today)) if employee else {"birthdays": [], "anniversaries": []}
-		),
+		"celebrations": _get_celebrations(None, getdate(today), company=company),
 	}
 
 

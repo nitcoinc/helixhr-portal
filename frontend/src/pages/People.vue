@@ -84,6 +84,9 @@ const leaveBalances = computed(() => person.data?.leave_balances || [])
 const attendance = computed(() => person.data?.attendance || null)
 const requests = computed(() => person.data?.requests?.requests || [])
 const failedSections = computed(() => person.data?.failed_sections || [])
+// Plan 2026-10-14-001 KTD4: someone read through a company access grant is
+// view-only. `save_person` refuses them too; this only hides what it would.
+const canEdit = computed(() => !!person.data?.can_edit)
 
 function sectionFailed(name) {
   return failedSections.value.includes(name)
@@ -252,6 +255,13 @@ async function submitEdit() {
           v-if="profile"
           class="space-y-6"
         >
+          <p
+            v-if="!canEdit"
+            class="text-sm text-ink-gray-6"
+            data-testid="person-view-only"
+          >
+            View only. This person is outside the company you manage, so their record can't be changed here.
+          </p>
           <!-- Overview (P8-U8). -->
           <section
             class="surface-card elev-1 p-4"
@@ -265,6 +275,7 @@ async function submitEdit() {
                 Overview
               </h2>
               <Button
+                v-if="canEdit"
                 variant="ghost"
                 data-testid="person-edit-overview"
                 @click="openEdit('overview')"
@@ -321,6 +332,7 @@ async function submitEdit() {
                 Joining details
               </h2>
               <Button
+                v-if="canEdit"
                 variant="ghost"
                 data-testid="person-edit-joining"
                 @click="openEdit('joining')"
@@ -377,6 +389,7 @@ async function submitEdit() {
                 Approvers and shift
               </h2>
               <Button
+                v-if="canEdit"
                 variant="ghost"
                 data-testid="person-edit-approvers"
                 @click="openEdit('approvers')"

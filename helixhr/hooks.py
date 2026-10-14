@@ -232,6 +232,7 @@ doc_events = {
 		"validate": "helixhr.events.employee_validate",
 		"before_save": "helixhr.events.employee_before_save",
 		"on_update": "helixhr.events.employee_on_update",
+		"after_insert": "helixhr.events.employee_after_insert",
 	},
 	# P2-U4 / P2-KTD6. The employee-facing "HR replied" event. A fixture
 	# Notification watches one field on a Value Change and the existing one

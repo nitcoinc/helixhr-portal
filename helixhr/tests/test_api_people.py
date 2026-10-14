@@ -277,6 +277,7 @@ class TestGetPerson(IntegrationTestCase):
 				"shift",
 				"holiday_list",
 				"desk_url",
+				"can_edit",
 				"failed_sections",
 			},
 		)
