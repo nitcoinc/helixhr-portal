@@ -1,0 +1,98 @@
+{
+ "actions": [],
+ "autoname": "field:user",
+ "creation": "2026-10-14 00:00:00.000000",
+ "description": "Read-only access to other companies' data for one portal user (plan 2026-10-14-001). Managed from portal Settings -> Company access.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "user",
+  "employee",
+  "home_company",
+  "level",
+  "companies",
+  "allow_export",
+  "enabled",
+  "disabled_reason"
+ ],
+ "fields": [
+  {
+   "fieldname": "user",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "User",
+   "options": "User",
+   "reqd": 1,
+   "unique": 1
+  },
+  {
+   "description": "The holder's Employee when the grant was saved. The grant stops applying if the User moves to another Employee.",
+   "fieldname": "employee",
+   "fieldtype": "Link",
+   "label": "Employee",
+   "options": "Employee",
+   "read_only": 1
+  },
+  {
+   "description": "The holder's company when the grant was saved. The grant stops applying if the Employee moves company.",
+   "fieldname": "home_company",
+   "fieldtype": "Link",
+   "label": "Home company",
+   "options": "Company",
+   "read_only": 1
+  },
+  {
+   "default": "All data",
+   "fieldname": "level",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Level",
+   "options": "All data\nReports only",
+   "reqd": 1
+  },
+  {
+   "fieldname": "companies",
+   "fieldtype": "Table",
+   "label": "Companies",
+   "options": "HelixHR Company Access Company",
+   "reqd": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "allow_export",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "May export reports"
+  },
+  {
+   "default": "1",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "depends_on": "eval:!doc.enabled",
+   "fieldname": "disabled_reason",
+   "fieldtype": "Small Text",
+   "label": "Disabled because",
+   "read_only": 1
+  }
+ ],
+ "module": "HelixHR",
+ "name": "HelixHR Company Access",
+ "naming_rule": "By fieldname",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "read": 1,
+   "role": "System Manager",
+   "write": 1
+  }
+ ],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": [],
+ "track_changes": 1
+}

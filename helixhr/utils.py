@@ -1357,6 +1357,8 @@ def admin_scope_employee_filters(scope):
 		return {}
 	if scope["kind"] == "company":
 		return {"company": scope["company"]}
+	if scope["kind"] == "companies":
+		return {"company": ["in", scope["companies"]]}
 	return None
 
 
@@ -1369,6 +1371,8 @@ def employee_in_admin_scope(employee, scope):
 		return bool(frappe.db.exists("Employee", employee))
 	if scope["kind"] == "company":
 		return bool(frappe.db.exists("Employee", {"name": employee, "company": scope["company"]}))
+	if scope["kind"] == "companies":
+		return bool(frappe.db.exists("Employee", {"name": employee, "company": ["in", scope["companies"]]}))
 	return False
 
 
@@ -1435,6 +1439,18 @@ def project_scope_filters(scope):
 		if not projects:
 			return None
 		return {"name": ["in", projects]}
+	if scope["kind"] == "companies":
+		# A read scope (plan 2026-10-14-001): granted companies, plus a
+		# Delivery Manager's assigned projects when ``user`` is set.
+		if not scope.get("user"):
+			return {"company": ["in", scope["companies"]]}
+		assigned = frappe.get_all("Project User", filters={"user": scope["user"]}, pluck="parent")
+		names = frappe.get_all(
+			"Project",
+			or_filters={"company": ["in", scope["companies"]], "name": ["in", assigned or [""]]},
+			pluck="name",
+		)
+		return {"name": ["in", names]} if names else None
 	return None
 
 
@@ -1454,6 +1470,12 @@ def project_in_scope(project, scope):
 		return bool(frappe.db.exists("Project", {"name": project, "company": scope["company"]}))
 	if scope["kind"] == "assigned":
 		return bool(frappe.db.exists("Project User", {"parent": project, "user": scope["user"]}))
+	if scope["kind"] == "companies":
+		if frappe.db.exists("Project", {"name": project, "company": ["in", scope["companies"]]}):
+			return True
+		return bool(
+			scope.get("user") and frappe.db.exists("Project User", {"parent": project, "user": scope["user"]})
+		)
 	return False
 
 
@@ -1527,6 +1549,128 @@ def can_admin_portal(user):
 	if user == "Administrator":
 		return True
 	return bool(set(frappe.get_roles(user)) & {PORTAL_ADMIN_ROLE, "System Manager"})
+
+
+# --- Cross-company read grants (plan 2026-10-14-001) ------------------------
+#
+# A grant widens what its holder may READ, never what they may change. The
+# two resolvers above stay the answer for every REST permission hook and
+# every write or approve gate (KTD1); `resolve_read_scope` and
+# `resolve_project_read_scope` are called only by read sites, which must
+# then read server-side (`frappe.get_all`, which ignores permissions) because
+# the holder's own self User Permission still bounds a permission-aware read.
+
+COMPANY_ACCESS_ALL = "All data"
+COMPANY_ACCESS_REPORTS = "Reports only"
+
+
+def active_company_grant(user):
+	"""``user``'s enabled grant as ``{level, companies, allow_export,
+	home_company}``, or None.
+
+	A grant applies only to the Employee and company it was saved against,
+	and only while that Employee is Active (R16). The `employee_on_update`
+	hook disables it when either changes; this check covers the moment
+	before the hook runs and any `db_set` that skips it."""
+	if not user or user in ("Administrator", "Guest"):
+		return None
+	grant = frappe.db.get_value(
+		"HelixHR Company Access",
+		{"user": user, "enabled": 1},
+		["name", "employee", "home_company", "level", "allow_export"],
+		as_dict=True,
+	)
+	if not grant:
+		return None
+	anchor = frappe.db.get_value("Employee", {"user_id": user}, ["name", "status", "company"], as_dict=True)
+	if (
+		not anchor
+		or anchor.status != "Active"
+		or anchor.name != grant.employee
+		or anchor.company != grant.home_company
+	):
+		return None
+	companies = frappe.get_all(
+		"HelixHR Company Access Company",
+		filters={"parent": grant.name, "parenttype": "HelixHR Company Access"},
+		pluck="company",
+		order_by="idx asc",
+	)
+	return {
+		"level": grant.level,
+		"companies": companies,
+		"allow_export": bool(grant.allow_export),
+		"home_company": anchor.company,
+	}
+
+
+def disable_company_access(user, reason):
+	"""Switch off ``user``'s enabled grant, recording ``reason`` on it and as
+	an Info comment on the User. Re-enabling is a fresh decision by a grantor
+	(KTD9), never automatic. Returns whether a grant was disabled."""
+	name = frappe.db.get_value("HelixHR Company Access", {"user": user, "enabled": 1})
+	if not name:
+		return False
+	doc = frappe.get_doc("HelixHR Company Access", name)
+	doc.enabled = 0
+	doc.disabled_reason = reason
+	doc.flags.ignore_permissions = True
+	doc.save()
+	frappe.get_doc("User", user).add_comment(
+		"Info", _("HelixHR company access was disabled: {0}").format(reason)
+	)
+	frappe.clear_cache(user=user)
+	return True
+
+
+def _widen_by_companies(scope, companies, user=None):
+	"""``scope`` plus read access to ``companies``. One company stays the
+	``"company"`` kind so single-company callers see no new shape; more
+	become ``{"kind": "companies", "companies": [...]}``. ``user`` keeps a
+	Delivery Manager's assigned projects in a project read scope."""
+	if scope["kind"] == "unscoped" or not companies:
+		return scope
+	names = list(dict.fromkeys(([scope["company"]] if scope["kind"] == "company" else []) + companies))
+	if user is None and len(names) == 1:
+		return {"kind": "company", "company": names[0]}
+	widened = {"kind": "companies", "companies": names}
+	if user is not None:
+		widened["user"] = user
+	return widened
+
+
+def resolve_read_scope(user):
+	"""Which employees ``user`` may READ: `resolve_admin_scope` widened by an
+	All-data grant. People, Organisation and photos use this; `can_edit` and
+	every write keep using `resolve_admin_scope` (KTD4)."""
+	admin = resolve_admin_scope(user)
+	if admin["kind"] == "unscoped":
+		return admin
+	grant = active_company_grant(user)
+	if not grant or grant["level"] != COMPANY_ACCESS_ALL:
+		return admin
+	return _widen_by_companies(admin, grant["companies"])
+
+
+def resolve_project_read_scope(user):
+	"""Which projects ``user`` may READ: `resolve_project_scope` widened by an
+	All-data grant. A Delivery Manager keeps their assigned projects too."""
+	scope = resolve_project_scope(user)
+	if scope["kind"] == "unscoped":
+		return scope
+	grant = active_company_grant(user)
+	if not grant or grant["level"] != COMPANY_ACCESS_ALL:
+		return scope
+	return _widen_by_companies(scope, grant["companies"], user=user if scope["kind"] == "assigned" else None)
+
+
+def read_companies(scope):
+	"""The company names a read scope covers, or None for every company."""
+	if scope["kind"] == "unscoped":
+		return None
+	if scope["kind"] == "company":
+		return [scope["company"]]
+	return list(scope.get("companies") or [])
 
 
 def resolve_report_access(user, report_key):

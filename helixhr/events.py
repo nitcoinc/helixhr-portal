@@ -551,6 +551,22 @@ def employee_on_update(doc, method=None):
 		):
 			frappe.db.set_value("HelixHR Timesheet Change", name, "status", "Withdrawn")
 
+	# Plan 2026-10-14-001 KTD9 / R16. A cross-company grant belongs to this
+	# login, in this company, while Active. Any of the three changing
+	# switches it off; `active_company_grant` already ignores it meanwhile.
+	if before.user_id:
+		reason = None
+		if before.user_id != doc.user_id:
+			reason = _("the employee's login changed")
+		elif before.status == "Active" and doc.status != "Active":
+			reason = _("the employee is now {0}").format(_(doc.status))
+		elif before.company != doc.company:
+			reason = _("the employee moved to {0}").format(doc.company)
+		if reason:
+			from helixhr.utils import disable_company_access
+
+			disable_company_access(before.user_id, reason)
+
 
 def employee_validate(doc, method=None):
 	"""Plan 2026-10-07-001 R1/R2. The three approver fields are never typed:

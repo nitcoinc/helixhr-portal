@@ -389,6 +389,34 @@ def make_test_hr_user(company=None, **employee_fields):
 	return _make_role_user(HR_USER_USER, "HR User", company, **employee_fields)
 
 
+GRANT_HOLDER_USER = "grant-holder@helixhr.test"
+
+
+def make_test_company_grant(user, companies, level="All data", allow_export=0, enabled=1):
+	"""Upsert ``user``'s HelixHR Company Access (plan 2026-10-14-001), saved
+	against their current Employee and company the way the admin endpoint
+	saves it. Returns the grant name."""
+	anchor = frappe.db.get_value("Employee", {"user_id": user}, ["name", "company"], as_dict=True)
+	values = {
+		"employee": anchor.name if anchor else None,
+		"home_company": anchor.company if anchor else None,
+		"level": level,
+		"allow_export": allow_export,
+		"enabled": enabled,
+		"disabled_reason": None if enabled else "test",
+	}
+	if frappe.db.exists("HelixHR Company Access", user):
+		doc = frappe.get_doc("HelixHR Company Access", user)
+		doc.update(values)
+		doc.set("companies", [])
+	else:
+		doc = frappe.get_doc({"doctype": "HelixHR Company Access", "user": user, **values})
+	for company in companies:
+		doc.append("companies", {"company": company})
+	doc.save(ignore_permissions=True)
+	return doc.name
+
+
 def set_report_access(report_key, **flags):
 	"""Upsert one HelixHR Report Access row; unspecified flags become 0."""
 	values = {field: flags.get(field, 0) for field in ("hr_user_run", "hr_user_export", "dm_run", "dm_export")}
