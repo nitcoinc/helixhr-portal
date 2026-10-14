@@ -287,7 +287,7 @@ class TestRequestExport(IntegrationTestCase):
 			(log.owner, log.report_key, log.format, log.mode, log.company, log.row_count),
 			(self.hr_user, KEY, "csv", "Inline", self.company, out["row_count"]),
 		)
-		self.assertEqual(frappe.parse_json(log.filters), {"status": "Active"})
+		self.assertEqual(frappe.parse_json(log.filters), {"status": "Active", "company": self.company})
 
 		# Another user cannot redeem it, and that attempt does not burn it.
 		with self.assertRaises(frappe.PermissionError):

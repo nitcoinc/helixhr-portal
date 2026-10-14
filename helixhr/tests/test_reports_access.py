@@ -43,10 +43,18 @@ class TestResolveReportAccess(IntegrationTestCase):
 		self.assertTrue(access["can_run"] and access["can_export"])
 		self.assertEqual(access["tier"], "admin")
 
-	def test_anchorless_hr_manager_is_unscoped(self):
-		access = resolve_report_access(ensure_hr_manager_user(), PROJECT_KEY)
-		self.assertEqual(access["scope"]["kind"], "unscoped")
+	def test_anchorless_hr_manager_runs_any_company_one_at_a_time(self):
+		"""Plan 2026-10-14-001: unscoped callers pick a company; each run
+		covers that one company."""
+		other = ensure_baseline_company()
+		user = ensure_hr_manager_user()
+		access = resolve_report_access(user, PROJECT_KEY)
+		self.assertEqual(access["scope"], {"kind": "company", "company": access["company"]})
 		self.assertTrue(access["can_export"])
+		self.assertTrue({self.company, other} <= {row["company"] for row in access["companies"]})
+		picked = resolve_report_access(user, PROJECT_KEY, other)
+		self.assertEqual(picked["scope"], {"kind": "company", "company": other})
+		self.assertFalse(picked["company_removed"])
 
 	def test_report_manager_with_active_employee_gets_company_and_full_rights(self):
 		other = ensure_baseline_company()
@@ -91,7 +99,7 @@ class TestResolveReportAccess(IntegrationTestCase):
 		_, user = make_test_delivery_manager()
 		set_report_access(PROJECT_KEY, dm_run=1, dm_export=1)
 		access = resolve_report_access(user, PROJECT_KEY)
-		self.assertEqual(access["scope"], {"kind": "assigned", "user": user})
+		self.assertEqual(access["scope"], {"kind": "assigned", "user": user, "company": self.company})
 		self.assertTrue(access["can_export"])
 		self.assertFalse(resolve_report_access(user, COMPANY_ONLY_KEY)["can_run"])
 

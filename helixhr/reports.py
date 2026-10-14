@@ -1806,6 +1806,10 @@ def client_entry(entry, access):
 		],
 		"group_by": [{"field": field, "label": frappe.unscrub(field)} for field in entry["group_by"]],
 		"can_export": access["can_export"],
+		# Plan 2026-10-14-001 R11: the companies this caller may run the
+		# report for, each with its own export right, and the default.
+		"company": access["company"],
+		"companies": access["companies"],
 	}
 
 
@@ -2037,6 +2041,11 @@ def run(report_key, scope, filters=None, group_by=None, sort=None):
 		group_by = list(entry["fixed_group_by"])
 
 	clean, removed = resolve_filters(entry, raw, scope)
+	# Plan 2026-10-14-001 KTD7: the company this run covers travels with the
+	# filters, so saved views, export fingerprints and the background job
+	# carry it. The API boundary already decided it (`resolve_report_access`).
+	if scope.get("company"):
+		clean["company"] = scope["company"]
 	if removed:
 		columns, rows = [], []
 		if entry["engine"] == "helixhr":
@@ -2453,8 +2462,8 @@ def run_background_export(export, filters=None, group_by=None, sort=None, hidden
 		frappe.db.set_value("HelixHR Report Export", export, "status", "Running")
 		frappe.db.commit()  # nosemgrep -- the "My exports" panel shows Running
 		try:
-			access = resolve_report_access(row.owner, row.report_key)
-			if not access["can_export"]:
+			access = resolve_report_access(row.owner, row.report_key, _parse(filters, {}).get("company"))
+			if not access["can_export"] or access["company_removed"]:
 				raise _ExportRefused(_("You no longer have access to export this report."))
 			entry = get_entry(row.report_key)
 			scope = access["export_scope"]

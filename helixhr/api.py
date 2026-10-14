@@ -9975,6 +9975,27 @@ def get_report_link(report, employee=None):
 _REPORT_NOT_OFFERED = "That report is not offered here."
 
 
+def _report_access(report_key, company=None, right="can_run"):
+	"""`resolve_report_access` for the session user and the requested
+	``company`` (plan 2026-10-14-001 KTD6), refused uniformly unless it
+	grants ``right``. Every report endpoint resolves the company here, at
+	the boundary, and nowhere else."""
+	from helixhr.utils import resolve_report_access
+
+	access = resolve_report_access(frappe.session.user, report_key, company)
+	if not access[right]:
+		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
+	return access
+
+
+def _requested_company(filters):
+	"""The ``company`` a report request names, if any."""
+	from helixhr import reports
+
+	raw = reports._parse(filters, {})
+	return raw.get("company") if isinstance(raw, dict) else None
+
+
 @frappe.whitelist()
 def run_report(report_key, filters=None, group_by=None, sort=None, **kwargs):
 	"""Run one catalog report for the screen (R8, R9, R22).
@@ -9982,8 +10003,10 @@ def run_report(report_key, filters=None, group_by=None, sort=None, **kwargs):
 	Access comes from `resolve_report_access` alone: an unknown key, a
 	deny-listed report and a report this caller may not run all get the same
 	refusal. `filters` is allowlisted against the entry's filter specs,
-	company is forced to the caller's scope, and entity filters must be plain
-	in-scope strings (see `reports.resolve_filters`). Anything else in the
+	``filters.company`` must be a company this caller may run the report for
+	(else it is listed in ``filters_removed`` and the default company runs),
+	and entity filters must be plain in-scope strings (see
+	`reports.resolve_filters`). Anything else in the
 	request -- including a key naming a user to run as -- lands in
 	``**kwargs`` and is never read.
 
@@ -9993,14 +10016,14 @@ def run_report(report_key, filters=None, group_by=None, sort=None, **kwargs):
 	group boundary; ``totals`` and the trailing total row cover every row.
 	"""
 	from helixhr import reports
-	from helixhr.utils import resolve_report_access
 
 	rate_limit_per_user("run_report")
-	access = resolve_report_access(frappe.session.user, report_key)
-	if not access["can_run"]:
-		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
+	access = _report_access(report_key, _requested_company(filters))
 
 	result = reports.run(report_key, access["scope"], filters, group_by, sort)
+	if access["company_removed"]:
+		# R14: the company fell back rather than emptying the run.
+		result["filters_removed"] = [*result["filters_removed"], "company"]
 	rows, truncated = reports.cap_rows(result["shaped"]["rows"])
 	return {
 		"columns": result["columns"],
@@ -10058,14 +10081,16 @@ def search_report_options(report_key, filter, query=None, value=None, context=No
 	most `reports.OPTIONS_LIMIT` results; a query under two characters
 	returns nothing. ``value`` resolves one chosen value's label (URL load).
 	``context`` carries a dependent picker's parent, e.g. ``{"project"}``
-	for tasks."""
+	for tasks, and the picked ``company``."""
 	from helixhr import reports
-	from helixhr.utils import resolve_report_access
 
 	rate_limit_per_user("search_report_options")
-	access = resolve_report_access(frappe.session.user, report_key)
-	if not access["can_run"]:
-		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
+	parsed = frappe.parse_json(context) if isinstance(context, str) and context else context
+	company = parsed.get("company") if isinstance(parsed, dict) else None
+	access = _report_access(report_key, company)
+	if access["company_removed"]:
+		# Options for a company the caller may not use: none, never home's.
+		return []
 	return reports.search_options(
 		reports.get_entry(report_key), filter, access["scope"], query=query, value=value, context=context
 	)
@@ -10113,11 +10138,11 @@ def request_export(report_key, format, filters=None, group_by=None, sort=None, h
 	filters" sentence.
 	"""
 	from helixhr import reports
-	from helixhr.utils import resolve_report_access
 
 	rate_limit_per_user("request_export")
-	access = resolve_report_access(frappe.session.user, report_key)
-	if not access["can_export"]:
+	access = _report_access(report_key, _requested_company(filters), right="can_export")
+	if access["company_removed"]:
+		# A file is never silently another company's data.
 		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
 	if format not in reports.EXPORT_FORMATS:
 		frappe.throw(_("Choose CSV, Excel or PDF."))
@@ -10141,8 +10166,7 @@ def request_export(report_key, format, filters=None, group_by=None, sort=None, h
 		"report_key": report_key,
 		"report_label": entry["label"],
 		"format": format,
-		"company": scope.get("company")
-		or (reports._scope_company(scope, raw) if scope["kind"] == "unscoped" else None),
+		"company": access["company"],
 		"row_count": total_rows,
 		"filters": json.dumps(result["filters"], sort_keys=True, default=str),
 		"group_by": ", ".join(result["groups_applied"]),
@@ -10308,12 +10332,21 @@ def download_report_export(export):
 	rate_limit_per_user("download_export")
 	row = (
 		frappe.db.get_value(
-			"HelixHR Report Export", export, ["owner", "status", "file", "file_name", "format"], as_dict=True
+			"HelixHR Report Export",
+			export,
+			["owner", "status", "file", "file_name", "format", "report_key", "company"],
+			as_dict=True,
 		)
 		if isinstance(export, str)
 		else None
 	)
 	if not row or row.owner != frappe.session.user or row.status != "Ready" or not row.file:
+		frappe.throw(_(_EXPORT_GONE), frappe.PermissionError)
+	from helixhr.utils import resolve_report_access
+
+	# R15: the right to this company's data is re-checked at download time.
+	access = resolve_report_access(frappe.session.user, row.report_key, row.company)
+	if not access["can_export"] or access["company_removed"]:
 		frappe.throw(_(_EXPORT_GONE), frappe.PermissionError)
 	file_name = frappe.db.get_value(
 		"File", {"file_url": row.file, "attached_to_doctype": "HelixHR Report Export", "attached_to_name": export}
@@ -10347,14 +10380,14 @@ _VIEW_QUERY_MAX = 4000
 _VIEW_LABEL_MAX = 80
 
 
-def _viewer_company(user, scope):
-	"""The company a view is shared within: the scope's company, else the
-	caller's Active Employee's (project-scoped tiers). None when unscoped."""
-	if scope["kind"] == "unscoped":
+def _viewer_company(user):
+	"""The company a view is shared within: the caller's Active Employee's --
+	never a company reached through a grant, so a holder's shared view is
+	not published into another company (plan 2026-10-14-001). None for an
+	unscoped caller, who sees every shared view."""
+	if resolve_admin_scope(user)["kind"] == "unscoped":
 		return None
-	return scope.get("company") or frappe.db.get_value(
-		"Employee", {"user_id": user, "status": "Active"}, "company"
-	)
+	return frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "company")
 
 
 def _clean_view_query(entry, query):
@@ -10373,7 +10406,8 @@ def _clean_view_query(entry, query):
 			continue
 		if len(value) > _VIEW_VALUE_MAX:
 			frappe.throw(_("Invalid view."))
-		if key in filter_names:
+		if key in filter_names or key == "company":
+			# A saved company is re-checked on every run (R14).
 			clean[key] = value
 		elif key in ("group", "hide"):
 			fields = value.split(",")
@@ -10393,15 +10427,6 @@ def _clean_view_query(entry, query):
 	return clean
 
 
-def _view_access(report_key):
-	from helixhr.utils import resolve_report_access
-
-	access = resolve_report_access(frappe.session.user, report_key)
-	if not access["can_run"]:
-		frappe.throw(_(_REPORT_NOT_OFFERED), frappe.PermissionError)
-	return access
-
-
 def _can_delete_view(view, user):
 	if view.owner == user:
 		return True
@@ -10417,11 +10442,11 @@ def list_report_views(report_key):
 	their company. A report the caller can no longer run lists nothing (the
 	views are kept, not deleted)."""
 	rate_limit_per_user("list_report_views")
-	access = _view_access(report_key)
+	_report_access(report_key)
 	user = frappe.session.user
-	company = _viewer_company(user, access["scope"])
+	company = _viewer_company(user)
 	shared = {"visibility": "Shared", "report_key": report_key}
-	if access["scope"]["kind"] != "unscoped":
+	if resolve_admin_scope(user)["kind"] != "unscoped":
 		if not company:
 			shared = None
 		else:
@@ -10456,7 +10481,7 @@ def save_report_view(report_key, label, query=None, visibility="Private", name=N
 	from helixhr import reports
 
 	rate_limit_per_user("save_report_view")
-	access = _view_access(report_key)
+	_report_access(report_key)
 	user = frappe.session.user
 	label = (label or "").strip() if isinstance(label, str) else ""
 	if not label or len(label) > _VIEW_LABEL_MAX:
@@ -10483,7 +10508,7 @@ def save_report_view(report_key, label, query=None, visibility="Private", name=N
 			"label": label,
 			"visibility": visibility,
 			"query": json.dumps(clean, sort_keys=True),
-			"company": _viewer_company(user, access["scope"]),
+			"company": _viewer_company(user),
 		}
 	)
 	doc.save(ignore_permissions=True)
@@ -10830,10 +10855,17 @@ def _assert_not_own_grant(user):
 
 
 def _comment_company_access(user, message):
+	"""Record the change on the User, and drop any Ready export file the
+	holder could no longer request (R15)."""
+	from helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export import (
+		expire_unreachable_exports,
+	)
+
 	frappe.get_doc("User", user).add_comment(
 		"Info", f"{frappe.utils.get_fullname(frappe.session.user)} {message}"
 	)
 	frappe.clear_cache(user=user)
+	expire_unreachable_exports(user)
 
 
 @frappe.whitelist()

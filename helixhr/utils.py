@@ -1620,6 +1620,11 @@ def disable_company_access(user, reason):
 		"Info", _("HelixHR company access was disabled: {0}").format(reason)
 	)
 	frappe.clear_cache(user=user)
+	from helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export import (
+		expire_unreachable_exports,
+	)
+
+	expire_unreachable_exports(user)
 	return True
 
 
@@ -1703,16 +1708,28 @@ def read_companies(scope):
 	return list(scope.get("companies") or [])
 
 
-def resolve_report_access(user, report_key):
-	"""Who may run and export one catalog report, and over what (KTD5).
+def resolve_report_access(user, report_key, company=None):
+	"""Who may run and export one catalog report, for which company, and over
+	what (KTD5; per company since plan 2026-10-14-001 KTD6).
 
-	Returns ``{"tier", "scope", "can_run", "can_export", "export_scope"}``.
-	``scope`` / ``export_scope`` use `resolve_admin_scope`'s vocabulary
-	(``unscoped`` / ``company`` / ``assigned`` / ``none``) and are each the
-	widest scope among the tiers granting that right on THIS report -- an HR
-	User + Delivery Manager running a Delivery-Manager-only report gets
-	project scope, not company scope. Export callers must use
-	``export_scope``, which can be narrower than ``scope``.
+	Returns ``{"tier", "scope", "can_run", "can_export", "export_scope",
+	"company", "companies", "company_removed"}``. Access is decided per
+	company: the existing tiers apply to the caller's home company (every
+	company for an unscoped caller), and a company access grant adds the
+	companies it names. ``company`` picks one of them; the other keys then
+	describe that company alone, and every scope is single-company, so the
+	engines never see more than one.
+
+	``scope`` / ``export_scope`` use `resolve_admin_scope`'s vocabulary and
+	are each the widest scope among the tiers granting that right on THIS
+	report in THIS company -- an HR User + Delivery Manager running a
+	Delivery-Manager-only report gets project scope, not company scope.
+	Export callers must use ``export_scope``, which can be narrower.
+
+	A ``company`` the caller may not use falls back to the default company
+	with ``company_removed`` set (R14): home when it is allowed, else the
+	site default for an unscoped caller, else the first allowed company.
+	``companies`` lists ``{company, can_export}`` per allowed company.
 
 	An unknown key and a denied key return the identical answer (R22).
 	"""
@@ -1724,22 +1741,24 @@ def resolve_report_access(user, report_key):
 		"can_run": False,
 		"can_export": False,
 		"export_scope": {"kind": "none"},
+		"company": None,
+		"companies": [],
+		"company_removed": False,
 	}
 	entry = get_entry(report_key)
 	if not entry:
 		return denied
 
 	roles = set(frappe.get_roles(user))
-	grants = []  # (tier, scope, can_export)
+	grants = []  # (tier, scope, can_export) for the home company
 
 	admin = resolve_admin_scope(user)
 	if admin["kind"] != "none":
 		grants.append(("admin", admin, True))
 
-	if REPORT_MANAGER_ROLE in roles:
-		company = _active_anchor_company(user)
-		if company:
-			grants.append(("report_manager", {"kind": "company", "company": company}, True))
+	home = _active_anchor_company(user)
+	if REPORT_MANAGER_ROLE in roles and home:
+		grants.append(("report_manager", {"kind": "company", "company": home}, True))
 
 	matrix = None
 	if roles & {HR_USER_ROLE, DELIVERY_MANAGER_ROLE}:
@@ -1750,34 +1769,70 @@ def resolve_report_access(user, report_key):
 			as_dict=True,
 		)
 
-	if matrix and HR_USER_ROLE in roles and matrix.hr_user_run:
-		company = _active_anchor_company(user)
-		if company:
-			grants.append(
-				("hr_user", {"kind": "company", "company": company}, bool(matrix.hr_user_export))
-			)
+	if matrix and HR_USER_ROLE in roles and matrix.hr_user_run and home:
+		grants.append(("hr_user", {"kind": "company", "company": home}, bool(matrix.hr_user_export)))
 
 	if matrix and DELIVERY_MANAGER_ROLE in roles and matrix.dm_run and "project" in entry["scopes"]:
 		# Same offboarding rule as `resolve_project_scope`: an Employee that
 		# exists but is not Active narrows to nothing.
 		status = frappe.db.get_value("Employee", {"user_id": user}, "status")
 		if not status or status == "Active":
-			grants.append(("delivery_manager", {"kind": "assigned", "user": user}, bool(matrix.dm_export)))
+			scope = {"kind": "assigned", "user": user}
+			if home:
+				scope["company"] = home
+			grants.append(("delivery_manager", scope, bool(matrix.dm_export)))
 
-	if not grants:
+	# One company's tier list each. An unscoped caller's tiers apply to every
+	# company, narrowed to that company (one company per run, KTD11).
+	by_company = {}
+	unscoped = any(grant[1]["kind"] == "unscoped" for grant in grants)
+	if unscoped:
+		for name in frappe.get_all("Company", pluck="name", order_by="name asc"):
+			by_company[name] = [("admin", {"kind": "company", "company": name}, True)]
+	elif grants:
+		by_company[grants[0][1].get("company") or home] = grants
+
+	# KTD8: a grant at either level runs every company-scoped catalog report
+	# for its companies; its own flag decides export.
+	grant = None if unscoped else active_company_grant(user)
+	if grant and "company" in entry["scopes"]:
+		for name in grant["companies"]:
+			by_company.setdefault(name, []).append(
+				("grant", {"kind": "company", "company": name}, grant["allow_export"])
+			)
+	if not by_company:
 		return denied
+
+	if home in by_company:
+		default = home
+	elif unscoped and frappe.defaults.get_global_default("company") in by_company:
+		default = frappe.defaults.get_global_default("company")
+	else:
+		default = next(iter(by_company))
+	picked = company if isinstance(company, str) and company in by_company else default
 
 	def widest(candidates):
 		return max(candidates, key=lambda grant: _SCOPE_RANK[grant[1]["kind"]], default=None)
 
-	run_grant = widest(grants)
-	export_grant = widest([grant for grant in grants if grant[2]])
+	def answer(tiers):
+		run_grant = widest(tiers)
+		export_grant = widest([grant for grant in tiers if grant[2]])
+		return run_grant, export_grant
+
+	companies = []
+	for name, tiers in by_company.items():
+		if name:
+			companies.append({"company": name, "can_export": answer(tiers)[1] is not None})
+	run_grant, export_grant = answer(by_company[picked])
 	return {
 		"tier": run_grant[0],
 		"scope": run_grant[1],
 		"can_run": True,
 		"can_export": export_grant is not None,
 		"export_scope": export_grant[1] if export_grant else {"kind": "none"},
+		"company": picked,
+		"companies": companies,
+		"company_removed": company not in (None, "") and picked != company,
 	}
 
 
