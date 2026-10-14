@@ -61,6 +61,9 @@ class _GrantReports(IntegrationTestCase):
 		self.other = ensure_baseline_company()
 		self.own = make_test_user(GRANT_HOLDER_USER, self.company)
 		self.foreign = make_test_user("grant-report-foreign@helixhr.test", self.other)
+		# The e2e fixtures commit grants; every test starts from none.
+		frappe.db.delete("HelixHR Company Access Company", {"parent": ["like", "%@helixhr.test"]})
+		frappe.db.delete("HelixHR Company Access", {"user": ["like", "%@helixhr.test"]})
 
 	def tearDown(self):
 		frappe.set_user("Administrator")

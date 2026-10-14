@@ -55,6 +55,9 @@ class TestCompanyAccessAdmin(IntegrationTestCase):
 		_, self.admin = make_test_portal_admin()
 		frappe.db.delete("User Permission", {"user": self.admin, "allow": "Company"})
 		make_test_user(GRANT_HOLDER_USER, self.company)
+		# The e2e fixtures commit grants; every test starts from none.
+		frappe.db.delete("HelixHR Company Access Company", {"parent": ["like", "%@helixhr.test"]})
+		frappe.db.delete("HelixHR Company Access", {"user": ["like", "%@helixhr.test"]})
 		self.foreign = "grant-admin-foreign@helixhr.test"
 		make_test_user(self.foreign, self.other)
 

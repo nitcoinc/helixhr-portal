@@ -417,6 +417,46 @@ def make_test_company_grant(user, companies, level="All data", allow_export=0, e
 	return doc.name
 
 
+COMPANY_ACCESS_TARGET_USER = "grant-e2e-target@helixhr.test"
+COMPANY_ACCESS_READONLY_USER = "grant-e2e-readonly@helixhr.test"
+COMPANY_ACCESS_FOREIGN_USER = "grant-e2e-foreign@helixhr.test"
+COMPANY_ACCESS_THIRD_COMPANY = "_Test Company Access C"
+
+
+def ensure_company_access_fixtures():
+	"""Plan 2026-10-14-001 e2e fixtures. The Portal Admin reaches the
+	baseline second company through a Company-only User Permission; the
+	grant holder reads both companies (All data, export on); a target with no
+	grant for the Settings spec to grant; and a grant naming a third company
+	the Portal Admin cannot reach, so its row is read-only."""
+	company = ensure_test_company()
+	other = ensure_baseline_company()
+	third = create_test_company(COMPANY_ACCESS_THIRD_COMPANY, "TCAC")
+	_, admin = make_test_portal_admin()
+	if not frappe.db.exists(
+		"User Permission",
+		{"user": admin, "allow": "Company", "for_value": other, "applicable_for": "Company"},
+	):
+		frappe.get_doc(
+			{
+				"doctype": "User Permission",
+				"user": admin,
+				"allow": "Company",
+				"for_value": other,
+				"apply_to_all_doctypes": 0,
+				"applicable_for": "Company",
+			}
+		).insert(ignore_permissions=True)
+	make_test_user(GRANT_HOLDER_USER, company, status="Active")
+	make_test_company_grant(GRANT_HOLDER_USER, [company, other], allow_export=1)
+	make_test_user(COMPANY_ACCESS_FOREIGN_USER, other, employee_number="GRANT-E2E-B1")
+	make_test_user(COMPANY_ACCESS_TARGET_USER, company)
+	frappe.db.delete("HelixHR Company Access Company", {"parent": COMPANY_ACCESS_TARGET_USER})
+	frappe.db.delete("HelixHR Company Access", {"name": COMPANY_ACCESS_TARGET_USER})
+	make_test_user(COMPANY_ACCESS_READONLY_USER, company)
+	make_test_company_grant(COMPANY_ACCESS_READONLY_USER, [third], level="Reports only")
+
+
 def set_report_access(report_key, **flags):
 	"""Upsert one HelixHR Report Access row; unspecified flags become 0."""
 	values = {field: flags.get(field, 0) for field in ("hr_user_run", "hr_user_export", "dm_run", "dm_export")}
@@ -843,6 +883,10 @@ def setup_playwright_fixtures():
 
 	# Plan 2026-09-30-001 U11: the roster specs (U9/U10).
 	ensure_roster_fixtures()
+
+	# Plan 2026-10-14-001: company access grants (company-access.spec.ts,
+	# reports-company.spec.ts).
+	ensure_company_access_fixtures()
 
 	frappe.db.commit()  # nosemgrep
 
