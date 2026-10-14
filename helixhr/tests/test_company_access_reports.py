@@ -224,6 +224,9 @@ class TestRevokedExports(IntegrationTestCase):
 		self.company = ensure_test_company()
 		self.other = ensure_baseline_company()
 		make_test_user(GRANT_HOLDER_USER, self.company)
+		# At least one row in the export, or it is built inline (a fresh site
+		# has nobody in the second company).
+		make_test_user("grant-report-foreign@helixhr.test", self.other)
 		make_test_company_grant(GRANT_HOLDER_USER, [self.other], level="Reports only", allow_export=1)
 		frappe.db.commit()  # nosemgrep -- the job under test commits and rolls back
 		self.addCleanup(self._clear)
