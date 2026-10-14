@@ -25,7 +25,6 @@ from helixhr.tests.utils import (
 	make_test_delivery_manager,
 	make_test_hr_manager_employee,
 	make_test_hr_user,
-	make_test_portal_admin,
 	make_test_user,
 	set_report_access,
 )
@@ -333,7 +332,7 @@ class TestExportLogReach(_GrantReports):
 
 	def test_log_lists_a_row_on_either_side_of_the_reach(self):
 		name = self._grant_holder_export()
-		_, admin_a = make_test_portal_admin()
+		admin_a = self._make_portal_admin("grant-admin-a@helixhr.test", self.company)
 		admin_b = self._make_portal_admin("grant-admin-b@helixhr.test", self.other)
 		# Exporter side: an admin reaching only the holder's home company.
 		rows_a = _as(admin_a, get_export_log, page_length=200)["rows"]
@@ -344,13 +343,14 @@ class TestExportLogReach(_GrantReports):
 		self.assertIn(name, names_b)
 
 	def test_log_hides_a_row_on_neither_side(self):
-		doc = frappe.get_doc("User", self.foreign)
+		foreign_user = "grant-report-foreign@helixhr.test"
+		doc = frappe.get_doc("User", foreign_user)
 		doc.append_roles("HR User")
 		doc.save(ignore_permissions=True)
-		frappe.clear_cache(user=self.foreign)
+		frappe.clear_cache(user=foreign_user)
 		set_report_access(DIRECTORY, hr_user_run=1, hr_user_export=1)
-		other_only = _as(self.foreign, request_export, DIRECTORY, "csv")["export"]
-		_, admin_a = make_test_portal_admin()
+		other_only = _as(foreign_user, request_export, DIRECTORY, "csv")["export"]
+		admin_a = self._make_portal_admin("grant-admin-a@helixhr.test", self.company)
 		names = [row.name for row in _as(admin_a, get_export_log, page_length=200)["rows"]]
 		self.assertNotIn(other_only, names)
 
