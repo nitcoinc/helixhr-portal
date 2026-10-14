@@ -1531,3 +1531,72 @@ class TestReportAccessHrLockout(IntegrationTestCase):
 			result = preflight.check_report_access_hr_lockout()
 		self.assertEqual(result["status"], preflight.FAIL)
 		self.assertIn("apply_permission_deltas", result["detail"])
+
+
+class TestCompanyAccessGrantsCheck(IntegrationTestCase):
+	"""Plan 2026-10-14-001 U11 / R18."""
+
+	def setUp(self):
+		from helixhr.tests.utils import (
+			GRANT_HOLDER_USER,
+			ensure_baseline_company,
+			ensure_test_company,
+			make_test_user,
+		)
+
+		frappe.set_user("Administrator")
+		self.user = GRANT_HOLDER_USER
+		self.company = ensure_test_company()
+		self.other = ensure_baseline_company()
+		# Rolled back per class, not per test: restore what a test changed.
+		self.employee = make_test_user(self.user, self.company, status="Active")
+		self._clear()
+		self.addCleanup(self._clear)
+
+	def _clear(self):
+		frappe.db.delete("HelixHR Company Access Company", {"parent": ["like", "%@helixhr.test"]})
+		frappe.db.delete("HelixHR Company Access", {"user": ["like", "%@helixhr.test"]})
+
+	def _grant(self):
+		from helixhr.tests.utils import make_test_company_grant
+
+		make_test_company_grant(self.user, [self.other])
+
+	def test_no_grants_passes(self):
+		result = preflight.check_company_access_grants()
+		self.assertEqual((result["status"], result["detail"]), (preflight.PASS, "no enabled grants"))
+
+	def test_a_live_grant_is_listed(self):
+		self._grant()
+		result = preflight.check_company_access_grants()
+		self.assertEqual(result["status"], preflight.PASS)
+		self.assertIn(f"{self.user} (All data: {self.other})", result["detail"])
+
+	def test_a_grant_on_an_inactive_holder_warns(self):
+		self._grant()
+		frappe.db.set_value("Employee", self.employee, "status", "Inactive")
+		result = preflight.check_company_access_grants()
+		self.assertEqual(result["status"], preflight.WARN)
+		self.assertIn(f"{self.user}: holder is not Active", result["detail"])
+
+	def test_a_grant_naming_an_unknown_company_warns(self):
+		self._grant()
+		frappe.db.set_value(
+			"HelixHR Company Access Company", {"parent": self.user}, "company", "_Gone Company"
+		)
+		result = preflight.check_company_access_grants()
+		self.assertEqual(result["status"], preflight.WARN)
+		self.assertIn("unknown companies _Gone Company", result["detail"])
+
+	def test_an_extra_docperm_fails(self):
+		real_get_all = preflight.frappe.get_all
+
+		def leaking_get_all(doctype, *args, **kwargs):
+			if doctype == "Custom DocPerm" and kwargs.get("pluck") == "role":
+				return ["HelixHR Portal Admin"]
+			return real_get_all(doctype, *args, **kwargs)
+
+		with patch.object(preflight.frappe, "get_all", side_effect=leaking_get_all):
+			result = preflight.check_company_access_grants()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("HelixHR Portal Admin", result["detail"])

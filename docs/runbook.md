@@ -1371,6 +1371,33 @@ this change keep their old values until something saves them. After deploying:
 The one-department-per-manager workaround is no longer needed for routing.
 Departments are untouched. Restructuring them is separate work.
 
+## Company access: letting someone read another company (plan 2026-10-14-001)
+
+The portal scopes HR reads to the reader's own company. Desk Role Permissions
+and User Permissions do not widen it. To let a C-level user, a Delivery Manager
+or a reports user read another company, give them a **company access grant**.
+Grants are read-only: approvals, edits and the roster stay with each company's
+own HR.
+
+1. **Give the granting Portal Admin reach.** A Portal Admin can grant only its
+   own company, plus each company named in its own User Permissions on Company.
+   In Desk, add a User Permission for that Portal Admin with Allow `Company`, the
+   company as the value, **Apply To All Document Types off** and **Applicable For
+   `Company`**. An apply-to-all row does not count, and it would also narrow that
+   person's own reads of every company-linked doctype. A System Manager needs
+   none of this.
+2. **Grant.** In the portal, open **Settings > Company access**. Pick the
+   person, a level (*All data* or *Reports only*), the companies and whether
+   they may export reports. Nobody can grant themselves.
+3. **Run preflight.** `Company access grants` lists every enabled grant. It
+   WARNs on a grant that no longer applies or is held by a Portal Admin.
+
+The holder reloads the portal once to see the new menu entries. A grant
+switches itself off when the holder stops being Active, gets a different
+login or moves company. The row shows why; save it again to re-enable it.
+Disabling or narrowing a grant deletes any finished export file the holder
+can no longer request.
+
 ## Go-live checklist
 
 How the portal is exposed, which host names serve what, how employees are kept
