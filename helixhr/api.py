@@ -79,6 +79,8 @@ from helixhr.helixhr.doctype.helixhr_timesheet_change.helixhr_timesheet_change i
 # `hr_request.get_permission_query_conditions` cannot drift apart.
 from helixhr.helixhr.doctype.hr_request.hr_request import _WORKER_ROLES as _ROUTED_WORKER_ROLES
 from helixhr.utils import (
+	COMPANY_ACCESS_ALL,
+	COMPANY_ACCESS_REPORTS,
 	EMAIL_THEME,
 	HOLIDAY_LIST_EDITABLE_FIELDS,
 	LEAVE_TYPE_EDITABLE_FIELDS,
@@ -101,11 +103,13 @@ from helixhr.utils import (
 	admin_scope_employee_filters,
 	as_administrator,
 	can_admin_portal,
+	disable_company_access,
 	email_theme,
 	employee_in_admin_scope,
 	event_variables,
 	get_manager_user,
 	get_week_bounds,
+	grantable_companies,
 	has_custom_wording,
 	is_photo_content,
 	mask_identifier,
@@ -10719,6 +10723,244 @@ def set_portal_role(employee, role, enabled):
 	return _role_holder_rows(
 		[frappe._dict(name=target.name, employee_name=target.employee_name, user_id=target.user_id)]
 	)[0]
+
+
+# --- Company access grants (plan 2026-10-14-001 U2, R2-R6) -------------------
+#
+# A Portal Admin or System Manager gives a portal user read access to other
+# companies. Who may grant which company is `grantable_companies` (KTD3).
+# The doctype holds a System Manager DocPerm only; these endpoints are the
+# Portal Admin's gate, exactly as `save_report_access` is.
+
+_COMPANY_ACCESS_LEVELS = (COMPANY_ACCESS_ALL, COMPANY_ACCESS_REPORTS)
+_COMPANY_ACCESS_REFUSED = "You are not authorised to change this person's company access."
+
+
+def _company_access_reach():
+	user = frappe.session.user
+	reach = grantable_companies(user) if can_admin_portal(user) else None
+	if not reach:
+		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
+	return reach
+
+
+def _company_access_rows(reach, users=None):
+	"""Grants the caller may see -- any named or home company in ``reach`` --
+	each with ``can_edit``: every one of its companies in reach, and not the
+	caller's own."""
+	filters = {"user": ["in", users]} if users else {}
+	grants = frappe.get_all(
+		"HelixHR Company Access",
+		filters=filters,
+		fields=[
+			"name",
+			"user",
+			"employee",
+			"home_company",
+			"level",
+			"allow_export",
+			"enabled",
+			"disabled_reason",
+			"modified",
+		],
+		order_by="modified desc",
+	)
+	if not grants:
+		return []
+	companies = {}
+	for row in frappe.get_all(
+		"HelixHR Company Access Company",
+		filters={"parenttype": "HelixHR Company Access", "parent": ["in", [g.name for g in grants]]},
+		fields=["parent", "company"],
+		order_by="idx asc",
+	):
+		companies.setdefault(row.parent, []).append(row.company)
+	names = dict(
+		frappe.get_all(
+			"Employee",
+			filters={"name": ["in", [g.employee for g in grants if g.employee]]},
+			fields=["name", "employee_name"],
+			as_list=True,
+		)
+	)
+	reach = set(reach)
+	rows = []
+	for grant in grants:
+		named = companies.get(grant.name, [])
+		touched = {*named, grant.home_company} - {None}
+		if not touched & reach:
+			continue
+		rows.append(
+			{
+				"user": grant.user,
+				"employee": grant.employee,
+				"employee_name": names.get(grant.employee) or grant.user,
+				"home_company": grant.home_company,
+				"level": grant.level,
+				"companies": named,
+				"allow_export": bool(grant.allow_export),
+				"enabled": bool(grant.enabled),
+				"disabled_reason": grant.disabled_reason,
+				"modified": str(grant.modified),
+				"can_edit": grant.user != frappe.session.user and touched <= reach,
+			}
+		)
+	return rows
+
+
+def _editable_grant(user, reach, modified):
+	"""The existing grant on ``user`` once the caller may change it (R4), or
+	None when there is none. ``modified`` must match what the caller saw."""
+	if not frappe.db.exists("HelixHR Company Access", user):
+		return None
+	doc = frappe.get_doc("HelixHR Company Access", user)
+	touched = {row.company for row in doc.companies} | ({doc.home_company} - {None})
+	if not touched <= set(reach):
+		frappe.throw(_(_COMPANY_ACCESS_REFUSED), frappe.PermissionError)
+	if not modified or str(doc.modified) != str(modified):
+		frappe.throw(_("This person's company access changed since you opened it. Reload and try again."))
+	return doc
+
+
+def _assert_not_own_grant(user):
+	if not isinstance(user, str) or not user or user in ("Administrator", "Guest"):
+		frappe.throw(_(_COMPANY_ACCESS_REFUSED), frappe.PermissionError)
+	if user == frappe.session.user:
+		frappe.throw(_("You can't change your own company access."), frappe.PermissionError)
+
+
+def _comment_company_access(user, message):
+	frappe.get_doc("User", user).add_comment(
+		"Info", f"{frappe.utils.get_fullname(frappe.session.user)} {message}"
+	)
+	frappe.clear_cache(user=user)
+
+
+@frappe.whitelist()
+def get_company_access():
+	"""The grants the caller may see, the companies they may grant, and the
+	two levels. Names and companies only -- no HR data."""
+	rate_limit_per_user("get_company_access")
+	reach = _company_access_reach()
+	return {
+		"grantable": reach,
+		"levels": list(_COMPANY_ACCESS_LEVELS),
+		"rows": _company_access_rows(reach),
+	}
+
+
+@frappe.whitelist()
+def search_company_access_targets(query=None):
+	"""Active employees with a User in a company the caller may grant, other
+	than the caller (2+ characters). Name, id, user and company only."""
+	rate_limit_per_user("search_company_access_targets")
+	reach = _company_access_reach()
+	query = query.strip() if isinstance(query, str) else ""
+	if len(query) < 2:
+		return []
+	like = f"%{query[:80]}%"
+	return frappe.get_all(
+		"Employee",
+		filters={
+			"status": "Active",
+			"user_id": ["not in", [frappe.session.user, "Administrator", "Guest"]],
+			"company": ["in", reach],
+		},
+		or_filters={"employee_name": ["like", like], "name": ["like", like]},
+		fields=["name as employee", "employee_name", "user_id as user", "company"],
+		order_by="employee_name asc",
+		limit=_PORTAL_ROLE_RESULTS,
+	)
+
+
+@frappe.whitelist(methods=["POST"])
+def save_company_access(user, level, companies, allow_export=0, modified=None):
+	"""Create or replace ``user``'s grant, and enable it (R3-R6).
+
+	Refused: the caller's own User, a target that is not an Active Employee
+	with this login in a company the caller may grant, any company outside
+	that reach, and an existing grant naming a company outside it. Editing
+	an existing grant needs the ``modified`` the caller last saw."""
+	rate_limit_per_user("save_company_access")
+	reach = _company_access_reach()
+	_assert_not_own_grant(user)
+	target = frappe.db.get_value(
+		"Employee", {"user_id": user}, ["name", "status", "company"], as_dict=True
+	)
+	if not target or target.status != "Active" or target.company not in reach:
+		frappe.throw(_(_COMPANY_ACCESS_REFUSED), frappe.PermissionError)
+	if level not in _COMPANY_ACCESS_LEVELS:
+		frappe.throw(_("Choose a level."))
+	companies = frappe.parse_json(companies) if isinstance(companies, str) else companies
+	if (
+		not isinstance(companies, list)
+		or not companies
+		or not all(isinstance(company, str) for company in companies)
+	):
+		frappe.throw(_("Choose at least one company."))
+	for company in companies:
+		if company not in reach:
+			frappe.throw(_("You can't grant access to {0}.").format(company), frappe.PermissionError)
+
+	doc = _editable_grant(user, reach, modified)
+	if doc is None:
+		doc = frappe.new_doc("HelixHR Company Access")
+		doc.user = user
+	doc.update(
+		{
+			"employee": target.name,
+			"home_company": target.company,
+			"level": level,
+			"allow_export": 1 if allow_export in (1, True, "1", "true") else 0,
+			"enabled": 1,
+			"disabled_reason": None,
+		}
+	)
+	doc.set("companies", [{"company": company} for company in companies])
+	# The caller holds no DocPerm here (KTD2); the checks above are the gate.
+	doc.flags.ignore_permissions = True
+	doc.save()
+	_comment_company_access(
+		user,
+		_("set HelixHR company access to {0} for {1}{2}").format(
+			_(level),
+			", ".join(companies),
+			_(", with export") if doc.allow_export else "",
+		),
+	)
+	return _company_access_rows(reach, [user])[0]
+
+
+@frappe.whitelist(methods=["POST"])
+def revoke_company_access(user, modified=None):
+	"""Switch ``user``'s grant off; the row stays for history and can be
+	saved again later, which re-runs every check."""
+	rate_limit_per_user("revoke_company_access")
+	reach = _company_access_reach()
+	_assert_not_own_grant(user)
+	doc = _editable_grant(user, reach, modified)
+	if doc is None:
+		frappe.throw(_(_COMPANY_ACCESS_REFUSED), frappe.PermissionError)
+	if doc.enabled:
+		disable_company_access(
+			user, _("{0} switched it off").format(frappe.utils.get_fullname(frappe.session.user))
+		)
+	return _company_access_rows(reach, [user])[0]
+
+
+@frappe.whitelist(methods=["POST"])
+def delete_company_access(user, modified=None):
+	"""Delete ``user``'s grant outright. Its version history stays on the
+	Deleted Document, and the User keeps an Info comment."""
+	rate_limit_per_user("delete_company_access")
+	reach = _company_access_reach()
+	_assert_not_own_grant(user)
+	doc = _editable_grant(user, reach, modified)
+	if doc is None:
+		frappe.throw(_(_COMPANY_ACCESS_REFUSED), frappe.PermissionError)
+	frappe.delete_doc("HelixHR Company Access", doc.name, ignore_permissions=True)
+	_comment_company_access(user, _("removed HelixHR company access"))
+	return {"user": user, "deleted": True}
 
 
 # --- Approvers cleanup (plan 2026-10-07-001 U4) ------------------------------

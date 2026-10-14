@@ -1623,6 +1623,36 @@ def disable_company_access(user, reason):
 	return True
 
 
+def grantable_companies(user):
+	"""Which companies ``user`` may name in a grant, or None when they may not
+	grant at all (KTD3, user decision 2026-10-14).
+
+	System Manager and Administrator: every company. Portal Admin: their
+	Active home company plus each company named in their own User
+	Permissions on Company that apply to Company itself. A row that applies
+	to every doctype is ignored: ERPNext creates those as a side effect of
+	"Create User Permission" on Employee and never removes them on a
+	transfer, so they say nothing about a deliberate grant of reach."""
+	if user == "Administrator" or "System Manager" in frappe.get_roles(user):
+		return frappe.get_all("Company", pluck="name", order_by="name asc")
+	if PORTAL_ADMIN_ROLE not in frappe.get_roles(user):
+		return None
+	home = _active_anchor_company(user)
+	if not home:
+		return None
+	extra = frappe.get_all(
+		"User Permission",
+		filters={
+			"user": user,
+			"allow": "Company",
+			"apply_to_all_doctypes": 0,
+			"applicable_for": "Company",
+		},
+		pluck="for_value",
+	)
+	return list(dict.fromkeys([home, *sorted(extra)]))
+
+
 def _widen_by_companies(scope, companies, user=None):
 	"""``scope`` plus read access to ``companies``. One company stays the
 	``"company"`` kind so single-company callers see no new shape; more
@@ -1853,6 +1883,13 @@ RATE_LIMIT_POLICY = {
 	# an occasional administrative grant.
 	"get_portal_role_holders": (60, 60),
 	"set_portal_role": (30, 3600),
+	# Plan 2026-10-14-001 U2: company access grants -- the Settings list, a
+	# holder search per keystroke pause, and rare administrative writes.
+	"get_company_access": (60, 60),
+	"search_company_access_targets": (60, 60),
+	"save_company_access": (30, 3600),
+	"revoke_company_access": (30, 3600),
+	"delete_company_access": (30, 3600),
 	# Plan 2026-10-07-001 U4: the Approvers cleanup -- a preview read and a
 	# rare batch apply.
 	"get_approver_cleanup": (60, 60),
