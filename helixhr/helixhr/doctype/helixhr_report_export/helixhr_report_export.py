@@ -54,13 +54,12 @@ def expire_unreachable_exports(user):
 	Ready background export of theirs they could no longer request. The
 	download endpoint refuses them anyway; this removes the private File
 	itself, which `/private/files` would otherwise still serve its owner."""
-	from helixhr.utils import resolve_report_access
+	from helixhr.utils import can_export_report
 
 	for row in frappe.get_all(
 		"HelixHR Report Export",
 		filters={"owner": user, "status": "Ready", "file": ["is", "set"]},
 		fields=["name", "report_key", "company"],
 	):
-		access = resolve_report_access(user, row.report_key, row.company)
-		if not access["can_export"] or access["company_removed"]:
+		if not can_export_report(user, row.report_key, row.company):
 			expire_export(row.name)

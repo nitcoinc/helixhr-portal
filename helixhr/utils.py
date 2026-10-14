@@ -1619,12 +1619,6 @@ def disable_company_access(user, reason):
 	frappe.get_doc("User", user).add_comment(
 		"Info", _("HelixHR company access was disabled: {0}").format(reason)
 	)
-	frappe.clear_cache(user=user)
-	from helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export import (
-		expire_unreachable_exports,
-	)
-
-	expire_unreachable_exports(user)
 	return True
 
 
@@ -1834,6 +1828,15 @@ def resolve_report_access(user, report_key, company=None):
 		"companies": companies,
 		"company_removed": company not in (None, "") and picked != company,
 	}
+
+
+def can_export_report(user, report_key, company=None, access=None):
+	"""Whether ``user`` may still export ``report_key`` for ``company`` --
+	the re-check every deferred export action makes (R15): the background
+	job, the download, and expiring files after a grant narrows. A company
+	the caller may not use is a no, never the default company's yes."""
+	access = access or resolve_report_access(user, report_key, company)
+	return access["can_export"] and not access["company_removed"]
 
 
 def portal_home_page(user=None):
