@@ -100,9 +100,11 @@ describe('reportQuery', () => {
       expect(toQuery({ filters: parsed.filters }, MULTI)).toEqual({ company: 'Beta Ltd' })
     })
 
-    it('drops an unknown company from the query string', () => {
-      expect(fromQuery({ company: 'Gamma Ltd' }, MULTI).filters).toEqual({})
-      expect(toQuery({ filters: { company: 'Gamma Ltd' } }, MULTI)).toEqual({})
+    it('keeps any company name for the server to judge, never a malformed one', () => {
+      expect(fromQuery({ company: 'Gamma Ltd' }, MULTI).filters).toEqual({ company: 'Gamma Ltd' })
+      expect(toQuery({ filters: { company: 'Gamma Ltd' } }, MULTI)).toEqual({ company: 'Gamma Ltd' })
+      expect(fromQuery({ company: 'x'.repeat(141) }, MULTI).filters).toEqual({})
+      expect(fromQuery({ company: ['', 'Alpha Ltd'] }, MULTI).filters).toEqual({})
       // An entry with no companies list never carries one.
       expect(fromQuery({ company: 'Alpha Ltd' }, ENTRY).filters).toEqual({})
     })

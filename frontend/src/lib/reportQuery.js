@@ -8,8 +8,14 @@
 //   ?hide=a,b                hidden columns (resolved decision 10); absent =
 //                            the report's defaults (ID columns beside a name),
 //                            `?hide=` = every column shown
-//   ?company=X               plan 2026-10-14-001 U10: the company to run for,
-//                            kept only when the entry's `companies` lists it
+//   ?company=X               plan 2026-10-14-001 U10: the company to run for.
+//                            Kept as any plain string while the entry offers
+//                            more than one company: the server decides, and
+//                            names a company it would not run in
+//                            `filters_removed` (R14) -- a shared link from
+//                            another company says so instead of silently
+//                            showing the reader's own data. An entry with
+//                            no companies list never carries one.
 //
 // Everything is validated against the catalog entry's own specs; unknown
 // keys and malformed values are dropped, never passed through. The server
@@ -49,11 +55,11 @@ export function cleanFilterValue(spec, value) {
   return raw
 }
 
-/** `value` when the entry offers that company to this caller, else undefined. */
-export function cleanCompany(entry, value) {
+/** A plain company name, or undefined. Whether the caller may run it is the
+ * server's answer, not this one's. */
+export function cleanCompany(value) {
   const raw = first(value)
-  if (typeof raw !== 'string' || !raw) return undefined
-  return (entry.companies || []).some((option) => option.company === raw) ? raw : undefined
+  return typeof raw === 'string' && raw && raw.length <= MAX_VALUE ? raw : undefined
 }
 
 /** `filters` switched to `company`. Employee, project, task and department
@@ -76,7 +82,8 @@ export function fromQuery(query, entry) {
     const value = cleanFilterValue(spec, query[spec.name])
     if (value !== undefined) filters[spec.name] = value
   }
-  const company = cleanCompany(entry, query.company)
+  const offersChoice = (entry.companies || []).length > 0
+  const company = offersChoice ? cleanCompany(query.company) : undefined
   if (company !== undefined) filters.company = company
   const groupable = new Set((entry.group_by || []).map((group) => group.field))
   const groupBy = list(query.group).filter((field) => groupable.has(field)).slice(0, 2)
@@ -103,7 +110,8 @@ export function toQuery(state, entry) {
     const value = cleanFilterValue(spec, state.filters?.[spec.name])
     if (value !== undefined) query[spec.name] = String(value)
   }
-  const company = cleanCompany(entry, state.filters?.company)
+  const offersChoice = (entry.companies || []).length > 0
+  const company = offersChoice ? cleanCompany(state.filters?.company) : undefined
   if (company !== undefined) query.company = company
   if (state.groupBy?.length) query.group = state.groupBy.slice(0, 2).join(',')
   if (state.sort?.field) query.sort = `${state.sort.order === 'desc' ? '-' : ''}${state.sort.field}`
