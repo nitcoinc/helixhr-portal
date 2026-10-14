@@ -8,6 +8,8 @@
 //   ?hide=a,b                hidden columns (resolved decision 10); absent =
 //                            the report's defaults (ID columns beside a name),
 //                            `?hide=` = every column shown
+//   ?company=X               plan 2026-10-14-001 U10: the company to run for,
+//                            kept only when the entry's `companies` lists it
 //
 // Everything is validated against the catalog entry's own specs; unknown
 // keys and malformed values are dropped, never passed through. The server
@@ -17,6 +19,9 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 const MONTH_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 const FIELD_RE = /^[A-Za-z0-9_]{1,64}$/
 const MAX_VALUE = 140
+// Entity filters whose values belong to one company (`select_link` masters
+// such as Designation and Branch are shared, so they survive a switch).
+const COMPANY_BOUND_TYPES = new Set(['employee', 'project', 'task', 'department'])
 
 function first(value) {
   return Array.isArray(value) ? value[0] : value
@@ -44,6 +49,24 @@ export function cleanFilterValue(spec, value) {
   return raw
 }
 
+/** `value` when the entry offers that company to this caller, else undefined. */
+export function cleanCompany(entry, value) {
+  const raw = first(value)
+  if (typeof raw !== 'string' || !raw) return undefined
+  return (entry.companies || []).some((option) => option.company === raw) ? raw : undefined
+}
+
+/** `filters` switched to `company`. Employee, project, task and department
+ * values belong to one company, so a switch drops them. */
+export function withCompany(filters, entry, company) {
+  if (filters.company === company) return filters
+  const next = { ...filters, company }
+  for (const spec of entry.filters) {
+    if (COMPANY_BOUND_TYPES.has(spec.type)) delete next[spec.name]
+  }
+  return next
+}
+
 /** Route query -> `{filters, groupBy, sort, hidden, hasState}` for `entry`.
  * `hasState` is whether the link carried any report state at all (an
  * opened link auto-runs; a bare open waits for Run). */
@@ -53,6 +76,8 @@ export function fromQuery(query, entry) {
     const value = cleanFilterValue(spec, query[spec.name])
     if (value !== undefined) filters[spec.name] = value
   }
+  const company = cleanCompany(entry, query.company)
+  if (company !== undefined) filters.company = company
   const groupable = new Set((entry.group_by || []).map((group) => group.field))
   const groupBy = list(query.group).filter((field) => groupable.has(field)).slice(0, 2)
 
@@ -78,6 +103,8 @@ export function toQuery(state, entry) {
     const value = cleanFilterValue(spec, state.filters?.[spec.name])
     if (value !== undefined) query[spec.name] = String(value)
   }
+  const company = cleanCompany(entry, state.filters?.company)
+  if (company !== undefined) query.company = company
   if (state.groupBy?.length) query.group = state.groupBy.slice(0, 2).join(',')
   if (state.sort?.field) query.sort = `${state.sort.order === 'desc' ? '-' : ''}${state.sort.field}`
   if (Array.isArray(state.hidden)) query.hide = state.hidden.join(',')

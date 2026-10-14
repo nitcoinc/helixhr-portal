@@ -5,6 +5,7 @@ import EntityPicker from '@/components/reports/EntityPicker.vue'
 import { DATE_PRESETS, matchPreset, presetRange } from '@/lib/datePresets'
 import { today } from '@/lib/dates'
 import { call } from '@/lib/api'
+import { withCompany } from '@/lib/reportQuery'
 
 // Plan 2026-10-04-001 U3 (resolved decision 14): the filter bar, built from
 // the catalog entry's own filter specs. Nothing here runs a report: Run is
@@ -51,6 +52,23 @@ function set(name, value) {
   emit('update:modelValue', { ...props.modelValue, [name]: value })
 }
 
+// Plan 2026-10-14-001 U10: one company per run, offered only when the
+// catalog lists more than one. A switch clears the entity filters (they
+// belong to one company) and every option search names the company.
+const companyOptions = computed(() => props.entry.companies || [])
+const showCompany = computed(() => companyOptions.value.length > 1)
+
+function setCompany(company) {
+  emit('update:modelValue', withCompany(props.modelValue, props.entry, company))
+}
+
+function pickerContext(filter) {
+  const context = {}
+  if (filter.type === 'task' && props.modelValue.project) context.project = props.modelValue.project
+  if (props.modelValue.company) context.company = props.modelValue.company
+  return Object.keys(context).length ? context : null
+}
+
 // Plan 2026-10-05-001 U7 (R12): a new Project clears a chosen Task that
 // does not belong to it. The server answers "is this task in that project"
 // with the same scoped lookup the picker uses.
@@ -64,7 +82,7 @@ async function setProject(value) {
       report_key: props.entry.key,
       filter: 'task',
       value: task,
-      context: JSON.stringify({ project: value }),
+      context: JSON.stringify({ project: value, ...(props.modelValue.company ? { company: props.modelValue.company } : {}) }),
     })
     keep = !!found?.length
   } catch {
@@ -137,6 +155,27 @@ function secondGroupOptions() {
       :class="panelOpen ? 'block' : 'hidden sm:block'"
     >
       <div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <div v-if="showCompany">
+          <label
+            :for="`${id}-company`"
+            :class="LABEL_CLASS"
+          >Company</label>
+          <select
+            :id="`${id}-company`"
+            :value="modelValue.company || entry.company || ''"
+            :class="FIELD_CLASS"
+            @change="setCompany($event.target.value)"
+          >
+            <option
+              v-for="option in companyOptions"
+              :key="option.company"
+              :value="option.company"
+            >
+              {{ option.company }}
+            </option>
+          </select>
+        </div>
+
         <template v-if="hasRange">
           <div>
             <div class="flex items-center">
@@ -217,7 +256,7 @@ function secondGroupOptions() {
             v-if="ENTITY_TYPES.has(filter.type)"
             :report-key="entry.key"
             :filter="filter"
-            :context="filter.type === 'task' && modelValue.project ? { project: modelValue.project } : null"
+            :context="pickerContext(filter)"
             :model-value="modelValue[filter.name] || ''"
             @update:model-value="filter.name === 'project' ? setProject($event) : set(filter.name, $event)"
           />

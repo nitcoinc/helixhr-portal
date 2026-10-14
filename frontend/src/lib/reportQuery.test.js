@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { fromQuery, toQuery } from './reportQuery'
+import { fromQuery, toQuery, withCompany } from './reportQuery'
 
 const ENTRY = {
   key: 'hours_by_project',
@@ -74,5 +74,62 @@ describe('reportQuery', () => {
 
   it('keeps the first of a repeated key', () => {
     expect(fromQuery({ employee: ['A', 'B'] }, ENTRY).filters).toEqual({ employee: 'A' })
+  })
+
+  describe('company (plan 2026-10-14-001 U10)', () => {
+    const MULTI = {
+      ...ENTRY,
+      filters: [
+        ...ENTRY.filters,
+        { name: 'project', type: 'project' },
+        { name: 'task', type: 'task' },
+        { name: 'department', type: 'department' },
+        { name: 'branch', type: 'select_link' },
+      ],
+      company: 'Alpha Ltd',
+      companies: [
+        { company: 'Alpha Ltd', can_export: true },
+        { company: 'Beta Ltd', can_export: false },
+      ],
+    }
+
+    it('keeps a company the entry offers and round-trips it', () => {
+      const parsed = fromQuery({ company: 'Beta Ltd' }, MULTI)
+      expect(parsed.filters).toEqual({ company: 'Beta Ltd' })
+      expect(parsed.hasState).toBe(true)
+      expect(toQuery({ filters: parsed.filters }, MULTI)).toEqual({ company: 'Beta Ltd' })
+    })
+
+    it('drops an unknown company from the query string', () => {
+      expect(fromQuery({ company: 'Gamma Ltd' }, MULTI).filters).toEqual({})
+      expect(toQuery({ filters: { company: 'Gamma Ltd' } }, MULTI)).toEqual({})
+      // An entry with no companies list never carries one.
+      expect(fromQuery({ company: 'Alpha Ltd' }, ENTRY).filters).toEqual({})
+    })
+
+    it('switching company drops employee, project, task and department values', () => {
+      const filters = {
+        company: 'Alpha Ltd',
+        employee: 'HR-EMP-0001',
+        project: 'PROJ-0001',
+        task: 'TASK-0001',
+        department: 'Ops - A',
+        branch: 'Head Office',
+        status: 'Active',
+        from_date: '2026-01-01',
+      }
+      expect(withCompany(filters, MULTI, 'Beta Ltd')).toEqual({
+        company: 'Beta Ltd',
+        branch: 'Head Office',
+        status: 'Active',
+        from_date: '2026-01-01',
+      })
+      expect(filters.employee).toBe('HR-EMP-0001')
+    })
+
+    it('re-picking the same company keeps every filter', () => {
+      const filters = { company: 'Alpha Ltd', employee: 'HR-EMP-0001' }
+      expect(withCompany(filters, MULTI, 'Alpha Ltd')).toBe(filters)
+    })
   })
 })
