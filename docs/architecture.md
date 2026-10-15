@@ -1682,3 +1682,21 @@ roster keeps the same rules as every other HR surface here:
   `ignore_permissions` on a write, and nothing reaches `frappe.client`.
 - Recurring schedules (Shift Schedule Assignment), swaps and employee
   shift requests stay out; Desk still owns them.
+
+### Approvals lanes and timesheet oversight (plan 2026-10-15-002)
+
+The Approvals page splits into up to three tabs: Approvals, Timesheets and
+All pending. Each queue row carries a ``lane`` tag (team / hr / it) so the
+frontend groups them.
+
+- **Lane tags.** Rows from the line-manager collectors are ``"team"``;
+  HR-stage items are ``"hr"``; IT-routed requests are ``"it"``. The
+  ``counts.lanes`` dict reports per-lane totals alongside ``counts.kinds``.
+- **Decided window.** Widened to 14 days and 25 rows, timesheets excluded
+  (KTD8). A disclosure below the pending lanes, collapsed by default.
+- **Oversight scope.** HR Manager sees every pending item in their admin
+  scope. HR User sees timesheets only, scoped to their anchor company
+  (KTD4). Both use ``frappe.get_all`` with explicit field allow-lists.
+- **Reminders.** ``send_timesheet_reminder`` sends one mail plus one portal
+  notification per approver per company, guarded by a 24-hour Redis key
+  (KTD6). Guard format: ``helixhr:reminder:<company>:<approver_user>``.

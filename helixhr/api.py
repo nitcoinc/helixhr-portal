@@ -2755,6 +2755,10 @@ def _approval_summaries(employee):
 
 	Each kind's read runs as the session user, so Frappe's own permissions
 	decide what comes back; the per-kind collector says how.
+
+	Plan 2026-10-15-002 KTD1: each row carries a ``lane`` key: ``"team"``
+	for line-manager items, ``"hr"`` for HR-stage items, ``"it"`` for
+	IT-routed requests. ``counts.lanes`` reports per-lane totals.
 	"""
 	today = _as_date(user_today())
 	rows = []
@@ -2763,6 +2767,17 @@ def _approval_summaries(employee):
 	# (P3-R25), so a backlog of 200 used to be reported as 50 with nothing
 	# saying so.
 	capped = False
+	lane_counts = {"team": 0, "hr": 0, "it": 0}
+
+	# Helper to tag rows with their lane.
+	def _extend(collected, lane):
+		nonlocal capped
+		capped = capped or False
+		for row in collected:
+			row["lane"] = lane
+			lane_counts[lane] += 1
+		rows.extend(collected)
+
 	# A routed-role holder who is not also an Employee (P5-U2 ships IT Team
 	# without that role, deliberately -- P5-KTD10) has no possible
 	# line-manager backlog at all. Leave Application, Timesheet and
@@ -2776,17 +2791,17 @@ def _approval_summaries(employee):
 		for collect, bound in _APPROVAL_SUMMARY_COLLECTORS:
 			collected = collect(employee, today)
 			capped = capped or len(collected) >= bound
-			rows.extend(collected)
+			_extend(collected, "team")
 	# P4-R11: one queue. An HR Manager's own reports' work arrived above,
 	# narrowed by `_line_manager_filter`; everything waiting for HR is added
 	# here and tagged, so the two halves are one oldest-first backlog rather
 	# than two lists to poll.
-	#
+	# Plan 2026-10-15-002 KTD1: HR-stage items are tagged "hr".
 	if _is_hr():
 		for kind in _APPROVAL_KINDS.values():
 			collected = kind["hr_queue"](employee, today)
 			capped = capped or len(collected) >= _QUEUE_FETCH
-			rows.extend(collected)
+			_extend(collected, "hr")
 	elif _holds_routed_role():
 		# P5-R11: a routed-role holder (IT Team today) has no line-manager
 		# half and no standing on Leave Application, Timesheet or Attendance
@@ -2796,12 +2811,21 @@ def _approval_summaries(employee):
 		# queue is `_hr_request_summaries`, and only that one is reached.
 		collected = _hr_request_summaries(employee, today)
 		capped = capped or len(collected) >= _QUEUE_FETCH
+		# Plan 2026-10-15-002 KTD1: tag routed items by their role.
+		for row in collected:
+			role = row.get("routed_to_role", "")
+			if role == "IT Team":
+				row["lane"] = "it"
+				lane_counts["it"] += 1
+			else:
+				row["lane"] = "hr"
+				lane_counts["hr"] += 1
 		rows.extend(collected)
 
 	# Oldest first: the queue is a backlog, and the person who has waited
 	# longest is the one the manager is holding up (P2-U7 step 7).
 	rows.sort(key=lambda entry: (entry["sent_on"] or "", entry["name"]))
-	return _with_photo_urls(rows), capped
+	return _with_photo_urls(rows), capped, lane_counts
 
 
 def _holds_routed_role(user=None):
@@ -2847,7 +2871,7 @@ def _pending_approvals(employee):
 	the other.
 	"""
 	decisions = []
-	rows, _capped = _approval_summaries(employee)
+	rows, _capped, _lane_counts = _approval_summaries(employee)
 	for row in rows:
 		title = _QUEUE_TITLE[row["kind"]](row)
 		if row["for_hr"]:
@@ -5885,13 +5909,14 @@ def get_my_approvals(kind=None, category=None):
 	if category:
 		kind = "request"
 	employee = get_current_employee()
-	pending, capped = _approval_summaries(employee)
+	pending, capped, lane_counts = _approval_summaries(employee)
 	counts = {
 		"kinds": [
 			{"name": name, "count": sum(1 for row in pending if row["kind"] == name)}
 			for name in _APPROVAL_FILTER_KINDS
 		],
 		"categories": _count_by(row.get("category") for row in pending if row["kind"] == "request"),
+		"lanes": lane_counts,
 	}
 	if kind:
 		pending = [row for row in pending if row["kind"] == kind]
@@ -6182,7 +6207,7 @@ def _decided_attendance_requests(employee, since):
 	]
 
 
-_DECIDED_COLLECTORS = (_decided_leave, _decided_timesheets, _decided_attendance_requests)
+_DECIDED_COLLECTORS = (_decided_leave, _decided_attendance_requests)
 
 
 def _recently_decided(employee):
