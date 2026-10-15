@@ -5832,8 +5832,8 @@ def _get_unread_notification_count():
 _APPROVAL_PAGE = 25
 # "Decided this week" is a receipt, not a history: the last few outcomes, so
 # a manager can see that the thing they just did actually happened.
-_DECIDED_DAYS = 7
-_DECIDED_LIMIT = 5
+_DECIDED_DAYS = 14
+_DECIDED_LIMIT = 25
 # What a handed-over leave reads as in the receipt list. Leave has no workflow
 # state of its own (P2-KTD17), so this is the one place the word lives -- the
 # same word `TIMESHEET_PENDING_HR` and `REQUEST_PENDING_HR` already carry, so
