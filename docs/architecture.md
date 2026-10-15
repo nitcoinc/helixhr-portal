@@ -1685,18 +1685,64 @@ roster keeps the same rules as every other HR surface here:
 
 ### Approvals lanes and timesheet oversight (plan 2026-10-15-002)
 
-The Approvals page splits into up to three tabs: Approvals, Timesheets and
-All pending. Each queue row carries a ``lane`` tag (team / hr / it) so the
-frontend groups them.
+The Approvals page has up to three tabs, each in the URL (`?view=`):
 
-- **Lane tags.** Rows from the line-manager collectors are ``"team"``;
-  HR-stage items are ``"hr"``; IT-routed requests are ``"it"``. The
-  ``counts.lanes`` dict reports per-lane totals alongside ``counts.kinds``.
-- **Decided window.** Widened to 14 days and 25 rows, timesheets excluded
-  (KTD8). A disclosure below the pending lanes, collapsed by default.
-- **Oversight scope.** HR Manager sees every pending item in their admin
-  scope. HR User sees timesheets only, scoped to their anchor company
-  (KTD4). Both use ``frappe.get_all`` with explicit field allow-lists.
-- **Reminders.** ``send_timesheet_reminder`` sends one mail plus one portal
-  notification per approver per company, guarded by a 24-hour Redis key
-  (KTD6). Guard format: ``helixhr:reminder:<company>:<approver_user>``.
+| Tab | Who | What |
+|---|---|---|
+| Approvals | `canApprove` or `canWorkRequests` | Every kind but timesheets, in lanes |
+| Timesheets | `canApprove` or `canOverseeTimesheets` | Waiting on you, Waiting on HR, All pending timesheets |
+| All pending | HR Manager (`canConfigure`) | Non-timesheet kinds by approver, Overdue-only toggle |
+
+One visible tab hides the bar; a tab the caller lacks falls back to their
+first. `?view=overdue` is an alias for All pending with Overdue only on.
+
+- **Lane tags.** `_approval_summaries` tags every row `lane`: `team` from the
+  line-manager collectors, `hr` from the HR collectors, and any routed request
+  by its `routed_to_role` (`IT Team` → `it`, else `hr`) whichever half read it,
+  so HR keeps its read-only view of IT rows in the IT lane. `counts.lanes`
+  rides beside `counts.kinds`; Home's count is the same rows, unchanged.
+  `frontend/src/lib/approvalLanes.js` only groups (`laneSections`,
+  `laneSubsections`, `groupByPerson`).
+- **Decided by me.** 14 days, 25 rows, timesheets excluded; a collapsed
+  disclosure after My team (first when My team is empty). HR still sees only
+  its own decisions (`modified_by`).
+- **One collector.** `reminders.collect_overdue(today, cutoff, companies,
+  kinds, resolve_owners, stats)`. The digest calls it with defaults (overdue
+  only, every company, owners resolved). `cutoff=ALL_PENDING` reads every
+  pending item, including rows with no `helixhr_pending_since` (age `None`,
+  shown "Since unknown"). `companies` filters by the employee's company in
+  SQL, before the 500-per-doctype bound; `stats["capped"]` reports the bound.
+  `get_pending_by_approver` and the `get_overdue_approvals` wrapper both read
+  through it.
+- **Approver resolver.** `reminders.resolve_approvers(items)` turns each raw
+  approver (a user, the employee's `reports_to`, or a role) into
+  `approver_user / approver_employee / approver_name / approver_role / reason`
+  with one Employee read (a self-join on `reports_to`) and one User read per
+  call. Reason precedence: `no_approver`, `inactive` (still returns the user,
+  so HR sees whose queue it is), `no_login`, `unmailable`, else `none`.
+  Groups key on user, then Employee, then role, then one no-approver bucket.
+- **Oversight scope** (`api._oversight_scope`, also the bootstrap's
+  `can_oversee_timesheets`). HR Manager: `resolve_admin_scope` -- one company,
+  or every company for the unscoped Desk persona; an HR Manager whose Employee
+  is not Active is refused, never widened. HR User with an Active Employee:
+  the anchor company, timesheets only. Company access grants never widen it.
+  Reads are `frappe.get_all` with explicit fields, so strict User Permissions
+  do not empty them.
+- **HR User detail.** `get_approval_detail` checks, from the row's columns
+  before loading the document, that the timesheet is pending and in the HR
+  User's company; it then returns the evidence with `actions: []` and
+  `read_only: true` unless the HR User is that timesheet's own approver.
+  Every other kind or company falls through to `_assert_may_act_on`'s
+  not-found refusal; `act_on_approval` is untouched.
+- **Reminders.** `send_timesheet_reminder(approver_user)` rebuilds the
+  approver's pending timesheets in the caller's scope and refuses when there
+  are none (not found) or the approver's reason is not `none`. Per company it
+  claims `helixhr-timesheet-reminder|<company>|<approver>` with Redis `SET NX`
+  for 24h (kept through `clear-cache` by `persistent_cache_keys`), sends one
+  `timesheet_approval_reminder` mail through `send_notification` (editable in
+  Email templates), inserts one Notification Log bell pointing at the oldest
+  timesheet, and writes an Info comment on each listed timesheet (failures go
+  to the Error Log). When `send_notification` queues nothing (event switched
+  off, or the mail failed) the claim is released. A Redis loss allows at most
+  one early reminder; the per-caller `RATE_LIMIT_POLICY` entry (20/hour)
+  bounds that. The digest's guard and this one never touch each other.

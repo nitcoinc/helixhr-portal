@@ -1725,23 +1725,37 @@ IT / Asset category, `HR-REQ-…` when the prefix is blank. Facts operators need
 
 ### Reminder button disabled
 
-The Send reminder button in the Timesheets tab may be disabled for several reasons:
+On Approvals → Timesheets → All pending timesheets, each approver group shows
+why it has no live **Send reminder**, as text under the button:
 
-1. **Guard active (24h cooldown).** Another reminder was sent to this approver in the
-   last 24 hours. The "Next reminder allowed at" text shows when it expires.
-2. **Approver inactive or missing.** The group shows "Approver has left" or "No approver"
-   and the button is not rendered. Set a new Reports to in Person edit or Settings → Approvers.
-3. **No login or unmailable.** The approver has no User account, no email, or is disabled.
-   The group shows the reason. Fix the approver's User record.
-4. **Pending HR rows.** HR-stage timesheets don't get reminders; HR is the approver.
+1. **"Reminded recently. Next reminder allowed …"** -- a reminder went to this
+   approver about this company in the last 24 hours, from any HR user. The
+   claim is the Redis key `helixhr-timesheet-reminder|<company>|<approver>`;
+   it expires on its own. Deleting it by hand allows one more reminder.
+2. **"Approver has left; set a new Reports to"** (`inactive`) or **"No approver
+   set"** (`no_approver`) -- no button. Fix Reports to in Settings → Approvers
+   (linked from the group).
+3. **"Approver has no portal login"** (`no_login`: no User, or a disabled one)
+   or **"…no email address"** (`unmailable`) -- no button. Fix the User.
+4. **"HR is the approver for these"** -- Pending HR timesheets group under
+   HR Manager and never get a reminder.
+
+If the button was pressed and the message says the mail is switched off,
+`timesheet_approval_reminder` is Off in Email templates (or the mail failed:
+see Error Log, "HelixHR timesheet_approval_reminder mail failed"). Nothing was
+sent and the 24h claim was released.
 
 ### HR User can't see Approvals
 
-An HR User who cannot find the Approvals nav item:
+Approvals appears for an HR User only when the bootstrap's
+`can_oversee_timesheets` is true (`api._oversight_scope`):
 
-1. Check that the user holds **HR User** role (not HR Manager) on their User document.
-2. Check they have an **Active Employee** record with a company. Without an anchor
-   company, `can_oversee_timesheets` is false and the nav item is hidden.
-3. Navigate directly to `/approvals?view=timesheets` — if the page loads with the
-   Timesheets tab showing "All pending timesheets", the bootstrap flag may need a
-   cache clear: `bench clear-cache` or the Portal Admin's Clear cache button.
+1. The User holds **HR User** (HR Manager takes the HR Manager path instead).
+2. Their Employee record is **Active** and has a company. Inactive, Left or
+   no Employee means no flag and no nav item.
+3. The bootstrap is read once per page load: reload the portal after
+   changing the role or the Employee.
+
+An HR User with only oversight sees one tab (Timesheets), so the tab bar is
+hidden. They can open a pending timesheet in their own company read-only
+("View only"); any other kind or company is refused as not found.
