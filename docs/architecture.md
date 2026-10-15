@@ -105,6 +105,13 @@ There is no app-level auth code. Three Frappe mechanisms carry it:
      employee's own HR Request. The Employee role has no `write` on HR Request,
      which File creation checks; the File is attached only to the request
      being inserted, in the same transaction, after `_validate_new_correction`.
+   - `comment_on_request` (plan 2026-10-15-003 KTD2) and the widened
+     `reply_to_my_request` write their Comment through `add_comment`, which
+     inserts with `ignore_permissions`, and one Notification Log per
+     recipient. The gate runs first: `_assert_may_act_on` plus
+     `_handler_comment_refusal` (routed role, Active Employee in the
+     employee's company for non-HR handlers, open state) for handlers; the
+     session-resolved ownership check for the employee.
 
 Writes the employee should not be able to make are refused server-side:
 
@@ -1750,29 +1757,46 @@ first. `?view=overdue` is an alias for All pending with Overdue only on.
 ### Request conversation (plan 2026-10-15-003)
 
 Both the employee and the handling team can comment on a request while it is
-Open, In Progress or Waiting on Employee. Comments are stored as Frappe
-Comments and rendered by ``_request_thread``.
+Open, In Progress or Waiting on Employee. Comments are Frappe Comments,
+projected by `_request_thread` and rendered everywhere by
+`frontend/src/components/requests/RequestThread.vue`.
 
-- **Employee comments.** ``reply_to_my_request`` is widened (KTD1): accepts
-  all three open states. Only a comment while Waiting on Employee moves the
-  status to In Progress. ``can_comment`` replaces ``can_reply`` in payloads.
-- **Handler comments.** ``comment_on_request`` (KTD2) writes a Comment and
-  never changes status. The handler must hold the request's ``routed_to_role``
-  and be in the employee's company (R3). Unscoped HR Managers are exempt from
-  the company check for HR-routed requests.
-- **Author names.** Thread entries carry the commenter's full name, resolved
-  server-side. Administrator and system entries show "HR team" or "IT team"
-  by the request's routed role (R5).
-- **Need info from Open.** Two new workflow transitions (KTD3) allow
-  "Need info" from Open for both HR Manager and IT Team. The asker becomes
-  the picker (``before_save`` stamps ``picked_up_by``/``picked_up_on``, KTD4).
-- **Bank-number guard.** On correction requests, comments, replies and
-  decision reasons are checked for account-number-shaped text (KTD7). The
-  guard normalises text with NFKC, skips date-shaped tokens, and refuses
-  runs of 8+ digits or IBAN patterns.
-- **Company-scoped mails.** ``request_comment`` event (KTD5) mails only
-  role holders in the employee's company. Unscoped HR Managers still receive
-  mail for HR-routed requests.
+- **Employee comments.** `reply_to_my_request` is widened (KTD1) to the three
+  open states. Only a comment while Waiting on Employee moves the status to
+  In Progress, and only that case needs `expected_modified`. Payloads carry
+  `can_comment` and `closed` (`can_reply` is gone).
+- **Handler comments.** `comment_on_request` (KTD2) runs
+  `_assert_may_act_on`, then `_handler_comment_refusal`: the caller holds the
+  stored `routed_to_role` (Administrator exempt); a non-HR handler needs an
+  Active Employee in the employee's company (no Employee means refused); the
+  request is open. It writes a Comment and never changes status. Rate limit
+  key `comment_on_request`. `_request_decision_detail` returns `can_comment`
+  from the same function, so Approvals and Requests "To work on" show the box
+  only when the server would accept it.
+- **Author names.** `_request_thread` resolves every author with one batched
+  User read. Administrator and system entries show "HR team" or "IT team" by
+  routed role (R5).
+- **Need info from Open.** Two fixture transitions (KTD3), one per routed
+  role; the workflow's `modified` was bumped so `migrate` re-imports it.
+  `hr_request.before_save` treats Waiting on Employee as a pick-up when
+  nobody picked the request up yet (KTD4), so the asker is the picker.
+- **Bank-number guard.** `utils.has_bank_number` (KTD7), applied only when
+  `correction_field` is set: comments, replies, and Need info / Reject
+  reasons in `_decide_one`. NFKC-normalised; date tokens (YYYY-MM-DD,
+  DD/MM/YYYY and friends) are skipped; 8+ digits joined only by single
+  spaces, dots, hyphens or slashes are refused unless a letter touches the
+  run (a reference code); an IBAN, compact or grouped, is refused. Each side
+  gets its own sentence.
+- **Notifications.** `_notify_request_comment` sends one mail
+  (`request_comment`, or `request_reply` when the status moves) and one
+  Notification Log per recipient, never to the author. A handler comment
+  goes to the employee with the `HR_REPLY_SUBJECT_PREFIX` bell, so Home's
+  Needs-you and `mark_my_request_read` pick it up. An employee comment goes
+  to the picker when set, otherwise to `utils.company_role_holders`: enabled
+  holders of the routed role with an Active Employee in the employee's
+  company, plus unscoped HR/System Managers; HR Manager is the fallback when
+  nobody qualifies. Correction requests send no message text (R11). Arrival
+  mail still uses `_enabled_users_with_role` (deferred).
 - **Desk comments.** Comments added from Desk already appear in the
   thread. Internal notes (deferred) would be a separate marker the portal
   projection skips.

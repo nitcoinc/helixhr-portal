@@ -1770,6 +1770,9 @@ hidden. They can open a pending timesheet in their own company read-only
    not "Reply".
 3. **An HR or IT handler updated the request.** Reload to see the latest
    state.
+4. **Handler has no box.** `can_comment` is false when the handler lacks the
+   request's routed role, is not an Active Employee in the employee's company
+   (non-HR roles), or the request is closed.
 
 ### Comment refused: account number
 
@@ -1779,8 +1782,11 @@ account-number-shaped text. The refusal names the reason:
 - **Employee:** "Don't put account numbers in comments. Use the bank detail fields on this request."
 - **Handler:** "Don't put account numbers in comments. Ask the employee to use the bank detail fields."
 
-The guard catches full-width digits, IBANs, and runs of 8+ digits.
-Date-shaped strings and phone-length references are exempted.
+The guard catches full-width digits, IBANs (compact or grouped), and 8+
+digits joined only by single spaces, dots, hyphens or slashes. Dates and
+references with a letter touching the digits ("INV12345678") pass. A phone
+number of 8+ digits is refused on these requests; ask for it outside the
+comment.
 
 ### Need info button missing from Open
 
@@ -1788,6 +1794,5 @@ Run `bench migrate` to reload the workflow fixtures, which add the
 Open -> Waiting on Employee transitions. Verify:
 
     bench console --site <site>
-    >>> from helixhr.events import HR_REQUEST_STATE_EDGES
-    >>> ("Open", "Waiting on Employee") in HR_REQUEST_STATE_EDGES
-    True
+    >>> frappe.get_all("Workflow Transition", filters={"parent": "HR Request Handling", "state": "Open", "action": "Need info"}, pluck="allowed")
+    ['HR Manager', 'IT Team']
