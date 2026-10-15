@@ -314,6 +314,9 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			# Plan 2026-10-04-003 U6: one batch stands in for 60 decisions.
 			"approve_clean_items": (10, 60),
 			"get_overdue_approvals": (60, 60),
+			# Plan 2026-10-15-002 U2/U3: oversight read and the manual reminder.
+			"get_pending_by_approver": (60, 60),
+			"send_timesheet_reminder": (20, 3600),
 			"apply_for_leave": (20, 3600),
 			"withdraw_my_leave": (20, 3600),
 			"create_my_request": (10, 3600),

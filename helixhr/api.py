@@ -37,6 +37,7 @@ from hrms.api import (
 from hrms.hr.doctype.leave_application.leave_application import get_employee_leave_approver
 from hrms.utils.holiday_list import get_holiday_list_for_employee
 
+from helixhr import reminders
 from helixhr.events import (
 	APPROVER_FIELDS,
 	DECISION_REASON_FIELD,
@@ -83,6 +84,7 @@ from helixhr.utils import (
 	COMPANY_ACCESS_REPORTS,
 	EMAIL_THEME,
 	HOLIDAY_LIST_EDITABLE_FIELDS,
+	HR_USER_ROLE,
 	LEAVE_TYPE_EDITABLE_FIELDS,
 	MANAGED_PORTAL_ROLES,
 	NOTIFICATION_EVENTS,
@@ -100,6 +102,7 @@ from helixhr.utils import (
 	THEME_PLACEHOLDERS,
 	UPLOAD_MAX_BYTES,
 	TemplateRejected,
+	_active_anchor_company,
 	admin_scope_employee_filters,
 	as_administrator,
 	can_admin_portal,
@@ -2743,6 +2746,10 @@ _APPROVAL_SUMMARY_COLLECTORS = (
 )
 
 
+# Plan 2026-10-15-002 KTD1: requests routed here make up the IT lane.
+_IT_ROLE = "IT Team"
+
+
 def _approval_summaries(employee):
 	"""Every decision the session user may make right now, as one bounded,
 	typed, oldest-first list -- leave, timesheet *and* attendance request
@@ -2771,13 +2778,16 @@ def _approval_summaries(employee):
 	capped = False
 	lane_counts = {"team": 0, "hr": 0, "it": 0}
 
-	# Helper to tag rows with their lane.
 	def _extend(collected, lane):
-		nonlocal capped
-		capped = capped or False
+		"""Tag `collected` with `lane` and add it. A routed request goes to
+		the lane of the role it is routed to, whichever half read it (KTD1:
+		HR keeps its read-only view of IT-routed rows, tagged `it`)."""
 		for row in collected:
-			row["lane"] = lane
-			lane_counts[lane] += 1
+			if row["kind"] == "request":
+				row["lane"] = "it" if row.get("routed_to_role") == _IT_ROLE else "hr"
+			else:
+				row["lane"] = lane
+			lane_counts[row["lane"]] += 1
 		rows.extend(collected)
 
 	# A routed-role holder who is not also an Employee (P5-U2 ships IT Team
@@ -2797,8 +2807,7 @@ def _approval_summaries(employee):
 	# P4-R11: one queue. An HR Manager's own reports' work arrived above,
 	# narrowed by `_line_manager_filter`; everything waiting for HR is added
 	# here and tagged, so the two halves are one oldest-first backlog rather
-	# than two lists to poll.
-	# Plan 2026-10-15-002 KTD1: HR-stage items are tagged "hr".
+	# than two lists to poll. Plan 2026-10-15-002 KTD1: tagged "hr".
 	if _is_hr():
 		for kind in _APPROVAL_KINDS.values():
 			collected = kind["hr_queue"](employee, today)
@@ -2813,16 +2822,7 @@ def _approval_summaries(employee):
 		# queue is `_hr_request_summaries`, and only that one is reached.
 		collected = _hr_request_summaries(employee, today)
 		capped = capped or len(collected) >= _QUEUE_FETCH
-		# Plan 2026-10-15-002 KTD1: tag routed items by their role.
-		for row in collected:
-			role = row.get("routed_to_role", "")
-			if role == "IT Team":
-				row["lane"] = "it"
-				lane_counts["it"] += 1
-			else:
-				row["lane"] = "hr"
-				lane_counts["hr"] += 1
-		rows.extend(collected)
+		_extend(collected, "hr")
 
 	# Oldest first: the queue is a backlog, and the person who has waited
 	# longest is the one the manager is holding up (P2-U7 step 7).
@@ -6245,120 +6245,311 @@ def _recently_decided(employee):
 	return _with_photo_urls(decided[:_DECIDED_LIMIT])
 
 
-@frappe.whitelist()
-def get_overdue_approvals():
-	"""U12 / R26. HR's Overdue tab: who is sitting on what, how long, and
-	against which threshold, within the caller's admin scope (P6-R6).
+def _oversight_scope(user=None):
+	"""Plan 2026-10-15-002 KTD4: who may see pending work by approver, and
+	where. ``{"hr_manager", "companies"}`` or None for anyone else.
 
-	Same collector and grouping as the daily HR summary (U11), so the tab
-	and the email never disagree. Owner groups come oldest item first; rows
-	inside a group are oldest first."""
-	rate_limit_per_user("get_overdue_approvals")
-	if not _is_hr():
-		frappe.throw(_("Only HR can see overdue approvals."), frappe.PermissionError)
-	from helixhr.reminders import _summary_owners, collect_overdue
+	- HR Manager (`_is_hr`): their admin scope -- one company, or ``None``
+	  companies (every company) for the unscoped Desk persona. An HR Manager
+	  whose own Employee is not Active resolves to nobody (`resolve_admin_scope`
+	  "none") and is refused, never widened.
+	- HR User with an Active Employee: their anchor company, timesheets only.
 
-	def row(item):
-		return {
-			"kind": item["kind"],
-			"route_kind": item["route_kind"],
-			"name": item["name"],
-			"title": item["title"],
-			"employee_name": item["employee_name"],
-			"age_days": item["age_days"],
-			"threshold_days": item["threshold_days"],
-		}
+	Company access grants never widen this: each company's HR chases its own
+	managers (plan scope boundary)."""
+	user = user or frappe.session.user
+	if _is_hr(user):
+		scope = resolve_admin_scope(user)
+		if scope["kind"] == "unscoped":
+			return {"hr_manager": True, "companies": None}
+		if scope["kind"] == "company":
+			return {"hr_manager": True, "companies": [scope["company"]]}
+		return None
+	if HR_USER_ROLE in frappe.get_roles(user):
+		anchor = _active_anchor_company(user)
+		if anchor:
+			return {"hr_manager": False, "companies": [anchor]}
+	return None
 
-	today = getdate(user_today())
-	groups = _summary_owners(collect_overdue(today), frappe.session.user, project=row)
-	return {"groups": groups, "count": sum(len(group["items"]) for group in groups)}
+
+def _can_oversee_timesheets(user=None):
+	"""The bootstrap's `can_oversee_timesheets` (U4): `_oversight_scope`'s
+	own gate, so the nav item and the endpoints can never disagree."""
+	return _oversight_scope(user) is not None
+
+
+def _pending_groups(scope, kinds, overdue_only):
+	"""Pending items in `scope`, grouped by approver (KTD3), oldest wait
+	first, plus whether a read hit the bound. Groups key on the approver's
+	user, then their Employee, then a role, then one no-approver bucket."""
+	stats = {}
+	cutoff = None if overdue_only else reminders.ALL_PENDING
+	items = reminders.collect_overdue(
+		getdate(user_today()),
+		cutoff=cutoff,
+		companies=scope["companies"],
+		kinds=kinds,
+		resolve_owners=False,
+		stats=stats,
+	)
+	reminders.resolve_approvers(items)
+
+	groups = {}
+	for item in items:
+		if item["approver_role"]:
+			key = f"role:{item['approver_role']}"
+		elif item["approver_user"]:
+			key = f"user:{item['approver_user']}"
+		elif item["approver_employee"]:
+			key = f"employee:{item['approver_employee']}"
+		else:
+			key = "none"
+		group = groups.setdefault(
+			key,
+			{
+				"key": key,
+				"approver_user": item["approver_user"],
+				"approver_employee": item["approver_employee"],
+				"approver_name": item["approver_name"] or _("No approver"),
+				"approver_role": item["approver_role"],
+				"reason": None if item["approver_role"] else item["reason"],
+				"is_you": bool(item["approver_user"]) and item["approver_user"] == frappe.session.user,
+				"companies": set(),
+				"items": [],
+			},
+		)
+		if item["route_kind"] == "timesheet":
+			group["companies"].add(item["company"])
+		group["items"].append(
+			{
+				"kind": item["kind"],
+				"route_kind": item["route_kind"],
+				"name": item["name"],
+				"title": item["title"],
+				"employee": item["employee"],
+				"employee_name": item["employee_name"],
+				"date": item["date"],
+				"pending_since": item["pending_since"],
+				# R6: a row with no `helixhr_pending_since` is "since unknown",
+				# never counted as 0 days.
+				"age_days": item["age_days"],
+				"since_unknown": item["age_days"] is None,
+				"threshold_days": item["threshold_days"],
+				"overdue": item["overdue"],
+			}
+		)
+
+	result = []
+	for group in groups.values():
+		ages = [row["age_days"] for row in group["items"] if row["age_days"] is not None]
+		group["count"] = len(group["items"])
+		group["oldest_days"] = max(ages) if ages else None
+		# R9/R11/R12: timesheets only, a person (never a role), reason none.
+		companies_of = sorted(company for company in group.pop("companies") if company)
+		remindable = (
+			bool(companies_of)
+			and not group["approver_role"]
+			and group["reason"] == reminders.APPROVER_OK
+		)
+		waits = [reminders.next_reminder_at(group["approver_user"], company) for company in companies_of] if remindable else []
+		# Blocked only while every company's slot is taken; then the earliest frees it.
+		blocked = bool(waits) and all(waits)
+		group["remindable"] = remindable and not blocked
+		group["next_reminder_at"] = str(min(waits)) if blocked else None
+		result.append(group)
+	result.sort(key=lambda group: (-(group["oldest_days"] if group["oldest_days"] is not None else -1), group["approver_name"]))
+	return result, bool(stats.get("capped"))
+
+
+_OVERSIGHT_KINDS = ("leave", "attendance", "request", "change")
 
 
 @frappe.whitelist()
 def get_pending_by_approver(kind=None, overdue_only=0):
-	"""Plan 2026-10-15-002 U2/KTD2: pending items grouped by approver.
+	"""Plan 2026-10-15-002 U2/KTD2: every pending item in the caller's
+	company, grouped by approver.
 
-	HR Manager: any kind (timesheets + non-timesheet). HR User: timesheets
-	only (KTD4). Refused for anyone else.
-
-	``overdue_only=1`` filters to overdue items only. Returns groups keyed
-	on approver_user, with count, oldest_days, and remindable flags.
-	"""
-	from helixhr.reminders import collect_pending_timesheets
-
+	``kind="timesheet"`` is the Timesheets tab's "All pending timesheets"
+	(HR Manager and HR User). Any other kind, or none, is the All pending
+	tab's non-timesheet kinds -- HR Manager only. ``overdue_only=1`` keeps
+	only late items, which reproduces the old Overdue tab."""
 	rate_limit_per_user("get_pending_by_approver")
-	user = frappe.session.user
-	is_hr_manager = _is_hr(user)
-	is_hr_user = not is_hr_manager and "HR User" in frappe.get_roles(user)
-
-	if not is_hr_manager and not is_hr_user:
+	scope = _oversight_scope()
+	if not scope:
 		frappe.throw(_("Only HR can see pending approvals by approver."), frappe.PermissionError)
-
-	# HR User gets timesheets only (KTD4).
-	if is_hr_user and kind and kind != "timesheet":
+	if kind not in (None, "", "timesheet", *_OVERSIGHT_KINDS):
+		frappe.throw(_("Not a valid kind."))
+	if kind != "timesheet" and not scope["hr_manager"]:
 		frappe.throw(_("You can only see pending timesheets."), frappe.PermissionError)
 
-	override = bool(cint(overdue_only))
+	kinds = [kind] if kind else list(_OVERSIGHT_KINDS)
+	groups, capped = _pending_groups(scope, kinds, cint(overdue_only))
+	response = {
+		"groups": groups,
+		"count": sum(group["count"] for group in groups),
+		"total_is_capped": capped,
+	}
+	if kind != "timesheet":
+		# R8: the All pending header links to the Timesheets tab with this count.
+		company_filter = {"company": ["in", scope["companies"]]} if scope["companies"] is not None else {}
+		response["timesheet_count"] = frappe.db.count(
+			"Timesheet",
+			{"docstatus": 0, "workflow_state": ["in", ("Pending Approval", TIMESHEET_PENDING_HR)], **company_filter},
+		)
+	return response
 
-	# Resolve scope: HR Manager gets admin scope; HR User gets anchor company.
-	if is_hr_manager:
-		scope = resolve_admin_scope(user)
-		if scope["kind"] == "none":
-			return {"groups": [], "count": 0, "total_is_capped": False}
-		companies = [scope.get("company")] if scope["kind"] == "company" else frappe.get_all("Company", pluck="name")
-	else:
-		from helixhr.utils import _active_anchor_company
 
-		anchor = _active_anchor_company(user)
-		if not anchor:
-			return {"groups": [], "count": 0, "total_is_capped": False}
-		companies = [anchor]
+@frappe.whitelist()
+def get_overdue_approvals():
+	"""U12 / R26. HR's late items, every kind, grouped by who owes the
+	decision, within the caller's admin scope (P6-R6).
 
-	from helixhr.reminders import APPROVER_REASON_NONE
+	Plan 2026-10-15-002 KTD2: a thin wrapper over the All pending tab's
+	collector with the overdue filter on, so there is one collector, not two.
+	Kept for its dotted path; the page now reads `get_pending_by_approver`.
+	Groups keep the digest summary's `owner_name` / `inactive` keys."""
+	rate_limit_per_user("get_overdue_approvals")
+	if not _is_hr():
+		frappe.throw(_("Only HR can see overdue approvals."), frappe.PermissionError)
+	scope = _oversight_scope()
+	if not scope:
+		return {"groups": [], "count": 0}
+	groups, _capped = _pending_groups(scope, list(reminders.PENDING_KINDS), True)
+	for group in groups:
+		group["owner_name"] = f"{group['approver_name']} (you)" if group["is_you"] else group["approver_name"]
+		group["inactive"] = group["reason"] not in (None, reminders.APPROVER_OK)
+	return {"groups": groups, "count": sum(group["count"] for group in groups)}
 
-	groups = {}
-	for company in companies:
-		items = collect_pending_timesheets(company, overdue_only=override)
-		for item in items:
-			# HR-scoped items show under HR, not individual approver.
-			if item["is_hr"]:
-				key = "__hr__"
-				group = groups.setdefault(key, {
-					"approver_user": None,
-					"approver_name": "Pending HR",
-					"reason": None,
-					"remindable": False,
-					"items": [],
-				})
-			else:
-				key = item.get("approver_user") or "__no_approver__"
-				group = groups.setdefault(key, {
-					"approver_user": item.get("approver_user"),
-					"approver_name": item.get("approver_name") or "Unknown",
-					"reason": item.get("approver_reason"),
-					"remindable": item.get("approver_reason") == APPROVER_REASON_NONE
-						and not item["is_hr"],
-					"items": [],
-				})
-			group["items"].append({
-				"kind": item["kind"],
-				"name": item["name"],
-				"employee": item["employee"],
-				"employee_name": item["employee_name"],
-				"pending_since": item["pending_since"],
-				"age_days": item["age_days"],
-				"overdue": item["overdue"],
-			})
 
-	result = []
-	for _key, group in groups.items():
-		ages = [it["age_days"] for it in group["items"]]
-		group["count"] = len(group["items"])
-		group["oldest_days"] = max(ages) if ages else 0
-		result.append(group)
+_REMINDER_REASON_TEXT = {
+	reminders.APPROVER_INACTIVE: "This approver has left. Set a new Reports to in Settings → Approvers.",
+	reminders.APPROVER_NO_LOGIN: "This approver has no portal login. Fix their user in Settings → Approvers.",
+	reminders.APPROVER_UNMAILABLE: "This approver has no email address. Fix their user in Settings → Approvers.",
+	reminders.APPROVER_NO_APPROVER: "These timesheets have no approver. Set Reports to in Settings → Approvers.",
+}
+_REMINDER_NOT_FOUND = "No pending timesheets wait on this approver in your company."
+_REMINDER_ERROR_TITLE = "HelixHR timesheet reminder"
 
-	result.sort(key=lambda g: -g["oldest_days"])
-	return {"groups": result, "count": sum(g["count"] for g in result), "total_is_capped": False}
+
+@frappe.whitelist(methods=["POST"])
+def send_timesheet_reminder(approver_user):
+	"""Plan 2026-10-15-002 U3: one batched reminder to an approver about all
+	their pending timesheets in the caller's company -- one mail
+	(`timesheet_approval_reminder`), one bell, an Info comment per timesheet.
+
+	The server rebuilds the list (KTD5): only rows whose resolved approver is
+	``approver_user`` with reason "none" are sent; a blocking reason refuses.
+	At most one reminder per (approver, company) per 24h, whoever sends it,
+	claimed atomically before sending (KTD6). Returns ``sent`` and
+	``next_reminder_at``; ``sent`` is False only when every company's slot
+	was already taken."""
+	if not isinstance(approver_user, str) or not approver_user.strip():
+		frappe.throw(_("Choose an approver."))
+	approver_user = approver_user.strip()
+	rate_limit_per_user("send_timesheet_reminder")
+	scope = _oversight_scope()
+	if not scope:
+		frappe.throw(_("Only HR can send reminders."), frappe.PermissionError)
+
+	items = reminders.collect_overdue(
+		getdate(user_today()),
+		cutoff=reminders.ALL_PENDING,
+		companies=scope["companies"],
+		kinds=["timesheet"],
+		resolve_owners=False,
+	)
+	mine = [
+		item
+		for item in reminders.resolve_approvers(items)
+		if item["approver_user"] == approver_user and not item["approver_role"]
+	]
+	if not mine:
+		frappe.throw(_(_REMINDER_NOT_FOUND), frappe.PermissionError)
+	blocking = next((item["reason"] for item in mine if item["reason"] != reminders.APPROVER_OK), None)
+	if blocking:
+		frappe.throw(_(_REMINDER_REASON_TEXT[blocking]))
+
+	by_company = {}
+	for item in mine:
+		by_company.setdefault(item["company"], []).append(item)
+
+	sender = frappe.utils.get_fullname(frappe.session.user)
+	sent, waits = [], []
+	for company, listed in sorted(by_company.items()):
+		if not reminders.claim_reminder(approver_user, company):
+			waits.append(reminders.next_reminder_at(approver_user, company))
+			continue
+		try:
+			queued = send_notification(
+				"timesheet_approval_reminder",
+				[approver_user],
+				{
+					"items": [
+						{
+							"employee_name": item["employee_name"],
+							"week": frappe.utils.format_date(item["date"]) if item["date"] else "",
+							"age_days": item["age_days"],
+							"url": item["url"],
+						}
+						for item in listed
+					],
+					"count": len(listed),
+					"company": company,
+					"sender_name": sender,
+				},
+			)
+		except Exception:
+			reminders.release_reminder(approver_user, company)
+			raise
+		if not queued:
+			# Switched off in Email templates, or the mail failed (logged by
+			# `send_notification`): nothing went, so the slot goes back.
+			reminders.release_reminder(approver_user, company)
+			continue
+		# KTD7: the bell is its own write, pointing at the oldest timesheet.
+		frappe.get_doc(
+			{
+				"doctype": "Notification Log",
+				"for_user": approver_user,
+				"from_user": frappe.session.user,
+				"type": "Alert",
+				"document_type": "Timesheet",
+				"document_name": listed[0]["name"],
+				"subject": _("{0} timesheet(s) are waiting for your approval").format(len(listed)),
+			}
+		).insert(ignore_permissions=True)
+		# R13: the timesheet's own history shows it was chased.
+		note = _("Approval reminder sent to {0} by {1}.").format(listed[0]["approver_name"], sender)
+		for item in listed:
+			try:
+				frappe.get_doc(
+					{
+						"doctype": "Comment",
+						"comment_type": "Info",
+						"reference_doctype": "Timesheet",
+						"reference_name": item["name"],
+						"content": note,
+					}
+				).insert(ignore_permissions=True)
+			except Exception:
+				frappe.log_error(frappe.get_traceback(), _REMINDER_ERROR_TITLE)
+		sent.append(company)
+		waits.append(reminders.next_reminder_at(approver_user, company))
+
+	next_at = max((wait for wait in waits if wait), default=None)
+	if sent:
+		return {
+			"sent": True,
+			"message": _("Reminder sent to {0}.").format(mine[0]["approver_name"]),
+			"next_reminder_at": str(next_at) if next_at else None,
+		}
+	if not any(waits):
+		frappe.throw(_("The reminder mail is switched off or could not be sent. Nothing was sent."))
+	return {
+		"sent": False,
+		"message": _("A reminder already went to {0} in the last 24 hours.").format(mine[0]["approver_name"]),
+		"next_reminder_at": str(min(wait for wait in waits if wait)),
+	}
 
 
 @frappe.whitelist()
@@ -6384,17 +6575,25 @@ def get_approval_detail(kind, name):
 	if not frappe.db.exists(doctype, name):
 		frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
 
+	# Plan 2026-10-15-002 KTD4: an HR User reads a pending timesheet in their
+	# anchor company, read-only. Decided from the row's columns before the
+	# document is loaded; any other kind or company falls through to the
+	# approver rule below and its not-found refusal.
+	scope = _oversight_scope() if kind == "timesheet" and not _is_hr() else None
+	oversees = bool(scope) and bool(
+		frappe.db.exists(
+			"Timesheet",
+			{
+				"name": name,
+				"docstatus": 0,
+				"company": ["in", scope["companies"]],
+				"workflow_state": ["in", ("Pending Approval", TIMESHEET_PENDING_HR)],
+			},
+		)
+	)
+
 	doc = frappe.get_doc(doctype, name)
-
-	# Plan 2026-10-15-002 KTD4: HR User read-only timesheet branch.
-	if "HR User" in frappe.get_roles() and not _is_hr():
-		if kind != "timesheet":
-			frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
-		from helixhr.utils import _active_anchor_company
-
-		anchor = _active_anchor_company(frappe.session.user)
-		if not anchor or doc.company != anchor:
-			frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
+	if oversees and get_manager_user(doc.employee) != frappe.session.user:
 		detail = _APPROVAL_KINDS[doctype]["detail"](doc)
 		detail["actions"] = []
 		detail["read_only"] = True
@@ -7108,142 +7307,6 @@ def _may_act_on_attendance_request(doc, user):
 		)
 
 
-@frappe.whitelist(methods=["POST"])
-def send_timesheet_reminder(approver_user):
-	"""Plan 2026-10-15-002 U3: send one batched reminder about pending
-	timesheets to an approver, guarded by a 24-hour Redis key (KTD6).
-
-	HR Manager or HR User in their company scope. Rebuilds the approver's
-	pending timesheets, refuses when any row's resolved approver differs
-	from ``approver_user`` or when the reason blocks it.
-	"""
-	from helixhr.reminders import (
-		APPROVER_REASON_NONE,
-		REMINDER_GUARD_PREFIX,
-		collect_pending_timesheets,
-	)
-
-	rate_limit_per_user("send_timesheet_reminder")
-	user = frappe.session.user
-	is_hr_manager = _is_hr(user)
-	is_hr_user = not is_hr_manager and "HR User" in frappe.get_roles(user)
-
-	if not is_hr_manager and not is_hr_user:
-		frappe.throw(_("Only HR can send reminders."), frappe.PermissionError)
-
-	# Resolve caller's company scope.
-	if is_hr_manager:
-		scope = resolve_admin_scope(user)
-		companies = [scope.get("company")] if scope.get("company") else frappe.get_all("Company", pluck="name")
-	else:
-		from helixhr.utils import _active_anchor_company
-
-		anchor = _active_anchor_company(user)
-		if not anchor:
-			frappe.throw(_("You don't have a home company."), frappe.PermissionError)
-		companies = [anchor]
-
-	if not isinstance(approver_user, str) or not approver_user:
-		frappe.throw(_("Choose an approver."))
-
-	sent_any = False
-	responses = []
-
-	for company in companies:
-		items = collect_pending_timesheets(company, approver_user=approver_user)
-		# Filter to non-HR items that are remindable.
-		remindable = [it for it in items if not it["is_hr"] and it.get("approver_reason") == APPROVER_REASON_NONE]
-
-		if not remindable:
-			continue
-
-		# Verify every row resolved to the same approver_user.
-		for it in remindable:
-			if it.get("approver_user") != approver_user:
-				frappe.throw(
-					_("Some items don't belong to this approver. Reload and try again."),
-					frappe.PermissionError,
-				)
-
-		# KTD6: atomic Redis guard.
-		guard_key = f"{REMINDER_GUARD_PREFIX}:{company}:{approver_user}"
-		if not frappe.cache.set(guard_key, frappe.utils.now(), expires_in_sec=86400, nx=True):
-			existing = frappe.cache.get(guard_key)
-			return {
-				"sent": False,
-				"message": _("A reminder was already sent recently."),
-				"next_reminder_at": (
-					frappe.utils.add_days(existing, 1).strftime("%Y-%m-%d %H:%M")
-					if existing else None
-				),
-			}
-
-		try:
-			# Build the mail content.
-			timesheet_list = "\n".join(
-				f"- {it['employee_name']}: week of {it.get('pending_since', '?')}"
-				for it in remindable
-			)
-			subject = _("Timesheets waiting for your approval in {0}").format(company)
-
-			# Send mail via send_notification.
-			frappe.sendmail(
-				recipients=[approver_user],
-				subject=subject,
-				content=_("The following timesheets are waiting for you:\n\n{0}").format(timesheet_list),
-			)
-
-			# Create a bell (Notification Log) pointing at the oldest item.
-			oldest = remindable[0]
-			frappe.get_doc({
-				"doctype": "Notification Log",
-				"for_user": approver_user,
-				"document_type": "Timesheet",
-				"document_name": oldest["name"],
-				"subject": _("Timesheet reminder: {0} items pending").format(len(remindable)),
-				"email_content": subject,
-			}).insert(ignore_permissions=True)
-
-			# Write Info comments on each timesheet.
-			for it in remindable:
-				try:
-					timesheet = frappe.get_doc("Timesheet", it["name"])
-					timesheet.add_comment(
-						"Info",
-						_("Reminder sent to approver by {0}").format(
-							frappe.utils.get_fullname(frappe.session.user)
-						),
-					)
-				except Exception:
-					pass
-
-			sent_any = True
-			responses.append(company)
-
-		except Exception:
-			# Release guard on failure.
-			frappe.cache.delete(guard_key)
-			raise
-
-	if not sent_any:
-		frappe.throw(
-			_("No remindable timesheets found for this approver."),
-			frappe.ValidationError,
-		)
-
-	return {
-		"sent": True,
-		"message": _("Reminder sent to {0}.").format(approver_user),
-		"next_reminder_at": frappe.utils.add_days(frappe.utils.now(), 1).strftime("%Y-%m-%d %H:%M"),
-	}
-
-
-@frappe.whitelist(methods=["POST"])
-def send_self_reminder(kind="timesheet"):
-	"""Placeholder for future self-reminder feature."""
-	frappe.throw(_("Not implemented yet."))
-
-
 def _assert_may_act_on(doc):
 	"""Refuse anyone but this record's own approver (or HR) before a single
 	side effect runs (P2-U1 step 9).
@@ -7702,20 +7765,6 @@ def get_my_documents():
 	the bootstrap's `can_manage_documents`.
 	"""
 	return _visible_document_links(get_current_employee())
-
-
-def _can_oversee_timesheets(user=None):
-	"""Plan 2026-10-15-002 U4/KTD4: whether the user can see pending
-	timesheets in their company. True for HR Manager (always) and for HR
-	User with an Active anchor Employee."""
-	user = user or frappe.session.user
-	if _is_hr(user):
-		return True
-	if "HR User" in frappe.get_roles(user):
-		from helixhr.utils import _active_anchor_company
-
-		return bool(_active_anchor_company(user))
-	return False
 
 
 def _can_manage_documents(user=None):
