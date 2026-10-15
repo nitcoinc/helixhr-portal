@@ -1722,3 +1722,26 @@ IT / Asset category, `HR-REQ-…` when the prefix is blank. Facts operators need
   again, read the row's `status`, `decided_by`, `decision_note` and
   `amended_timesheet`. Accepted with an amended copy means Accept fired.
   Declined with a Draft means look for a Send back or a second request.
+
+### Reminder button disabled
+
+The Send reminder button in the Timesheets tab may be disabled for several reasons:
+
+1. **Guard active (24h cooldown).** Another reminder was sent to this approver in the
+   last 24 hours. The "Next reminder allowed at" text shows when it expires.
+2. **Approver inactive or missing.** The group shows "Approver has left" or "No approver"
+   and the button is not rendered. Set a new Reports to in Person edit or Settings → Approvers.
+3. **No login or unmailable.** The approver has no User account, no email, or is disabled.
+   The group shows the reason. Fix the approver's User record.
+4. **Pending HR rows.** HR-stage timesheets don't get reminders; HR is the approver.
+
+### HR User can't see Approvals
+
+An HR User who cannot find the Approvals nav item:
+
+1. Check that the user holds **HR User** role (not HR Manager) on their User document.
+2. Check they have an **Active Employee** record with a company. Without an anchor
+   company, `can_oversee_timesheets` is false and the nav item is hidden.
+3. Navigate directly to `/approvals?view=timesheets` — if the page loads with the
+   Timesheets tab showing "All pending timesheets", the bootstrap flag may need a
+   cache clear: `bench clear-cache` or the Portal Admin's Clear cache button.
