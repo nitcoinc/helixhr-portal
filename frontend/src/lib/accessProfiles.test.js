@@ -21,10 +21,12 @@ describe('matchProfiles', () => {
     expect(matches.some((p) => p.key === 'delivery-manager')).toBe(true)
   })
 
-  it('returns Custom for unknown role combination', () => {
-    const matches = matchProfiles(['IT Team', 'Some Unknown Role'], null)
-    expect(matches.some((p) => p.key === 'custom')).toBe(true)
-    expect(matches.some((p) => p.key === 'employee')).toBe(false)
+  it('returns only Custom when a role no profile names is held', () => {
+    expect(matchProfiles(['IT Team', 'Some Unknown Role'], null).map((p) => p.key)).toEqual(['custom'])
+  })
+
+  it('returns only Custom for an unknown grant level', () => {
+    expect(matchProfiles([], 'Everything').map((p) => p.key)).toEqual(['custom'])
   })
 
   it('returns Leadership when grant is All data', () => {

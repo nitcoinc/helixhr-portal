@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { fromQuery, toQuery, withCompany } from './reportQuery'
+import { ALL_COMPANIES, fromQuery, toQuery, withCompany } from './reportQuery'
 
 const ENTRY = {
   key: 'hours_by_project',
@@ -132,6 +132,44 @@ describe('reportQuery', () => {
     it('re-picking the same company keeps every filter', () => {
       const filters = { company: 'Alpha Ltd', employee: 'HR-EMP-0001' }
       expect(withCompany(filters, MULTI, 'Alpha Ltd')).toBe(filters)
+    })
+  })
+
+  describe('All my companies (plan 2026-10-15-001 U4)', () => {
+    const COMBINED = {
+      ...ENTRY,
+      filters: [...ENTRY.filters, { name: 'project', type: 'project' }, { name: 'task', type: 'task' }],
+      company: ALL_COMPANIES,
+      combined_option: true,
+      companies: [
+        { company: 'Inc', can_export: true },
+        { company: 'Outsourcing', can_export: true },
+      ],
+    }
+
+    it('keeps the keyword through the URL and a saved view', () => {
+      const parsed = fromQuery({ company: ALL_COMPANIES }, COMBINED)
+      expect(parsed.filters).toEqual({ company: ALL_COMPANIES })
+      expect(toQuery({ filters: parsed.filters }, COMBINED)).toEqual({ company: ALL_COMPANIES })
+    })
+
+    it('switching from All my companies to one company keeps the project and task', () => {
+      const filters = { company: ALL_COMPANIES, project: 'PROJ-0001', task: 'TASK-0001' }
+      expect(withCompany(filters, COMBINED, 'Outsourcing')).toEqual({
+        company: 'Outsourcing',
+        project: 'PROJ-0001',
+        task: 'TASK-0001',
+      })
+      expect(withCompany({ company: 'Inc', project: 'PROJ-0001' }, COMBINED, ALL_COMPANIES)).toEqual({
+        company: ALL_COMPANIES,
+        project: 'PROJ-0001',
+      })
+    })
+
+    it('switching between two named companies still drops the project', () => {
+      expect(withCompany({ company: 'Inc', project: 'PROJ-0001' }, COMBINED, 'Outsourcing')).toEqual({
+        company: 'Outsourcing',
+      })
     })
   })
 })

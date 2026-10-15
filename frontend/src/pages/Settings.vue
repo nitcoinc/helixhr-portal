@@ -45,7 +45,7 @@ const ALL_SECTIONS = [
   // page's own group; /settings/celebrations redirects there.
   { key: 'report-access', label: 'Report access' },
   // Plan 2026-10-15-001 U6: People & access replaces Portal roles and
-  // Company access. Old anchors redirect to it.
+  // Company access; their old URLs redirect here (router.js).
   { key: 'people-access', label: 'People & access' },
   // Plan 2026-10-07-001 U4: the "approvers follow Reports to" cleanup.
   { key: 'approvers', label: 'Approvers' },
@@ -82,14 +82,6 @@ const activeDeskUrl = computed(() => {
   return config.data?.desk_urls?.[key] || null
 })
 
-// Plan 2026-10-15-001 U6: grantable companies for People & access.
-const grantable = computed(() => {
-  if (!session.canAdminPortal) return []
-  if (session.canConfigure) return null  // System Manager: all companies.
-  // Portal Admin: read from a quick server call.
-  return []  // Will be resolved by get_person_access endpoint.
-})
-
 function selectSection(key) {
   router.push(key === DEFAULT_SECTION ? '/settings' : `/settings/${key}`)
 }
@@ -103,7 +95,7 @@ function reload() {
   <div>
     <PageHeader
       title="Settings"
-      :subtitle="portalOnly ? 'Report access, portal roles, approvers and company access -- without Desk.' : 'Request categories and the day-to-day HRMS masters -- without Desk.'"
+      :subtitle="portalOnly ? 'Report access, people and their access, and approvers -- without Desk.' : 'Request categories and the day-to-day HRMS masters -- without Desk.'"
     >
       <template #actions>
         <!-- P8-U6: the server's own gate (`_can_open_desk`), not merely
@@ -174,9 +166,7 @@ function reload() {
         />
         <LeaveRulesSection v-else-if="activeSection === 'leave-rules'" />
         <ReportAccessSection v-else-if="activeSection === 'report-access'" />
-        <PeopleAccessSection
-          v-else-if="activeSection === 'people-access'"
-        />
+        <PeopleAccessSection v-else-if="activeSection === 'people-access'" />
         <ApproverCleanupSection v-else-if="activeSection === 'approvers'" />
       </div>
     </AsyncState>

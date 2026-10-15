@@ -16,6 +16,9 @@ import { call } from '@/lib/api'
 const props = defineProps({
   reportKey: { type: String, required: true },
   canExport: { type: Boolean, default: false },
+  /** Plan 2026-10-15-001 R5: a reason shown as visible text beside the
+   * disabled button, instead of the screen-reader-only default. */
+  disabledReason: { type: String, default: '' },
   /** `{filters, group_by, sort, hidden}` -- what the screen shows now. */
   query: { type: Object, required: true },
 })
@@ -141,7 +144,7 @@ async function exportAs(format) {
       :aria-controls="`${id}-menu`"
       :aria-describedby="canExport ? undefined : `${id}-why`"
       :disabled="!canExport || !!working"
-      :title="canExport ? undefined : 'Your access lets you run this report, not export it.'"
+      :title="canExport ? undefined : disabledReason || 'Your access lets you run this report, not export it.'"
       @click="toggle"
     >
       <span
@@ -165,8 +168,9 @@ async function exportAs(format) {
     <span
       v-if="!canExport"
       :id="`${id}-why`"
-      class="sr-only"
-    >Your access lets you run this report, not export it.</span>
+      :class="disabledReason ? 'text-sm text-ink-gray-6' : 'sr-only'"
+      data-testid="export-blocked-reason"
+    >{{ disabledReason || 'Your access lets you run this report, not export it.' }}</span>
 
     <div
       v-show="open"

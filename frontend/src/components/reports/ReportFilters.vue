@@ -5,7 +5,7 @@ import EntityPicker from '@/components/reports/EntityPicker.vue'
 import { DATE_PRESETS, matchPreset, presetRange } from '@/lib/datePresets'
 import { today } from '@/lib/dates'
 import { call } from '@/lib/api'
-import { withCompany } from '@/lib/reportQuery'
+import { ALL_COMPANIES, withCompany } from '@/lib/reportQuery'
 
 // Plan 2026-10-04-001 U3 (resolved decision 14): the filter bar, built from
 // the catalog entry's own filter specs. Nothing here runs a report: Run is
@@ -59,7 +59,7 @@ function set(name, value) {
 const companyOptions = computed(() => {
   const options = [...(props.entry.companies || [])]
   if (props.entry.combined_option) {
-    options.unshift({ company: '__all', can_export: props.entry.combined_exportable })
+    options.unshift({ company: ALL_COMPANIES, can_export: props.entry.combined_exportable })
   }
   return options
 })
@@ -178,17 +178,9 @@ function secondGroupOptions() {
               :key="option.company"
               :value="option.company"
             >
-              {{ option.company === '__all' ? 'All my companies' : option.company }}
+              {{ option.company === ALL_COMPANIES ? 'All my companies' : option.company }}
             </option>
           </select>
-          <p
-            v-if="modelValue.company === '__all' && !entry.combined_exportable"
-            class="mt-1 text-xs text-ink-red-4"
-            role="note"
-            :id="`${id}-export-note`"
-          >
-            {{ entry.blocking_companies?.join(', ') }}: export not allowed in this company.
-          </p>
         </div>
 
         <template v-if="hasRange">

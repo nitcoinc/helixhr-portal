@@ -55,13 +55,14 @@ export function cleanFilterValue(spec, value) {
   return raw
 }
 
-/** A plain company name, or the "__all" sentinel, or undefined. Whether
- * the caller may run it is the server's answer, not this one's. */
+/** Plan 2026-10-15-001 KTD1: the "All my companies" company value. */
+export const ALL_COMPANIES = '__all'
+
+/** A plain company name (or `ALL_COMPANIES`), or undefined. Whether the
+ * caller may run it is the server's answer, not this one's. */
 export function cleanCompany(value) {
   const raw = first(value)
-  if (typeof raw !== 'string' || !raw || raw.length > MAX_VALUE) return undefined
-    // Plan 2026-10-15-001 KTD1: the sentinel is a valid company value.
-  return raw
+  return typeof raw === 'string' && raw && raw.length <= MAX_VALUE ? raw : undefined
 }
 
 /** `filters` switched to `company`. Employee, project, task and department
@@ -71,8 +72,9 @@ export function cleanCompany(value) {
 export function withCompany(filters, entry, company) {
   if (filters.company === company) return filters
   const next = { ...filters, company }
-  // Switching to/from the sentinel is not narrowing -- keep the filters.
-  if (filters.company === '__all' || company === '__all') return next
+  // To or from "All my companies": the server drops what no longer fits
+  // (`filters_removed`), so the picks survive.
+  if (filters.company === ALL_COMPANIES || company === ALL_COMPANIES) return next
   for (const spec of entry.filters) {
     if (COMPANY_BOUND_TYPES.has(spec.type)) delete next[spec.name]
   }

@@ -1,7 +1,6 @@
 <script setup>
-// Plan 2026-10-15-001 U6: company checkboxes and export toggle for one
-// person's grant. Extracted from CompanyAccessSection.vue so PeopleAccessSection
-// can reuse it.
+// Plan 2026-10-15-001 U6: the level, company checkboxes and export toggle
+// for one person's grant, used by PeopleAccessSection.
 import { computed } from 'vue'
 
 const props = defineProps({
@@ -22,6 +21,7 @@ const props = defineProps({
 const emit = defineEmits(['update:level', 'update:companies', 'update:allowExport'])
 
 const LEVEL_OPTIONS = [
+  { value: null, label: 'No grant', hint: 'Their own company only.' },
   { value: 'All data', hint: 'People, organisation, projects and reports.' },
   { value: 'Reports only', hint: 'Reports, nothing else.' },
 ]
@@ -55,40 +55,38 @@ function setExport(value) {
     </legend>
 
     <div v-if="showLevel">
-      <label
-        :class="LABEL_CLASS"
-      >Level</label>
+      <span :class="LABEL_CLASS">Level</span>
       <div class="flex flex-col gap-2">
         <label
           v-for="opt in LEVEL_OPTIONS"
-          :key="opt.value"
+          :key="opt.value || 'none'"
           class="flex items-center gap-2 text-sm"
         >
           <input
             type="radio"
             :checked="activeLevel === opt.value"
-            :value="opt.value"
             :class="CHECK_CLASS"
             :disabled="disabled"
             @change="setLevel(opt.value)"
           >
-          <span class="font-medium text-ink-gray-9">{{ opt.value }}</span>
+          <span class="font-medium text-ink-gray-9">{{ opt.label || opt.value }}</span>
           <span class="text-ink-gray-6">— {{ opt.hint }}</span>
         </label>
       </div>
     </div>
 
-    <div class="mt-3">
-      <label
-        :class="LABEL_CLASS"
-      >Companies</label>
+    <div
+      v-if="activeLevel"
+      class="mt-3"
+    >
+      <span :class="LABEL_CLASS">Companies</span>
       <div
         v-if="!grantable.length"
         class="text-sm text-ink-gray-6"
       >
         No companies available to grant.
       </div>
-      <div
+      <label
         v-for="name in grantable"
         :key="name"
         class="flex items-center gap-2 text-sm"
@@ -100,11 +98,11 @@ function setExport(value) {
           :disabled="disabled"
           @change="toggleCompany(name)"
         >
-        <label>{{ name }}</label>
-      </div>
+        {{ name }}
+      </label>
     </div>
 
-    <div
+    <label
       v-if="activeLevel"
       class="mt-3 flex items-center gap-2 text-sm"
     >
@@ -115,7 +113,7 @@ function setExport(value) {
         :disabled="disabled"
         @change="setExport($event.target.checked)"
       >
-      <label>May export reports</label>
-    </div>
+      May export reports
+    </label>
   </fieldset>
 </template>

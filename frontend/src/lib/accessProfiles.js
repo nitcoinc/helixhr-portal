@@ -4,8 +4,8 @@
 //
 // Leadership and Reports across companies are mutually exclusive (both set
 // the same grant field). A role chip adds its roles; un-toggling it removes
-// only those roles. `matchProfiles(toggles)` returns the matching profiles
-// or ["Custom"] when none match.
+// only those roles. `matchProfiles(roles, grantLevel)` returns the matching
+// profiles, or Custom when they do not describe the person exactly.
 
 const PROFILES = [
   {
@@ -65,23 +65,21 @@ const PROFILES = [
   },
 ]
 
-/** Which profiles apply to a set of roles and grant level. */
+const CUSTOM = { key: 'custom', label: 'Custom', roles: [], grant: null }
+
+/** The profiles that exactly describe `roles` (managed and HR roles held)
+ * and `grantLevel`: every held role is covered by a matching role profile
+ * and the grant level by its grant profile. Anything left over -- a role
+ * no profile names, say -- makes the person Custom; nothing at all makes
+ * them an Employee. */
 export function matchProfiles(roles, grantLevel) {
-  const activeRoles = new Set(roles || [])
-  const matches = PROFILES.filter((profile) => {
-    const roleMatch = profile.roles.every((role) => activeRoles.has(role)) && profile.roles.length > 0
-    const grantMatch =
-      profile.grant && grantLevel === profile.grant.level
-    return roleMatch || grantMatch
-  })
-  const emptyPro = PROFILES.find((p) => p.key === 'employee')
-  if (matches.length === 0 && emptyPro) {
-    const hasNoRoles = !roles || roles.length === 0
-    const hasNoGrant = !grantLevel
-    if (hasNoRoles && hasNoGrant) return [emptyPro]
-    return [{ key: 'custom', label: 'Custom', roles: roles || [], grant: grantLevel ? { level: grantLevel } : null }]
-  }
-  return matches
+  const held = new Set(roles || [])
+  const matches = PROFILES.filter((profile) => profile.roles.length && profile.roles.every((role) => held.has(role)))
+  const covered = new Set(matches.flatMap((profile) => profile.roles))
+  const grantProfile = grantLevel ? PROFILES.find((profile) => profile.grant?.level === grantLevel) : null
+  if ([...held].some((role) => !covered.has(role)) || (grantLevel && !grantProfile)) return [CUSTOM]
+  if (grantProfile) matches.push(grantProfile)
+  return matches.length ? matches : PROFILES.filter((profile) => profile.key === 'employee')
 }
 
 export function getProfiles(isSystemManager) {

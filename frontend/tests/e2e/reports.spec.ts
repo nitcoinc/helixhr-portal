@@ -489,9 +489,9 @@ test.describe('report tiers', () => {
     }
   })
 
-  // HelixHR Portal Admin: Settings with only Report access + Portal roles,
+  // HelixHR Portal Admin: Settings with only its admin sections,
   // Reports with only the export log, and no HR data.
-  test('a Portal Admin manages portal roles and reads the export log, nothing more', async ({ page, baseURL }) => {
+  test('a Portal Admin manages people\'s roles and reads the export log, nothing more', async ({ page, baseURL }) => {
     const admin = await apiAs(baseURL, PORTAL_ADMIN)
     const holders = await admin.post('/api/method/helixhr.api.get_portal_role_holders', {
       data: { query: 'hr-user' },
@@ -507,21 +507,24 @@ test.describe('report tiers', () => {
       await signInAs(page, baseURL, PORTAL_ADMIN)
       await page.goto('/helixhr/settings')
       await expect(page.getByTestId('settings-tab-report-access')).toBeVisible()
-      await expect(page.getByTestId('settings-tab-portal-roles')).toBeVisible()
+      await expect(page.getByTestId('settings-tab-people-access')).toBeVisible()
       await expect(page.getByTestId('settings-tab-categories')).toHaveCount(0)
       await expect(page.getByRole('heading', { name: 'Report access' })).toBeVisible()
 
-      await page.getByTestId('settings-tab-portal-roles').click()
-      await expect(page).toHaveURL(/\/settings\/portal-roles/)
-      await page.getByLabel('Find an employee').fill('hr-user')
-      const row = page.getByTestId(`portal-role-row-${target.employee}`)
-      const itTeam = row.getByRole('checkbox', { name: /: IT Team$/ })
+      // Plan 2026-10-15-001 U6: roles are managed in People & access.
+      await page.getByTestId('settings-tab-people-access').click()
+      await expect(page).toHaveURL(/\/settings\/people-access/)
+      await page.getByTestId('people-access-search').fill('hr-user')
+      await page.getByTestId(`people-access-row-${HR_USER}`).click()
+      const itTeam = page.getByTestId('people-access-panel').getByRole('checkbox', { name: 'IT Team' })
       await expect(itTeam).not.toBeChecked()
       await itTeam.check()
-      await expect(page.getByRole('status')).toContainText('IT Team granted')
-      await expect(row.getByRole('checkbox', { name: /: Report Manager$/ })).not.toBeChecked()
+      await page.getByTestId('people-access-save').click()
+      await expect(page.getByRole('status')).toContainText('Saved')
+      await expect(page.getByTestId('people-access-summary')).toContainText('IT Team')
       await itTeam.uncheck()
-      await expect(page.getByRole('status')).toContainText('IT Team removed')
+      await page.getByTestId('people-access-save').click()
+      await expect(page.getByTestId('people-access-summary')).not.toContainText('IT Team')
 
       await page.goto('/helixhr/reports')
       await expect(page.getByRole('button', { name: 'Export log' })).toBeVisible()

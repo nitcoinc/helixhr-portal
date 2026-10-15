@@ -67,7 +67,7 @@ export default defineConfig({
       // Plan 2026-10-02-001 U10: email-templates.spec.ts -- HR is the refused
       // hat; the Notification Manager signs in inside the spec itself, the
       // same way login-dashboard.spec.ts does, since it has no Employee.
-      testMatch: /(approvals|settings|organisation|people|reports|reports-company|company-access|projects|roster|navigation|email-templates)\.spec\.ts/,
+      testMatch: /(approvals|settings|organisation|people|people-access|reports|reports-company|projects|roster|navigation|email-templates)\.spec\.ts/,
     },
     // P5-U11. The routed-worker identity: `IT Team`, portal-only
     // (desk_access: 0), which never reaches Desk and works only the requests
@@ -87,15 +87,14 @@ export default defineConfig({
       testMatch: /(approvals|organisation|people|reports)\.spec\.ts/,
     },
     // Plan 2026-10-06-001 U3. The Portal Admin identity (`make_test_portal_admin`,
-    // seeded by setup_playwright_fixtures): Report access and Portal roles are
-    // its sections now, and it sees none of the HR ones. Scoped to
-    // settings.spec.ts, the only page whose audience changed -- HR remains the
-    // refused hat there.
+    // seeded by setup_playwright_fixtures): Report access, People & access and
+    // Approvers are its sections, and it sees none of the HR ones. Scoped to
+    // the Settings specs -- HR remains the refused hat there.
     {
       name: 'portal-admin',
       use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/portal-admin.json' },
       dependencies: ['setup'],
-      testMatch: /(settings|company-access)\.spec\.ts/,
+      testMatch: /(settings|people-access)\.spec\.ts/,
     },
     // P2-U9 step 9. Mobile WebKit is the second mandatory browser: it is the
     // only engine on iOS, it is where a coarse pointer, a real safe-area
