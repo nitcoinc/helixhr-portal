@@ -361,6 +361,10 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"save_company_access": (30, 3600),
 			"revoke_company_access": (30, 3600),
 			"delete_company_access": (30, 3600),
+			# Plan 2026-10-15-001 U5: People & access.
+			"get_person_access": (60, 60),
+			"save_person_access": (30, 3600),
+			"list_people_access": (60, 60),
 			"get_approver_cleanup": (60, 60),
 			"apply_approver_cleanup": (10, 3600),
 			"get_dashboard": (60, 60),

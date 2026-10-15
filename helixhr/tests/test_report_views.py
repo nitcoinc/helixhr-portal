@@ -111,3 +111,39 @@ class TestReportViews(IntegrationTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			_as(self.hr_user, list_report_views, KEY)
 		self.assertTrue(frappe.db.exists("HelixHR Report View", view["name"]))
+
+
+class TestCombinedReportViews(IntegrationTestCase):
+	"""Plan 2026-10-15-001 R6/U3: a saved "All my companies" view keeps the
+	keyword and re-resolves it per viewer on every run."""
+
+	def setUp(self):
+		from helixhr.tests.utils import (
+			GRANT_HOLDER_USER,
+			ensure_cross_company_project_fixture,
+			make_test_company_grant,
+		)
+		from helixhr.utils import SENTINEL_ALL
+
+		frappe.set_user("Administrator")
+		self.fx = ensure_cross_company_project_fixture()
+		self.sentinel = SENTINEL_ALL
+		self.holder = GRANT_HOLDER_USER
+		make_test_user(self.holder, self.fx.company)
+		make_test_company_grant(self.holder, [self.fx.company, self.fx.other], allow_export=1)
+		_, self.hr = make_test_hr_manager_employee()
+		self.query = {"project": self.fx.project, "month": "2016-04", "company": SENTINEL_ALL}
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def test_saved_combined_view_keeps_the_keyword_and_narrows_for_a_single_company_viewer(self):
+		view = _as(self.holder, save_report_view, "project_timesheet", "All companies P", self.query, "Shared")
+		self.assertEqual(view["query"]["company"], self.sentinel)
+		mine = _as(self.holder, run_report, "project_timesheet", filters=view["query"])
+		self.assertEqual(mine["filters"]["company"], self.sentinel)
+		self.assertEqual(sum(row["hours"] for row in mine["rows"] if row["_kind"] == "row"), 8)
+		theirs = _as(self.hr, run_report, "project_timesheet", filters=view["query"])
+		self.assertEqual(theirs["filters_removed"], ["company"])
+		self.assertEqual(theirs["filters"]["company"], self.fx.company)
+		self.assertEqual(sum(row["hours"] for row in theirs["rows"] if row["_kind"] == "row"), 5)

@@ -1557,10 +1557,10 @@ class TestCompanyAccessGrantsCheck(IntegrationTestCase):
 		frappe.db.delete("HelixHR Company Access Company", {"parent": ["like", "%@helixhr.test"]})
 		frappe.db.delete("HelixHR Company Access", {"user": ["like", "%@helixhr.test"]})
 
-	def _grant(self):
+	def _grant(self, allow_export=1):
 		from helixhr.tests.utils import make_test_company_grant
 
-		make_test_company_grant(self.user, [self.other])
+		make_test_company_grant(self.user, [self.other], allow_export=allow_export)
 
 	def test_no_grants_passes(self):
 		result = preflight.check_company_access_grants()
@@ -1571,6 +1571,26 @@ class TestCompanyAccessGrantsCheck(IntegrationTestCase):
 		result = preflight.check_company_access_grants()
 		self.assertEqual(result["status"], preflight.PASS)
 		self.assertIn(f"{self.user} (All data: {self.other})", result["detail"])
+
+	def test_a_run_only_grant_warns(self):
+		"""Plan 2026-10-15-001 U7: run rights without export in a company."""
+		self._grant(allow_export=0)
+		result = preflight.check_company_access_grants()
+		self.assertEqual(result["status"], preflight.WARN)
+		self.assertIn(f"{self.user}: may run but not export reports in {self.other}", result["detail"])
+
+	def test_a_missing_export_company_table_fails(self):
+		real_exists = preflight.frappe.db.exists
+
+		def missing(doctype, name=None, *args, **kwargs):
+			if doctype == "DocType" and name == "HelixHR Report Export Company":
+				return None
+			return real_exists(doctype, name, *args, **kwargs)
+
+		with patch.object(preflight.frappe.db, "exists", side_effect=missing):
+			result = preflight.check_company_access_grants()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("HelixHR Report Export Company", result["detail"])
 
 	def test_a_grant_on_an_inactive_holder_warns(self):
 		self._grant()

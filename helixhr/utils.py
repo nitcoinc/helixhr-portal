@@ -1484,6 +1484,9 @@ def project_in_scope(project, scope):
 # decision 1 replaces KTD15): wrapped HRMS reports run in `reports.elevated`.
 REPORT_MANAGER_ROLE = "HelixHR Report Manager"
 HR_USER_ROLE = "HR User"
+# Plan 2026-10-15-001 R11/KTD9: the HR roles People & access shows, editable
+# by a System Manager only.
+HR_ROLES = (HR_USER_ROLE, "HR Manager")
 
 # Widest first. `resolve_report_access` picks the widest scope among the
 # tiers that grant a right on the report in question (resolved decision 2).
@@ -1702,71 +1705,80 @@ def read_companies(scope):
 	return list(scope.get("companies") or [])
 
 
-# Plan 2026-10-15-001 (KTD1): the "All my companies" sentinel value.
+# Plan 2026-10-15-001 (KTD1): the "All my companies" company filter value.
 SENTINEL_ALL = "__all"
 
 
-def _combined_option(entry, by_company):
-	"""Whether ``entry`` may offer the sentinel, and whether every
-	run-capable company also allows export, plus the list of blocking
-	companies."""
-	if "project" not in entry.get("scopes", []):
-		return False, False, []
-	run_capable = {n for n in by_company if n}  # skip falsy sentinel holders
-	if len(run_capable) < 2:
-		return False, False, []
-	blocking = []
-	for name in run_capable:
-		tiers = by_company[name]
-		_export_grant = max(
-			(g for g in tiers if g[2]),
-			key=lambda g: _SCOPE_RANK[g[1]["kind"]],
-			default=None,
-		)
-		if not _export_grant:
+def _widest_tier(tiers):
+	return max(tiers, key=lambda grant: _SCOPE_RANK[grant[1]["kind"]], default=None)
+
+
+def _combined_access(entry, by_company, user, unscoped):
+	"""The combined ("All my companies") answer for one report, or None when
+	the entry may not offer it (KTD3: "project" in scopes and two or more
+	run-capable companies).
+
+	Built company by company (KTD2): a company whose widest run tier is
+	company-wide joins ``companies``; one served only by the assigned tier
+	contributes ``user`` (assigned projects) instead. The export scope is
+	built the same way from export tiers, and a company whose export tier is
+	missing or narrower than its run tier is a blocking company. An unscoped
+	caller runs ``unscoped``; ``companies`` still lists every company, which
+	is the concrete set an export stores (R7)."""
+	names = [name for name in by_company if name]
+	if "project" not in entry["scopes"] or len(names) < 2:
+		return None
+	companies, assigned, blocking = [], [], []
+	for name in names:
+		run_grant = _widest_tier(by_company[name])
+		export_grant = _widest_tier([grant for grant in by_company[name] if grant[2]])
+		if run_grant[1]["kind"] == "assigned":
+			assigned.append(name)
+		else:
+			companies.append(name)
+		if not export_grant or _SCOPE_RANK[export_grant[1]["kind"]] < _SCOPE_RANK[run_grant[1]["kind"]]:
 			blocking.append(name)
-	return True, not blocking, blocking
-
-
-def _build_combined_scope(by_company, user):
-	"""Build ``scope`` and ``export_scope`` for a combined run.
-
-	Each company at ``company`` width contributes to ``companies``; a
-	company served only by the ``assigned`` tier contributes ``user``
-	instead. Returns ``(scope, export_scope)``."""
-	companies = []
-	has_user = False
-	export_tiers = []
-
-	def _widest(tiers):
-		return max(tiers, key=lambda g: _SCOPE_RANK[g[1]["kind"]], default=None)
-
-	for name, tiers in by_company.items():
-		if not name:
-			continue
-		run_grant = _widest(tiers)
-		if run_grant:
-			kind = run_grant[1]["kind"]
-			if kind == "assigned":
-				has_user = True
-			else:
-				companies.append(name)
-		export_grant = _widest([g for g in tiers if g[2]])
-		if export_grant:
-			export_tiers.append(export_grant)
-
-	scope = {"kind": "combined", "companies": sorted(set(companies))}
-	if has_user:
-		scope["user"] = user
-
-	if export_tiers:
-		export_scope = {"kind": "combined", "companies": sorted(set(companies))}
-		if has_user:
-			export_scope["user"] = user
+	if unscoped:
+		scope = {"kind": "unscoped", "combined": True}
 	else:
-		export_scope = {"kind": "none"}
+		scope = {"kind": "combined", "combined": True, "companies": sorted(companies)}
+		if assigned:
+			scope["user"] = user
+	return {
+		"scope": scope,
+		"export_scope": dict(scope) if not blocking else {"kind": "none"},
+		"companies": sorted(names),
+		"assigned_companies": assigned,
+		"blocking": sorted(blocking),
+	}
 
-	return scope, export_scope
+
+def combined_export_scope(user, report_key, stored):
+	"""The scope a stored combined export may still run over, or None (R7).
+
+	``stored`` is the export's recorded company set. Every one of them must
+	still be in the caller's combined set and exportable at full width;
+	the answer is narrowed to ``stored`` and never widened to a company the
+	set gained since. An empty set is refused, never re-resolved."""
+	stored = sorted(set(stored or []))
+	if not stored:
+		return None
+	access = resolve_report_access(user, report_key, SENTINEL_ALL)
+	if access["company"] != SENTINEL_ALL:
+		return None
+	if not set(stored) <= set(access["combined_companies"]) or set(stored) & set(access["blocking_companies"]):
+		return None
+	scope = access["scope"]
+	if scope["kind"] == "unscoped":
+		return {"kind": "combined", "combined": True, "companies": stored}
+	narrowed = {
+		"kind": "combined",
+		"combined": True,
+		"companies": [name for name in scope["companies"] if name in stored],
+	}
+	if scope.get("user") and set(access["assigned_companies"]) & set(stored):
+		narrowed["user"] = scope["user"]
+	return narrowed
 
 
 def resolve_report_access(user, report_key, company=None):
@@ -1814,6 +1826,8 @@ def resolve_report_access(user, report_key, company=None):
 		"combined_option": False,
 		"combined_exportable": False,
 		"blocking_companies": [],
+		"combined_companies": [],
+		"assigned_companies": [],
 	}
 	entry = get_entry(report_key)
 	if not entry:
@@ -1873,35 +1887,34 @@ def resolve_report_access(user, report_key, company=None):
 	if not by_company:
 		return denied
 
-	# Plan 2026-10-15-001 (KTD1/KTD3): combined company option for
-	# project-scoped entries with two or more run-capable companies.
-	combined_option, combined_exportable, blocking_companies = _combined_option(entry, by_company)
+	# Plan 2026-10-15-001 (KTD1/KTD3): the "All my companies" option.
+	combined = _combined_access(entry, by_company, user, unscoped)
+	combined_keys = {
+		"combined_option": bool(combined),
+		"combined_exportable": bool(combined) and not combined["blocking"],
+		# Only ever names companies from the caller's own run set.
+		"blocking_companies": combined["blocking"] if combined else [],
+		"combined_companies": combined["companies"] if combined else [],
+		"assigned_companies": combined["assigned_companies"] if combined else [],
+	}
 
 	if home in by_company:
-		default = SENTINEL_ALL if combined_option and combined_exportable else home
+		# R2: the sentinel is the default only when it is exportable in full.
+		default = SENTINEL_ALL if combined_keys["combined_exportable"] else home
 	elif unscoped and frappe.defaults.get_global_default("company") in by_company:
 		default = frappe.defaults.get_global_default("company")
 	else:
 		default = next(iter(by_company))
-
-	# Handle sentinel company request.
 	if company == SENTINEL_ALL:
-		if combined_option:
-			picked = SENTINEL_ALL
-		else:
-			# Sentinel not available; fall back to default.
-			picked = default
-			company_removed = True
+		# KTD3: an entry that cannot combine falls back like a disallowed company.
+		picked = SENTINEL_ALL if combined else default
 	else:
 		picked = company if isinstance(company, str) and company in by_company else default
-		company_removed = company not in (None, "") and picked != company
-
-	def widest(candidates):
-		return max(candidates, key=lambda grant: _SCOPE_RANK[grant[1]["kind"]], default=None)
+	company_removed = company not in (None, "") and picked != company
 
 	def answer(tiers):
-		run_grant = widest(tiers)
-		export_grant = widest([grant for grant in tiers if grant[2]])
+		run_grant = _widest_tier(tiers)
+		export_grant = _widest_tier([grant for grant in tiers if grant[2]])
 		return run_grant, export_grant
 
 	companies = []
@@ -1910,25 +1923,16 @@ def resolve_report_access(user, report_key, company=None):
 			companies.append({"company": name, "can_export": answer(tiers)[1] is not None})
 
 	if picked == SENTINEL_ALL:
-		scope, export_scope = _build_combined_scope(by_company, user)
-		can_export_val = combined_exportable
-		# Build companies list with each company's export flag.
-		all_companies = []
-		for name, tiers in by_company.items():
-			if name:
-				all_companies.append({"company": name, "can_export": answer(tiers)[1] is not None})
 		return {
 			"tier": "combined",
-			"scope": scope,
+			"scope": combined["scope"],
 			"can_run": True,
-			"can_export": can_export_val,
-			"export_scope": export_scope,
+			"can_export": combined_keys["combined_exportable"],
+			"export_scope": combined["export_scope"],
 			"company": SENTINEL_ALL,
-			"companies": all_companies,
+			"companies": companies,
 			"company_removed": False,
-			"combined_option": True,
-			"combined_exportable": combined_exportable,
-			"blocking_companies": blocking_companies,
+			**combined_keys,
 		}
 
 	run_grant, export_grant = answer(by_company[picked])
@@ -1941,9 +1945,7 @@ def resolve_report_access(user, report_key, company=None):
 		"company": picked,
 		"companies": companies,
 		"company_removed": company_removed,
-		"combined_option": combined_option,
-		"combined_exportable": combined_exportable,
-		"blocking_companies": blocking_companies,
+		**combined_keys,
 	}
 
 
@@ -1953,15 +1955,60 @@ def can_export_report(user, report_key, company=None, access=None):
 	job, the download, and expiring files after a grant narrows. A company
 	the caller may not use is a no, never the default company's yes.
 
-	When ``company`` is ``__all`` (the combined sentinel), returns
-	``True`` only when every company in the combined set also allows
-	export (R5)."""
-	if company == SENTINEL_ALL:
-		# For a combined run, re-check each company individually.
-		access = access or resolve_report_access(user, report_key, SENTINEL_ALL)
-		return access["can_export"] and not access.get("blocking_companies", [])
+	The combined sentinel answers for the full combined width (R5): every
+	included company must export at the width it runs."""
 	access = access or resolve_report_access(user, report_key, company)
 	return access["can_export"] and not access["company_removed"]
+
+
+def access_summary(roles, grant, direct_reports):
+	"""Plain-language sentences about one person's SAVED access (plan
+	2026-10-15-001 R16): ``roles`` they hold, their active ``grant`` (as
+	`active_company_grant` returns it) and how many people report to them."""
+	parts = []
+	held = [role for role in (*MANAGED_PORTAL_ROLES, *HR_ROLES) if role in roles]
+	if held:
+		parts.append(_("Holds {0}.").format(", ".join(held)))
+	if grant:
+		reach = (
+			_("people, organisation, projects and reports")
+			if grant["level"] == COMPANY_ACCESS_ALL
+			else _("reports")
+		)
+		parts.append(
+			_("Can read {0} for {1}, {2}.").format(
+				reach,
+				", ".join(grant["companies"]),
+				_("with export") if grant["allow_export"] else _("without export"),
+			)
+		)
+	if not parts:
+		parts.append(_("Employee access only: their own records."))
+	if direct_reports:
+		parts.append(_("{0} people report to them.").format(direct_reports))
+	return " ".join(parts)
+
+
+def stored_export_companies(export):
+	"""The company set a combined export recorded (plan 2026-10-15-001 KTD5);
+	empty for a single-company export."""
+	return frappe.get_all(
+		"HelixHR Report Export Company",
+		filters={"parent": export, "parenttype": "HelixHR Report Export"},
+		pluck="company",
+	)
+
+
+def stored_export_scope(user, report_key, company, stored):
+	"""The scope a recorded export may still be built or downloaded over, or
+	None (R7). The background job, the download and the expiry check all ask
+	this. A row with a stored company set is combined and re-checks every
+	company in it (`combined_export_scope`); any other row is the
+	single-company check it always was."""
+	if stored:
+		return combined_export_scope(user, report_key, stored)
+	access = resolve_report_access(user, report_key, company)
+	return access["export_scope"] if can_export_report(user, report_key, access=access) else None
 
 
 def portal_home_page(user=None):

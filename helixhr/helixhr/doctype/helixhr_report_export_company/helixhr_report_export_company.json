@@ -1,7 +1,7 @@
 {
  "actions": [],
- "creation": "2026-10-15 00:00:00",
- "doctype": "HelixHR Report Export Company",
+ "creation": "2026-10-15 00:00:00.000000",
+ "doctype": "DocType",
  "editable_grid": 1,
  "engine": "InnoDB",
  "field_order": [
@@ -17,16 +17,10 @@
    "reqd": 1
   }
  ],
- "grid_table": "HelixHR Report Export Company",
  "istable": 1,
- "links": [],
- "modified": "2026-10-15 00:00:00",
- "modified_by": "Administrator",
  "module": "HelixHR",
  "name": "HelixHR Report Export Company",
- "owner": "Administrator",
  "permissions": [],
  "sort_field": "modified",
- "sort_order": "DESC",
- "states": []
+ "sort_order": "DESC"
 }

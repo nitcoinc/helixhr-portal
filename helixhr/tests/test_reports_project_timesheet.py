@@ -296,3 +296,170 @@ class TestProjectTimesheet(IntegrationTestCase):
 		lines = csv[3:].decode().strip().splitlines()
 		self.assertEqual(len(lines), 1 + 2)  # header + two detail rows, no subtotals/total
 		self.assertNotIn("Total", csv.decode())
+
+
+# --- Plan 2026-10-15-001 U2: combined and logged-by project reports ----------
+
+
+class TestCrossCompanyProjectReports(IntegrationTestCase):
+	"""The Nitco case: an Inc project, 5h logged by Inc staff and 3h by
+	Outsourcing staff (`ensure_cross_company_project_fixture`)."""
+
+	OUT_HR = "xco-out-hr@helixhr.test"
+
+	def setUp(self):
+		from helixhr.tests.utils import (
+			GRANT_HOLDER_USER,
+			_make_role_user,
+			ensure_cross_company_project_fixture,
+			make_test_company_grant,
+			make_test_user,
+		)
+
+		frappe.set_user("Administrator")
+		self.fx = ensure_cross_company_project_fixture()
+		_hr_employee, self.inc_hr = make_test_hr_manager_employee()
+		_make_role_user(self.OUT_HR, "HR Manager", self.fx.other, create_user_permission=0)
+		self.holder = GRANT_HOLDER_USER
+		make_test_user(self.holder, self.fx.company)
+		make_test_company_grant(self.holder, [self.fx.company, self.fx.other], allow_export=1)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _as(self, user, fn, *args, **kwargs):
+		frappe.set_user(user)
+		try:
+			return fn(*args, **kwargs)
+		finally:
+			frappe.set_user("Administrator")
+
+	def _run(self, user, key=KEY, **filters):
+		filters = {"project": self.fx.project, "month": "2016-04", **filters} if key == KEY else filters
+		return self._as(user, run_report, key, filters=filters)
+
+	def _options(self, user, filter_name, context=None, key="hours_by_project"):
+		from helixhr.api import search_report_options
+
+		return {
+			row["value"]
+			for row in self._as(user, search_report_options, key, filter_name, context=context or {})
+		}
+
+	def test_combined_run_totals_both_companies_with_a_company_column(self):
+		result = self._run(self.holder)
+		self.assertEqual(result["filters"]["company"], reports.SENTINEL_ALL)
+		self.assertIn("company", [column["fieldname"] for column in result["columns"]])
+		hours = {}
+		for row in _data(result):
+			hours[row["company"]] = hours.get(row["company"], 0) + row["hours"]
+		self.assertEqual(hours, {self.fx.company: 5, self.fx.other: 3})
+		self.assertEqual(result["company_counts"], {self.fx.company: 1, self.fx.other: 1})
+		self.assertEqual(result["extra"]["grid"]["grand_total"], 8)
+
+	def test_inc_hr_without_a_grant_sees_inc_hours_only(self):
+		result = self._run(self.inc_hr)
+		self.assertEqual(sum(row["hours"] for row in _data(result)), 5)
+		self.assertNotIn("company", [column["fieldname"] for column in result["columns"]])
+		self.assertIsNone(result["company_counts"])
+
+	def test_outsourcing_hr_picks_the_inc_project_and_sees_outsourcing_hours_and_holidays(self):
+		"""Covers AE3."""
+		from unittest.mock import patch
+
+		with patch.object(reports, "_company_holidays", return_value={}) as holidays:
+			result = self._run(self.OUT_HR)
+		self.assertEqual(result["filters_removed"], [])
+		self.assertEqual(sum(row["hours"] for row in _data(result)), 3)
+		self.assertEqual(holidays.call_args.args[0], self.fx.other)
+
+	def test_combined_run_labels_project_company_holidays(self):
+		from unittest.mock import patch
+
+		day = frappe.utils.getdate("2016-04-14")
+		with patch.object(reports, "_company_holidays", return_value={day: "Fixture day"}) as holidays:
+			result = self._run(self.holder)
+		self.assertEqual(holidays.call_args.args[0], self.fx.company)
+		self.assertEqual(
+			result["extra"]["grid"]["holidays"], [{"date": "2016-04-14", "description": f"Fixture day ({self.fx.company})"}]
+		)
+
+	def test_combined_hours_by_project_groups_both_employees(self):
+		result = self._as(
+			self.holder,
+			run_report,
+			"hours_by_project",
+			filters={"project": self.fx.project, "from_date": "2016-04-01", "to_date": "2016-04-30"},
+			group_by=["project"],
+		)
+		rows = _data(result)
+		self.assertEqual({row["employee"] for row in rows}, {self.fx.inc, self.fx.out})
+		self.assertEqual({row["company"] for row in rows}, {self.fx.company, self.fx.other})
+
+	def test_outsourcing_pickers_list_logged_projects_tasks_and_employees_only(self):
+		projects = self._options(self.OUT_HR, "project", key=KEY)
+		self.assertIn(self.fx.project, projects)
+		self.assertNotIn(self.fx.idle, projects)
+		tasks = self._options(self.OUT_HR, "task", {"project": self.fx.project})
+		self.assertEqual(tasks, {self.fx.out_task})
+		# Inc HR owns the project: every task on it.
+		self.assertEqual(
+			self._options(self.inc_hr, "task", {"project": self.fx.project}) & {self.fx.inc_task, self.fx.out_task},
+			{self.fx.inc_task, self.fx.out_task},
+		)
+		employees = self._as(
+			self.OUT_HR,
+			reports.search_options,
+			reports.get_entry("hours_by_project"),
+			"employee",
+			{"kind": "company", "company": self.fx.other},
+			context={"project": self.fx.project},
+		)
+		self.assertEqual({row["value"] for row in employees}, {self.fx.out})
+
+	def test_out_of_reach_project_and_task_are_removed(self):
+		result = self._run(self.OUT_HR, project=self.fx.idle)
+		self.assertEqual(result["filters_removed"], ["project"])
+		removed = self._as(
+			self.OUT_HR,
+			run_report,
+			"hours_by_project",
+			filters={"project": self.fx.project, "task": self.fx.inc_task},
+		)
+		self.assertEqual(removed["filters_removed"], ["task"])
+
+	def test_pending_hours_obey_the_same_scope(self):
+		_make_timesheet(
+			self.fx.company,
+			self.fx.inc,
+			"XCO Inc",
+			[{"date": "2016-04-20", "project": self.fx.project, "task": self.fx.inc_task, "hours": 2}],
+			state="Pending Approval",
+		)
+		self.assertEqual(self._run(self.OUT_HR)["extra"]["pending_hours"], 0)
+		self.assertEqual(self._run(self.inc_hr)["extra"]["pending_hours"], 2)
+
+	def test_a_third_company_never_appears_in_a_combined_run(self):
+		from helixhr.tests.utils import COMPANY_ACCESS_THIRD_COMPANY, create_test_company, make_test_user
+
+		third = create_test_company(COMPANY_ACCESS_THIRD_COMPANY, "TCAC")
+		employee = make_test_user("xco-third@helixhr.test", third)
+		_make_timesheet(
+			third,
+			employee,
+			"XCO Third",
+			[{"date": "2016-04-21", "project": self.fx.project, "task": self.fx.inc_task, "hours": 4}],
+		)
+		result = self._run(self.holder)
+		self.assertEqual(sum(row["hours"] for row in _data(result)), 8)
+		self.assertNotIn(third, {row["company"] for row in _data(result)})
+
+	def test_projects_page_is_not_widened(self):
+		from helixhr.api import search_projects
+
+		names = {row["name"] for row in self._as(self.OUT_HR, search_projects)["projects"]}
+		self.assertNotIn(self.fx.project, names)
+
+	def test_an_unknown_scope_kind_raises(self):
+		with self.assertRaises(frappe.ValidationError):
+			reports._timesheet_scope_conditions({"kind": "companies", "companies": [self.fx.company]}, {})
