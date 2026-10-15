@@ -9,6 +9,7 @@ import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
 import { attachToRequestReply } from '@/lib/api'
 import CorrectionReview from '@/components/approvals/CorrectionReview.vue'
+import TimesheetOversight from '@/components/approvals/TimesheetOversight.vue'
 import { session } from '@/lib/session'
 import { formatDate, formatDateRange, formatDateTime } from '@/lib/dates'
 import { toPlainLeaveError } from '@/lib/errorMap'
@@ -69,16 +70,35 @@ function filterQueue(kind, category) {
 // U12 / R26. HR-only Overdue tab, in the URL like the chips. The server
 // refuses anyone else; `canConfigure` mirrors that gate (`_is_hr`).
 const VIEW_TABS = [
-  { name: 'queue', label: 'Queue' },
-  { name: 'overdue', label: 'Overdue' },
+  { name: 'queue', label: 'Approvals' },
+  { name: 'timesheets', label: 'Timesheets' },
+  { name: 'overdue', label: 'All pending' },
 ]
 const OVERDUE_VISIBLE_ROWS = 5
-const view = computed(() => (session.canConfigure && route.query.view === 'overdue' ? 'overdue' : 'queue'))
+const view = computed(() => {
+  if (route.query.view === 'overdue' || route.query.view === 'all-pending') return 'overdue'
+  if (route.query.view === 'timesheets') return 'timesheets'
+  return 'queue'
+})
 const overdue = createResource({ url: 'helixhr.api.get_overdue_approvals' })
-watch(view, (value) => value === 'overdue' && overdue.fetch(), { immediate: true })
+watch(view, (value) => {
+  if (value === 'overdue') overdue.fetch()
+  if (value === 'timesheets') queue.reload()
+}, { immediate: true })
 function showView(name) {
-  router.push({ path: '/approvals', query: name === 'overdue' ? { view: 'overdue' } : {} })
+  router.push({ path: '/approvals', query: name === 'overdue' ? { view: 'all-pending' } : name === 'timesheets' ? { view: 'timesheets' } : {} })
 }
+
+// Plan 2026-10-15-002 U5/U6: timesheet tab visibility and data.
+const showTimesheetsTab = computed(() => {
+  if (session.canOverseeTimesheets) return true
+  const tc = queue.data?.counts?.kinds?.find((k) => k.name === 'timesheet')
+  return (tc?.count || 0) > 0
+})
+const showAllPendingTab = computed(() => {
+  // Only show when explicitly navigating to it, or when HR.
+  return view.value === 'overdue'
+})
 
 const pending = computed(() => queue.data?.pending || [])
 const decided = computed(() => queue.data?.decided || [])
@@ -725,7 +745,7 @@ function dismissBulkResult() {
          threshold, within HR's admin scope. Same collector as the daily HR
          summary (U11). The tab lives in the URL query like the chips. -->
     <div
-      v-if="session.canConfigure"
+      v-if="session.canConfigure || session.canOverseeTimesheets"
       class="mb-4 flex gap-2 border-b border-outline-gray-2"
       role="tablist"
       aria-label="Approvals views"
@@ -747,6 +767,11 @@ function dismissBulkResult() {
         {{ tab.label }}
       </button>
     </div>
+
+    <!-- Plan 2026-10-15-002 U6: Timesheets tab for managers and HR. -->
+    <section v-if="view === 'timesheets'">
+      <TimesheetOversight />
+    </section>
 
     <section
       v-if="view === 'overdue'"
