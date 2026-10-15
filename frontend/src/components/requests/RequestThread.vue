@@ -1,7 +1,7 @@
 <script setup>
 // Plan 2026-10-15-003 KTD8: shared thread and comment box for requests.
 // Used on the Requests page (employee + handler) and Approvals detail.
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick, useId } from 'vue'
 import { call } from '@/lib/api'
 import { formatDateTime } from '@/lib/dates'
 
@@ -16,36 +16,40 @@ const props = defineProps({
   closed: { type: Boolean, default: false },
   /** The request name, for the API call. */
   requestName: { type: String, default: '' },
-  /** The handler's label prefix for the comment box. */
+  /** The employee's name, for the handler box's label. */
   employeeName: { type: String, default: '' },
-  /** Expected modified timestamp for employee replies (status-change case). */
+  /** Only while Waiting on Employee: the token the status move is checked against. */
   expectedModified: { type: String, default: null },
 })
 
-const emit = defineEmits(['posted'])
+const emit = defineEmits(['posted', 'new-request'])
 
 const message = ref('')
 const posting = ref(false)
 const postError = ref('')
+const box = ref(null)
+const boxId = useId()
+// The server's `_DETAILS_MAX`; the server still refuses past it.
 const detailsMax = 6000
 
 const isEmployee = computed(() => props.mode === 'employee')
-const placeholder = computed(() => {
-  if (props.closed) return ''
-  if (isEmployee.value) return props.expectedModified ? 'Reply…' : 'Add a comment…'
-  return props.employeeName ? `Comment (visible to ${props.employeeName})…` : 'Comment…'
+// Plan U4: "Reply" only while the request waits on the employee.
+const replying = computed(() => isEmployee.value && !!props.expectedModified)
+const boxLabel = computed(() => {
+  if (replying.value) return 'Reply'
+  if (isEmployee.value) return 'Add a comment'
+  return props.employeeName ? `Comment (visible to ${props.employeeName})` : 'Comment (visible to the employee)'
 })
+const tooLong = computed(() => message.value.length > detailsMax)
 const buttonLabel = computed(() => {
-  if (props.closed) return ''
   if (posting.value) return 'Sending…'
-  if (isEmployee.value && props.expectedModified) return 'Reply'
-  return 'Comment'
+  return replying.value ? 'Reply' : 'Comment'
 })
 
 async function post() {
   const text = message.value.trim()
   if (!text || posting.value || props.closed) return
-  if (text.length > detailsMax) {
+  if (tooLong.value) {
     postError.value = `Too long. Keep it under ${detailsMax} characters.`
     return
   }
@@ -67,6 +71,8 @@ async function post() {
     }
     message.value = ''
     emit('posted')
+    await nextTick()
+    box.value?.focus()
   } catch (failure) {
     postError.value = failure?.messages?.[0] || "That didn't send. Try again."
   } finally {
@@ -81,10 +87,14 @@ async function post() {
     data-testid="request-thread"
   >
     <!-- Thread entries -->
+    <h3 class="label">
+      Conversation
+    </h3>
     <ul
       v-if="entries.length"
       class="space-y-2"
       aria-label="Conversation"
+      aria-live="polite"
     >
       <li
         v-for="(entry, index) in entries"
@@ -109,18 +119,25 @@ async function post() {
 
     <!-- Comment box -->
     <div v-if="!closed && canComment">
+      <label
+        :for="boxId"
+        class="label"
+      >{{ boxLabel }}</label>
       <textarea
+        :id="boxId"
+        ref="box"
         v-model="message"
-        :placeholder="placeholder"
+        data-testid="thread-box"
         class="min-h-20 w-full rounded-md border border-outline-gray-2 bg-surface-white p-2 text-sm text-ink-gray-8"
         :disabled="posting"
         rows="2"
-      ></textarea>
+      />
       <div class="mt-1 flex items-center gap-2">
         <button
           type="button"
           class="inline-flex min-h-11 cursor-pointer items-center rounded-lg bg-signal px-4 text-sm font-medium text-white disabled:opacity-50"
-          :disabled="!message.trim() || posting"
+          :disabled="!message.trim() || tooLong || posting"
+          data-testid="thread-post"
           @click="post"
         >
           {{ buttonLabel }}
@@ -145,13 +162,16 @@ async function post() {
       class="mt-2 text-sm text-ink-gray-6"
     >
       <p>This request is closed.</p>
-      <router-link
+      <!-- R4: the parent opens its own new-request form (no route for it). -->
+      <button
         v-if="isEmployee"
-        :to="{ name: 'NewRequest' }"
-        class="inline-flex items-center text-blue-700 underline underline-offset-2"
+        type="button"
+        class="inline-flex min-h-11 cursor-pointer items-center text-blue-700 underline underline-offset-2"
+        data-testid="thread-new-request"
+        @click="emit('new-request')"
       >
         Start a new request
-      </router-link>
+      </button>
     </div>
   </section>
 </template>

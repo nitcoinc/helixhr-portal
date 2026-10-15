@@ -978,7 +978,7 @@ function dismissBulkResult() {
            (My team, Decided by me, HR, IT); the Timesheets tab as Waiting on
            you and Waiting on HR, with HR's oversight list below. -->
       <div
-        v-show="!name || isDesktop"
+        v-show="!name || isDesktop || openInQueue"
         class="min-w-0 lg:flex-1"
         data-testid="approvals-queue"
       >
@@ -1422,7 +1422,7 @@ function dismissBulkResult() {
                             <div
                               v-else-if="selected.kind === 'request'"
                               class="border-t border-outline-gray-2 pt-3"
-                                            >
+                            >
                               <p class="text-sm text-ink-gray-6">
                                 {{ selected.category }}
                               </p>
@@ -1501,6 +1501,14 @@ function dismissBulkResult() {
                             >
                               <p class="text-sm font-medium text-white">
                                 {{ reasonCopy.heading }}
+                              </p>
+                              <!-- Plan 2026-10-15-003 R6: Need info from Open is a pick-up. -->
+                              <p
+                                v-if="reasonFor === 'Need info' && selected.kind === 'request' && selected.status === 'Open'"
+                                class="mt-1 text-sm text-white"
+                                data-testid="need-info-assigns"
+                              >
+                                This also assigns the request to you.
                               </p>
                               <FormControl
                                 v-model="reason"
@@ -2069,6 +2077,14 @@ function dismissBulkResult() {
             >
               <p class="text-sm font-medium text-white">
                 {{ reasonCopy.heading }}
+              </p>
+              <!-- Plan 2026-10-15-003 R6: Need info from Open is a pick-up. -->
+              <p
+                v-if="reasonFor === 'Need info' && selected.kind === 'request' && selected.status === 'Open'"
+                class="mt-1 text-sm text-white"
+                data-testid="need-info-assigns"
+              >
+                This also assigns the request to you.
               </p>
               <FormControl
                 v-model="reason"

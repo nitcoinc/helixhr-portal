@@ -832,30 +832,18 @@ const timeline = computed(() => {
               </li>
             </ul>
 
-            <section
-              v-if="workSelected.thread?.length"
+            <!-- Plan 2026-10-15-003 KTD8: the shared thread; the handler's
+                 box shows only when `comment_on_request` would accept it. -->
+            <RequestThread
               class="mt-4 border-t border-outline-gray-1 pt-4"
-              data-testid="request-thread"
-            >
-              <h3 class="label">
-                Conversation
-              </h3>
-              <ul class="mt-2 space-y-2">
-                <li
-                  v-for="(entry, index) in workSelected.thread"
-                  :key="index"
-                  class="surface-inset p-3 text-sm"
-                >
-                  <p class="text-xs font-medium text-ink-gray-5">
-                    {{ entry.by === 'employee' ? 'Employee' : 'You' }}
-                    · {{ formatDateTime(entry.on) }}
-                  </p>
-                  <p class="mt-0.5 whitespace-pre-line text-ink-gray-8">
-                    {{ entry.message }}
-                  </p>
-                </li>
-              </ul>
-            </section>
+              :entries="workSelected.thread || []"
+              :can-comment="!!workSelected.can_comment"
+              :closed="!!workSelected.closed"
+              :request-name="workSelected.name"
+              :employee-name="workSelected.employee_name || ''"
+              mode="handler"
+              @posted="workDetail.fetch()"
+            />
 
             <!-- Need info / Reject refuse to submit without their words
                  (P5-U6); the box holds them on the same surface. -->
@@ -870,6 +858,13 @@ const timeline = computed(() => {
                 :label="REASON_HEADINGS[reasonFor]"
                 :placeholder="reasonFor === 'Reject' ? 'Why this is a final no' : 'What do you need from them?'"
               />
+              <p
+                v-if="reasonFor === 'Need info' && workSelected.status === 'Open'"
+                class="mt-1 text-sm text-ink-gray-6"
+                data-testid="need-info-assigns"
+              >
+                This also assigns the request to you.
+              </p>
               <p
                 v-if="reasonError"
                 class="mt-1 text-sm font-medium text-signal"
@@ -1176,11 +1171,13 @@ const timeline = computed(() => {
             <RequestThread
               class="mt-4 border-t border-outline-gray-1 pt-4"
               :entries="selected.thread || []"
-              :can-comment="selected.can_comment"
+              :can-comment="!!selected.can_comment"
+              :closed="!!selected.closed"
               :request-name="selected.name"
-              :expected-modified="selected.modified"
+              :expected-modified="selected.status === 'Waiting on Employee' ? selected.modified : null"
               mode="employee"
               @posted="reloadRequest"
+              @new-request="newRequest"
             />
 
             <div class="mt-4 border-t border-outline-gray-1 pt-4">
