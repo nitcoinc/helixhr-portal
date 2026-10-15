@@ -905,7 +905,7 @@ class TestRequestApprovalQueue(IntegrationTestCase):
 
 		name = self._file()
 		frappe.set_user(self.it_user)
-		rows, _capped = _approval_summaries(self.it_employee)
+		rows, _capped, _lanes = _approval_summaries(self.it_employee)
 		matching = [row for row in rows if row["name"] == name]
 		self.assertEqual(len(matching), 1)
 		self.assertEqual(matching[0]["kind"], "request")
