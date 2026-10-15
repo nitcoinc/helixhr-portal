@@ -97,6 +97,14 @@ export default defineConfig({
       dependencies: ['setup'],
       testMatch: /(settings|company-access)\.spec\.ts/,
     },
+    // Plan 2026-10-15-002 U4/U6. HR User: no approve right, but oversight of
+    // pending timesheets in their company (`make_test_hr_user`).
+    {
+      name: 'hr-user',
+      use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/hr-user.json' },
+      dependencies: ['setup'],
+      testMatch: /timesheet-oversight\.spec\.ts/,
+    },
     // P2-U9 step 9. Mobile WebKit is the second mandatory browser: it is the
     // only engine on iOS, it is where a coarse pointer, a real safe-area
     // inset and Safari's own overlay behaviour actually live, and every
