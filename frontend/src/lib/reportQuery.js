@@ -55,18 +55,24 @@ export function cleanFilterValue(spec, value) {
   return raw
 }
 
-/** A plain company name, or undefined. Whether the caller may run it is the
- * server's answer, not this one's. */
+/** A plain company name, or the "__all" sentinel, or undefined. Whether
+ * the caller may run it is the server's answer, not this one's. */
 export function cleanCompany(value) {
   const raw = first(value)
-  return typeof raw === 'string' && raw && raw.length <= MAX_VALUE ? raw : undefined
+  if (typeof raw !== 'string' || !raw || raw.length > MAX_VALUE) return undefined
+    // Plan 2026-10-15-001 KTD1: the sentinel is a valid company value.
+  return raw
 }
 
 /** `filters` switched to `company`. Employee, project, task and department
- * values belong to one company, so a switch drops them. */
+ * values belong to one company, so a switch normally drops them. The
+ * "__all" sentinel covers every company (plan 2026-10-15-001), so switching
+ * to or from it keeps the entity filters. */
 export function withCompany(filters, entry, company) {
   if (filters.company === company) return filters
   const next = { ...filters, company }
+  // Switching to/from the sentinel is not narrowing -- keep the filters.
+  if (filters.company === '__all' || company === '__all') return next
   for (const spec of entry.filters) {
     if (COMPANY_BOUND_TYPES.has(spec.type)) delete next[spec.name]
   }
@@ -82,7 +88,7 @@ export function fromQuery(query, entry) {
     const value = cleanFilterValue(spec, query[spec.name])
     if (value !== undefined) filters[spec.name] = value
   }
-  const offersChoice = (entry.companies || []).length > 0
+  const offersChoice = (entry.companies || []).length > 0 || entry.combined_option
   const company = offersChoice ? cleanCompany(query.company) : undefined
   if (company !== undefined) filters.company = company
   const groupable = new Set((entry.group_by || []).map((group) => group.field))
@@ -110,7 +116,7 @@ export function toQuery(state, entry) {
     const value = cleanFilterValue(spec, state.filters?.[spec.name])
     if (value !== undefined) query[spec.name] = String(value)
   }
-  const offersChoice = (entry.companies || []).length > 0
+  const offersChoice = (entry.companies || []).length > 0 || entry.combined_option
   const company = offersChoice ? cleanCompany(state.filters?.company) : undefined
   if (company !== undefined) query.company = company
   if (state.groupBy?.length) query.group = state.groupBy.slice(0, 2).join(',')

@@ -55,7 +55,14 @@ function set(name, value) {
 // Plan 2026-10-14-001 U10: one company per run, offered only when the
 // catalog lists more than one. A switch clears the entity filters (they
 // belong to one company) and every option search names the company.
-const companyOptions = computed(() => props.entry.companies || [])
+// Plan 2026-10-15-001 U4: prepend "All my companies" when combined_option.
+const companyOptions = computed(() => {
+  const options = [...(props.entry.companies || [])]
+  if (props.entry.combined_option) {
+    options.unshift({ company: '__all', can_export: props.entry.combined_exportable })
+  }
+  return options
+})
 const showCompany = computed(() => companyOptions.value.length > 1)
 
 function setCompany(company) {
@@ -171,9 +178,17 @@ function secondGroupOptions() {
               :key="option.company"
               :value="option.company"
             >
-              {{ option.company }}
+              {{ option.company === '__all' ? 'All my companies' : option.company }}
             </option>
           </select>
+          <p
+            v-if="modelValue.company === '__all' && !entry.combined_exportable"
+            class="mt-1 text-xs text-ink-red-4"
+            role="note"
+            :id="`${id}-export-note`"
+          >
+            {{ entry.blocking_companies?.join(', ') }}: export not allowed in this company.
+          </p>
         </div>
 
         <template v-if="hasRange">

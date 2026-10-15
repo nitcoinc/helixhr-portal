@@ -74,7 +74,8 @@ function defaults(item) {
   }
   // Plan 2026-10-14-001 U10: a caller offered several companies starts on
   // the default one; a single-company caller sends none, exactly as before.
-  if (item.companies?.length > 1) values.company = item.company || item.companies[0].company
+  // Plan 2026-10-15-001 R2: the sentinel is the default when combined_exportable.
+  if (item.companies?.length > 1 || item.combined_option) values.company = item.company || item.companies?.[0]?.company
   const range = item.default_preset ? presetRange(item.default_preset, today()) : null
   return range ? { ...values, ...range } : values
 }
@@ -116,10 +117,16 @@ function run() {
 
 // Plan 2026-10-14-001 U10: export rights and the Desk hand-off follow the
 // picked company. The Desk link is offered for the default company only.
+// Plan 2026-10-15-001 R1/R5: combined run offers "All my companies" option
+// and may block export if not every company allows it.
 const pickedCompany = computed(() =>
   entry.value?.companies?.find((option) => option.company === filters.value.company) || null,
 )
-const canExport = computed(() => (pickedCompany.value ? !!pickedCompany.value.can_export : !!entry.value?.can_export))
+const isCombined = computed(() => filters.value.company === '__all')
+const canExport = computed(() => {
+  if (isCombined.value) return !!entry.value?.combined_exportable
+  return (pickedCompany.value ? !!pickedCompany.value.can_export : !!entry.value?.can_export)
+})
 const canOpenInDesk = computed(
   () => !!entry.value?.can_open_in_desk && (!filters.value.company || filters.value.company === entry.value.company),
 )
