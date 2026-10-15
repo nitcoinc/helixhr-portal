@@ -9998,11 +9998,17 @@ def _report_access(report_key, company=None, right="can_run"):
 
 
 def _requested_company(filters):
-	"""The ``company`` a report request names, if any."""
+	"""The ``company`` a report request names, if any. The ``"__all"``
+	sentinel is returned as-is for the API boundary to resolve."""
 	from helixhr import reports
+	from helixhr.utils import SENTINEL_ALL
 
 	raw = reports._parse(filters, {})
-	return raw.get("company") if isinstance(raw, dict) else None
+	value = raw.get("company") if isinstance(raw, dict) else None
+	# Return the sentinel as-is so the API boundary can resolve it.
+	if value == SENTINEL_ALL:
+		return SENTINEL_ALL
+	return value
 
 
 @frappe.whitelist()
@@ -10025,6 +10031,7 @@ def run_report(report_key, filters=None, group_by=None, sort=None, **kwargs):
 	group boundary; ``totals`` and the trailing total row cover every row.
 	"""
 	from helixhr import reports
+	from helixhr.utils import SENTINEL_ALL
 
 	rate_limit_per_user("run_report")
 	access = _report_access(report_key, _requested_company(filters))
@@ -10033,6 +10040,10 @@ def run_report(report_key, filters=None, group_by=None, sort=None, **kwargs):
 	if access["company_removed"]:
 		# R14: the company fell back rather than emptying the run.
 		result["filters_removed"] = [*result["filters_removed"], "company"]
+	# Plan 2026-10-15-001 KTD1: write the sentinel back into the result
+	# filters so saved views, fingerprints and background jobs carry it.
+	if access["company"] == SENTINEL_ALL:
+		result["filters"]["company"] = SENTINEL_ALL
 	rows, truncated = reports.cap_rows(result["shaped"]["rows"])
 	return {
 		"columns": result["columns"],
@@ -10044,6 +10055,9 @@ def run_report(report_key, filters=None, group_by=None, sort=None, **kwargs):
 		"filters_removed": result["filters_removed"],
 		"filters": result["filters"],
 		"can_export": access["can_export"],
+		"combined_option": access.get("combined_option", False),
+		"combined_exportable": access.get("combined_exportable", False),
+		"blocking_companies": access.get("blocking_companies", []),
 		# U7: the flagship's task x day grid and pending-hours figure.
 		"extra": result["extra"],
 	}

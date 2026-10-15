@@ -1702,17 +1702,90 @@ def read_companies(scope):
 	return list(scope.get("companies") or [])
 
 
+# Plan 2026-10-15-001 (KTD1): the "All my companies" sentinel value.
+SENTINEL_ALL = "__all"
+
+
+def _combined_option(entry, by_company):
+	"""Whether ``entry`` may offer the sentinel, and whether every
+	run-capable company also allows export, plus the list of blocking
+	companies."""
+	if "project" not in entry.get("scopes", []):
+		return False, False, []
+	run_capable = {n for n in by_company if n}  # skip falsy sentinel holders
+	if len(run_capable) < 2:
+		return False, False, []
+	blocking = []
+	for name in run_capable:
+		tiers = by_company[name]
+		_export_grant = max(
+			(g for g in tiers if g[2]),
+			key=lambda g: _SCOPE_RANK[g[1]["kind"]],
+			default=None,
+		)
+		if not _export_grant:
+			blocking.append(name)
+	return True, not blocking, blocking
+
+
+def _build_combined_scope(by_company, user):
+	"""Build ``scope`` and ``export_scope`` for a combined run.
+
+	Each company at ``company`` width contributes to ``companies``; a
+	company served only by the ``assigned`` tier contributes ``user``
+	instead. Returns ``(scope, export_scope)``."""
+	companies = []
+	has_user = False
+	export_tiers = []
+
+	def _widest(tiers):
+		return max(tiers, key=lambda g: _SCOPE_RANK[g[1]["kind"]], default=None)
+
+	for name, tiers in by_company.items():
+		if not name:
+			continue
+		run_grant = _widest(tiers)
+		if run_grant:
+			kind = run_grant[1]["kind"]
+			if kind == "assigned":
+				has_user = True
+			else:
+				companies.append(name)
+		export_grant = _widest([g for g in tiers if g[2]])
+		if export_grant:
+			export_tiers.append(export_grant)
+
+	scope = {"kind": "combined", "companies": sorted(set(companies))}
+	if has_user:
+		scope["user"] = user
+
+	if export_tiers:
+		export_scope = {"kind": "combined", "companies": sorted(set(companies))}
+		if has_user:
+			export_scope["user"] = user
+	else:
+		export_scope = {"kind": "none"}
+
+	return scope, export_scope
+
+
 def resolve_report_access(user, report_key, company=None):
 	"""Who may run and export one catalog report, for which company, and over
 	what (KTD5; per company since plan 2026-10-14-001 KTD6).
 
 	Returns ``{"tier", "scope", "can_run", "can_export", "export_scope",
-	"company", "companies", "company_removed"}``. Access is decided per
+	"company", "companies", "company_removed", "combined_option",
+	"combined_exportable", "blocking_companies"}``. Access is decided per
 	company: the existing tiers apply to the caller's home company (every
 	company for an unscoped caller), and a company access grant adds the
 	companies it names. ``company`` picks one of them; the other keys then
 	describe that company alone, and every scope is single-company, so the
 	engines never see more than one.
+
+	When ``company`` is ``"__all"`` (the sentinel) and a combined run is
+	available, the scope is widened across all run-capable companies. The
+	sentinel is offered only for entries with ``"project"`` in ``scopes``
+	and two or more run-capable companies (KTD3).
 
 	``scope`` / ``export_scope`` use `resolve_admin_scope`'s vocabulary and
 	are each the widest scope among the tiers granting that right on THIS
@@ -1738,6 +1811,9 @@ def resolve_report_access(user, report_key, company=None):
 		"company": None,
 		"companies": [],
 		"company_removed": False,
+		"combined_option": False,
+		"combined_exportable": False,
+		"blocking_companies": [],
 	}
 	entry = get_entry(report_key)
 	if not entry:
@@ -1797,13 +1873,28 @@ def resolve_report_access(user, report_key, company=None):
 	if not by_company:
 		return denied
 
+	# Plan 2026-10-15-001 (KTD1/KTD3): combined company option for
+	# project-scoped entries with two or more run-capable companies.
+	combined_option, combined_exportable, blocking_companies = _combined_option(entry, by_company)
+
 	if home in by_company:
-		default = home
+		default = SENTINEL_ALL if combined_option and combined_exportable else home
 	elif unscoped and frappe.defaults.get_global_default("company") in by_company:
 		default = frappe.defaults.get_global_default("company")
 	else:
 		default = next(iter(by_company))
-	picked = company if isinstance(company, str) and company in by_company else default
+
+	# Handle sentinel company request.
+	if company == SENTINEL_ALL:
+		if combined_option:
+			picked = SENTINEL_ALL
+		else:
+			# Sentinel not available; fall back to default.
+			picked = default
+			company_removed = True
+	else:
+		picked = company if isinstance(company, str) and company in by_company else default
+		company_removed = company not in (None, "") and picked != company
 
 	def widest(candidates):
 		return max(candidates, key=lambda grant: _SCOPE_RANK[grant[1]["kind"]], default=None)
@@ -1817,6 +1908,29 @@ def resolve_report_access(user, report_key, company=None):
 	for name, tiers in by_company.items():
 		if name:
 			companies.append({"company": name, "can_export": answer(tiers)[1] is not None})
+
+	if picked == SENTINEL_ALL:
+		scope, export_scope = _build_combined_scope(by_company, user)
+		can_export_val = combined_exportable
+		# Build companies list with each company's export flag.
+		all_companies = []
+		for name, tiers in by_company.items():
+			if name:
+				all_companies.append({"company": name, "can_export": answer(tiers)[1] is not None})
+		return {
+			"tier": "combined",
+			"scope": scope,
+			"can_run": True,
+			"can_export": can_export_val,
+			"export_scope": export_scope,
+			"company": SENTINEL_ALL,
+			"companies": all_companies,
+			"company_removed": False,
+			"combined_option": True,
+			"combined_exportable": combined_exportable,
+			"blocking_companies": blocking_companies,
+		}
+
 	run_grant, export_grant = answer(by_company[picked])
 	return {
 		"tier": run_grant[0],
@@ -1826,7 +1940,10 @@ def resolve_report_access(user, report_key, company=None):
 		"export_scope": export_grant[1] if export_grant else {"kind": "none"},
 		"company": picked,
 		"companies": companies,
-		"company_removed": company not in (None, "") and picked != company,
+		"company_removed": company_removed,
+		"combined_option": combined_option,
+		"combined_exportable": combined_exportable,
+		"blocking_companies": blocking_companies,
 	}
 
 
@@ -1834,7 +1951,15 @@ def can_export_report(user, report_key, company=None, access=None):
 	"""Whether ``user`` may still export ``report_key`` for ``company`` --
 	the re-check every deferred export action makes (R15): the background
 	job, the download, and expiring files after a grant narrows. A company
-	the caller may not use is a no, never the default company's yes."""
+	the caller may not use is a no, never the default company's yes.
+
+	When ``company`` is ``__all`` (the combined sentinel), returns
+	``True`` only when every company in the combined set also allows
+	export (R5)."""
+	if company == SENTINEL_ALL:
+		# For a combined run, re-check each company individually.
+		access = access or resolve_report_access(user, report_key, SENTINEL_ALL)
+		return access["can_export"] and not access.get("blocking_companies", [])
 	access = access or resolve_report_access(user, report_key, company)
 	return access["can_export"] and not access["company_removed"]
 

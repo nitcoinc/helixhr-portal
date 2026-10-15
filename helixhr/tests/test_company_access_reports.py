@@ -28,7 +28,7 @@ from helixhr.tests.utils import (
 	make_test_user,
 	set_report_access,
 )
-from helixhr.utils import resolve_report_access
+from helixhr.utils import SENTINEL_ALL, resolve_report_access
 
 WRAPPED = "leave_ledger"
 DIRECTORY = "employee_directory"
@@ -367,3 +367,78 @@ class TestExportLogReach(_GrantReports):
 		self.assertEqual(
 			frappe.db.get_value("HelixHR Report Export", name, "exporter_company"), self.company
 		)
+
+# --- Plan 2026-10-15-001: combined company scope (U1) -----------------------
+
+
+class TestCombinedCompanyScope(_GrantReports):
+	"""Plan 2026-10-15-001 KTD1/KTD3: the sentinel resolves to a combined
+	scope across all run-capable companies for project-scoped entries."""
+
+	def setUp(self):
+		super().setUp()
+		# Make the grant holder scoped to both companies with export.
+		make_test_company_grant(GRANT_HOLDER_USER, [self.company, self.other], level="All data", allow_export=1)
+
+	def test_combined_scope_default_when_exportable(self):
+		"""R1/R2: holder with export in both gets combined as default."""
+		access = resolve_report_access(GRANT_HOLDER_USER, PROJECT_KEY)
+		self.assertTrue(access["combined_option"])
+		self.assertTrue(access["combined_exportable"])
+		self.assertEqual(access["company"], SENTINEL_ALL)
+		self.assertEqual(access["scope"]["kind"], "combined")
+		self.assertIn(self.company, access["scope"]["companies"])
+		self.assertIn(self.other, access["scope"]["companies"])
+		self.assertTrue(access["can_export"])
+
+	def test_defaults_to_home_when_not_combined_exportable(self):
+		"""R2: Reports-only grant without export defaults to home."""
+		_clear_grants()
+		make_test_company_grant(GRANT_HOLDER_USER, [self.company, self.other], level="Reports only", allow_export=0)
+		access = resolve_report_access(GRANT_HOLDER_USER, PROJECT_KEY)
+		self.assertTrue(access["combined_option"])
+		self.assertFalse(access["combined_exportable"])
+		self.assertEqual(access["company"], self.company)
+		self.assertIn(self.other, access["blocking_companies"])
+
+	def test_dm_with_outsourcing_grant_combined_scope(self):
+		"""DM with Outsourcing-only grant: combined Outsourcing hours + assigned Inc."""
+		_clear_grants()
+		_, dm = make_test_delivery_manager()
+		set_report_access(PROJECT_KEY, dm_run=1, dm_export=1)
+		make_test_company_grant(dm, [self.other], level="Reports only")
+		access = resolve_report_access(dm, PROJECT_KEY, SENTINEL_ALL)
+		self.assertEqual(access["company"], SENTINEL_ALL)
+		self.assertIn(self.other, access["scope"]["companies"])
+		self.assertIsNotNone(access["scope"].get("user"))
+
+	def test_single_company_sentinel_falls_back(self):
+		"""KTD3: single-company HR passing __all falls back with company_removed."""
+		_clear_grants()
+		_, hr = make_test_hr_manager_employee()
+		access = resolve_report_access(hr, PROJECT_KEY, SENTINEL_ALL)
+		self.assertFalse(access["combined_option"])
+		self.assertTrue(access["company_removed"])
+		self.assertEqual(access["company"], self.company)
+
+	def test_non_project_report_rejects_sentinel(self):
+		"""KTD3: sentinel on non-project report falls back."""
+		access = resolve_report_access(GRANT_HOLDER_USER, DIRECTORY)
+		self.assertFalse(access["combined_option"])
+
+	def test_revoked_grant_resolves_to_home_when_user_has_other_tier(self):
+		"""Error: revoked grant resolves to home only for a user with another
+		tier. A grant-only holder loses all access on revocation."""
+		from helixhr.utils import disable_company_access
+
+		# Create a DM who also has a grant.
+		_, dm = make_test_delivery_manager()
+		set_report_access(PROJECT_KEY, dm_run=1, dm_export=1)
+		make_test_company_grant(dm, [self.company, self.other], level="All data", allow_export=1)
+
+		# Revoke the grant; DM still has assigned access at home.
+		disable_company_access(dm, "test")
+		access = resolve_report_access(dm, PROJECT_KEY)
+		self.assertEqual(access["company"], self.company)
+		self.assertFalse(access["combined_option"])
+		self.assertEqual(access["scope"]["kind"], "assigned")

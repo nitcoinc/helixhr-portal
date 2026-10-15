@@ -1810,6 +1810,10 @@ def client_entry(entry, access):
 		# report for, each with its own export right, and the default.
 		"company": access["company"],
 		"companies": access["companies"],
+		# Plan 2026-10-15-001 KTD1/KTD3: combined company option.
+		"combined_option": access.get("combined_option", False),
+		"combined_exportable": access.get("combined_exportable", False),
+		"blocking_companies": access.get("blocking_companies", []),
 	}
 
 
@@ -2046,6 +2050,14 @@ def run(report_key, scope, filters=None, group_by=None, sort=None):
 	# carry it. The API boundary already decided it (`resolve_report_access`).
 	if scope.get("company"):
 		clean["company"] = scope["company"]
+	# Plan 2026-10-15-001 KTD1: a combined scope writes the sentinel into
+	# the result filters so saved views, fingerprints and background jobs
+	# carry it. The API boundary writes it back too, but writing it here
+	# covers every caller of `reports.run` directly.
+	if scope["kind"] == "combined":
+		from helixhr.utils import SENTINEL_ALL
+
+		clean["company"] = SENTINEL_ALL
 	if removed:
 		columns, rows = [], []
 		if entry["engine"] == "helixhr":
