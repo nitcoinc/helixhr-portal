@@ -1733,10 +1733,13 @@ incorrect filter scope or a missing SQL condition can silently drop rows.
 2. Check ``result.filters.company`` for ``__all`` (the sentinel). If it is
    a named company, the resolver was given a specific company, not the
    combined option.
-3. Verify ``_timesheet_scope_conditions`` or ``_hours_by_project`` emitted
-   ``ts.company IN %(scope_companies)s`` (combined branch). A mis-cased
-   ``"combined"`` vs ``"combine"`` or a missing kind check produces an
-   empty set.
+3. A single-company caller sees only their own company's hours on another
+   company's project -- by design (R4). Hours from the other company need a
+   grant over it, then "All my companies".
+4. "All my companies" missing from the picker: the caller has fewer than
+   two run-capable companies for this report, or it is not a project report.
+5. An unknown scope kind reaching `_timesheet_scope_conditions` raises
+   "Unsupported report scope." rather than returning nothing.
 
 ### Who can change what (People & access)
 
