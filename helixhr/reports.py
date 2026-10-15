@@ -126,7 +126,7 @@ _HOURS_FIELDS = (
 def _hours_by_project(filters, scope):
 	"""Hours logged against projects and tasks. Approved (submitted) rows
 	only, unless ``include_pending`` adds rows awaiting approval, marked in
-	an ``approval`` column."""
+	an ``approval`` column. Combined scope adds a Company column."""
 	include_pending = cint(filters.get("include_pending"))
 	columns = [
 		{"fieldname": "date", "label": "Date", "fieldtype": "Date"},
@@ -157,6 +157,29 @@ def _hours_by_project(filters, scope):
 			return columns, []
 		conditions.append("td.project in %(scope_projects)s")
 		values["scope_projects"] = tuple(scope_filters["name"][1])
+	elif scope["kind"] == "combined":
+		# Plan 2026-10-15-001 KTD2: ts.company in set, or-ed with assigned.
+		companies = scope.get("companies", [])
+		if not companies and not scope.get("user"):
+			return columns, []
+		scope_conditions = []
+		if companies:
+			scope_conditions.append("ts.company in %(scope_companies)s")
+			values["scope_companies"] = tuple(companies)
+		if scope.get("user"):
+			assigned = frappe.get_all("Project User", filters={"user": scope["user"]}, pluck="parent")
+			if assigned:
+				scope_conditions.append("td.project in %(scope_projects)s")
+				values["scope_projects"] = tuple(assigned)
+		if not scope_conditions:
+			return columns, []
+		# Add Company column for combined runs.
+		fields.append("ts.company as company")
+		columns.append({"fieldname": "company", "label": "Company", "fieldtype": "Data"})
+		if len(scope_conditions) == 1:
+			conditions.append(scope_conditions[0])
+		else:
+			conditions.append(f"({' or '.join(scope_conditions)})")
 	elif scope["kind"] != "unscoped":
 		return columns, []
 
@@ -199,6 +222,19 @@ def _timesheet_scope_conditions(scope, values):
 			return None
 		values["scope_projects"] = tuple(scope_filters["name"][1])
 		return ["td.project in %(scope_projects)s"]
+	if scope["kind"] == "combined":
+		# Plan 2026-10-15-001 KTD2: ts.company in set, or-ed with assigned.
+		companies = scope.get("companies", [])
+		conditions = []
+		if companies:
+			values["scope_companies"] = tuple(companies)
+			conditions.append("ts.company in %(scope_companies)s")
+		if scope.get("user"):
+			assigned = frappe.get_all("Project User", filters={"user": scope["user"]}, pluck="parent")
+			if assigned:
+				values["scope_projects"] = tuple(assigned)
+				conditions.append("td.project in %(scope_projects)s")
+		return conditions if conditions else None
 	if scope["kind"] == "unscoped":
 		return []
 	return None
@@ -226,7 +262,8 @@ def _month_bounds(month):
 
 def _project_timesheet(filters, scope):
 	"""Approved (submitted) hours on one project in one month, one row per
-	time log (KTD3: named columns only, no rate or amount)."""
+	time log (KTD3: named columns only, no rate or amount). Combined scope
+	adds a Company column."""
 	columns = [dict(column) for column in _PROJECT_TIMESHEET_COLUMNS]
 	if not filters.get("project") or not filters.get("month"):
 		return columns, []
@@ -236,11 +273,16 @@ def _project_timesheet(filters, scope):
 		return columns, []
 	start, end = _month_bounds(filters["month"])
 	values.update({"project": filters["project"], "start": start, "end": end})
+	if scope["kind"] == "combined":
+		columns.append({"fieldname": "company", "label": "Company", "fieldtype": "Data"})
+		extra_fields = ", ts.company as company"
+	else:
+		extra_fields = ""
 	rows = frappe.db.sql(
 		f"""
 		select date(td.from_time) as `date`, ts.employee_name as employee_name,
 			coalesce(nullif(tsk.subject, ''), td.task, %(no_task)s) as task_subject,
-			td.description as note, td.hours as hours, td.billing_hours as billing_hours
+			td.description as note, td.hours as hours, td.billing_hours as billing_hours{extra_fields}
 		from `tabTimesheet Detail` td
 		inner join `tabTimesheet` ts on ts.name = td.parent
 		left join `tabTask` tsk on tsk.name = td.task
@@ -1556,6 +1598,13 @@ def _entity_in_scope(kind, value, scope):
 			# The hours query intersects with member projects itself; an
 			# employee filter can only narrow that further.
 			return bool(frappe.db.exists("Employee", value))
+		if scope["kind"] == "combined":
+			# Combined scope: employee must be in one of the scope companies
+			# or assigned to a scope project.
+			companies = scope.get("companies", [])
+			if not companies:
+				return bool(frappe.db.exists("Employee", value))
+			return bool(frappe.db.exists("Employee", {"name": value, "company": ["in", companies]}))
 		return employee_in_admin_scope(value, scope)
 	if kind == "project":
 		return project_in_scope(value, scope)
@@ -1567,6 +1616,11 @@ def _entity_in_scope(kind, value, scope):
 			return bool(frappe.db.exists("Department", value))
 		if scope["kind"] == "company":
 			return bool(frappe.db.exists("Department", {"name": value, "company": scope["company"]}))
+		if scope["kind"] == "combined":
+			companies = scope.get("companies", [])
+			if companies:
+				return bool(frappe.db.exists("Department", {"name": value, "company": ["in", companies]}))
+			return bool(frappe.db.exists("Department", value))
 		return False
 	return False
 
@@ -1661,7 +1715,24 @@ _SELECT_LINK_DOCTYPES = {
 
 
 def _scope_projects(scope):
-	"""Project names in scope, or None for "every project" (unscoped)."""
+	"""Project names in scope, or None for "every project" (unscoped).
+	Combined scope returns projects owned by scope companies plus projects
+	with hours from scope companies (KTD4)."""
+	if scope["kind"] == "combined":
+		companies = scope.get("companies", [])
+		if not companies and not scope.get("user"):
+			return []
+		filters = {}
+		or_filters = []
+		if companies:
+			or_filters.append({"company": ["in", companies]})
+		if scope.get("user"):
+			assigned = frappe.get_all("Project User", filters={"user": scope["user"]}, pluck="parent")
+			if assigned:
+				or_filters.append({"name": ["in", assigned]})
+		if not or_filters:
+			return []
+		return frappe.get_all("Project", or_filters=or_filters, pluck="name", distinct=True)
 	filters = project_scope_filters(scope)
 	if filters is None:
 		return []
@@ -1685,6 +1756,12 @@ def _option_source(spec, scope, context):
 				else []
 			)
 			filters = {"user_id": ["in", users]} if users else None
+		elif scope["kind"] == "combined":
+			companies = scope.get("companies", [])
+			if companies:
+				filters = {"company": ["in", companies]}
+			else:
+				filters = None if scope.get("user") else {}
 		else:
 			filters = admin_scope_employee_filters(scope)
 		return (
@@ -1704,7 +1781,13 @@ def _option_source(spec, scope, context):
 			filters = {"project": wanted} if project_in_scope(wanted, scope) else None
 		return "Task", filters, "subject", "project", ("name", "subject")
 	if kind == "department":
-		filters = admin_scope_employee_filters(scope) if scope["kind"] != "assigned" else None
+		if scope["kind"] == "combined":
+			companies = scope.get("companies", [])
+			filters = {"company": ["in", companies]} if companies else {}
+		elif scope["kind"] != "assigned":
+			filters = admin_scope_employee_filters(scope)
+		else:
+			filters = None
 		return "Department", filters, "department_name", "company", ("name", "department_name")
 	doctype = _SELECT_LINK_DOCTYPES[spec["name"]]
 	return doctype, {}, "name", None, ("name",)
@@ -1820,9 +1903,16 @@ def client_entry(entry, access):
 def _scope_company(scope, raw):
 	"""The company a wrapped report runs for: always the scope's company;
 	only an unscoped caller (Administrator, anchorless HR Manager) may name
-	one, and otherwise gets the site default."""
+	one, and otherwise gets the site default. Combined scope returns the
+	first scope company for letterhead/meta purposes; the caller is
+	responsible for showing the Company column."""
 	if scope["kind"] == "company":
 		return scope["company"]
+	if scope["kind"] == "combined":
+		companies = scope.get("companies", [])
+		if companies:
+			return companies[0]
+		return frappe.defaults.get_global_default("company") or frappe.db.get_value("Company", {}, "name")
 	requested = raw.get("company") if isinstance(raw, dict) else None
 	if isinstance(requested, str) and frappe.db.exists("Company", requested):
 		return requested
