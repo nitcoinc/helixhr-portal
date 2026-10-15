@@ -1,69 +1,57 @@
-// Plan 2026-10-15-002 U5: unit tests for approval lane helpers.
+// Plan 2026-10-15-002 U5: the Approvals page's lane helpers.
 import { describe, expect, it } from 'vitest'
-import { laneSections, groupByPerson, groupByApprover } from './approvalLanes'
+import { groupByPerson, laneSections, laneSubsections } from './approvalLanes'
+
+const row = (lane, name, extra = {}) => ({ lane, name, employee: `E-${name}`, kind: 'leave', ...extra })
 
 describe('laneSections', () => {
-  it('orders lanes: team, decided, hr, it', () => {
-    const rows = [
-      { lane: 'team', employee_name: 'Alice', kind: 'leave' },
-      { lane: 'hr', employee_name: 'Bob', kind: 'leave' },
-      { lane: 'it', employee_name: 'Carol', kind: 'request' },
-    ]
-    const sections = laneSections(rows, [])
-    expect(sections).toHaveLength(3)
-    expect(sections[0].key).toBe('team')
-    expect(sections[1].key).toBe('hr')
-    expect(sections[2].key).toBe('it')
+  it('orders team, decided, hr, it', () => {
+    const lanes = laneSections([row('it', 'c'), row('hr', 'b'), row('team', 'a')], 2)
+    expect(lanes.map((lane) => lane.key)).toEqual(['team', 'decided', 'hr', 'it'])
+    expect(lanes.map((lane) => lane.title)).toEqual(['My team', 'Decided by me', 'HR', 'IT'])
   })
 
   it('drops empty pending lanes', () => {
-    const rows = [{ lane: 'team', employee_name: 'Alice', kind: 'leave' }]
-    const sections = laneSections(rows, [])
-    expect(sections).toHaveLength(1)
-    expect(sections[0].key).toBe('team')
+    expect(laneSections([row('team', 'a')], 0).map((lane) => lane.key)).toEqual(['team'])
+    expect(laneSections([], 0)).toEqual([])
   })
 
-  it('includes decided whenever it has items', () => {
-    const rows = [{ lane: 'team', employee_name: 'Alice', kind: 'leave' }]
-    const decided = [{ kind: 'leave', name: 'L-001' }]
-    const sections = laneSections(rows, decided)
-    expect(sections).toHaveLength(2)
-    expect(sections[0].key).toBe('team')
-    expect(sections[1].key).toBe('decided')
-    expect(sections[1].collapsed).toBe(true)
+  it('keeps Decided, first, when My team is empty', () => {
+    expect(laneSections([row('hr', 'b')], 1).map((lane) => lane.key)).toEqual(['decided', 'hr'])
+    expect(laneSections([], 3).map((lane) => lane.key)).toEqual(['decided'])
   })
 
-  it('shows decided first when team is empty', () => {
-    const rows = [{ lane: 'hr', employee_name: 'Bob', kind: 'leave' }]
-    const decided = [{ kind: 'leave', name: 'L-001' }]
-    const sections = laneSections(rows, decided)
-    expect(sections[0].key).toBe('decided')
-    expect(sections[1].key).toBe('hr')
+  it('treats an untagged row as the caller\'s team', () => {
+    expect(laneSections([{ name: 'x', kind: 'leave' }])[0].key).toBe('team')
+  })
+
+  it('keeps change rows first within a lane, then flagged, then normal', () => {
+    const [lane] = laneSections([
+      row('team', 'n'),
+      row('team', 'f', { needs_look: true }),
+      row('team', 'c', { kind: 'change' }),
+    ])
+    expect(lane.sections.map((section) => section.key)).toEqual(['change', 'flagged', 'normal'])
+    expect(lane.sections[0].rows.map((r) => r.name)).toEqual(['c'])
+  })
+})
+
+describe('laneSubsections', () => {
+  it('drops empty sub-sections', () => {
+    expect(laneSubsections([row('team', 'n')]).map((section) => section.key)).toEqual(['normal'])
   })
 })
 
 describe('groupByPerson', () => {
-  it('groups rows by employee', () => {
+  it('groups by employee in first-seen order, oldest row leading', () => {
     const rows = [
-      { employee: 'E-001', employee_name: 'Alice', kind: 'leave' },
-      { employee: 'E-001', employee_name: 'Alice', kind: 'timesheet' },
-      { employee: 'E-002', employee_name: 'Bob', kind: 'leave' },
+      { employee: 'E-1', employee_name: 'Alice', name: 'a1' },
+      { employee: 'E-2', employee_name: 'Bob', name: 'b1' },
+      { employee: 'E-1', employee_name: 'Alice', name: 'a2' },
     ]
     const groups = groupByPerson(rows)
-    expect(groups).toHaveLength(2)
-    const alice = groups.find((g) => g.employee_name === 'Alice')
-    expect(alice.count).toBe(2)
-  })
-})
-
-describe('groupByApprover', () => {
-  it('groups by approver_user, sorts by oldest_days desc', () => {
-    const rows = [
-      { approver_user: 'user-a', approver_name: 'Alice', age_days: 5 },
-      { approver_user: 'user-b', approver_name: 'Bob', age_days: 10 },
-    ]
-    const groups = groupByApprover(rows)
-    expect(groups).toHaveLength(2)
-    expect(groups[0].approver_name).toBe('Bob') // 10 days first
+    expect(groups.map((group) => group.employee)).toEqual(['E-1', 'E-2'])
+    expect(groups[0].rows.map((r) => r.name)).toEqual(['a1', 'a2'])
+    expect(groups[0].oldest.name).toBe('a1')
   })
 })

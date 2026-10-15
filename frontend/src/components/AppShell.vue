@@ -68,7 +68,12 @@ const unreadLabel = computed(() => (unread.value > 9 ? '9+' : String(unread.valu
 // empty queue, the same "always present" rule `canApprove` already gives HR,
 // but IT holds none of the leave/timesheet/attendance approval capability
 // `canApprove` otherwise means.
-const isManager = computed(() => session.canApprove || session.canWorkRequests)
+//
+// Plan 2026-10-15-002 U4: HR User has no approve right but oversees pending
+// timesheets, so `canOverseeTimesheets` opens the item too.
+const isManager = computed(
+  () => session.canApprove || session.canWorkRequests || session.canOverseeTimesheets,
+)
 const navItems = computed(() =>
   NAV.filter(
     (item) =>

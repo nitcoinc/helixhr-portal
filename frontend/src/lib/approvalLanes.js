@@ -1,89 +1,91 @@
-// Plan 2026-10-15-002 U5: lane helpers for the Approvals page.
-// Each row from `get_my_approvals` carries a `lane` key: "team", "hr", or "it".
-// `laneSections(rows)` builds the ordered lane structure.
+// Plan 2026-10-15-002 KTD9: the Approvals page's grouping as pure helpers, so
+// the lane order and the empty-lane rules are unit-tested rather than living
+// inline in `Approvals.vue`. The server tags each queue row with `lane`
+// ("team", "hr" or "it", KTD1); these functions only group.
 
-const LANE_ORDER = ['team', 'decided', 'hr', 'it']
-
-const LANE_LABELS = {
+export const LANE_TITLES = {
   team: 'My team',
   decided: 'Decided by me',
   hr: 'HR',
   it: 'IT',
 }
 
-/** Group rows by lane. Returns ordered sections; empty pending lanes are
- * omitted. Decided is included whenever it has items. */
-export function laneSections(rows, decided) {
-  const lanes = { team: [], hr: [], it: [] }
-  for (const row of rows || []) {
-    const lane = row.lane || 'team'
-    if (lanes[lane] !== undefined) lanes[lane].push(row)
-  }
-
-  const sections = []
-  for (const key of LANE_ORDER) {
-    if (key === 'decided') {
-      if (decided?.length) {
-        sections.push({ key, label: LANE_LABELS[key], rows: decided, collapsed: true })
-      }
-      continue
-    }
-    if (lanes[key].length) {
-      sections.push({ key, label: LANE_LABELS[key], rows: lanes[key], collapsed: false })
-    }
-  }
-
-  return sections
+/** R8/R11: why an approver group cannot be reminded, in words. Keys are the
+ * server resolver's reasons (`helixhr.reminders.resolve_approvers`). */
+export const APPROVER_REASON_TEXT = {
+  inactive: 'Approver has left; set a new Reports to',
+  no_login: 'Approver has no portal login',
+  unmailable: 'Approver has no email address',
+  no_approver: 'No approver set; set Reports to',
 }
 
-/** Group rows by employee (person). Returns array of {employee, employee_name,
- * initials, photo_url, count, rows} sorted by oldest wait first. */
-export function groupByPerson(pending) {
-  const people = []
-  const byEmployee = {}
-  for (const row of pending) {
-    const emp = row.employee || row.employee_name
-    let entry = byEmployee[emp]
-    if (!entry) {
-      entry = {
-        employee: emp,
-        employee_name: row.employee_name,
-        initials: row.initials || (row.employee_name || '?').split(' ').map((s) => s[0]).join('').toUpperCase().slice(0, 2),
-        photo_url: row.photo_url,
-        count: 0,
-        rows: [],
-      }
-      byEmployee[emp] = entry
-      people.push(entry)
-    }
-    entry.count++
-    entry.rows.push(row)
-  }
-  return people
+const PENDING_LANES = ['team', 'hr', 'it']
+
+/** Plan 2026-10-04-003 U7 (R13, R19): inside a lane, change requests (never
+ * batchable) first, then the rows the server flagged, then everything else.
+ * Empty sub-sections are dropped. */
+export function laneSubsections(rows) {
+  return [
+    {
+      key: 'change',
+      title: 'Change requests',
+      note: 'One decision at a time, never in bulk.',
+      rows: rows.filter((row) => row.kind === 'change'),
+    },
+    {
+      key: 'flagged',
+      title: 'Needs a look',
+      note: 'Something on these rows is unusual. Decide each one on its own evidence.',
+      rows: rows.filter((row) => row.kind !== 'change' && row.needs_look),
+    },
+    {
+      key: 'normal',
+      title: 'Looks normal',
+      note: '',
+      rows: rows.filter((row) => row.kind !== 'change' && !row.needs_look),
+    },
+  ].filter((section) => section.rows.length)
 }
 
-/** Group pending items by approver_user. Returns array of {approver_user,
- * approver_name, count, oldest_days, rows} for oversight views. */
-export function groupByApprover(rows) {
+/**
+ * R1/R2: the Approvals tab's lanes, in order My team, Decided by me, HR, IT.
+ * A pending lane with no rows is dropped; Decided appears whenever
+ * `decidedCount` is non-zero, so with My team empty it comes first. A row
+ * with no lane tag counts as the caller's own team.
+ */
+export function laneSections(rows, decidedCount = 0) {
+  const byLane = { team: [], hr: [], it: [] }
+  for (const row of rows || []) (byLane[row.lane] || byLane.team).push(row)
+  const lanes = []
+  for (const key of PENDING_LANES) {
+    if (byLane[key].length) {
+      lanes.push({ key, title: LANE_TITLES[key], rows: byLane[key], sections: laneSubsections(byLane[key]) })
+    }
+    if (key === 'team' && decidedCount) lanes.push({ key: 'decided', title: LANE_TITLES.decided, rows: [], sections: [] })
+  }
+  return lanes
+}
+
+/** R14 (plan 2026-10-04-003): one group per person, in first-seen order --
+ * the rows arrive oldest first, so each group leads with its oldest item. */
+export function groupByPerson(rows) {
   const groups = []
-  const byUser = {}
+  const index = {}
   for (const row of rows || []) {
-    const key = row.approver_user || '__none__'
-    let group = byUser[key]
+    let group = index[row.employee]
     if (!group) {
       group = {
-        approver_user: row.approver_user,
-        approver_name: row.approver_name || 'Unassigned',
-        count: 0,
-        oldest_days: 0,
+        employee: row.employee,
+        employee_name: row.employee_name,
+        initials: row.initials,
+        photo_url: row.photo_url,
+        oldest: row,
         rows: [],
       }
-      byUser[key] = group
+      index[row.employee] = group
       groups.push(group)
     }
-    group.count++
     group.rows.push(row)
-    if (row.age_days && row.age_days > group.oldest_days) group.oldest_days = row.age_days
   }
-  return groups.sort((a, b) => b.oldest_days - a.oldest_days)
+  return groups
 }
