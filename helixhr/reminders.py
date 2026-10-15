@@ -1268,3 +1268,157 @@ def _role_holders(role):
 def _active_hr_managers():
 	"""Who receives `hr_overdue_summary` (R24)."""
 	return [user for user in _mailable(_role_holders(_HR_ROLE)) if user != "Administrator"]
+
+
+# --- Plan 2026-10-15-002: timesheet oversight and reminders (U2/U3) ---------
+#
+# KTD3: new approver resolver, separate from the digest's `_manager_owner`.
+# Returns structured data with approver_user, approver_employee, approver_name,
+# and reason where reason is one of none, inactive, no_login, unmailable or
+# no_approver. Groups key on user id, then on employee, then on a
+# no-approver bucket. Owners are resolved in batches (one Employee read and
+# one User read per call).
+
+APPROVER_REASON_NONE = "none"
+APPROVER_REASON_INACTIVE = "inactive"
+APPROVER_REASON_NO_LOGIN = "no_login"
+APPROVER_REASON_UNMAILABLE = "unmailable"
+APPROVER_REASON_NO_APPROVER = "no_approver"
+
+# Redis guard key format for reminders (KTD6).
+REMINDER_GUARD_PREFIX = "helixhr:reminder"
+
+
+# --- imports from api.py (avoid circular at module level) -------------------
+
+def _resolve_approver(employee):
+	"""KTD3: one employee's timesheet approver, with reason.
+
+	Returns a dict with keys: approver_user, approver_employee, approver_name, reason.
+	"""
+	reports_to = frappe.db.get_value("Employee", employee, "reports_to")
+	if not reports_to:
+		return {
+			"approver_user": None,
+			"approver_employee": None,
+			"approver_name": None,
+			"reason": APPROVER_REASON_NO_APPROVER,
+		}
+	manager = frappe.db.get_value(
+		"Employee", reports_to, ["user_id", "employee_name", "status"], as_dict=True
+	)
+	if not manager:
+		return {
+			"approver_user": None,
+			"approver_employee": reports_to,
+			"approver_name": None,
+			"reason": APPROVER_REASON_NO_APPROVER,
+		}
+	if not manager.user_id:
+		return {
+			"approver_user": None,
+			"approver_employee": reports_to,
+			"approver_name": manager.employee_name,
+			"reason": APPROVER_REASON_NO_LOGIN,
+		}
+	if manager.status != "Active":
+		return {
+			"approver_user": manager.user_id,
+			"approver_employee": reports_to,
+			"approver_name": manager.employee_name,
+			"reason": APPROVER_REASON_INACTIVE,
+		}
+	user = frappe.db.get_value("User", manager.user_id, ["enabled", "email"], as_dict=True)
+	if not user or not user.enabled:
+		return {
+			"approver_user": manager.user_id,
+			"approver_employee": reports_to,
+			"approver_name": manager.employee_name,
+			"reason": APPROVER_REASON_NO_LOGIN,
+		}
+	if not user.email:
+		return {
+			"approver_user": manager.user_id,
+			"approver_employee": reports_to,
+			"approver_name": manager.employee_name,
+			"reason": APPROVER_REASON_UNMAILABLE,
+		}
+	return {
+		"approver_user": manager.user_id,
+		"approver_employee": reports_to,
+		"approver_name": manager.employee_name,
+		"reason": APPROVER_REASON_NONE,
+	}
+
+
+def collect_pending_timesheets(company, approver_user=None, overdue_only=False, limit=500):
+	"""Plan 2026-10-15-002 U2: Pending Approval and Pending HR timesheets in
+	a company, grouped by approver.
+
+	Returns list of ``{"kind", "name", "employee", "employee_name",
+	"approver_user", "approver_employee", "approver_name", "approver_reason",
+	"pending_since", "age_days", "overdue"}``.
+
+	When ``approver_user`` is set, filters to that approver's rows. When
+	``overdue_only`` is set, filters to overdue rows only. The company
+	filter is applied in SQL before the 500-per-doctype bound (KTD2).
+	"""
+	from helixhr.api import TIMESHEET_PENDING_HR, is_overdue
+
+	today = getdate(company_today(company))
+	threshold = frappe.db.get_single_value("HelixHR Settings", "approval_overdue_days") or 3
+	cutoff = add_days(today, -threshold)
+	items = []
+
+	for state in ("Pending Approval", "Pending HR"):
+		filters = {
+			"docstatus": 0,
+			"workflow_state": state,
+			"company": company,
+		}
+		if approver_user:
+			# Narrow to timesheets whose employee's approver is approver_user.
+			# Resolve via the employee's reports_to chain.
+			approver_employees = frappe.get_all(
+				"Employee",
+				filters={"user_id": approver_user, "status": "Active"},
+				pluck="name",
+			)
+			if approver_employees:
+				filters["employee"] = ["in", frappe.get_all(
+					"Employee",
+					filters={"reports_to": approver_employees[0], "company": company},
+					pluck="name",
+				)]
+			else:
+				# No matching employee; return empty.
+				continue
+
+		for row in frappe.get_all(
+			"Timesheet",
+			filters=filters,
+			fields=["name", "employee", "employee_name", "start_date", "workflow_state", PENDING_SINCE],
+			order_by=f"{PENDING_SINCE} asc",
+			limit=limit,
+		):
+			since = row.get(PENDING_SINCE)
+			if not since:
+				continue
+			age = (today - getdate(since)).days if since else 0
+			if overdue_only and age <= threshold:
+				continue
+
+			resolved = _resolve_approver(row.employee)
+			items.append({
+				"kind": "timesheet",
+				"name": row.name,
+				"employee": row.employee,
+				"employee_name": row.employee_name or row.employee,
+				"pending_since": str(since),
+				"age_days": max(0, age),
+				"overdue": age > threshold,
+				"is_hr": row.workflow_state == TIMESHEET_PENDING_HR,
+				**resolved,
+			})
+
+	return items

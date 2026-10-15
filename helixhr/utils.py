@@ -1947,6 +1947,9 @@ RATE_LIMIT_POLICY = {
 	"search_company_access_targets": (60, 60),
 	"save_company_access": (30, 3600),
 	"revoke_company_access": (30, 3600),
+	# Plan 2026-10-15-002: timesheet oversight and reminders.
+	"get_pending_by_approver": (60, 60),
+	"send_timesheet_reminder": (20, 3600),
 	"delete_company_access": (30, 3600),
 	# Plan 2026-10-07-001 U4: the Approvers cleanup -- a preview read and a
 	# rare batch apply.
