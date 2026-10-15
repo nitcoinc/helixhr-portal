@@ -1746,3 +1746,33 @@ first. `?view=overdue` is an alias for All pending with Overdue only on.
   off, or the mail failed) the claim is released. A Redis loss allows at most
   one early reminder; the per-caller `RATE_LIMIT_POLICY` entry (20/hour)
   bounds that. The digest's guard and this one never touch each other.
+
+### Request conversation (plan 2026-10-15-003)
+
+Both the employee and the handling team can comment on a request while it is
+Open, In Progress or Waiting on Employee. Comments are stored as Frappe
+Comments and rendered by ``_request_thread``.
+
+- **Employee comments.** ``reply_to_my_request`` is widened (KTD1): accepts
+  all three open states. Only a comment while Waiting on Employee moves the
+  status to In Progress. ``can_comment`` replaces ``can_reply`` in payloads.
+- **Handler comments.** ``comment_on_request`` (KTD2) writes a Comment and
+  never changes status. The handler must hold the request's ``routed_to_role``
+  and be in the employee's company (R3). Unscoped HR Managers are exempt from
+  the company check for HR-routed requests.
+- **Author names.** Thread entries carry the commenter's full name, resolved
+  server-side. Administrator and system entries show "HR team" or "IT team"
+  by the request's routed role (R5).
+- **Need info from Open.** Two new workflow transitions (KTD3) allow
+  "Need info" from Open for both HR Manager and IT Team. The asker becomes
+  the picker (``before_save`` stamps ``picked_up_by``/``picked_up_on``, KTD4).
+- **Bank-number guard.** On correction requests, comments, replies and
+  decision reasons are checked for account-number-shaped text (KTD7). The
+  guard normalises text with NFKC, skips date-shaped tokens, and refuses
+  runs of 8+ digits or IBAN patterns.
+- **Company-scoped mails.** ``request_comment`` event (KTD5) mails only
+  role holders in the employee's company. Unscoped HR Managers still receive
+  mail for HR-routed requests.
+- **Desk comments.** Comments added from Desk already appear in the
+  thread. Internal notes (deferred) would be a separate marker the portal
+  projection skips.
