@@ -1682,3 +1682,46 @@ roster keeps the same rules as every other HR surface here:
   `ignore_permissions` on a write, and nothing reaches `frappe.client`.
 - Recurring schedules (Shift Schedule Assignment), swaps and employee
   shift requests stay out; Desk still owns them.
+
+### Cross-company project reports (plan 2026-10-15-001)
+
+A combined run widens project-scoped reports across the caller's allowed
+companies, reversing the "one company per run" decision (KTD11 of plan
+2026-10-14-001) for project reports only.
+
+- **Sentinel.** The ``"__all"`` sentinel selects every run-capable company.
+  The server resolves it into a ``combined`` scope with the concrete
+  company list. Saved views, export rows and fingerprints all carry the
+  sentinel verbatim and re-resolve it on use.
+- **Company column.** Combined runs add ``ts.company`` to the result set
+  so each row shows its data company.
+- **Picker widening.** The project picker lists projects owned by scope
+  companies *and* projects with logged hours from scope companies (KTD4).
+  Task and employee pickers are similarly widened per-company. The
+  ``project_scope_filters`` utility is not touched; widening is
+  report-local.
+- **Export stored set.** Combined exports store the concrete company set
+  in a child table (``HelixHR Report Export Company``). Every deferred
+  action (background job, download, expiry) re-checks the stored set and
+  never widens to a re-resolved one (R7). A single-company export row's
+  empty child table behaves as before.
+- **Export gate.** A combined export is refused when any company in the
+  set lacks export rights. The reason names the blocking company.
+
+### People & access (plan 2026-10-15-001)
+
+One Settings section for one person: their managed portal roles, HR roles
+and cross-company grant, in one screen with one Save.
+
+- **Reach split.** A Portal Admin may edit managed roles only for targets
+  in their home company, and the grant only for companies in their
+  ``grantable_companies`` reach. HR roles (HR User, HR Manager) are System
+  Manager only (KTD9). Self-edit is refused (R14).
+- **HR Manager self-UP.** Saving HR Manager creates the target's self
+  Employee User Permission. Removing HR Manager removes it (R13).
+- **Side effects deferred.** The grant's cache clear and export expiry run
+  after commit (KTD7), via a ``defer_side_effects`` flag on
+  ``HelixHRCompanyAccess``. A rollback then never leaves deleted export
+  files behind.
+- **Profiles.** Frontend-only templates over role and grant toggles. The
+  server validates the resulting toggle set, never a profile name (KTD8).

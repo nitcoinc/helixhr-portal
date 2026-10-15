@@ -1722,3 +1722,31 @@ IT / Asset category, `HR-REQ-…` when the prefix is blank. Facts operators need
   again, read the row's `status`, `decided_by`, `decision_note` and
   `amended_timesheet`. Accepted with an amended copy means Accept fired.
   Declined with a Draft means look for a Send back or a second request.
+
+### Project report missing hours from the other company
+
+A combined run covers every company the caller's grant allows, but an
+incorrect filter scope or a missing SQL condition can silently drop rows.
+
+1. Check the result's ``columns`` for a ``company`` field. Without it,
+   the scope was single-company, not combined.
+2. Check ``result.filters.company`` for ``__all`` (the sentinel). If it is
+   a named company, the resolver was given a specific company, not the
+   combined option.
+3. Verify ``_timesheet_scope_conditions`` or ``_hours_by_project`` emitted
+   ``ts.company IN %(scope_companies)s`` (combined branch). A mis-cased
+   ``"combined"`` vs ``"combine"`` or a missing kind check produces an
+   empty set.
+
+### Who can change what (People & access)
+
+The People & access Settings section replaces the Portal roles and Company
+access sections. The reach split can confuse:
+
+| Action | Who | Why blocked |
+|---|---|---|
+| Edit managed roles | Portal Admin, home company only | The target is outside the admin's home company "home company only" |
+| Edit grant | Portal Admin, any grantable company | Grant company outside `grantable_companies` "You can't grant access to..." |
+| Edit HR roles | System Manager only | Portal Admin toggles are locked |
+| Self-edit | Nobody | "You can't change your own access here." |
+| Role Profile user | Nobody | "This person's roles come from a role profile." |

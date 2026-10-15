@@ -1847,6 +1847,21 @@ def check_company_access_grants():
 	detail = f"{len(grants)} enabled: {'; '.join(listed)}"
 	if problems:
 		return _result(label, WARN, f"{'; '.join(problems)}. {detail}")
+	# Plan 2026-10-15-001 R5/U7: WARN when a holder has run rights but not
+	# export rights in at least one company.
+	if not frappe.db.exists("DocType", "HelixHR Report Export Company"):
+		return _result(label, FAIL, "HelixHR Report Export Company doctype is missing.")
+	export_gaps = []
+	for grant in grants:
+		if grant.level in ("All data", "Reports only") and not frappe.db.get_value(
+			"HelixHR Company Access", grant.name, "allow_export"
+		):
+			export_gaps.append(grant.user)
+	if export_gaps:
+		return _result(
+			label, WARN,
+			f"{' '.join(export_gaps)}: grant holders without export right. {detail}",
+		)
 	return _result(label, PASS, detail)
 
 
