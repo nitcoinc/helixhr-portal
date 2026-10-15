@@ -737,6 +737,8 @@ _HR_REQUEST_EDGES = frozenset(
 		for state, action, next_state in (
 			("Open", "Pick up", "In Progress"),
 			("Open", "Reject", "Rejected"),
+			# Plan 2026-10-15-003 KTD3: Need info straight from Open.
+			("Open", "Need info", "Waiting on Employee"),
 			("In Progress", "Need info", "Waiting on Employee"),
 			("In Progress", "Done", "Done"),
 			("In Progress", "Reject", "Rejected"),

@@ -13,9 +13,9 @@ from helixhr.utils import resolve_admin_scope, session_company
 # The first worker claim and terminal outcomes. Both are read off the
 # DocType's own Select options; a status added in Desk that is in neither set
 # simply stamps nothing rather than guessing (P2-U8, P5-R6).
-PICKED_UP_STATUSES = ("In Progress",)
-# Plan 2026-10-15-003 KTD4: Need info from Open also stamps the picker.
-NEED_INFO_STATUSES = ("Waiting on Employee",)
+# Plan 2026-10-15-003 KTD4: Need info straight from Open is a pick-up too, so
+# Waiting on Employee stamps the asker when nobody picked the request up yet.
+PICKED_UP_STATUSES = ("In Progress", "Waiting on Employee")
 CLOSED_STATUSES = ("Done", "Rejected")
 
 
@@ -69,10 +69,6 @@ class HRRequest(Document):
 			return
 
 		if not self.picked_up_on and self.status in PICKED_UP_STATUSES:
-			self.picked_up_on = now_datetime()
-			self.picked_up_by = frappe.session.user
-		# Plan 2026-10-15-003 KTD4: Need info from Open stamps picker too.
-		if not self.picked_up_on and not self.picked_up_by and self.status in NEED_INFO_STATUSES:
 			self.picked_up_on = now_datetime()
 			self.picked_up_by = frappe.session.user
 		if not self.closed_on and self.status in CLOSED_STATUSES:
