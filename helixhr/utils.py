@@ -450,6 +450,25 @@ NOTIFICATION_EVENTS = {
 		),
 		"action_label": "Open request",
 	},
+	# Plan 2026-10-15-003: handler comment on a request.
+	"request_comment": {
+		"label": "Comment on a request",
+		"audience": "Employee",
+		"variables": {
+			"handler_name": ("Handler's name", "Jane HR"),
+			"category": ("Request category", "IT / Asset"),
+			"subject": ("The request's subject", "Laptop replacement"),
+			"comment_excerpt": ("The start of the comment", "I've checked this with finance."),
+			"action_url": ("Link to the request", "https://hr.example.com/helixhr/requests"),
+		},
+		"subject": "{{ handler_name }} commented: {{ subject }}",
+		"body": (
+			"<p>Hi,</p>"
+			"<p>{{ handler_name }} added a comment on your {{ category }} request “{{ subject }}”:</p>"
+			"<blockquote>{{ comment_excerpt }}</blockquote>"
+		),
+		"action_label": "Open request",
+	},
 	"approval_overdue_digest": {
 		"label": "Overdue approvals digest",
 		"audience": "Approver",
@@ -1918,6 +1937,8 @@ RATE_LIMIT_POLICY = {
 	# Both trigger mail to the routed role, so an unbounded reply or
 	# attachment is mail amplification, not just a write to police (P5-U6).
 	"reply_to_my_request": (20, 3600),
+	# Plan 2026-10-15-003: handler comment on a request.
+	"comment_on_request": (20, 3600),
 	"attach_to_request_reply": (20, 3600),
 	"mark_notifications_read": (60, 60),
 	# P3-U1 step 5 / P3-R25. Writes first; the two reads are bounded too
