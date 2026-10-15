@@ -2551,10 +2551,10 @@ def run_background_export(export, filters=None, group_by=None, sort=None, hidden
 	file is a private File attached to the owner-only export row, which is
 	what keeps it downloadable by the requester alone. Either way the
 	requester gets a Notification Log routed to Reports."""
-	from helixhr.utils import can_export_report, resolve_report_access
+	from helixhr.utils import SENTINEL_ALL, can_export_report, resolve_report_access
 
 	row = frappe.db.get_value(
-		"HelixHR Report Export", export, ["name", "owner", "report_key", "format", "status"], as_dict=True
+		"HelixHR Report Export", export, ["name", "owner", "report_key", "format", "status", "company"], as_dict=True
 	)
 	if not row or row.status != "Queued":
 		return
@@ -2564,11 +2564,30 @@ def run_background_export(export, filters=None, group_by=None, sort=None, hidden
 		frappe.db.set_value("HelixHR Report Export", export, "status", "Running")
 		frappe.db.commit()  # nosemgrep -- the "My exports" panel shows Running
 		try:
-			access = resolve_report_access(row.owner, row.report_key, _parse(filters, {}).get("company"))
-			if not can_export_report(row.owner, row.report_key, access=access):
-				raise _ExportRefused(_("You no longer have access to export this report."))
+			# Plan 2026-10-15-001 R7: for combined exports, resolve the
+			# stored set and re-check each company.
+			company_filter = _parse(filters, {}).get("company")
+			if row.company == SENTINEL_ALL:
+				stored = frappe.get_all(
+					"HelixHR Report Export Company",
+					filters={"parent": export, "parenttype": "HelixHR Report Export"},
+					pluck="company",
+				)
+				# Re-check each stored company individually.
+				for name in stored:
+					if not can_export_report(row.owner, row.report_key, name):
+						raise _ExportRefused(_("You no longer have access to export this report."))
+				access = resolve_report_access(row.owner, row.report_key, SENTINEL_ALL)
+			else:
+				access = resolve_report_access(row.owner, row.report_key, company_filter)
+				if not can_export_report(row.owner, row.report_key, access=access):
+					raise _ExportRefused(_("You no longer have access to export this report."))
 			entry = get_entry(row.report_key)
 			scope = access["export_scope"]
+			# Plan 2026-10-15-001 R7: run over the stored set as an explicit
+			# scope; never widen to a re-resolved set.
+			if row.company == SENTINEL_ALL and stored:
+				scope = {"kind": "combined", "companies": stored}
 			result = run(row.report_key, scope, filters, group_by, sort)
 			total_rows = result["shaped"]["total_rows"]
 			if export_mode(row.format, total_rows) == "refused":
@@ -2578,7 +2597,11 @@ def run_background_export(export, filters=None, group_by=None, sort=None, hidden
 			)
 			# A revoke can land while the file is being built; check again
 			# before it becomes downloadable.
-			if not can_export_report(row.owner, row.report_key, _parse(filters, {}).get("company")):
+			if row.company == SENTINEL_ALL:
+				for name in stored:
+					if not can_export_report(row.owner, row.report_key, name):
+						raise _ExportRefused(_("You no longer have access to export this report."))
+			elif not can_export_report(row.owner, row.report_key, company_filter):
 				raise _ExportRefused(_("You no longer have access to export this report."))
 			file = frappe.get_doc(
 				{

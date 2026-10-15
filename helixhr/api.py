@@ -10176,6 +10176,7 @@ def request_export(report_key, format, filters=None, group_by=None, sort=None, h
 	filters" sentence.
 	"""
 	from helixhr import reports
+	from helixhr.utils import SENTINEL_ALL
 
 	rate_limit_per_user("request_export")
 	access = _report_access(report_key, _requested_company(filters), right="can_export")
@@ -10199,12 +10200,18 @@ def request_export(report_key, format, filters=None, group_by=None, sort=None, h
 	fingerprint = _export_fingerprint(
 		report_key, format, result["filters"], result["groups_applied"], sort, hidden
 	)
+	company_val = access["company"]
+	# Plan 2026-10-15-001 R5: store the concrete company set for combined runs.
+	if company_val == SENTINEL_ALL and access.get("scope", {}).get("kind") == "combined":
+		stored_companies = access["scope"].get("companies", [])
+	else:
+		stored_companies = []
 	row = {
 		"doctype": "HelixHR Report Export",
 		"report_key": report_key,
 		"report_label": entry["label"],
 		"format": format,
-		"company": access["company"],
+		"company": company_val,
 		"exporter_company": frappe.db.get_value(  # plan 2026-10-14-001 KTD12/U9
 			"Employee", {"user_id": frappe.session.user, "status": "Active"}, "company"
 		),
@@ -10218,12 +10225,17 @@ def request_export(report_key, format, filters=None, group_by=None, sort=None, h
 	if mode == "refused":
 		frappe.throw(_(_EXPORT_TOO_LARGE))
 	if mode == "background":
-		return _queue_export(row, result, sort, hidden)
+		return _queue_export(row, result, sort, hidden, stored_companies)
 
 	content, filename, content_type = reports.build_export(entry, result, format, scope, raw, hidden)
 	log = frappe.get_doc({**row, "mode": "Inline", "status": "Ready", "file_name": filename}).insert(
 		ignore_permissions=True
 	)
+	# Plan 2026-10-15-001 R5: store the concrete company set for combined runs.
+	if stored_companies:
+		for name in stored_companies:
+			log.append("companies", {"company": name})
+		log.save(ignore_permissions=True)
 
 	token = frappe.generate_hash(length=32)
 	frappe.cache.set_value(
@@ -10276,10 +10288,17 @@ def get_export_log(start=0, page_length=50):
 		return {"rows": [], "has_more": False}
 	filters, or_filters = {}, None
 	if scope["kind"] == "company":
-		from helixhr.utils import grantable_companies
+		from helixhr.utils import SENTINEL_ALL, grantable_companies
 
 		reach = grantable_companies(frappe.session.user) or [scope["company"]]
-		or_filters = [["company", "in", reach], ["exporter_company", "in", reach]]
+		# Plan 2026-10-15-001 R7: also match rows whose stored companies
+		# touch the admin's reach. Combined exports carry the sentinel in
+		# the company field; the child table has the concrete set.
+		or_filters = [
+			["company", "in", reach],
+			["company", "=", SENTINEL_ALL],
+			["exporter_company", "in", reach],
+		]
 	rows = frappe.get_all(
 		"HelixHR Report Export",
 		filters=filters,
@@ -10317,9 +10336,10 @@ _EXPORT_USER_ACTIVE_CAP = 2
 _MY_EXPORTS_LIMIT = 20
 
 
-def _queue_export(row, result, sort, hidden):
+def _queue_export(row, result, sort, hidden, stored_companies=None):
 	"""Insert a Queued background export and enqueue its job -- or hand back
-	the caller's identical Queued/Running one. The job re-resolves access."""
+	the caller's identical Queued/Running one. The job re-resolves access.
+	``stored_companies`` is the concrete company set for combined runs (R5)."""
 	user = frappe.session.user
 	existing = frappe.get_all(
 		"HelixHR Report Export",
@@ -10336,6 +10356,12 @@ def _queue_export(row, result, sort, hidden):
 		frappe.throw(_("You already have two exports being prepared. Try again when one is ready."))
 
 	log = frappe.get_doc({**row, "mode": "Background", "status": "Queued"}).insert(ignore_permissions=True)
+	# Plan 2026-10-15-001 R5: store the concrete company set for combined runs.
+	stored_companies = stored_companies or []
+	if stored_companies:
+		for name in stored_companies:
+			log.append("companies", {"company": name})
+		log.save(ignore_permissions=True)
 	frappe.enqueue(
 		"helixhr.reports.run_background_export",
 		queue="long",
@@ -10391,10 +10417,20 @@ def download_report_export(export):
 	)
 	if not row or row.owner != frappe.session.user or row.status != "Ready" or not row.file:
 		frappe.throw(_(_EXPORT_GONE), frappe.PermissionError)
-	from helixhr.utils import can_export_report
+	from helixhr.utils import SENTINEL_ALL, can_export_report
 
 	# R15: the right to this company's data is re-checked at download time.
-	if not can_export_report(frappe.session.user, row.report_key, row.company):
+	# Plan 2026-10-15-001 R7: for combined exports, every stored company is
+	# re-checked.
+	if row.company == SENTINEL_ALL:
+		stored = frappe.get_all(
+			"HelixHR Report Export Company",
+			filters={"parent": export, "parenttype": "HelixHR Report Export"},
+			pluck="company",
+		)
+		if any(not can_export_report(frappe.session.user, row.report_key, name) for name in stored):
+			frappe.throw(_(_EXPORT_GONE), frappe.PermissionError)
+	elif not can_export_report(frappe.session.user, row.report_key, row.company):
 		frappe.throw(_(_EXPORT_GONE), frappe.PermissionError)
 	file_name = frappe.db.get_value(
 		"File", {"file_url": row.file, "attached_to_doctype": "HelixHR Report Export", "attached_to_name": export}
