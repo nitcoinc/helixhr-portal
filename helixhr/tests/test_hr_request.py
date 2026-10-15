@@ -22,6 +22,9 @@ from helixhr.tests.utils import (
 	suspend_chart_of_account_fixtures,
 )
 
+# Plan 2026-10-15-003 KTD7: "123456789012" in full-width digits (U+FF10..).
+_FULL_WIDTH_DIGITS = "".join(chr(0xFF10 + int(digit)) for digit in "123456789012")
+
 
 class _UploadedFile:
 	"""The shape `frappe.request.files["file"]` has: a name and a stream.
@@ -727,7 +730,8 @@ class TestRequestApprovalQueue(IntegrationTestCase):
 		name = self._file()
 		frappe.set_user(self.it_user)
 		detail = get_approval_detail("request", name)
-		self.assertEqual(set(detail["actions"]), {"Pick up", "Reject"})
+		# Plan 2026-10-15-003 KTD3: Need info is offered from Open too.
+		self.assertEqual(set(detail["actions"]), {"Pick up", "Need info", "Reject"})
 
 		with self.assertRaises(frappe.ValidationError):
 			act_on_approval("HR Request", name, "Done", **self._token(name))
@@ -805,10 +809,14 @@ class TestRequestApprovalQueue(IntegrationTestCase):
 		self.assertEqual(len(to_it_user), 1)
 		self.assertIn("A Dell Latitude", frappe.db.get_value("Email Queue", to_it_user[0], "message"))
 
-	def test_reply_against_a_status_that_isnt_waiting_on_employee_is_refused(self):
-		from helixhr.api import reply_to_my_request
+	def test_reply_against_a_closed_request_is_refused(self):
+		"""Plan 2026-10-15-003 R1/R4: Open and In Progress take comments now;
+		a closed request does not."""
+		from helixhr.api import act_on_approval, reply_to_my_request
 
 		name = self._file()
+		frappe.set_user(self.it_user)
+		act_on_approval("HR Request", name, "Reject", comment="Not this year.", **self._token(name))
 		frappe.set_user(EMPLOYEE_USER)
 		with self.assertRaises(frappe.ValidationError):
 			reply_to_my_request(name, "hello", expected_modified=self._token(name)["expected_modified"])
@@ -1439,6 +1447,81 @@ class TestProfileCorrection(IntegrationTestCase):
 
 	# --- no plaintext anywhere ---------------------------------------------
 
+	# --- conversation guard (plan 2026-10-15-003 R10, R11) -----------------
+
+	def _token(self, name):
+		row = frappe.db.get_value("HR Request", name, ["modified", "status"], as_dict=True)
+		return {"expected_modified": str(row.modified), "expected_state": row.status}
+
+	def test_account_numbers_in_comments_are_refused_with_each_sides_sentence(self):
+		from helixhr.api import comment_on_request, reply_to_my_request
+
+		name = self._file()["name"]
+		frappe.set_user(EMPLOYEE_USER)
+		for text in ("my account is 1234 5678 9012", _FULL_WIDTH_DIGITS, "GB82WEST12345698765432"):
+			with self.assertRaisesRegex(frappe.ValidationError, "Use the bank detail fields on this request"):
+				reply_to_my_request(name, text)
+
+		frappe.set_user(self.hr_user)
+		for text in ("1234.5678.9012", "GB82 WEST 1234 5698 7654 32"):
+			with self.assertRaisesRegex(frappe.ValidationError, "Ask the employee to use the bank detail fields"):
+				comment_on_request(name, text)
+
+		frappe.set_user("Administrator")
+		self.assertFalse(
+			frappe.get_all(
+				"Comment",
+				filters={"reference_doctype": "HR Request", "reference_name": name, "comment_type": "Comment"},
+			)
+		)
+
+	def test_references_and_dates_still_pass_on_a_correction(self):
+		from helixhr.api import reply_to_my_request
+
+		name = self._file()["name"]
+		frappe.set_user(EMPLOYEE_USER)
+		reply_to_my_request(name, "Ref 1234, letter dated 2026-10-15 and 15/10/2026.")
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("HR Request", name, "status"), "Open")
+
+	def test_a_need_info_or_reject_reason_with_an_iban_is_refused(self):
+		from helixhr.api import act_on_approval
+
+		name = self._file()["name"]
+		frappe.set_user(self.hr_user)
+		for action in ("Need info", "Reject"):
+			with self.assertRaisesRegex(frappe.ValidationError, "Ask the employee to use the bank detail fields"):
+				act_on_approval(
+					"HR Request", name, action, comment="Is it GB82WEST12345698765432?", **self._token(name)
+				)
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("HR Request", name, "status"), "Open")
+
+	def test_correction_comment_mail_carries_no_message_text(self):
+		from helixhr.api import comment_on_request
+
+		name = self._file()["name"]
+		employee_user = frappe.db.get_value("Employee", self.employee_name, "user_id")
+		frappe.set_user(self.hr_user)
+		comment_on_request(name, "Please upload a clearer secret-letter scan.")
+		frappe.set_user("Administrator")
+		new = set(frappe.get_all("Email Queue", pluck="name")) - self._mail_before
+		mails = frappe.get_all(
+			"Email Queue Recipient",
+			filters={"parent": ["in", list(new) or [""]], "recipient": employee_user},
+			pluck="parent",
+		)
+		self.assertTrue(mails)
+		for mail in mails:
+			self.assertNotIn("secret-letter", frappe.db.get_value("Email Queue", mail, "message") or "")
+		bells = frappe.get_all(
+			"Notification Log",
+			filters={"document_name": name, "for_user": employee_user},
+			fields=["email_content", "subject"],
+		)
+		self.assertTrue(bells)
+		self.assertTrue(all("secret-letter" not in (row.email_content or "") for row in bells))
+
 	def test_queue_detail_and_own_request_carry_the_masked_copies(self):
 		# U14: what the HR view and the employee's request show.
 		from helixhr.api import get_approval_detail, get_my_approvals, get_my_request
@@ -1866,3 +1949,285 @@ class TestRequestWork(IntegrationTestCase):
 				break
 		self.assertIn(first, found)
 		self.assertIn(second, found)
+
+
+class TestBankNumberGuard(IntegrationTestCase):
+	"""Plan 2026-10-15-003 KTD7: the predicate on its own."""
+
+	def test_account_shapes_are_caught(self):
+		from helixhr.utils import has_bank_number
+
+		for text in (
+			"my account is 1234 5678 9012",
+			"1234.5678.9012",
+			"1234-5678",
+			"12345678",
+			"GB82WEST12345698765432",
+			"GB82 WEST 1234 5698 7654 32",
+			_FULL_WIDTH_DIGITS,
+		):
+			self.assertTrue(has_bank_number(text), text)
+
+	def test_ordinary_text_passes(self):
+		from helixhr.utils import has_bank_number
+
+		for text in (
+			"ref 1234",
+			"2026-10-15",
+			"from 15/10/2026 to 20/10/2026",
+			"invoice INV12345678",
+			"Please CHECK THIS LETTER AGAIN",
+			"",
+		):
+			self.assertFalse(has_bank_number(text), text)
+
+
+class TestRequestConversation(IntegrationTestCase):
+	"""Plan 2026-10-15-003 U1-U3: Need info from Open, comments from both
+	sides in every open state, author names, company-scoped notices."""
+
+	def setUp(self):
+		self.employee_name, _, _, _ = make_test_employee_and_manager()
+		self.it_employee, self.it_user = make_test_it_user()
+		self.hr_user = make_test_hr_manager_employee()[1]
+		ensure_test_email_account()
+		self._mail_before = set(frappe.get_all("Email Queue", pluck="name"))
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		for row in set(frappe.get_all("Email Queue", pluck="name")) - self._mail_before:
+			frappe.db.delete("Email Queue Recipient", {"parent": row})
+			frappe.db.delete("Email Queue", {"name": row})
+
+	def _file(self, category="IT / Asset", details="Mine died"):
+		from helixhr.api import create_my_request
+
+		frappe.set_user(EMPLOYEE_USER)
+		created = create_my_request(
+			category=category, subject="Conversation check", details=details, operation_key=str(uuid.uuid4())
+		)
+		frappe.set_user("Administrator")
+		self.addCleanup(_delete_request, created["name"])
+		return created["name"]
+
+	def _token(self, name):
+		row = frappe.db.get_value("HR Request", name, ["modified", "status"], as_dict=True)
+		return {"expected_modified": str(row.modified), "expected_state": row.status}
+
+	def _act(self, user, name, action, comment=None):
+		from helixhr.api import act_on_approval
+
+		frappe.set_user(user)
+		try:
+			return act_on_approval("HR Request", name, action, comment=comment, **self._token(name))
+		finally:
+			frappe.set_user("Administrator")
+
+	def _bells(self, name, user):
+		return frappe.get_all(
+			"Notification Log", filters={"document_name": name, "for_user": user}, pluck="subject"
+		)
+
+	def _user_with_role(self, user, role, company=None):
+		if company:
+			make_test_user(user, company)
+		elif not frappe.db.exists("User", user):
+			frappe.get_doc(
+				{"doctype": "User", "email": user, "first_name": user.split("@")[0], "send_welcome_email": 0}
+			).insert(ignore_permissions=True)
+		doc = frappe.get_doc("User", user)
+		if role not in [row.role for row in doc.roles]:
+			doc.append("roles", {"role": role})
+			doc.save(ignore_permissions=True)
+			frappe.clear_cache(user=user)
+		return user
+
+	# --- U1: Need info from Open -----------------------------------------
+
+	def test_need_info_from_open_picks_up_and_the_reply_returns_it_to_the_asker(self):
+		from helixhr.api import get_approval_detail, reply_to_my_request
+
+		name = self._file(category="HR Letter")
+		with self.assertRaises(frappe.ValidationError):
+			self._act(self.hr_user, name, "Need info")
+		with self.assertRaises(frappe.PermissionError):
+			self._act(self.it_user, name, "Need info", comment="Which month?")
+
+		self._act(self.hr_user, name, "Need info", comment="Which month?")
+		row = frappe.db.get_value("HR Request", name, ["status", "picked_up_by", "picked_up_on"], as_dict=True)
+		self.assertEqual(row.status, "Waiting on Employee")
+		self.assertEqual(row.picked_up_by, self.hr_user)
+		self.assertIsNotNone(row.picked_up_on)
+
+		frappe.set_user(EMPLOYEE_USER)
+		reply_to_my_request(name, "August", expected_modified=self._token(name)["expected_modified"])
+		frappe.set_user(self.hr_user)
+		detail = get_approval_detail("request", name)
+		self.assertEqual(detail["status"], "In Progress")
+		self.assertEqual(detail["picked_up_by"], self.hr_user)
+		self.assertEqual([entry["message"] for entry in detail["thread"]][-2:], ["Which month?", "August"])
+
+	def test_need_info_on_your_own_request_is_refused(self):
+		from helixhr.api import create_my_request
+
+		frappe.set_user(self.hr_user)
+		created = create_my_request(
+			category="HR Letter", subject="Own", details="x", operation_key=str(uuid.uuid4())
+		)
+		frappe.set_user("Administrator")
+		self.addCleanup(_delete_request, created["name"])
+		with self.assertRaises(frappe.PermissionError):
+			self._act(self.hr_user, created["name"], "Need info", comment="?")
+
+	# --- U2: employee comments -------------------------------------------
+
+	def test_an_employee_comment_while_open_or_in_progress_changes_nothing(self):
+		from helixhr.api import get_my_request, reply_to_my_request
+
+		name = self._file()
+		for status in ("Open", "In Progress"):
+			if status == "In Progress":
+				self._act(self.it_user, name, "Pick up")
+			before = frappe.db.get_value("HR Request", name, "modified")
+			frappe.set_user(EMPLOYEE_USER)
+			# No token: a comment that moves nothing needs none (KTD1).
+			result = reply_to_my_request(name, f"Still waiting ({status})")
+			frappe.set_user("Administrator")
+			self.assertEqual(result["status"], status)
+			self.assertEqual(frappe.db.get_value("HR Request", name, "status"), status)
+			self.assertEqual(frappe.db.get_value("HR Request", name, "modified"), before)
+
+		frappe.set_user(EMPLOYEE_USER)
+		detail = get_my_request(name)
+		employee_name = frappe.db.get_value("Employee", self.employee_name, "employee_name")
+		self.assertEqual(detail["thread"][-1]["author"], employee_name)
+		self.assertTrue(detail["can_comment"])
+		self.assertFalse(detail["closed"])
+		self.assertNotIn("can_reply", detail)
+
+	def test_a_waiting_reply_needs_a_current_token(self):
+		from helixhr.api import reply_to_my_request
+
+		name = self._file()
+		self._act(self.it_user, name, "Need info", comment="Which model?")
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.ValidationError):
+			reply_to_my_request(name, "Dell")
+		with self.assertRaises(frappe.ValidationError):
+			reply_to_my_request(name, "Dell", expected_modified="2001-01-01 00:00:00")
+		self.assertEqual(frappe.db.get_value("HR Request", name, "status"), "Waiting on Employee")
+
+	def test_a_done_request_is_read_only_for_both_sides(self):
+		from helixhr.api import comment_on_request, get_my_request, reply_to_my_request
+
+		name = self._file()
+		self._act(self.it_user, name, "Pick up")
+		self._act(self.it_user, name, "Done")
+		frappe.set_user(EMPLOYEE_USER)
+		with self.assertRaises(frappe.ValidationError):
+			reply_to_my_request(name, "one more thing")
+		detail = get_my_request(name)
+		self.assertFalse(detail["can_comment"])
+		self.assertTrue(detail["closed"])
+		frappe.set_user(self.it_user)
+		with self.assertRaises(frappe.ValidationError):
+			comment_on_request(name, "closing note")
+
+	def test_the_same_digits_pass_on_a_request_that_is_not_a_correction(self):
+		from helixhr.api import reply_to_my_request
+
+		name = self._file()
+		frappe.set_user(EMPLOYEE_USER)
+		reply_to_my_request(name, "Asset tag 1234 5678 9012")
+
+	# --- U2: handler comments --------------------------------------------
+
+	def test_an_it_handler_comments_and_the_employee_sees_the_name_and_a_bell(self):
+		from helixhr.api import comment_on_request, get_approval_detail, get_my_request, mark_my_request_read
+		from helixhr.events import HR_REPLY_SUBJECT_PREFIX
+
+		name = self._file()
+		self._act(self.it_user, name, "Pick up")
+		frappe.set_user(self.it_user)
+		self.assertTrue(get_approval_detail("request", name)["can_comment"])
+		before = frappe.db.get_value("HR Request", name, "modified")
+		result = comment_on_request(name, "Ordering it today.")
+		self.assertEqual(result["status"], "In Progress")
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("HR Request", name, "modified"), before)
+
+		bells = self._bells(name, EMPLOYEE_USER)
+		self.assertTrue(any(subject.startswith(HR_REPLY_SUBJECT_PREFIX) for subject in bells))
+		self.assertFalse(self._bells(name, self.it_user), "nobody is told what they just wrote")
+
+		frappe.set_user(EMPLOYEE_USER)
+		detail = get_my_request(name)
+		self.assertEqual(detail["thread"][-1]["author"], frappe.utils.get_fullname(self.it_user))
+		self.assertTrue(detail["unread_notifications"])
+		mark_my_request_read(name)
+		self.assertFalse(get_my_request(name)["unread_notifications"])
+
+	def test_handler_comments_outside_the_route_or_company_are_refused(self):
+		from helixhr.api import comment_on_request, get_approval_detail
+
+		it_request = self._file()
+		hr_request = self._file(category="HR Letter")
+		other_it = self._user_with_role("other-company-it@helixhr.test", "IT Team", ensure_baseline_company())
+		loose_it = self._user_with_role("no-employee-it@helixhr.test", "IT Team")
+
+		for user, name in (
+			(self.hr_user, it_request),
+			(self.it_user, hr_request),
+			(other_it, it_request),
+			(loose_it, it_request),
+		):
+			frappe.set_user(user)
+			with self.assertRaises(frappe.PermissionError, msg=user):
+				comment_on_request(name, "hello")
+		frappe.set_user(self.hr_user)
+		self.assertTrue(get_approval_detail("request", hr_request)["can_comment"])
+		comment_on_request(hr_request, "We'll draft it today.")
+		self._act(self.it_user, it_request, "Reject", comment="No budget.")
+		frappe.set_user(self.it_user)
+		with self.assertRaises(frappe.ValidationError):
+			comment_on_request(it_request, "after the fact")
+
+	def test_an_administrator_comment_shows_the_team_label(self):
+		from helixhr.api import get_my_request
+
+		name = self._file()
+		frappe.get_doc("HR Request", name).add_comment("Comment", "System note")
+		frappe.set_user(EMPLOYEE_USER)
+		self.assertEqual(get_my_request(name)["thread"][-1]["author"], "IT team")
+
+	# --- U3: who hears about it ------------------------------------------
+
+	def test_an_employee_comment_with_a_picker_notifies_only_the_picker(self):
+		from helixhr.api import reply_to_my_request
+
+		name = self._file()
+		second = self._user_with_role("second-it-team@helixhr.test", "IT Team", ensure_test_company())
+		self._act(self.it_user, name, "Pick up")
+		employee_bells = len(self._bells(name, EMPLOYEE_USER))
+		frappe.set_user(EMPLOYEE_USER)
+		reply_to_my_request(name, "Any news?")
+		frappe.set_user("Administrator")
+		self.assertTrue(self._bells(name, self.it_user))
+		self.assertFalse(self._bells(name, second))
+		self.assertEqual(len(self._bells(name, EMPLOYEE_USER)), employee_bells, "never to the author")
+
+	def test_a_reply_mails_only_the_routed_role_in_the_employees_company(self):
+		from helixhr.api import reply_to_my_request
+
+		name = self._file()
+		other_it = self._user_with_role("other-company-it@helixhr.test", "IT Team", ensure_baseline_company())
+		self._act(self.it_user, name, "Need info", comment="Which model?")
+		frappe.set_user(EMPLOYEE_USER)
+		reply_to_my_request(name, "Dell", expected_modified=self._token(name)["expected_modified"])
+		frappe.set_user("Administrator")
+		new = list(set(frappe.get_all("Email Queue", pluck="name")) - self._mail_before) or [""]
+		recipients = set(
+			frappe.get_all("Email Queue Recipient", filters={"parent": ["in", new]}, pluck="recipient")
+		)
+		self.assertIn(self.it_user, recipients)
+		self.assertNotIn(other_it, recipients)

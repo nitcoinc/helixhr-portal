@@ -1302,3 +1302,73 @@ class TestMigrateMessageTemplatesToJinja(IntegrationTestCase):
 		self.assertEqual(message["subject"], "Request IT arrived")
 		self.assertIn("Use {{ braces }} for Laptop: https://x/helixhr/requests", message["content"])
 		self.assertFalse(frappe.db.exists(_MT, "request_status_changed"))
+
+
+class TestRequestConversationRecipients(IntegrationTestCase):
+	"""Plan 2026-10-15-003 KTD5 / R9: reply and comment mail stays inside the
+	employee's company, plus unscoped HR, with HR Manager as the fallback."""
+
+	def setUp(self):
+		from helixhr.tests.utils import ensure_baseline_company, make_test_hr_manager_employee
+
+		frappe.set_user("Administrator")
+		self.employee_name, _, _, _ = make_test_employee_and_manager()
+		self.hr_user = make_test_hr_manager_employee()[1]
+		self.unscoped_hr = ensure_hr_manager_user()
+		self.other_hr = "other-company-hr@helixhr.test"
+		make_test_user(self.other_hr, ensure_baseline_company())
+		self._grant(self.other_hr, "HR Manager")
+
+	def _grant(self, user, role):
+		doc = frappe.get_doc("User", user)
+		if role not in [row.role for row in doc.roles]:
+			doc.append("roles", {"role": role})
+			doc.save(ignore_permissions=True)
+			frappe.clear_cache(user=user)
+
+	def test_only_in_company_holders_and_unscoped_hr_are_returned(self):
+		from helixhr.utils import company_role_holders
+
+		holders = company_role_holders("HR Manager", self.employee_name)
+		self.assertIn(self.hr_user, holders)
+		self.assertIn(self.unscoped_hr, holders)
+		self.assertNotIn(self.other_hr, holders)
+		self.assertNotIn("Administrator", holders)
+
+	def test_an_it_holder_in_another_company_is_not_returned(self):
+		from helixhr.utils import company_role_holders
+
+		_, it_user = make_test_it_user()
+		self._grant(self.other_hr, "IT Team")
+		holders = company_role_holders("IT Team", self.employee_name)
+		self.assertIn(it_user, holders)
+		self.assertNotIn(self.other_hr, holders)
+
+	def test_no_holder_in_the_company_falls_back_to_hr_manager(self):
+		from helixhr.utils import company_role_holders
+
+		role = "HelixHR Test Unheld Role"
+		if not frappe.db.exists("Role", role):
+			frappe.get_doc({"doctype": "Role", "role_name": role, "desk_access": 0}).insert(
+				ignore_permissions=True
+			)
+		self.assertEqual(
+			set(company_role_holders(role, self.employee_name)),
+			set(company_role_holders("HR Manager", self.employee_name)),
+		)
+
+	def test_the_comment_template_renders_with_and_without_an_excerpt(self):
+		from helixhr.utils import render_message
+
+		context = {
+			"author_name": "Jane HR",
+			"category": "IT / Asset",
+			"subject": "Laptop",
+			"comment_excerpt": "Ordering today",
+			"action_url": "https://example.test",
+		}
+		message = render_message("request_comment", context)
+		self.assertIn("Jane HR commented", message["subject"])
+		self.assertIn("Ordering today", message["html"])
+		message = render_message("request_comment", {**context, "comment_excerpt": ""})
+		self.assertNotIn("<blockquote>", message["html"])
