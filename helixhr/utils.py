@@ -2073,6 +2073,11 @@ RATE_LIMIT_POLICY = {
 	"save_company_access": (30, 3600),
 	"revoke_company_access": (30, 3600),
 	"delete_company_access": (30, 3600),
+	# Plan 2026-10-15-001 U5: People & access -- a read per person open,
+	# occasional administrative writes, and a paged search.
+	"get_person_access": (60, 60),
+	"save_person_access": (30, 3600),
+	"list_people_access": (60, 60),
 	# Plan 2026-10-07-001 U4: the Approvers cleanup -- a preview read and a
 	# rare batch apply.
 	"get_approver_cleanup": (60, 60),
