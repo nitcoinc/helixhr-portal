@@ -1,6 +1,7 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref, useId } from 'vue'
 import { call } from '@/lib/api'
+import { notify } from '@/lib/notify'
 
 // Plan 2026-10-04-001 U5 (resolved decisions 3 and 14). Export is two calls:
 // POST `request_export` builds the file and returns a one-time token, then a
@@ -13,6 +14,10 @@ import { call } from '@/lib/api'
 // `{status: 'Queued'}`; the "My exports" panel then polls the caller's own
 // background exports (status, rows, expiry, Download) until none is
 // preparing, and announces Ready / Failed. The download is an owner-only GET.
+// Plan 2026-10-17-001 U14: those announcements, and "this one is queued", go
+// through the app toast (`lib/notify.js`) instead of a local status line. A
+// failed background export is an error toast, which stays until dismissed
+// (R18); the refusal from Export itself stays inline, beside the control.
 const props = defineProps({
   reportKey: { type: String, required: true },
   canExport: { type: Boolean, default: false },
@@ -35,7 +40,6 @@ const open = ref(false)
 const working = ref('')
 const error = ref('')
 const notice = ref('')
-const toast = ref('')
 
 const exportsOpen = ref(false)
 const myExports = ref([])
@@ -53,9 +57,8 @@ async function loadExports() {
     for (const row of myExports.value) {
       const was = before.get(row.name)
       if (was && isActive({ status: was }) && !isActive(row)) {
-        toast.value = row.status === 'Ready'
-          ? `${row.report_label} is ready to download.`
-          : `${row.report_label} export failed. Try again.`
+        if (row.status === 'Ready') notify.success(`${row.report_label} is ready to download.`)
+        else notify.error(`${row.report_label} export failed. Try again.`)
       }
     }
   } catch (failure) {
@@ -102,7 +105,6 @@ async function exportAs(format) {
   open.value = false
   error.value = ''
   notice.value = ''
-  toast.value = ''
   working.value = format
   try {
     const out = await call('helixhr.api.request_export', {
@@ -117,7 +119,7 @@ async function exportAs(format) {
       window.location.assign(`/api/method/helixhr.api.download_export?token=${encodeURIComponent(out.token)}`)
       notice.value = `Downloading ${out.filename}.`
     } else if (out?.status === 'Queued') {
-      toast.value = "This export is large, so it's being prepared. You'll get a notification when it's ready."
+      notify.success("This export is large, so it's being prepared. You'll get a notification when it's ready.")
       exportsOpen.value = true
       loadExports()
     }
@@ -239,15 +241,6 @@ async function exportAs(format) {
         </li>
       </ul>
     </section>
-
-    <p
-      v-if="toast"
-      class="surface-inset mt-2 p-2 text-sm text-ink-gray-8 sm:absolute sm:right-0 sm:z-10 sm:w-72"
-      role="status"
-      data-testid="export-toast"
-    >
-      {{ toast }}
-    </p>
 
     <p
       v-if="error"

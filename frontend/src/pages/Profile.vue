@@ -248,7 +248,7 @@ async function saveChanges() {
           :href="profile.data.desk_url"
           target="_blank"
           rel="noopener noreferrer"
-          class="inline-flex min-h-11 items-center rounded-lg border border-outline-gray-2 px-3 text-sm font-medium text-ink-gray-7 hover:bg-surface-gray-2"
+          class="inline-flex min-h-11 items-center rounded px-3 text-sm font-medium text-ink-gray-8 hover:bg-surface-gray-3"
           data-testid="profile-desk-link"
         >
           Open in Desk

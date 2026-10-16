@@ -1,4 +1,4 @@
-import { test, expect, Page } from '@playwright/test'
+import { test, expect, Browser, Page } from '@playwright/test'
 
 // P2-U3. The visual and asynchronous foundation, checked rather than asserted
 // in a document: one surface language, five distinguishable async states, and
@@ -41,35 +41,40 @@ async function undersizedControls(page: Page, routes: string[]) {
   for (const route of routes) {
     await page.goto(route)
     await page.waitForLoadState('networkidle')
-    findings.push(
-      ...(await page.evaluate(() => {
-        const small: string[] = []
-        const nodes = document.querySelectorAll('button, a[href], [role="button"], select, input')
-        for (const node of nodes) {
-          const element = node as HTMLElement
-          if (element.hasAttribute('disabled')) continue
-          const style = getComputedStyle(element)
-          if (style.display === 'none' || style.visibility === 'hidden') continue
-          // Inline links inside a sentence are text, not targets; `min-height`
-          // does not apply to them and WCAG 2.5.8 exempts them.
-          if (style.display === 'inline') continue
-          const box = element.getBoundingClientRect()
-          if (box.height === 0 && box.width === 0) continue
-          if (box.height < 44) {
-            small.push(
-              `${location.pathname} ${element.tagName}.${element.className
-                .toString()
-                .split(/\s+/)
-                .slice(0, 3)
-                .join('.')} = ${box.height.toFixed(1)}px`,
-            )
-          }
-        }
-        return small
-      })),
-    )
+    findings.push(...(await undersizedOnPage(page)))
   }
   return findings
+}
+
+/** The same sweep on the page as it stands, without navigating; `scope`
+ * narrows it to one region. */
+async function undersizedOnPage(page: Page, scope = 'body') {
+  return page.evaluate((selector) => {
+    const small: string[] = []
+    const root = document.querySelector(selector)
+    const nodes = root ? root.querySelectorAll('button, a[href], [role="button"], select, input') : []
+    for (const node of nodes) {
+      const element = node as HTMLElement
+      if (element.hasAttribute('disabled')) continue
+      const style = getComputedStyle(element)
+      if (style.display === 'none' || style.visibility === 'hidden') continue
+      // Inline links inside a sentence are text, not targets; `min-height`
+      // does not apply to them and WCAG 2.5.8 exempts them.
+      if (style.display === 'inline') continue
+      const box = element.getBoundingClientRect()
+      if (box.height === 0 && box.width === 0) continue
+      if (box.height < 44) {
+        small.push(
+          `${location.pathname} ${element.tagName}.${element.className
+            .toString()
+            .split(/\s+/)
+            .slice(0, 3)
+            .join('.')} = ${box.height.toFixed(1)}px`,
+        )
+      }
+    }
+    return small
+  }, scope)
 }
 
 /** The reduced-motion contract, read off one held region. Both skeleton
@@ -759,6 +764,196 @@ test.describe('manager', () => {
     await expect(page.getByRole('status')).toHaveAttribute('aria-busy', 'true')
 
     release()
+    await context.close()
+  })
+})
+
+// Plan 2026-10-17-001 U14 (R17; EP-13, ED-15). One header-action convention:
+// the page's create action is the brand solid Button in PageHeader's actions
+// slot, on every page that has one -- Attendance's white pill was the outlier.
+test.describe('page header actions', () => {
+  test.beforeEach(async ({}, testInfo) => {
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee routes')
+  })
+
+  test("every page's primary create action is the brand solid Button in the header", async ({
+    page,
+  }) => {
+    for (const [route, name] of [
+      ['/helixhr/leave', 'Ask for leave'],
+      ['/helixhr/requests', 'New request'],
+      ['/helixhr/attendance', 'Fix a day'],
+    ]) {
+      await page.goto(route)
+      const action = page.locator('[data-slot="page-actions"]').getByRole('button', { name })
+      await expect(action, route).toBeVisible()
+      // blue-500 is the Signal brand green (#1E6F53), white on it 6.08.
+      await expect(action, route).toHaveCSS('background-color', 'rgb(30, 111, 83)')
+      await expect(action, route).toHaveCSS('color', 'rgb(255, 255, 255)')
+    }
+  })
+})
+
+// Plan 2026-10-17-001 U14 (R18). The toast is triggered by a real flow: an
+// HR Manager exports a report, and the export is answered "Queued" (stubbed
+// at the network, since a genuinely large export is not a fixture), which
+// the export menu reports through `notify`. The poll of "My exports" then
+// answers Failed for the error tone. No debug hook ships in the build.
+const HR_STATE = 'tests/.auth/hr.json'
+const LEDGER_URL = '/helixhr/reports/leave_ledger?from_date=2000-01-01&to_date=2100-01-01'
+const QUEUED = "This export is large, so it's being prepared."
+const FAILED = 'Leave ledger export failed. Try again.'
+
+/** Answer Export with "Queued". With `then: 'Failed'`, the first poll of My
+ * exports says Running and every later one Failed (the poll is 5s). */
+async function stubQueuedExport(page: Page, then?: 'Failed') {
+  await page.route('**/api/method/helixhr.api.request_export', (route) =>
+    route.fulfill({ json: { message: { status: 'Queued' } } }),
+  )
+  let polls = 0
+  await page.route('**/api/method/helixhr.api.list_my_exports*', (route) => {
+    polls += 1
+    const row = {
+      name: 'u14-export',
+      report_label: 'Leave ledger',
+      format: 'csv',
+      status: polls === 1 ? 'Running' : then,
+      row_count: 0,
+      expires_on: null,
+    }
+    return route.fulfill({ json: { message: then ? [row] : [] } })
+  })
+}
+
+async function exportCsv(page: Page) {
+  await page.goto(LEDGER_URL)
+  await expect(page.getByRole('heading', { name: 'Leave ledger', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Export', exact: true }).click()
+  await page.getByRole('menuitem', { name: /CSV/ }).click()
+}
+
+async function coarsePhone(browser: Browser) {
+  return browser.newContext({
+    storageState: HR_STATE,
+    viewport: { width: 360, height: 720 },
+    hasTouch: true,
+    isMobile: true,
+  })
+}
+
+const focusInToaster = (page: Page) =>
+  page.evaluate(() => !!document.activeElement?.closest('[data-testid="toaster"]'))
+
+test.describe('toast', () => {
+  test.beforeEach(async ({}, testInfo) => {
+    // Signs in as HR itself; once per run is enough, on desktop Chromium
+    // with a coarse-pointer context of its own.
+    test.skip(testInfo.project.name !== 'employee', 'run once, as HR, from the employee project')
+  })
+
+  test('a success toast at 360px is polite, keeps focus, clears the tab bar and leaves on its own', async ({
+    browser,
+  }) => {
+    const context = await coarsePhone(browser)
+    const page = await context.newPage()
+    await stubQueuedExport(page)
+    await exportCsv(page)
+
+    const toast = page.getByTestId('toast')
+    await expect(toast).toContainText(QUEUED)
+    await expect(toast).toHaveAttribute('data-tone', 'success')
+    const polite = page.locator('[data-toast-live="polite"]')
+    await expect(polite).toHaveAttribute('aria-live', 'polite')
+    await expect(polite).toContainText(QUEUED)
+    expect(await focusInToaster(page), 'a toast never takes focus').toBe(false)
+
+    const box = await toast.boundingBox()
+    const tabBar = await page.locator('nav[data-toast-clear]').boundingBox()
+    expect(box!.y + box!.height, 'the toast sits above the tab bar').toBeLessThanOrEqual(tabBar!.y)
+    // What the toast adds to the page is 44px under a thumb. The rest of
+    // /reports is not in the employee sweep above; this checks the toast.
+    const small = await undersizedOnPage(page, '[data-testid="toaster"]')
+    expect(small, small.join('\n')).toEqual([])
+    await expect(toast.getByRole('button', { name: 'Dismiss' })).toBeVisible()
+
+    // About 4s, then gone without a tap.
+    await expect(toast).toHaveCount(0, { timeout: 8_000 })
+    await context.close()
+  })
+
+  test('an error toast persists past 6s, clears an action bar, and goes when dismissed', async ({
+    browser,
+  }) => {
+    test.setTimeout(60_000)
+    const context = await coarsePhone(browser)
+    const page = await context.newPage()
+    await stubQueuedExport(page, 'Failed')
+    await exportCsv(page)
+
+    const error = page.getByTestId('toast').filter({ hasText: FAILED })
+    await expect(error).toBeVisible({ timeout: 15_000 })
+    await expect(error).toHaveAttribute('data-tone', 'error')
+    await expect(page.locator('[data-toast-live="assertive"]')).toContainText(FAILED)
+    expect(await focusInToaster(page)).toBe(false)
+
+    await page.waitForTimeout(6_500)
+    await expect(error, 'an error waits to be dismissed').toBeVisible()
+
+    // Client-side, so the toast survives: More -> Profile -> Contact, and a
+    // changed field raises the page's sticky action bar under it.
+    await page.getByRole('button', { name: 'More' }).click()
+    await page.getByRole('dialog').getByRole('link', { name: 'Profile' }).click()
+    await page.getByRole('link', { name: 'Contact & emergency' }).click()
+    await page
+      .getByTestId('profile-editable-cell_number')
+      .getByLabel('Mobile')
+      .fill(`+1-555-${String(Date.now() % 10000).padStart(4, '0')}`)
+    const bar = page.locator('.action-bar')
+    await expect(bar).toBeVisible()
+    await expect(error).toBeVisible()
+    await expect
+      .poll(async () => {
+        const toastBox = await error.boundingBox()
+        const barBox = await bar.boundingBox()
+        return toastBox!.y + toastBox!.height <= barBox!.y
+      }, { message: 'the toast sits above the action bar' })
+      .toBe(true)
+
+    await error.getByRole('button', { name: 'Dismiss' }).click()
+    await expect(error).toHaveCount(0)
+    await context.close()
+  })
+
+  test('a toast raised over an open sheet is announced and dismissed without closing it', async ({
+    browser,
+  }) => {
+    test.setTimeout(60_000)
+    const context = await coarsePhone(browser)
+    const page = await context.newPage()
+    await stubQueuedExport(page, 'Failed')
+    await exportCsv(page)
+    await expect(page.getByTestId('toast').filter({ hasText: QUEUED })).toBeVisible()
+
+    // Open the More sheet before the next poll answers Failed.
+    await page.getByRole('button', { name: 'More' }).click()
+    const sheet = page.getByRole('dialog')
+    await expect(sheet).toBeVisible()
+
+    const error = page.getByTestId('toast').filter({ hasText: FAILED })
+    await expect(error).toBeVisible({ timeout: 15_000 })
+    const assertive = page.locator('[data-toast-live="assertive"]')
+    await expect(assertive).toContainText(FAILED)
+    // The modal hides the page from assistive tech; the live region is the
+    // one thing it must leave exposed, or the message is never spoken.
+    expect(
+      await assertive.evaluate((node) => !!node.closest('[aria-hidden="true"]')),
+      'the live region is inside an aria-hidden subtree',
+    ).toBe(false)
+    expect(await focusInToaster(page)).toBe(false)
+
+    await error.getByRole('button', { name: 'Dismiss' }).click()
+    await expect(error).toHaveCount(0)
+    await expect(sheet, 'dismissing the toast left the sheet open').toBeVisible()
     await context.close()
   })
 })

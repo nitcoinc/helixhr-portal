@@ -257,6 +257,7 @@ async function confirmDelete() {
       >
         <Button
           variant="solid"
+          theme="blue"
           data-testid="documents-upload"
           @click="openEditor()"
         >

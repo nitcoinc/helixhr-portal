@@ -107,6 +107,8 @@ export const icons = {
   // CommandInput (which upstream imports from lucide-vue-next).
   // `peopleSearch` above is the People nav glyph and stays its own name.
   search: ['M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z', 'm21 21-4.3-4.3'],
+  // U14: the toast's dismiss control (Lucide `x`).
+  close: ['M18 6 6 18', 'm6 6 12 12'],
 }
 
 // Every kind `helixhr.api._get_needs_you` emits, and the glyph its row draws.

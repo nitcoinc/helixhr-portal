@@ -148,7 +148,7 @@ async function markAll() {
     <PageHeader title="Notifications">
       <template #actions>
         <Button
-          variant="subtle"
+          variant="ghost"
           :loading="markAllRead.loading"
           @click="markAll"
         >

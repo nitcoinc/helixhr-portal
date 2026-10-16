@@ -14,11 +14,18 @@ defineProps({
 
        The title is the `type-page-title` role (26px/700/-2%) rather than a
        Tailwind size chosen per page -- `text-2xl` here and `text-xl` there
-       was the visible half of the same drift. `items-center` keeps the
-       primary action optically aligned with the title rather than with the
-       top of its ascenders, which is what the canvas shows on Leave and
-       Requests. -->
-  <div class="mb-5 flex flex-wrap items-center justify-between gap-3">
+       was the visible half of the same drift.
+
+       The actions convention (plan 2026-10-17-001 U14, EP-13, ED-15):
+         * the page's one create action is a frappe-ui `Button`
+           variant="solid" theme="blue" (blue is the Signal brand green);
+         * navigation (back, past weeks, open in Desk) is ghost: a
+           `Button variant="ghost"`, or a real link styled the same way.
+       `items-baseline` sits the slot on the title's baseline (MH-26).
+       `items-center` centred it on the title *and* subtitle block, so on a
+       page with a subtitle the button floated between the two lines, and
+       Approvals' count pill rode above the title's baseline. -->
+  <div class="mb-5 flex flex-wrap items-baseline justify-between gap-3">
     <div class="min-w-0">
       <h1 class="type-page-title font-heading text-ink-gray-9">
         {{ title }}
@@ -30,7 +37,10 @@ defineProps({
         {{ subtitle }}
       </p>
     </div>
-    <div class="flex shrink-0 items-center gap-2">
+    <div
+      class="flex shrink-0 items-center gap-2"
+      data-slot="page-actions"
+    >
       <slot name="actions" />
     </div>
   </div>

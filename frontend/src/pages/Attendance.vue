@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { createResource, Dialog } from 'frappe-ui'
+import { Button, createResource, Dialog } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
@@ -352,13 +352,15 @@ const LEGEND = [
       <template #actions>
         <!-- P3-U6 step 1. The page-level way in, for a day the employee has
              to scroll to find. The day sheet offers the same thing with the
-             day already named. -->
-        <button
-          class="min-h-11 cursor-pointer rounded-full border border-outline-gray-2 bg-surface-white px-4 text-sm font-medium text-ink-gray-8 hover:bg-surface-gray-2"
+             day already named. U14 (ED-15): the page's primary action, so the
+             brand solid Button every other page header uses, not a pill. -->
+        <Button
+          variant="solid"
+          theme="blue"
           @click="fixADay(today())"
         >
           Fix a day
-        </button>
+        </Button>
       </template>
     </PageHeader>
 
@@ -372,12 +374,13 @@ const LEGEND = [
       </button>
       <div class="flex items-center gap-2">
         <span class="font-medium text-ink-gray-9">{{ monthLabel }}</span>
-        <button
-          class="min-h-11 cursor-pointer rounded-full bg-surface-gray-2 px-3 text-xs text-ink-gray-7 hover:bg-surface-gray-3"
+        <!-- Navigation, so ghost (U14, EP-13), not a grey pill. -->
+        <Button
+          variant="ghost"
           @click="goToday"
         >
           This month
-        </button>
+        </Button>
       </div>
       <button
         class="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-md text-ink-gray-6 hover:bg-surface-gray-2"

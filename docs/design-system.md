@@ -158,6 +158,52 @@ bottom tab bar is `z-10` and therefore its own stacking context, and reka-ui por
 the end of `<body>` with `z-index: auto` — without a value a sheet renders *behind* the tab bar it
 is supposed to cover.
 
+## Toasts: one channel for write feedback (U14)
+
+A write reports its outcome through `notify` (`frontend/src/lib/notify.js`), not through a status
+line each page invents. `notify.success(text)` is a polite toast that leaves after about 4s;
+`notify.error(text, { detail })` is announced assertively and **stays until it is dismissed**,
+because a failure read once and gone is a failure nobody can act on (R18). There are two tones and
+no third: the text carries the meaning, the surface is a second channel.
+
+- Success is `.surface-card` with heading ink; error is the measured sent-back pair, `#A8351A` on
+  `#F6E2DC` (5.28), the same as `.surface-alert`. Signal yellow never appears in a toast: a toast
+  is not the field.
+- **A toast never takes focus.** Focus stays where the person was working; after a row leaves a
+  list, KTD16's rule moves it (next row, else the lane heading), not the toast.
+- **A toast never stands in for a confirm** (KTD6). An irreversible action keeps its confirm step,
+  and the toast reports what happened after it. No "Undo" toast on a workflow transition: Approve,
+  Reject and Send back have no reverse path.
+- Use it for the outcome of a write the person just made, or a background job they started
+  finishing. A refusal tied to one control ("narrow the filters") stays inline beside that
+  control; a form error stays under its field.
+- Replace an existing inline `aria-live` message only one-for-one, in the unit that owns the page.
+
+How it is built, because each choice is load-bearing:
+
+- **frappe-ui's Toast is not used** (KTD1): it never passes reka's `type`, so every toast is
+  assertive, and its viewport is hard-coded over the phone tab bar.
+- `notify.js` is eager and about 1KB: a queue and nothing else. `Toaster.vue` (reka-ui's Toast
+  primitives, ~18KB) loads through `defineAsyncComponent` in AppShell on the first idle moment, so
+  it is never in the eager chunk; a message sent before then waits in the queue and pulls the chunk
+  in. Never import `Toaster.vue` statically — `uiComponents.test.js` fails if one is.
+- **Announcing**: Toaster keeps one polite and one assertive `aria-live` region in the DOM from
+  mount and writes each message into them. reka's own per-toast announcer is parked out of the
+  accessibility tree: it is a fresh `role="alert"` node per toast, even for a polite message.
+- **Over a bottom sheet**: a modal reka dialog hides the rest of the page with the `aria-hidden`
+  package, which leaves `[aria-live]` elements exposed — so a toast raised over an open sheet is
+  still spoken. The toast list itself carries `aria-live="off"` for the same reason: without it
+  the modal marked the list `aria-hidden`, and the Dismiss button of a toast raised over a sheet
+  vanished from the accessibility tree. The viewport is a reka DismissableLayerBranch, so tapping a toast's close is not an
+  outside tap and the sheet stays open; the toast turns `pointer-events` back on under the sheet's
+  `body { pointer-events: none }`. Escape belongs to the sheet: a toast only takes Escape while
+  focus is inside it. On a phone the toast moves to the top while a sheet is open, because the
+  sheet's primary action lives at the bottom. Its z-index is 60, over the overlay's 50.
+- **Placement**: on a phone it stacks above the tab bar *and* any `.action-bar`, measured while a
+  toast is showing (a sticky bar rides higher on a short page), plus the safe-area inset; on a
+  desktop it is bottom-right, 22rem wide. The close control is a real `<button>` named "Dismiss",
+  44 by 44 under a coarse pointer. The entrance slide is skipped under reduced motion.
+
 ## Component conventions (frappe-ui)
 
 - Use frappe-ui's `Button`, `FormControl` and `Dialog` as-is. Do not restyle their internals — only the theme tokens above change their color. **Reaching for another frappe-ui component is a build decision as well as a design one:** `tailwind.config.cjs` scans a named list of frappe-ui components rather than all of them (scanning all of them cost 167,821 bytes of CSS against U0's 162,906-byte budget), so a new one has to be added to `FRAPPE_UI_IN_USE` or it renders unstyled. `frontend/src/lib/frappeUiComponents.test.js` fails until it is.
@@ -165,6 +211,7 @@ is supposed to cover.
 - Status badges use `StatusBadge.vue`, not frappe-ui's `Badge`. It takes a raw Frappe status plus the document kind (`leave` / `timesheet` / `request` / `attendance`) and answers with this product's word — the same status value means different things on different documents, and five pages used to hold five drifting copies of that mapping. The word carries the meaning; the tint is a redundant second channel, so nothing here relies on colour alone. The table itself lives in `frontend/src/lib/statusBadge.js` with a vitest file beside it (a `<script setup>` component cannot export, so the mapping had to leave the component to be testable), and `Cancelled` is keyed on `docstatus === 2` ahead of the table — an attendance request cancelled after approval still stores the state `Approved`, and reading it as "Counted" would be a lie.
 - Icons: SVG only (Lucide, matching frappe-ui's own icon set). No emoji as icons anywhere, including empty states.
 - Primary action: one filled `Button` (brand color) per screen. Secondary actions are `Button` with `variant="ghost"` or a plain text link.
+- **Page header actions** (`PageHeader.vue`'s `actions` slot, U14, EP-13/ED-15/MH-26). The page's one create or primary action is `<Button variant="solid" theme="blue">` — `blue` is the brand green, and without `theme` a solid Button paints frappe-ui's near-black gray. Navigation (back to a list, past weeks, open in Desk) is ghost: `variant="ghost"`, or, for a real link, an `<a>`/`router-link` styled the same way (`inline-flex min-h-11 items-center rounded px-3 text-sm font-medium text-ink-gray-8 hover:bg-surface-gray-3`). No hand-rolled pills, outlines or underlined links in a header. The slot sits on the title's baseline, so a page with a subtitle does not float its button between the two lines.
 - Motion: 150–300ms transitions only, on hover/focus/state-change. No decorative animation. Respect `prefers-reduced-motion`.
 - Loading, empty and failure: every resource-backed region is an `AsyncState.vue`. It distinguishes five states — pending (a **sized** skeleton), unavailable (a retry panel), forbidden (its own words, no Retry), empty (the task and its next step), ready. A failed request must never render as an empty list; `v-else-if="rows.length === 0"` is true when a request 500s, which is how an outage used to read as "You have no requests yet" (P2-AE8).
 - Skeletons reserve the room the answer needs, and a page keeps every element that depends on one response *inside* one region. That is not a detail: unsized skeletons on the Dashboard measured CLS 0.8431 on the U0 baseline, an order of magnitude over R23's 0.1.

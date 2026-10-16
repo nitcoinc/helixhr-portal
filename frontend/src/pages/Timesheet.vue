@@ -559,7 +559,7 @@ const savedLabel = computed(() => {
       <template #actions>
         <router-link
           to="/timesheet/history"
-          class="-my-2 inline-flex min-h-11 cursor-pointer items-center text-sm text-ink-gray-6 underline underline-offset-2 hover:text-ink-gray-9"
+          class="inline-flex min-h-11 items-center rounded px-3 text-sm font-medium text-ink-gray-8 hover:bg-surface-gray-3"
         >
           Past weeks
         </router-link>

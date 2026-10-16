@@ -1,6 +1,6 @@
 <script setup>
 import Avatar from '@/components/Avatar.vue'
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { Dialog } from 'frappe-ui'
 import Icon from '@/components/Icon.vue'
@@ -8,6 +8,26 @@ import { session, signOut } from '@/lib/session'
 import { currentUnread, watchUnread, unwatchUnread } from '@/lib/unread'
 import { watchDialogs, unwatchDialogs } from '@/lib/dialogA11y'
 import { groupNav, readCollapsed, writeCollapsed } from '@/lib/navGroups'
+import { toasts } from '@/lib/notify'
+
+// Plan 2026-10-17-001 U14 (KTD4, R4). The toast UI is reka-ui's Toast, about
+// 18KB, so it never rides in the eager chunk: it is fetched on the first idle
+// moment after the shell paints, which puts its live regions in the page
+// before the first message in the usual case. A message sent sooner waits in
+// `lib/notify.js` and pulls the chunk in itself. A dedicated file means Vite
+// names the chunk `Toaster-<hash>.js`, which hardening.spec.ts looks for.
+const Toaster = defineAsyncComponent(() => import('@/components/Toaster.vue'))
+const toasterWanted = ref(false)
+let idleHandle = null
+let idleTimer = null
+function wantToaster() {
+  toasterWanted.value = true
+}
+watch(
+  () => toasts.length > 0,
+  (pending) => pending && wantToaster(),
+  { immediate: true },
+)
 
 // `primary` items are the four that fit the phone tab bar alongside
 // "More" (design system: max 5 tab items). Everything else lives in the
@@ -155,10 +175,16 @@ onMounted(() => {
   // P2-U9: names frappe-ui's unlabelled dialog close button, once for the
   // whole application. See src/lib/dialogA11y.js.
   watchDialogs()
+  if (!toasterWanted.value) {
+    if ('requestIdleCallback' in window) idleHandle = requestIdleCallback(wantToaster, { timeout: 3000 })
+    else idleTimer = setTimeout(wantToaster, 1500)
+  }
 })
 onUnmounted(() => {
   unwatchUnread()
   unwatchDialogs()
+  if (idleHandle !== null) cancelIdleCallback(idleHandle)
+  clearTimeout(idleTimer)
 })
 </script>
 
@@ -370,10 +396,12 @@ onUnmounted(() => {
       </main>
     </div>
 
-    <!-- Phone/tablet bottom tab bar. -->
+    <!-- Phone/tablet bottom tab bar. `data-toast-clear`: toasts stack above
+         it (Toaster.vue). -->
     <nav
       class="fixed inset-x-0 bottom-0 z-10 flex bg-field pb-[env(safe-area-inset-bottom)] lg:hidden"
       aria-label="Main"
+      data-toast-clear
     >
       <router-link
         v-for="item in primaryItems"
@@ -466,5 +494,7 @@ onUnmounted(() => {
         </a>
       </template>
     </Dialog>
+
+    <Toaster v-if="toasterWanted" />
   </div>
 </template>
