@@ -1,4 +1,4 @@
-import { test, expect, request, APIRequestContext } from '@playwright/test'
+import { test, expect, request, APIRequestContext, Page } from '@playwright/test'
 
 // Plan 2026-10-15-003 U4. Both sides of a request's conversation in the
 // browser. Each test files its own request through the portal's own method,
@@ -167,3 +167,131 @@ test('handler Send and wait moves to waiting, employee sees Needs your reply ban
   await expect(thread.getByTestId('thread-declined')).toContainText('No response required')
 })
 
+
+// Plan 2026-10-17-001 U8 (R13). Triage from the inbox list: search, Assign
+// to me on the row, the stale-row refusal, and the phone layout. Each test
+// files its own requests under one stamp and searches for it, so the
+// long-lived site's other rows never decide what is on screen.
+async function searchInbox(page: Page, text: string) {
+  await page.goto('/helixhr/requests?tab=work')
+  await page.getByTestId('work-search').fill(text)
+}
+
+function inboxRow(page: Page, subject: string) {
+  return page.getByTestId('work-row').filter({ hasText: subject })
+}
+
+test('HR assigns a New request to themselves from the list, without opening it', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'the HR handler side')
+  test.setTimeout(60000)
+  const stamp = `U8 assign ${Date.now()}`
+  const name = await fileRequest('HR Letter', `${stamp} letter`)
+
+  await searchInbox(page, stamp)
+  const row = inboxRow(page, `${stamp} letter`)
+  await expect(page.locator('[data-group="new"]').getByTestId('work-row').filter({ hasText: stamp })).toHaveCount(1, {
+    timeout: 10000,
+  })
+  await row.getByTestId('row-pick-up').click()
+
+  await expect(page.getByTestId('toast').filter({ hasText: `Assigned to you: ${stamp} letter` })).toBeVisible()
+  await expect(page).toHaveURL(/\/requests\?tab=work$/)
+  await expect(page.locator('[data-group="in_progress"]').getByTestId('work-row').filter({ hasText: stamp })).toHaveCount(1)
+  // Picked up by me: nothing left to assign on this row.
+  await expect(row.getByTestId('row-pick-up')).toHaveCount(0)
+  // KTD16: the New group emptied, so focus lands on the first group heading.
+  await expect(page.locator('[data-group] h3').first()).toBeFocused()
+  expect(await status(name)).toBe('In Progress')
+})
+
+test('a row somebody else just took is refused with the server sentence and refreshes', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'the HR handler side')
+  test.setTimeout(60000)
+  const stamp = `U8 race ${Date.now()}`
+  const name = await fileRequest('HR Letter', `${stamp} letter`)
+
+  await searchInbox(page, stamp)
+  const row = inboxRow(page, `${stamp} letter`)
+  await expect(row.getByTestId('row-pick-up')).toBeVisible({ timeout: 10000 })
+  // The other handler wins while this list is on screen.
+  const admin = await login('Administrator', 'admin')
+  const detail = await call(admin, 'get_approval_detail', { kind: 'request', name })
+  await call(admin, 'act_on_approval', {
+    doctype: 'HR Request',
+    name,
+    action: 'Pick up',
+    expected_modified: detail.modified,
+    expected_state: detail.state,
+  })
+  await admin.dispose()
+  expect(await status(name)).toBe('In Progress')
+
+  await row.getByTestId('row-pick-up').click()
+  await expect(page.locator('[data-testid="toast"][data-tone="error"]')).toBeVisible()
+  await expect(page.locator('[data-group="in_progress"]').getByTestId('work-row').filter({ hasText: stamp })).toHaveCount(1)
+  await expect(row.getByTestId('row-pick-up')).toHaveCount(0)
+})
+
+test('the inbox search narrows by subject and clearing it restores the list', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'the HR handler side')
+  test.setTimeout(60000)
+  const stamp = `U8 search ${Date.now()}`
+  await fileRequest('HR Letter', `${stamp} alpha`)
+  await fileRequest('HR Letter', `${stamp} beta`)
+
+  await searchInbox(page, `${stamp} alpha`)
+  const rows = page.getByTestId('work-row')
+  await expect(rows).toHaveCount(1, { timeout: 10000 })
+  await expect(rows.first()).toContainText(`${stamp} alpha`)
+
+  await page.getByTestId('work-search').fill(stamp)
+  await expect(rows.filter({ hasText: stamp })).toHaveCount(2)
+
+  await page.getByTestId('work-search').fill('')
+  await expect.poll(() => rows.count(), { timeout: 10000 }).toBeGreaterThan(1)
+  await expect(page.locator('[data-async-state="work-list:ready"]')).toBeVisible()
+})
+
+test('at 390px an inbox row keeps the whole requester name clear of its badges', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'the HR handler side')
+  test.setTimeout(60000)
+  const stamp = `U8 phone ${Date.now()}`
+  const name = await fileRequest('HR Letter', `${stamp} a subject long enough to wrap on a phone`)
+  const hr = await login(HR)
+  const employeeName = (await call(hr, 'get_approval_detail', { kind: 'request', name })).employee_name
+  await hr.dispose()
+
+  await page.setViewportSize({ width: 390, height: 844 })
+  await searchInbox(page, stamp)
+  const row = inboxRow(page, stamp)
+  await expect(row).toHaveCount(1, { timeout: 10000 })
+  const requester = row.getByTestId('work-requester')
+  await expect(requester).toHaveText(employeeName)
+  // Normal case, not the 11px uppercase group label (AI-19).
+  expect(await requester.evaluate((el) => getComputedStyle(el).textTransform)).toBe('none')
+  // Nothing clipped, and the badges sit on their own line below the subject.
+  expect(await requester.evaluate((el) => el.scrollWidth <= el.clientWidth)).toBe(true)
+  const [person, link, button] = await Promise.all([
+    requester.boundingBox(),
+    row.getByRole('link').boundingBox(),
+    row.getByTestId('row-pick-up').boundingBox(),
+  ])
+  expect(person && link && button).toBeTruthy()
+  expect(person!.y + person!.height).toBeLessThanOrEqual(link!.y + 0.5)
+  expect(button!.y).toBeGreaterThanOrEqual(link!.y + link!.height - 0.5)
+})
+
+test('an IT handler can assign IT rows from the list and never sees an HR-routed one', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'it', 'the routed IT worker')
+  test.setTimeout(60000)
+  const stamp = `U8 it ${Date.now()}`
+  await fileRequest('IT / Asset', `${stamp} laptop`)
+  await fileRequest('HR Letter', `${stamp} letter`)
+
+  await searchInbox(page, stamp)
+  await expect(inboxRow(page, `${stamp} laptop`).getByTestId('row-pick-up')).toBeVisible({ timeout: 10000 })
+  await expect(inboxRow(page, `${stamp} letter`)).toHaveCount(0)
+  await expect(page.getByTestId('row-pick-up')).toHaveCount(1)
+  // One kind in this inbox, so no kind tag repeats "IT request" on every row.
+  await expect(inboxRow(page, `${stamp} laptop`)).not.toContainText('IT request')
+})

@@ -396,6 +396,53 @@ test.describe('employee', () => {
     }
   })
 
+  // ── Plan 2026-10-17-001 KTD12: an update is not an ask ────────────────
+  test('an unread Done with no message from the team sits under Closed with a dot', async ({
+    page,
+    baseURL,
+  }) => {
+    const api = await admin(baseURL!)
+    const employeeApi = await asEmployee(baseURL!)
+    const itApi = await asItTeam(baseURL!)
+    const subject = `U8 done ${Date.now()}`
+    let name = ''
+
+    try {
+      name = await seedRequest(employeeApi, subject, { category: 'IT / Asset' })
+      for (const action of ['Pick up', 'Done']) {
+        const detail = await itApi.post('/api/method/helixhr.api.get_approval_detail', {
+          data: { kind: 'request', name },
+        })
+        const token = (await detail.json())?.message
+        const acted = await itApi.post('/api/method/helixhr.api.act_on_approval', {
+          data: {
+            doctype: 'HR Request',
+            name,
+            action,
+            expected_modified: token.modified,
+            expected_state: token.state,
+          },
+        })
+        expect(acted.ok(), await acted.text()).toBeTruthy()
+      }
+
+      await page.goto('/helixhr/requests')
+      // ED-19: the subject search finds it whatever else the list holds.
+      await page.getByTestId('request-search').fill(subject)
+      const row = page.locator('[data-testid="request-row"]', { hasText: subject })
+      await expect(row).toHaveCount(1, { timeout: 10000 })
+      await expect(row).toHaveAttribute('data-unread', '1')
+      await expect(row.getByTestId('unread-dot')).toBeVisible()
+      await expect(page.getByRole('region', { name: 'Closed' }).locator('[data-testid="request-row"]', { hasText: subject })).toHaveCount(1)
+      await expect(page.getByRole('region', { name: 'Needs you' })).toHaveCount(0)
+    } finally {
+      await removeRequest(api, name)
+      await itApi.dispose()
+      await employeeApi.dispose()
+      await api.dispose()
+    }
+  })
+
   // ── Documents: tabs, buckets, search, and where a link is about to send you ─
   test('documents are grouped, searchable, and say where each link goes', async ({
     page,

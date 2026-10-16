@@ -2558,7 +2558,20 @@ def _hr_attendance_request_summaries(employee, today):
 	]
 
 
-def _hr_request_summaries(employee, today, states=None, picked_up_by=None, routed_roles=None, limit=None, start=None):
+def _hr_request_summaries(
+	employee,
+	today,
+	states=None,
+	picked_up_by=None,
+	routed_roles=None,
+	limit=None,
+	start=None,
+	category=None,
+	or_filters=None,
+	names=None,
+	sla_days=None,
+	with_actions=False,
+):
 	"""Every routed request the session user may work right now (P5-R11,
 	P5-R12).
 
@@ -2598,18 +2611,32 @@ def _hr_request_summaries(employee, today, states=None, picked_up_by=None, route
 	The filter dict itself is built by `_request_summaries_filters`, so the
 	feed's page and its count can never ask two different questions.
 
+	Plan 2026-10-17-001 U8 (all additive, the queue passes none of them):
+	`category` and `or_filters` (the inbox search, `_request_search_or_filters`)
+	narrow the page exactly as they narrow the feed's count; `names` reads one
+	already-ordered page of names (the `sort=sla` page); `sla_days` reuses a
+	category read the caller already made; `with_actions` adds each row's
+	`actions` (`_request_row_actions`). Every row carries `token_modified`
+	and `sla_over_days`.
+
 	Rows always carry `picked_up_by_name` (resolved server-side, KTD4) and
 	`sla_overdue` (the category's SLA against age, `is_overdue`'s predicate)
 	-- keys the queue's consumers ignore and the feed renders.
 	"""
 	filters = _request_summaries_filters(
-		employee, states or (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS), picked_up_by, routed_roles
+		employee, states or (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS), picked_up_by, routed_roles, category
 	)
+	if names is not None:
+		if not names:
+			return []
+		filters["name"] = ["in", names]
 	rows = frappe.get_list(
 		"HR Request",
 		filters=filters,
+		or_filters=or_filters or None,
 		fields=[
 			"name",
+			"owner",
 			"employee",
 			"category",
 			"subject",
@@ -2662,10 +2689,9 @@ def _hr_request_summaries(employee, today, states=None, picked_up_by=None, route
 	}
 	# One read per page, not per row (P2-R22): SLA days ride beside the
 	# routed role the categories already answer.
-	sla_days = {
-		name: cint(sla)
-		for name, sla in frappe.get_all("HelixHR Request Category", fields=["name", "sla_days"], as_list=True)
-	}
+	if sla_days is None:
+		sla_days = _request_sla_days()
+	actions = _request_row_actions(rows, frappe.session.user) if with_actions else {}
 	result = []
 	for row in rows:
 		waiting_on = None
@@ -2677,6 +2703,7 @@ def _hr_request_summaries(employee, today, states=None, picked_up_by=None, route
 			since = latest_questions.get(row.name) or row.modified
 			waiting_since = str(since) if since else None
 		emp_name = (employees.get(row.employee) or {}).get("employee_name") or row.employee
+		overdue = _request_sla_overdue(row, today, sla_days)
 		result.append(
 			_summary_row(
 				"request",
@@ -2694,8 +2721,15 @@ def _hr_request_summaries(employee, today, states=None, picked_up_by=None, route
 				routed_to_role=row.routed_to_role,
 				picked_up_by=row.picked_up_by,
 				picked_up_by_name=picker_names.get(row.picked_up_by),
-				sla_overdue=is_overdue(row.creation, today, sla_days.get(row.category, 0))
-				and row.status in (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS),
+				sla_overdue=overdue,
+				# U8 / AI-17: how far past, so the pill can say "2 d over".
+				sla_over_days=_age_in_days(row.creation, today) - sla_days.get(row.category, 0)
+				if overdue
+				else None,
+				# U8 / AI-04: the row's own stale-write token, so "Assign to
+				# me" from the list is checked like the detail's button.
+				token_modified=str(row.modified),
+				**({"actions": actions.get(row.name, [])} if with_actions else {}),
 				for_hr=(row.routed_to_role == "HR Manager"),
 				hr_note=row.hr_note,
 				correction_field=row.correction_field,
@@ -2708,7 +2742,7 @@ def _hr_request_summaries(employee, today, states=None, picked_up_by=None, route
 	return result
 
 
-def _request_summaries_filters(employee, states, picked_up_by=None, routed_roles=None):
+def _request_summaries_filters(employee, states, picked_up_by=None, routed_roles=None, category=None):
 	"""The one place the request summaries' filter dict is built: the queue,
 	the work feed's page and the feed's count all ask through it, so the
 	"both views read one function" claim (plan 2026-10-04-002 KTD5) cannot
@@ -2721,7 +2755,114 @@ def _request_summaries_filters(employee, states, picked_up_by=None, routed_roles
 		filters["picked_up_by"] = picked_up_by
 	if routed_roles:
 		filters["routed_to_role"] = ["in", routed_roles]
+	if category:
+		filters["category"] = category
 	return filters
+
+
+# Plan 2026-10-17-001 U8 / KTD5: the bounded request search. `q` is trimmed,
+# ignored under 2 characters, cut at 60, and its LIKE metacharacters are
+# escaped, so "50%" finds "50%" rather than everything starting "50".
+_REQUEST_SEARCH_MIN = 2
+_REQUEST_SEARCH_MAX = 60
+# The requester-name half resolves at most this many Employees.
+_REQUEST_SEARCH_PEOPLE = 200
+
+
+def _request_search_pattern(q):
+	"""`q` as a LIKE pattern, or None when there is nothing to search for."""
+	term = (q if isinstance(q, str) else "").strip()[:_REQUEST_SEARCH_MAX]
+	if len(term) < _REQUEST_SEARCH_MIN:
+		return None
+	escaped = term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+	return f"%{escaped}%"
+
+
+def _request_requester_scope(user):
+	"""The Employee filter for "requesters this caller may see", or None for
+	nobody -- the same branches as `hr_request.get_permission_query_conditions`:
+	an HR/System Manager reads through `resolve_admin_scope`, a routed worker
+	through their own company."""
+	if user == "Administrator":
+		return {}
+	if set(frappe.get_roles(user)) & {"HR Manager", "System Manager"}:
+		return admin_scope_employee_filters(resolve_admin_scope(user))
+	company = session_company(user)
+	return {"company": company} if company else None
+
+
+def _request_search_or_filters(q, user):
+	"""The inbox search as `or_filters`: subject, or a requester whose name
+	matches (U8; U5's palette reuses it). None when `q` is too short.
+
+	The requester half is one bounded Employee read inside the caller's own
+	scope, turned into `employee in (...)` on the same permission-aware
+	`get_list` the page and its count already run -- so a name match can
+	only ever narrow what the caller could already list, never widen it."""
+	pattern = _request_search_pattern(q)
+	if not pattern:
+		return None
+	or_filters = [["subject", "like", pattern]]
+	scope = _request_requester_scope(user)
+	if scope is not None:
+		requesters = frappe.get_all(
+			"Employee",
+			filters={**scope, "employee_name": ["like", pattern]},
+			pluck="name",
+			limit=_REQUEST_SEARCH_PEOPLE,
+		)
+		if requesters:
+			or_filters.append(["employee", "in", requesters])
+	return or_filters
+
+
+def _request_sla_days():
+	"""{category -> SLA days}, one read over a bounded table."""
+	return {
+		name: cint(sla)
+		for name, sla in frappe.get_all("HelixHR Request Category", fields=["name", "sla_days"], as_list=True)
+	}
+
+
+def _request_sla_overdue(row, today, sla_days):
+	"""The one SLA predicate for a request row: the row's pill and the
+	`sort=sla` order both read it, so they can never disagree."""
+	return bool(
+		row.status in (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS)
+		and is_overdue(row.creation, today, sla_days.get(row.category, 0))
+	)
+
+
+def _request_row_actions(rows, user):
+	"""{name -> the actions this user may take on that row}, with no query
+	per row (U8 / AI-04: the inbox's "Assign to me").
+
+	Drawn from the same `HR Request Handling` transitions `_allowed_actions`
+	derives the detail's `actions` from -- state, held role, self-approval --
+	in `_APPROVAL_ACTIONS` order. The fixture conditions' two clauses are the
+	feed's own filters, applied before a row gets here: the transition's role
+	is the row's stored `routed_to_role` (`_may_act_on_hr_request`), and the
+	caller's own requests are excluded (`employee != caller`). Evaluating the
+	condition itself would cost a query per row. `act_on_approval` re-runs
+	`_allowed_actions` on every click, so a row button can be refused, never
+	widened."""
+	from frappe.model.workflow import get_workflow, has_approval_access
+
+	transitions = get_workflow("HR Request").transitions
+	roles = set(frappe.get_roles(user))
+	actions = {}
+	for row in rows:
+		reachable = {
+			transition.action
+			for transition in transitions
+			if transition.state == row.status
+			and transition.allowed == row.routed_to_role
+			and transition.allowed in roles
+			and transition.action in _APPROVAL_ACTIONS
+			and has_approval_access(user, row, transition)
+		}
+		actions[row.name] = [action for action in _APPROVAL_ACTIONS if action in reachable]
+	return actions
 
 
 # Plan 2026-10-04-002 U3: the "To work on" chips. Each chip names the
@@ -2738,7 +2879,7 @@ _REQUEST_WORK_STATES = {
 
 
 @frappe.whitelist()
-def get_request_work(state=None, limit=None, start=0):
+def get_request_work(state=None, limit=None, start=0, q=None, sort=None, category=None):
 	"""The "To work on" feed behind /requests' second tab (plan
 	2026-10-04-002 U3, R7-R8).
 
@@ -2752,6 +2893,21 @@ def get_request_work(state=None, limit=None, start=0):
 	Frappe's own permission conditions (company for a company-anchored HR
 	Manager, own route for a routed-role holder) and by the roles the
 	caller actually holds.
+
+	Plan 2026-10-17-001 U8 (R13), all additive:
+
+	* `q` searches subject or requester name (`_request_search_or_filters`)
+	  and `category` names one category; both narrow the page *and* `total`.
+	  `action_count` stays unfiltered -- it is the tab's badge.
+	* `sort=sla` puts rows past their category's SLA first, each half oldest
+	  first; the default (`''`) keeps plain oldest-first. Frappe's `get_list`
+	  cannot order by a per-category date expression, so the count read --
+	  which already lists every matching row -- also carries `category`,
+	  `creation` and `status`, the rows are ordered here by the same
+	  predicate the row's pill uses (`_request_sla_overdue`), and the page is
+	  read by name. No query is added for it.
+	* Rows carry `token_modified` and the caller's `actions` for the row, so
+	  "Assign to me" works from the list.
 	"""
 	rate_limit_per_user("get_request_work")
 	if not (_is_hr() or _holds_routed_role()):
@@ -2760,44 +2916,74 @@ def get_request_work(state=None, limit=None, start=0):
 	state = (state or "").strip().lower() or "open"
 	if state not in _REQUEST_WORK_STATES:
 		frappe.throw(_("There is no work filter called {0}.").format(state))
+	sort = sort.strip().lower() if isinstance(sort, str) else (sort or "")
+	if sort not in ("", "sla"):
+		frappe.throw(_("There is no sort called {0}.").format(sort))
+	category = _valid_request_category(category)
 
 	roles = set(frappe.get_roles())
 	routed_roles = [role for role in ("HR Manager", *_ROUTED_WORKER_ROLES) if role in roles]
 	if not routed_roles:
 		# An HR-adjacent session (System Manager) without either role that
 		# routes requests: nothing here is theirs to work.
-		return {"work": [], "total": 0, "action_count": 0, "limit": _REQUEST_PAGE, "today": user_today()}
+		return {
+			"work": [],
+			"total": 0,
+			"action_count": 0,
+			"categories": [],
+			"limit": _REQUEST_PAGE,
+			"today": user_today(),
+		}
 
 	employee = get_current_employee()
 	today = _as_date(user_today())
 	page = min(max(cint(limit) or _REQUEST_PAGE, 1), _REQUEST_MAX_PAGE)
+	start = max(cint(start), 0)
+	picked_up_by = frappe.session.user if state == "mine" else None
+	or_filters = _request_search_or_filters(q, frappe.session.user)
+	# One category read serves the SLA order, every row's pill and the
+	# inbox's category chips (the categories routed to a role held here).
+	categories = frappe.get_all(
+		"HelixHR Request Category", fields=["name", "sla_days", "route_to_role"], order_by="name asc"
+	)
+	sla_days = {row.name: cint(row.sla_days) for row in categories}
 	filters = {
 		"states": _REQUEST_WORK_STATES[state],
 		"routed_roles": routed_roles,
-		"limit": page,
-		"start": max(cint(start), 0),
+		"picked_up_by": picked_up_by,
+		"category": category,
+		"or_filters": or_filters,
+		"sla_days": sla_days,
+		"with_actions": True,
 	}
-	if state == "mine":
-		filters["picked_up_by"] = frappe.session.user
 
-	rows = _hr_request_summaries(employee, today, **filters)
 	# One count for the same filter, so Load More has an honest end (P2-R22).
 	# Read through `get_list`, not a bare COUNT: the caller's permission
 	# conditions are the scope, and the count must answer exactly what the
-	# page above was scoped to.
-	total = len(
-		frappe.get_list(
-			"HR Request",
-			filters=_request_summaries_filters(
-				employee,
-				_REQUEST_WORK_STATES[state],
-				frappe.session.user if state == "mine" else None,
-				routed_roles,
-			),
-			pluck="name",
-			limit_page_length=0,
-		)
+	# page below was scoped to.
+	matching = frappe.get_list(
+		"HR Request",
+		filters=_request_summaries_filters(
+			employee, _REQUEST_WORK_STATES[state], picked_up_by, routed_roles, category
+		),
+		or_filters=or_filters,
+		fields=["name", "category", "creation", "status"] if sort == "sla" else ["name"],
+		order_by="creation asc",
+		limit_page_length=0,
 	)
+	total = len(matching)
+	if sort == "sla":
+		overdue = [row.name for row in matching if _request_sla_overdue(row, today, sla_days)]
+		late = set(overdue)
+		ordered = overdue + [row.name for row in matching if row.name not in late]
+		names = ordered[start : start + page]
+		position = {name: index for index, name in enumerate(names)}
+		rows = sorted(
+			_hr_request_summaries(employee, today, names=names, limit=page, start=0, **filters),
+			key=lambda row: position[row["name"]],
+		)
+	else:
+		rows = _hr_request_summaries(employee, today, limit=page, start=start, **filters)
 	# Plan 2026-10-16-001 R8: Team inbox count is requests needing team action
 	# (New and In progress), matching Home count.
 	action_count = len(
@@ -2820,6 +3006,7 @@ def get_request_work(state=None, limit=None, start=0):
 		# Plan 2026-10-16-001 U6: the inbox header names the team -- "HR" or
 		# "IT" from the roles actually read, none when the caller works both.
 		"team": _handled_by_team(routed_roles[0]) if len(routed_roles) == 1 else None,
+		"categories": [row.name for row in categories if row.route_to_role in routed_roles],
 		"limit": page,
 		"today": user_today(),
 	}
@@ -8421,9 +8608,12 @@ def _picker_display_name(picked_up_by):
 	return row.full_name
 
 
-def _requests_summary(employee, limit=None, category=None):
+def _requests_summary(employee, limit=None, category=None, q=None):
 	"""A bounded page of `employee`'s requests, newest first, optionally of
-	one category (U6 / R13; `counts` is per category across all of them).
+	one category (U6 / R13; `counts` is per category across all of them)
+	and matching a subject search (plan 2026-10-17-001 U8 / ED-19: the same
+	bounded `_request_search_pattern` the inbox uses; `total` counts the
+	matches, the category chips do not).
 
 	Carries what the list actually renders and nothing else: the lifecycle
 	dates, HR's reply, how many files are on it, and whether there is an
@@ -8433,6 +8623,9 @@ def _requests_summary(employee, limit=None, category=None):
 	limit = min(max(cint(limit) or _REQUEST_PAGE, 1), _REQUEST_MAX_PAGE)
 	category = _valid_request_category(category)
 	filters = {"employee": employee, **({"category": category} if category else {})}
+	pattern = _request_search_pattern(q)
+	if pattern:
+		filters["subject"] = ["like", pattern]
 
 	rows = frappe.get_all(
 		"HR Request",
@@ -8442,7 +8635,8 @@ def _requests_summary(employee, limit=None, category=None):
 		limit=limit,
 	)
 	names = [row.name for row in rows]
-	unread = _unread_request_notifications(names)
+	replies = set()
+	unread = _unread_request_notifications(names, replies)
 	counts = _attachment_counts(names)
 	# Team labels come from the category, one query for the whole page.
 	teams = _category_teams()
@@ -8455,6 +8649,11 @@ def _requests_summary(employee, limit=None, category=None):
 			{
 				**row,
 				"unread": row.name in unread,
+				# Plan 2026-10-17-001 KTD12: an unread *message* from the
+				# handling team (the HR_REPLY_SUBJECT_PREFIX bell), as opposed
+				# to an unread status change. Only the message puts a row
+				# under "Needs you", the same rule Home applies.
+				"unread_reply": row.name in replies,
 				"attachments": counts.get(row.name, 0),
 			}
 			for row in rows
@@ -8473,8 +8672,8 @@ def _requests_summary(employee, limit=None, category=None):
 
 
 @frappe.whitelist()
-def get_my_requests(limit=None, category=None):
-	return _requests_summary(get_current_employee(), limit, category)
+def get_my_requests(limit=None, category=None, q=None):
+	return _requests_summary(get_current_employee(), limit, category, q)
 
 
 @frappe.whitelist()
@@ -8580,8 +8779,12 @@ def _attachment_counts(names):
 	return counts
 
 
-def _unread_request_notifications(names):
+def _unread_request_notifications(names, replies=None):
 	"""{request name -> the caller's unread Notification Log rows about it}.
+
+	When a `replies` set is passed, the names whose unread rows include a
+	message from the handling team (`HR_REPLY_SUBJECT_PREFIX`) are added to
+	it -- from the same read, not a second one (plan 2026-10-17-001 KTD12).
 
 	The read state is Frappe's own (P2-KTD6); there is no second seen-model
 	here. `for_user` is the session user in the filter as well as in the
@@ -8599,9 +8802,11 @@ def _unread_request_notifications(names):
 			"document_name": ["in", names],
 			"read": 0,
 		},
-		fields=["name", "document_name"],
+		fields=["name", "document_name", "subject"],
 	):
 		found.setdefault(row.document_name, []).append(row.name)
+		if replies is not None and (row.subject or "").startswith(HR_REPLY_SUBJECT_PREFIX):
+			replies.add(row.document_name)
 	return found
 
 

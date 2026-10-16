@@ -2628,3 +2628,304 @@ class TestRequestConversation(IntegrationTestCase):
 		for m in sent:
 			self.assertNotIn(HR_REQUEST_QUESTION_PREFIX, _decoded(m.message))
 
+
+
+class TestRequestInboxTriage(IntegrationTestCase):
+	"""Plan 2026-10-17-001 U8 (R13, R19): the inbox searches, sorts by SLA and
+	carries each row's own actions; the employee's list tells an unread
+	message from an unread status change (KTD12)."""
+
+	def setUp(self):
+		self.employee_name, _, _, _ = make_test_employee_and_manager()
+		self.it_employee, self.it_user = make_test_it_user()
+		self.hr_user = make_test_hr_manager_employee()[1]
+		ensure_test_email_account()
+		self.stamp = uuid.uuid4().hex[:10]
+		self.addCleanup(setattr, frappe.local, "request", None)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _file(self, subject, category="IT / Asset", as_user=EMPLOYEE_USER, days_ago=None):
+		from helixhr.api import create_my_request
+
+		frappe.set_user(as_user)
+		created = create_my_request(
+			category=category, subject=subject, details="Inbox triage", operation_key=str(uuid.uuid4())
+		)
+		frappe.set_user("Administrator")
+		self.addCleanup(_delete_request, created["name"])
+		if days_ago is not None:
+			frappe.db.set_value(
+				"HR Request",
+				created["name"],
+				"creation",
+				frappe.utils.add_days(frappe.utils.now_datetime(), -days_ago),
+				update_modified=False,
+			)
+		return created["name"]
+
+	def _work(self, user, **kwargs):
+		from helixhr.api import get_request_work
+
+		frappe.set_user(user)
+		try:
+			return get_request_work(**kwargs)
+		finally:
+			frappe.set_user("Administrator")
+
+	def _names(self, result):
+		return [row["name"] for row in result["work"]]
+
+	def _sla(self, category, days):
+		before = frappe.db.get_value("HelixHR Request Category", category, "sla_days")
+		frappe.db.set_value("HelixHR Request Category", category, "sla_days", days)
+		self.addCleanup(frappe.db.set_value, "HelixHR Request Category", category, "sla_days", before)
+
+	def _act(self, user, name, action, comment=None):
+		from helixhr.api import act_on_approval
+
+		row = frappe.db.get_value("HR Request", name, ["modified", "status"], as_dict=True)
+		frappe.set_user(user)
+		try:
+			act_on_approval(
+				"HR Request",
+				name,
+				action,
+				comment=comment,
+				expected_modified=str(row.modified),
+				expected_state=row.status,
+			)
+		finally:
+			frappe.set_user("Administrator")
+
+	# --- the gate ----------------------------------------------------------
+
+	def test_a_non_handler_is_refused_with_or_without_search_and_sort(self):
+		for kwargs in ({}, {"q": "laptop"}, {"sort": "sla"}, {"q": "laptop", "sort": "nonsense"}):
+			with self.assertRaises(frappe.PermissionError, msg=kwargs):
+				self._work(EMPLOYEE_USER, **kwargs)
+
+	def test_an_unknown_sort_is_refused_and_the_default_is_oldest_first(self):
+		with self.assertRaises(frappe.ValidationError):
+			self._work(self.it_user, sort="newest")
+		older = self._file(f"Order {self.stamp} older", days_ago=5)
+		newer = self._file(f"Order {self.stamp} newer", days_ago=1)
+
+		self.assertEqual(self._names(self._work(self.it_user, q=f"Order {self.stamp}")), [older, newer])
+		self.assertEqual(self._names(self._work(self.it_user, q=f"Order {self.stamp}", sort="")), [older, newer])
+
+	# --- q -----------------------------------------------------------------
+
+	def test_q_matches_part_of_a_subject_and_total_counts_only_the_matches(self):
+		laptop = self._file(f"Inbox {self.stamp} laptop charger")
+		badge = self._file(f"Inbox {self.stamp} door badge")
+
+		unfiltered = self._work(self.it_user)
+		result = self._work(self.it_user, q=f"{self.stamp} laptop")
+		self.assertEqual(self._names(result), [laptop])
+		self.assertEqual(result["total"], 1)
+
+		both = self._work(self.it_user, q=f"  Inbox {self.stamp}  ")
+		self.assertEqual(set(self._names(both)), {laptop, badge})
+		self.assertEqual(both["total"], 2)
+
+		# The badge is not a search result: it counts everything waiting.
+		self.assertEqual(result["action_count"], unfiltered["action_count"])
+		# One character is not a search; clearing it restores the list.
+		self.assertEqual(self._work(self.it_user, q="x")["total"], unfiltered["total"])
+		self.assertEqual(self._work(self.it_user, q="")["total"], unfiltered["total"])
+
+	def test_q_matches_the_requesters_name(self):
+		requester = f"zq{self.stamp}@helixhr.test"
+		make_test_user(requester, ensure_test_company())
+		name = self._file("Requester search check", as_user=requester)
+
+		result = self._work(self.it_user, q=f"zq{self.stamp}")
+
+		self.assertEqual(self._names(result), [name])
+		self.assertEqual(result["total"], 1)
+
+	def test_like_metacharacters_in_q_are_literal(self):
+		percent = self._file(f"Pct {self.stamp} 50% off")
+		self._file(f"Pct {self.stamp} 50 off")
+		underscore = self._file(f"Pct {self.stamp} a_b")
+		self._file(f"Pct {self.stamp} axb")
+
+		self.assertEqual(self._names(self._work(self.it_user, q=f"{self.stamp} 50%")), [percent])
+		self.assertEqual(self._names(self._work(self.it_user, q=f"{self.stamp} a_b")), [underscore])
+
+	def test_an_hr_managers_search_never_reaches_it_routes_or_another_company(self):
+		mine = self._file(f"Scope {self.stamp} letter", category="HR Letter")
+		self._file(f"Scope {self.stamp} laptop")  # IT-routed
+		other_user = f"oc{self.stamp}@helixhr.test"
+		make_test_user(other_user, ensure_baseline_company())
+		self._file("Other company letter", category="HR Letter", as_user=other_user)
+
+		self.assertEqual(self._names(self._work(self.hr_user, q=f"Scope {self.stamp}")), [mine])
+		by_name = self._work(self.hr_user, q=f"oc{self.stamp}")
+		self.assertEqual(by_name["work"], [])
+		self.assertEqual(by_name["total"], 0)
+
+	def test_category_narrows_the_page_and_the_total(self):
+		letter = self._file(f"Cat {self.stamp} letter", category="HR Letter")
+		self._file(f"Cat {self.stamp} pay", category="Payroll Question")
+
+		result = self._work(self.hr_user, q=f"Cat {self.stamp}", category="HR Letter")
+
+		self.assertEqual(self._names(result), [letter])
+		self.assertEqual(result["total"], 1)
+		self.assertIn("HR Letter", result["categories"])
+		self.assertNotIn("IT / Asset", result["categories"])
+		with self.assertRaises(frappe.ValidationError):
+			self._work(self.hr_user, category="No such category")
+
+	# --- sort=sla ------------------------------------------------------------
+
+	def test_sort_sla_lifts_an_overdue_row_from_page_two_to_page_one(self):
+		self._sla("HR Letter", 30)
+		self._sla("Payroll Question", 1)
+		first = self._file(f"Sla {self.stamp} first", category="HR Letter", days_ago=10)
+		second = self._file(f"Sla {self.stamp} second", category="HR Letter", days_ago=9)
+		late = self._file(f"Sla {self.stamp} late", category="Payroll Question", days_ago=3)
+		q = f"Sla {self.stamp}"
+
+		self.assertEqual(self._names(self._work(self.hr_user, q=q, limit=2)), [first, second])
+		self.assertEqual(self._names(self._work(self.hr_user, q=q, limit=2, start=2)), [late])
+
+		page_one = self._work(self.hr_user, q=q, sort="sla", limit=2)
+		self.assertEqual(self._names(page_one), [late, first])
+		self.assertEqual(page_one["total"], 3)
+		row = page_one["work"][0]
+		self.assertTrue(row["sla_overdue"])
+		self.assertEqual(row["sla_over_days"], 2)
+		self.assertIsNone(page_one["work"][1]["sla_over_days"])
+
+		# Load More, one row at a time: every row once, none missing.
+		walked = []
+		for start in range(4):
+			walked += self._names(self._work(self.hr_user, q=q, sort="sla", limit=1, start=start))
+		self.assertEqual(walked, [late, first, second])
+
+	def test_sort_sla_pages_the_whole_inbox_without_duplicates_or_gaps(self):
+		for index in range(3):
+			self._file(f"Walk {self.stamp} {index}", days_ago=index)
+
+		everything = self._work(self.it_user, sort="sla", limit=100)
+		walked = []
+		for start in range(0, everything["total"] + 5, 5):
+			walked += self._names(self._work(self.it_user, sort="sla", limit=5, start=start))
+
+		self.assertEqual(len(walked), len(set(walked)), "Load More must not repeat a row")
+		self.assertEqual(walked, self._names(everything))
+		self.assertEqual(len(walked), everything["total"])
+		overdue = [row["sla_overdue"] for row in everything["work"]]
+		self.assertEqual(overdue, sorted(overdue, reverse=True), "overdue rows come first")
+
+	def test_search_and_sort_add_at_most_two_queries(self):
+		from unittest.mock import patch
+
+		self._file(f"Count {self.stamp} one")
+		self._file(f"Count {self.stamp} two")
+		self._work(self.it_user)  # warm the meta and workflow caches
+		self._work(self.it_user, q=f"Count {self.stamp}", sort="sla")
+
+		real_sql = frappe.db.sql
+
+		def counted(**kwargs):
+			count = {"n": 0}
+
+			def counting_sql(*args, **kw):
+				count["n"] += 1
+				return real_sql(*args, **kw)
+
+			with patch.object(frappe.db, "sql", side_effect=counting_sql):
+				self._work(self.it_user, **kwargs)
+			return count["n"]
+
+		plain = counted()
+		searched = counted(q=f"Count {self.stamp}", sort="sla")
+		self.assertLessEqual(searched, plain + 2)
+
+	# --- row actions ---------------------------------------------------------
+
+	def test_rows_carry_their_token_and_the_details_actions(self):
+		from helixhr.api import get_approval_detail
+
+		fresh = self._file(f"Acts {self.stamp} fresh")
+		taken = self._file(f"Acts {self.stamp} taken")
+		self._act(self.it_user, taken, "Pick up")
+		waiting = self._file(f"Acts {self.stamp} waiting")
+		self._act(self.it_user, waiting, "Need info", comment="Which model?")
+
+		rows = {row["name"]: row for row in self._work(self.it_user, q=f"Acts {self.stamp}")["work"]}
+		self.assertEqual(set(rows), {fresh, taken, waiting})
+		self.assertIn("Pick up", rows[fresh]["actions"])
+		self.assertNotIn("Pick up", rows[taken]["actions"])
+		frappe.set_user(self.it_user)
+		for name, row in rows.items():
+			self.assertEqual(row["token_modified"], str(frappe.db.get_value("HR Request", name, "modified")))
+			self.assertEqual(row["actions"], get_approval_detail("request", name)["actions"], name)
+		frappe.set_user("Administrator")
+
+		letter = self._file(f"Acts {self.stamp} letter", category="HR Letter")
+		hr_rows = {row["name"]: row for row in self._work(self.hr_user, q=f"Acts {self.stamp}")["work"]}
+		self.assertEqual(set(hr_rows), {letter})
+		frappe.set_user(self.hr_user)
+		self.assertEqual(hr_rows[letter]["actions"], get_approval_detail("request", letter)["actions"])
+		frappe.set_user("Administrator")
+
+	def test_a_stale_row_token_is_refused_after_another_handler_picks_it_up(self):
+		from helixhr.api import act_on_approval
+
+		name = self._file(f"Race {self.stamp}")
+		row = self._work(self.it_user, q=f"Race {self.stamp}")["work"][0]
+		self._act("Administrator", name, "Pick up")
+
+		frappe.set_user(self.it_user)
+		with self.assertRaises(frappe.ValidationError):
+			act_on_approval(
+				"HR Request", name, "Pick up", expected_modified=row["token_modified"], expected_state="Open"
+			)
+		frappe.set_user("Administrator")
+		self.assertNotIn("Pick up", self._work(self.it_user, q=f"Race {self.stamp}")["work"][0]["actions"])
+
+	# --- the employee's side (KTD12, ED-19) ---------------------------------
+
+	def test_an_unread_message_is_told_apart_from_an_unread_status_change(self):
+		from helixhr.api import get_my_requests
+
+		replied = self._file(f"Owed {self.stamp} replied", category="HR Letter")
+		desk = frappe.get_doc("HR Request", replied)
+		desk.hr_note = "Ready at the front desk."
+		desk.save()
+		done = self._file(f"Owed {self.stamp} done")
+		self._act(self.it_user, done, "Pick up")
+		self._act(self.it_user, done, "Done")
+
+		frappe.set_user(EMPLOYEE_USER)
+		rows = {row["name"]: row for row in get_my_requests(q=f"Owed {self.stamp}")["requests"]}
+		frappe.set_user("Administrator")
+
+		self.assertTrue(rows[replied]["unread"])
+		self.assertTrue(rows[replied]["unread_reply"])
+		self.assertTrue(rows[done]["unread"], "the Done change is still unread")
+		self.assertFalse(rows[done]["unread_reply"], "a status change is not a message")
+
+	def test_the_employees_subject_search_narrows_the_page_and_the_total(self):
+		from helixhr.api import get_my_requests
+
+		match = self._file(f"Mine {self.stamp} visa letter", category="HR Letter")
+		self._file(f"Mine {self.stamp} payslip", category="HR Letter")
+
+		frappe.set_user(EMPLOYEE_USER)
+		result = get_my_requests(q=f"{self.stamp} visa")
+		everything = get_my_requests()
+		short = get_my_requests(q="v")
+		frappe.set_user("Administrator")
+
+		self.assertEqual([row["name"] for row in result["requests"]], [match])
+		self.assertEqual(result["total"], 1)
+		self.assertEqual(short["total"], everything["total"])
+		# The chips count every request, not the search's matches.
+		self.assertEqual(result["counts"], everything["counts"])
