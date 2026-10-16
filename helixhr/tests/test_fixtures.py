@@ -742,6 +742,9 @@ _HR_REQUEST_EDGES = frozenset(
 			("In Progress", "Need info", "Waiting on Employee"),
 			("In Progress", "Done", "Done"),
 			("In Progress", "Reject", "Rejected"),
+			# Plan 2026-10-16-001 U2 / KTD3: Handlers close from Waiting on Employee.
+			("Waiting on Employee", "Done", "Done"),
+			("Waiting on Employee", "Reject", "Rejected"),
 		)
 	}
 )
@@ -830,6 +833,37 @@ class TestApprovalWorkflowFixtures(IntegrationTestCase):
 		restored = [row for row in workflow.transitions if row.state == "Open" and row.action == "Need info"]
 		self.assertEqual(len(restored), 2)
 		self.assertEqual({row.allowed: row.condition for row in restored}, conditions)
+
+	def test_the_close_from_waiting_patch_restores_four_rows_once(self):
+		"""Plan 2026-10-16-001 U2 / KTD3: the patch re-adds the missing Done
+		and Reject transitions from Waiting on Employee, with the fixture's
+		conditions, and is idempotent."""
+		from helixhr.patches.v1_0.ensure_close_from_waiting import execute
+
+		workflow = self._workflow("HR Request Handling")
+		dropped = [
+			row
+			for row in workflow.transitions
+			if row.state == "Waiting on Employee" and row.action in ("Done", "Reject")
+		]
+		self.assertEqual(len(dropped), 4)
+		conditions = {(row.allowed, row.action): row.condition for row in dropped}
+		workflow.transitions = [row for row in workflow.transitions if row not in dropped]
+		workflow.flags.ignore_links = True
+		workflow.save(ignore_permissions=True)
+
+		execute()
+		execute()
+
+		workflow = self._workflow("HR Request Handling")
+		self.assertEqual(self._edges(workflow), _HR_REQUEST_EDGES)
+		restored = [
+			row
+			for row in workflow.transitions
+			if row.state == "Waiting on Employee" and row.action in ("Done", "Reject")
+		]
+		self.assertEqual(len(restored), 4)
+		self.assertEqual({(row.allowed, row.action): row.condition for row in restored}, conditions)
 
 	def test_the_attendance_request_workflow_matches_the_table(self):
 		workflow = self._workflow("Attendance Request Approval")

@@ -127,3 +127,6 @@ helixhr.patches.v1_0.backfill_export_exporter_company
 # Plan 2026-10-15-003 KTD3: Need info from Open for HR Manager and IT Team on
 # HR Request Handling -- copied from the fixture, idempotent.
 helixhr.patches.v1_0.ensure_need_info_from_open
+# Plan 2026-10-16-001 U2 / KTD3: Mark done and Decline from Waiting on Employee
+# for HR Manager and IT Team on HR Request Handling -- copied from the fixture, idempotent.
+helixhr.patches.v1_0.ensure_close_from_waiting

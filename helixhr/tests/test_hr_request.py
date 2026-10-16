@@ -2329,3 +2329,59 @@ class TestRequestConversation(IntegrationTestCase):
 		)
 		self.assertIn(self.it_user, recipients)
 		self.assertNotIn(other_it, recipients)
+
+	# --- U2: Handlers close from Waiting on Employee -------------------
+
+	def test_an_hr_manager_marks_a_waiting_hr_request_done(self):
+		name = self._file(category="HR Letter")
+		self._act(self.hr_user, name, "Need info", comment="Which month?")
+		self.assertEqual(frappe.db.get_value("HR Request", name, "status"), "Waiting on Employee")
+
+		self._act(self.hr_user, name, "Done")
+		row = frappe.db.get_value("HR Request", name, ["status", "closed_on"], as_dict=True)
+		self.assertEqual(row.status, "Done")
+		self.assertIsNotNone(row.closed_on)
+
+		bells = self._bells(name, EMPLOYEE_USER)
+		self.assertTrue(any("is done" in b for b in bells))
+
+	def test_an_it_team_user_declines_a_waiting_it_request_with_a_reason(self):
+		from helixhr.events import DECISION_REASON_FIELD
+
+		name = self._file(category="IT / Asset")
+		self._act(self.it_user, name, "Need info", comment="Which model?")
+		self.assertEqual(frappe.db.get_value("HR Request", name, "status"), "Waiting on Employee")
+
+		# Error: decline without reason is refused
+		with self.assertRaises(frappe.ValidationError):
+			self._act(self.it_user, name, "Reject")
+
+		self._act(self.it_user, name, "Reject", comment="No reply after 7 days")
+		row = frappe.db.get_value(
+			"HR Request", name, ["status", "closed_on", DECISION_REASON_FIELD], as_dict=True
+		)
+		self.assertEqual(row.status, "Rejected")
+		self.assertIsNotNone(row.closed_on)
+		self.assertEqual(row.get(DECISION_REASON_FIELD), "No reply after 7 days")
+
+		bells = self._bells(name, EMPLOYEE_USER)
+		self.assertTrue(any("was declined" in b for b in bells))
+
+	def test_close_from_waiting_refusals_and_lifecycle_gates(self):
+		name = self._file(category="HR Letter")
+		self._act(self.hr_user, name, "Need info", comment="Which month?")
+
+		# IT Team cannot act on an HR-routed waiting request
+		with self.assertRaises(frappe.PermissionError):
+			self._act(self.it_user, name, "Done")
+
+		# Employee cannot decide their own waiting request
+		with self.assertRaises(frappe.PermissionError):
+			self._act(EMPLOYEE_USER, name, "Done")
+
+		# hr_request_validate still refuses Waiting on Employee -> Open
+		doc = frappe.get_doc("HR Request", name)
+		doc.status = "Open"
+		with self.assertRaisesRegex(frappe.ValidationError, "can't move from Waiting on Employee to Open"):
+			doc.save(ignore_permissions=True)
+
