@@ -1892,16 +1892,19 @@ class TestRequestWork(IntegrationTestCase):
 
 		# Open: not closed, and not waiting on the employee either (that is
 		# the employee's ball, on its own chip).
+		# Open and mine both include waiting on employee (plan 2026-10-16-001 KTD2).
 		self.assertIn(open_name, names(self._work(self.it_user, state="open")))
-		self.assertNotIn(waiting_name, names(self._work(self.it_user, state="open")))
+		self.assertIn(mine_name, names(self._work(self.it_user, state="open")))
+		self.assertIn(waiting_name, names(self._work(self.it_user, state="open")))
 		self.assertNotIn(closed_name, names(self._work(self.it_user, state="open")))
-		# Mine: what I picked up and still hold.
+		# Mine: what I picked up and still hold, including waiting.
 		self.assertIn(mine_name, names(self._work(self.it_user, state="mine")))
+		self.assertIn(waiting_name, names(self._work(self.it_user, state="mine")))
 		self.assertNotIn(open_name, names(self._work(self.it_user, state="mine")))
-		# Waiting on employee: its own chip, off the default view.
+		# Waiting on employee: its own chip, keeps only waiting requests.
 		self.assertIn(waiting_name, names(self._work(self.it_user, state="waiting")))
 		self.assertNotIn(mine_name, names(self._work(self.it_user, state="waiting")))
-		self.assertNotIn(waiting_name, names(self._work(self.it_user)))
+		self.assertNotIn(open_name, names(self._work(self.it_user, state="waiting")))
 		# Closed arrives only when asked.
 		self.assertIn(closed_name, names(self._work(self.it_user, state="closed")))
 		self.assertNotIn(waiting_name, names(self._work(self.it_user, state="closed")))
@@ -2479,4 +2482,107 @@ class TestRequestConversation(IntegrationTestCase):
 		self.assertTrue(reply_mails)
 		expected_url = f"/helixhr/requests/{name}?tab=work"
 		self.assertTrue(any(expected_url in m.message.replace("=3D", "=") for m in reply_mails))
+
+	# --- U4: Work feed keeps waiting requests; thread entries know their kind ---
+
+	def test_thread_entry_kinds_and_marker_stripping(self):
+		from helixhr.api import (
+			comment_on_request,
+			get_approval_detail,
+			get_my_request,
+			reply_to_my_request,
+		)
+
+		name = self._file(category="IT / Asset", details="Opening problem statement")
+
+		# 1. Plain handler comment -> kind: note
+		frappe.set_user(self.it_user)
+		comment_on_request(name, "Taking a look at this")
+
+		# 2. Need info -> kind: question with marker stripped
+		self._act(self.it_user, name, "Need info", comment="Which model?")
+
+		# 3. Employee reply -> kind: note
+		frappe.set_user(EMPLOYEE_USER)
+		reply_to_my_request(name, "MacBook Pro M3", expected_modified=self._token(name)["expected_modified"])
+
+		# 4. Handler decline -> kind: declined
+		self._act(self.it_user, name, "Reject", comment="Out of stock for this quarter")
+
+		# Check thread in both employee and handler views
+		frappe.set_user(self.it_user)
+		handler_thread = get_approval_detail("request", name)["thread"]
+		frappe.set_user(EMPLOYEE_USER)
+		employee_thread = get_my_request(name)["thread"]
+
+		for thread in (handler_thread, employee_thread):
+			self.assertEqual(len(thread), 5)
+			self.assertEqual(thread[0]["kind"], "opening")
+			self.assertEqual(thread[0]["message"], "Opening problem statement")
+
+			self.assertEqual(thread[1]["kind"], "note")
+			self.assertEqual(thread[1]["message"], "Taking a look at this")
+
+			self.assertEqual(thread[2]["kind"], "question")
+			self.assertEqual(thread[2]["message"], "Which model?")
+			self.assertFalse(thread[2]["message"].startswith("Question:"))
+
+			self.assertEqual(thread[3]["kind"], "note")
+			self.assertEqual(thread[3]["message"], "MacBook Pro M3")
+
+			self.assertEqual(thread[4]["kind"], "declined")
+			self.assertEqual(thread[4]["message"], "Out of stock for this quarter")
+			self.assertFalse(thread[4]["message"].startswith("Declined:"))
+
+	def test_old_comment_with_no_marker_renders_as_note(self):
+		from helixhr.api import get_approval_detail
+
+		name = self._file()
+		doc = frappe.get_doc("HR Request", name)
+		doc.add_comment("Comment", "Legacy comment before markers")
+
+		frappe.set_user(self.it_user)
+		thread = get_approval_detail("request", name)["thread"]
+		matching = next(t for t in thread if t["message"] == "Legacy comment before markers")
+		self.assertEqual(matching["kind"], "note")
+
+	def test_waiting_requests_in_feed_and_home_collector_isolation(self):
+		from helixhr.api import _hr_request_summaries, get_request_work
+
+		name = self._file(category="IT / Asset")
+		self._act(self.it_user, name, "Need info", comment="Which model?")
+
+		# After Need info, state="mine" and state="open" both list it with status Waiting on Employee
+		frappe.set_user(self.it_user)
+		work_mine = get_request_work(state="mine")["work"]
+		matching_mine = next((r for r in work_mine if r["name"] == name), None)
+		self.assertIsNotNone(matching_mine)
+		self.assertEqual(matching_mine["status"], "Waiting on Employee")
+		self.assertEqual(matching_mine["waiting_on"], "Employee")
+		self.assertIsNotNone(matching_mine["waiting_since"])
+
+		work_open = get_request_work(state="open")["work"]
+		matching_open = next((r for r in work_open if r["name"] == name), None)
+		self.assertIsNotNone(matching_open)
+		self.assertEqual(matching_open["status"], "Waiting on Employee")
+
+		# state="waiting" returns it too
+		work_waiting = get_request_work(state="waiting")["work"]
+		self.assertTrue(any(r["name"] == name for r in work_waiting))
+		self.assertTrue(all(r["status"] == "Waiting on Employee" for r in work_waiting))
+
+		# Collector default states (used by Home count & backlog count) DO NOT include waiting request (R8)
+		default_summary = _hr_request_summaries(self.it_employee, frappe.utils.getdate())
+		self.assertNotIn(name, [r["name"] for r in default_summary])
+
+	def test_mail_excerpt_for_question_never_contains_raw_marker(self):
+		from helixhr.events import HR_REQUEST_QUESTION_PREFIX
+
+		name = self._file(category="IT / Asset")
+		added = self._watch_mail()
+		self._act(self.it_user, name, "Need info", comment="Which model?")
+
+		sent = [frappe.get_doc("Email Queue", row) for row in added()]
+		for m in sent:
+			self.assertNotIn(HR_REQUEST_QUESTION_PREFIX, m.message.replace("=3D", "="))
 

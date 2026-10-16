@@ -42,9 +42,11 @@ from helixhr.events import (
 	APPROVER_FIELDS,
 	DECISION_REASON_FIELD,
 	HR_REPLY_SUBJECT_PREFIX,
+	HR_REQUEST_DECLINED_PREFIX,
 	HR_REQUEST_DONE,
 	HR_REQUEST_IN_PROGRESS,
 	HR_REQUEST_OPEN,
+	HR_REQUEST_QUESTION_PREFIX,
 	HR_REQUEST_REJECTED,
 	HR_REQUEST_WAITING_ON_EMPLOYEE,
 	LEAVE_RULES_DOCTYPE,
@@ -69,6 +71,8 @@ from helixhr.events import (
 	backdated_leave_reason,
 	leave_overdraw,
 	rederive_approvers,
+	strip_request_comment,
+	strip_request_comment_marker,
 )
 from helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export import expire_unreachable_exports
 from helixhr.helixhr.doctype.helixhr_timesheet_change.helixhr_timesheet_change import (
@@ -2617,14 +2621,31 @@ def _hr_request_summaries(employee, today, states=None, picked_up_by=None, route
 	if not rows:
 		return []
 
-	employee_names = {
-		row.name: row.employee_name
+	employees = {
+		row.name: row
 		for row in frappe.get_all(
 			"Employee",
 			filters={"name": ["in", list({row.employee for row in rows})]},
-			fields=["name", "employee_name"],
+			fields=["name", "employee_name", "first_name"],
 		)
 	}
+	waiting_rows = [r for r in rows if r.status == HR_REQUEST_WAITING_ON_EMPLOYEE]
+	latest_questions = {}
+	if waiting_rows:
+		comments = frappe.get_all(
+			"Comment",
+			filters={
+				"reference_doctype": "HR Request",
+				"reference_name": ["in", [r.name for r in waiting_rows]],
+				"comment_type": "Comment",
+				"content": ["like", f"{HR_REQUEST_QUESTION_PREFIX}%"],
+			},
+			fields=["reference_name", "creation"],
+			order_by="creation desc",
+		)
+		for c in comments:
+			if c.reference_name not in latest_questions:
+				latest_questions[c.reference_name] = c.creation
 	picker_names = {
 		user: _picker_display_name(user)
 		for user in {row.picked_up_by for row in rows if row.picked_up_by}
@@ -2635,32 +2656,46 @@ def _hr_request_summaries(employee, today, states=None, picked_up_by=None, route
 		name: cint(sla)
 		for name, sla in frappe.get_all("HelixHR Request Category", fields=["name", "sla_days"], as_list=True)
 	}
-	return [
-		_summary_row(
-			"request",
-			"HR Request",
-			row.name,
-			row.employee,
-			employee_names.get(row.employee) or row.employee,
-			None,
-			None,
-			row.creation,
-			row.status,
-			today,
-			category=row.category,
-			subject=row.subject,
-			routed_to_role=row.routed_to_role,
-			picked_up_by=row.picked_up_by,
-			picked_up_by_name=picker_names.get(row.picked_up_by),
-			sla_overdue=is_overdue(row.creation, today, sla_days.get(row.category, 0))
-			and row.status in (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS),
-			for_hr=(row.routed_to_role == "HR Manager"),
-			hr_note=row.hr_note,
-			correction_field=row.correction_field,
-			correction_proposed_masked=row.correction_proposed_masked,
+	result = []
+	for row in rows:
+		waiting_on = None
+		waiting_since = None
+		if row.status == HR_REQUEST_WAITING_ON_EMPLOYEE:
+			emp = employees.get(row.employee) or {}
+			first_name = (emp.get("first_name") or "").strip()
+			waiting_on = first_name if first_name else "the employee"
+			since = latest_questions.get(row.name) or row.modified
+			waiting_since = str(since) if since else None
+		emp_name = (employees.get(row.employee) or {}).get("employee_name") or row.employee
+		result.append(
+			_summary_row(
+				"request",
+				"HR Request",
+				row.name,
+				row.employee,
+				emp_name,
+				None,
+				None,
+				row.creation,
+				row.status,
+				today,
+				category=row.category,
+				subject=row.subject,
+				routed_to_role=row.routed_to_role,
+				picked_up_by=row.picked_up_by,
+				picked_up_by_name=picker_names.get(row.picked_up_by),
+				sla_overdue=is_overdue(row.creation, today, sla_days.get(row.category, 0))
+				and row.status in (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS),
+				for_hr=(row.routed_to_role == "HR Manager"),
+				hr_note=row.hr_note,
+				correction_field=row.correction_field,
+				correction_proposed_masked=row.correction_proposed_masked,
+				waiting_on=waiting_on,
+				waiting_since=waiting_since,
+				waiting_days=_age_in_days(waiting_since, today) if waiting_since else None,
+			)
 		)
-		for row in rows
-	]
+	return result
 
 
 def _request_summaries_filters(employee, states, picked_up_by=None, routed_roles=None):
@@ -2682,9 +2717,11 @@ def _request_summaries_filters(employee, states, picked_up_by=None, routed_roles
 # Plan 2026-10-04-002 U3: the "To work on" chips. Each chip names the
 # statuses it can mean; "open" is the working set, "waiting" is the ball in
 # the employee's hands, "closed" is off by default.
+# Plan 2026-10-16-001 KTD2: open and mine gain Waiting on Employee so picked-up
+# and active requests never vanish from handler views.
 _REQUEST_WORK_STATES = {
-	"open": (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS),
-	"mine": (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS),
+	"open": (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS, HR_REQUEST_WAITING_ON_EMPLOYEE),
+	"mine": (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS, HR_REQUEST_WAITING_ON_EMPLOYEE),
 	"waiting": (HR_REQUEST_WAITING_ON_EMPLOYEE,),
 	"closed": (HR_REQUEST_DONE, HR_REQUEST_REJECTED),
 }
@@ -7207,10 +7244,16 @@ def _decide_one(doctype, name, action, reason, expected_modified, expected_state
 			doc.db_set(DECISION_REASON_FIELD, reason)
 		# P4-R5: a hand-over note is marked, so no employee-facing reason
 		# reader can ever return it (see HR_HANDOVER_NOTE_PREFIX).
-		doc.add_comment(
-			"Comment",
-			f"{HR_HANDOVER_NOTE_PREFIX} {reason}" if action == "Send to HR" else reason,
-		)
+		# Plan 2026-10-16-001 KTD5: question and declined markers for HR Request.
+		if doctype == "HR Request" and action == "Need info":
+			comment_text = f"{HR_REQUEST_QUESTION_PREFIX} {reason}"
+		elif doctype == "HR Request" and action in ("Reject", "Decline"):
+			comment_text = f"{HR_REQUEST_DECLINED_PREFIX} {reason}"
+		elif action == "Send to HR":
+			comment_text = f"{HR_HANDOVER_NOTE_PREFIX} {reason}"
+		else:
+			comment_text = reason
+		doc.add_comment("Comment", comment_text)
 
 	# U9: leave keeps its reason as a Comment, so the decision email reads it
 	# from here (`events.leave_application_on_submit` / `_on_update`).
@@ -7665,7 +7708,9 @@ def _request_thread(doc):
 	entries = []
 	opening = frappe.utils.strip_html(doc.details or "").strip()
 	if opening:
-		entries.append({"author": employee_name, "message": opening, "on": str(doc.creation)})
+		entries.append(
+			{"author": employee_name, "message": opening, "on": str(doc.creation), "kind": "opening"}
+		)
 
 	team_label = _("IT team") if doc.routed_to_role == "IT Team" else _("HR team")
 	rows = frappe.get_all(
@@ -7693,13 +7738,17 @@ def _request_thread(doc):
 		text = frappe.utils.strip_html(row.content or "").strip()
 		if not text or text.startswith(HR_HANDOVER_NOTE_PREFIX):
 			continue
+		stripped_text, entry_kind = strip_request_comment_marker(text)
 		if employee_user and row.owner == employee_user:
 			author = employee_name
+			entry_kind = "note"
 		elif row.owner in ("Administrator", "Guest") or not names.get(row.owner):
 			author = team_label
 		else:
 			author = names[row.owner]
-		entries.append({"author": author, "message": text, "on": str(row.creation)})
+		entries.append(
+			{"author": author, "message": stripped_text, "on": str(row.creation), "kind": entry_kind}
+		)
 	return entries
 
 
@@ -7730,6 +7779,10 @@ def _request_decision_detail(doc):
 		"routed_to_role": doc.routed_to_role,
 		"picked_up_by": doc.picked_up_by,
 		"decision_reason": doc.get(DECISION_REASON_FIELD),
+		"creation": str(doc.creation) if doc.creation else None,
+		"picked_up_on": str(doc.picked_up_on) if doc.picked_up_on else None,
+		"replied_on": str(doc.replied_on) if doc.replied_on else None,
+		"closed_on": str(doc.closed_on) if doc.closed_on else None,
 		"sent_on": str(doc.creation) if doc.creation else None,
 		"age_days": _age_in_days(doc.creation, _as_date(user_today())),
 		"thread": _request_thread(doc),
@@ -7799,7 +7852,8 @@ def _notify_request_comment(doc, recipients, author_name, message, bell_subject,
 	recipients = [user for user in dict.fromkeys(recipients) if user and user != frappe.session.user]
 	if not recipients:
 		return
-	excerpt = "" if doc.get("correction_field") else message[:300]
+	clean_message = strip_request_comment(message)
+	excerpt = "" if doc.get("correction_field") else clean_message[:300]
 	send_notification(
 		event_key,
 		recipients,
@@ -8386,6 +8440,10 @@ def _request_detail(name, employee):
 	# no read on User; the raw ids are popped, never returned.
 	row["picked_up_by_name"] = _picker_display_name(row.pop("picked_up_by"))
 	row["handled_by_team"] = _handled_by_team(row.pop("routed_to_role"))
+	row["creation"] = str(row["creation"]) if row.get("creation") else None
+	row["picked_up_on"] = str(row["picked_up_on"]) if row.get("picked_up_on") else None
+	row["replied_on"] = str(row["replied_on"]) if row.get("replied_on") else None
+	row["closed_on"] = str(row["closed_on"]) if row.get("closed_on") else None
 
 	files = frappe.get_all(
 		"File",

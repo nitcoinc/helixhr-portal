@@ -1131,6 +1131,29 @@ def _reconcile_share(doctype, name, employee, keep_user, submit=0):
 # both written and matched in one place. helixhr.api._get_needs_you imports it.
 HR_REPLY_SUBJECT_PREFIX = "HR replied about"
 
+# Plan 2026-10-16-001 KTD5: question and declined markers for HR Request comments.
+HR_REQUEST_QUESTION_PREFIX = "Question:"
+HR_REQUEST_DECLINED_PREFIX = "Declined:"
+
+
+def strip_request_comment_marker(text):
+	"""Plan 2026-10-16-001 KTD5: single helper that strips question and declined
+	markers from stored request comment text."""
+	if not text:
+		return "", "note"
+	stripped = text.strip()
+	if stripped.startswith(HR_REQUEST_QUESTION_PREFIX):
+		return stripped[len(HR_REQUEST_QUESTION_PREFIX) :].strip(), "question"
+	if stripped.startswith(HR_REQUEST_DECLINED_PREFIX):
+		return stripped[len(HR_REQUEST_DECLINED_PREFIX) :].strip(), "declined"
+	return stripped, "note"
+
+
+def strip_request_comment(text):
+	"""Returns the stripped comment message text without markers."""
+	return strip_request_comment_marker(text)[0]
+
+
 HR_REQUEST_OPEN = "Open"
 HR_REQUEST_IN_PROGRESS = "In Progress"
 HR_REQUEST_WAITING_ON_EMPLOYEE = "Waiting on Employee"
@@ -1531,7 +1554,7 @@ def _notify_hr_request_status(doc):
 	for_user = frappe.db.get_value("Employee", doc.employee, "user_id") or doc.owner
 	if not for_user or for_user == frappe.session.user:
 		return
-	reason = (doc.get(DECISION_REASON_FIELD) or "").strip()
+	reason = strip_request_comment((doc.get(DECISION_REASON_FIELD) or "").strip())
 	state = {
 		HR_REQUEST_IN_PROGRESS: "is being worked on",
 		HR_REQUEST_WAITING_ON_EMPLOYEE: "needs more information from you",
