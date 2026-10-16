@@ -477,7 +477,7 @@ test('an IT identity has no Approvals nav item and works requests from Team inbo
   const name = await getValue(
     admin,
     'HR Request',
-    { category: 'IT / Asset', routed_to_role: 'IT Team' },
+    { category: 'IT / Asset', routed_to_role: 'IT Team', status: 'Open' },
     'name',
   )
   await admin.dispose()
@@ -489,7 +489,8 @@ test('an IT identity has no Approvals nav item and works requests from Team inbo
 
   // R2: Works requests from Team inbox
   await page.goto('/helixhr/requests?tab=work')
-  const row = page.locator('[data-testid="work-row"]', { hasText: name })
+  // The row shows the subject, not the ID; find it by its link.
+  const row = page.getByTestId('work-row').filter({ has: page.locator(`a[href*="/requests/${name}"]`) })
   await expect(row).toBeVisible({ timeout: 10000 })
   await row.click()
   await expect(page).toHaveURL(new RegExp(`/helixhr/requests/${name}`))

@@ -2426,6 +2426,22 @@ class TestRequestConversation(IntegrationTestCase):
 		# 5. Non-existent request -> none
 		self.assertEqual(get_request_view("NO-SUCH-REQ"), "none")
 
+		# 6. HR Manager on an HR-routed request -> handler (company scope via
+		# resolve_admin_scope, not a hand-rolled company comparison)
+		hr_req = self._file(category="HR Letter")
+		frappe.set_user(self.hr_user)
+		self.assertEqual(get_request_view(hr_req), "handler")
+
+	def test_waiting_detail_names_the_employee(self):
+		from helixhr.api import get_approval_detail
+
+		name = self._file(category="IT / Asset")
+		self._act(self.it_user, name, "Need info", comment="Which model?")
+		frappe.set_user(self.it_user)
+		detail = get_approval_detail("request", name)
+		first_name = frappe.db.get_value("Employee", detail["employee"], "first_name")
+		self.assertEqual(detail["waiting_on"], (first_name or "").strip() or "the employee")
+
 	def test_hr_manager_and_it_user_approvals_and_home_routing(self):
 		from helixhr.api import (
 			_get_needs_you,
@@ -2546,6 +2562,22 @@ class TestRequestConversation(IntegrationTestCase):
 		matching = next(t for t in thread if t["message"] == "Legacy comment before markers")
 		self.assertEqual(matching["kind"], "note")
 
+	def test_a_typed_note_starting_with_a_marker_stays_a_note(self):
+		from helixhr.api import comment_on_request, get_approval_detail, reply_to_my_request
+
+		name = self._file()
+		frappe.set_user(self.it_user)
+		comment_on_request(name, "Question: did the courier call?")
+		frappe.set_user(EMPLOYEE_USER)
+		reply_to_my_request(name, "Declined: the courier, not me.")
+
+		frappe.set_user(self.it_user)
+		thread = get_approval_detail("request", name)["thread"]
+		typed = [t for t in thread if t["kind"] != "opening"]
+		self.assertEqual([t["kind"] for t in typed], ["note", "note"])
+		self.assertIn("Question: did the courier call?", typed[0]["message"])
+		self.assertIn("Declined: the courier, not me.", typed[1]["message"])
+
 	def test_waiting_requests_in_feed_and_home_collector_isolation(self):
 		from helixhr.api import _hr_request_summaries, get_request_work
 
@@ -2554,7 +2586,9 @@ class TestRequestConversation(IntegrationTestCase):
 
 		# After Need info, state="mine" and state="open" both list it with status Waiting on Employee
 		frappe.set_user(self.it_user)
-		work_mine = get_request_work(state="mine")["work"]
+		feed = get_request_work(state="mine")
+		self.assertEqual(feed["team"], "IT")
+		work_mine = feed["work"]
 		matching_mine = next((r for r in work_mine if r["name"] == name), None)
 		self.assertIsNotNone(matching_mine)
 		self.assertEqual(matching_mine["status"], "Waiting on Employee")

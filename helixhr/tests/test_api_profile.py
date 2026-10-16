@@ -684,18 +684,35 @@ class TestPhotoInProjections(_PhotoTestCase):
 		self.assertEqual(self._as(EMPLOYEE_USER, get_portal_bootstrap)["employee"]["photo_url"], uploaded)
 
 	def test_an_approval_queue_row_carries_the_requesters_versioned_photo(self):
+		# Plan 2026-10-16-001 KTD1: requests left Approvals, so the queue row
+		# under test is a decision -- the requester's pending leave.
 		import uuid
 
-		from helixhr.api import create_my_request, get_my_approvals
+		from frappe.utils import add_days, today
+
+		from helixhr.api import get_my_approvals
+		from helixhr.tests.utils import ensure_leave_allocation
 
 		uploaded = self._as(EMPLOYEE_USER, self._upload)["photo_url"]
+		ensure_leave_allocation(self.employee_name, "Casual Leave", 5)
+		leave_date = str(add_days(today(), uuid.uuid4().int % 100))
 		name = self._as(
 			EMPLOYEE_USER,
-			lambda: create_my_request(
-				category="HR Letter", subject="Photo in queue", operation_key=str(uuid.uuid4())
-			)["name"],
+			lambda: frappe.get_doc(
+				{
+					"doctype": "Leave Application",
+					"employee": self.employee_name,
+					"leave_type": "Casual Leave",
+					"from_date": leave_date,
+					"to_date": leave_date,
+					"description": "Photo in queue",
+					"leave_approver": MANAGER_USER,
+				}
+			)
+			.insert()
+			.name,
 		)
-		pending = self._as(self.hr_user, get_my_approvals)["pending"]
+		pending = self._as(MANAGER_USER, get_my_approvals)["pending"]
 		row = next(row for row in pending if row["name"] == name)
 		self.assertEqual(row["photo_url"], uploaded)
 		self.assertIn("v=", row["photo_url"])

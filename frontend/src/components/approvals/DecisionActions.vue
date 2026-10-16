@@ -1,112 +1,57 @@
 <script setup>
-// Plan 2026-10-16-001 KTD9: One action-row component for Approvals.
-// Fixed order on both phone and desktop: Primary -> Return -> Final No -> Hand-over.
+// Plan 2026-10-16-001 KTD9: One action-row component for Approvals, used by
+// both the phone and desktop detail. Words and order come from the one kind
+// map (`workKinds.KIND_ACTIONS`, KTD6): primary, return, final no, hand-over.
 import { computed } from 'vue'
 import { Button } from 'frappe-ui'
+import { getActionButtons } from '@/lib/workKinds'
 
 const props = defineProps({
   kind: { type: String, default: '' },
   actions: { type: Array, default: () => [] },
   disabled: { type: Boolean, default: false },
   loading: { type: Boolean, default: false },
+  /** While a reason or note surface is open, only its own action shows. */
   armed: { type: String, default: '' },
+  /** The kind's amount-bearing Approve label, e.g. "Approve 3 days". */
+  approveLabel: { type: String, default: '' },
 })
 
 const emit = defineEmits(['act'])
 
-const availableActions = computed(() => {
-  const allowed = Array.isArray(props.actions) ? props.actions : []
-  const list = []
+// The decision tones the page already styles; the primary is the solid green.
+const TONE = {
+  'Send Back': 'decision-tone decision-tone--return',
+  Reject: 'decision-tone decision-tone--final',
+  Decline: 'decision-tone decision-tone--final',
+  'Send to HR': 'decision-tone decision-tone--handover',
+}
 
-  // 1. Primary action
-  if (props.kind === 'change') {
-    if (allowed.includes('Accept')) {
-      list.push({
-        action: 'Accept',
-        label: 'Approve change',
-        variant: 'solid',
-        theme: 'green',
-        testid: 'accept',
-      })
-    }
-  } else {
-    if (allowed.includes('Approve')) {
-      list.push({
-        action: 'Approve',
-        label: 'Approve',
-        variant: 'solid',
-        theme: 'green',
-        testid: 'approve',
-      })
-    }
-  }
-
-  // 2. Return action (Send back)
-  if (allowed.includes('Send Back')) {
-    list.push({
-      action: 'Send Back',
-      label: 'Send back',
-      variant: 'outline',
-      class: 'decision-tone decision-tone--return',
-      testid: 'send-back',
-    })
-  }
-
-  // 3. Final no (Reject / Decline)
-  if (props.kind === 'change') {
-    if (allowed.includes('Decline')) {
-      list.push({
-        action: 'Decline',
-        label: 'Decline',
-        variant: 'outline',
-        class: 'decision-tone decision-tone--final',
-        testid: 'decline',
-      })
-    }
-  } else {
-    if (allowed.includes('Reject')) {
-      list.push({
-        action: 'Reject',
-        label: 'Reject',
-        variant: 'outline',
-        class: 'decision-tone decision-tone--final',
-        testid: 'reject',
-      })
-    }
-  }
-
-  // 4. Quiet hand-over (Send to HR)
-  if (allowed.includes('Send to HR')) {
-    list.push({
-      action: 'Send to HR',
-      label: 'Send to HR',
-      variant: 'outline',
-      class: 'decision-tone decision-tone--handover',
-      testid: 'send-to-hr',
-    })
-  }
-
-  if (props.armed) {
-    return list.filter((item) => item.action === props.armed)
-  }
-  return list
-})
+const buttons = computed(() =>
+  getActionButtons(props.kind, props.actions)
+    .filter((item) => !props.armed || item.action === props.armed)
+    .map((item) => ({
+      ...item,
+      label: item.action === 'Approve' && props.approveLabel ? props.approveLabel : item.label,
+      testid: item.action.toLowerCase().replace(/ /g, '-'),
+    })),
+)
 </script>
 
 <template>
   <div
-    v-if="availableActions.length"
+    v-if="buttons.length"
     class="flex flex-wrap items-center gap-2"
     data-testid="decision-actions"
   >
     <Button
-      v-for="btn in availableActions"
+      v-for="btn in buttons"
       :key="btn.action"
-      :variant="btn.variant"
-      :theme="btn.theme"
-      :class="btn.class"
+      :variant="btn.variant === 'solid' ? 'solid' : 'outline'"
+      :theme="btn.variant === 'solid' ? 'green' : undefined"
+      :class="TONE[btn.action]"
       :disabled="disabled"
-      :loading="loading && armed === btn.action"
+      :loading="loading && btn.variant === 'solid'"
       :data-testid="btn.testid"
       @click="emit('act', btn.action)"
     >

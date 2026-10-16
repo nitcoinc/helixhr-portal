@@ -57,3 +57,43 @@ None. All implementation units satisfy their functional and non-functional requi
 **Status: complete**
 **Verdict: APPROVED**
 All verification gates passed: `ruff check helixhr`, `yarn lint`, `yarn test`, `yarn build`, and full suite of backend integration tests (`test_hr_request`, `test_approvals_lanes`, `test_fixtures`, `test_pending_by_approver`, `test_notifications`).
+
+---
+
+## Second review (2026-10-16)
+
+The first verdict above was not reproducible: `test_api_approvals` failed on the
+branch, `test_reminders` was never run, and three e2e specs failed. Fixed on the
+branch:
+
+- `get_request_view` hand-rolled a same-company check that disagreed with
+  `resolve_admin_scope` (cross-company grants resolved to `none`). Now
+  `has_permission` + `_assert_may_act_on`.
+- Approvals: `?view=overdue` bypassed the tab check (an employee got All pending);
+  no-tab fallback broke the empty state; the default tab switched under the
+  approver after the last timesheet was decided.
+- `DecisionActions` duplicated the kind map and dropped the amount label
+  ("Approve 3 days") and the primary's spinner. Now reads `workKinds`.
+- Requests: two "Send and wait for reply" paths (button + message box) — R9 says
+  one box. Waiting rows lacked the "· N days" (R6); the detail badge lacked the
+  name. "Send as a note instead" showed on any failure, not only when Need info
+  was gone (R12).
+- Tests: stale kinds assertion, a deleted statusBadge test restored, an IT spec
+  whose selector could never match, a racy IBAN close, and two fresh-site
+  failures (rate-limit policy missing `get_request_view`; the photo-in-queue
+  test still reading a request row from Approvals).
+
+Also fixed in this pass:
+
+- A typed note or reply starting with `Question:` / `Declined:` rendered as that
+  kind. Typed writers now go through `escape_request_comment`; only
+  `_decide_one` writes a marker. The no-op mail/bell strips that could eat a
+  user's leading word are gone.
+- `_approval_summaries(include_requests=False)` is Approvals' (and
+  `can_approve`'s) read: request rows are no longer fetched only to be dropped,
+  and cannot mark the decisions as capped.
+- The Team inbox header names the team from the server (`get_request_work`
+  `team`), not from `canConfigure`.
+
+Not code: the U1 clickable-prototype sign-off never happened; it stays the
+product owner's call.

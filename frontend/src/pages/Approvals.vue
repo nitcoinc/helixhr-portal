@@ -9,6 +9,7 @@ import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
 import DecisionActions from '@/components/approvals/DecisionActions.vue'
 import KindTag from '@/components/KindTag.vue'
+import { KIND_TAGS, getReasonCopy } from '@/lib/workKinds'
 import TimesheetOversight from '@/components/approvals/TimesheetOversight.vue'
 import { APPROVER_REASON_TEXT, groupByPerson, laneSections, laneSubsections } from '@/lib/approvalLanes'
 import { session } from '@/lib/session'
@@ -48,10 +49,6 @@ const queue = createResource({
 })
 watch(kindFilter, () => queue.reload())
 
-const KIND_CHIP_LABEL = {
-  leave: 'Leave',
-  attendance: 'Attendance',
-}
 // Plan 2026-10-16-001 R16: in Leave & attendance tab, chips filter leave / attendance.
 const kindChips = computed(() =>
   (queue.data?.counts?.kinds || []).filter(
@@ -98,22 +95,31 @@ const VIEW_TABS = computed(() =>
 )
 const OVERDUE_VISIBLE_ROWS = 5
 
-const defaultTab = computed(() => {
+const firstWaitingTab = computed(() => {
   if (timesheetCount.value > 0) return 'timesheets'
   if (leaveAttendanceCount.value > 0) return 'queue'
   const names = VIEW_TABS.value.map((tab) => tab.name)
-  return names[0] || 'timesheets'
+  return names[0] || 'queue'
 })
+// Chosen once, on the first answer: deciding the last timesheet must not
+// swap the tab out from under the approver.
+const landedTab = ref('')
+watch(
+  () => queue.data,
+  (data) => {
+    if (data && !landedTab.value) landedTab.value = firstWaitingTab.value
+  },
+  { immediate: true },
+)
+const defaultTab = computed(() => landedTab.value || firstWaitingTab.value)
 
 /** The open tab: `?view=`, where the old `overdue` is an alias for All
  * pending with its toggle on; default tab is the first one with something waiting. */
 const view = computed(() => {
-  if (route.query.view === 'overdue') return 'all-pending'
-  if (route.query.view) {
-    const names = VIEW_TABS.value.map((tab) => tab.name)
-    if (names.includes(route.query.view)) return route.query.view
-  }
-  return defaultTab.value
+  // A tab this caller does not have -- the `overdue` alias included -- falls
+  // back to the default (R14); the server refuses them regardless.
+  const asked = route.query.view === 'overdue' ? 'all-pending' : route.query.view
+  return VIEW_TABS.value.some((tab) => tab.name === asked) ? asked : defaultTab.value
 })
 const overdueOnly = computed(() => route.query.view === 'overdue' || route.query.overdue === '1')
 function showView(name) {
@@ -298,28 +304,8 @@ function openNote() {
   noteOpen.value = true
 }
 
-// What the reason field is called, per outcome. The label says which button
-// the sentence is going to, so the field can never be read as the other one.
-const REASON_COPY = {
-  'Send Back': {
-    heading: 'Send back with a reason',
-    placeholder: 'What should they change?',
-    // The server's own sentence, so the screen and the refusal agree.
-    missing: 'Say what should change before sending it back.',
-  },
-  Reject: {
-    heading: 'Reject with a reason',
-    placeholder: 'Why is the answer final?',
-    missing: 'Say why before rejecting this.',
-  },
-  Decline: {
-    heading: 'Decline with a reason',
-    placeholder: 'Why is the week staying as it is?',
-    missing: 'Say why before declining this.',
-  },
-}
-
-const reasonCopy = computed(() => REASON_COPY[reasonFor.value] || REASON_COPY['Send Back'])
+// What the reason field is called, per outcome: the one kind map's copy (KTD6).
+const reasonCopy = computed(() => getReasonCopy(reasonFor.value))
 
 /** The field's own label, naming the person the sentence is written to. */
 const reasonPlaceholder = computed(() =>
@@ -878,7 +864,7 @@ function dismissBulkResult() {
         :aria-pressed="kindFilter === chip.name"
         @click="filterQueue(chip.name)"
       >
-        {{ KIND_CHIP_LABEL[chip.name] }}
+        {{ KIND_TAGS[chip.name].label }}
         <span class="tabular text-ink-gray-5">{{ chip.count }}</span>
       </button>
     </div>
@@ -1430,6 +1416,7 @@ function dismissBulkResult() {
                               :disabled="acting === selected.name"
                               :loading="acting === selected.name"
                               :armed="reasonFor || (noteOpen ? 'Send to HR' : (confirmAccept ? 'Accept' : ''))"
+                              :approve-label="approveLabel"
                               @act="decide"
                             />
                           </div>
@@ -1916,6 +1903,7 @@ function dismissBulkResult() {
                 :disabled="acting === selected.name"
                 :loading="acting === selected.name"
                 :armed="reasonFor || (noteOpen ? 'Send to HR' : (confirmAccept ? 'Accept' : ''))"
+                :approve-label="approveLabel"
                 @act="decide"
               />
             </div>

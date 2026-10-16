@@ -136,6 +136,7 @@ test.describe('employee', () => {
     await panel.getByTestId('pick-up').click()
     await expect(panel.getByTestId('done')).toBeVisible({ timeout: 10000 })
     await panel.getByTestId('done').click()
+    await expect(panel.getByTestId('request-thread')).toContainText('This request is closed.', { timeout: 10000 })
     await hrContext.close()
 
     await page.goto('/helixhr/profile/bank')

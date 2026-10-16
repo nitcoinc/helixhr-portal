@@ -105,10 +105,11 @@ test('HR sees the employee by name and asks for info straight from Open', async 
   await expect(thread).toContainText('Needed for a visa.', { timeout: 10000 })
   await expect(thread.getByLabel(/^Comment \(visible to .+\)$/)).toBeVisible()
 
-  await detail.getByTestId('need-info').click()
-  await expect(detail.getByTestId('need-info-assigns')).toHaveText('This also assigns the request to you.')
-  await detail.getByRole('textbox', { name: 'Ask a question' }).fill('Which country is the visa for?')
-  await detail.getByTestId('work-reason-confirm').click()
+  // R9: one message box; Need info is its "Send and wait for reply".
+  await expect(detail.getByTestId('need-info')).toHaveCount(0)
+  await expect(thread.getByTestId('need-info-assigns')).toHaveText('This also assigns the request to you.')
+  await thread.getByTestId('thread-box').fill('Which country is the visa for?')
+  await thread.getByTestId('thread-send-and-wait').click()
   await expect.poll(() => status(name), { timeout: 15000 }).toBe('Waiting on Employee')
 })
 
@@ -149,6 +150,14 @@ test('handler Send and wait moves to waiting, employee sees Needs your reply ban
 
   // Verify thread has question entry
   await expect(thread.getByTestId('thread-question')).toContainText('Which specific date?')
+
+  // R11: the employee's read carries the waiting status and the question
+  // entry the "Needs your reply" banner highlights
+  const employee = await login(EMPLOYEE)
+  const mine = await call(employee, 'get_my_request', { name })
+  await employee.dispose()
+  expect(mine.status).toBe('Waiting on Employee')
+  expect(mine.thread.find((entry: { kind: string }) => entry.kind === 'question')?.message).toBe('Which specific date?')
 
   // Handler can decline from waiting (R7, AE3)
   await detail.getByTestId('reject').click()

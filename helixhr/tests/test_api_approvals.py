@@ -466,9 +466,12 @@ class TestApprovalQueueAndEvidence(IntegrationTestCase):
 		self.assertIn(timesheet, names)
 		self.assertNotIn(leave.name, names)
 		kinds = {row["name"]: row["count"] for row in result["counts"]["kinds"]}
-		self.assertEqual(list(kinds), ["leave", "timesheet", "attendance", "request", "change"])
+		# Plan 2026-10-16-001 KTD1: requests left Approvals; `kind=request`
+		# stays a valid, empty answer because the dotted path is public.
+		self.assertEqual(list(kinds), ["leave", "timesheet", "attendance", "change"])
 		self.assertEqual(result["total"], kinds["timesheet"])
 		self.assertGreaterEqual(kinds["leave"], 1)
+		self.assertEqual(get_my_approvals(kind="request")["pending"], [])
 		with self.assertRaises(frappe.ValidationError):
 			get_my_approvals(kind="nonsense")
 

@@ -27,6 +27,8 @@ const props = defineProps({
   expectedState: { type: String, default: null },
   /** Whether server currently offers 'Need info' action. */
   canNeedInfo: { type: Boolean, default: false },
+  /** On a New request, Need info also assigns it to the sender (KTD4). */
+  assignsOnWait: { type: Boolean, default: false },
   /** Milestones to show in-line: [{ label, at }] */
   milestones: { type: Array, default: () => [] },
 })
@@ -36,7 +38,10 @@ const emit = defineEmits(['posted', 'refetch', 'new-request'])
 const message = ref('')
 const posting = ref(false)
 const postError = ref('')
-const canSendAsNote = ref(false)
+// R12: set when Send and wait was refused; the offer shows only once the
+// refetched detail no longer allows Need info.
+const waitRefused = ref(false)
+const canSendAsNote = computed(() => waitRefused.value && !props.canNeedInfo)
 const box = ref(null)
 const boxId = useId()
 // The server's `_DETAILS_MAX`; the server still refuses past it.
@@ -85,7 +90,9 @@ const combinedTimeline = computed(() => {
       })
     }
   }
-  result.sort((a, b) => new Date(a.on || 0) - new Date(b.on || 0))
+  // Frappe timestamps share one zero-padded site-time format, so they sort as
+  // strings; `new Date()` rejects the space-separated form in Safari.
+  result.sort((a, b) => String(a.on || '').localeCompare(String(b.on || '')))
   return result
 })
 
@@ -99,7 +106,7 @@ async function sendNote() {
 
   posting.value = true
   postError.value = ''
-  canSendAsNote.value = false
+  waitRefused.value = false
   try {
     if (isEmployee.value) {
       await call('helixhr.api.reply_to_my_request', {
@@ -134,7 +141,7 @@ async function sendAndWait() {
 
   posting.value = true
   postError.value = ''
-  canSendAsNote.value = false
+  waitRefused.value = false
   try {
     await call('helixhr.api.act_on_approval', {
       doctype: 'HR Request',
@@ -150,7 +157,7 @@ async function sendAndWait() {
     box.value?.focus()
   } catch (failure) {
     postError.value = failure?.messages?.[0] || "That didn't send. Try again."
-    canSendAsNote.value = true
+    waitRefused.value = true
     emit('refetch')
   } finally {
     posting.value = false
@@ -303,6 +310,10 @@ async function sendAndWait() {
           <template v-if="canNeedInfo">
             <br>
             <span class="font-medium text-ink-gray-7">Send and wait for reply:</span> {{ employeeFirstName }} is asked to reply. The request waits until they do.
+            <span
+              v-if="assignsOnWait"
+              data-testid="need-info-assigns"
+            >This also assigns the request to you.</span>
           </template>
         </p>
       </div>

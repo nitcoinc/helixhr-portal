@@ -764,8 +764,10 @@ Key architecture for routed requests:
   `/approvals/request/:name` and `/approvals?kind=request|category=` to the
   Team inbox.
 - **The resolver (Plan 2026-10-16-001 KTD8).** `helixhr.api.get_request_view(name)`
-  returns `employee`, `handler` or `none` for a request name based on ownership,
-  routed role, company matching, and `_assert_may_act_on`. `Notifications.vue`
+  returns `employee`, `handler` or `none` for a request name: ownership first, then
+  the two rules that already exist -- `hr_request.has_permission` (read scope:
+  company for a routed holder, `resolve_admin_scope` with grants for HR) and
+  `_assert_may_act_on` (stored route, not own request). `Notifications.vue`
   calls this resolver when opening a notification so handlers land on the Team
   inbox detail and employees land on My requests, preventing "That request isn't yours"
   refusals.
@@ -777,10 +779,11 @@ Key architecture for routed requests:
 - **Thread kinds and comment markers (Plan 2026-10-16-001 KTD5).**
   Thread entries tell notes, questions, declines, and milestones apart.
   `_decide_one` prefixes comments with `Question:` for Need info and `Declined:`
-  for Reject/Decline. `strip_request_comment_marker` and `strip_request_comment`
-  strip the marker in `_request_thread` and wherever comment text leaves the
-  server (mail excerpts, bells), while old comments without markers render as
-  notes. Milestones (Sent, Assigned to {name}, Closed) appear in-line in the thread.
+  for Reject/Decline. `strip_request_comment_marker` reads and strips it in
+  `_request_thread` (the only reader of request comments); mail and bells are
+  built from the typed text, never from a stored comment. Typed notes and
+  replies pass through `escape_request_comment`, so a note that starts with
+  "Question:" stays a note. Old comments without markers render as notes. Milestones (Sent, Assigned to {name}, Closed) appear in-line in the thread.
 - **Numbering is per category (plan 2026-10-04-002).** Each category carries
   an `ID prefix` (`HelixHR Request Category.name_prefix`, validated as 2-10
   uppercase letters/digits/hyphens, no trailing hyphen), and `HR Request`'s

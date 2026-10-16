@@ -134,11 +134,6 @@ const WORK_FILTERS = [
   { name: 'closed', label: 'Closed' },
 ]
 
-const teamName = computed(() => {
-  if (session.canWorkRequests && !session.canConfigure) return 'IT Team'
-  if (session.canConfigure && !session.canWorkRequests) return 'HR Team'
-  return 'Team'
-})
 
 const tab = computed(() =>
   session.canHandleRequests && route.query.tab === 'work' ? 'work' : 'mine',
@@ -197,12 +192,19 @@ watch(
   { immediate: true },
 )
 const workRows = computed(() => work.data?.work || [])
+// The server names the team from the roles it read (HR or IT); both -> plain.
+const inboxTitle = computed(() => (work.data?.team ? `${work.data.team} team inbox` : 'Team inbox'))
 const workTotal = computed(() => work.data?.total || 0)
 const workNeedsActionCount = computed(() =>
   work.data?.action_count !== undefined
     ? work.data.action_count
     : workRows.value.filter((r) => r.status === 'Open' || r.status === 'In Progress').length,
 )
+/** R6: "Waiting on Ravi · 3 days" -- the badge names the person, this the time. */
+function waitedFor(days) {
+  if (!days) return 'since today'
+  return days === 1 ? '1 day' : `${days} days`
+}
 const workMoreCount = computed(() => Math.max(0, workTotal.value - workRows.value.length))
 
 const workGroups = computed(() => {
@@ -245,12 +247,11 @@ const workAct = createResource({ url: 'helixhr.api.act_on_approval', method: 'PO
 const workSelected = computed(() => (props.name && tab.value === 'work' ? workDetail.data : null))
 
 const workActing = ref('')
-const reasonFor = ref('') // 'Need info' or 'Reject' while its box is open
+const reasonFor = ref('') // 'Reject' while its box is open
 const reasonMessage = ref('')
 const reasonError = ref('')
-const currentReasonCopy = computed(() =>
-  getReasonCopy(reasonFor.value === 'Reject' ? 'Decline' : reasonFor.value),
-)
+// The server's action is Reject; the word on screen is Decline (R14).
+const currentReasonCopy = computed(() => getReasonCopy('Decline'))
 
 const attachingReply = ref(false)
 const attachReplyError = ref('')
@@ -281,10 +282,10 @@ function openReason(action) {
 async function decide(action) {
   const item = workSelected.value
   if (!item || workActing.value) return
-  const wantsReason = action === 'Need info' || action === 'Reject'
+  const wantsReason = action === 'Reject'
   const message = wantsReason ? reasonMessage.value.trim() : ''
   if (wantsReason && !message) {
-    reasonError.value = getReasonCopy(action === 'Reject' ? 'Decline' : action).missing
+    reasonError.value = currentReasonCopy.value.missing
     return
   }
   workActing.value = item.name
@@ -497,7 +498,7 @@ const latestQuestion = computed(() => {
 
 <template>
   <div>
-    <PageHeader :title="tab === 'work' ? `${teamName} inbox` : 'Requests'">
+    <PageHeader :title="tab === 'work' ? inboxTitle : 'Requests'">
       <template #actions>
         <Button
           v-if="tab !== 'work'"
@@ -633,6 +634,9 @@ const latestQuestion = computed(() => {
                           {{ row.category }} · sent {{ formatDate(row.sent_on) }}
                           <template v-if="row.picked_up_by_name">
                             · picked up by {{ row.picked_up_by_name }}
+                          </template>
+                          <template v-if="row.waiting_since">
+                            · waiting {{ waitedFor(row.waiting_days) }}
                           </template>
                         </p>
                       </div>
@@ -904,7 +908,7 @@ const latestQuestion = computed(() => {
                 kind="request"
                 :status="workSelected.status"
                 audience="handler"
-                :waiting-on="workSelected.waiting_on"
+                :waiting-on="workSelected.waiting_on || ''"
                 :assignee="workSelected.picked_up_by_name"
               />
             </div>
@@ -1017,14 +1021,15 @@ const latestQuestion = computed(() => {
               :expected-modified="workSelected.modified"
               :expected-state="workSelected.state || workSelected.status"
               :can-need-info="may('Need info')"
+              :assigns-on-wait="workSelected.status === 'Open'"
               :milestones="workTimeline"
               mode="handler"
-              @posted="workDetail.fetch()"
+              @posted="workDetail.fetch(); work.fetch()"
               @refetch="workDetail.fetch()"
             />
 
-            <!-- Need info / Reject refuse to submit without their words
-                 (P5-U6); the box holds them on the same surface. -->
+            <!-- Decline refuses to submit without a reason (P5-U6). Need info
+                 is the message box's "Send and wait for reply" (R9). -->
             <div
               v-if="reasonFor"
               class="surface-inset mt-4 p-3"
@@ -1036,13 +1041,6 @@ const latestQuestion = computed(() => {
                 :label="currentReasonCopy.heading"
                 :placeholder="currentReasonCopy.placeholder"
               />
-              <p
-                v-if="reasonFor === 'Need info' && workSelected.status === 'Open'"
-                class="mt-1 text-sm text-ink-gray-6"
-                data-testid="need-info-assigns"
-              >
-                This also assigns the request to you.
-              </p>
               <p
                 v-if="reasonError"
                 class="mt-1 text-sm font-medium text-signal"
@@ -1058,7 +1056,7 @@ const latestQuestion = computed(() => {
                   data-testid="work-reason-confirm"
                   @click="confirmReason"
                 >
-                  {{ reasonFor === 'Reject' ? 'Decline' : (reasonFor === 'Need info' ? 'Send and wait for reply' : reasonFor) }}
+                  Decline
                 </Button>
                 <Button
                   variant="ghost"
@@ -1095,16 +1093,6 @@ const latestQuestion = computed(() => {
                 @click="decide('Done')"
               >
                 Mark done
-              </Button>
-              <Button
-                v-if="may('Need info')"
-                variant="outline"
-                class="decision-tone decision-tone--return"
-                :disabled="workActing === workSelected.name"
-                data-testid="need-info"
-                @click="openReason('Need info')"
-              >
-                Send and wait for reply
               </Button>
               <Button
                 v-if="may('Reject')"

@@ -69,9 +69,9 @@ from helixhr.events import (
 	backdated_grace_days,
 	backdated_leave_earliest,
 	backdated_leave_reason,
+	escape_request_comment,
 	leave_overdraw,
 	rederive_approvers,
-	strip_request_comment,
 	strip_request_comment_marker,
 )
 from helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export import expire_unreachable_exports
@@ -713,14 +713,7 @@ def get_portal_bootstrap():
 	boot["can_approve"] = (
 		report_count > 0
 		or _is_hr(frappe.session.user)
-		or bool(
-			_safe(
-				lambda: [
-					d for d in _pending_approvals(employee["name"]) if d["route_kind"] != "request"
-				],
-				title=title,
-			)
-		)
+		or bool(_safe(lambda: _approval_summaries(employee["name"], include_requests=False)[0], title=title))
 	)
 	boot["unread_notifications"] = _safe(_get_unread_notification_count, title=title) or 0
 	return boot
@@ -2580,8 +2573,8 @@ def _hr_request_summaries(employee, today, states=None, picked_up_by=None, route
 	* `picked_up_by` narrows to the rows that caller picked up (the Mine
 	  chip). The queue never passes it.
 	* `routed_roles` narrows to the roles the caller holds -- an HR Manager
-	  cannot act on an IT-routed row, so the work feed refuses to show one;
-	  the queue keeps its wider behaviour untouched.
+	  cannot act on an IT-routed row, so neither the work feed nor (plan
+	  2026-10-16-001 R4, via `_hr_request_queue`) the queue shows one.
 	* `limit` / `start` page the feed; the queue stays bounded at
 	  `_QUEUE_FETCH` and reports a floor instead (P3-R25).
 
@@ -2756,7 +2749,7 @@ def get_request_work(state=None, limit=None, start=0):
 	if not routed_roles:
 		# An HR-adjacent session (System Manager) without either role that
 		# routes requests: nothing here is theirs to work.
-		return {"work": [], "total": 0, "limit": _REQUEST_PAGE, "today": user_today()}
+		return {"work": [], "total": 0, "action_count": 0, "limit": _REQUEST_PAGE, "today": user_today()}
 
 	employee = get_current_employee()
 	today = _as_date(user_today())
@@ -2807,6 +2800,9 @@ def get_request_work(state=None, limit=None, start=0):
 		"work": rows,
 		"total": total,
 		"action_count": action_count,
+		# Plan 2026-10-16-001 U6: the inbox header names the team -- "HR" or
+		# "IT" from the roles actually read, none when the caller works both.
+		"team": _handled_by_team(routed_roles[0]) if len(routed_roles) == 1 else None,
 		"limit": page,
 		"today": user_today(),
 	}
@@ -2828,7 +2824,7 @@ _APPROVAL_SUMMARY_COLLECTORS = (
 _IT_ROLE = "IT Team"
 
 
-def _approval_summaries(employee):
+def _approval_summaries(employee, include_requests=True):
 	"""Every decision the session user may make right now, as one bounded,
 	typed, oldest-first list -- leave, timesheet *and* attendance request
 	(P2-R11, P2-U7 step 1, P3-R16).
@@ -2846,6 +2842,10 @@ def _approval_summaries(employee):
 	Plan 2026-10-15-002 KTD1: each row carries a ``lane`` key: ``"team"``
 	for line-manager items, ``"hr"`` for HR-stage items, ``"it"`` for
 	IT-routed requests. ``counts.lanes`` reports per-lane totals.
+
+	Plan 2026-10-16-001 KTD1: `include_requests=False` is Approvals' read --
+	routed requests are not collected at all, so they can neither show nor
+	fill a collector and mark the decisions as capped. Home keeps the default.
 	"""
 	today = _as_date(user_today())
 	rows = []
@@ -2889,11 +2889,13 @@ def _approval_summaries(employee):
 	# Plan 2026-10-16-001 R4: HR Managers see HR requests only; IT requests
 	# belong to IT Team.
 	if _is_hr():
-		for kind in _APPROVAL_KINDS.values():
+		for doctype, kind in _APPROVAL_KINDS.items():
+			if doctype == "HR Request" and not include_requests:
+				continue
 			collected = kind["hr_queue"](employee, today)
 			capped = capped or len(collected) >= _QUEUE_FETCH
 			_extend(collected, "hr")
-	elif _holds_routed_role():
+	elif include_requests and _holds_routed_role():
 		# P5-R11: a routed-role holder (IT Team today) has no line-manager
 		# half and no standing on Leave Application, Timesheet or Attendance
 		# Request at all -- calling their `hr_queue` collectors the way the
@@ -5992,10 +5994,9 @@ def get_my_approvals(kind=None, category=None):
 	if category:
 		kind = "request"
 	employee = get_current_employee()
-	pending, capped, _lane_counts = _approval_summaries(employee)
 	# Plan 2026-10-16-001 KTD1: requests leave Approvals rows, lanes, counts,
 	# categories and Decided list.
-	pending = [row for row in pending if row["kind"] != "request"]
+	pending, capped, _lane_counts = _approval_summaries(employee, include_requests=False)
 	lanes = {"team": sum(1 for row in pending if row.get("lane") == "team")}
 	if _is_hr():
 		lanes["hr"] = sum(1 for row in pending if row.get("lane") == "hr")
@@ -7772,8 +7773,13 @@ def _request_decision_detail(doc):
 	"""The evidence a worker needs to decide a routed request: what the
 	employee wrote, the category it came in under, and the conversation so
 	far (P5-R10, P5-R11)."""
-	employee_name = frappe.db.get_value("Employee", doc.employee, "employee_name") or doc.employee
+	person = frappe.db.get_value("Employee", doc.employee, ["employee_name", "first_name"], as_dict=True) or {}
+	employee_name = person.get("employee_name") or doc.employee
 	return {
+		# Plan 2026-10-16-001 R6: the detail badge names the person, as the row does.
+		"waiting_on": ((person.get("first_name") or "").strip() or "the employee")
+		if doc.status == HR_REQUEST_WAITING_ON_EMPLOYEE
+		else None,
 		"name": doc.name,
 		"doctype": doc.doctype,
 		"employee": doc.employee,
@@ -7868,8 +7874,7 @@ def _notify_request_comment(doc, recipients, author_name, message, bell_subject,
 	recipients = [user for user in dict.fromkeys(recipients) if user and user != frappe.session.user]
 	if not recipients:
 		return
-	clean_message = strip_request_comment(message)
-	excerpt = "" if doc.get("correction_field") else clean_message[:300]
+	excerpt = "" if doc.get("correction_field") else message[:300]
 	send_notification(
 		event_key,
 		recipients,
@@ -9936,7 +9941,7 @@ def reply_to_my_request(name, message, expected_modified=None):
 
 	doc = frappe.get_doc("HR Request", name)
 	_refuse_bank_number(doc, message, _BANK_NUMBER_EMPLOYEE_REFUSAL)
-	doc.add_comment("Comment", message)
+	doc.add_comment("Comment", escape_request_comment(message))
 	if moves_status:
 		doc.db_set("status", HR_REQUEST_IN_PROGRESS)
 
@@ -9992,7 +9997,7 @@ def comment_on_request(name, message):
 		frappe.throw(_("That comment is too long. Keep it under {0} characters.").format(_DETAILS_MAX))
 	_refuse_bank_number(doc, message, _BANK_NUMBER_HANDLER_REFUSAL)
 
-	doc.add_comment("Comment", message)
+	doc.add_comment("Comment", escape_request_comment(message))
 
 	# R8 / KTD6: the employee hears about it; the bell carries the HR-reply
 	# prefix so Home's Needs-you and `mark_my_request_read` pick it up.
@@ -10024,26 +10029,22 @@ def get_request_view(name):
 		return "none"
 
 	doc = frappe.get_doc("HR Request", name)
-	user = frappe.session.user
 
 	employee = get_current_employee()
 	if employee and doc.employee == employee:
 		return "employee"
 
+	# The two rules that already decide this elsewhere, not a third copy:
+	# `hr_request.has_permission` is the read scope (company for a routed
+	# holder, `resolve_admin_scope` -- grants included -- for HR), and
+	# `_assert_may_act_on` is the handler rule (stored route, own-request).
+	if not frappe.has_permission("HR Request", "read", doc=doc):
+		return "none"
 	try:
 		_assert_may_act_on(doc)
-		if user != "Administrator" and doc.routed_to_role not in frappe.get_roles(user):
-			return "none"
-		if user != "Administrator":
-			user_emp = frappe.db.get_value("Employee", {"user_id": user}, ["company", "status"], as_dict=True)
-			if not user_emp or user_emp.status != "Active":
-				return "none"
-			target_company = frappe.db.get_value("Employee", doc.employee, "company")
-			if user_emp.company != target_company:
-				return "none"
-		return "handler"
-	except (frappe.PermissionError, frappe.ValidationError):
+	except frappe.PermissionError:
 		return "none"
+	return "handler"
 
 
 @frappe.whitelist(methods=["POST"])

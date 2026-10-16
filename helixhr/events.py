@@ -1149,9 +1149,18 @@ def strip_request_comment_marker(text):
 	return stripped, "note"
 
 
-def strip_request_comment(text):
-	"""Returns the stripped comment message text without markers."""
-	return strip_request_comment_marker(text)[0]
+# Zero width and not whitespace to `str.strip`, so it survives
+# `strip_request_comment_marker` and renders as nothing.
+_MARKER_ESCAPE = "\u200b"
+
+
+def escape_request_comment(text):
+	"""A note someone *typed* starting with "Question:" or "Declined:" must stay
+	a note: only `_decide_one` writes a marker. Every typed-text writer of
+	request comments passes its text through here first."""
+	if text.startswith((HR_REQUEST_QUESTION_PREFIX, HR_REQUEST_DECLINED_PREFIX)):
+		return _MARKER_ESCAPE + text
+	return text
 
 
 HR_REQUEST_OPEN = "Open"
@@ -1554,7 +1563,7 @@ def _notify_hr_request_status(doc):
 	for_user = frappe.db.get_value("Employee", doc.employee, "user_id") or doc.owner
 	if not for_user or for_user == frappe.session.user:
 		return
-	reason = strip_request_comment((doc.get(DECISION_REASON_FIELD) or "").strip())
+	reason = (doc.get(DECISION_REASON_FIELD) or "").strip()
 	state = {
 		HR_REQUEST_IN_PROGRESS: "is being worked on",
 		HR_REQUEST_WAITING_ON_EMPLOYEE: "needs more information from you",
