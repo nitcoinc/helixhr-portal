@@ -2110,7 +2110,7 @@ class TestRequestConversation(IntegrationTestCase):
 		reply_to_my_request(name, "August", expected_modified=self._token(name)["expected_modified"])
 		detail = get_my_request(name)
 		self.assertTrue(detail["picked_up_on"])
-		self.assertEqual(detail["picked_up_by_name"], frappe.utils.get_fullname(self.hr_user))
+		self.assertEqual(detail["picked_up_by_name"], frappe.db.get_value("User", self.hr_user, "full_name"))
 		frappe.set_user(self.hr_user)
 		mine = get_request_work(state="mine")
 		self.assertIn(name, [row["name"] for row in mine["work"]])
@@ -2210,7 +2210,7 @@ class TestRequestConversation(IntegrationTestCase):
 
 		frappe.set_user(EMPLOYEE_USER)
 		detail = get_my_request(name)
-		self.assertEqual(detail["thread"][-1]["author"], frappe.utils.get_fullname(self.it_user))
+		self.assertEqual(detail["thread"][-1]["author"], frappe.db.get_value("User", self.it_user, "full_name"))
 		self.assertTrue(detail["unread_notifications"])
 		mark_my_request_read(name)
 		self.assertFalse(get_my_request(name)["unread_notifications"])
