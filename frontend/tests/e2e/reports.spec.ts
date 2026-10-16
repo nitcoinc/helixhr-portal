@@ -519,6 +519,18 @@ test.describe('report tiers', () => {
       const itTeam = page.getByTestId('people-access-panel').getByRole('checkbox', { name: 'IT Team' })
       await expect(itTeam).not.toBeChecked()
       await itTeam.check()
+
+      // U6: on a phone the panel stacks with a Back control, and the sticky
+      // Save bar clears the fixed 56px tab bar instead of sitting under it.
+      const desktop = page.viewportSize()
+      await page.setViewportSize({ width: 375, height: 667 })
+      await expect(page.getByRole('button', { name: 'Back to everyone' })).toBeVisible()
+      await page.getByTestId('people-access-panel').getByRole('checkbox', { name: 'IT Team' }).scrollIntoViewIfNeeded()
+      const bar = await page.getByTestId('people-access-save-bar').boundingBox()
+      expect(bar, 'Save bar is rendered').toBeTruthy()
+      expect(bar.y + bar.height).toBeLessThanOrEqual(667 - 56 + 1)
+      if (desktop) await page.setViewportSize(desktop)
+
       await page.getByTestId('people-access-save').click()
       await expect(page.getByRole('status')).toContainText('Saved')
       await expect(page.getByTestId('people-access-summary')).toContainText('IT Team')

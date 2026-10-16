@@ -557,7 +557,14 @@ async function save() {
           {{ savedMessage }}
         </p>
 
-        <div class="sticky bottom-0 mt-4 flex items-center gap-3 border-t border-outline-gray-2 bg-surface-white py-3">
+        <!-- Below lg the fixed phone tab bar (56px + home-indicator inset)
+             owns the viewport edge; a bar stuck to bottom-0 sits underneath
+             it, so Save would be unreachable. Same offset as `.action-bar`
+             (index.css), without its page-level layout rules. -->
+        <div
+          class="sticky bottom-[calc(56px+env(safe-area-inset-bottom))] z-[5] mt-4 flex items-center gap-3 border-t border-outline-gray-2 bg-surface-white py-3 lg:bottom-0"
+          data-testid="people-access-save-bar"
+        >
           <button
             type="button"
             class="inline-flex min-h-11 cursor-pointer items-center justify-center rounded-lg bg-signal px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
