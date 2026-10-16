@@ -705,19 +705,22 @@ class TestRequestApprovalQueue(IntegrationTestCase):
 		return added
 
 	def test_the_queue_filters_to_a_category_and_the_total_matches_its_chip(self):
-		"""U6 / R13: a worker filters to `IT / Asset`; `counts` stays the whole
-		queue and the filtered total equals the chip's count."""
+		"""Plan 2026-10-16-001 U3 / KTD1: requests leave Approvals, so get_my_approvals
+		returns an empty pending list for ?kind=request or category=..., and categories
+		is an empty list."""
 		from helixhr.api import get_my_approvals
 
-		name = self._file()
+		self._file()
 		frappe.set_user(self.it_user)
 		result = get_my_approvals(category="IT / Asset")
-		self.assertIn(name, [row["name"] for row in result["pending"]])
-		self.assertTrue(all(row["category"] == "IT / Asset" for row in result["pending"]))
-		chips = {row["name"]: row["count"] for row in result["counts"]["categories"]}
-		self.assertEqual(result["total"], chips["IT / Asset"])
-		kinds = {row["name"]: row["count"] for row in result["counts"]["kinds"]}
-		self.assertEqual(kinds["request"], sum(chips.values()))
+		self.assertEqual(result["pending"], [])
+		self.assertEqual(result["total"], 0)
+		self.assertEqual(result["counts"]["categories"], [])
+		self.assertNotIn("request", [k["name"] for k in result["counts"]["kinds"]])
+
+		result_kind = get_my_approvals(kind="request")
+		self.assertEqual(result_kind["pending"], [])
+		self.assertEqual(result_kind["total"], 0)
 
 		with self.assertRaisesRegex(frappe.ValidationError, "no request category called"):
 			get_my_approvals(category="No Such Category")
@@ -1524,12 +1527,12 @@ class TestProfileCorrection(IntegrationTestCase):
 
 	def test_queue_detail_and_own_request_carry_the_masked_copies(self):
 		# U14: what the HR view and the employee's request show.
-		from helixhr.api import get_approval_detail, get_my_approvals, get_my_request
+		from helixhr.api import get_approval_detail, get_my_request, get_request_work
 
 		name = self._file()["name"]
 		frappe.set_user(self.hr_user)
 		try:
-			row = next(r for r in get_my_approvals()["pending"] if r["name"] == name)
+			row = next(r for r in get_request_work()["work"] if r["name"] == name)
 			detail = get_approval_detail("request", name)
 		finally:
 			frappe.set_user("Administrator")
@@ -2049,6 +2052,14 @@ class TestRequestConversation(IntegrationTestCase):
 			"Notification Log", filters={"document_name": name, "for_user": user}, pluck="subject"
 		)
 
+	def _watch_mail(self):
+		before = set(frappe.get_all("Email Queue", pluck="name"))
+
+		def added():
+			return set(frappe.get_all("Email Queue", pluck="name")) - before
+
+		return added
+
 	def _user_with_role(self, user, role, company=None):
 		if company:
 			make_test_user(user, company)
@@ -2384,4 +2395,88 @@ class TestRequestConversation(IntegrationTestCase):
 		doc.status = "Open"
 		with self.assertRaisesRegex(frappe.ValidationError, "can't move from Waiting on Employee to Open"):
 			doc.save(ignore_permissions=True)
+
+	# --- U3: Requests leave Approvals; handler links go to Team inbox ---
+
+	def test_get_request_view_resolver(self):
+		from helixhr.api import get_request_view
+
+		# IT Request
+		it_req = self._file(category="IT / Asset")
+		# 1. The employee asking about their own request -> employee
+		frappe.set_user(EMPLOYEE_USER)
+		self.assertEqual(get_request_view(it_req), "employee")
+
+		# 2. Handler (IT Team user in same company) -> handler
+		frappe.set_user(self.it_user)
+		self.assertEqual(get_request_view(it_req), "handler")
+
+		# 3. IT holder in another company -> none
+		other_it = self._user_with_role("other-company-it-res@helixhr.test", "IT Team", company="_Test Company B")
+		frappe.set_user(other_it)
+		self.assertEqual(get_request_view(it_req), "none")
+
+		# 4. HR Manager asking about an IT request -> none
+		frappe.set_user(self.hr_user)
+		self.assertEqual(get_request_view(it_req), "none")
+
+		# 5. Non-existent request -> none
+		self.assertEqual(get_request_view("NO-SUCH-REQ"), "none")
+
+	def test_hr_manager_and_it_user_approvals_and_home_routing(self):
+		from helixhr.api import (
+			_get_needs_you,
+			get_pending_by_approver,
+			get_portal_bootstrap,
+			get_request_work,
+		)
+
+		it_req = self._file(category="IT / Asset")
+
+		# HR Manager Home and Team inbox never list an IT-routed request (R4)
+		hr_employee = frappe.db.get_value("Employee", {"user_id": self.hr_user}, "name")
+		frappe.set_user(self.hr_user)
+		hr_home = _get_needs_you(hr_employee, lambda k, f: f())
+		self.assertNotIn(it_req, [item["name"] for item in hr_home["items"]])
+		hr_work = get_request_work()["work"]
+		self.assertNotIn(it_req, [row["name"] for row in hr_work])
+
+		# IT user with no reports and queued IT request:
+		# can_approve is false, can_work_requests is true (R3)
+		frappe.set_user(self.it_user)
+		boot = get_portal_bootstrap()
+		self.assertFalse(boot["can_approve"])
+		self.assertTrue(boot["can_work_requests"])
+
+		# Home Needs-you for IT Team user lists IT request with route to RequestDetail and tab=work
+		it_home = _get_needs_you(self.it_employee, lambda k, f: f())
+		matching_home = next((item for item in it_home["items"] if item["id"].endswith(it_req)), None)
+		self.assertIsNotNone(matching_home)
+		self.assertEqual(
+			matching_home["to"],
+			{"name": "RequestDetail", "params": {"name": it_req}, "query": {"tab": "work"}},
+		)
+
+		# All pending with overdue_only returns no request rows
+		frappe.set_user(self.hr_user)
+		oversight = get_pending_by_approver(overdue_only=1)
+		for group in oversight["groups"]:
+			for item in group["items"]:
+				self.assertNotEqual(item.get("doctype"), "HR Request")
+
+	def test_employee_reply_mail_carries_team_inbox_url(self):
+		from helixhr.api import reply_to_my_request
+
+		name = self._file(category="IT / Asset")
+		self._act(self.it_user, name, "Need info", comment="Which model?")
+
+		added = self._watch_mail()
+		frappe.set_user(EMPLOYEE_USER)
+		reply_to_my_request(name, "MacBook Pro", expected_modified=self._token(name)["expected_modified"])
+
+		sent = [frappe.get_doc("Email Queue", row) for row in added()]
+		reply_mails = [m for m in sent if "replied" in m.message]
+		self.assertTrue(reply_mails)
+		expected_url = f"/helixhr/requests/{name}?tab=work"
+		self.assertTrue(any(expected_url in m.message.replace("=3D", "=") for m in reply_mails))
 

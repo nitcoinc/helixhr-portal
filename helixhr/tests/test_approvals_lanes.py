@@ -72,7 +72,9 @@ class TestApprovalLanes(IntegrationTestCase):
 		result = _as(self.hr_manager, get_my_approvals)
 		return {row["name"]: row["lane"] for row in result["pending"]}, result
 
-	def test_hr_manager_who_manages_sees_team_hr_and_it_lanes(self):
+	def test_hr_manager_who_manages_sees_team_and_hr_lanes_and_no_requests(self):
+		"""Plan 2026-10-16-001 U3 / KTD1: requests leave Approvals, so IT and HR
+		requests never appear in rows, lanes or counts, and counts.lanes has no it key."""
 		team = [_row("leave", "L-TEAM", "E1", doctype="Leave Application")]
 		hr = [
 			_row("leave", "L-HR", "E2", doctype="Leave Application", for_hr=True),
@@ -80,8 +82,9 @@ class TestApprovalLanes(IntegrationTestCase):
 			_row("request", "R-HR", "E4", doctype="HR Request", routed_to_role="HR Manager"),
 		]
 		lanes, result = self._lanes(team, hr)
-		self.assertEqual(lanes, {"L-TEAM": "team", "L-HR": "hr", "R-IT": "it", "R-HR": "hr"})
-		self.assertEqual(result["counts"]["lanes"], {"team": 1, "hr": 2, "it": 1})
+		self.assertEqual(lanes, {"L-TEAM": "team", "L-HR": "hr"})
+		self.assertEqual(result["counts"]["lanes"], {"team": 1, "hr": 1})
+		self.assertEqual(result["counts"]["categories"], [])
 
 	def test_every_row_has_a_lane_and_the_lane_counts_are_the_home_count(self):
 		team = [_row("timesheet", "T-1", "E1", doctype="Timesheet")]
@@ -92,7 +95,9 @@ class TestApprovalLanes(IntegrationTestCase):
 		rows, _capped, _counts = _as(self.hr_manager, api._approval_summaries, self.hr_employee)
 		self.assertEqual(len(rows), result["total"])
 
-	def test_an_it_holder_sees_their_routed_rows_in_the_it_lane(self):
+	def test_an_it_holder_has_empty_approvals_queue(self):
+		"""Plan 2026-10-16-001 U3 / KTD1: requests leave Approvals, so an IT Team
+		holder with no reports has an empty queue in get_my_approvals."""
 		_it_employee, it_user = make_test_it_user()
 		with patch.object(
 			api,
@@ -100,7 +105,8 @@ class TestApprovalLanes(IntegrationTestCase):
 			return_value=[_row("request", "R-IT", "E3", doctype="HR Request", routed_to_role="IT Team")],
 		):
 			result = _as(it_user, get_my_approvals)
-		self.assertEqual([row["lane"] for row in result["pending"]], ["it"])
+		self.assertEqual(result["pending"], [])
+		self.assertEqual(result["total"], 0)
 
 	def test_hr_managers_own_timesheet_never_reaches_their_hr_lane(self):
 		own = make_timesheet(self, self.hr_employee, 3, state="Pending HR")
@@ -173,11 +179,9 @@ class TestApprovalLanes(IntegrationTestCase):
 		self.assertNotIn(stale, hr_decided)
 		self.assertNotIn(routed, hr_decided)
 
-		# An IT holder has no Employee role: the stamped kinds still reach them.
+		# An IT holder has no Employee role; requests are dropped from Decided.
 		it_decided = {row["name"]: row for row in _as(it_user, api._recently_decided, _it_employee)}
-		self.assertEqual(it_decided[routed]["kind"], "request")
-		self.assertEqual(it_decided[routed]["label"], "Laptop")
-		self.assertEqual(it_decided[routed]["status"], "Done")
+		self.assertNotIn(routed, it_decided)
 		self.assertNotIn(open_routed, it_decided)
 		self.assertNotIn(change, it_decided)
 

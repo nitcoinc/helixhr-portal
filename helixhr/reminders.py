@@ -1123,7 +1123,11 @@ def collect_overdue(today=None, cutoff=None, companies=None, kinds=None, resolve
 				"overdue": is_overdue(since, today, threshold_days),
 				"pending_since": str(since) if since else None,
 				"date": str(date) if date else None,
-				"url": get_url(f"/helixhr/approvals/{path}/{row.name}"),
+				"url": (
+					get_url(f"/helixhr/requests/{row.name}?tab=work")
+					if path == "request"
+					else get_url(f"/helixhr/approvals/{path}/{row.name}")
+				),
 				"route_kind": path,
 				"owners": owners,
 				"owner_name": owner_name,

@@ -705,10 +705,18 @@ def get_portal_bootstrap():
 	# queue or not -- HR's work arrives without warning and a rail item that
 	# comes and goes is a rail item nobody trusts. Still a nav decision, not
 	# a grant: `_assert_may_act_on` re-checks every read and every action.
+	# Plan 2026-10-16-001 KTD1: can_approve stops counting request rows.
 	boot["can_approve"] = (
 		report_count > 0
 		or _is_hr(frappe.session.user)
-		or bool(_safe(lambda: _pending_approvals(employee["name"]), title=title))
+		or bool(
+			_safe(
+				lambda: [
+					d for d in _pending_approvals(employee["name"]) if d["route_kind"] != "request"
+				],
+				title=title,
+			)
+		)
 	)
 	boot["unread_notifications"] = _safe(_get_unread_notification_count, title=title) or 0
 	return boot
@@ -1283,7 +1291,20 @@ def _get_needs_you(employee, once):
 
 	# One row per decision, not a count: "3 requests waiting" is a link to a
 	# list, and P2-R12 asks for the exact decision.
+	# Plan 2026-10-16-001 KTD1/KTD8: requests route to the Team inbox.
 	for decision in once("approvals", lambda: _pending_approvals(employee)):
+		target_to = (
+			{
+				"name": "RequestDetail",
+				"params": {"name": decision["reference_name"]},
+				"query": {"tab": "work"},
+			}
+			if decision["route_kind"] == "request"
+			else {
+				"name": "ApprovalDetail",
+				"params": {"kind": decision["route_kind"], "name": decision["reference_name"]},
+			}
+		)
 		items.append(
 			_queue_item(
 				kind=decision["kind"],
@@ -1296,10 +1317,7 @@ def _get_needs_you(employee, once):
 				action="Review",
 				owner="you",
 				urgency="decision",
-				to={
-					"name": "ApprovalDetail",
-					"params": {"kind": decision["route_kind"], "name": decision["reference_name"]},
-				},
+				to=target_to,
 			)
 		)
 
@@ -2815,6 +2833,8 @@ def _approval_summaries(employee):
 	# narrowed by `_line_manager_filter`; everything waiting for HR is added
 	# here and tagged, so the two halves are one oldest-first backlog rather
 	# than two lists to poll. Plan 2026-10-15-002 KTD1: tagged "hr".
+	# Plan 2026-10-16-001 R4: HR Managers see HR requests only; IT requests
+	# belong to IT Team.
 	if _is_hr():
 		for kind in _APPROVAL_KINDS.values():
 			collected = kind["hr_queue"](employee, today)
@@ -2827,7 +2847,7 @@ def _approval_summaries(employee):
 		# `_is_hr()` branch above does would be the same hard PermissionError
 		# the line-manager loop hit above, not an empty answer. Their whole
 		# queue is `_hr_request_summaries`, and only that one is reached.
-		collected = _hr_request_summaries(employee, today)
+		collected = _hr_request_queue(employee, today)
 		capped = capped or len(collected) >= _QUEUE_FETCH
 		_extend(collected, "hr")
 
@@ -5875,7 +5895,8 @@ _LEAVE_PENDING_HR = "Pending HR"
 
 
 # U6 / R13. The kinds a queue row can be, in the order the chips render.
-_APPROVAL_FILTER_KINDS = ("leave", "timesheet", "attendance", "request", "change")
+# Plan 2026-10-16-001 KTD1: requests leave Approvals.
+_APPROVAL_FILTER_KINDS = ("leave", "timesheet", "attendance", "change")
 
 
 def _valid_request_category(category):
@@ -5912,20 +5933,26 @@ def get_my_approvals(kind=None, category=None):
 	A category implies kind "request" -- only requests have one.
 	"""
 	rate_limit_per_user("get_my_approvals")
-	if kind and kind not in _APPROVAL_FILTER_KINDS:
+	if kind and kind not in _APPROVAL_FILTER_KINDS and kind != "request":
 		frappe.throw(_("There is no approval kind called {0}.").format(kind))
 	category = _valid_request_category(category)
 	if category:
 		kind = "request"
 	employee = get_current_employee()
-	pending, capped, lane_counts = _approval_summaries(employee)
+	pending, capped, _lane_counts = _approval_summaries(employee)
+	# Plan 2026-10-16-001 KTD1: requests leave Approvals rows, lanes, counts,
+	# categories and Decided list.
+	pending = [row for row in pending if row["kind"] != "request"]
+	lanes = {"team": sum(1 for row in pending if row.get("lane") == "team")}
+	if _is_hr():
+		lanes["hr"] = sum(1 for row in pending if row.get("lane") == "hr")
 	counts = {
 		"kinds": [
 			{"name": name, "count": sum(1 for row in pending if row["kind"] == name)}
 			for name in _APPROVAL_FILTER_KINDS
 		],
-		"categories": _count_by(row.get("category") for row in pending if row["kind"] == "request"),
-		"lanes": lane_counts,
+		"categories": [],
+		"lanes": lanes,
 	}
 	if kind:
 		pending = [row for row in pending if row["kind"] == kind]
@@ -5933,9 +5960,8 @@ def get_my_approvals(kind=None, category=None):
 		pending = [row for row in pending if row.get("category") == category]
 	# Plan 2026-10-04-003 KTD8 / R19: the 25-row page is gone for the kinds
 	# the redesign groups per person (timesheet, leave, and the mixed view
-	# those live in); the routed and attendance kinds keep theirs. The hard
-	# cap stands behind all of it.
-	shown = pending[:_APPROVAL_PAGE] if kind in ("attendance", "request") else pending[:_QUEUE_HARD_CAP]
+	# those live in); attendance keeps theirs. The hard cap stands behind all of it.
+	shown = pending[:_APPROVAL_PAGE] if kind == "attendance" else pending[:_QUEUE_HARD_CAP]
 
 	# R14: the queue is grouped per person on the server, oldest waiting
 	# first -- the rows are already oldest-first, so the first time each
@@ -6290,8 +6316,9 @@ def _decided_routed_requests(employee, since):
 # Workflow kinds read through `frappe.get_list` and need role Employee; the
 # change and routed kinds are scoped by their own decider stamp and run for
 # every caller (a routed-role holder may have no Employee role, P5-KTD10).
+# Plan 2026-10-16-001 KTD1: drops _decided_routed_requests from Decided.
 _DECIDED_COLLECTORS = (_decided_leave, _decided_attendance_requests)
-_DECIDED_STAMPED_COLLECTORS = (_decided_change_requests, _decided_routed_requests)
+_DECIDED_STAMPED_COLLECTORS = (_decided_change_requests,)
 
 
 def _recently_decided(employee):
@@ -6451,7 +6478,8 @@ def _pending_groups(scope, kinds, overdue_only):
 	return result, bool(stats.get("capped"))
 
 
-_OVERSIGHT_KINDS = ("leave", "attendance", "request", "change")
+# Plan 2026-10-16-001 KTD1: requests leave All pending oversight.
+_OVERSIGHT_KINDS = ("leave", "attendance", "change")
 
 
 @frappe.whitelist()
@@ -7440,6 +7468,10 @@ def _assert_may_act_on(doc):
 		# endpoint cannot be used to learn whether a record exists.
 		if not employee_in_admin_scope(doc.employee, resolve_admin_scope(user)):
 			frappe.throw(_APPROVAL_NOT_FOUND, frappe.PermissionError)
+		# Plan 2026-10-16-001 R4: HR Managers see HR requests only; IT requests
+		# belong to IT Team.
+		if doc.doctype == "HR Request" and user != "Administrator" and doc.routed_to_role not in frappe.get_roles(user):
+			frappe.throw(_APPROVAL_NOT_FOUND, frappe.PermissionError)
 		return
 
 	_APPROVAL_KINDS[doc.doctype]["may_act"](doc, user)
@@ -7812,6 +7844,16 @@ def _correction_summary(doc):
 	}
 
 
+def _hr_request_queue(employee, today):
+	"""Plan 2026-10-16-001 R4: HR Managers see HR requests only; IT requests
+	belong to IT Team."""
+	roles = set(frappe.get_roles())
+	routed_roles = [r for r in ("HR Manager", *_ROUTED_WORKER_ROLES) if r in roles]
+	if not routed_roles:
+		return []
+	return _hr_request_summaries(employee, today, routed_roles=routed_roles)
+
+
 # Everything that is per-kind about a decision, in one doctype-keyed table
 # (P3-U6 step 0, P3-U9). It replaced five parallel maps over the same three
 # doctypes -- five places a fourth kind could be half-registered, which is the
@@ -7877,7 +7919,7 @@ _APPROVAL_KINDS = {
 		),
 		"open_message": "This request has already been finished. Reload to see the result.",
 		"hr_state": lambda doc: doc.routed_to_role == "HR Manager",
-		"hr_queue": _hr_request_summaries,
+		"hr_queue": _hr_request_queue,
 		"act": _act_on_hr_request,
 	},
 	"HelixHR Timesheet Change": {
@@ -9838,7 +9880,7 @@ def reply_to_my_request(name, message, expected_modified=None):
 		employee_name,
 		message,
 		_("{0} commented: {1}").format(employee_name, doc.subject),
-		frappe.utils.get_url(f"/helixhr/approvals/request/{name}"),
+		frappe.utils.get_url(f"/helixhr/requests/{name}?tab=work"),
 		"request_reply" if moves_status else "request_comment",
 	)
 
@@ -9893,6 +9935,41 @@ def comment_on_request(name, message):
 		)
 
 	return {"name": name, "status": doc.status}
+
+
+@frappe.whitelist()
+def get_request_view(name):
+	"""Plan 2026-10-16-001 KTD8: one read that returns 'employee', 'handler'
+	or 'none' for an HR Request name.
+
+	Called by Notifications.vue when opening an HR Request notification so
+	it routes to the right view without leaking records or guessing.
+	"""
+	rate_limit_per_user("get_request_view")
+	if not name or not isinstance(name, str) or not frappe.db.exists("HR Request", name):
+		return "none"
+
+	doc = frappe.get_doc("HR Request", name)
+	user = frappe.session.user
+
+	employee = get_current_employee()
+	if employee and doc.employee == employee:
+		return "employee"
+
+	try:
+		_assert_may_act_on(doc)
+		if user != "Administrator" and doc.routed_to_role not in frappe.get_roles(user):
+			return "none"
+		if user != "Administrator":
+			user_emp = frappe.db.get_value("Employee", {"user_id": user}, ["company", "status"], as_dict=True)
+			if not user_emp or user_emp.status != "Active":
+				return "none"
+			target_company = frappe.db.get_value("Employee", doc.employee, "company")
+			if user_emp.company != target_company:
+				return "none"
+		return "handler"
+	except (frappe.PermissionError, frappe.ValidationError):
+		return "none"
 
 
 @frappe.whitelist(methods=["POST"])
