@@ -2788,9 +2788,25 @@ def get_request_work(state=None, limit=None, start=0):
 			limit_page_length=0,
 		)
 	)
+	# Plan 2026-10-16-001 R8: Team inbox count is requests needing team action
+	# (New and In progress), matching Home count.
+	action_count = len(
+		frappe.get_list(
+			"HR Request",
+			filters=_request_summaries_filters(
+				employee,
+				(HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS),
+				None,
+				routed_roles,
+			),
+			pluck="name",
+			limit_page_length=0,
+		)
+	)
 	return {
 		"work": rows,
 		"total": total,
+		"action_count": action_count,
 		"limit": page,
 		"today": user_today(),
 	}

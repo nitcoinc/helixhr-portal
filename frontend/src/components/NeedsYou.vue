@@ -3,6 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
 import { formatDate } from '@/lib/dates'
 import { NEEDS_YOU_ICON } from '@/lib/icons'
+import { session } from '@/lib/session'
 
 const props = defineProps({
   items: { type: Array, default: () => [] },
@@ -51,6 +52,11 @@ const queueHeight = ref(null)
 const waitingHeight = ref(null)
 const queueTotal = computed(() => props.items.length + props.more)
 const waitingTotal = computed(() => props.waiting.length + props.waitingMore)
+const viewAllDestination = computed(() => {
+  if (session.canApprove) return '/approvals'
+  if (session.canHandleRequests || session.canWorkRequests) return { path: '/requests', query: { tab: 'work' } }
+  return '/approvals'
+})
 
 function capHeight(el) {
   const rows = el?.children
@@ -200,7 +206,7 @@ watch(
         and <span class="tabular font-medium">{{ more }}</span> more not shown here.
       </span>
       <router-link
-        to="/approvals"
+        :to="viewAllDestination"
         class="tabular ml-auto inline-flex min-h-11 cursor-pointer items-center font-medium text-blue-700 hover:underline"
       >
         View all ({{ queueTotal }})

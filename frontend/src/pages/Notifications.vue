@@ -50,6 +50,7 @@ const ICON_FOR_DOCTYPE = {
 }
 
 const timesheetWeek = createResource({ url: 'helixhr.api.get_timesheet_week_start' })
+const requestView = createResource({ url: 'helixhr.api.get_request_view' })
 
 async function routeFor(row) {
   const route = ROUTE_FOR_DOCTYPE[row.document_type]
@@ -62,6 +63,18 @@ async function routeFor(row) {
         .submit({ name: row.document_name })
         .catch(() => null)
       return weekStart ? { name: route.detail, params: { weekStart } } : { name: route.list }
+    }
+    if (row.document_type === 'HR Request') {
+      const view = await requestView
+        .submit({ name: row.document_name })
+        .catch(() => null)
+      if (view === 'handler') {
+        return { name: 'RequestDetail', params: { name: row.document_name }, query: { tab: 'work' } }
+      }
+      if (view === 'employee') {
+        return { name: 'RequestDetail', params: { name: row.document_name } }
+      }
+      return { name: 'Requests' }
     }
     return { name: route.detail, params: { name: row.document_name } }
   }
