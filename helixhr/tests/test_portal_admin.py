@@ -136,6 +136,31 @@ class TestPortalAdminSeesNoHrData(IntegrationTestCase):
 
 	def test_export_log_is_company_scoped(self):
 		other = ensure_baseline_company()
+		# `setup_playwright_fixtures` gives this Portal Admin a Company User
+		# Permission on `other` (reach, plan 2026-10-14-001). On a site seeded
+		# for e2e that makes `other` legitimately visible; take it away for
+		# this test and put it back after.
+		reach = frappe.get_all(
+			"User Permission",
+			filters={"user": self.user, "allow": "Company", "for_value": other},
+			fields=["name", "applicable_for", "apply_to_all_doctypes", "is_default", "hide_descendants"],
+		)
+		for row in reach:
+			frappe.db.delete("User Permission", row.name)
+			self.addCleanup(
+				lambda row=row: frappe.get_doc(
+					{
+						"doctype": "User Permission",
+						"user": self.user,
+						"allow": "Company",
+						"for_value": other,
+						"applicable_for": row.applicable_for,
+						"apply_to_all_doctypes": row.apply_to_all_doctypes,
+						"is_default": row.is_default,
+						"hide_descendants": row.hide_descendants,
+					}
+				).insert(ignore_permissions=True)
+			)
 		mine = frappe.get_doc(
 			{
 				"doctype": "HelixHR Report Export",
@@ -299,13 +324,15 @@ class TestApproverCleanup(IntegrationTestCase):
 		self.assertEqual(frappe.db.get_value("Leave Application", leave, "leave_approver"), CLEANUP_MANAGER)
 
 	def test_a_manager_without_a_login_needs_hr_attention(self):
-		orphan = frappe.db.get_value("Employee", {"employee_number": "_Test Cleanup Orphan Manager"})
+		# Committed on purpose and left behind; no "Manager" in its name or
+		# number, or people.spec.ts's "Manager" search opens it first.
+		orphan = frappe.db.get_value("Employee", {"employee_number": "_Test Cleanup Orphan Approver"})
 		if not orphan:
 			orphan = (
 				frappe.get_doc(
 					{
 						"doctype": "Employee",
-						"employee_number": "_Test Cleanup Orphan Manager",
+						"employee_number": "_Test Cleanup Orphan Approver",
 						"first_name": "Cleanup Orphan",
 						"company": self.company,
 						"date_of_birth": "1990-01-01",
