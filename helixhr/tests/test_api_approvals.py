@@ -1411,12 +1411,13 @@ class TestAttendanceRequestApprovals(IntegrationTestCase):
 		# queue collector of its own; it has no "recently decided" receipt on
 		# purpose -- the employee already hears every accept and decline
 		# through `timesheet_change_decided`, and the request's own record
-		# carries the outcome (R21).
+		# carries the outcome (R21). Timesheets left the receipt list too
+		# (plan 2026-10-15-002 KTD8): they have their own tab.
 		line_manager_doctypes = doctypes - {"HR Request"}
 		self.assertEqual(len(api._APPROVAL_SUMMARY_COLLECTORS), len(line_manager_doctypes))
 		self.assertEqual(
 			len(api._DECIDED_COLLECTORS),
-			len(line_manager_doctypes - {"HelixHR Timesheet Change"}),
+			len(line_manager_doctypes - {"HelixHR Timesheet Change", "Timesheet"}),
 		)
 		# Each kind's "already decided" sentence names its own record type.
 		self.assertEqual(
@@ -1947,13 +1948,15 @@ class TestFourOutcomesAndTheHrQueue(IntegrationTestCase):
 		an HR Manager's native read spans the company, so filtering on
 		`employee != caller` alone showed HR every manager's decisions as if
 		HR had made them."""
-		timesheet = self._pending_timesheet()
+		# Plan 2026-10-15-002 KTD8: timesheets left the decided list, so an
+		# attendance request carries the check.
+		request = self._pending_manager_request()
 		frappe.set_user(MANAGER_USER)
-		act_on_approval("Timesheet", timesheet, "Approve", **token("Timesheet", timesheet))
-		self.assertIn(timesheet, [row["name"] for row in get_my_approvals()["decided"]])
+		act_on_approval(DOCTYPE, request, "Approve", **token(DOCTYPE, request))
+		self.assertIn(request, [row["name"] for row in get_my_approvals()["decided"]])
 
 		frappe.set_user(self.hr_user)
-		self.assertNotIn(timesheet, [row["name"] for row in get_my_approvals()["decided"]])
+		self.assertNotIn(request, [row["name"] for row in get_my_approvals()["decided"]])
 
 	def test_a_hand_over_note_is_never_read_back_as_a_send_back_reason(self):
 		"""P4-R5's note is written for HR's eyes. It lives in the same

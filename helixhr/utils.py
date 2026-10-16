@@ -484,6 +484,37 @@ NOTIFICATION_EVENTS = {
 			" ({{ item.age_days }} day(s))</li>{% endfor %}</ul>{% endfor %}"
 		),
 	},
+	# Plan 2026-10-15-002 U3 (R9, R13): HR's manual nudge about one
+	# approver's pending timesheets, sent from the Timesheets tab.
+	"timesheet_approval_reminder": {
+		"label": "Timesheet approval reminder",
+		"audience": "Approver",
+		"variables": {
+			"items": (
+				"Pending timesheets: employee_name, week, age_days, url",
+				[
+					{
+						"employee_name": "Arjun Rao",
+						"week": "12 Oct 2026",
+						"age_days": 4,
+						"url": "https://hr.example.com/helixhr/approvals/timesheet/TS-2026-00001",
+					}
+				],
+			),
+			"count": ("How many timesheets are waiting", 1),
+			"company": ("The company the timesheets belong to", "Helix Inc"),
+			"sender_name": ("Who in HR sent the reminder", "Meera Shah"),
+		},
+		"subject": "{{ count }} timesheet(s) waiting for your approval",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>{{ sender_name }} in HR asked us to remind you that these timesheets"
+			" are waiting for your approval:</p><ul>"
+			'{% for item in items %}<li><a href="{{ item.url }}">{{ item.employee_name }}, week of {{ item.week }}</a>'
+			"{% if item.age_days is not none %} ({{ item.age_days }} day(s)){% endif %}</li>{% endfor %}</ul>"
+		),
+		"action_label": "Open approvals",
+	},
 	"bank_change_requested": {
 		"label": "Bank detail change requested",
 		"audience": "Security",
@@ -1134,7 +1165,9 @@ def message_brand(user):
 def send_notification(event_key, recipients, context, reference_doctype=None, reference_name=None):
 	"""Render and queue `event_key` to each recipient (KTD8). One mail per
 	recipient so `recipient_first_name` is theirs. Never raises: a mail
-	failure must not fail the write that triggered it (P5-KTD9)."""
+	failure must not fail the write that triggered it (P5-KTD9). Returns how
+	many mails were queued (0 when the event is switched off)."""
+	queued = 0
 	for recipient in recipients or ():
 		try:
 			first_name = frappe.db.get_value("User", recipient, "first_name")
@@ -1143,7 +1176,7 @@ def send_notification(event_key, recipients, context, reference_doctype=None, re
 				{"recipient_first_name": first_name, **_recipient_brand(recipient), **(context or {})},
 			)
 			if message is None:
-				return
+				return queued
 			frappe.sendmail(
 				recipients=[recipient],
 				subject=message["subject"],
@@ -1151,8 +1184,10 @@ def send_notification(event_key, recipients, context, reference_doctype=None, re
 				reference_doctype=reference_doctype,
 				reference_name=reference_name,
 			)
+			queued += 1
 		except Exception:
 			frappe.log_error(frappe.get_traceback(), f"HelixHR {event_key} mail failed")
+	return queued
 
 
 # Plan 2026-10-08-001 U1: a company's own clock. A server whose System
@@ -1947,6 +1982,9 @@ RATE_LIMIT_POLICY = {
 	"search_company_access_targets": (60, 60),
 	"save_company_access": (30, 3600),
 	"revoke_company_access": (30, 3600),
+	# Plan 2026-10-15-002: timesheet oversight and reminders.
+	"get_pending_by_approver": (60, 60),
+	"send_timesheet_reminder": (20, 3600),
 	"delete_company_access": (30, 3600),
 	# Plan 2026-10-07-001 U4: the Approvers cleanup -- a preview read and a
 	# rare batch apply.

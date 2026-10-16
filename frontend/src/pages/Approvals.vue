@@ -9,6 +9,8 @@ import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
 import { attachToRequestReply } from '@/lib/api'
 import CorrectionReview from '@/components/approvals/CorrectionReview.vue'
+import TimesheetOversight from '@/components/approvals/TimesheetOversight.vue'
+import { APPROVER_REASON_TEXT, groupByPerson, laneSections, laneSubsections } from '@/lib/approvalLanes'
 import { session } from '@/lib/session'
 import { formatDate, formatDateRange, formatDateTime } from '@/lib/dates'
 import { toPlainLeaveError } from '@/lib/errorMap'
@@ -55,8 +57,11 @@ const KIND_CHIP_LABEL = {
   request: 'Requests',
   change: 'Change requests',
 }
+// Plan 2026-10-15-002 R3: timesheets have their own tab, so no chip here.
 const kindChips = computed(() =>
-  (queue.data?.counts?.kinds || []).filter((chip) => chip.count || chip.name === kindFilter.value),
+  (queue.data?.counts?.kinds || []).filter(
+    (chip) => chip.name !== 'timesheet' && (chip.count || chip.name === kindFilter.value),
+  ),
 )
 const categoryChips = computed(() => queue.data?.counts?.categories || [])
 
@@ -66,19 +71,55 @@ function filterQueue(kind, category) {
   router.push({ name: route.name, params: route.params, query: { kind: kind || undefined, category: category || undefined } })
 }
 
-// U12 / R26. HR-only Overdue tab, in the URL like the chips. The server
-// refuses anyone else; `canConfigure` mirrors that gate (`_is_hr`).
-const VIEW_TABS = [
-  { name: 'queue', label: 'Queue' },
-  { name: 'overdue', label: 'Overdue' },
-]
+// Plan 2026-10-15-002 U5 (R3, R8, R14). Three tabs, each in the URL like the
+// chips: Approvals (every kind but timesheets, in lanes), Timesheets, and --
+// HR Manager only -- All pending, which replaced the Overdue tab. Each tab is
+// drawn only for a caller its server endpoint would serve; the server
+// refuses anyone else regardless.
+const timesheetCount = computed(
+  () => (queue.data?.counts?.kinds || []).find((chip) => chip.name === 'timesheet')?.count || 0,
+)
+const VIEW_TABS = computed(() =>
+  [
+    (session.canApprove || session.canWorkRequests) && { name: 'queue', label: 'Approvals' },
+    (session.canApprove || session.canOverseeTimesheets) && {
+      name: 'timesheets',
+      label: 'Timesheets',
+      count: timesheetCount.value,
+    },
+    session.canSeeAllPending && { name: 'all-pending', label: 'All pending' },
+  ].filter(Boolean),
+)
 const OVERDUE_VISIBLE_ROWS = 5
-const view = computed(() => (session.canConfigure && route.query.view === 'overdue' ? 'overdue' : 'queue'))
-const overdue = createResource({ url: 'helixhr.api.get_overdue_approvals' })
-watch(view, (value) => value === 'overdue' && overdue.fetch(), { immediate: true })
+/** The open tab: `?view=`, where the old `overdue` is an alias for All
+ * pending with its toggle on; a tab this caller does not have falls back to
+ * the first one they do (R14). */
+const view = computed(() => {
+  const asked = route.query.view === 'overdue' ? 'all-pending' : route.query.view || 'queue'
+  const names = VIEW_TABS.value.map((tab) => tab.name)
+  return names.includes(asked) ? asked : names[0] || 'queue'
+})
+const overdueOnly = computed(() => route.query.view === 'overdue' || route.query.overdue === '1')
 function showView(name) {
-  router.push({ path: '/approvals', query: name === 'overdue' ? { view: 'overdue' } : {} })
+  router.push({ path: '/approvals', query: name === 'queue' ? {} : { view: name } })
 }
+function toggleOverdue() {
+  router.push({ path: '/approvals', query: { view: 'all-pending', overdue: overdueOnly.value ? undefined : '1' } })
+}
+
+const allPending = createResource({
+  url: 'helixhr.api.get_pending_by_approver',
+  makeParams: () => ({ overdue_only: overdueOnly.value ? 1 : 0 }),
+})
+watch(
+  [view, overdueOnly],
+  ([value]) => value === 'all-pending' && allPending.fetch(),
+  { immediate: true },
+)
+// Bulk selection belongs to one tab's rows and clears when the tab changes.
+watch(view, () => {
+  bulkSelected.value = []
+})
 
 const pending = computed(() => queue.data?.pending || [])
 const decided = computed(() => queue.data?.decided || [])
@@ -567,43 +608,25 @@ function flagLabels(row) {
   return Object.keys(row.flags || {}).map((flag) => FLAG_LABELS[flag] || flag)
 }
 
-const changeRows = computed(() => pending.value.filter((row) => row.kind === 'change'))
-const flaggedRows = computed(() =>
-  pending.value.filter((row) => row.kind !== 'change' && row.needs_look),
-)
-const normalRows = computed(() =>
-  pending.value.filter((row) => row.kind !== 'change' && !row.needs_look),
-)
-
-function groupByPerson(rows) {
-  const groups = []
-  const index = {}
-  for (const row of rows) {
-    let group = index[row.employee]
-    if (!group) {
-      group = {
-        employee: row.employee,
-        employee_name: row.employee_name,
-        initials: row.initials,
-        photo_url: row.photo_url,
-        oldest: row,
-        rows: [],
-      }
-      index[row.employee] = group
-      groups.push(group)
-    }
-    group.rows.push(row)
-  }
-  return groups
-}
-
-const queueSections = computed(() =>
-  [
-    { key: 'change', title: 'Change requests', note: 'One decision at a time, never in bulk.', rows: changeRows.value },
-    { key: 'flagged', title: 'Needs a look', note: 'Something on these rows is unusual. Decide each one on its own evidence.', rows: flaggedRows.value },
-    { key: 'normal', title: 'Looks normal', note: '', rows: normalRows.value },
-  ].filter((section) => section.rows.length),
-)
+// R1-R5: Approvals shows every kind but timesheets, in lanes; Timesheets
+// shows the caller's own timesheet queue as "Waiting on you" (their team)
+// and "Waiting on HR" (the HR stage, HR Manager only).
+const approvalRows = computed(() => pending.value.filter((row) => row.kind !== 'timesheet'))
+const timesheetRows = computed(() => pending.value.filter((row) => row.kind === 'timesheet'))
+const tabRows = computed(() => (view.value === 'timesheets' ? timesheetRows.value : approvalRows.value))
+const lanes = computed(() => {
+  if (view.value !== 'timesheets') return laneSections(approvalRows.value, decided.value.length)
+  return [
+    { key: 'yours', title: 'Waiting on you', rows: timesheetRows.value.filter((row) => row.lane !== 'hr') },
+    { key: 'hr-stage', title: 'Waiting on HR', rows: timesheetRows.value.filter((row) => row.lane === 'hr') },
+  ]
+    .filter((lane) => lane.rows.length)
+    .map((lane) => ({ ...lane, sections: laneSubsections(lane.rows) }))
+})
+// A row opened from the oversight list is not in this caller's own queue;
+// its detail then takes the column the queue would have used on a phone.
+const decidedOpen = ref(false)
+const openInQueue = computed(() => !!props.name && pending.value.some((row) => row.name === props.name))
 
 // R20: selection exists from 640px up. A phone queue is one column of
 // single decisions; the checkboxes would only crowd it.
@@ -721,12 +744,10 @@ function dismissBulkResult() {
       </template>
     </PageHeader>
 
-    <!-- U12 / R26. HR's Overdue tab: who is sitting on what, past R25's
-         threshold, within HR's admin scope. Same collector as the daily HR
-         summary (U11). The tab lives in the URL query like the chips. -->
+    <!-- Plan 2026-10-15-002 U5. One visible tab hides the bar (R14). -->
     <div
-      v-if="session.canConfigure"
-      class="mb-4 flex gap-2 border-b border-outline-gray-2"
+      v-if="VIEW_TABS.length > 1"
+      class="mb-4 flex gap-2 overflow-x-auto border-b border-outline-gray-2"
       role="tablist"
       aria-label="Approvals views"
     >
@@ -735,7 +756,7 @@ function dismissBulkResult() {
         :key="tab.name"
         type="button"
         role="tab"
-        class="-mb-px min-h-11 border-b-2 px-3 text-sm font-medium"
+        class="-mb-px min-h-11 shrink-0 border-b-2 px-3 text-sm font-medium"
         :class="
           view === tab.name
             ? 'border-ink-gray-9 text-ink-gray-9'
@@ -745,40 +766,86 @@ function dismissBulkResult() {
         @click="showView(tab.name)"
       >
         {{ tab.label }}
+        <span
+          v-if="tab.count"
+          class="tabular ml-1 text-ink-gray-5"
+        >{{ tab.count }}</span>
       </button>
     </div>
 
+    <!-- R8: every pending non-timesheet item in HR's company, by approver.
+         Overdue only reproduces the old Overdue tab; `?view=overdue` lands
+         here with it on. -->
     <section
-      v-if="view === 'overdue'"
+      v-if="view === 'all-pending'"
       data-testid="overdue-tab"
     >
+      <div class="mb-4 flex flex-wrap items-center gap-3">
+        <button
+          type="button"
+          class="min-h-11 rounded-full border px-4 text-sm font-medium"
+          :class="
+            overdueOnly
+              ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
+              : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
+          "
+          :aria-pressed="overdueOnly"
+          data-testid="overdue-toggle"
+          @click="toggleOverdue"
+        >
+          Overdue only
+        </button>
+        <p
+          v-if="allPending.data?.timesheet_count"
+          class="text-sm text-ink-gray-5"
+        >
+          Timesheets are on their own tab:
+          <button
+            type="button"
+            class="min-h-11 cursor-pointer font-medium text-ink-gray-9 underline"
+            @click="showView('timesheets')"
+          >
+            <span class="tabular">{{ allPending.data.timesheet_count }}</span> pending
+          </button>
+        </p>
+      </div>
       <AsyncState
-        section="approvals-overdue"
-        :resource="overdue"
-        :empty="!overdue.data?.count"
-        empty-title="Nothing overdue"
-        empty-body="Approvals and requests waiting past their deadline appear here, grouped by who owes the decision."
+        section="approvals-all-pending"
+        :resource="allPending"
+        :empty="!allPending.data?.count"
+        :empty-title="overdueOnly ? 'Nothing overdue' : `Nothing pending in ${session.employee?.company || 'your company'}`"
+        empty-body="Leave, attendance, change requests and requests waiting on someone appear here, grouped by who owes the decision."
         :skeleton-rows="3"
       >
+        <p
+          v-if="allPending.data.total_is_capped"
+          class="mb-3 text-sm text-ink-amber-3"
+        >
+          Showing the oldest 500. Narrow by approver.
+        </p>
         <div class="space-y-6">
           <section
-            v-for="group in overdue.data.groups"
-            :key="group.owner_name + group.inactive"
+            v-for="group in allPending.data.groups"
+            :key="group.key"
             data-testid="overdue-group"
           >
             <h2 class="label mb-2">
-              {{ group.owner_name }}
-              <span class="tabular text-ink-gray-5">{{ group.items.length }}</span>
+              {{ group.approver_name }}
               <span
-                v-if="group.inactive"
+                v-if="group.is_you"
+                class="text-ink-gray-5"
+              >(You)</span>
+              <span class="tabular text-ink-gray-5">{{ group.count }}</span>
+              <span
+                v-if="group.reason && group.reason !== 'none'"
                 class="ml-1 text-ink-amber-3"
-              >No active owner</span>
+              >{{ APPROVER_REASON_TEXT[group.reason] }}</span>
             </h2>
             <ul
               class="space-y-2"
               :class="group.items.length > OVERDUE_VISIBLE_ROWS ? 'scroll-queue max-h-[19.5rem]' : ''"
               :tabindex="group.items.length > OVERDUE_VISIBLE_ROWS ? 0 : undefined"
-              :aria-label="group.items.length > OVERDUE_VISIBLE_ROWS ? `${group.owner_name}, scrollable` : undefined"
+              :aria-label="group.items.length > OVERDUE_VISIBLE_ROWS ? `${group.approver_name}, scrollable` : undefined"
             >
               <li
                 v-for="item in group.items"
@@ -788,14 +855,17 @@ function dismissBulkResult() {
               >
                 <router-link
                   :to="`/approvals/${item.route_kind}/${item.name}`"
-                  class="surface-card elev-1 flex h-14 min-w-0 items-center gap-3 px-3 hover:bg-surface-gray-2"
+                  class="surface-card elev-1 flex min-h-14 min-w-0 items-center gap-3 px-3 hover:bg-surface-gray-2"
                 >
                   <span class="min-w-0 flex-1">
                     <span class="block truncate text-sm font-medium text-ink-gray-9">{{ item.employee_name }} · {{ item.title }}</span>
-                    <span class="block truncate text-xs text-ink-gray-5">{{ item.kind }}</span>
+                    <span class="block truncate text-xs text-ink-gray-5">
+                      {{ item.kind }}
+                      <template v-if="item.overdue"> · Overdue</template>
+                    </span>
                   </span>
                   <span class="tabular shrink-0 text-right text-sm text-ink-gray-9">
-                    {{ item.age_days }} days
+                    {{ item.since_unknown ? 'Since unknown' : `${item.age_days} days` }}
                     <span class="block text-xs text-ink-gray-5">limit {{ item.threshold_days }}</span>
                   </span>
                 </router-link>
@@ -900,13 +970,12 @@ function dismissBulkResult() {
     </div>
 
     <div
-      v-if="view === 'queue'"
+      v-if="view === 'queue' || view === 'timesheets'"
       class="lg:flex lg:items-start lg:gap-6"
     >
-      <!-- The queue. One list, leave and timesheets together: they are the
-           same job -- somebody is waiting on a decision -- and splitting them
-           into two sections made a manager check two places to find out
-           whether they were done (P2-U7 step 7). -->
+      <!-- The queue. Plan 2026-10-15-002 U5/U6: the Approvals tab in lanes
+           (My team, Decided by me, HR, IT); the Timesheets tab as Waiting on
+           you and Waiting on HR, with HR's oversight list below. -->
       <div
         v-show="!name || isDesktop"
         class="min-w-0 lg:flex-1"
@@ -915,625 +984,707 @@ function dismissBulkResult() {
         <AsyncState
           section="approvals-queue"
           :resource="queue"
-          :empty="pending.length === 0"
-          empty-title="Nothing waiting on you"
-          empty-body="Leave, weeks and attendance requests your team sends for approval appear here."
+          :empty="!tabRows.length && !(view === 'queue' && decided.length)"
+          :empty-title="view === 'timesheets' ? 'No timesheets waiting on you' : 'Nothing waiting on you'"
+          :empty-body="
+            view === 'timesheets'
+              ? 'Weeks your team sends for approval appear here.'
+              : 'Leave, attendance, change requests and requests waiting on you appear here.'
+          "
           :skeleton-rows="3"
         >
-          <!-- Plan 2026-10-04-003 U7 (R13, R19): three lanes, oldest waiting
-               first inside each -- change requests (never batchable), the
-               rows the server flagged, and everything else. -->
-          <section
-            v-for="section in queueSections"
-            :key="section.key"
-            class="mb-6"
-            :data-testid="`queue-section-${section.key}`"
+          <!-- R2: with every pending lane empty, the empty copy sits above
+               the Decided disclosure. -->
+          <p
+            v-if="!tabRows.length"
+            class="surface-inset mb-6 p-4 text-sm text-ink-gray-7"
           >
-            <h2 class="label mb-2">
-              {{ section.title }}
-              <span class="tabular text-ink-gray-5">{{ section.rows.length }}</span>
-            </h2>
-            <p
-              v-if="section.note"
-              class="mb-2 text-sm text-ink-gray-5"
-            >
-              {{ section.note }}
-            </p>
-
-            <!-- R14: one header per person, their oldest item leading. -->
-            <div
-              v-for="group in groupByPerson(section.rows)"
-              :key="group.employee"
-              class="mb-4"
-              :data-testid="`person-group-${section.key}`"
-              :data-person="group.employee_name"
-            >
-              <div class="mb-1.5 flex items-center gap-2 px-1">
-                <Avatar
-                  class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-[10px] font-bold text-ink-gray-7"
-                  :photo-url="group.photo_url"
-                  :initials="group.initials"
-                  :size="24"
+            Nothing waiting on you.
+          </p>
+          <section
+            v-for="lane in lanes"
+            :key="lane.key"
+            class="mb-8"
+            :data-testid="`lane-${lane.key}`"
+          >
+            <!-- KTD8: the last 14 days of this caller's own decisions,
+                 collapsed. Directly after My team, or first without it. -->
+            <template v-if="lane.key === 'decided'">
+              <button
+                type="button"
+                class="flex min-h-11 w-full cursor-pointer items-center gap-2 text-left"
+                :aria-expanded="decidedOpen"
+                aria-controls="approvals-decided-list"
+                data-testid="decided-toggle"
+                @click="decidedOpen = !decidedOpen"
+              >
+                <Icon
+                  name="chevronRight"
+                  class="shrink-0 text-ink-gray-5 transition-transform duration-200"
+                  :class="decidedOpen ? 'rotate-90' : ''"
                 />
-                <span class="min-w-0 truncate text-sm font-medium text-ink-gray-9">
-                  {{ group.employee_name }}
-                </span>
-                <span class="tabular text-xs text-ink-gray-5">
-                  {{ group.rows.length }} {{ group.rows.length === 1 ? 'item' : 'items' }} · waiting
-                  {{ ageLabel(group.oldest) }}
-                </span>
-              </div>
-
-              <ul class="space-y-2">
+                <span class="label">{{ lane.title }}</span>
+                <span class="tabular text-sm text-ink-gray-5">{{ decided.length }}</span>
+              </button>
+              <ul
+                v-show="decidedOpen"
+                id="approvals-decided-list"
+                class="mt-2 space-y-2"
+              >
                 <li
-                  v-for="row in group.rows"
+                  v-for="row in decided"
                   :key="row.id"
-                  class="surface-card elev-1"
-                  :class="row.name === name ? 'ring-2 ring-field' : ''"
-                  data-testid="approval-row"
-                  :data-approval-kind="row.kind"
-                  :data-approval-name="row.name"
+                  class="surface-card elev-1 flex items-center gap-3 p-3"
                 >
-                  <div class="flex items-stretch">
-                    <!-- R17: selection exists only in Looks normal, only for
-                         the two kinds the batch takes, and only while the
-                         server still calls the row clean. -->
-                    <button
-                      v-if="section.key === 'normal'"
-                      type="button"
-                      class="flex w-11 shrink-0 cursor-pointer items-center justify-center border-r border-outline-gray-2"
-                      :class="selectable(row) ? '' : 'cursor-default opacity-0'"
-                      :aria-label="isSelected(row) ? `Unselect ${rowSummary(row)}` : `Select ${rowSummary(row)}`"
-                      :aria-pressed="isSelected(row)"
-                      :data-testid="`bulk-check-${row.kind}`"
-                      :tabindex="selectable(row) ? 0 : -1"
-                      @click.stop="toggleBulk(row)"
-                    >
-                      <span
-                        class="flex h-5 w-5 items-center justify-center rounded border"
-                        :class="isSelected(row) ? 'border-ink-gray-9 bg-ink-gray-9 text-field' : 'border-outline-gray-3'"
-                        aria-hidden="true"
-                      >
-                        <Icon
-                          v-if="isSelected(row)"
-                          name="check"
-                          class="h-3 w-3"
-                        />
-                      </span>
-                    </button>
-
-                    <button
-                      type="button"
-                      class="flex w-full min-w-0 cursor-pointer items-center gap-3 p-3 text-left"
-                      :aria-expanded="row.name === name"
-                      @click="row.name === name ? closeDetail() : open(row)"
-                    >
-                      <Avatar
-                        class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-sm font-bold text-ink-green-3"
-                        :photo-url="row.photo_url"
-                        :initials="row.initials"
-                        :size="40"
-                      />
-
-                      <span class="min-w-0 flex-1">
-                        <span class="flex min-w-0 items-center gap-2">
-                          <span class="min-w-0 truncate font-medium text-ink-gray-9">
-                            {{ row.employee_name }}
-                          </span>
-                          <!-- P4-R11. One queue, two hats. The chip is a word, not
-                               a tint, because it is the only thing that says whether
-                               this row is HR's work or this manager's own. -->
-                          <span
-                            v-if="row.for_hr"
-                            class="shrink-0 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-bold text-ink-gray-7"
-                            data-testid="hr-chip"
-                          >HR</span>
-                        </span>
-                        <span class="block truncate text-sm text-ink-gray-6">
-                          {{ rowSummary(row) }}
-                        </span>
-                        <span
-                          v-if="row.kind === 'timesheet' && row.expected_hours != null"
-                          class="tabular block text-xs text-ink-gray-5"
-                        >
-                          {{ Number(row.total_hours).toFixed(1).replace(/\.0$/, '') }} of
-                          {{ Number(row.expected_hours).toFixed(1).replace(/\.0$/, '') }} h expected
-                        </span>
-                        <span
-                          v-if="row.kind === 'leave' && row.balance_after != null"
-                          class="block text-xs text-ink-gray-5"
-                        >
-                          Balance after:
-                          <span class="tabular">{{ Number(row.balance_after).toFixed(1).replace(/\.0$/, '') }}</span>
-                          <template v-if="row.overlap_count">
-                            · {{ row.overlap_count }}
-                            {{ row.overlap_count === 1 ? 'other person is' : 'other people are' }} off then
-                          </template>
-                        </span>
-                        <!-- R16: the flags in words, never colour alone. -->
-                        <span
-                          v-if="row.needs_look"
-                          class="mt-1 flex flex-wrap gap-1"
-                          data-testid="flag-chips"
-                        >
-                          <span
-                            v-for="flag in flagLabels(row)"
-                            :key="flag"
-                            class="rounded-full bg-surface-amber-1 px-2 py-0.5 text-xs font-medium text-ink-amber-3"
-                          >
-                            {{ flag }}
-                          </span>
-                        </span>
-                        <span
-                          v-if="hrLine(row)"
-                          class="block truncate text-xs text-ink-gray-5"
-                        >
-                          {{ hrLine(row) }}
-                        </span>
-                      </span>
-
-                      <span class="shrink-0 text-right">
-                        <span
-                          class="tabular block font-medium text-ink-gray-9"
-                          :data-testid="row.kind === 'request' ? 'request-claim' : null"
-                        >{{ rowAmount(row) }}</span>
-                        <span class="tabular block text-xs text-ink-gray-5">{{ ageLabel(row) }}</span>
-                      </span>
-
-                      <Icon
-                        v-if="!isDesktop"
-                        name="chevronRight"
-                        class="shrink-0 text-ink-gray-4 transition-transform duration-200"
-                        :class="row.name === name ? 'rotate-90' : ''"
-                      />
-                    </button>
-                  </div>
-
-                  <!-- Phone: the selected item opens where it is, so the manager
-                       never loses their place in the queue (P2-U7 step 7). -->
-                  <div
-                    v-if="!isDesktop && row.name === name"
-                    class="border-t border-outline-gray-2 px-3 pb-3"
-                  >
-                    <AsyncState
-                      section="approvals-detail"
-                      class="pt-3"
-                      :resource="detail"
-                      :empty="!detail.data"
-                      empty-title="That request isn't here any more"
-                      empty-body="It may have been withdrawn or already decided."
-                      skeleton="block"
-                      skeleton-height="h-40"
-                    >
-                      <template #error-title>
-                        We couldn't load this request
-                      </template>
-                      <div v-if="selected">
-                        <!-- R13: the change request's own words are the
-                             evidence; the approved week's hours sit beside
-                             them. -->
-                        <div
-                          v-if="selected.kind === 'change'"
-                          class="surface-inset p-3 text-sm"
-                        >
-                          <p class="font-medium text-ink-gray-9">
-                            What they asked to change
-                          </p>
-                          <p class="mt-1 text-ink-gray-7">
-                            {{ selected.comment }}
-                          </p>
-                          <p class="tabular mt-2 text-xs text-ink-gray-5">
-                            The approved week carries
-                            {{ Number(selected.total_hours).toFixed(1).replace(/\.0$/, '') }} h ·
-                            {{ formatDateRange(selected.week_start, selected.week_end) }}
-                          </p>
-                        </div>
-
-                        <!-- The 7-day hours strip: the shape of the week, before
-                         the numbers under it. -->
-                        <div
-                          v-if="selected.kind === 'timesheet'"
-                          class="flex gap-1.5"
-                          aria-hidden="true"
-                        >
-                          <div
-                            v-for="(day, index) in selected.day_totals"
-                            :key="day.date"
-                            class="min-w-0 flex-1 text-center"
-                          >
-                            <p class="label mb-1">
-                              {{ DAY_LETTERS[index] }}
-                            </p>
-                            <div class="flex h-10 items-end justify-center rounded bg-surface-gray-2">
-                              <div
-                                class="w-full rounded bg-blue-500"
-                                :style="{ height: day.hours ? barHeight(day.hours) : '0' }"
-                              />
-                            </div>
-                            <p class="tabular mt-1 text-xs text-ink-gray-6">
-                              {{ day.hours || '–' }}
-                            </p>
-                          </div>
-                        </div>
-                        <p
-                          v-if="selected.kind === 'timesheet'"
-                          class="sr-only"
-                        >
-                          <span
-                            v-for="(day, index) in selected.day_totals"
-                            :key="day.date"
-                          >{{ DAY_LETTERS[index] }} {{ day.hours }} hours.
-                          </span>
-                        </p>
-
-
-                        <!-- Evidence, then the decision. Never the other way
-                         round: the buttons live below everything that
-                         justifies them (P2-AE6). -->
-                        <dl
-                          v-if="selected.kind === 'timesheet'"
-                          class="mt-3 divide-y divide-outline-gray-2 border-t border-outline-gray-2"
-                        >
-                          <div
-                            v-for="line in selected.lines"
-                            :key="`${line.project}:${line.task}`"
-                            class="flex items-baseline justify-between gap-3 py-2"
-                          >
-                            <dt class="min-w-0 text-sm">
-                              <span class="font-medium text-ink-gray-9">{{ line.project_name }}</span>
-                              <span
-                                v-if="line.task_subject"
-                                class="text-ink-gray-6"
-                              > · {{ line.task_subject }}</span>
-                            </dt>
-                            <dd class="tabular shrink-0 text-sm text-ink-gray-9">
-                              {{ line.total }}
-                            </dd>
-                          </div>
-                          <div class="flex items-baseline justify-between gap-3 py-2">
-                            <dt class="text-sm font-medium text-ink-gray-9">
-                              Week total
-                            </dt>
-                            <dd class="tabular shrink-0 font-bold text-ink-gray-9">
-                              {{ selected.total_hours }}
-                            </dd>
-                          </div>
-                        </dl>
-
-                        <dl
-                          v-else-if="selected.kind === 'leave'"
-                          class="border-t border-outline-gray-2 pt-3 text-sm"
-                        >
-                          <div class="flex justify-between gap-3">
-                            <dt class="text-ink-gray-6">
-                              {{ selected.leave_type }}
-                            </dt>
-                            <dd class="text-ink-gray-9">
-                              {{ formatDateRange(selected.from_date, selected.to_date) }}
-                            </dd>
-                          </div>
-                          <div class="mt-1 flex justify-between gap-3">
-                            <dt class="text-ink-gray-6">
-                              Days
-                            </dt>
-                            <dd class="tabular text-ink-gray-9">
-                              {{ selected.total_days }}
-                              <span v-if="selected.half_day">(half day)</span>
-                            </dd>
-                          </div>
-                          <div class="mt-1 flex justify-between gap-3">
-                            <dt class="text-ink-gray-6">
-                              Status
-                            </dt>
-                            <dd>
-                              <StatusBadge
-                                kind="leave"
-                                :status="selected.status"
-                                :docstatus="selected.docstatus"
-                              />
-                            </dd>
-                          </div>
-                        </dl>
-
-                        <!-- P3-R16. The days themselves, and what the calendar
-                         already shows for each: the manager is agreeing that
-                         these particular days were worked. -->
-                        <dl
-                          v-else-if="selected.kind === 'attendance'"
-                          class="border-t border-outline-gray-2 pt-3 text-sm"
-                        >
-                          <div class="flex justify-between gap-3">
-                            <dt class="text-ink-gray-6">
-                              {{ selected.reason }}
-                            </dt>
-                            <dd class="text-ink-gray-9">
-                              {{ formatDateRange(selected.from_date, selected.to_date) }}
-                            </dd>
-                          </div>
-                          <div
-                            v-for="day in selected.days"
-                            :key="day.date"
-                            class="mt-1 flex justify-between gap-3"
-                          >
-                            <dt class="tabular text-ink-gray-6">
-                              {{ formatDate(day.date) }}
-                            </dt>
-                            <dd class="text-ink-gray-9">
-                              {{ requestedDayLabel(day) }}
-                            </dd>
-                          </div>
-                          <div
-                            v-if="selected.half_day"
-                            class="mt-1 flex justify-between gap-3"
-                          >
-                            <dt class="text-ink-gray-6">
-                              Half day
-                            </dt>
-                            <dd class="text-ink-gray-9">
-                              {{ formatDate(selected.half_day_date) }}
-                            </dd>
-                          </div>
-                        </dl>
-
-                        <!-- P5-R10: the request and every reply after it, one
-                         conversation, oldest first. -->
-                        <div
-                          v-else-if="selected.kind === 'request'"
-                          class="border-t border-outline-gray-2 pt-3"
-                          data-testid="request-thread"
-                        >
-                          <p class="text-sm text-ink-gray-6">
-                            {{ selected.category }}
-                          </p>
-                          <CorrectionReview
-                            v-if="selected.correction"
-                            :key="selected.name"
-                            :request="selected.name"
-                            :correction="selected.correction"
-                            :attachments="selected.attachments"
-                            :can-reveal="actions.length > 0"
-                          />
-                          <ul
-                            v-if="selected.thread?.length"
-                            class="mt-2 space-y-2"
-                          >
-                            <li
-                              v-for="(entry, index) in selected.thread"
-                              :key="index"
-                              class="surface-inset p-2 text-sm"
-                            >
-                              <p class="text-xs font-medium text-ink-gray-5">
-                                {{ entry.by === 'employee' ? firstName || 'Employee' : 'Worker' }}
-                                · {{ formatDateTime(entry.on) }}
-                              </p>
-                              <p class="mt-0.5 whitespace-pre-line text-ink-gray-8">
-                                {{ entry.message }}
-                              </p>
-                            </li>
-                          </ul>
-                          <p
-                            v-else
-                            class="mt-2 text-sm text-ink-gray-5"
-                          >
-                            No details were written with this request.
-                          </p>
-
-                          <!-- P5-R10a: what makes an HR Letter completable
-                           without opening Desk. -->
-                          <div
-                            v-if="actions.length"
-                            class="mt-3"
-                          >
-                            <Button
-                              variant="outline"
-                              :loading="attachingReply"
-                              :disabled="attachingReply"
-                              @click="requestFileInputMobile?.click()"
-                            >
-                              Attach a file
-                            </Button>
-                            <input
-                              ref="requestFileInputMobile"
-                              type="file"
-                              class="sr-only"
-                              data-testid="attach-reply-input"
-                              @change="attachReplyFile"
-                            >
-                            <p
-                              v-if="attachReplyError"
-                              class="mt-1 text-sm text-signal"
-                              role="alert"
-                            >
-                              {{ attachReplyError }}
-                            </p>
-                          </div>
-                        </div>
-
-                        <p
-                          v-if="quote"
-                          class="surface-inset mt-3 p-3 text-sm text-ink-gray-7"
-                        >
-                          {{ firstName }}: “{{ quote }}”
-                        </p>
-
-                        <p
-                          v-if="actionError"
-                          class="surface-alert mt-3 p-3 text-sm"
-                          role="alert"
-                        >
-                          {{ actionError }}
-                        </p>
-
-                        <!-- P4-U4. One reason surface, armed for one outcome at a
-                         time, on the deep field where the portal's other
-                         anchored write regions live. -->
-                        <div
-                          v-if="reasonFor"
-                          class="surface-field elev-2 mt-3 p-3"
-                          data-testid="decision-reason"
-                        >
-                          <p class="text-sm font-medium text-white">
-                            {{ reasonCopy.heading }}
-                          </p>
-                          <FormControl
-                            v-model="reason"
-                            class="mt-2"
-                            type="textarea"
-                            :placeholder="reasonPlaceholder"
-                            :aria-label="reasonCopy.heading"
-                            required
-                          />
-                          <p
-                            v-if="reasonError"
-                            class="mt-1 text-sm font-medium text-signal"
-                            role="alert"
-                          >
-                            {{ reasonError }}
-                          </p>
-                          <!-- Plan 2026-10-05-001 U3: closing the reason puts the other
-                               outcomes (Accept among them) back. -->
-                          <Button
-                            class="mt-2"
-                            variant="subtle"
-                            data-testid="reason-cancel"
-                            @click="closeReason"
-                          >
-                            Cancel
-                          </Button>
-                        </div>
-
-                        <!-- Send to HR is a routing act, so its words are a note
-                         to a colleague and optional (P4-R5). -->
-                        <div
-                          v-if="noteOpen"
-                          class="mt-3"
-                          data-testid="hr-note"
-                        >
-                          <FormControl
-                            v-model="note"
-                            type="textarea"
-                            label="Anything HR should know? (optional)"
-                            placeholder="Why this needs HR"
-                          />
-                          <Button
-                            class="mt-2"
-                            variant="subtle"
-                            data-testid="note-cancel"
-                            @click="closeNote"
-                          >
-                            Cancel
-                          </Button>
-                        </div>
-
-                        <div
-                          class="mt-3 flex flex-wrap items-center gap-2"
-                          data-testid="decision-actions"
-                        >
-                          <!-- R13: the change request's two decisions. Accept
-                           cancels the approved week and returns an editable
-                           copy; Decline is the final no, with a reason. -->
-                          <Button
-                            v-if="shown('Accept')"
-                            variant="solid"
-                            theme="green"
-                            :loading="acting === selected.name"
-                            :disabled="acting === selected.name"
-                            data-testid="accept"
-                            @click="decide('Accept')"
-                          >
-                            Accept
-                          </Button>
-                          <Button
-                            v-if="shown('Approve')"
-                            variant="solid"
-                            theme="green"
-                            :loading="acting === selected.name"
-                            :disabled="acting === selected.name"
-                            @click="decide('Approve')"
-                          >
-                            {{ approveLabel }}
-                          </Button>
-                          <Button
-                            v-if="shown('Pick up')"
-                            variant="solid"
-                            theme="green"
-                            :loading="acting === selected.name"
-                            :disabled="acting === selected.name"
-                            data-testid="pick-up"
-                            @click="decide('Pick up')"
-                          >
-                            Pick up
-                          </Button>
-                          <Button
-                            v-if="shown('Done')"
-                            variant="solid"
-                            theme="green"
-                            :loading="acting === selected.name"
-                            :disabled="acting === selected.name"
-                            data-testid="done"
-                            @click="decide('Done')"
-                          >
-                            Done
-                          </Button>
-                          <Button
-                            v-if="shown('Need info')"
-                            variant="outline"
-                            class="decision-tone decision-tone--return"
-                            :disabled="acting === selected.name"
-                            data-testid="need-info"
-                            @click="decide('Need info')"
-                          >
-                            Need info
-                          </Button>
-                          <Button
-                            v-if="shown('Send Back')"
-                            variant="outline"
-                            class="decision-tone decision-tone--return"
-                            :disabled="acting === selected.name"
-                            data-testid="send-back"
-                            @click="decide('Send Back')"
-                          >
-                            Send back
-                          </Button>
-                          <Button
-                            v-if="shown('Reject')"
-                            variant="outline"
-                            class="decision-tone decision-tone--final"
-                            :disabled="acting === selected.name"
-                            data-testid="reject"
-                            @click="decide('Reject')"
-                          >
-                            Reject
-                          </Button>
-                          <!-- R12: a decline is a final no with a reason; the
-                           week stays as it was. -->
-                          <Button
-                            v-if="shown('Decline')"
-                            variant="outline"
-                            class="decision-tone decision-tone--final"
-                            :disabled="acting === selected.name"
-                            data-testid="decline"
-                            @click="decide('Decline')"
-                          >
-                            Decline
-                          </Button>
-                          <Button
-                            v-if="shown('Send to HR')"
-                            variant="outline"
-                            class="decision-tone decision-tone--handover"
-                            :disabled="acting === selected.name"
-                            data-testid="send-to-hr"
-                            @click="decide('Send to HR')"
-                          >
-                            Send to HR
-                          </Button>
-                        </div>
-                      </div>
-                    </AsyncState>
-                  </div>
+                  <Avatar
+                    class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-xs font-bold text-ink-gray-7"
+                    :photo-url="row.photo_url"
+                    :initials="row.initials"
+                    :size="32"
+                  />
+                  <p class="min-w-0 flex-1 truncate text-sm text-ink-gray-7">
+                    {{ row.employee_name }} · {{ row.label }}
+                    <template v-if="row.from_date">
+                      · {{ formatDateRange(row.from_date, row.to_date) }}
+                    </template>
+                  </p>
+                  <StatusBadge
+                    :kind="row.kind"
+                    :status="row.status"
+                    :docstatus="row.docstatus"
+                  />
                 </li>
               </ul>
-            </div>
+            </template>
+            <template v-else>
+              <h2 class="mb-3 text-base font-semibold text-ink-gray-9">
+                {{ lane.title }}
+                <span class="tabular text-sm font-normal text-ink-gray-5">{{ lane.rows.length }}</span>
+              </h2>
+              <!-- Plan 2026-10-04-003 U7 (R13, R19): inside a lane, oldest waiting
+               first -- change requests (never batchable), the rows the
+               server flagged, and everything else. -->
+              <section
+                v-for="section in lane.sections"
+                :key="section.key"
+                class="mb-6"
+                :data-testid="`queue-section-${section.key}`"
+              >
+                <h3 class="label mb-2">
+                  {{ section.title }}
+                  <span class="tabular text-ink-gray-5">{{ section.rows.length }}</span>
+                </h3>
+                <p
+                  v-if="section.note"
+                  class="mb-2 text-sm text-ink-gray-5"
+                >
+                  {{ section.note }}
+                </p>
+
+                <!-- R14: one header per person, their oldest item leading. -->
+                <div
+                  v-for="group in groupByPerson(section.rows)"
+                  :key="group.employee"
+                  class="mb-4"
+                  :data-testid="`person-group-${section.key}`"
+                  :data-person="group.employee_name"
+                >
+                  <div class="mb-1.5 flex items-center gap-2 px-1">
+                    <Avatar
+                      class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-[10px] font-bold text-ink-gray-7"
+                      :photo-url="group.photo_url"
+                      :initials="group.initials"
+                      :size="24"
+                    />
+                    <span class="min-w-0 truncate text-sm font-medium text-ink-gray-9">
+                      {{ group.employee_name }}
+                    </span>
+                    <span class="tabular text-xs text-ink-gray-5">
+                      {{ group.rows.length }} {{ group.rows.length === 1 ? 'item' : 'items' }} · waiting
+                      {{ ageLabel(group.oldest) }}
+                    </span>
+                  </div>
+
+                  <ul class="space-y-2">
+                    <li
+                      v-for="row in group.rows"
+                      :key="row.id"
+                      class="surface-card elev-1"
+                      :class="row.name === name ? 'ring-2 ring-field' : ''"
+                      data-testid="approval-row"
+                      :data-approval-kind="row.kind"
+                      :data-approval-name="row.name"
+                    >
+                      <div class="flex items-stretch">
+                        <!-- R17: selection exists only in Looks normal, only for
+                         the two kinds the batch takes, and only while the
+                         server still calls the row clean. -->
+                        <button
+                          v-if="section.key === 'normal'"
+                          type="button"
+                          class="flex w-11 shrink-0 cursor-pointer items-center justify-center border-r border-outline-gray-2"
+                          :class="selectable(row) ? '' : 'cursor-default opacity-0'"
+                          :aria-label="isSelected(row) ? `Unselect ${rowSummary(row)}` : `Select ${rowSummary(row)}`"
+                          :aria-pressed="isSelected(row)"
+                          :data-testid="`bulk-check-${row.kind}`"
+                          :tabindex="selectable(row) ? 0 : -1"
+                          @click.stop="toggleBulk(row)"
+                        >
+                          <span
+                            class="flex h-5 w-5 items-center justify-center rounded border"
+                            :class="isSelected(row) ? 'border-ink-gray-9 bg-ink-gray-9 text-field' : 'border-outline-gray-3'"
+                            aria-hidden="true"
+                          >
+                            <Icon
+                              v-if="isSelected(row)"
+                              name="check"
+                              class="h-3 w-3"
+                            />
+                          </span>
+                        </button>
+
+                        <button
+                          type="button"
+                          class="flex w-full min-w-0 cursor-pointer items-center gap-3 p-3 text-left"
+                          :aria-expanded="row.name === name"
+                          @click="row.name === name ? closeDetail() : open(row)"
+                        >
+                          <Avatar
+                            class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-sm font-bold text-ink-green-3"
+                            :photo-url="row.photo_url"
+                            :initials="row.initials"
+                            :size="40"
+                          />
+
+                          <span class="min-w-0 flex-1">
+                            <span class="flex min-w-0 items-center gap-2">
+                              <span class="min-w-0 truncate font-medium text-ink-gray-9">
+                                {{ row.employee_name }}
+                              </span>
+                              <!-- P4-R11. One queue, two hats. The chip is a word, not
+                               a tint, because it is the only thing that says whether
+                               this row is HR's work or this manager's own. -->
+                              <span
+                                v-if="row.for_hr"
+                                class="shrink-0 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-bold text-ink-gray-7"
+                                data-testid="hr-chip"
+                              >HR</span>
+                            </span>
+                            <span class="block truncate text-sm text-ink-gray-6">
+                              {{ rowSummary(row) }}
+                            </span>
+                            <span
+                              v-if="row.kind === 'timesheet' && row.expected_hours != null"
+                              class="tabular block text-xs text-ink-gray-5"
+                            >
+                              {{ Number(row.total_hours).toFixed(1).replace(/\.0$/, '') }} of
+                              {{ Number(row.expected_hours).toFixed(1).replace(/\.0$/, '') }} h expected
+                            </span>
+                            <span
+                              v-if="row.kind === 'leave' && row.balance_after != null"
+                              class="block text-xs text-ink-gray-5"
+                            >
+                              Balance after:
+                              <span class="tabular">{{ Number(row.balance_after).toFixed(1).replace(/\.0$/, '') }}</span>
+                              <template v-if="row.overlap_count">
+                                · {{ row.overlap_count }}
+                                {{ row.overlap_count === 1 ? 'other person is' : 'other people are' }} off then
+                              </template>
+                            </span>
+                            <!-- R16: the flags in words, never colour alone. -->
+                            <span
+                              v-if="row.needs_look"
+                              class="mt-1 flex flex-wrap gap-1"
+                              data-testid="flag-chips"
+                            >
+                              <span
+                                v-for="flag in flagLabels(row)"
+                                :key="flag"
+                                class="rounded-full bg-surface-amber-1 px-2 py-0.5 text-xs font-medium text-ink-amber-3"
+                              >
+                                {{ flag }}
+                              </span>
+                            </span>
+                            <span
+                              v-if="hrLine(row)"
+                              class="block truncate text-xs text-ink-gray-5"
+                            >
+                              {{ hrLine(row) }}
+                            </span>
+                          </span>
+
+                          <span class="shrink-0 text-right">
+                            <span
+                              class="tabular block font-medium text-ink-gray-9"
+                              :data-testid="row.kind === 'request' ? 'request-claim' : null"
+                            >{{ rowAmount(row) }}</span>
+                            <span class="tabular block text-xs text-ink-gray-5">{{ ageLabel(row) }}</span>
+                          </span>
+
+                          <Icon
+                            v-if="!isDesktop"
+                            name="chevronRight"
+                            class="shrink-0 text-ink-gray-4 transition-transform duration-200"
+                            :class="row.name === name ? 'rotate-90' : ''"
+                          />
+                        </button>
+                      </div>
+
+                      <!-- Phone: the selected item opens where it is, so the manager
+                       never loses their place in the queue (P2-U7 step 7). -->
+                      <div
+                        v-if="!isDesktop && row.name === name"
+                        class="border-t border-outline-gray-2 px-3 pb-3"
+                      >
+                        <AsyncState
+                          section="approvals-detail"
+                          class="pt-3"
+                          :resource="detail"
+                          :empty="!detail.data"
+                          empty-title="That request isn't here any more"
+                          empty-body="It may have been withdrawn or already decided."
+                          skeleton="block"
+                          skeleton-height="h-40"
+                        >
+                          <template #error-title>
+                            We couldn't load this request
+                          </template>
+                          <div v-if="selected">
+                            <!-- R13: the change request's own words are the
+                             evidence; the approved week's hours sit beside
+                             them. -->
+                            <div
+                              v-if="selected.kind === 'change'"
+                              class="surface-inset p-3 text-sm"
+                            >
+                              <p class="font-medium text-ink-gray-9">
+                                What they asked to change
+                              </p>
+                              <p class="mt-1 text-ink-gray-7">
+                                {{ selected.comment }}
+                              </p>
+                              <p class="tabular mt-2 text-xs text-ink-gray-5">
+                                The approved week carries
+                                {{ Number(selected.total_hours).toFixed(1).replace(/\.0$/, '') }} h ·
+                                {{ formatDateRange(selected.week_start, selected.week_end) }}
+                              </p>
+                            </div>
+
+                            <!-- The 7-day hours strip: the shape of the week, before
+                         the numbers under it. -->
+                            <div
+                              v-if="selected.kind === 'timesheet'"
+                              class="flex gap-1.5"
+                              aria-hidden="true"
+                            >
+                              <div
+                                v-for="(day, index) in selected.day_totals"
+                                :key="day.date"
+                                class="min-w-0 flex-1 text-center"
+                              >
+                                <p class="label mb-1">
+                                  {{ DAY_LETTERS[index] }}
+                                </p>
+                                <div class="flex h-10 items-end justify-center rounded bg-surface-gray-2">
+                                  <div
+                                    class="w-full rounded bg-blue-500"
+                                    :style="{ height: day.hours ? barHeight(day.hours) : '0' }"
+                                  />
+                                </div>
+                                <p class="tabular mt-1 text-xs text-ink-gray-6">
+                                  {{ day.hours || '–' }}
+                                </p>
+                              </div>
+                            </div>
+                            <p
+                              v-if="selected.kind === 'timesheet'"
+                              class="sr-only"
+                            >
+                              <span
+                                v-for="(day, index) in selected.day_totals"
+                                :key="day.date"
+                              >{{ DAY_LETTERS[index] }} {{ day.hours }} hours.
+                              </span>
+                            </p>
+
+
+                            <!-- Evidence, then the decision. Never the other way
+                         round: the buttons live below everything that
+                         justifies them (P2-AE6). -->
+                            <dl
+                              v-if="selected.kind === 'timesheet'"
+                              class="mt-3 divide-y divide-outline-gray-2 border-t border-outline-gray-2"
+                            >
+                              <div
+                                v-for="line in selected.lines"
+                                :key="`${line.project}:${line.task}`"
+                                class="flex items-baseline justify-between gap-3 py-2"
+                              >
+                                <dt class="min-w-0 text-sm">
+                                  <span class="font-medium text-ink-gray-9">{{ line.project_name }}</span>
+                                  <span
+                                    v-if="line.task_subject"
+                                    class="text-ink-gray-6"
+                                  > · {{ line.task_subject }}</span>
+                                </dt>
+                                <dd class="tabular shrink-0 text-sm text-ink-gray-9">
+                                  {{ line.total }}
+                                </dd>
+                              </div>
+                              <div class="flex items-baseline justify-between gap-3 py-2">
+                                <dt class="text-sm font-medium text-ink-gray-9">
+                                  Week total
+                                </dt>
+                                <dd class="tabular shrink-0 font-bold text-ink-gray-9">
+                                  {{ selected.total_hours }}
+                                </dd>
+                              </div>
+                            </dl>
+
+                            <dl
+                              v-else-if="selected.kind === 'leave'"
+                              class="border-t border-outline-gray-2 pt-3 text-sm"
+                            >
+                              <div class="flex justify-between gap-3">
+                                <dt class="text-ink-gray-6">
+                                  {{ selected.leave_type }}
+                                </dt>
+                                <dd class="text-ink-gray-9">
+                                  {{ formatDateRange(selected.from_date, selected.to_date) }}
+                                </dd>
+                              </div>
+                              <div class="mt-1 flex justify-between gap-3">
+                                <dt class="text-ink-gray-6">
+                                  Days
+                                </dt>
+                                <dd class="tabular text-ink-gray-9">
+                                  {{ selected.total_days }}
+                                  <span v-if="selected.half_day">(half day)</span>
+                                </dd>
+                              </div>
+                              <div class="mt-1 flex justify-between gap-3">
+                                <dt class="text-ink-gray-6">
+                                  Status
+                                </dt>
+                                <dd>
+                                  <StatusBadge
+                                    kind="leave"
+                                    :status="selected.status"
+                                    :docstatus="selected.docstatus"
+                                  />
+                                </dd>
+                              </div>
+                            </dl>
+
+                            <!-- P3-R16. The days themselves, and what the calendar
+                         already shows for each: the manager is agreeing that
+                         these particular days were worked. -->
+                            <dl
+                              v-else-if="selected.kind === 'attendance'"
+                              class="border-t border-outline-gray-2 pt-3 text-sm"
+                            >
+                              <div class="flex justify-between gap-3">
+                                <dt class="text-ink-gray-6">
+                                  {{ selected.reason }}
+                                </dt>
+                                <dd class="text-ink-gray-9">
+                                  {{ formatDateRange(selected.from_date, selected.to_date) }}
+                                </dd>
+                              </div>
+                              <div
+                                v-for="day in selected.days"
+                                :key="day.date"
+                                class="mt-1 flex justify-between gap-3"
+                              >
+                                <dt class="tabular text-ink-gray-6">
+                                  {{ formatDate(day.date) }}
+                                </dt>
+                                <dd class="text-ink-gray-9">
+                                  {{ requestedDayLabel(day) }}
+                                </dd>
+                              </div>
+                              <div
+                                v-if="selected.half_day"
+                                class="mt-1 flex justify-between gap-3"
+                              >
+                                <dt class="text-ink-gray-6">
+                                  Half day
+                                </dt>
+                                <dd class="text-ink-gray-9">
+                                  {{ formatDate(selected.half_day_date) }}
+                                </dd>
+                              </div>
+                            </dl>
+
+                            <!-- P5-R10: the request and every reply after it, one
+                         conversation, oldest first. -->
+                            <div
+                              v-else-if="selected.kind === 'request'"
+                              class="border-t border-outline-gray-2 pt-3"
+                              data-testid="request-thread"
+                            >
+                              <p class="text-sm text-ink-gray-6">
+                                {{ selected.category }}
+                              </p>
+                              <CorrectionReview
+                                v-if="selected.correction"
+                                :key="selected.name"
+                                :request="selected.name"
+                                :correction="selected.correction"
+                                :attachments="selected.attachments"
+                                :can-reveal="actions.length > 0"
+                              />
+                              <ul
+                                v-if="selected.thread?.length"
+                                class="mt-2 space-y-2"
+                              >
+                                <li
+                                  v-for="(entry, index) in selected.thread"
+                                  :key="index"
+                                  class="surface-inset p-2 text-sm"
+                                >
+                                  <p class="text-xs font-medium text-ink-gray-5">
+                                    {{ entry.by === 'employee' ? firstName || 'Employee' : 'Worker' }}
+                                    · {{ formatDateTime(entry.on) }}
+                                  </p>
+                                  <p class="mt-0.5 whitespace-pre-line text-ink-gray-8">
+                                    {{ entry.message }}
+                                  </p>
+                                </li>
+                              </ul>
+                              <p
+                                v-else
+                                class="mt-2 text-sm text-ink-gray-5"
+                              >
+                                No details were written with this request.
+                              </p>
+
+                              <!-- P5-R10a: what makes an HR Letter completable
+                           without opening Desk. -->
+                              <div
+                                v-if="actions.length"
+                                class="mt-3"
+                              >
+                                <Button
+                                  variant="outline"
+                                  :loading="attachingReply"
+                                  :disabled="attachingReply"
+                                  @click="requestFileInputMobile?.click()"
+                                >
+                                  Attach a file
+                                </Button>
+                                <input
+                                  ref="requestFileInputMobile"
+                                  type="file"
+                                  class="sr-only"
+                                  data-testid="attach-reply-input"
+                                  @change="attachReplyFile"
+                                >
+                                <p
+                                  v-if="attachReplyError"
+                                  class="mt-1 text-sm text-signal"
+                                  role="alert"
+                                >
+                                  {{ attachReplyError }}
+                                </p>
+                              </div>
+                            </div>
+
+                            <p
+                              v-if="quote"
+                              class="surface-inset mt-3 p-3 text-sm text-ink-gray-7"
+                            >
+                              {{ firstName }}: “{{ quote }}”
+                            </p>
+
+                            <p
+                              v-if="actionError"
+                              class="surface-alert mt-3 p-3 text-sm"
+                              role="alert"
+                            >
+                              {{ actionError }}
+                            </p>
+
+                            <!-- P4-U4. One reason surface, armed for one outcome at a
+                         time, on the deep field where the portal's other
+                         anchored write regions live. -->
+                            <div
+                              v-if="reasonFor"
+                              class="surface-field elev-2 mt-3 p-3"
+                              data-testid="decision-reason"
+                            >
+                              <p class="text-sm font-medium text-white">
+                                {{ reasonCopy.heading }}
+                              </p>
+                              <FormControl
+                                v-model="reason"
+                                class="mt-2"
+                                type="textarea"
+                                :placeholder="reasonPlaceholder"
+                                :aria-label="reasonCopy.heading"
+                                required
+                              />
+                              <p
+                                v-if="reasonError"
+                                class="mt-1 text-sm font-medium text-signal"
+                                role="alert"
+                              >
+                                {{ reasonError }}
+                              </p>
+                              <!-- Plan 2026-10-05-001 U3: closing the reason puts the other
+                               outcomes (Accept among them) back. -->
+                              <Button
+                                class="mt-2"
+                                variant="subtle"
+                                data-testid="reason-cancel"
+                                @click="closeReason"
+                              >
+                                Cancel
+                              </Button>
+                            </div>
+
+                            <!-- Send to HR is a routing act, so its words are a note
+                         to a colleague and optional (P4-R5). -->
+                            <div
+                              v-if="noteOpen"
+                              class="mt-3"
+                              data-testid="hr-note"
+                            >
+                              <FormControl
+                                v-model="note"
+                                type="textarea"
+                                label="Anything HR should know? (optional)"
+                                placeholder="Why this needs HR"
+                              />
+                              <Button
+                                class="mt-2"
+                                variant="subtle"
+                                data-testid="note-cancel"
+                                @click="closeNote"
+                              >
+                                Cancel
+                              </Button>
+                            </div>
+
+                            <!-- Plan 2026-10-15-002 R7: HR User reads, never decides. -->
+                            <p
+                              v-if="selected.read_only"
+                              class="surface-inset mt-3 p-3 text-sm text-ink-gray-7"
+                              data-testid="view-only-note"
+                            >
+                              View only: you can't approve timesheets.
+                            </p>
+                            <div
+                              class="mt-3 flex flex-wrap items-center gap-2"
+                              data-testid="decision-actions"
+                            >
+                              <!-- R13: the change request's two decisions. Accept
+                           cancels the approved week and returns an editable
+                           copy; Decline is the final no, with a reason. -->
+                              <Button
+                                v-if="shown('Accept')"
+                                variant="solid"
+                                theme="green"
+                                :loading="acting === selected.name"
+                                :disabled="acting === selected.name"
+                                data-testid="accept"
+                                @click="decide('Accept')"
+                              >
+                                Accept
+                              </Button>
+                              <Button
+                                v-if="shown('Approve')"
+                                variant="solid"
+                                theme="green"
+                                :loading="acting === selected.name"
+                                :disabled="acting === selected.name"
+                                @click="decide('Approve')"
+                              >
+                                {{ approveLabel }}
+                              </Button>
+                              <Button
+                                v-if="shown('Pick up')"
+                                variant="solid"
+                                theme="green"
+                                :loading="acting === selected.name"
+                                :disabled="acting === selected.name"
+                                data-testid="pick-up"
+                                @click="decide('Pick up')"
+                              >
+                                Pick up
+                              </Button>
+                              <Button
+                                v-if="shown('Done')"
+                                variant="solid"
+                                theme="green"
+                                :loading="acting === selected.name"
+                                :disabled="acting === selected.name"
+                                data-testid="done"
+                                @click="decide('Done')"
+                              >
+                                Done
+                              </Button>
+                              <Button
+                                v-if="shown('Need info')"
+                                variant="outline"
+                                class="decision-tone decision-tone--return"
+                                :disabled="acting === selected.name"
+                                data-testid="need-info"
+                                @click="decide('Need info')"
+                              >
+                                Need info
+                              </Button>
+                              <Button
+                                v-if="shown('Send Back')"
+                                variant="outline"
+                                class="decision-tone decision-tone--return"
+                                :disabled="acting === selected.name"
+                                data-testid="send-back"
+                                @click="decide('Send Back')"
+                              >
+                                Send back
+                              </Button>
+                              <Button
+                                v-if="shown('Reject')"
+                                variant="outline"
+                                class="decision-tone decision-tone--final"
+                                :disabled="acting === selected.name"
+                                data-testid="reject"
+                                @click="decide('Reject')"
+                              >
+                                Reject
+                              </Button>
+                              <!-- R12: a decline is a final no with a reason; the
+                           week stays as it was. -->
+                              <Button
+                                v-if="shown('Decline')"
+                                variant="outline"
+                                class="decision-tone decision-tone--final"
+                                :disabled="acting === selected.name"
+                                data-testid="decline"
+                                @click="decide('Decline')"
+                              >
+                                Decline
+                              </Button>
+                              <Button
+                                v-if="shown('Send to HR')"
+                                variant="outline"
+                                class="decision-tone decision-tone--handover"
+                                :disabled="acting === selected.name"
+                                data-testid="send-to-hr"
+                                @click="decide('Send to HR')"
+                              >
+                                Send to HR
+                              </Button>
+                            </div>
+                          </div>
+                        </AsyncState>
+                      </div>
+                    </li>
+                  </ul>
+                </div>
+              </section>
+            </template>
           </section>
 
           <p
@@ -1545,43 +1696,12 @@ function dismissBulkResult() {
           </p>
         </AsyncState>
 
-        <!-- Decided this week: a receipt, so a manager can see that what they
-             did actually happened. -->
-        <section
-          v-if="decided.length"
-          class="mt-6"
-          aria-labelledby="approvals-decided-heading"
-        >
-          <h2
-            id="approvals-decided-heading"
-            class="label mb-2"
-          >
-            Decided this week
-          </h2>
-          <ul class="space-y-2">
-            <li
-              v-for="row in decided"
-              :key="row.id"
-              class="surface-card elev-1 flex items-center gap-3 p-3"
-            >
-              <Avatar
-                class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-xs font-bold text-ink-gray-7"
-                :photo-url="row.photo_url"
-                :initials="row.initials"
-                :size="32"
-              />
-              <p class="min-w-0 flex-1 truncate text-sm text-ink-gray-7">
-                {{ row.employee_name }} · {{ row.label }}
-                · {{ formatDateRange(row.from_date, row.to_date) }}
-              </p>
-              <StatusBadge
-                :kind="row.kind"
-                :status="row.status"
-                :docstatus="row.docstatus"
-              />
-            </li>
-          </ul>
-        </section>
+        <!-- R6/R9: HR's view of every pending timesheet in their company,
+             by approver, with Send reminder. -->
+        <TimesheetOversight
+          v-if="view === 'timesheets' && session.canOverseeTimesheets"
+          class="mt-8"
+        />
       </div>
 
       <!-- Desktop: the full evidence beside the queue. Approve is not on
@@ -1589,7 +1709,7 @@ function dismissBulkResult() {
            the decision is only available once the thing being decided is
            visible. -->
       <aside
-        v-if="name && isDesktop"
+        v-if="name && (isDesktop || !openInQueue)"
         class="min-w-0 lg:w-[36rem] lg:shrink-0"
         data-testid="approval-detail"
       >
@@ -2033,6 +2153,14 @@ function dismissBulkResult() {
                  rendered rather than rendered disabled -- a greyed-out Reject
                  on a timesheet would still teach a manager that a week can be
                  rejected, which it cannot (P4-KTD2). -->
+            <!-- Plan 2026-10-15-002 R7: HR User reads, never decides. -->
+            <p
+              v-if="selected.read_only"
+              class="surface-inset mt-3 p-3 text-sm text-ink-gray-7"
+              data-testid="view-only-note"
+            >
+              View only: you can't approve timesheets.
+            </p>
             <div
               class="mt-4 flex flex-wrap items-center justify-end gap-2"
               data-testid="decision-actions"

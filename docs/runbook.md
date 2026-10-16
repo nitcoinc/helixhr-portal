@@ -1722,3 +1722,40 @@ IT / Asset category, `HR-REQ-…` when the prefix is blank. Facts operators need
   again, read the row's `status`, `decided_by`, `decision_note` and
   `amended_timesheet`. Accepted with an amended copy means Accept fired.
   Declined with a Draft means look for a Send back or a second request.
+
+### Reminder button disabled
+
+On Approvals → Timesheets → All pending timesheets, each approver group shows
+why it has no live **Send reminder**, as text under the button:
+
+1. **"Reminded recently. Next reminder allowed …"** -- a reminder went to this
+   approver about this company in the last 24 hours, from any HR user. The
+   claim is the Redis key `helixhr-timesheet-reminder|<company>|<approver>`;
+   it expires on its own. Deleting it by hand allows one more reminder.
+2. **"Approver has left; set a new Reports to"** (`inactive`) or **"No approver
+   set"** (`no_approver`) -- no button. Fix Reports to in Settings → Approvers
+   (linked from the group).
+3. **"Approver has no portal login"** (`no_login`: no User, or a disabled one)
+   or **"…no email address"** (`unmailable`) -- no button. Fix the User.
+4. **"HR is the approver for these"** -- Pending HR timesheets group under
+   HR Manager and never get a reminder.
+
+If the button was pressed and the message says the mail is switched off,
+`timesheet_approval_reminder` is Off in Email templates (or the mail failed:
+see Error Log, "HelixHR timesheet_approval_reminder mail failed"). Nothing was
+sent and the 24h claim was released.
+
+### HR User can't see Approvals
+
+Approvals appears for an HR User only when the bootstrap's
+`can_oversee_timesheets` is true (`api._oversight_scope`):
+
+1. The User holds **HR User** (HR Manager takes the HR Manager path instead).
+2. Their Employee record is **Active** and has a company. Inactive, Left or
+   no Employee means no flag and no nav item.
+3. The bootstrap is read once per page load: reload the portal after
+   changing the role or the Employee.
+
+An HR User with only oversight sees one tab (Timesheets), so the tab bar is
+hidden. They can open a pending timesheet in their own company read-only
+("View only"); any other kind or company is refused as not found.

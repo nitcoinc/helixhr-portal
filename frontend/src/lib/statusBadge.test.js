@@ -110,4 +110,13 @@ describe('resolveStatus', () => {
   it('lists attendance among the kinds the component validates', () => {
     expect(KINDS).toContain('attendance')
   })
+
+  it('words a change request decision for the Decided-by-me receipt', () => {
+    expect(KINDS).toContain('change')
+    expect(resolveStatus({ kind: 'change', status: 'Accepted' })).toEqual({ label: 'Accepted', toneClass: TONE.done })
+    expect(resolveStatus({ kind: 'change', status: 'Declined' })).toEqual({
+      label: 'Declined',
+      toneClass: TONE.sentBack,
+    })
+  })
 })

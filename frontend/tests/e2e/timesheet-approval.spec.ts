@@ -197,9 +197,10 @@ test('employee submits a week, manager rejects with a comment, employee edits an
 
   const mgrCtx = await browser.newContext({ storageState: 'tests/.auth/manager.json' })
   const mgrPage = await mgrCtx.newPage()
-  await mgrPage.goto('/helixhr/approvals')
+  await mgrPage.goto('/helixhr/approvals?view=timesheets')
   await expect(mgrPage.getByRole('heading', { name: 'Approvals' })).toBeVisible()
 
+  // Plan 2026-10-15-002 R3: timesheets have their own tab again.
   // P2-U7 replaced the two sections (Leave, Timesheets) with one mixed
   // queue, and the reject dialog with the reason field on the same surface
   // as the evidence: the manager reads the week, then decides it.
@@ -244,7 +245,7 @@ test('employee submits a week, manager rejects with a comment, employee edits an
   await empPage.getByRole('button', { name: 'Send again' }).click()
   await expect(empPage.locator('[data-status="Pending Approval"]:visible')).toBeVisible({ timeout: 10000 })
 
-  await mgrPage.goto('/helixhr/approvals')
+  await mgrPage.goto('/helixhr/approvals?view=timesheets')
   await expect(weekRow).toBeVisible({ timeout: 10000 })
   await weekRow.click()
   await expect(panel.getByText('Day total')).toBeVisible({ timeout: 10000 })

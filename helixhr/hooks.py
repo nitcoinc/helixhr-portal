@@ -420,8 +420,9 @@ has_permission = {
 # must survive `clear-cache` and `bench migrate`; it expires on its own.
 # Plan 2026-10-04-004 U1: the same guard, per (event, company, day), for
 # the celebration senders -- per-company settings multiply the blast radius
-# of a hand-run `bench execute`.
-persistent_cache_keys = ["helixhr-overdue-digest|*", "helixhr-celebration|*"]
+# of a hand-run `bench execute`. Plan 2026-10-15-002 KTD6: the manual
+# timesheet reminder's 24h per-(approver, company) claim too.
+persistent_cache_keys = ["helixhr-overdue-digest|*", "helixhr-celebration|*", "helixhr-timesheet-reminder|*"]
 
 scheduler_events = {
 	"daily": [

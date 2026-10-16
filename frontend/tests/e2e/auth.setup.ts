@@ -23,6 +23,8 @@ const IDENTITIES = [
   // Plan 2026-10-06-001 U3. Portal Admin: the portal-only role that owns
   // Report access and Portal roles now that HR Manager does not.
   { user: 'portal-admin@helixhr.test', storageState: 'tests/.auth/portal-admin.json' },
+  // Plan 2026-10-15-002 U4. HR User: timesheet oversight, no approve right.
+  { user: 'hr-user@helixhr.test', storageState: 'tests/.auth/hr-user.json' },
 ]
 
 setup('authenticate as employee, manager, HR, IT and Portal Admin', async ({ baseURL }) => {

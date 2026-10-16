@@ -74,6 +74,11 @@ const state = reactive({
   /** Documents: the upload / edit / delete controls. Mirrors
    * `save_document_link`'s own gate, which is the real one. */
   canManageDocuments: false,
+  /** Plan 2026-10-15-002 U4: HR Manager, or HR User with an Active Employee,
+   * may see pending timesheets in their company. Gates the Approvals nav
+   * item and the Timesheets tab's oversight list; the endpoints re-check. */
+  canOverseeTimesheets: false,
+  canSeeAllPending: false,
   /** P6-U4: whether this caller can actually reach Desk (a System User
    * holding a `desk_access` role) -- decides whether a Desk link is drawn
    * anywhere in the portal, never whether one works: every method that
@@ -141,6 +146,8 @@ function apply(boot) {
   state.canWorkRequests = !!boot?.can_work_requests
   state.canHandleRequests = !!boot?.can_handle_requests
   state.canConfigure = !!boot?.can_configure
+  state.canOverseeTimesheets = !!boot?.can_oversee_timesheets
+  state.canSeeAllPending = !!boot?.can_see_all_pending
   // The Email templates page: Portal Admin or System Manager only, the same
   // predicate every endpoint behind the page enforces.
   state.canEditEmailTemplates = !!boot?.can_edit_email_templates

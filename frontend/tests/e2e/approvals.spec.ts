@@ -135,7 +135,7 @@ test('a manager reads the whole week before Approve exists, and a stale decision
   const baseURL = process.env.BASE_URL || 'http://localhost:8080'
   const { name } = await seedPendingWeek(baseURL)
 
-  await page.goto('/helixhr/approvals')
+  await page.goto('/helixhr/approvals?view=timesheets')
   await expect(page.getByRole('heading', { name: 'Approvals' })).toBeVisible()
 
   const queue = page.getByTestId('approvals-queue')
@@ -148,7 +148,7 @@ test('a manager reads the whole week before Approve exists, and a stale decision
   await expect(page.getByRole('button', { name: /^Approve/ })).toHaveCount(0)
 
   await row.click()
-  await expect(page).toHaveURL(new RegExp(`/helixhr/approvals/timesheet/${name}$`))
+  await expect(page).toHaveURL(new RegExp(`/helixhr/approvals/timesheet/${name}\\?view=timesheets$`))
 
   const panel = page.getByTestId('approval-detail')
   await expect(panel.getByText('Day total')).toBeVisible({ timeout: 10000 })
@@ -253,7 +253,7 @@ test('HR works what a manager handed over, tagged and with the note, and has no 
   expect(escalated.ok(), await escalated.text()).toBeTruthy()
   await managerApi.dispose()
 
-  await page.goto('/helixhr/approvals')
+  await page.goto('/helixhr/approvals?view=timesheets')
   const row = page.getByTestId('approvals-queue').locator(`[data-approval-name="${name}"]`)
   await expect(row).toBeVisible({ timeout: 15000 })
   // The chip is a word, not a tint: it is the only thing that says whether a
@@ -355,10 +355,11 @@ test('HR decides a manager-stage leave the approver has sat on, tagged with why'
 })
 
 /**
- * Plan 2026-10-02-001 U12 / R26. HR's Overdue tab lists a seeded late leave
- * under the approver who owes it, with its age and the threshold.
+ * Plan 2026-10-02-001 U12 / R26, moved by plan 2026-10-15-002 U5 (R8): the
+ * Overdue tab became All pending with an Overdue-only toggle, and the old
+ * `?view=overdue` link lands there with the toggle on.
  */
-test('HR sees an overdue item on the Overdue tab, grouped under its approver', async ({
+test('HR sees an overdue item under All pending, grouped under its approver', async ({
   page,
 }, testInfo) => {
   test.skip(testInfo.project.name !== 'hr', 'this is the HR capability shape')
@@ -394,8 +395,15 @@ test('HR sees an overdue item on the Overdue tab, grouped under its approver', a
 
   try {
     await page.goto('/helixhr/approvals')
-    await page.getByRole('tab', { name: 'Overdue', exact: true }).click()
-    await expect(page).toHaveURL(/view=overdue/)
+    await page.getByRole('tab', { name: 'All pending', exact: true }).click()
+    await expect(page).toHaveURL(/view=all-pending/)
+    await expect(page.getByTestId('overdue-tab').locator(`[data-overdue-name="${name}"]`)).toBeVisible({
+      timeout: 15000,
+    })
+
+    await page.goto('/helixhr/approvals?view=overdue')
+    await expect(page.getByRole('tab', { name: 'All pending', exact: true })).toHaveAttribute('aria-selected', 'true')
+    await expect(page.getByTestId('overdue-toggle')).toHaveAttribute('aria-pressed', 'true')
     const row = page.getByTestId('overdue-tab').locator(`[data-overdue-name="${name}"]`)
     await expect(row).toBeVisible({ timeout: 15000 })
     // Seeded five UTC days back; the site counts in its own time zone, which
@@ -411,13 +419,44 @@ test('HR sees an overdue item on the Overdue tab, grouped under its approver', a
   }
 })
 
-test('an employee has no Overdue tab, even by URL', async ({ page }, testInfo) => {
+test('an employee has no All pending tab, even by URL', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'employee', 'this is the non-HR capability shape')
 
   await page.goto('/helixhr/approvals?view=overdue')
   await expect(page.getByRole('heading', { name: 'Approvals' })).toBeVisible()
-  await expect(page.getByRole('tab', { name: 'Overdue', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('tab', { name: 'All pending', exact: true })).toHaveCount(0)
   await expect(page.getByTestId('overdue-tab')).toHaveCount(0)
+})
+
+/** Plan 2026-10-15-002 U5 (R1, R3): a manager's Approvals tab is My team with
+ * no HR lane, and timesheets live on their own tab. */
+test('a manager sees My team and no HR lane; timesheets have their own tab', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'manager', 'this is the line-manager capability shape')
+
+  await page.goto('/helixhr/approvals')
+  await expect(page.getByRole('heading', { name: 'Approvals' })).toBeVisible()
+  await expect(page.getByTestId('lane-hr')).toHaveCount(0)
+  await expect(page.getByTestId('approvals-queue').locator('[data-approval-kind="timesheet"]')).toHaveCount(0)
+  await page.getByRole('tab', { name: /^Timesheets/ }).click()
+  await expect(page).toHaveURL(/view=timesheets/)
+  await expect(page.getByTestId('timesheet-oversight')).toHaveCount(0)
+})
+
+/** Plan 2026-10-15-002 R6 (AE2): HR Manager's Timesheets tab lists every
+ * pending week in the company by approver -- here the oversight fixture's
+ * group from `setup_playwright_fixtures`. */
+test('HR sees All pending timesheets grouped by approver on the Timesheets tab', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'this is the HR capability shape')
+
+  await page.goto('/helixhr/approvals')
+  await expect(page.getByRole('tab', { name: 'All pending', exact: true })).toBeVisible()
+  await page.getByRole('tab', { name: /^Timesheets/ }).click()
+  await expect(page).toHaveURL(/view=timesheets/)
+  const oversight = page.getByTestId('timesheet-oversight')
+  await expect(oversight.getByRole('heading', { name: /All pending timesheets/ })).toBeVisible()
+  const group = oversight.locator('[data-testid="oversight-group"][data-approver="oversight-manager@helixhr.test"]')
+  await expect(group).toBeVisible({ timeout: 15000 })
+  await expect(group.getByTestId('oversight-row')).not.toHaveCount(0)
 })
 
 /**
