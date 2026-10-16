@@ -101,6 +101,36 @@ module.exports = {
           DEFAULT: '#143D33',
           deep: '#0E2C25',
         },
+        // ── shadcn-vue names, mapped onto Signal (plan 2026-10-17-001 KTD4) ──
+        // The copied components under src/components/ui/ speak shadcn's
+        // colour vocabulary. Each name points at a Signal variable already
+        // retuned in src/index.css -- never a second palette -- so a retune
+        // there moves these too. Only the names the copied files use are
+        // here. They are hex variables, not channel triplets, so an opacity
+        // modifier (`bg-muted/50`) generates nothing: use a solid step.
+        // `src/lib/uiComponents.test.js` rejects one.
+        //
+        // Pairs, as frappe-ui's own Combobox paints a highlighted option:
+        // popover/foreground ink-gray-8 on surface-white 14.03; accent is the
+        // hover step with ink-gray-9 on it, 13.64. muted-foreground is
+        // ink-gray-6, not the lighter gray-5, because it sits on the
+        // highlighted row too: 6.66 on surface-gray-2 where gray-5 is 4.23.
+        foreground: 'var(--ink-gray-8)',
+        popover: {
+          DEFAULT: 'var(--surface-white)',
+          foreground: 'var(--ink-gray-8)',
+        },
+        muted: {
+          DEFAULT: 'var(--surface-gray-1)',
+          foreground: 'var(--ink-gray-6)',
+        },
+        accent: {
+          DEFAULT: 'var(--surface-gray-2)',
+          foreground: 'var(--ink-gray-9)',
+        },
+        // frappe-ui's default border colour, so `border-b` and `bg-border`
+        // draw the same rule.
+        border: 'var(--outline-gray-1)',
       },
     },
   },

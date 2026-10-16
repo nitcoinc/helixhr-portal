@@ -103,6 +103,10 @@ export const icons = {
   folder: [
     'M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2z',
   ],
+  // Plan 2026-10-17-001 U2: Lucide's own `search`, for the copied shadcn
+  // CommandInput (which upstream imports from lucide-vue-next).
+  // `peopleSearch` above is the People nav glyph and stays its own name.
+  search: ['M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z', 'm21 21-4.3-4.3'],
 }
 
 // Every kind `helixhr.api._get_needs_you` emits, and the glyph its row draws.
