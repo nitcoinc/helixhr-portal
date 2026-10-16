@@ -230,7 +230,7 @@ async function save() {
 
     <div
       v-if="dirty"
-      class="surface-card elev-2 sticky bottom-0 z-10 flex flex-wrap items-center gap-3 p-3"
+      class="surface-card elev-2 sticky bottom-[calc(56px+env(safe-area-inset-bottom))] z-10 flex flex-wrap items-center gap-3 p-3 lg:bottom-0"
       data-testid="access-save-bar"
     >
       <p
