@@ -13,7 +13,9 @@ from helixhr.utils import resolve_admin_scope, session_company
 # The first worker claim and terminal outcomes. Both are read off the
 # DocType's own Select options; a status added in Desk that is in neither set
 # simply stamps nothing rather than guessing (P2-U8, P5-R6).
-PICKED_UP_STATUSES = ("In Progress",)
+# Plan 2026-10-15-003 KTD4: Need info straight from Open is a pick-up too, so
+# Waiting on Employee stamps the asker when nobody picked the request up yet.
+PICKED_UP_STATUSES = ("In Progress", "Waiting on Employee")
 CLOSED_STATUSES = ("Done", "Rejected")
 
 

@@ -450,6 +450,27 @@ NOTIFICATION_EVENTS = {
 		),
 		"action_label": "Open request",
 	},
+	# Plan 2026-10-15-003 KTD6: a comment on an open request, either way --
+	# a handler to the employee, or the employee to the picker / handlers.
+	# Correction requests send an empty excerpt (R11).
+	"request_comment": {
+		"label": "Comment on a request",
+		"audience": "Employee or route role",
+		"variables": {
+			"author_name": ("Who commented", "Jane HR"),
+			"category": ("Request category", "IT / Asset"),
+			"subject": ("The request's subject", "Laptop replacement"),
+			"comment_excerpt": ("The start of the comment (may be empty)", "I've checked this with finance."),
+			"action_url": ("Link to the request", "https://hr.example.com/helixhr/requests"),
+		},
+		"subject": "{{ author_name }} commented: {{ subject }}",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>{{ author_name }} commented on the {{ category }} request “{{ subject }}”.</p>"
+			"{% if comment_excerpt %}<blockquote>{{ comment_excerpt }}</blockquote>{% endif %}"
+		),
+		"action_label": "Open request",
+	},
 	"approval_overdue_digest": {
 		"label": "Overdue approvals digest",
 		"audience": "Approver",
@@ -1411,6 +1432,106 @@ def employee_in_admin_scope(employee, scope):
 	return False
 
 
+def company_role_holders(role, employee):
+	"""Enabled holders of ``role`` who may hear about ``employee``'s request
+	(plan 2026-10-15-003 KTD5, R9): an unscoped admin (`resolve_admin_scope`
+	says ``unscoped`` -- an HR Manager or System Manager with no Employee),
+	or a holder whose Active Employee is in ``employee``'s company.
+	Administrator is never a recipient. When nobody qualifies, HR Manager
+	through the same rule is the fallback, so a company with no in-company
+	IT holder still reaches someone. Arrival mail keeps
+	`events._enabled_users_with_role` until its own follow-up."""
+	company = frappe.db.get_value("Employee", employee, "company") if employee else None
+	holders = _company_role_holders(role, company)
+	if not holders and role != "HR Manager":
+		holders = _company_role_holders("HR Manager", company)
+	return holders
+
+
+def _company_role_holders(role, company):
+	if not role or not company:
+		return []
+	holders = frappe.get_all(
+		"Has Role", filters={"role": role, "parenttype": "User"}, pluck="parent", distinct=True
+	)
+	users = frappe.get_all(
+		"User",
+		filters={"name": ["in", holders or [""]], "enabled": 1},
+		pluck="name",
+	)
+	users = [user for user in users if user not in ("Administrator", "Guest")]
+	if not users:
+		return []
+	anchors = {
+		row.user_id: row
+		for row in frappe.get_all(
+			"Employee",
+			filters={"user_id": ["in", users]},
+			fields=["user_id", "status", "company"],
+		)
+	}
+	result = []
+	for user in users:
+		anchor = anchors.get(user)
+		if anchor:
+			if anchor.status == "Active" and anchor.company == company:
+				result.append(user)
+		elif resolve_admin_scope(user)["kind"] == "unscoped":
+			result.append(user)
+	return result
+
+
+# Plan 2026-10-15-003 KTD7: the bank-number guard, compiled once. Text is
+# NFKC-normalised first, so full-width digits read as ASCII ones.
+# Exactly the three date shapes KTD7 names -- YYYY-MM-DD, DD-MM-YYYY and
+# DD/MM/YYYY -- and only when they are a real calendar date, so "1234-56-78"
+# is still an 8-digit run.
+_DATE_TOKEN_RE = re.compile(
+	r"(?<![\d\-/])(?<!\d\.)(?:(?P<iso_y>\d{4})-(?P<iso_m>\d{2})-(?P<iso_d>\d{2})"
+	r"|(?P<dmy_d>\d{2})(?P<sep>[-/])(?P<dmy_m>\d{2})(?P=sep)(?P<dmy_y>\d{4}))(?![\d\-/])(?!\.\d)"
+)
+# 8+ digits joined only by single separators. A letter touching either end
+# makes it a reference code ("INV12345678"), not an account number.
+_DIGIT_RUN_RE = re.compile(r"(?<![^\W\d_])\d(?:[ .\-/]?\d){7,}(?![^\W\d_])")
+# IBAN: country code, check digits, then 10-30 alphanumerics, optionally in
+# space-separated groups ("GB82 WEST 1234 5698 7654 32"). Case-insensitive:
+# "gb82 west ..." is the same account; the 8-digit floor below keeps prose out.
+_IBAN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]){10,30}(?![A-Za-z0-9])", re.IGNORECASE)
+
+
+def _date_break(match):
+	"""A real calendar date becomes a hard break; anything else stays."""
+	import datetime
+
+	if match.group("iso_y"):
+		parts = match.group("iso_y", "iso_m", "iso_d")
+	else:
+		parts = match.group("dmy_y", "dmy_m", "dmy_d")
+	try:
+		datetime.date(*(int(part) for part in parts))
+	except ValueError:
+		return match.group()
+	return "|"
+
+
+def has_bank_number(text):
+	"""Whether ``text`` holds an account-number-shaped value (KTD7): a run of
+	8+ digits joined only by single spaces, dots, hyphens or slashes, or an
+	IBAN, after skipping real dates written YYYY-MM-DD, DD-MM-YYYY or
+	DD/MM/YYYY. Callers apply it only to bank-detail correction requests."""
+	import unicodedata
+
+	normalised = unicodedata.normalize("NFKC", text or "")
+	# A date becomes a hard break, so it neither matches nor joins a run.
+	normalised = _DATE_TOKEN_RE.sub(_date_break, normalised)
+	if _DIGIT_RUN_RE.search(normalised):
+		return True
+	for match in _IBAN_RE.finditer(normalised):
+		if sum(char.isdigit() for char in match.group()) >= 8:
+			return True
+	return False
+
+
 # P7-U2: the role this app grants an ability to administer a project, named
 # once so `resolve_project_scope` and `project_permissions.py`'s hooks answer
 # from the same constant (KTD8 -- every DocPerm this plan grants must be
@@ -1918,6 +2039,8 @@ RATE_LIMIT_POLICY = {
 	# Both trigger mail to the routed role, so an unbounded reply or
 	# attachment is mail amplification, not just a write to police (P5-U6).
 	"reply_to_my_request": (20, 3600),
+	# Plan 2026-10-15-003 KTD2: a handler comment mails the employee.
+	"comment_on_request": (20, 3600),
 	"attach_to_request_reply": (20, 3600),
 	"mark_notifications_read": (60, 60),
 	# P3-U1 step 5 / P3-R25. Writes first; the two reads are bounded too

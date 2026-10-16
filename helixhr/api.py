@@ -61,7 +61,6 @@ from helixhr.events import (
 	TIMESHEET_PENDING_HR,
 	TIMESHEET_SENT_BACK,
 	_approver_user,
-	_enabled_users_with_role,
 	_is_hr,
 	approver_drift,
 	approver_problem,
@@ -106,6 +105,7 @@ from helixhr.utils import (
 	admin_scope_employee_filters,
 	as_administrator,
 	can_admin_portal,
+	company_role_holders,
 	disable_company_access,
 	email_theme,
 	employee_in_admin_scope,
@@ -113,6 +113,7 @@ from helixhr.utils import (
 	get_manager_user,
 	get_week_bounds,
 	grantable_companies,
+	has_bank_number,
 	has_custom_wording,
 	is_photo_content,
 	mask_identifier,
@@ -7158,6 +7159,10 @@ def _decide_one(doctype, name, action, reason, expected_modified, expected_state
 		frappe.throw(_("That isn't something you can do to this request."))
 	_assert_expected_state(expected_modified, current_modified)
 	_assert_expected_workflow_state(doc, expected_state)
+	if reason and doctype == "HR Request":
+		# Plan 2026-10-15-003 R10: Need info and Reject reasons join the
+		# employee's thread, so they get the same guard as a comment.
+		_refuse_bank_number(doc, reason, _BANK_NUMBER_HANDLER_REFUSAL)
 
 	# Before the transition, so the employee's notification carries the
 	# reason the transition writes (P4-R9, P3-KTD9).
@@ -7613,22 +7618,21 @@ def _request_thread(doc):
 	"""The request and every reply after it, oldest first, as one
 	conversation (P5-R10).
 
-	The employee's opening message is a field of the record; everything
-	after it is a Comment -- the routed role's `Need info`/`Reject` reasons
-	(written by `act_on_approval`'s existing, doctype-generic reason code)
-	and the employee's own replies (`reply_to_my_request`) land there the
-	same way, told apart only by who wrote them. Filtered the way
-	`_rejection_comments` filters a hand-over note: a `Send to HR` prefix can
-	never appear on this doctype's own transitions, but the guard costs
-	nothing and keeps the rule in one place rather than assuming it.
+	Plan 2026-10-15-003 KTD8: each entry carries an ``author`` field with
+	the resolved name. Employee entries show the employee's name. Handler
+	entries show the commenter's name. Administrator and system entries
+	show the team label by routed role.
 	"""
-	employee_user = frappe.db.get_value("Employee", doc.employee, "user_id")
+	employee = frappe.db.get_value("Employee", doc.employee, ["user_id", "employee_name"], as_dict=True) or {}
+	employee_user = employee.get("user_id")
+	employee_name = employee.get("employee_name") or doc.employee
 	entries = []
 	opening = frappe.utils.strip_html(doc.details or "").strip()
 	if opening:
-		entries.append({"by": "employee", "message": opening, "on": str(doc.creation)})
+		entries.append({"author": employee_name, "message": opening, "on": str(doc.creation)})
 
-	for row in frappe.get_all(
+	team_label = _("IT team") if doc.routed_to_role == "IT Team" else _("HR team")
+	rows = frappe.get_all(
 		"Comment",
 		filters={
 			"reference_doctype": "HR Request",
@@ -7638,17 +7642,28 @@ def _request_thread(doc):
 		fields=["content", "owner", "creation"],
 		order_by="creation asc",
 		limit=_COMMENT_FETCH,
-	):
+	)
+	# R5: one batched User read for every handler name; the employee has no
+	# read on User, so the names are resolved here, never on the client.
+	names = {
+		user.name: user.full_name
+		for user in frappe.get_all(
+			"User",
+			filters={"name": ["in", list({row.owner for row in rows}) or [""]]},
+			fields=["name", "full_name"],
+		)
+	}
+	for row in rows:
 		text = frappe.utils.strip_html(row.content or "").strip()
 		if not text or text.startswith(HR_HANDOVER_NOTE_PREFIX):
 			continue
-		entries.append(
-			{
-				"by": "employee" if employee_user and row.owner == employee_user else "worker",
-				"message": text,
-				"on": str(row.creation),
-			}
-		)
+		if employee_user and row.owner == employee_user:
+			author = employee_name
+		elif row.owner in ("Administrator", "Guest") or not names.get(row.owner):
+			author = team_label
+		else:
+			author = names[row.owner]
+		entries.append({"author": author, "message": text, "on": str(row.creation)})
 	return entries
 
 
@@ -7682,6 +7697,10 @@ def _request_decision_detail(doc):
 		"sent_on": str(doc.creation) if doc.creation else None,
 		"age_days": _age_in_days(doc.creation, _as_date(user_today())),
 		"thread": _request_thread(doc),
+		# Plan 2026-10-15-003 R3/R4: the comment box shows only when
+		# `comment_on_request` would accept this caller.
+		"can_comment": _handler_comment_refusal(doc, frappe.session.user) is None,
+		"closed": doc.status not in _REQUEST_OPEN_STATES,
 		"correction": _correction_summary(doc),
 		# U14: the files on the request -- for a correction, the proof HR
 		# checks before Done. Private; File's own read check gates download.
@@ -7695,6 +7714,84 @@ def _request_decision_detail(doc):
 			)
 		],
 	}
+
+
+# Plan 2026-10-15-003: the states a request takes comments in (R1, R3).
+_REQUEST_OPEN_STATES = (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS, HR_REQUEST_WAITING_ON_EMPLOYEE)
+# KTD7 / R10: one refusal per side, so each is told where the number belongs.
+_BANK_NUMBER_EMPLOYEE_REFUSAL = (
+	"Don't put account numbers in comments. Use the bank detail fields on this request."
+)
+_BANK_NUMBER_HANDLER_REFUSAL = (
+	"Don't put account numbers in comments. Ask the employee to use the bank detail fields."
+)
+
+
+def _refuse_bank_number(doc, text, refusal):
+	"""KTD7: refuse ``text`` on a correction request when it holds an
+	account-number-shaped value. Every other request passes untouched."""
+	if doc.get("correction_field") and has_bank_number(text):
+		frappe.throw(_(refusal))
+
+
+def _handler_comment_refusal(doc, user):
+	"""Why ``user`` may not comment on ``doc`` as its handler (R3), or None.
+
+	Runs after `_assert_may_act_on`, which already holds HR to its admin
+	scope. On top of that: the caller must hold the stored routed role
+	(Administrator exempt), a non-HR handler must have an Active Employee in
+	the employee's company (an IT holder with no Employee is refused, never
+	treated as unscoped), and the request must be open. Returns the refusal
+	text so `can_comment` and the endpoint share one rule."""
+	if user != "Administrator":
+		if doc.routed_to_role not in frappe.get_roles(user):
+			return _(_APPROVAL_NOT_FOUND)
+		if not _is_hr(user):
+			anchor = frappe.db.get_value("Employee", {"user_id": user}, ["status", "company"], as_dict=True)
+			company = frappe.db.get_value("Employee", doc.employee, "company")
+			if not anchor or anchor.status != "Active" or anchor.company != company:
+				return _(_APPROVAL_NOT_FOUND)
+	if doc.status not in _REQUEST_OPEN_STATES:
+		return _("This request is {0}. Comments are only allowed while it is open.").format(doc.status)
+	return None
+
+
+def _notify_request_comment(doc, recipients, author_name, message, bell_subject, action_url, event_key):
+	"""KTD6: one mail per recipient through `send_notification` and one
+	Notification Log bell each, never to the author. R11: a correction
+	request's mail and bell carry no message text."""
+	recipients = [user for user in dict.fromkeys(recipients) if user and user != frappe.session.user]
+	if not recipients:
+		return
+	excerpt = "" if doc.get("correction_field") else message[:300]
+	send_notification(
+		event_key,
+		recipients,
+		{
+			"author_name": author_name,
+			"employee_name": author_name,
+			"category": doc.category,
+			"subject": doc.subject,
+			"comment_excerpt": excerpt,
+			"reply_excerpt": excerpt,
+			"action_url": action_url,
+		},
+		reference_doctype="HR Request",
+		reference_name=doc.name,
+	)
+	for user in recipients:
+		frappe.get_doc(
+			{
+				"doctype": "Notification Log",
+				"for_user": user,
+				"from_user": frappe.session.user,
+				"type": "Alert",
+				"document_type": "HR Request",
+				"document_name": doc.name,
+				"subject": bell_subject,
+				"description": frappe.utils.escape_html(excerpt),
+			}
+		).insert(ignore_permissions=True)
 
 
 def _correction_summary(doc):
@@ -8265,7 +8362,10 @@ def _request_detail(name, employee):
 		# read as one thread on both sides rather than two different views of
 		# the same record.
 		"thread": _request_thread(frappe.get_doc("HR Request", name)),
-		"can_reply": row.status == HR_REQUEST_WAITING_ON_EMPLOYEE,
+		# Plan 2026-10-15-003 R1/R4 (replaces `can_reply`): the owner may
+		# comment while the request is open; the thread is read-only after.
+		"can_comment": row.status in _REQUEST_OPEN_STATES,
+		"closed": row.status not in _REQUEST_OPEN_STATES,
 	}
 
 
@@ -9688,21 +9788,25 @@ def reply_to_my_request(name, message, expected_modified=None):
 	row = frappe.db.get_value(
 		"HR Request",
 		name,
-		["employee", "status", "modified", "routed_to_role", "category", "subject"],
+		["employee", "status", "modified", "routed_to_role", "picked_up_by"],
 		as_dict=True,
 	)
 	if not row or row.employee != employee:
 		frappe.throw(_("That request isn't yours."), frappe.PermissionError)
-	if not expected_modified:
-		frappe.throw(_("Open this request before replying, then try again."))
-	if get_datetime(expected_modified) != get_datetime(row.modified):
-		frappe.throw(_("Somebody changed this while you were looking at it. Reload and try again."))
-	if row.status != HR_REQUEST_WAITING_ON_EMPLOYEE:
+	if row.status not in _REQUEST_OPEN_STATES:
 		frappe.throw(
-			_("This request isn't waiting on you right now ({0}). Reload to see its status.").format(
+			_("This request is {0}, so it no longer takes comments. Start a new request instead.").format(
 				row.status
 			)
 		)
+	# KTD1: the token guards only the status move. A comment while Open or In
+	# Progress changes nothing a handler is looking at.
+	moves_status = row.status == HR_REQUEST_WAITING_ON_EMPLOYEE
+	if moves_status:
+		if not expected_modified:
+			frappe.throw(_("Open this request before replying, then try again."))
+		if get_datetime(expected_modified) != get_datetime(row.modified):
+			frappe.throw(_("Somebody changed this while you were looking at it. Reload and try again."))
 
 	message = (message or "").strip()
 	if not message:
@@ -9711,24 +9815,78 @@ def reply_to_my_request(name, message, expected_modified=None):
 		frappe.throw(_("That reply is too long. Keep it under {0} characters.").format(_DETAILS_MAX))
 
 	doc = frappe.get_doc("HR Request", name)
+	_refuse_bank_number(doc, message, _BANK_NUMBER_EMPLOYEE_REFUSAL)
 	doc.add_comment("Comment", message)
-	doc.db_set("status", HR_REQUEST_IN_PROGRESS)
+	if moves_status:
+		doc.db_set("status", HR_REQUEST_IN_PROGRESS)
 
-	# U9: templated through the HelixHR sandbox; `send_notification` never
-	# raises, so a mail failure cannot undo the reply.
-	send_notification(
-		"request_reply",
-		_enabled_users_with_role(row.routed_to_role),
-		{
-			"employee_name": frappe.db.get_value("Employee", employee, "employee_name"),
-			"category": row.category,
-			"subject": row.subject,
-			"reply_excerpt": message[:300],
-			"action_url": frappe.utils.get_url(f"/helixhr/approvals/request/{name}"),
-		},
-		reference_doctype="HR Request",
-		reference_name=name,
+	# R8/R9: a reply goes to the routed role's holders in the employee's
+	# company; a plain comment goes to the picker when there is one.
+	# `send_notification` never raises, so a mail failure cannot undo this.
+	employee_name = frappe.db.get_value("Employee", employee, "employee_name") or employee
+	if not moves_status and row.picked_up_by and frappe.db.get_value("User", row.picked_up_by, "enabled"):
+		recipients = [row.picked_up_by]
+	else:
+		recipients = company_role_holders(row.routed_to_role, employee)
+	_notify_request_comment(
+		doc,
+		recipients,
+		employee_name,
+		message,
+		_("{0} commented: {1}").format(employee_name, doc.subject),
+		frappe.utils.get_url(f"/helixhr/approvals/request/{name}"),
+		"request_reply" if moves_status else "request_comment",
 	)
+
+	return {"name": name, "status": HR_REQUEST_IN_PROGRESS if moves_status else row.status}
+
+
+@frappe.whitelist(methods=["POST"])
+def comment_on_request(name, message):
+	"""Plan 2026-10-15-003 KTD2: the handler's comment on an open request.
+
+	Gate order: `_assert_may_act_on` (own request, HR admin scope), then
+	`_handler_comment_refusal` (routed role, company, open state), then the
+	message checks, then `add_comment`. Never changes status, never writes
+	`helixhr_decision_reason`, takes no modified token: Frappe writes
+	`_comments` without bumping `modified`. `add_comment` inserts with
+	`ignore_permissions` -- the documented exception `reply_to_my_request`
+	already is, after this function's own checks have authorised it.
+	"""
+	rate_limit_per_user("comment_on_request")
+	if not isinstance(name, str) or not name or not frappe.db.exists("HR Request", name):
+		frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
+
+	doc = frappe.get_doc("HR Request", name)
+	_assert_may_act_on(doc)
+	refusal = _handler_comment_refusal(doc, frappe.session.user)
+	if refusal:
+		if refusal == _(_APPROVAL_NOT_FOUND):
+			frappe.throw(refusal, frappe.PermissionError)
+		frappe.throw(refusal)
+
+	message = (message or "").strip()
+	if not message:
+		frappe.throw(_("Say something before sending your comment."))
+	if len(message) > _DETAILS_MAX:
+		frappe.throw(_("That comment is too long. Keep it under {0} characters.").format(_DETAILS_MAX))
+	_refuse_bank_number(doc, message, _BANK_NUMBER_HANDLER_REFUSAL)
+
+	doc.add_comment("Comment", message)
+
+	# R8 / KTD6: the employee hears about it; the bell carries the HR-reply
+	# prefix so Home's Needs-you and `mark_my_request_read` pick it up.
+	employee_user = frappe.db.get_value("Employee", {"name": doc.employee, "status": "Active"}, "user_id")
+	if employee_user and frappe.db.get_value("User", employee_user, "enabled"):
+		_notify_request_comment(
+			doc,
+			[employee_user],
+			frappe.utils.get_fullname(frappe.session.user),
+			message,
+			f"{HR_REPLY_SUBJECT_PREFIX} {doc.subject}",
+			frappe.utils.get_url(f"/helixhr/requests/{doc.name}"),
+			"request_comment",
+		)
 
 	return {"name": name, "status": doc.status}
 

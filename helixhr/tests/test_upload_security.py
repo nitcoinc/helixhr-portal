@@ -378,6 +378,8 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"get_request_categories": (60, 60),
 			"reply_to_my_request": (20, 3600),
 			"attach_to_request_reply": (20, 3600),
+			# Plan 2026-10-15-003 KTD2: a handler comment mails the employee.
+			"comment_on_request": (20, 3600),
 			"get_organisation_view": (60, 60),
 			"get_portal_config": (60, 60),
 			"save_request_category": (30, 3600),

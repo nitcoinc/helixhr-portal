@@ -9,10 +9,11 @@ import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
 import { attachToRequestReply } from '@/lib/api'
 import CorrectionReview from '@/components/approvals/CorrectionReview.vue'
+import RequestThread from '@/components/requests/RequestThread.vue'
 import TimesheetOversight from '@/components/approvals/TimesheetOversight.vue'
 import { APPROVER_REASON_TEXT, groupByPerson, laneSections, laneSubsections } from '@/lib/approvalLanes'
 import { session } from '@/lib/session'
-import { formatDate, formatDateRange, formatDateTime } from '@/lib/dates'
+import { formatDate, formatDateRange } from '@/lib/dates'
 import { toPlainLeaveError } from '@/lib/errorMap'
 import { useIsDesktop } from '@/lib/useIsDesktop'
 import { ATTENDANCE_LABEL } from '@/lib/week'
@@ -977,7 +978,7 @@ function dismissBulkResult() {
            (My team, Decided by me, HR, IT); the Timesheets tab as Waiting on
            you and Waiting on HR, with HR's oversight list below. -->
       <div
-        v-show="!name || isDesktop"
+        v-show="!name || isDesktop || openInQueue"
         class="min-w-0 lg:flex-1"
         data-testid="approvals-queue"
       >
@@ -1421,7 +1422,6 @@ function dismissBulkResult() {
                             <div
                               v-else-if="selected.kind === 'request'"
                               class="border-t border-outline-gray-2 pt-3"
-                              data-testid="request-thread"
                             >
                               <p class="text-sm text-ink-gray-6">
                                 {{ selected.category }}
@@ -1434,30 +1434,16 @@ function dismissBulkResult() {
                                 :attachments="selected.attachments"
                                 :can-reveal="actions.length > 0"
                               />
-                              <ul
-                                v-if="selected.thread?.length"
-                                class="mt-2 space-y-2"
-                              >
-                                <li
-                                  v-for="(entry, index) in selected.thread"
-                                  :key="index"
-                                  class="surface-inset p-2 text-sm"
-                                >
-                                  <p class="text-xs font-medium text-ink-gray-5">
-                                    {{ entry.by === 'employee' ? firstName || 'Employee' : 'Worker' }}
-                                    · {{ formatDateTime(entry.on) }}
-                                  </p>
-                                  <p class="mt-0.5 whitespace-pre-line text-ink-gray-8">
-                                    {{ entry.message }}
-                                  </p>
-                                </li>
-                              </ul>
-                              <p
-                                v-else
-                                class="mt-2 text-sm text-ink-gray-5"
-                              >
-                                No details were written with this request.
-                              </p>
+                              <RequestThread
+                                :entries="selected.thread || []"
+                                :can-comment="!!selected.can_comment"
+                                :closed="!!selected.closed"
+                                :request-name="selected.name"
+                                :employee-name="selected.employee_name || ''"
+                                mode="handler"
+                                class="mt-3"
+                                @posted="detail.fetch()"
+                              />
 
                               <!-- P5-R10a: what makes an HR Letter completable
                            without opening Desk. -->
@@ -1515,6 +1501,14 @@ function dismissBulkResult() {
                             >
                               <p class="text-sm font-medium text-white">
                                 {{ reasonCopy.heading }}
+                              </p>
+                              <!-- Plan 2026-10-15-003 R6: Need info from Open is a pick-up. -->
+                              <p
+                                v-if="reasonFor === 'Need info' && selected.kind === 'request' && selected.status === 'Open'"
+                                class="mt-1 text-sm text-white"
+                                data-testid="need-info-assigns"
+                              >
+                                This also assigns the request to you.
                               </p>
                               <FormControl
                                 v-model="reason"
@@ -2003,7 +1997,6 @@ function dismissBulkResult() {
             <div
               v-else-if="selected.kind === 'request'"
               class="mt-4"
-              data-testid="request-thread"
             >
               <p class="text-sm text-ink-gray-6">
                 {{ selected.category }}
@@ -2016,30 +2009,16 @@ function dismissBulkResult() {
                 :attachments="selected.attachments"
                 :can-reveal="actions.length > 0"
               />
-              <ul
-                v-if="selected.thread?.length"
-                class="mt-2 space-y-2"
-              >
-                <li
-                  v-for="(entry, index) in selected.thread"
-                  :key="index"
-                  class="surface-inset p-3 text-sm"
-                >
-                  <p class="text-xs font-medium text-ink-gray-5">
-                    {{ entry.by === 'employee' ? firstName || 'Employee' : 'Worker' }}
-                    · {{ formatDateTime(entry.on) }}
-                  </p>
-                  <p class="mt-0.5 whitespace-pre-line text-ink-gray-8">
-                    {{ entry.message }}
-                  </p>
-                </li>
-              </ul>
-              <p
-                v-else
-                class="mt-2 text-sm text-ink-gray-5"
-              >
-                No details were written with this request.
-              </p>
+              <RequestThread
+                :entries="selected.thread || []"
+                :can-comment="!!selected.can_comment"
+                :closed="!!selected.closed"
+                :request-name="selected.name"
+                :employee-name="selected.employee_name || ''"
+                mode="handler"
+                class="mt-3"
+                @posted="detail.fetch()"
+              />
 
               <div
                 v-if="actions.length"
@@ -2098,6 +2077,14 @@ function dismissBulkResult() {
             >
               <p class="text-sm font-medium text-white">
                 {{ reasonCopy.heading }}
+              </p>
+              <!-- Plan 2026-10-15-003 R6: Need info from Open is a pick-up. -->
+              <p
+                v-if="reasonFor === 'Need info' && selected.kind === 'request' && selected.status === 'Open'"
+                class="mt-1 text-sm text-white"
+                data-testid="need-info-assigns"
+              >
+                This also assigns the request to you.
               </p>
               <FormControl
                 v-model="reason"

@@ -6,6 +6,7 @@ import RequestForm from '@/components/RequestForm.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
+import RequestThread from '@/components/requests/RequestThread.vue'
 import Icon from '@/components/Icon.vue'
 import { attachToRequest, keepaliveRequest } from '@/lib/api'
 import { session } from '@/lib/session'
@@ -247,31 +248,25 @@ function confirmReason() {
 
 const may = (action) => workSelected.value?.actions?.includes(action)
 
-// --- replying (P5-R10, P5-R6) --------------------------------------------
-//
-// Not a workflow action -- role Employee has no write on HR Request at all
-// (P5-KTD5), so this is the one transition the employee owns, and it moves
-// through `reply_to_my_request` rather than `act_on_approval`.
-
-const reply = createResource({ url: 'helixhr.api.reply_to_my_request', method: 'POST' })
-const replyMessage = ref('')
-const replyError = ref('')
+// --- replying / commenting (P5-R10, P5-KTD5 / Plan 2026-10-15-003 KTD8) ---
+// Handled by RequestThread.vue component.
 
 watch(
   [() => props.name, tab],
-  ([name, value]) => {
-    replyMessage.value = ''
-    replyError.value = ''
+  ([name]) => {
     if (!name) return
-    // One open record, two readers: the work tab reads the decision detail,
-    // the employee's tab reads their own projection.
-    if (value === 'work') workDetail.fetch()
+    if (tab.value === 'work') workDetail.fetch()
     else detail.fetch()
   },
   { immediate: true },
 )
 
 const selected = computed(() => (props.name ? detail.data : null))
+
+function reloadRequest() {
+  detail.fetch()
+  requests.reload()
+}
 
 function closeDetail() {
   // Back to the tab the detail was opened from (R9), keeping its filter.
@@ -282,26 +277,6 @@ function closeDetail() {
         ? { type: categoryFilter.value }
         : {}
   router.push({ name: 'Requests', query })
-}
-
-async function submitReply() {
-  const item = selected.value
-  const message = replyMessage.value.trim()
-  if (!item || reply.loading) return
-  if (!message) {
-    replyError.value = 'Say something before sending your reply.'
-    return
-  }
-  replyError.value = ''
-  try {
-    await reply.submit({ name: item.name, message, expected_modified: item.modified })
-    replyMessage.value = ''
-    detail.fetch()
-    requests.reload()
-  } catch (error) {
-    replyError.value =
-      error?.messages?.[0] || "That reply didn't go through. Reload and try again."
-  }
 }
 
 // --- clearing the obligation --------------------------------------------
@@ -857,30 +832,18 @@ const timeline = computed(() => {
               </li>
             </ul>
 
-            <section
-              v-if="workSelected.thread?.length"
+            <!-- Plan 2026-10-15-003 KTD8: the shared thread; the handler's
+                 box shows only when `comment_on_request` would accept it. -->
+            <RequestThread
               class="mt-4 border-t border-outline-gray-1 pt-4"
-              data-testid="request-thread"
-            >
-              <h3 class="label">
-                Conversation
-              </h3>
-              <ul class="mt-2 space-y-2">
-                <li
-                  v-for="(entry, index) in workSelected.thread"
-                  :key="index"
-                  class="surface-inset p-3 text-sm"
-                >
-                  <p class="text-xs font-medium text-ink-gray-5">
-                    {{ entry.by === 'employee' ? 'Employee' : 'You' }}
-                    · {{ formatDateTime(entry.on) }}
-                  </p>
-                  <p class="mt-0.5 whitespace-pre-line text-ink-gray-8">
-                    {{ entry.message }}
-                  </p>
-                </li>
-              </ul>
-            </section>
+              :entries="workSelected.thread || []"
+              :can-comment="!!workSelected.can_comment"
+              :closed="!!workSelected.closed"
+              :request-name="workSelected.name"
+              :employee-name="workSelected.employee_name || ''"
+              mode="handler"
+              @posted="workDetail.fetch()"
+            />
 
             <!-- Need info / Reject refuse to submit without their words
                  (P5-U6); the box holds them on the same surface. -->
@@ -895,6 +858,13 @@ const timeline = computed(() => {
                 :label="REASON_HEADINGS[reasonFor]"
                 :placeholder="reasonFor === 'Reject' ? 'Why this is a final no' : 'What do you need from them?'"
               />
+              <p
+                v-if="reasonFor === 'Need info' && workSelected.status === 'Open'"
+                class="mt-1 text-sm text-ink-gray-6"
+                data-testid="need-info-assigns"
+              >
+                This also assigns the request to you.
+              </p>
               <p
                 v-if="reasonError"
                 class="mt-1 text-sm font-medium text-signal"
@@ -1197,70 +1167,18 @@ const timeline = computed(() => {
               </div>
             </section>
 
-            <!-- P5-R10: the request and every reply after it, one
-                 conversation, the same thread the routed worker reads on
-                 their side of the Approvals queue. -->
-            <section
-              v-if="selected.thread?.length > 1"
+            <!-- P5-R10 / Plan 2026-10-15-003 KTD8: shared thread component. -->
+            <RequestThread
               class="mt-4 border-t border-outline-gray-1 pt-4"
-              data-testid="request-thread"
-            >
-              <h3 class="label">
-                Conversation
-              </h3>
-              <ul class="mt-2 space-y-2">
-                <li
-                  v-for="(entry, index) in selected.thread"
-                  :key="index"
-                  class="surface-inset p-3 text-sm"
-                >
-                  <p class="text-xs font-medium text-ink-gray-5">
-                    {{ entry.by === 'employee' ? 'You' : selected.handled_by_team || 'HR' }}
-                    · {{ formatDateTime(entry.on) }}
-                  </p>
-                  <p class="mt-0.5 whitespace-pre-line text-ink-gray-8">
-                    {{ entry.message }}
-                  </p>
-                </li>
-              </ul>
-            </section>
-
-            <!-- P5-R6, P5-KTD5: replying is the employee's one transition
-                 out of "Waiting on Employee", and it is not a workflow
-                 action -- role Employee has no write on this doctype. -->
-            <section
-              v-if="selected.can_reply"
-              class="mt-4 border-t border-outline-gray-1 pt-4"
-              data-testid="request-reply"
-            >
-              <h3 class="label">
-                {{ selected.category }} needs your reply
-              </h3>
-              <FormControl
-                v-model="replyMessage"
-                class="mt-2"
-                type="textarea"
-                placeholder="Write your reply"
-                aria-label="Your reply"
-              />
-              <p
-                v-if="replyError"
-                class="mt-1 text-sm font-medium text-signal"
-                role="alert"
-              >
-                {{ replyError }}
-              </p>
-              <Button
-                class="mt-2"
-                variant="solid"
-                theme="blue"
-                :loading="reply.loading"
-                :disabled="reply.loading"
-                @click="submitReply"
-              >
-                Send reply
-              </Button>
-            </section>
+              :entries="selected.thread || []"
+              :can-comment="!!selected.can_comment"
+              :closed="!!selected.closed"
+              :request-name="selected.name"
+              :expected-modified="selected.status === 'Waiting on Employee' ? selected.modified : null"
+              mode="employee"
+              @posted="reloadRequest"
+              @new-request="newRequest"
+            />
 
             <div class="mt-4 border-t border-outline-gray-1 pt-4">
               <!-- A follow-up is a new request, carrying the subject it is

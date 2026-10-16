@@ -67,7 +67,7 @@ export default defineConfig({
       // Plan 2026-10-02-001 U10: email-templates.spec.ts -- HR is the refused
       // hat; the Notification Manager signs in inside the spec itself, the
       // same way login-dashboard.spec.ts does, since it has no Employee.
-      testMatch: /(approvals|settings|organisation|people|reports|reports-company|company-access|projects|roster|navigation|email-templates)\.spec\.ts/,
+      testMatch: /(approvals|settings|organisation|people|reports|reports-company|company-access|projects|roster|navigation|email-templates|requests-conversation)\.spec\.ts/,
     },
     // P5-U11. The routed-worker identity: `IT Team`, portal-only
     // (desk_access: 0), which never reaches Desk and works only the requests
@@ -84,7 +84,7 @@ export default defineConfig({
       name: 'it',
       use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/it.json' },
       dependencies: ['setup'],
-      testMatch: /(approvals|organisation|people|reports)\.spec\.ts/,
+      testMatch: /(approvals|organisation|people|reports|requests-conversation)\.spec\.ts/,
     },
     // Plan 2026-10-06-001 U3. The Portal Admin identity (`make_test_portal_admin`,
     // seeded by setup_playwright_fixtures): Report access and Portal roles are
