@@ -5,6 +5,9 @@
 // identical, and free to drift into three answers to "how tall is a full day"
 // or "what do we call a Half Day".
 
+/** Monday-first short weekday names, the order `weekDates` returns. */
+export const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
 /** A normal working day. Hour bars are read against this, never against the
  * week's own maximum: a week whose biggest day was 2h should look like a thin
  * week, not a full one. */

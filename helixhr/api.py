@@ -1679,6 +1679,23 @@ def _employee_working_days(index, employee, monday, sunday):
 	}
 
 
+def _employment_span(employee):
+	"""`(joined, relieved)` as dates, either None when unset: the
+	joining..relieving clamp `get_my_month` and `get_my_week` share."""
+	joined, relieved = frappe.db.get_value("Employee", employee, ["date_of_joining", "relieving_date"])
+	return (getdate(joined) if joined else None, getdate(relieved) if relieved else None)
+
+
+def _within_employment(days, span):
+	"""The dates in `days` that fall inside the `_employment_span`."""
+	joined, relieved = span
+	return {
+		day
+		for day in days
+		if (not joined or getdate(day) >= joined) and (not relieved or getdate(day) <= relieved)
+	}
+
+
 def _working_days_by_employee(employees, monday, sunday):
 	"""`{employee: set(date)}` for one week -- the index, folded to a week."""
 	index = _working_days_index(employees, monday, sunday)
@@ -4805,6 +4822,18 @@ def get_my_week(week_start=None):
 	timesheet = None
 	if current:
 		doc = frappe.get_doc("Timesheet", current.name)
+		# U9 / KTD9: "Copy last week" names what it could not copy, so a row
+		# carries its project's and task's words, not only their ids. One
+		# query for the week's tasks; a task the caller can no longer read
+		# falls back to its id.
+		task_ids = {row.task for row in doc.time_logs if row.task}
+		subjects = (
+			dict(
+				frappe.get_all("Task", filters={"name": ["in", list(task_ids)]}, fields=["name", "subject"], as_list=True)
+			)
+			if task_ids
+			else {}
+		)
 		timesheet = {
 			"name": doc.name,
 			"workflow_state": doc.workflow_state,
@@ -4826,7 +4855,9 @@ def get_my_week(week_start=None):
 			"rows": [
 				{
 					"project": row.project,
+					"project_name": row.project_name or row.project,
 					"task": row.task,
+					"task_subject": subjects.get(row.task) or row.task,
 					"hours": row.hours,
 					"note": row.description,
 					"date": _row_date(row),
@@ -4865,6 +4896,11 @@ def get_my_week(week_start=None):
 		# they fill a week in rather than by a refusal afterwards.
 		"approver_name": _approver_name(employee),
 		"full_week_hours": FULL_WEEK_HOURS,
+		# U9 / KTD9: `{date: bool}` for all seven days -- True on a holiday,
+		# approved leave, or a day outside joining..relieving. Additive, so
+		# a client that predates it ignores it; "Copy last week" reads it to
+		# keep hours off days the employee is not expected to work.
+		"non_working": _week_non_working(employee, monday, sunday),
 		"timesheet": timesheet,
 		"change": {
 			"name": change.name,
@@ -4882,6 +4918,27 @@ def get_my_week(week_start=None):
 		if declined_change
 		else None,
 		"changeable": changeable,
+	}
+
+
+def _week_non_working(employee, monday, sunday):
+	"""`{date: True}` for each day of the week the employee is not expected
+	at work, `False` for the rest (U9 / KTD9).
+
+	The working days are `_working_days_index` (holiday list + approved
+	leave) clamped to the joining..relieving span exactly as `get_my_month`
+	clamps them. A half-day leave is a day off here because it is one in
+	the index the approval flags (`hours_off`, `missing_day`) read: a copy
+	that put a full day's hours on it would raise the very flag that keeps
+	the week out of "Approve all". The employee adds the half day by hand.
+	"""
+	index = _working_days_index([employee], monday, sunday)
+	working = _within_employment(
+		_employee_working_days(index, employee, monday, sunday),
+		_employment_span(employee),
+	)
+	return {
+		str(add_days(monday, offset)): str(add_days(monday, offset)) not in working for offset in range(7)
 	}
 
 
@@ -4998,11 +5055,7 @@ def get_my_month(month=None):
 		monday = add_days(monday, 7)
 	span_start, span_end = mondays[0], add_days(mondays[-1], 6)
 
-	joined, relieved = frappe.db.get_value(
-		"Employee", employee, ["date_of_joining", "relieving_date"]
-	)
-	joined = getdate(joined) if joined else None
-	relieved = getdate(relieved) if relieved else None
+	span = _employment_span(employee)
 
 	sheets = {}
 	for row in frappe.get_all(
@@ -5036,11 +5089,7 @@ def get_my_month(month=None):
 	weeks = []
 	for monday in mondays:
 		sunday = add_days(monday, 6)
-		days = {
-			day
-			for day in _employee_working_days(index, employee, monday, sunday)
-			if (not joined or getdate(day) >= joined) and (not relieved or getdate(day) <= relieved)
-		}
+		days = _within_employment(_employee_working_days(index, employee, monday, sunday), span)
 		sheet = sheets.get(monday)
 		state = sheet.workflow_state if sheet else None
 		weeks.append(

@@ -1602,3 +1602,125 @@ class TestGetMyMonth(IntegrationTestCase):
 		for bad in ("2026-13", "2026-1", "26-01", "2026-01-01", "x"):
 			with self.assertRaises(frappe.ValidationError):
 				get_my_month(bad)
+
+
+class TestGetMyWeekNonWorking(IntegrationTestCase):
+	"""U9 / KTD9: `get_my_week.non_working`, the per-day marker "Copy last
+	week" reads to keep hours off days nobody expects the employee at work."""
+
+	def setUp(self):
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		digest = int(hashlib.md5(self.id().encode()).hexdigest(), 16)
+		self.monday, self.sunday = get_week_bounds(add_days(frappe.utils.today(), (digest % 200000) * 7))
+		self.saved = frappe.db.get_value(
+			"Employee",
+			self.employee_name,
+			["holiday_list", "date_of_joining", "relieving_date"],
+			as_dict=True,
+		)
+		# Wednesday plus the weekend off, in a list of this week's own.
+		name = f"_Test Week Non Working {self.monday}"
+		if not frappe.db.exists("Holiday List", name):
+			frappe.get_doc(
+				{
+					"doctype": "Holiday List",
+					"holiday_list_name": name,
+					"from_date": str(add_days(self.monday, -7)),
+					"to_date": str(add_days(self.monday, 14)),
+					"holidays": [
+						{"holiday_date": str(add_days(self.monday, offset)), "description": "Off"}
+						for offset in (2, 5, 6)
+					],
+				}
+			).insert(ignore_permissions=True)
+		frappe.db.set_value("Employee", self.employee_name, "holiday_list", name)
+		self._purge_leave()
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		self._purge_leave()
+		frappe.db.set_value("Employee", self.employee_name, dict(self.saved))
+
+	def _purge_leave(self):
+		frappe.db.delete("Leave Application", {"name": ["like", "_TEST-WEEKNW-%"]})
+
+	def _leave(self, first, last, suffix, half_day=False):
+		doc = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": self.employee_name,
+				"leave_type": "Casual Leave",
+				"from_date": str(add_days(self.monday, first)),
+				"to_date": str(add_days(self.monday, last)),
+				"half_day": 1 if half_day else 0,
+				"status": "Approved",
+				"docstatus": 1,
+			}
+		)
+		doc.name = f"_TEST-WEEKNW-{suffix}"
+		doc.db_insert()
+
+	def _non_working(self):
+		frappe.set_user(EMPLOYEE_USER)
+		marker = get_my_week(str(self.monday))["non_working"]
+		frappe.set_user("Administrator")
+		return [marker[str(add_days(self.monday, offset))] for offset in range(7)]
+
+	def test_non_working_is_the_working_days_index_clamped_to_employment(self):
+		from helixhr.api import _employee_working_days, _working_days_index
+
+		self._leave(3, 4, "thu-fri")
+		joined = add_days(self.monday, 1)
+		frappe.db.set_value("Employee", self.employee_name, "date_of_joining", str(joined))
+
+		index = _working_days_index([self.employee_name], self.monday, self.sunday)
+		working = {
+			day
+			for day in _employee_working_days(index, self.employee_name, self.monday, self.sunday)
+			if frappe.utils.getdate(day) >= joined
+		}
+		expected = [str(add_days(self.monday, offset)) not in working for offset in range(7)]
+		self.assertEqual(self._non_working(), expected)
+		# Mon before joining, Wed holiday, Thu-Fri leave, the weekend off.
+		self.assertEqual(self._non_working(), [True, False, True, True, True, True, True])
+
+		frappe.db.set_value(
+			"Employee",
+			self.employee_name,
+			{"date_of_joining": self.saved.date_of_joining, "relieving_date": str(add_days(self.monday, 1))},
+		)
+		self._purge_leave()
+		self.assertEqual(self._non_working(), [False, False, True, True, True, True, True])
+
+	def test_a_joiners_first_week_marks_the_days_before_joining(self):
+		frappe.db.set_value("Employee", self.employee_name, "date_of_joining", str(add_days(self.monday, 2)))
+		self.assertEqual(self._non_working()[:2], [True, True])
+		self.assertEqual(self._non_working()[3:5], [False, False])
+
+	def test_a_half_day_leave_is_a_day_off_as_the_approval_flags_count_it(self):
+		from helixhr.api import _employee_working_days, _working_days_index
+
+		self._leave(3, 3, "thu-half", half_day=True)
+		self._leave(4, 4, "fri-full")
+		self.assertEqual(self._non_working()[3:5], [True, True])
+		index = _working_days_index([self.employee_name], self.monday, self.sunday)
+		thursday = str(add_days(self.monday, 3))
+		self.assertNotIn(thursday, _employee_working_days(index, self.employee_name, self.monday, self.sunday))
+
+	def test_the_marker_is_additive_and_rows_carry_their_names(self):
+		frappe.set_user(EMPLOYEE_USER)
+		project = make_test_project("non-working", users=[EMPLOYEE_USER])
+		frappe.cache.delete(f"helixhr:rate-limit:save_my_week:{EMPLOYEE_USER}")
+		row = {"date": str(self.monday), "project": project, "task": "", "hours": 3, "note": "x"}
+		save_my_week(str(self.monday), json.dumps([row]))
+		result = get_my_week(str(self.monday))
+		for key in ("week_start", "week_end", "approver_name", "full_week_hours", "timesheet", "change"):
+			self.assertIn(key, result)
+		self.assertEqual(len(result["non_working"]), 7)
+		self.assertTrue(all(isinstance(value, bool) for value in result["non_working"].values()))
+		[saved] = result["timesheet"]["rows"]
+		self.assertEqual(saved["project_name"], frappe.db.get_value("Project", project, "project_name"))
+		self.assertEqual(saved["hours"], 3)
+		frappe.set_user("Administrator")
+		frappe.db.delete("Timesheet Detail", {"parent": result["timesheet"]["name"]})
+		frappe.db.delete("Timesheet", result["timesheet"]["name"])

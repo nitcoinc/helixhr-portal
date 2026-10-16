@@ -18,8 +18,10 @@ import {
   today,
   weekDates,
 } from '@/lib/dates'
-import { FULL_WEEK_HOURS as DEFAULT_FULL_WEEK_HOURS, barHeight } from '@/lib/week'
+import { FULL_WEEK_HOURS as DEFAULT_FULL_WEEK_HOURS, WEEKDAYS, barHeight } from '@/lib/week'
 import { TONE } from '@/lib/statusBadge'
+import { copyWeekNote, copyWeekRows } from '@/lib/copyWeek'
+import { useIsDesktop } from '@/lib/useIsDesktop'
 
 // P2-U6 / P2-R12 / P2-AE5. `/timesheet` and `/timesheet/:weekStart` are the
 // same component: the week is a route parameter, so refresh and browser Back
@@ -31,8 +33,9 @@ const props = defineProps({
 
 const router = useRouter()
 const route = useRoute()
-
-const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+// U9 (EP-02): the phone shape puts the week first and folds the month under
+// it; desktop keeps the month strip on top as the one week navigator.
+const isDesktop = useIsDesktop()
 
 // P2-AE3, and the defect this page carried until now: the week was computed
 // with `new Date('YYYY-MM-DD')` and read back with `.getDay()`/`.getDate()`,
@@ -72,6 +75,9 @@ const error = ref('')
 const savedAt = ref(null)
 const submitting = ref(false)
 const confirmCopy = ref(false)
+// U9 / KTD9: what the last copy left out, in one line. Cleared by the next
+// copy and by moving to another week.
+const copyNote = ref('')
 
 let nextLineId = 0
 /** Stable client identity, so Vue keys never fall back to the array index
@@ -172,17 +178,21 @@ function loadFromServer() {
 watch(() => week.data, loadFromServer)
 watch(monday, () => {
   savedAt.value = null
+  copyNote.value = ''
   week.reload()
 })
 
 // The month overview (plan 2026-10-05-001 U5) lives in MonthOverview.vue;
-// this ref only lets a week action reload it.
+// these refs only let a week action reload it. Two refs because it renders
+// in a different place per layout (U9), and only one exists at a time.
 const monthOverview = ref(null)
+const monthSummary = ref(null)
 
 /** The week and the month both move after any action on the week. */
 async function reloadWeek() {
   await week.reload()
   monthOverview.value?.reload()
+  monthSummary.value?.reload()
 }
 
 function addLine(date) {
@@ -248,9 +258,15 @@ function copyDay(fromIso) {
 const previousMonday = computed(() => addCalendarDays(monday.value, -7))
 const previousWeek = createResource({ url: 'helixhr.api.get_my_week' })
 
+/** Projects are a precondition, not a nicety: the copy drops rows whose
+ * project or task is no longer open, which it cannot tell before
+ * `get_my_projects` answers (KTD9). */
+const projectsLoaded = computed(() => Array.isArray(projects.data))
+
 async function copyPreviousWeek() {
   confirmCopy.value = false
   error.value = ''
+  copyNote.value = ''
   try {
     const data = await previousWeek.submit({ week_start: previousMonday.value })
     const rows = data?.timesheet?.rows || []
@@ -258,12 +274,19 @@ async function copyPreviousWeek() {
       error.value = 'There is nothing in last week to copy.'
       return
     }
-    // Re-dated by seven calendar days, not by an offset in hours: a week
-    // that crosses a daylight-saving change is still seven days long.
-    lines.value = linesFrom(
-      rows.map((row) => ({ ...row, date: addCalendarDays(row.date, 7) })),
-      monday.value,
-    )
+    // KTD9: drop what can no longer be booked and the days nobody is
+    // expected at work this week; lib/copyWeek.js holds the rules.
+    const copied = copyWeekRows({
+      rows,
+      projects: projects.data,
+      targetMonday: monday.value,
+      targetNonWorking: week.data?.non_working,
+      sourceNonWorking: data?.non_working,
+    })
+    copyNote.value = copyWeekNote(copied.skipped)
+    // Everything skipped: the week keeps what it had rather than being
+    // replaced by nothing.
+    if (copied.rows.length) lines.value = linesFrom(copied.rows, monday.value)
   } catch (e) {
     error.value = e?.messages?.[0] || 'Could not read last week.'
   }
@@ -272,6 +295,7 @@ async function copyPreviousWeek() {
 /** Copying over a week that already has rows is destructive, so it asks
  * first (P2-U6 scenario 3). An empty week just fills. */
 function startCopyPreviousWeek() {
+  if (!projectsLoaded.value) return
   if (serialize().length) confirmCopy.value = true
   else copyPreviousWeek()
 }
@@ -543,6 +567,7 @@ const savedLabel = computed(() => {
     </PageHeader>
 
     <MonthOverview
+      v-if="isDesktop"
       ref="monthOverview"
       :monday="monday"
     />
@@ -640,46 +665,18 @@ const savedLabel = computed(() => {
         </div>
       </section>
 
-      <!-- Desktop keeps the same facts in the toolbar the grid needs: the
-           week, its status, and the two week-level actions. -->
+      <!-- Desktop: the month strip above is the one week navigator and
+           carries the week's status (ED-12), so this row only names the week
+           and holds the week-level action. -->
       <div class="hidden lg:mb-4 lg:flex lg:items-center lg:justify-between lg:gap-4">
-        <div class="flex items-center gap-2">
-          <button
-            class="flex h-11 w-11 cursor-pointer items-center justify-center rounded-lg border border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2"
-            type="button"
-            aria-label="Previous week"
-            @click="prevWeek"
-          >
-            <Icon name="chevronLeft" />
-          </button>
-          <button
-            class="flex h-11 w-11 cursor-pointer items-center justify-center rounded-lg border border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2"
-            type="button"
-            aria-label="Next week"
-            @click="nextWeek"
-          >
-            <Icon name="chevronRight" />
-          </button>
-          <h2 class="type-section ml-2 text-ink-gray-9">
-            Week of {{ formatDateRange(monday, week.data?.week_end) }}
-          </h2>
-          <button
-            class="cursor-pointer text-sm font-medium text-ink-blue-link underline underline-offset-2"
-            type="button"
-            @click="thisWeek"
-          >
-            This week
-          </button>
-          <StatusBadge
-            v-if="workflowState"
-            kind="timesheet"
-            :status="workflowState"
-          />
-        </div>
+        <h2 class="type-section text-ink-gray-9">
+          Week of {{ formatDateRange(monday, week.data?.week_end) }}
+        </h2>
         <Button
           v-if="!isReadOnly"
           variant="outline"
           :loading="previousWeek.loading"
+          :disabled="!projectsLoaded"
           @click="startCopyPreviousWeek"
         >
           Copy last week
@@ -726,7 +723,7 @@ const savedLabel = computed(() => {
         <WeekGrid
           :lines="lines"
           :projects="projects.data || []"
-          :projects-loaded="Array.isArray(projects.data)"
+          :projects-loaded="projectsLoaded"
           :days="days"
           :selected-date="selectedDate"
           :full-week-hours="fullWeekHours"
@@ -750,11 +747,21 @@ const savedLabel = computed(() => {
           variant="subtle"
           class="w-full"
           :loading="previousWeek.loading"
+          :disabled="!projectsLoaded"
           @click="startCopyPreviousWeek"
         >
           Copy last week
         </Button>
       </div>
+
+      <p
+        v-if="copyNote"
+        class="surface-inset mt-3 p-3 text-sm text-ink-gray-7"
+        role="status"
+        data-testid="copy-note"
+      >
+        {{ copyNote }}
+      </p>
     </AsyncState>
 
     <ul
@@ -776,6 +783,15 @@ const savedLabel = computed(() => {
     >
       {{ error }}
     </p>
+
+    <!-- Phone (U9, EP-02): the month is one summary row under the day,
+         never above it; the daily visit opens on today's editor. -->
+    <MonthOverview
+      v-if="!isDesktop"
+      ref="monthSummary"
+      collapsible
+      :monday="monday"
+    />
 
     <!-- `.action-bar` (index.css) sits above the phone tab bar and inside the
          safe area. This bar used to be `sticky bottom-0`, which put Submit
