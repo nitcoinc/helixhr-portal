@@ -14,7 +14,7 @@ import { session } from '@/lib/session'
 import { call } from '@/lib/api'
 import { presetRange } from '@/lib/datePresets'
 import { today } from '@/lib/dates'
-import { fromQuery, toQuery } from '@/lib/reportQuery'
+import { ALL_COMPANIES, fromQuery, toQuery } from '@/lib/reportQuery'
 import { roundHours } from '@/lib/hours'
 
 // Plan 2026-10-04-001 U4. Two routes, one page:
@@ -74,7 +74,9 @@ function defaults(item) {
   }
   // Plan 2026-10-14-001 U10: a caller offered several companies starts on
   // the default one; a single-company caller sends none, exactly as before.
-  if (item.companies?.length > 1) values.company = item.company || item.companies[0].company
+  // Plan 2026-10-15-001 R2: the server's default is "All my companies" only
+  // when it can be exported in full.
+  if (item.companies?.length > 1 || item.combined_option) values.company = item.company || item.companies?.[0]?.company
   const range = item.default_preset ? presetRange(item.default_preset, today()) : null
   return range ? { ...values, ...range } : values
 }
@@ -116,10 +118,22 @@ function run() {
 
 // Plan 2026-10-14-001 U10: export rights and the Desk hand-off follow the
 // picked company. The Desk link is offered for the default company only.
+// Plan 2026-10-15-001 R1/R5: combined run offers "All my companies" option
+// and may block export if not every company allows it.
 const pickedCompany = computed(() =>
   entry.value?.companies?.find((option) => option.company === filters.value.company) || null,
 )
-const canExport = computed(() => (pickedCompany.value ? !!pickedCompany.value.can_export : !!entry.value?.can_export))
+const isCombined = computed(() => filters.value.company === ALL_COMPANIES)
+const canExport = computed(() => {
+  if (isCombined.value) return !!entry.value?.combined_exportable
+  return pickedCompany.value ? !!pickedCompany.value.can_export : !!entry.value?.can_export
+})
+// R5: the visible reason names the company that blocks a combined export.
+const exportBlockedReason = computed(() => {
+  if (!isCombined.value || canExport.value) return ''
+  const blocking = entry.value?.blocking_companies || []
+  return `Export is off for All my companies: you can't export this report for ${blocking.join(', ')}.`
+})
 const canOpenInDesk = computed(
   () => !!entry.value?.can_open_in_desk && (!filters.value.company || filters.value.company === entry.value.company),
 )
@@ -336,6 +350,7 @@ async function openInDesk() {
             <ExportMenu
               :report-key="entry.key"
               :can-export="canExport"
+              :disabled-reason="exportBlockedReason"
               :query="exportQuery"
             />
             <button
@@ -464,6 +479,7 @@ async function openInDesk() {
               :rows="result.rows"
               :total-rows="result.total_rows"
               :truncated="result.truncated"
+              :company-counts="result.company_counts"
               :can-export="result.can_export"
               :sort="sort"
               :hidden="shownHidden || []"

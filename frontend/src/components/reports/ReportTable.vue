@@ -17,6 +17,8 @@ const props = defineProps({
   rows: { type: Array, required: true },
   totalRows: { type: Number, required: true },
   truncated: { type: Boolean, default: false },
+  /** Plan 2026-10-15-001 U2: `{company: rows}` for an "All my companies" run. */
+  companyCounts: { type: Object, default: null },
   canExport: { type: Boolean, default: false },
   /** `{field, order}` or null. */
   sort: { type: Object, default: null },
@@ -275,6 +277,10 @@ function subtotalLabel(row) {
     >
       Showing first <span class="tabular">{{ shown }}</span> of <span class="tabular">{{ totalRows }}</span> rows.
       Totals cover all <span class="tabular">{{ totalRows }}</span> rows.
+      <template v-if="companyCounts">
+        Rows by company:
+        {{ Object.entries(companyCounts).map(([company, count]) => `${company} ${count}`).join(', ') }}.
+      </template>
       <slot
         v-if="canExport"
         name="truncated-export"

@@ -178,11 +178,17 @@ const routes = [
     // the portal) rather than only via in-page tabs. `get_portal_config` is
     // the server's own gate -- an employee hitting this route directly gets
     // AsyncState's 'forbidden' region, not a client-side redirect.
-    path: '/settings/:section(categories|leave-types|holiday-lists|shift-types|leave-rules|report-access|portal-roles|approvers|company-access)',
+    path: '/settings/:section(categories|leave-types|holiday-lists|shift-types|leave-rules|report-access|people-access|approvers)',
     name: 'SettingsSection',
     meta: { deskOnly: true },
     component: () => import('@/pages/Settings.vue'),
     props: true,
+  },
+  {
+    // Plan 2026-10-15-001 U6: People & access replaced these two sections.
+    path: '/settings/:section(portal-roles|company-access)',
+    name: 'SettingsPeopleAccessRedirect',
+    redirect: { name: 'SettingsSection', params: { section: 'people-access' } },
   },
   {
     // Plan 2026-10-04-004 U5 / R13: the Settings page's celebrations section

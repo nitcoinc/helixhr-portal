@@ -10,9 +10,8 @@ import HolidayListsSection from '@/components/settings/HolidayListsSection.vue'
 import ShiftTypesSection from '@/components/settings/ShiftTypesSection.vue'
 import LeaveRulesSection from '@/components/settings/LeaveRulesSection.vue'
 import ReportAccessSection from '@/components/settings/ReportAccessSection.vue'
-import PortalRolesSection from '@/components/settings/PortalRolesSection.vue'
+import PeopleAccessSection from '@/components/settings/PeopleAccessSection.vue'
 import ApproverCleanupSection from '@/components/settings/ApproverCleanupSection.vue'
-import CompanyAccessSection from '@/components/settings/CompanyAccessSection.vue'
 import { session } from '@/lib/session'
 
 // P5-U14: `get_portal_config` is HR-only (`_is_hr()`, the same predicate
@@ -45,11 +44,11 @@ const ALL_SECTIONS = [
   // Plan 2026-10-04-004 U5: celebrations moved to the Email templates
   // page's own group; /settings/celebrations redirects there.
   { key: 'report-access', label: 'Report access' },
-  { key: 'portal-roles', label: 'Portal roles' },
+  // Plan 2026-10-15-001 U6: People & access replaces Portal roles and
+  // Company access; their old URLs redirect here (router.js).
+  { key: 'people-access', label: 'People & access' },
   // Plan 2026-10-07-001 U4: the "approvers follow Reports to" cleanup.
   { key: 'approvers', label: 'Approvers' },
-  // Plan 2026-10-14-001 U3: read grants across companies.
-  { key: 'company-access', label: 'Company access' },
 ]
 // Plan 2026-10-06-001 U3 (KTD4, R5): the tab list derives from the two
 // flags. HR sees the HR sections, Portal Admin sees the admin sections, and
@@ -57,7 +56,7 @@ const ALL_SECTIONS = [
 // with neither still receives the full list, so what they meet is the
 // server's refusal, never a client-side redirect.
 const HR_SECTIONS = ['categories', 'leave-types', 'holiday-lists', 'shift-types', 'leave-rules']
-const PORTAL_SECTIONS = ['report-access', 'portal-roles', 'approvers', 'company-access']
+const PORTAL_SECTIONS = ['report-access', 'people-access', 'approvers']
 const SECTIONS =
   !session.canConfigure && !session.canAdminPortal
     ? ALL_SECTIONS
@@ -96,7 +95,7 @@ function reload() {
   <div>
     <PageHeader
       title="Settings"
-      :subtitle="portalOnly ? 'Report access, portal roles, approvers and company access -- without Desk.' : 'Request categories and the day-to-day HRMS masters -- without Desk.'"
+      :subtitle="portalOnly ? 'Report access, people and their access, and approvers -- without Desk.' : 'Request categories and the day-to-day HRMS masters -- without Desk.'"
     >
       <template #actions>
         <!-- P8-U6: the server's own gate (`_can_open_desk`), not merely
@@ -167,9 +166,8 @@ function reload() {
         />
         <LeaveRulesSection v-else-if="activeSection === 'leave-rules'" />
         <ReportAccessSection v-else-if="activeSection === 'report-access'" />
-        <PortalRolesSection v-else-if="activeSection === 'portal-roles'" />
+        <PeopleAccessSection v-else-if="activeSection === 'people-access'" />
         <ApproverCleanupSection v-else-if="activeSection === 'approvers'" />
-        <CompanyAccessSection v-else-if="activeSection === 'company-access'" />
       </div>
     </AsyncState>
   </div>

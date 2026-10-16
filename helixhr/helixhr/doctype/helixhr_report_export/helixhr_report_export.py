@@ -53,13 +53,17 @@ def expire_unreachable_exports(user):
 	"""Plan 2026-10-14-001 R15: after ``user``'s access narrows, expire every
 	Ready background export of theirs they could no longer request. The
 	download endpoint refuses them anyway; this removes the private File
-	itself, which `/private/files` would otherwise still serve its owner."""
-	from helixhr.utils import can_export_report
+	itself, which `/private/files` would otherwise still serve its owner.
+
+	Plan 2026-10-15-001 R7: for combined exports, every stored company is
+	re-checked. The background job never widens to a re-resolved set."""
+	from helixhr.utils import stored_export_companies, stored_export_scope
 
 	for row in frappe.get_all(
 		"HelixHR Report Export",
 		filters={"owner": user, "status": "Ready", "file": ["is", "set"]},
 		fields=["name", "report_key", "company"],
 	):
-		if not can_export_report(user, row.report_key, row.company):
+		stored = stored_export_companies(row.name)
+		if stored_export_scope(user, row.report_key, row.company, stored) is None:
 			expire_export(row.name)

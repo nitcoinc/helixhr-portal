@@ -1796,3 +1796,34 @@ Open -> Waiting on Employee transitions. Verify:
     bench console --site <site>
     >>> frappe.get_all("Workflow Transition", filters={"parent": "HR Request Handling", "state": "Open", "action": "Need info"}, pluck="allowed")
     ['HR Manager', 'IT Team']
+
+### Project report missing hours from the other company
+
+A combined run covers every company the caller's grant allows, but an
+incorrect filter scope or a missing SQL condition can silently drop rows.
+
+1. Check the result's ``columns`` for a ``company`` field. Without it,
+   the scope was single-company, not combined.
+2. Check ``result.filters.company`` for ``__all`` (the sentinel). If it is
+   a named company, the resolver was given a specific company, not the
+   combined option.
+3. A single-company caller sees only their own company's hours on another
+   company's project -- by design (R4). Hours from the other company need a
+   grant over it, then "All my companies".
+4. "All my companies" missing from the picker: the caller has fewer than
+   two run-capable companies for this report, or it is not a project report.
+5. An unknown scope kind reaching `_timesheet_scope_conditions` raises
+   "Unsupported report scope." rather than returning nothing.
+
+### Who can change what (People & access)
+
+The People & access Settings section replaces the Portal roles and Company
+access sections. The reach split can confuse:
+
+| Action | Who | Why blocked |
+|---|---|---|
+| Edit managed roles | Portal Admin, home company only | The target is outside the admin's home company "home company only" |
+| Edit grant | Portal Admin, any grantable company | Grant company outside `grantable_companies` "You can't grant access to..." |
+| Edit HR roles | System Manager only | Portal Admin toggles are locked |
+| Self-edit | Nobody | "You can't change your own access here." |
+| Role Profile user | Nobody | "This person's roles come from a role profile." |

@@ -14,6 +14,7 @@
   "column_break_main",
   "company",
   "exporter_company",
+  "companies",
   "row_count",
   "file_name",
   "section_query",
@@ -82,6 +83,13 @@
    "fieldtype": "Link",
    "label": "Exporter company",
    "options": "Company",
+   "read_only": 1
+  },
+  {
+   "fieldname": "companies",
+   "fieldtype": "Table",
+   "label": "Export companies",
+   "options": "HelixHR Report Export Company",
    "read_only": 1
   },
   {

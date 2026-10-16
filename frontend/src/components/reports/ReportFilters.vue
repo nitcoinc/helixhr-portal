@@ -5,7 +5,7 @@ import EntityPicker from '@/components/reports/EntityPicker.vue'
 import { DATE_PRESETS, matchPreset, presetRange } from '@/lib/datePresets'
 import { today } from '@/lib/dates'
 import { call } from '@/lib/api'
-import { withCompany } from '@/lib/reportQuery'
+import { ALL_COMPANIES, withCompany } from '@/lib/reportQuery'
 
 // Plan 2026-10-04-001 U3 (resolved decision 14): the filter bar, built from
 // the catalog entry's own filter specs. Nothing here runs a report: Run is
@@ -55,7 +55,14 @@ function set(name, value) {
 // Plan 2026-10-14-001 U10: one company per run, offered only when the
 // catalog lists more than one. A switch clears the entity filters (they
 // belong to one company) and every option search names the company.
-const companyOptions = computed(() => props.entry.companies || [])
+// Plan 2026-10-15-001 U4: prepend "All my companies" when combined_option.
+const companyOptions = computed(() => {
+  const options = [...(props.entry.companies || [])]
+  if (props.entry.combined_option) {
+    options.unshift({ company: ALL_COMPANIES, can_export: props.entry.combined_exportable })
+  }
+  return options
+})
 const showCompany = computed(() => companyOptions.value.length > 1)
 
 function setCompany(company) {
@@ -171,7 +178,7 @@ function secondGroupOptions() {
               :key="option.company"
               :value="option.company"
             >
-              {{ option.company }}
+              {{ option.company === ALL_COMPANIES ? 'All my companies' : option.company }}
             </option>
           </select>
         </div>

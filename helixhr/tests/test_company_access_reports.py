@@ -28,7 +28,7 @@ from helixhr.tests.utils import (
 	make_test_user,
 	set_report_access,
 )
-from helixhr.utils import resolve_report_access
+from helixhr.utils import SENTINEL_ALL, resolve_report_access
 
 WRAPPED = "leave_ledger"
 DIRECTORY = "employee_directory"
@@ -367,3 +367,256 @@ class TestExportLogReach(_GrantReports):
 		self.assertEqual(
 			frappe.db.get_value("HelixHR Report Export", name, "exporter_company"), self.company
 		)
+
+# --- Plan 2026-10-15-001: combined company scope (U1) -----------------------
+
+
+class TestCombinedCompanyScope(_GrantReports):
+	"""Plan 2026-10-15-001 KTD1/KTD3: the sentinel resolves to a combined
+	scope across all run-capable companies for project-scoped entries."""
+
+	def setUp(self):
+		super().setUp()
+		# Make the grant holder scoped to both companies with export.
+		make_test_company_grant(GRANT_HOLDER_USER, [self.company, self.other], level="All data", allow_export=1)
+
+	def test_combined_scope_default_when_exportable(self):
+		"""R1/R2: holder with export in both gets combined as default."""
+		access = resolve_report_access(GRANT_HOLDER_USER, PROJECT_KEY)
+		self.assertTrue(access["combined_option"])
+		self.assertTrue(access["combined_exportable"])
+		self.assertEqual(access["company"], SENTINEL_ALL)
+		self.assertEqual(access["scope"]["kind"], "combined")
+		self.assertIn(self.company, access["scope"]["companies"])
+		self.assertIn(self.other, access["scope"]["companies"])
+		self.assertTrue(access["can_export"])
+
+	def test_defaults_to_home_when_not_combined_exportable(self):
+		"""R2: Reports-only grant without export defaults to home."""
+		_clear_grants()
+		make_test_company_grant(GRANT_HOLDER_USER, [self.company, self.other], level="Reports only", allow_export=0)
+		access = resolve_report_access(GRANT_HOLDER_USER, PROJECT_KEY)
+		self.assertTrue(access["combined_option"])
+		self.assertFalse(access["combined_exportable"])
+		self.assertEqual(access["company"], self.company)
+		self.assertIn(self.other, access["blocking_companies"])
+
+	def test_dm_with_outsourcing_grant_combined_scope(self):
+		"""DM with Outsourcing-only grant: combined Outsourcing hours + assigned Inc."""
+		_clear_grants()
+		_, dm = make_test_delivery_manager()
+		set_report_access(PROJECT_KEY, dm_run=1, dm_export=1)
+		make_test_company_grant(dm, [self.other], level="Reports only")
+		access = resolve_report_access(dm, PROJECT_KEY, SENTINEL_ALL)
+		self.assertEqual(access["company"], SENTINEL_ALL)
+		self.assertIn(self.other, access["scope"]["companies"])
+		self.assertIsNotNone(access["scope"].get("user"))
+
+	def test_single_company_sentinel_falls_back(self):
+		"""KTD3: single-company HR passing __all falls back with company_removed."""
+		_clear_grants()
+		_, hr = make_test_hr_manager_employee()
+		access = resolve_report_access(hr, PROJECT_KEY, SENTINEL_ALL)
+		self.assertFalse(access["combined_option"])
+		self.assertTrue(access["company_removed"])
+		self.assertEqual(access["company"], self.company)
+
+	def test_non_project_report_rejects_sentinel(self):
+		"""KTD3: sentinel on non-project report falls back."""
+		access = resolve_report_access(GRANT_HOLDER_USER, DIRECTORY)
+		self.assertFalse(access["combined_option"])
+
+	def test_revoked_grant_resolves_to_home_when_user_has_other_tier(self):
+		"""Error: revoked grant resolves to home only for a user with another
+		tier. A grant-only holder loses all access on revocation."""
+		from helixhr.utils import disable_company_access
+
+		# Create a DM who also has a grant.
+		_, dm = make_test_delivery_manager()
+		set_report_access(PROJECT_KEY, dm_run=1, dm_export=1)
+		make_test_company_grant(dm, [self.company, self.other], level="All data", allow_export=1)
+
+		# Revoke the grant; DM still has assigned access at home.
+		disable_company_access(dm, "test")
+		access = resolve_report_access(dm, PROJECT_KEY)
+		self.assertEqual(access["company"], self.company)
+		self.assertFalse(access["combined_option"])
+		self.assertEqual(access["scope"]["kind"], "assigned")
+
+	def test_hr_user_run_without_export_blocks_combined_export_at_home(self):
+		"""KTD2: an HR User who may run but not export, and is also a Delivery
+		Manager who may export, runs Inc company-wide but exports only
+		assigned projects there: combined export is blocked, naming Inc."""
+		_clear_grants()
+		_, hr_user = make_test_hr_user()
+		doc = frappe.get_doc("User", hr_user)
+		doc.append_roles("HelixHR Delivery Manager")
+		doc.save(ignore_permissions=True)
+		frappe.clear_cache(user=hr_user)
+		set_report_access(PROJECT_KEY, hr_user_run=1, hr_user_export=0, dm_run=1, dm_export=1)
+		make_test_company_grant(hr_user, [self.other], level="Reports only", allow_export=1)
+		access = resolve_report_access(hr_user, PROJECT_KEY, SENTINEL_ALL)
+		self.assertEqual(access["company"], SENTINEL_ALL)
+		self.assertFalse(access["can_export"])
+		self.assertEqual(access["blocking_companies"], [self.company])
+		self.assertEqual(access["export_scope"], {"kind": "none"})
+		# The default stays home (R2).
+		self.assertEqual(resolve_report_access(hr_user, PROJECT_KEY)["company"], self.company)
+
+	def test_unscoped_hr_gets_the_option_and_the_concrete_company_list(self):
+		"""R1: unscoped HR counts; exports store every company."""
+		from helixhr.tests.utils import ensure_hr_manager_user
+
+		hr = ensure_hr_manager_user()
+		access = resolve_report_access(hr, PROJECT_KEY, SENTINEL_ALL)
+		self.assertEqual(access["scope"], {"kind": "unscoped", "combined": True})
+		self.assertEqual(access["combined_companies"], sorted(frappe.get_all("Company", pluck="name")))
+
+	def test_dm_combined_scope_keeps_assigned_projects_but_not_other_inc_projects(self):
+		_clear_grants()
+		_, dm = make_test_delivery_manager()
+		set_report_access(PROJECT_KEY, dm_run=1, dm_export=1)
+		make_test_company_grant(dm, [self.other], level="Reports only", allow_export=1)
+		access = resolve_report_access(dm, PROJECT_KEY, SENTINEL_ALL)
+		self.assertEqual(
+			access["scope"], {"kind": "combined", "combined": True, "companies": [self.other], "user": dm}
+		)
+		self.assertEqual(access["assigned_companies"], [self.company])
+		self.assertTrue(access["can_export"])
+
+
+class TestCombinedExports(IntegrationTestCase):
+	"""Plan 2026-10-15-001 U3/R5/R7. The background job commits, so rows are
+	committed and deleted explicitly, like `TestRevokedExports`."""
+
+	def setUp(self):
+		from helixhr.tests.utils import ensure_cross_company_project_fixture
+
+		frappe.set_user("Administrator")
+		self.fx = ensure_cross_company_project_fixture()
+		self.company, self.other = self.fx.company, self.fx.other
+		make_test_user(GRANT_HOLDER_USER, self.company)
+		_clear_grants()
+		make_test_company_grant(GRANT_HOLDER_USER, [self.company, self.other], allow_export=1)
+		frappe.db.commit()  # nosemgrep -- the job under test commits and rolls back
+		self.addCleanup(self._clear)
+		if not getattr(frappe.local, "response_headers", None):
+			from werkzeug.datastructures import Headers
+
+			frappe.local.response_headers = Headers()
+		self.filters = {"project": self.fx.project, "month": "2016-04", "company": SENTINEL_ALL}
+
+	def _clear(self):
+		frappe.set_user("Administrator")
+		frappe.local.response = frappe._dict({"docs": []})
+		for name in frappe.get_all("HelixHR Report Export", {"owner": GRANT_HOLDER_USER}, pluck="name"):
+			for file in frappe.get_all(
+				"File", {"attached_to_doctype": "HelixHR Report Export", "attached_to_name": name}, pluck="name"
+			):
+				frappe.delete_doc("File", file, ignore_permissions=True, force=True)
+			frappe.db.delete("Notification Log", {"document_type": "HelixHR Report Export", "document_name": name})
+			frappe.db.delete("HelixHR Report Export Company", {"parent": name})
+			frappe.db.delete("HelixHR Report Export", {"name": name})
+		_clear_grants()
+		frappe.db.commit()  # nosemgrep
+
+	def _stored(self, export):
+		from helixhr.utils import stored_export_companies
+
+		return sorted(stored_export_companies(export))
+
+	def _queue(self):
+		caps = patch.dict(reports.INLINE_EXPORT_CAP, {"csv": 0, "xlsx": 0, "pdf": 0})
+		with caps, patch("frappe.enqueue") as enqueue:
+			out = _as(GRANT_HOLDER_USER, request_export, "project_timesheet", "csv", filters=self.filters)
+		kwargs = dict(enqueue.call_args.kwargs)
+		for key in ("queue", "job_id", "deduplicate", "enqueue_after_commit"):
+			kwargs.pop(key)
+		frappe.db.commit()  # nosemgrep
+		return out["export"], kwargs
+
+	def _assert_ready(self, export):
+		row = frappe.db.get_value("HelixHR Report Export", export, ["status", "error"], as_dict=True)
+		self.assertEqual(row.status, "Ready", row.error)
+
+	def _narrow_export(self):
+		frappe.db.set_value("HelixHR Company Access", GRANT_HOLDER_USER, "allow_export", 0)
+		frappe.db.commit()  # nosemgrep
+
+	def test_inline_combined_export_stores_both_companies_and_the_home_company(self):
+		out = _as(GRANT_HOLDER_USER, request_export, "project_timesheet", "csv", filters=self.filters)
+		self.assertEqual(self._stored(out["export"]), sorted([self.company, self.other]))
+		self.assertEqual(frappe.db.get_value("HelixHR Report Export", out["export"], "company"), self.company)
+
+	def test_combined_export_is_refused_when_not_exportable_in_full(self):
+		self._narrow_export()
+		with self.assertRaises(frappe.PermissionError):
+			_as(GRANT_HOLDER_USER, request_export, "project_timesheet", "csv", filters=self.filters)
+
+	def test_background_job_refuses_after_export_is_removed(self):
+		export, kwargs = self._queue()
+		self._narrow_export()
+		reports.run_background_export(**kwargs)
+		self.assertEqual(frappe.db.get_value("HelixHR Report Export", export, "status"), "Failed")
+
+	def test_ready_file_is_refused_and_expired_after_export_is_removed(self):
+		from helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export import (
+			expire_unreachable_exports,
+		)
+
+		export, kwargs = self._queue()
+		reports.run_background_export(**kwargs)
+		self._assert_ready(export)
+		self._narrow_export()
+		with self.assertRaises(frappe.PermissionError):
+			_as(GRANT_HOLDER_USER, download_report_export, export)
+		expire_unreachable_exports(GRANT_HOLDER_USER)
+		self.assertEqual(frappe.db.get_value("HelixHR Report Export", export, "status"), "Expired")
+
+	def test_a_grant_widened_before_the_job_runs_does_not_widen_the_file(self):
+		from helixhr.tests.utils import COMPANY_ACCESS_THIRD_COMPANY, create_test_company
+
+		export, kwargs = self._queue()
+		third = create_test_company(COMPANY_ACCESS_THIRD_COMPANY, "TCAC")
+		make_test_company_grant(GRANT_HOLDER_USER, [self.company, self.other, third], allow_export=1)
+		frappe.db.commit()  # nosemgrep
+		seen = []
+		real_run = reports.run
+
+		def recording_run(key, scope, *args, **kwargs):
+			seen.append(scope)
+			return real_run(key, scope, *args, **kwargs)
+
+		with patch.object(reports, "run", side_effect=recording_run):
+			reports.run_background_export(**kwargs)
+		self._assert_ready(export)
+		self.assertEqual(seen[0]["companies"], sorted([self.company, self.other]))
+
+	def test_an_empty_stored_set_is_refused_never_re_resolved(self):
+		export, kwargs = self._queue()
+		frappe.db.delete("HelixHR Report Export Company", {"parent": export})
+		frappe.db.commit()  # nosemgrep
+		reports.run_background_export(**kwargs)
+		self.assertEqual(frappe.db.get_value("HelixHR Report Export", export, "status"), "Failed")
+
+	def test_log_shows_a_combined_export_to_an_admin_reaching_only_a_stored_company(self):
+		out = _as(GRANT_HOLDER_USER, request_export, "project_timesheet", "csv", filters=self.filters)
+		admin = "xco-admin-b@helixhr.test"
+		make_test_user(admin, self.other)
+		doc = frappe.get_doc("User", admin)
+		if "HelixHR Portal Admin" not in [row.role for row in doc.roles]:
+			doc.append_roles("HelixHR Portal Admin")
+			doc.save(ignore_permissions=True)
+			frappe.clear_cache(user=admin)
+		names = [row.name for row in _as(admin, get_export_log, page_length=200)["rows"]]
+		self.assertIn(out["export"], names)
+		# A single-company export of the holder's home company stays hidden.
+		home = _as(
+			GRANT_HOLDER_USER,
+			request_export,
+			"project_timesheet",
+			"csv",
+			filters={**self.filters, "company": self.company},
+		)
+		names = [row.name for row in _as(admin, get_export_log, page_length=200)["rows"]]
+		self.assertNotIn(home["export"], names)

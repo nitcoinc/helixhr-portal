@@ -457,6 +457,69 @@ def ensure_company_access_fixtures():
 	make_test_company_grant(COMPANY_ACCESS_READONLY_USER, [third], level="Reports only")
 
 
+CROSS_COMPANY_PROJECT = "_Test Cross Company Project"
+CROSS_COMPANY_IDLE_PROJECT = "_Test Cross Company Idle"
+CROSS_COMPANY_MONTH = "2016-04"
+CROSS_COMPANY_INC_USER = "xco-inc@helixhr.test"
+CROSS_COMPANY_OUT_USER = "xco-out@helixhr.test"
+
+
+def ensure_cross_company_project_fixture():
+	"""Plan 2026-10-15-001, the Nitco case: a project owned by the test
+	company (Inc) where an Inc employee logs 5h on one task and an employee
+	of the baseline second company (Outsourcing) logs 3h on another, both
+	approved in `CROSS_COMPANY_MONTH`; plus an Inc project nobody from
+	Outsourcing logs on. Idempotent; shared by the report tests and e2e."""
+	from frappe.utils import add_to_date, get_datetime
+
+	company = ensure_test_company()
+	other = ensure_baseline_company()
+	inc = make_test_user(CROSS_COMPANY_INC_USER, company, employee_number="XCO-INC")
+	out = make_test_user(CROSS_COMPANY_OUT_USER, other, employee_number="XCO-OUT")
+	project = make_test_project(company, CROSS_COMPANY_PROJECT)
+	idle = make_test_project(company, CROSS_COMPANY_IDLE_PROJECT)
+	tasks = {}
+	for subject in ("_Test XCO Inc Build", "_Test XCO Outsourced"):
+		tasks[subject] = frappe.db.get_value("Task", {"project": project, "subject": subject}) or (
+			frappe.get_doc({"doctype": "Task", "project": project, "subject": subject, "status": "Open"})
+			.insert(ignore_permissions=True)
+			.name
+		)
+	if not frappe.db.exists("Timesheet Detail", {"project": project}):
+		for employee, ts_company, subject, day, hours in (
+			(inc, company, "_Test XCO Inc Build", "2016-04-05", 5),
+			(out, other, "_Test XCO Outsourced", "2016-04-06", 3),
+		):
+			doc = frappe.new_doc("Timesheet")
+			doc.update({"employee": employee, "company": ts_company})
+			start = get_datetime(f"{day} 09:00:00")
+			doc.append(
+				"time_logs",
+				{
+					"project": project,
+					"task": tasks[subject],
+					"activity_type": "General",
+					"from_time": start,
+					"to_time": add_to_date(start, hours=hours),
+					"hours": hours,
+					"description": "Cross-company fixture work",
+				},
+			)
+			doc.insert(ignore_permissions=True)
+			frappe.db.set_value("Timesheet", doc.name, {"workflow_state": "Approved", "docstatus": 1})
+			frappe.db.set_value("Timesheet Detail", {"parent": doc.name}, "docstatus", 1)
+	return frappe._dict(
+		company=company,
+		other=other,
+		inc=inc,
+		out=out,
+		project=project,
+		idle=idle,
+		inc_task=tasks["_Test XCO Inc Build"],
+		out_task=tasks["_Test XCO Outsourced"],
+	)
+
+
 def set_report_access(report_key, **flags):
 	"""Upsert one HelixHR Report Access row; unspecified flags become 0."""
 	values = {field: flags.get(field, 0) for field in ("hr_user_run", "hr_user_export", "dm_run", "dm_export")}
@@ -887,6 +950,9 @@ def setup_playwright_fixtures():
 	# Plan 2026-10-14-001: company access grants (company-access.spec.ts,
 	# reports-company.spec.ts).
 	ensure_company_access_fixtures()
+	# Plan 2026-10-15-001: an Inc project with Outsourcing hours
+	# (reports-company.spec.ts, "All my companies").
+	ensure_cross_company_project_fixture()
 
 	# Plan 2026-10-15-002 U6: timesheet-oversight.spec.ts needs a remindable
 	# approver group in the HR User's company on every run.

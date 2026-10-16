@@ -69,3 +69,57 @@ test.describe('report company picker', () => {
     await expect(page.getByRole('combobox', { name: 'Company', exact: true })).toHaveCount(0)
   })
 })
+
+// Plan 2026-10-15-001 U4: "All my companies" on project reports. Fixture:
+// `ensure_cross_company_project_fixture` -- an Inc (`_Test Company`) project
+// with 5h from an Inc employee and 3h from an Outsourcing (`_Test Company B`)
+// employee in April 2016.
+const CROSS_PROJECT = '_Test Cross Company Project'
+const HR_MANAGER = 'hr-manager-employee@helixhr.test'
+
+async function crossProjectId(baseURL: string | undefined): Promise<string> {
+  const api = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+  await api.post('/api/method/login', { form: { usr: 'Administrator', pwd: 'admin' } })
+  const response = await api.get('/api/method/frappe.client.get_value', {
+    params: { doctype: 'Project', filters: JSON.stringify({ project_name: CROSS_PROJECT }), fieldname: 'name' },
+  })
+  const name = (await response.json()).message?.name
+  await api.dispose()
+  expect(name, 'cross-company project fixture').toBeTruthy()
+  return name
+}
+
+test.describe('All my companies', () => {
+  test.use({ storageState: { cookies: [], origins: [] } })
+  test.beforeEach(async ({}, testInfo) => {
+    test.skip(testInfo.project.name !== 'hr', 'runs once, in the hr project')
+  })
+
+  test('a grant holder runs a project across both companies with a Company column', async ({ page, baseURL }) => {
+    const project = await crossProjectId(baseURL)
+    await signInAs(page, baseURL, GRANT_HOLDER)
+    await page.goto('/helixhr/reports/project_timesheet')
+    const company = page.getByRole('combobox', { name: 'Company', exact: true })
+    await expect(company).toHaveValue('__all')
+    await expect(company.locator('option').first()).toHaveText('All my companies')
+
+    await page.goto(`/helixhr/reports/project_timesheet?project=${project}&month=2016-04&company=__all`)
+    const table = page.locator('table').last()
+    await expect(table.getByRole('columnheader', { name: /Company/ })).toBeVisible()
+    await expect(table.getByRole('cell', { name: HOME_COMPANY, exact: true })).toBeVisible()
+    await expect(table.getByRole('cell', { name: OTHER_COMPANY, exact: true })).toBeVisible()
+
+    // Switching to one company keeps the project and shows only its hours.
+    await company.selectOption(OTHER_COMPANY)
+    await page.getByRole('button', { name: 'Run report' }).click()
+    await expect(page).toHaveURL(new RegExp(`project=${project}`))
+    await expect(table.getByRole('columnheader', { name: /Company/ })).toHaveCount(0)
+  })
+
+  test('a single-company HR Manager gets no All my companies option', async ({ page, baseURL }) => {
+    await signInAs(page, baseURL, HR_MANAGER)
+    await page.goto('/helixhr/reports/project_timesheet')
+    await expect(page.getByRole('heading', { name: 'Monthly project timesheet', exact: true })).toBeVisible()
+    await expect(page.getByRole('combobox', { name: 'Company', exact: true })).toHaveCount(0)
+  })
+})

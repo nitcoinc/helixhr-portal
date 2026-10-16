@@ -1800,3 +1800,67 @@ projected by `_request_thread` and rendered everywhere by
 - **Desk comments.** Comments added from Desk already appear in the
   thread. Internal notes (deferred) would be a separate marker the portal
   projection skips.
+
+### Cross-company project reports (plan 2026-10-15-001)
+
+A combined run widens project-scoped reports across the caller's allowed
+companies, reversing the "one company per run" decision (KTD11 of plan
+2026-10-14-001) for project reports only.
+
+- **Sentinel.** The ``"__all"`` company filter value ("All my companies")
+  is offered only on entries with ``"project"`` in ``scopes`` and two or
+  more run-capable companies (an unscoped HR caller counts). The resolver
+  builds it company by company: a company-wide tier joins ``companies``, an
+  assigned-only company contributes the Delivery Manager's projects
+  (``user``). The export scope is built the same way from export tiers; a
+  company whose export tier is missing or narrower than its run tier blocks
+  combined export and is named. Saved views and fingerprints carry the
+  sentinel verbatim and re-resolve it per viewer.
+- **Company column.** Combined runs add ``ts.company`` to the result set
+  so each row shows its data company.
+- **Logged-by pickers (R4).** Every report picker, single-company runs
+  included, lists projects owned by a scope company *or* carrying submitted
+  or pending hours from its staff (``reports.report_projects``). On a
+  project reached only through logged hours, the task and employee pickers
+  list only tasks and employees with hours from the scope companies.
+  ``project_scope_filters`` / ``project_in_scope`` are untouched, so the
+  Projects pages and write gates are not widened (KTD4).
+- **Holidays.** A single-company run shades the run company's holidays; a
+  combined run shades the project company's, labelled with it.
+- **Export stored set.** Combined exports keep the home company (or the
+  site default) in ``company`` and store the concrete company set in a
+  child table (``HelixHR Report Export Company``). The background job, the
+  download and the expiry check all ask ``utils.stored_export_scope``: every
+  stored company must still be in the caller's combined set and not
+  blocking, and the job runs over the stored set, never a re-resolved one
+  (R7). A combined row with an empty set is refused. Single-company rows
+  (empty child table) behave as before. The export log shows a combined row
+  to a Portal Admin whose reach touches its stored set.
+- **Export gate.** A combined export is refused when any company in the
+  set lacks export rights. The reason names the blocking company.
+
+### People & access (plan 2026-10-15-001)
+
+One Settings section for one person: their managed portal roles, HR roles
+and cross-company grant, in one screen with one Save.
+
+- **Reach split.** A Portal Admin may edit managed roles only for targets
+  in their home company, and the grant only for companies in their
+  ``grantable_companies`` reach. HR roles (HR User, HR Manager) are System
+  Manager only (KTD9). Self-edit is refused (R14).
+- **HR Manager self-UP (R13).** Adding HR Manager removes the target's
+  Employee User Permissions (an HR Manager scoped to themselves has no HR
+  queue); removing it creates the self one. Only an actual role change
+  triggers it.
+- **Writes.** ``set_portal_role``, ``save_company_access`` and
+  ``save_person_access`` share ``_apply_role_diff`` (one User save, Role
+  Profile refusal) and ``_apply_grant`` (upsert or switch off, stale-checked).
+  ``save_person_access`` needs ``user_modified`` and ``grant_modified`` as
+  loaded, leaves the grant alone unless sent, and revokes only on an explicit
+  ``{"revoke": true}``.
+- **Side effects deferred.** The grant's cache clear and export expiry run
+  after commit (KTD7), via a ``defer_side_effects`` flag on
+  ``HelixHRCompanyAccess``. A rollback then never leaves deleted export
+  files behind.
+- **Profiles.** Frontend-only templates over role and grant toggles. The
+  server validates the resulting toggle set, never a profile name (KTD8).

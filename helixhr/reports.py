@@ -26,11 +26,11 @@ from frappe import _
 from frappe.utils import cint, flt, get_first_day, get_last_day, getdate, today
 
 from helixhr.utils import (
+	SENTINEL_ALL,
 	admin_scope_employee_filters,
 	as_administrator,
 	employee_in_admin_scope,
-	project_in_scope,
-	project_scope_filters,
+	session_company,
 )
 
 # KTD14. Screen cap, and the export caps by format. Inline exports stream
@@ -126,7 +126,7 @@ _HOURS_FIELDS = (
 def _hours_by_project(filters, scope):
 	"""Hours logged against projects and tasks. Approved (submitted) rows
 	only, unless ``include_pending`` adds rows awaiting approval, marked in
-	an ``approval`` column."""
+	an ``approval`` column. Combined scope adds a Company column."""
 	include_pending = cint(filters.get("include_pending"))
 	columns = [
 		{"fieldname": "date", "label": "Date", "fieldtype": "Date"},
@@ -148,17 +148,14 @@ def _hours_by_project(filters, scope):
 	else:
 		conditions = ["ts.docstatus = 1"]
 
-	if scope["kind"] == "company":
-		conditions.append("ts.company = %(scope_company)s")
-		values["scope_company"] = scope["company"]
-	elif scope["kind"] == "assigned":
-		scope_filters = project_scope_filters(scope)
-		if scope_filters is None:
-			return columns, []
-		conditions.append("td.project in %(scope_projects)s")
-		values["scope_projects"] = tuple(scope_filters["name"][1])
-	elif scope["kind"] != "unscoped":
+	if scope.get("combined"):
+		# Plan 2026-10-15-001 R3: a combined run names each row's company.
+		fields.append("ts.company as company")
+		columns.append({"fieldname": "company", "label": "Company", "fieldtype": "Data"})
+	scope_conditions = _timesheet_scope_conditions(scope, values)
+	if scope_conditions is None:
 		return columns, []
+	conditions += scope_conditions
 
 	for key, condition in (
 		("employee", "ts.employee = %(employee)s"),
@@ -187,21 +184,47 @@ def _hours_by_project(filters, scope):
 	return columns, rows
 
 
+def _scope_parts(scope):
+	"""``(companies, assigned user)`` a project-report scope covers, or None
+	for every company (unscoped). An unknown kind raises rather than
+	silently returning nothing (plan 2026-10-15-001 U2)."""
+	kind = scope["kind"]
+	if kind == "unscoped":
+		return None
+	if kind == "company":
+		return [scope["company"]], None
+	if kind == "assigned":
+		return [], scope["user"]
+	if kind == "combined":
+		return list(scope.get("companies") or []), scope.get("user")
+	if kind == "none":
+		return [], None
+	frappe.throw(_("Unsupported report scope."))
+
+
+def _assigned_projects(user):
+	return frappe.get_all("Project User", filters={"user": user}, pluck="parent") if user else []
+
+
 def _timesheet_scope_conditions(scope, values):
 	"""SQL conditions narrowing ``tabTimesheet ts`` / ``tabTimesheet Detail
-	td`` to ``scope``, or None when nothing is in scope."""
-	if scope["kind"] == "company":
-		values["scope_company"] = scope["company"]
-		return ["ts.company = %(scope_company)s"]
-	if scope["kind"] == "assigned":
-		scope_filters = project_scope_filters(scope)
-		if scope_filters is None:
-			return None
-		values["scope_projects"] = tuple(scope_filters["name"][1])
-		return ["td.project in %(scope_projects)s"]
-	if scope["kind"] == "unscoped":
+	td`` to ``scope``, or None when nothing is in scope. A combined scope is
+	``ts.company in set``, or-ed with the assigned projects (KTD2)."""
+	parts = _scope_parts(scope)
+	if parts is None:
 		return []
-	return None
+	companies, user = parts
+	alternatives = []
+	if companies:
+		values["scope_companies"] = tuple(companies)
+		alternatives.append("ts.company in %(scope_companies)s")
+	assigned = _assigned_projects(user)
+	if assigned:
+		values["scope_projects"] = tuple(assigned)
+		alternatives.append("td.project in %(scope_projects)s")
+	if not alternatives:
+		return None
+	return [alternatives[0] if len(alternatives) == 1 else f"({' or '.join(alternatives)})"]
 
 
 # --- U7: monthly project timesheet (flagship) --------------------------------
@@ -226,7 +249,8 @@ def _month_bounds(month):
 
 def _project_timesheet(filters, scope):
 	"""Approved (submitted) hours on one project in one month, one row per
-	time log (KTD3: named columns only, no rate or amount)."""
+	time log (KTD3: named columns only, no rate or amount). Combined scope
+	adds a Company column."""
 	columns = [dict(column) for column in _PROJECT_TIMESHEET_COLUMNS]
 	if not filters.get("project") or not filters.get("month"):
 		return columns, []
@@ -236,11 +260,16 @@ def _project_timesheet(filters, scope):
 		return columns, []
 	start, end = _month_bounds(filters["month"])
 	values.update({"project": filters["project"], "start": start, "end": end})
+	if scope.get("combined"):
+		columns.append({"fieldname": "company", "label": "Company", "fieldtype": "Data"})
+		extra_fields = ", ts.company as company"
+	else:
+		extra_fields = ""
 	rows = frappe.db.sql(
 		f"""
 		select date(td.from_time) as `date`, ts.employee_name as employee_name,
 			coalesce(nullif(tsk.subject, ''), td.task, %(no_task)s) as task_subject,
-			td.description as note, td.hours as hours, td.billing_hours as billing_hours
+			td.description as note, td.hours as hours, td.billing_hours as billing_hours{extra_fields}
 		from `tabTimesheet Detail` td
 		inner join `tabTimesheet` ts on ts.name = td.parent
 		left join `tabTask` tsk on tsk.name = td.task
@@ -357,7 +386,13 @@ def _project_timesheet_extra(clean, scope, rows):
 		"Project", clean["project"], ["project_name", "customer", "company"], as_dict=True
 	)
 	start, end = _month_bounds(clean["month"])
-	holidays = _company_holidays(project.company, start, end) if project and project.company else {}
+	# Plan 2026-10-15-001 U2: a single-company run shades the run company's
+	# holidays (Outsourcing HR on an Inc project sees Outsourcing's); a
+	# combined or assigned run shades the project company's, labelled.
+	holiday_company = scope["company"] if scope["kind"] == "company" else (project.company if project else None)
+	holidays = _company_holidays(holiday_company, start, end) if holiday_company else {}
+	if holiday_company and scope["kind"] != "company":
+		holidays = {day: f"{text} ({holiday_company})" for day, text in holidays.items()}
 	return {
 		"grid": project_timesheet_grid(clean, rows, holidays),
 		"pending_hours": _pending_project_hours(clean, scope),
@@ -1552,16 +1587,23 @@ def wrapped_report_names():
 
 def _entity_in_scope(kind, value, scope):
 	if kind == "employee":
-		if scope["kind"] == "assigned":
-			# The hours query intersects with member projects itself; an
-			# employee filter can only narrow that further.
+		if scope["kind"] == "assigned" or (scope["kind"] == "combined" and scope.get("user")):
+			# The hours query intersects with the scope itself; an employee
+			# filter can only narrow that further.
 			return bool(frappe.db.exists("Employee", value))
+		if scope["kind"] == "combined":
+			return bool(frappe.db.exists("Employee", {"name": value, "company": ["in", scope["companies"]]}))
 		return employee_in_admin_scope(value, scope)
 	if kind == "project":
-		return project_in_scope(value, scope)
+		return report_project_in_scope(value, scope)
 	if kind == "task":
 		project = frappe.db.get_value("Task", value, "project")
-		return bool(project) and project_in_scope(project, scope)
+		filters = _report_task_filters(scope, project) if project else None
+		if filters is None:
+			return False
+		if "name" in filters:
+			return value in filters["name"][1]
+		return bool(frappe.db.exists("Task", {**filters, "name": value}))
 	if kind == "department":
 		if scope["kind"] == "unscoped":
 			return bool(frappe.db.exists("Department", value))
@@ -1660,33 +1702,140 @@ _SELECT_LINK_DOCTYPES = {
 }
 
 
-def _scope_projects(scope):
-	"""Project names in scope, or None for "every project" (unscoped)."""
-	filters = project_scope_filters(scope)
-	if filters is None:
+# Plan 2026-10-15-001 KTD4: report pickers list projects owned by a scope
+# company OR carrying submitted/pending hours from a scope company's staff,
+# so Outsourcing HR can report on the Inc projects its staff work on. This
+# stays report-local: `project_scope_filters` / `project_in_scope` keep
+# feeding the Projects pages and write gates unchanged.
+
+_LOGGED_STATE_SQL = "(ts.docstatus = 1 or (ts.docstatus = 0 and ts.workflow_state in %(pending_states)s))"
+
+
+def _logged(column, companies, project=None):
+	"""Distinct ``column`` values of submitted or pending time logs by
+	``companies``' staff, optionally on one ``project``."""
+	if not companies:
 		return []
-	if not filters:
+	values = {"companies": tuple(companies), "pending_states": PENDING_TIMESHEET_STATES}
+	project_condition = ""
+	if project:
+		values["project"] = project
+		project_condition = "and td.project = %(project)s"
+	return frappe.db.sql_list(
+		f"""
+		select distinct {column}
+		from `tabTimesheet Detail` td
+		inner join `tabTimesheet` ts on ts.name = td.parent
+		where ts.company in %(companies)s and {_LOGGED_STATE_SQL}
+			and ifnull({column}, '') != '' {project_condition}
+		""",
+		values,
+	)
+
+
+def report_projects(scope):
+	"""Project names a report may cover for ``scope``, or None for every
+	project (unscoped): owned by a scope company, logged on by its staff, or
+	assigned to the scope's Delivery Manager."""
+	parts = _scope_parts(scope)
+	if parts is None:
 		return None
-	if "name" in filters:
-		return list(filters["name"][1])
-	return frappe.get_all("Project", filters=filters, pluck="name")
+	companies, user = parts
+	names = set(_assigned_projects(user))
+	if companies:
+		names.update(frappe.get_all("Project", filters={"company": ["in", companies]}, pluck="name"))
+		names.update(_logged("td.project", companies))
+	return sorted(names)
+
+
+def _project_owned(project, scope):
+	"""Whether every hour on ``project`` is in scope by ownership or
+	assignment (as opposed to only the scope companies' logged hours)."""
+	parts = _scope_parts(scope)
+	if parts is None:
+		return True
+	companies, user = parts
+	if user and frappe.db.exists("Project User", {"parent": project, "user": user}):
+		return True
+	return bool(companies) and bool(frappe.db.exists("Project", {"name": project, "company": ["in", companies]}))
+
+
+def report_project_in_scope(project, scope):
+	"""Single-project sibling of `report_projects`."""
+	if not frappe.db.exists("Project", project):
+		return False
+	if _project_owned(project, scope):
+		return True
+	companies, _user = _scope_parts(scope)
+	return bool(_logged("td.project", companies, project))
+
+
+def _report_task_filters(scope, project=None):
+	"""Task filters for ``scope`` (and one ``project``), or None for none.
+	On a project the scope reaches only through logged hours, only tasks
+	with hours from the scope companies are listed."""
+	parts = _scope_parts(scope)
+	if parts is None:
+		return {"project": project} if project else {}
+	companies, user = parts
+	if project:
+		if not report_project_in_scope(project, scope):
+			return None
+		projects = [project]
+		full = projects if _project_owned(project, scope) else []
+	else:
+		projects = report_projects(scope)
+		owned = set(_assigned_projects(user))
+		if companies:
+			owned.update(frappe.get_all("Project", filters={"company": ["in", companies]}, pluck="name"))
+		full = [name for name in projects if name in owned]
+	partial = sorted(set(projects) - set(full))
+	if not partial:
+		return {"project": ["in", full]} if full else None
+	logged = set()
+	for name in partial:
+		logged.update(_logged("td.task", companies, name))
+	if full:
+		logged.update(frappe.get_all("Task", filters={"project": ["in", full]}, pluck="name"))
+	return {"name": ["in", sorted(logged)]} if logged else None
+
+
+def _report_employee_filters(scope, project=None):
+	"""Employee filters for ``scope``, or None for nobody. On a project the
+	scope reaches only through logged hours, only the scope companies'
+	employees who logged on it are listed."""
+	parts = _scope_parts(scope)
+	if parts is None:
+		return {}
+	companies, user = parts
+	if project and report_project_in_scope(project, scope) and not _project_owned(project, scope):
+		names = _logged("ts.employee", companies, project)
+		return {"name": ["in", names]} if names else None
+	assigned = _assigned_projects(user)
+	members = frappe.get_all("Project User", filters={"parent": ["in", assigned]}, pluck="user") if assigned else []
+	if not members:
+		return {"company": ["in", companies]} if companies else None
+	if not companies:
+		return {"user_id": ["in", members]}
+	names = frappe.get_all(
+		"Employee", or_filters={"company": ["in", companies], "user_id": ["in", members]}, pluck="name"
+	)
+	return {"name": ["in", names]} if names else None
 
 
 def _option_source(spec, scope, context):
 	"""(doctype, scope filters | None, label field, description field,
 	search fields) for one filter spec. None filters = nothing in scope."""
 	kind = spec["type"]
+	wanted = context.get("project") if isinstance(context, dict) else None
+	wanted = wanted if isinstance(wanted, str) and wanted else None
 	if kind == "employee":
-		if scope["kind"] == "assigned":
-			projects = _scope_projects(scope)
-			users = (
-				frappe.get_all("Project User", filters={"parent": ["in", projects]}, pluck="user")
-				if projects
-				else []
-			)
-			filters = {"user_id": ["in", users]} if users else None
+		if scope["kind"] in ("assigned", "combined"):
+			filters = _report_employee_filters(scope, wanted)
 		else:
 			filters = admin_scope_employee_filters(scope)
+			if filters is not None and wanted and scope["kind"] == "company":
+				filters = _report_employee_filters(scope, wanted)
 		return (
 			"Employee",
 			filters,
@@ -1695,16 +1844,13 @@ def _option_source(spec, scope, context):
 			("name", "employee_name", "employee_number"),
 		)
 	if kind == "project":
-		return "Project", project_scope_filters(scope), "project_name", "status", ("name", "project_name")
+		projects = report_projects(scope)
+		filters = {} if projects is None else ({"name": ["in", projects]} if projects else None)
+		return "Project", filters, "project_name", "status", ("name", "project_name")
 	if kind == "task":
-		projects = _scope_projects(scope)
-		filters = None if projects == [] else ({} if projects is None else {"project": ["in", projects]})
-		wanted = context.get("project") if isinstance(context, dict) else None
-		if filters is not None and isinstance(wanted, str) and wanted:
-			filters = {"project": wanted} if project_in_scope(wanted, scope) else None
-		return "Task", filters, "subject", "project", ("name", "subject")
+		return "Task", _report_task_filters(scope, wanted), "subject", "project", ("name", "subject")
 	if kind == "department":
-		filters = admin_scope_employee_filters(scope) if scope["kind"] != "assigned" else None
+		filters = admin_scope_employee_filters(scope) if scope["kind"] in ("company", "unscoped") else None
 		return "Department", filters, "department_name", "company", ("name", "department_name")
 	doctype = _SELECT_LINK_DOCTYPES[spec["name"]]
 	return doctype, {}, "name", None, ("name",)
@@ -1746,6 +1892,8 @@ def search_options(entry, filter_name, scope, query=None, value=None, context=No
 
 	if value not in (None, ""):
 		if not isinstance(value, str):
+			return []
+		if "name" in filters and value not in filters["name"][1]:
 			return []
 		rows = fetch({**filters, "name": value})
 	else:
@@ -1810,15 +1958,23 @@ def client_entry(entry, access):
 		# report for, each with its own export right, and the default.
 		"company": access["company"],
 		"companies": access["companies"],
+		# Plan 2026-10-15-001 KTD1/KTD3: combined company option.
+		"combined_option": access.get("combined_option", False),
+		"combined_exportable": access.get("combined_exportable", False),
+		"blocking_companies": access.get("blocking_companies", []),
 	}
 
 
 def _scope_company(scope, raw):
 	"""The company a wrapped report runs for: always the scope's company;
 	only an unscoped caller (Administrator, anchorless HR Manager) may name
-	one, and otherwise gets the site default."""
+	one, and otherwise gets the site default. A combined run (plan
+	2026-10-15-001 U2) answers the caller's home company: it feeds only the
+	letter head and export meta, while rows carry a Company column."""
 	if scope["kind"] == "company":
 		return scope["company"]
+	if scope.get("combined"):
+		return session_company(frappe.session.user) or frappe.defaults.get_global_default("company")
 	requested = raw.get("company") if isinstance(raw, dict) else None
 	if isinstance(requested, str) and frappe.db.exists("Company", requested):
 		return requested
@@ -2027,6 +2183,10 @@ def run(report_key, scope, filters=None, group_by=None, sort=None):
 	group_by = _parse(group_by, [])
 	sort = _parse(sort, None)
 
+	if entry["fixed_group_by"] is not None:
+		# Any requested grouping is ignored: a background export replays the
+		# fixed grouping the screen run applied, which is not a user choice.
+		group_by = []
 	if not isinstance(group_by, list) or len(group_by) > 2 or len(set(map(str, group_by))) != len(group_by):
 		frappe.throw(_("Group by at most two different fields."))
 	for field in group_by:
@@ -2036,7 +2196,6 @@ def run(report_key, scope, filters=None, group_by=None, sort=None):
 		isinstance(sort, dict) and isinstance(sort.get("field"), str) and sort.get("order") in ("asc", "desc")
 	):
 		frappe.throw(_("Invalid sort."))
-
 	if entry["fixed_group_by"] is not None:
 		group_by = list(entry["fixed_group_by"])
 
@@ -2046,6 +2205,9 @@ def run(report_key, scope, filters=None, group_by=None, sort=None):
 	# carry it. The API boundary already decided it (`resolve_report_access`).
 	if scope.get("company"):
 		clean["company"] = scope["company"]
+	# Plan 2026-10-15-001 KTD1: a combined scope carries the sentinel instead.
+	if scope.get("combined"):
+		clean["company"] = SENTINEL_ALL
 	if removed:
 		columns, rows = [], []
 		if entry["engine"] == "helixhr":
@@ -2056,12 +2218,20 @@ def run(report_key, scope, filters=None, group_by=None, sort=None):
 	columns = mark_id_columns(columns)
 
 	shaped = shape(columns, rows, group_by, sort, entry["totals"])
+	company_counts = None
+	if scope.get("combined"):
+		# Plan 2026-10-15-001 U2: rows per company, so a row-cap notice can
+		# name the company that was cut.
+		company_counts = {}
+		for row in rows:
+			company_counts[row.get("company")] = company_counts.get(row.get("company"), 0) + 1
 	return {
 		"columns": columns,
 		"shaped": shaped,
 		"groups_applied": group_by,
 		"filters_removed": removed,
 		"filters": clean,
+		"company_counts": company_counts,
 		"extra": entry["extra"](clean, scope, rows) if entry["extra"] and not removed else None,
 	}
 
@@ -2449,7 +2619,7 @@ def run_background_export(export, filters=None, group_by=None, sort=None, hidden
 	file is a private File attached to the owner-only export row, which is
 	what keeps it downloadable by the requester alone. Either way the
 	requester gets a Notification Log routed to Reports."""
-	from helixhr.utils import can_export_report, resolve_report_access
+	from helixhr.utils import stored_export_companies, stored_export_scope
 
 	row = frappe.db.get_value(
 		"HelixHR Report Export", export, ["name", "owner", "report_key", "format", "status"], as_dict=True
@@ -2462,11 +2632,22 @@ def run_background_export(export, filters=None, group_by=None, sort=None, hidden
 		frappe.db.set_value("HelixHR Report Export", export, "status", "Running")
 		frappe.db.commit()  # nosemgrep -- the "My exports" panel shows Running
 		try:
-			access = resolve_report_access(row.owner, row.report_key, _parse(filters, {}).get("company"))
-			if not can_export_report(row.owner, row.report_key, access=access):
+			# Plan 2026-10-15-001 R7: a combined export runs over its stored
+			# company set as an explicit scope, never a re-resolved (wider)
+			# one; an empty stored set is refused, never re-resolved.
+			company_filter = _parse(filters, {}).get("company")
+			stored = stored_export_companies(export)
+			if company_filter == SENTINEL_ALL and not stored:
 				raise _ExportRefused(_("You no longer have access to export this report."))
+
+			def allowed_scope():
+				scope = stored_export_scope(row.owner, row.report_key, company_filter, stored)
+				if scope is None:
+					raise _ExportRefused(_("You no longer have access to export this report."))
+				return scope
+
+			scope = allowed_scope()
 			entry = get_entry(row.report_key)
-			scope = access["export_scope"]
 			result = run(row.report_key, scope, filters, group_by, sort)
 			total_rows = result["shaped"]["total_rows"]
 			if export_mode(row.format, total_rows) == "refused":
@@ -2476,8 +2657,7 @@ def run_background_export(export, filters=None, group_by=None, sort=None, hidden
 			)
 			# A revoke can land while the file is being built; check again
 			# before it becomes downloadable.
-			if not can_export_report(row.owner, row.report_key, _parse(filters, {}).get("company")):
-				raise _ExportRefused(_("You no longer have access to export this report."))
+			allowed_scope()
 			file = frappe.get_doc(
 				{
 					"doctype": "File",

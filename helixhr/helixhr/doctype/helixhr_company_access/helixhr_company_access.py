@@ -36,7 +36,10 @@ class HelixHRCompanyAccess(Document):
 			self.employee, self.home_company = anchor.name, anchor.company
 
 	def on_update(self):
-		_after_change(self.user)
+		# Plan 2026-10-15-001 KTD7: when defer_side_effects is set, the
+		# caller runs them after commit. skip the hook.
+		if not self.flags.get("defer_side_effects"):
+			_after_change(self.user)
 
 	def after_delete(self):
 		_after_change(self.user)

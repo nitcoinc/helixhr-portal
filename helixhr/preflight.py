@@ -1805,8 +1805,15 @@ def check_company_access_grants():
 	with reach into the same companies can grant each other. FAIL when the
 	doctype gains a DocPerm beyond System Manager: Portal Admin writes
 	through its own gated endpoints, and a role DocPerm would let anybody
-	holding it edit grants over REST."""
+	holding it edit grants over REST.
+
+	Plan 2026-10-15-001 U7: FAIL when the combined-export company table is
+	missing (every combined export re-check reads it), and WARN for a
+	holder who may run reports but not export them in a granted company --
+	their "All my companies" export stays blocked there."""
 	label = "Company access grants"
+	if not frappe.db.exists("DocType", "HelixHR Report Export Company"):
+		return _result(label, FAIL, "HelixHR Report Export Company doctype is missing -- run bench migrate")
 	extra = set()
 	for doctype in ("DocPerm", "Custom DocPerm"):
 		extra |= set(frappe.get_all(doctype, filters={"parent": "HelixHR Company Access"}, pluck="role"))
@@ -1817,7 +1824,7 @@ def check_company_access_grants():
 	grants = frappe.get_all(
 		"HelixHR Company Access",
 		filters={"enabled": 1},
-		fields=["name", "user", "employee", "home_company", "level"],
+		fields=["name", "user", "employee", "home_company", "level", "allow_export"],
 		order_by="user asc",
 	)
 	if not grants:
@@ -1844,6 +1851,8 @@ def check_company_access_grants():
 			problems.append(f"{grant.user}: names unknown companies {', '.join(unknown)}")
 		if PORTAL_ADMIN in frappe.get_roles(grant.user):
 			problems.append(f"{grant.user}: holds Portal Admin -- check who granted it")
+		if not grant.allow_export:
+			problems.append(f"{grant.user}: may run but not export reports in {', '.join(named)}")
 	detail = f"{len(grants)} enabled: {'; '.join(listed)}"
 	if problems:
 		return _result(label, WARN, f"{'; '.join(problems)}. {detail}")
