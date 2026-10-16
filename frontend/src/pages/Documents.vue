@@ -1,10 +1,11 @@
 <script setup>
-import { ref, computed, reactive, nextTick } from 'vue'
+import { ref, computed, reactive } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
+import TabBar from '@/components/TabBar.vue'
 import { session } from '@/lib/session'
 import { call, saveDocumentWithFile } from '@/lib/api'
 import { formatDate, today } from '@/lib/dates'
@@ -37,15 +38,6 @@ const tab = computed(() => (route.query.tab === 'general' ? 'general' : 'importa
 
 function showTab(name) {
   router.replace({ query: { ...route.query, tab: name === 'important' ? undefined : name } })
-}
-
-/** Arrow keys move between the tabs, the way a `role="tablist"` is expected
- * to behave; focus follows the selection. */
-function cycleTab(delta) {
-  const names = TABS.map((item) => item.name)
-  const next = names[(names.indexOf(tab.value) + delta + names.length) % names.length]
-  showTab(next)
-  nextTick(() => document.getElementById(`documents-tab-${next}`)?.focus())
 }
 
 const query = ref('')
@@ -296,39 +288,20 @@ async function confirmDelete() {
       </p>
     </div>
 
-    <div
-      class="mb-4 flex gap-2 border-b border-outline-gray-2"
-      role="tablist"
-      aria-label="Document categories"
+    <TabBar
+      class="mb-4"
+      :tabs="TABS.map((item) => ({ key: item.name, label: item.label, count: counts[item.name] }))"
+      :model-value="tab"
+      label="Document categories"
+      panel-id="documents-panel"
       data-testid="documents-tabs"
-    >
-      <button
-        v-for="item in TABS"
-        :id="`documents-tab-${item.name}`"
-        :key="item.name"
-        type="button"
-        role="tab"
-        aria-controls="documents-panel"
-        class="-mb-px min-h-11 border-b-2 px-3 text-sm font-medium"
-        :class="
-          tab === item.name
-            ? 'border-heading text-ink-gray-9'
-            : 'border-transparent text-ink-gray-6 hover:text-ink-gray-9'
-        "
-        :aria-selected="tab === item.name"
-        :tabindex="tab === item.name ? 0 : -1"
-        @click="showTab(item.name)"
-        @keydown.right.prevent="cycleTab(1)"
-        @keydown.left.prevent="cycleTab(-1)"
-      >
-        {{ item.label }} ({{ counts[item.name] }})
-      </button>
-    </div>
+      @update:model-value="showTab"
+    />
 
     <div
       id="documents-panel"
       role="tabpanel"
-      :aria-labelledby="`documents-tab-${tab}`"
+      :aria-labelledby="`documents-panel-tab-${tab}`"
     >
       <AsyncState
         section="documents"

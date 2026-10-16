@@ -1,9 +1,9 @@
 <script setup>
 import { computed } from 'vue'
-import { useRouter } from 'vue-router'
 import { createResource } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
+import TabBar from '@/components/TabBar.vue'
 import CategoriesSection from '@/components/settings/CategoriesSection.vue'
 import LeaveTypesSection from '@/components/settings/LeaveTypesSection.vue'
 import HolidayListsSection from '@/components/settings/HolidayListsSection.vue'
@@ -21,7 +21,6 @@ import { session } from '@/lib/session'
 const props = defineProps({
   section: { type: String, default: '' },
 })
-const router = useRouter()
 
 // A Portal Admin who is not HR gets only the two sections whose endpoints
 // accept it, and never calls `get_portal_config` (HR-only). Anyone else still
@@ -82,9 +81,13 @@ const activeDeskUrl = computed(() => {
   return config.data?.desk_urls?.[key] || null
 })
 
-function selectSection(key) {
-  router.push(key === DEFAULT_SECTION ? '/settings' : `/settings/${key}`)
-}
+// Route-segment sections, so the bar is links (`nav` mode): a reload, a
+// middle-click and the back button all land on the section.
+const sectionTabs = SECTIONS.map((tab) => ({
+  ...tab,
+  to: tab.key === DEFAULT_SECTION ? '/settings' : `/settings/${tab.key}`,
+  testid: `settings-tab-${tab.key}`,
+}))
 
 function reload() {
   config.reload()
@@ -122,27 +125,14 @@ function reload() {
       skeleton-height="h-96"
     >
       <div class="space-y-5">
-        <nav
-          class="flex flex-wrap gap-1 border-b border-outline-gray-1"
-          aria-label="Settings sections"
-        >
-          <button
-            v-for="tab in SECTIONS"
-            :key="tab.key"
-            type="button"
-            class="min-h-11 cursor-pointer rounded-t-lg px-3 py-2 text-sm font-medium"
-            :aria-current="activeSection === tab.key ? 'page' : undefined"
-            :class="
-              activeSection === tab.key
-                ? 'border-b-2 border-heading text-ink-gray-9'
-                : 'text-ink-gray-6 hover:text-ink-gray-9'
-            "
-            :data-testid="`settings-tab-${tab.key}`"
-            @click="selectSection(tab.key)"
-          >
-            {{ tab.label }}
-          </button>
-        </nav>
+        <!-- One scrolling line at every width (HR-09): five sections used to
+             wrap onto two rows at 390px. -->
+        <TabBar
+          nav
+          :tabs="sectionTabs"
+          :model-value="activeSection"
+          label="Settings sections"
+        />
 
         <CategoriesSection
           v-if="activeSection === 'categories'"

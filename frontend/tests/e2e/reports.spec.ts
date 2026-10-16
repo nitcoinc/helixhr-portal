@@ -374,7 +374,10 @@ test.describe('export', () => {
     // as the Portal Admin to read the row back.
     await signInAs(page, baseURL, PORTAL_ADMIN)
     await page.goto('/helixhr/reports')
-    await page.getByRole('button', { name: 'Export log' }).click()
+    // The Portal Admin has no report role, so the log is the page's only
+    // view: shown straight away, with no one-item tab bar (AI-09).
+    await expect(page.getByRole('heading', { name: 'Export log' })).toBeVisible()
+    await expect(page.getByRole('tablist', { name: 'Reports sections' })).toHaveCount(0)
     await expect(page.getByTestId('export-log-row').first()).toContainText('Leave ledger')
     await expect(page.getByTestId('export-log-row').first()).toContainText('CSV')
   })
@@ -392,7 +395,8 @@ test.describe('report tiers', () => {
     await page.goto('/helixhr/reports')
     await expect(page.getByRole('link', { name: /Hours by project/ })).toBeVisible()
     await expect(page.getByRole('link', { name: /Leave ledger/ })).toHaveCount(0)
-    await expect(page.getByRole('button', { name: 'Export log' })).toHaveCount(0)
+    await expect(page.getByRole('tab', { name: 'Export log' })).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Export log' })).toHaveCount(0)
   })
 
   test('a Report Manager sees every family and may export', async ({ page, baseURL }) => {
@@ -539,7 +543,8 @@ test.describe('report tiers', () => {
       await expect(page.getByTestId('people-access-summary')).not.toContainText('IT Team')
 
       await page.goto('/helixhr/reports')
-      await expect(page.getByRole('button', { name: 'Export log' })).toBeVisible()
+      await expect(page.getByRole('heading', { name: 'Export log' })).toBeVisible()
+      await expect(page.getByRole('tablist', { name: 'Reports sections' })).toHaveCount(0)
       await expect(page.getByRole('heading', { name: 'Leave', exact: true })).toHaveCount(0)
       await expect(page.getByText("You don't have access to this")).toHaveCount(0)
 

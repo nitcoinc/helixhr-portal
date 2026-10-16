@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { createResource } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
+import TabBar from '@/components/TabBar.vue'
 import ReportCatalog from '@/components/reports/ReportCatalog.vue'
 import ReportFilters from '@/components/reports/ReportFilters.vue'
 import ReportTable from '@/components/reports/ReportTable.vue'
@@ -177,6 +178,13 @@ const tabs = computed(() =>
 )
 const pickedTab = ref('reports')
 const catalogTab = computed(() => (catalog.value.length ? pickedTab.value : 'exports'))
+// AI-09: the catalog's promise is wrong for someone who can only read the log.
+const exportLogOnly = computed(() => showExportLog.value && !!catalogResource.data && !catalog.value.length)
+const subtitle = computed(() => {
+  if (entry.value) return entry.value.question
+  if (exportLogOnly.value) return 'Who exported which report, when, and with which filters.'
+  return 'Named questions, answered inside the portal.'
+})
 
 // (Re)initialise when the report changes -- not on our own URL writes.
 watch(
@@ -269,7 +277,7 @@ async function openInDesk() {
   <div>
     <PageHeader
       title="Reports"
-      :subtitle="entry ? entry.question : 'Named questions, answered inside the portal.'"
+      :subtitle="subtitle"
     />
 
     <AsyncState
@@ -304,23 +312,16 @@ async function openInDesk() {
       </div>
 
       <template v-else-if="!entry">
-        <nav
+        <!-- Two views of this page, not routes, so a tablist. A Portal Admin
+             with no report role has the export log alone: one tab is no
+             choice, so no bar (AI-09). -->
+        <TabBar
           v-if="showExportLog"
-          class="mb-4 flex gap-1 border-b border-outline-gray-1"
-          aria-label="Reports sections"
-        >
-          <button
-            v-for="tab in tabs"
-            :key="tab.key"
-            type="button"
-            class="min-h-11 cursor-pointer rounded-t-lg px-3 py-2 text-sm font-medium"
-            :aria-current="catalogTab === tab.key ? 'page' : undefined"
-            :class="catalogTab === tab.key ? 'border-b-2 border-heading text-ink-gray-9' : 'text-ink-gray-6 hover:text-ink-gray-9'"
-            @click="pickedTab = tab.key"
-          >
-            {{ tab.label }}
-          </button>
-        </nav>
+          v-model="pickedTab"
+          class="mb-4"
+          :tabs="tabs"
+          label="Reports sections"
+        />
         <ExportLog v-if="showExportLog && catalogTab === 'exports'" />
         <ReportCatalog
           v-else

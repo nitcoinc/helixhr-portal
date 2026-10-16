@@ -4,6 +4,7 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
+import TabBar from '@/components/TabBar.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
@@ -81,16 +82,16 @@ const leaveAttendanceCount = computed(() => {
 const VIEW_TABS = computed(() =>
   [
     (session.canApprove || session.canOverseeTimesheets) && {
-      name: 'timesheets',
+      key: 'timesheets',
       label: 'Timesheets',
-      count: timesheetCount.value,
+      count: timesheetCount.value || null,
     },
     session.canApprove && {
-      name: 'queue',
+      key: 'queue',
       label: 'Leave & attendance',
-      count: leaveAttendanceCount.value,
+      count: leaveAttendanceCount.value || null,
     },
-    session.canSeeAllPending && { name: 'all-pending', label: 'All pending' },
+    session.canSeeAllPending && { key: 'all-pending', label: 'All pending' },
   ].filter(Boolean),
 )
 const OVERDUE_VISIBLE_ROWS = 5
@@ -98,7 +99,7 @@ const OVERDUE_VISIBLE_ROWS = 5
 const firstWaitingTab = computed(() => {
   if (timesheetCount.value > 0) return 'timesheets'
   if (leaveAttendanceCount.value > 0) return 'queue'
-  const names = VIEW_TABS.value.map((tab) => tab.name)
+  const names = VIEW_TABS.value.map((tab) => tab.key)
   return names[0] || 'queue'
 })
 // Chosen once, on the first answer: deciding the last timesheet must not
@@ -119,7 +120,7 @@ const view = computed(() => {
   // A tab this caller does not have -- the `overdue` alias included -- falls
   // back to the default (R14); the server refuses them regardless.
   const asked = route.query.view === 'overdue' ? 'all-pending' : route.query.view
-  return VIEW_TABS.value.some((tab) => tab.name === asked) ? asked : defaultTab.value
+  return VIEW_TABS.value.some((tab) => tab.key === asked) ? asked : defaultTab.value
 })
 const overdueOnly = computed(() => route.query.view === 'overdue' || route.query.overdue === '1')
 function showView(name) {
@@ -686,34 +687,15 @@ function dismissBulkResult() {
       </template>
     </PageHeader>
 
-    <!-- Plan 2026-10-15-002 U5. One visible tab hides the bar (R14). -->
-    <div
-      v-if="VIEW_TABS.length > 1"
-      class="mb-4 flex gap-2 overflow-x-auto border-b border-outline-gray-2"
-      role="tablist"
-      aria-label="Approvals views"
-    >
-      <button
-        v-for="tab in VIEW_TABS"
-        :key="tab.name"
-        type="button"
-        role="tab"
-        class="-mb-px min-h-11 shrink-0 border-b-2 px-3 text-sm font-medium"
-        :class="
-          view === tab.name
-            ? 'border-heading text-ink-gray-9'
-            : 'border-transparent text-ink-gray-6 hover:text-ink-gray-9'
-        "
-        :aria-selected="view === tab.name"
-        @click="showView(tab.name)"
-      >
-        {{ tab.label }}
-        <span
-          v-if="tab.count"
-          class="tabular ml-1 text-ink-gray-5"
-        >{{ tab.count }}</span>
-      </button>
-    </div>
+    <!-- Plan 2026-10-15-002 U5. One visible tab hides the bar (R14); TabBar
+         renders nothing for a single tab. -->
+    <TabBar
+      class="mb-4"
+      :tabs="VIEW_TABS"
+      :model-value="view"
+      label="Approvals views"
+      @update:model-value="showView"
+    />
 
     <!-- R8: every pending non-timesheet item in HR's company, by approver.
          Overdue only reproduces the old Overdue tab; `?view=overdue` lands

@@ -4,6 +4,7 @@ import { createResource, FormControl, Button, Dialog } from 'frappe-ui'
 import Avatar from '@/components/Avatar.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
+import TabBar from '@/components/TabBar.vue'
 import ProfileFields from '@/components/profile/ProfileFields.vue'
 import ProfileTable from '@/components/profile/ProfileTable.vue'
 import CorrectionDialog from '@/components/profile/CorrectionDialog.vue'
@@ -63,9 +64,11 @@ const correctionCategory = computed(() => profile.data?.correction_category || n
 // `helixhr_hr_contact`, rendered as a window global by the portal shell.
 const hrContactEmail = window.helixhr_hr_contact || ''
 
-function tabRoute(key) {
-  return key === 'personal' ? '/profile' : `/profile/${key}`
-}
+const sectionTabs = SECTIONS.map((tab) => ({
+  ...tab,
+  to: tab.key === 'personal' ? '/profile' : `/profile/${tab.key}`,
+  testid: `profile-tab-${tab.key}`,
+}))
 
 // ── The identity band ──────────────────────────────────────────────────
 // Who you are, on the deep field, with the initials monogram in signal
@@ -354,26 +357,12 @@ async function saveChanges() {
           </template>.
         </p>
 
-        <nav
-          class="flex flex-wrap gap-1 border-b border-outline-gray-1"
-          aria-label="Profile sections"
-        >
-          <router-link
-            v-for="tab in SECTIONS"
-            :key="tab.key"
-            :to="tabRoute(tab.key)"
-            class="inline-flex min-h-11 cursor-pointer items-center rounded-t-lg px-3 py-2 text-sm font-medium"
-            :aria-current="active.key === tab.key ? 'page' : undefined"
-            :class="
-              active.key === tab.key
-                ? 'border-b-2 border-heading text-ink-gray-9'
-                : 'text-ink-gray-6 hover:text-ink-gray-9'
-            "
-            :data-testid="`profile-tab-${tab.key}`"
-          >
-            {{ tab.label }}
-          </router-link>
-        </nav>
+        <TabBar
+          nav
+          :tabs="sectionTabs"
+          :model-value="active.key"
+          label="Profile sections"
+        />
 
         <h2 class="type-section font-heading text-ink-gray-9">
           {{ active.label }}

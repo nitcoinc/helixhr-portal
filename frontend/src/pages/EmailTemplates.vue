@@ -3,6 +3,7 @@ import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { onBeforeRouteLeave, useRoute, useRouter } from 'vue-router'
 import { createResource, Button, Dialog } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
+import TabBar from '@/components/TabBar.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import CelebrationEditor from '@/components/templates/CelebrationEditor.vue'
 import EmailThemeEditor from '@/components/templates/EmailThemeEditor.vue'
@@ -262,7 +263,12 @@ const showEditor = computed(() => !!selected.value)
 const route = useRoute()
 const router = useRouter()
 
-const GROUPS = ['theme', 'messages', 'celebrations']
+const TEMPLATE_GROUPS = [
+  { key: 'theme', label: 'Theme', testid: 'email-template-group-theme' },
+  { key: 'messages', label: 'Message templates', testid: 'email-template-group-messages' },
+  { key: 'celebrations', label: 'Celebrations & holidays', testid: 'email-template-group-celebrations' },
+]
+const GROUPS = TEMPLATE_GROUPS.map((group) => group.key)
 const activeGroup = computed(() => (GROUPS.includes(route.query.group) ? route.query.group : 'messages'))
 
 function chooseGroup(group) {
@@ -307,30 +313,14 @@ watch(
     />
 
     <!-- The group nav: the shared theme, message templates, celebrations. -->
-    <div
-      class="mb-4 flex gap-1 overflow-x-auto border-b border-outline-gray-1"
-      role="tablist"
-      aria-label="Template groups"
+    <TabBar
+      class="mb-4"
+      :tabs="TEMPLATE_GROUPS"
+      :model-value="activeGroup"
+      label="Template groups"
       data-testid="email-template-groups"
-    >
-      <button
-        v-for="group in [
-          { key: 'theme', label: 'Theme' },
-          { key: 'messages', label: 'Message templates' },
-          { key: 'celebrations', label: 'Celebrations & holidays' },
-        ]"
-        :key="group.key"
-        type="button"
-        role="tab"
-        class="min-h-11 shrink-0 rounded-t-lg px-3 py-2 text-sm"
-        :class="activeGroup === group.key ? 'border-b-2 border-outline-gray-4 font-medium text-ink-gray-9' : 'text-ink-gray-7 hover:text-ink-gray-9'"
-        :aria-selected="activeGroup === group.key ? 'true' : 'false'"
-        :data-testid="`email-template-group-${group.key}`"
-        @click="chooseGroup(group.key)"
-      >
-        {{ group.label }}
-      </button>
-    </div>
+      @update:model-value="chooseGroup"
+    />
 
     <EmailThemeEditor v-if="activeGroup === 'theme'" />
 

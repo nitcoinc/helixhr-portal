@@ -5,6 +5,7 @@ import { ref, computed, watch } from 'vue'
 import { createResource, Dialog, Button } from 'frappe-ui'
 import { useRoute, useRouter } from 'vue-router'
 import PageHeader from '@/components/PageHeader.vue'
+import TabBar from '@/components/TabBar.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
 import { addCalendarDays, dateTileParts, formatDateRange, mondayOf, today } from '@/lib/dates'
@@ -24,8 +25,8 @@ const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 const route = useRoute()
 const router = useRouter()
 const TABS = [
-  { name: 'leaves', label: 'Leaves' },
-  { name: 'timesheets', label: 'Timesheets' },
+  { key: 'leaves', label: 'Leaves' },
+  { key: 'timesheets', label: 'Timesheets' },
 ]
 const tab = computed(() => (route.query.tab === 'timesheets' ? 'timesheets' : 'leaves'))
 const weekStart = computed(() => {
@@ -39,12 +40,6 @@ function pushQuery(query) {
 }
 function showTab(name) {
   pushQuery({ ...route.query, tab: name, week: weekStart.value })
-}
-/** Arrow keys move between the two tabs, the way a `role="tablist"` is
- * expected to (the same pattern the Requests page uses). */
-function cycleTab(delta) {
-  const names = TABS.map((item) => item.name)
-  showTab(names[(names.indexOf(tab.value) + delta + names.length) % names.length])
 }
 function goToWeek(iso) {
   pushQuery({ ...route.query, tab: tab.value, week: iso })
@@ -326,33 +321,15 @@ const quietWeek = computed(() => !noReports.value && !hasLeave.value)
 
     <!-- Plan 2026-10-04-003 R1. Two tabs, in the URL, arrow-key switchable --
          the same segmented control the Requests page uses. -->
-    <div
+    <TabBar
       v-if="!forbidden"
-      class="mb-4 flex gap-2 border-b border-outline-gray-2"
-      role="tablist"
-      aria-label="Team views"
+      class="mb-4"
+      :tabs="TABS"
+      :model-value="tab"
+      label="Team views"
       data-testid="team-tabs"
-    >
-      <button
-        v-for="item in TABS"
-        :key="item.name"
-        type="button"
-        role="tab"
-        class="-mb-px min-h-11 border-b-2 px-3 text-sm font-medium"
-        :class="
-          tab === item.name
-            ? 'border-heading text-ink-gray-9'
-            : 'border-transparent text-ink-gray-6 hover:text-ink-gray-9'
-        "
-        :aria-selected="tab === item.name"
-        :tabindex="tab === item.name ? 0 : -1"
-        @click="showTab(item.name)"
-        @keydown.right.prevent="cycleTab(1)"
-        @keydown.left.prevent="cycleTab(-1)"
-      >
-        {{ item.label }}
-      </button>
-    </div>
+      @update:model-value="showTab"
+    />
 
     <!-- Week navigation. Both arrows and a way back, because a manager who
          has paged three weeks out should not have to page back. It sits

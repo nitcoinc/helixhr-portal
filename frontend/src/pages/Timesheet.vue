@@ -6,6 +6,7 @@ import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
 import WeekGrid from '@/components/WeekGrid.vue'
 import MonthOverview from '@/components/MonthOverview.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import TabBar from '@/components/TabBar.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
@@ -143,6 +144,17 @@ const days = computed(() =>
     label: formatDate(iso),
     isWeekend: index >= 5,
     total: dayTotal(iso),
+  })),
+)
+
+// The phone day picker's tabs. The weekend tint steps aside for the
+// selected day's own highlight.
+const dayTabs = computed(() =>
+  days.value.map((day) => ({
+    ...day,
+    key: day.iso,
+    ariaLabel: `${day.weekday} ${day.dayOfMonth}, ${day.total} hours`,
+    class: day.isWeekend && day.iso !== selectedDate.value ? 'bg-field-deep/50' : '',
   })),
 )
 
@@ -579,24 +591,15 @@ const savedLabel = computed(() => {
           </button>
         </div>
 
-        <div
-          class="grid grid-cols-7"
-          role="tablist"
-          aria-label="Days this week"
+        <TabBar
+          v-model="selectedDate"
+          variant="field"
+          :tabs="dayTabs"
+          label="Days this week"
         >
-          <button
-            v-for="day in days"
-            :key="day.iso"
-            class="relative flex cursor-pointer flex-col items-center gap-1 border-r border-white/10 px-1 pb-2 pt-2.5 last:border-r-0 hover:bg-white/10"
-            :class="day.iso === selectedDate ? 'bg-white/15' : day.isWeekend ? 'bg-field-deep/50' : ''"
-            type="button"
-            role="tab"
-            :aria-selected="day.iso === selectedDate"
-            :aria-label="`${day.weekday} ${day.dayOfMonth}, ${day.total} hours`"
-            @click="selectedDate = day.iso"
-          >
+          <template #tab="{ tab: day, selected }">
             <span
-              v-if="day.iso === selectedDate"
+              v-if="selected"
               class="absolute inset-x-0 top-0 h-0.5 bg-signal"
             />
             <span
@@ -619,8 +622,8 @@ const savedLabel = computed(() => {
             >
               {{ day.total ? `${day.total}h` : '0h' }}
             </span>
-          </button>
-        </div>
+          </template>
+        </TabBar>
 
         <div class="flex items-center justify-between gap-3 bg-field-deep/60 px-4 py-2.5">
           <p class="text-sm text-blue-100">

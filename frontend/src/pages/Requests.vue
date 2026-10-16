@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
 import RequestForm from '@/components/RequestForm.vue'
 import PageHeader from '@/components/PageHeader.vue'
+import TabBar from '@/components/TabBar.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import KindTag from '@/components/KindTag.vue'
@@ -125,8 +126,8 @@ const detail = createResource({
 // workflow's own transitions), never from a second rule.
 
 const WORK_TABS = [
-  { name: 'mine', label: 'My requests' },
-  { name: 'work', label: 'Team inbox' },
+  { key: 'mine', label: 'My requests' },
+  { key: 'work', label: 'Team inbox' },
 ]
 const WORK_FILTERS = [
   { name: 'open', label: 'Open' },
@@ -163,13 +164,6 @@ function showTab(name) {
   })
 }
 
-/** Arrow keys move between the two tabs, the way a `role="tablist"` is
- * expected to behave. */
-function cycleTab(delta) {
-  const names = WORK_TABS.map((item) => item.name)
-  showTab(names[(names.indexOf(tab.value) + delta + names.length) % names.length])
-}
-
 function filterWork(state) {
   router.push({
     name: route.name,
@@ -199,6 +193,12 @@ const workNeedsActionCount = computed(() =>
   work.data?.action_count !== undefined
     ? work.data.action_count
     : workRows.value.filter((r) => r.status === 'Open' || r.status === 'In Progress').length,
+)
+const workTabs = computed(() =>
+  WORK_TABS.map((item) => ({
+    ...item,
+    count: item.key === 'work' && workNeedsActionCount.value > 0 ? workNeedsActionCount.value : null,
+  })),
 )
 /** R6: "Waiting on Ravi · 3 days" -- the badge names the person, this the time. */
 function waitedFor(days) {
@@ -513,41 +513,16 @@ const latestQuestion = computed(() => {
 
     <!-- Plan 2026-10-04-002 R6/R9: two workspace tabs for a holder of a
          routed role; a user with neither role gets no tab bar at all. A
-         two-item segmented control, in the URL like the category chips,
-         arrow-key switchable like a `role="tablist"` should be. -->
-    <div
+         two-item tab bar, in the URL like the category chips. -->
+    <TabBar
       v-if="session.canHandleRequests"
-      class="mb-4 flex gap-2 border-b border-outline-gray-2"
-      role="tablist"
-      aria-label="Requests views"
+      class="mb-4"
+      :tabs="workTabs"
+      :model-value="tab"
+      label="Requests views"
       data-testid="requests-tabs"
-    >
-      <button
-        v-for="item in WORK_TABS"
-        :key="item.name"
-        type="button"
-        role="tab"
-        class="-mb-px flex min-h-11 items-center gap-2 border-b-2 px-3 text-sm font-medium"
-        :class="
-          tab === item.name
-            ? 'border-heading text-ink-gray-9'
-            : 'border-transparent text-ink-gray-6 hover:text-ink-gray-9'
-        "
-        :aria-selected="tab === item.name"
-        :tabindex="tab === item.name ? 0 : -1"
-        @click="showTab(item.name)"
-        @keydown.right.prevent="cycleTab(1)"
-        @keydown.left.prevent="cycleTab(-1)"
-      >
-        <span>{{ item.label }}</span>
-        <span
-          v-if="item.name === 'work' && workNeedsActionCount > 0"
-          class="rounded-full bg-surface-gray-3 px-2 py-0.5 text-xs font-semibold tabular text-ink-gray-7"
-        >
-          {{ workNeedsActionCount }}
-        </span>
-      </button>
-    </div>
+      @update:model-value="showTab"
+    />
 
     <div class="lg:flex lg:items-start lg:gap-6">
       <!-- The list. On a phone a selected record takes the whole width

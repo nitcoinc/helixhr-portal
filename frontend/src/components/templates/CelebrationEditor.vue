@@ -8,6 +8,7 @@ import { computed, reactive, ref, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { createResource, FormControl, Button } from 'frappe-ui'
 import { session } from '@/lib/session'
+import TabBar from '@/components/TabBar.vue'
 
 const props = defineProps({
   company: { type: String, required: true },
@@ -62,6 +63,15 @@ const formError = ref('')
 function rowFor(event) {
   return setup.data?.events?.[event] || {}
 }
+
+// Each event's tab says whether it is sending; the word carries it.
+const eventTabs = computed(() =>
+  EVENTS.map((event) => ({
+    ...event,
+    count: rowFor(event.key).is_enabled ? 'On' : 'Off',
+    testid: `email-template-celebration-${event.key}`,
+  })),
+)
 
 function edit(event) {
   editing.value = event
@@ -269,29 +279,12 @@ defineExpose({ setup })
       />
     </div>
 
-    <div
-      class="flex gap-1 overflow-x-auto"
-      role="tablist"
-      aria-label="Celebration events"
-    >
-      <button
-        v-for="event in EVENTS"
-        :key="event.key"
-        type="button"
-        role="tab"
-        class="min-h-9 shrink-0 rounded-lg px-3 py-1.5 text-sm"
-        :class="activeEvent === event.key ? 'bg-surface-gray-2 font-medium text-ink-gray-9' : 'text-ink-gray-7 hover:bg-surface-gray-1'"
-        :aria-selected="activeEvent === event.key ? 'true' : 'false'"
-        :data-testid="`email-template-celebration-${event.key}`"
-        @click="chooseEvent(event.key)"
-      >
-        {{ event.label }}
-        <span
-          class="ml-1 rounded px-1.5 py-0.5 text-xs font-medium"
-          :class="rowFor(event.key).is_enabled ? 'bg-surface-blue-2 text-ink-blue-2' : 'bg-surface-gray-3 text-ink-gray-8'"
-        >{{ rowFor(event.key).is_enabled ? 'On' : 'Off' }}</span>
-      </button>
-    </div>
+    <TabBar
+      :tabs="eventTabs"
+      :model-value="activeEvent"
+      label="Celebration events"
+      @update:model-value="chooseEvent"
+    />
 
     <div class="surface-card elev-1 p-4">
       <div class="flex items-center justify-between gap-3">
