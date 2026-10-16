@@ -315,7 +315,7 @@ async function openInDesk() {
             type="button"
             class="min-h-11 cursor-pointer rounded-t-lg px-3 py-2 text-sm font-medium"
             :aria-current="catalogTab === tab.key ? 'page' : undefined"
-            :class="catalogTab === tab.key ? 'border-b-2 border-signal text-ink-gray-9' : 'text-ink-gray-6 hover:text-ink-gray-9'"
+            :class="catalogTab === tab.key ? 'border-b-2 border-heading text-ink-gray-9' : 'text-ink-gray-6 hover:text-ink-gray-9'"
             @click="pickedTab = tab.key"
           >
             {{ tab.label }}

@@ -131,7 +131,7 @@ onBeforeUnmount(hide)
       </Button>
       <p
         v-if="revealError"
-        class="mt-1 text-signal"
+        class="mt-1 text-ink-red-4"
         role="alert"
       >
         {{ revealError }}

@@ -164,7 +164,7 @@ function onCreated({ name }) {
           <p
             v-if="mismatch"
             id="correction-mismatch"
-            class="mt-1 text-sm text-signal"
+            class="mt-1 text-sm text-ink-red-4"
             role="alert"
           >
             {{ mismatch }}

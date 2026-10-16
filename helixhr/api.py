@@ -3246,8 +3246,16 @@ def get_my_leave(limit=None):
 	reasons = _leave_reason(rejected, owners)
 	approver_names = _approver_names(rows)
 
+	# The caller's own Employee, resolved above, is the gate. HRMS's
+	# `get_leave_details` also lists Leave Types through `get_list`, and a
+	# routed worker who is a Website User without the Employee role (IT Team,
+	# P5-KTD10) has no read on Leave Type -- the whole page was a 403 for it.
+	# Same posture as `get_person`'s balances section.
+	with as_administrator():
+		balances = _leave_balances(employee)
+
 	return {
-		"balances": _leave_balances(employee),
+		"balances": balances,
 		"applications": [_leave_projection(row, approver_names, reasons) for row in rows],
 		"total": total,
 		"limit": limit,

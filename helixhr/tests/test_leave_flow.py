@@ -208,6 +208,27 @@ class TestPortalLeaveApi(IntegrationTestCase):
 		params.update(kwargs)
 		return apply_for_leave(**params)
 
+	def test_a_routed_worker_without_the_employee_role_reads_own_leave(self):
+		"""Plan 2026-10-17-001 U1. The IT Team identity is a Website User with
+		an Employee record and no Employee role (P5-KTD10), so it has no read
+		on Leave Type. HRMS's `get_leave_details` lists Leave Types through
+		`get_list`, which used to make the whole Leave page a 403 for it. The
+		caller's own Employee is the gate; the balance read stays scoped to
+		it."""
+		from helixhr.tests.utils import make_test_it_user
+
+		it_employee, it_user = make_test_it_user()
+		ensure_leave_allocation(it_employee, "Casual Leave", 12)
+		frappe.set_user(it_user)
+		self.assertFalse(frappe.has_permission("Leave Type", "read"))
+
+		payload = get_my_leave()
+
+		self.assertEqual(frappe.session.user, it_user)
+		casual = next(b for b in payload["balances"] if b["leave_type"] == "Casual Leave")
+		self.assertEqual(casual["allocated"], 12)
+		self.assertEqual(payload["applications"], [])
+
 	# --- scenario 3: the half-day date is never a stale form value ---------
 
 	def test_half_day_always_uses_the_selected_from_date(self):

@@ -28,6 +28,10 @@ export default defineConfig({
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
   },
+  // Plan 2026-10-17-001 U1: `console-clean.spec.ts` is in every project's
+  // list below. It is read-only and visits only the routes the signed-in
+  // identity's own bootstrap allows, so it never runs another hat's flow.
+  // `employee` and `manager` reach it through their ignore-list default.
   projects: [
     { name: 'setup', testMatch: /auth\.setup\.ts/ },
     {
@@ -67,7 +71,7 @@ export default defineConfig({
       // Plan 2026-10-02-001 U10: email-templates.spec.ts -- HR is the refused
       // hat; the Notification Manager signs in inside the spec itself, the
       // same way login-dashboard.spec.ts does, since it has no Employee.
-      testMatch: /(approvals|settings|organisation|people|people-access|reports|reports-company|projects|roster|navigation|email-templates|requests-conversation)\.spec\.ts/,
+      testMatch: /(console-clean|approvals|settings|organisation|people|people-access|reports|reports-company|projects|roster|navigation|email-templates|requests-conversation)\.spec\.ts/,
     },
     // P5-U11. The routed-worker identity: `IT Team`, portal-only
     // (desk_access: 0), which never reaches Desk and works only the requests
@@ -84,7 +88,7 @@ export default defineConfig({
       name: 'it',
       use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/it.json' },
       dependencies: ['setup'],
-      testMatch: /(approvals|organisation|people|reports|requests-conversation)\.spec\.ts/,
+      testMatch: /(console-clean|approvals|organisation|people|reports|requests-conversation)\.spec\.ts/,
     },
     // Plan 2026-10-06-001 U3. The Portal Admin identity (`make_test_portal_admin`,
     // seeded by setup_playwright_fixtures): Report access, People & access and
@@ -94,7 +98,7 @@ export default defineConfig({
       name: 'portal-admin',
       use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/portal-admin.json' },
       dependencies: ['setup'],
-      testMatch: /(settings|people-access)\.spec\.ts/,
+      testMatch: /(console-clean|settings|people-access)\.spec\.ts/,
     },
     // Plan 2026-10-15-002 U4/U6. HR User: no approve right, but oversight of
     // pending timesheets in their company (`make_test_hr_user`).
@@ -102,7 +106,7 @@ export default defineConfig({
       name: 'hr-user',
       use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/hr-user.json' },
       dependencies: ['setup'],
-      testMatch: /timesheet-oversight\.spec\.ts/,
+      testMatch: /(console-clean|timesheet-oversight)\.spec\.ts/,
     },
     // P2-U9 step 9. Mobile WebKit is the second mandatory browser: it is the
     // only engine on iOS, it is where a coarse pointer, a real safe-area
@@ -129,7 +133,7 @@ export default defineConfig({
       // design -- one of them signs a session out and another consumes a
       // leave allocation -- so a second pass in the same run would fight the
       // first rather than test a second engine.
-      testMatch: /(login-dashboard|navigation|visual-foundation|hardening|roster)\.spec\.ts/,
+      testMatch: /(console-clean|login-dashboard|navigation|visual-foundation|hardening|roster)\.spec\.ts/,
     },
     // P2-U0: the pinned quality baseline, present only when BASELINE_MODE
     // is set. The spec owns the viewport, CPU and network profile itself (a

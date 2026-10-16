@@ -312,7 +312,7 @@ async function confirmDelete() {
         class="-mb-px min-h-11 border-b-2 px-3 text-sm font-medium"
         :class="
           tab === item.name
-            ? 'border-ink-gray-9 text-ink-gray-9'
+            ? 'border-heading text-ink-gray-9'
             : 'border-transparent text-ink-gray-6 hover:text-ink-gray-9'
         "
         :aria-selected="tab === item.name"

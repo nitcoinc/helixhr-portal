@@ -355,7 +355,7 @@ async function doWithdraw() {
               >
                 <span
                   v-if="tile(app)"
-                  class="date-tile mt-0.5"
+                  class="date-tile mt-0.5 self-start"
                   aria-hidden="true"
                 >
                   <span class="date-tile-month">{{ tile(app).month }}</span>
@@ -401,10 +401,11 @@ async function doWithdraw() {
 
                   <!-- The manager's reason, quoted where the decision is,
                        rather than a status word that sends the employee
-                       looking for it (P2-R14). -->
+                       looking for it (P2-R14). A quote inside a card is
+                       `.surface-inset`; alert is for blocking callouts (ED-22). -->
                   <div
                     v-if="decidedAgainst(app) && app.reason"
-                    class="surface-alert mt-2 p-3 text-sm"
+                    class="surface-inset mt-2 p-3 text-sm text-ink-gray-7"
                   >
                     <span v-if="app.approver_name">{{ app.approver_name }}: </span>“{{ app.reason }}”
                   </div>
@@ -586,7 +587,7 @@ async function doWithdraw() {
                  (P2-U5 scenario 1). -->
             <div
               v-if="decidedAgainst(selected) && selected.reason"
-              class="surface-alert mt-4 p-3 text-sm"
+              class="surface-inset mt-4 p-3 text-sm text-ink-gray-7"
             >
               <span v-if="selected.approver_name">{{ selected.approver_name }}: </span>“{{
                 selected.reason

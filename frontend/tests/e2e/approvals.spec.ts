@@ -440,6 +440,16 @@ test('a manager sees My team and no HR lane; timesheets have their own tab', asy
   await page.getByRole('tab', { name: /^Timesheets/ }).click()
   await expect(page).toHaveURL(/view=timesheets/)
   await expect(page.getByTestId('timesheet-oversight')).toHaveCount(0)
+
+  // MH-01: the active tab carries a real 2px heading-ink bar. `border-ink-*`
+  // generated no CSS, so the bar was missing; the inactive tab stays clear.
+  const bar = (name: RegExp) =>
+    page.getByRole('tab', { name }).evaluate((el) => {
+      const style = getComputedStyle(el)
+      return `${style.borderBottomWidth} ${style.borderBottomColor}`
+    })
+  await expect.poll(() => bar(/^Timesheets/)).toBe('2px rgb(26, 23, 20)')
+  expect(await bar(/^Leave/)).toBe('2px rgba(0, 0, 0, 0)')
 })
 
 /** Plan 2026-10-15-002 R6 (AE2): HR Manager's Timesheets tab lists every

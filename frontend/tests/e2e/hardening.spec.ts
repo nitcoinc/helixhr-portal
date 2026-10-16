@@ -22,12 +22,14 @@ const LAZY_ROUTES = [
   { path: '/helixhr/documents', chunk: 'Documents' },
   { path: '/helixhr/notifications', chunk: 'Notifications' },
   { path: '/helixhr/profile', chunk: 'Profile' },
-  // P3-U1 scenario 2. Team is reachable by URL here even though the nav
-  // hides it from an employee; the property under test is the chunk split.
   { path: '/helixhr/payslips', chunk: 'Payslips' },
   { path: '/helixhr/holidays', chunk: 'Holidays' },
   { path: '/helixhr/directory', chunk: 'Directory' },
-  { path: '/helixhr/team', chunk: 'Team' },
+  // Plan 2026-10-17-001 U1 (EP-24): /team now sends an employee with no
+  // reports Home before its chunk loads, so My projects stands in as the
+  // route this employee reaches by URL. navigation.spec.ts covers the
+  // redirect itself.
+  { path: '/helixhr/my-projects', chunk: 'MyProjects' },
 ]
 
 function scriptUrls(page: Page) {

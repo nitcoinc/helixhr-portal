@@ -1,6 +1,6 @@
 <script setup>
 import { computed, ref, watch } from 'vue'
-import { createResource } from 'frappe-ui'
+import { Button, createResource } from 'frappe-ui'
 import { call } from '@/lib/api'
 
 // Plan 2026-10-04-001 U6 (R20, R21, resolved decision 14): who may run and
@@ -254,14 +254,15 @@ async function save() {
       >
         Discard
       </button>
-      <button
-        type="button"
-        class="inline-flex min-h-11 cursor-pointer items-center rounded-md bg-surface-gray-7 px-4 text-sm font-medium text-ink-white disabled:opacity-60"
+      <Button
+        variant="solid"
+        theme="blue"
+        class="min-h-11"
         :disabled="saving"
         @click="save"
       >
         {{ saving ? 'Saving…' : 'Save' }}
-      </button>
+      </Button>
     </div>
   </div>
 </template>

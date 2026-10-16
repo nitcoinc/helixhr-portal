@@ -52,10 +52,12 @@ const queueHeight = ref(null)
 const waitingHeight = ref(null)
 const queueTotal = computed(() => props.items.length + props.more)
 const waitingTotal = computed(() => props.waiting.length + props.waitingMore)
+// EP-09: a plain employee has no Approvals page, so their own queue's
+// "View all" opens Notifications -- every item addressed to them.
 const viewAllDestination = computed(() => {
   if (session.canApprove) return '/approvals'
   if (session.canHandleRequests || session.canWorkRequests) return { path: '/requests', query: { tab: 'work' } }
-  return '/approvals'
+  return '/notifications'
 })
 
 function capHeight(el) {

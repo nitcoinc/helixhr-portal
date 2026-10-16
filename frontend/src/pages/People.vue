@@ -51,6 +51,9 @@ watch(query, (value) => {
 onUnmounted(() => clearTimeout(pending))
 
 const rows = computed(() => results.data?.people || [])
+// MH-11: a refused caller gets AsyncState's refusal, not a search box that
+// can never return anything.
+const forbidden = computed(() => /PermissionError/.test(results.error?.exc_type || ''))
 const total = computed(() => results.data?.total || 0)
 const moreCount = computed(() => Math.max(0, total.value - rows.value.length))
 
@@ -919,7 +922,10 @@ async function submitEdit() {
         subtitle="Find a colleague to see their leave, attendance and requests."
       />
 
-      <div class="mb-4 lg:w-80">
+      <div
+        v-if="!forbidden"
+        class="mb-4 lg:w-80"
+      >
         <FormControl
           v-model="query"
           type="text"
