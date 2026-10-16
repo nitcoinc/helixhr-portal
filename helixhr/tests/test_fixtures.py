@@ -807,6 +807,30 @@ class TestApprovalWorkflowFixtures(IntegrationTestCase):
 			["Open", "In Progress", "Waiting on Employee", "Done", "Rejected"],
 		)
 
+	def test_the_need_info_from_open_patch_restores_both_rows_once(self):
+		"""Plan 2026-10-15-003 KTD3: the patch re-adds a missing Need info
+		from Open row, with the fixture's condition, and is idempotent."""
+		from helixhr.patches.v1_0.ensure_need_info_from_open import execute
+
+		workflow = self._workflow("HR Request Handling")
+		dropped = [
+			row for row in workflow.transitions if row.state == "Open" and row.action == "Need info"
+		]
+		self.assertEqual(len(dropped), 2)
+		conditions = {row.allowed: row.condition for row in dropped}
+		workflow.transitions = [row for row in workflow.transitions if row not in dropped]
+		workflow.flags.ignore_links = True
+		workflow.save(ignore_permissions=True)
+
+		execute()
+		execute()
+
+		workflow = self._workflow("HR Request Handling")
+		self.assertEqual(self._edges(workflow), _HR_REQUEST_EDGES)
+		restored = [row for row in workflow.transitions if row.state == "Open" and row.action == "Need info"]
+		self.assertEqual(len(restored), 2)
+		self.assertEqual({row.allowed: row.condition for row in restored}, conditions)
+
 	def test_the_attendance_request_workflow_matches_the_table(self):
 		workflow = self._workflow("Attendance Request Approval")
 		self.assertEqual(self._edges(workflow), _ATTENDANCE_EDGES)

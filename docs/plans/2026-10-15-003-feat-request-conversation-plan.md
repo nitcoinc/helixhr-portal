@@ -84,7 +84,7 @@ HR resolves requests by talking with the employee. Because the channel is so nar
   It never writes `helixhr_decision_reason`, never calls `db_set`, and takes no modified token. Comments do not conflict: Frappe writes `_comments` without bumping `modified`. Add the endpoint to the `ignore_permissions` exception lists in `helixhr/api.py` and `docs/architecture.md`.
 - KTD3. **Need info from Open is two new fixture transitions**, one each for HR Manager and IT Team, copying the existing In Progress conditions.
   - `events.HR_REQUEST_STATE_EDGES` and `tests/test_fixtures.py` `_HR_REQUEST_EDGES` gain Open → Waiting on Employee.
-  - No data patch is needed: fixtures re-sync on migrate.
+  - Fixtures re-sync on migrate; `patches/v1_0/ensure_need_info_from_open` also adds the two rows idempotently (AGENTS.md: fixture changes ship with a patch).
   - The state order keeps Open first.
 - KTD4. **`hr_request.before_save` stamps `picked_up_by` and `picked_up_on` on Open → Waiting on Employee** when the picker is empty. The later `db_set` back to In Progress in `reply_to_my_request` then lands on a request with a picker, so `reveal_correction_value`'s picker guard keeps working.
 - KTD5. **Company-scoped recipients come from one helper.** It returns the enabled holders of a role who:

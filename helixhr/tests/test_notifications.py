@@ -1146,6 +1146,14 @@ class TestTemplateValidation(IntegrationTestCase):
 				self.assertNotIn("{{", message["html"])
 				self.assertIn(message["content"], message["html"])
 
+	def test_every_registry_event_is_a_template_key_option(self):
+		"""An event missing from the Select cannot be saved as an override
+		in Email templates."""
+		from helixhr.utils import NOTIFICATION_EVENTS
+
+		options = frappe.get_meta(_MT).get_field("template_key").options.split("\n")
+		self.assertEqual(set(NOTIFICATION_EVENTS) - set(options), set())
+
 
 class TestRenderMessage(IntegrationTestCase):
 	def setUp(self):

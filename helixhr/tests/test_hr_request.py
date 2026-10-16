@@ -1978,8 +1978,29 @@ class TestBankNumberGuard(IntegrationTestCase):
 			"invoice INV12345678",
 			"Please CHECK THIS LETTER AGAIN",
 			"",
+			"changed on 15-10-2026.",
+			"see 2026-10-15, then 16/10/2026",
 		):
 			self.assertFalse(has_bank_number(text), text)
+
+	def test_a_lowercase_iban_is_caught(self):
+		from helixhr.utils import has_bank_number
+
+		for text in ("gb82west12345698765432", "gb82 west 1234 5698 7654 32", "Gb82 West 1234 5698 7654 32"):
+			self.assertTrue(has_bank_number(text), text)
+
+	def test_only_real_dates_in_the_three_shapes_are_skipped(self):
+		from helixhr.utils import has_bank_number
+
+		for text in (
+			"1234-56-78",  # YYYY-MM-DD shape, not a date
+			"45/67/8901",  # DD/MM/YYYY shape, not a date
+			"2026/10/15",  # not one of the three shapes
+			"15.10.2026",  # not one of the three shapes
+			"15-10/2026",  # mixed separators
+			"2026-10-1512",  # a date glued to more digits is not a date token
+		):
+			self.assertTrue(has_bank_number(text), text)
 
 
 class TestRequestConversation(IntegrationTestCase):
@@ -2066,6 +2087,33 @@ class TestRequestConversation(IntegrationTestCase):
 		self.assertEqual(detail["status"], "In Progress")
 		self.assertEqual(detail["picked_up_by"], self.hr_user)
 		self.assertEqual([entry["message"] for entry in detail["thread"]][-2:], ["Which month?", "August"])
+
+	def test_need_info_from_open_without_a_reason_is_refused(self):
+		name = self._file(category="HR Letter")
+		with self.assertRaises(frappe.ValidationError):
+			self._act(self.hr_user, name, "Need info")
+		self.assertEqual(frappe.db.get_value("HR Request", name, "status"), "Open")
+		self.assertFalse(frappe.db.get_value("HR Request", name, "picked_up_by"))
+
+	def test_it_team_need_info_on_an_hr_routed_request_is_refused(self):
+		name = self._file(category="HR Letter")
+		with self.assertRaises(frappe.PermissionError):
+			self._act(self.it_user, name, "Need info", comment="Which month?")
+		self.assertEqual(frappe.db.get_value("HR Request", name, "status"), "Open")
+
+	def test_the_employee_sees_the_pick_up_and_the_asker_has_it_under_mine(self):
+		from helixhr.api import get_my_request, get_request_work, reply_to_my_request
+
+		name = self._file(category="HR Letter")
+		self._act(self.hr_user, name, "Need info", comment="Which month?")
+		frappe.set_user(EMPLOYEE_USER)
+		reply_to_my_request(name, "August", expected_modified=self._token(name)["expected_modified"])
+		detail = get_my_request(name)
+		self.assertTrue(detail["picked_up_on"])
+		self.assertEqual(detail["picked_up_by_name"], frappe.utils.get_fullname(self.hr_user))
+		frappe.set_user(self.hr_user)
+		mine = get_request_work(state="mine")
+		self.assertIn(name, [row["name"] for row in mine["work"]])
 
 	def test_need_info_on_your_own_request_is_refused(self):
 		from helixhr.api import create_my_request
@@ -2191,6 +2239,56 @@ class TestRequestConversation(IntegrationTestCase):
 		frappe.set_user(self.it_user)
 		with self.assertRaises(frappe.ValidationError):
 			comment_on_request(it_request, "after the fact")
+
+	def test_an_hr_manager_of_another_company_cannot_comment(self):
+		from helixhr.api import comment_on_request
+
+		hr_request = self._file(category="HR Letter")
+		other_hr = self._user_with_role("other-company-hr@helixhr.test", "HR Manager", ensure_baseline_company())
+		frappe.set_user(other_hr)
+		with self.assertRaises(frappe.PermissionError):
+			comment_on_request(hr_request, "hello")
+		frappe.set_user("Administrator")
+		self.assertFalse(
+			frappe.db.exists(
+				"Comment",
+				{"reference_doctype": "HR Request", "reference_name": hr_request, "comment_type": "Comment"},
+			)
+		)
+
+	def _employee_mails(self):
+		new = list(set(frappe.get_all("Email Queue", pluck="name")) - self._mail_before) or [""]
+		return frappe.get_all(
+			"Email Queue Recipient", filters={"parent": ["in", new], "recipient": EMPLOYEE_USER}, pluck="parent"
+		)
+
+	def test_two_handler_comments_send_two_mails(self):
+		from helixhr.api import comment_on_request
+
+		name = self._file()
+		self._act(self.it_user, name, "Pick up")
+		before = len(self._employee_mails())
+		frappe.set_user(self.it_user)
+		comment_on_request(name, "Ordering it today.")
+		comment_on_request(name, "It shipped.")
+		frappe.set_user("Administrator")
+		self.assertEqual(len(self._employee_mails()), before + 2)
+
+	def test_a_left_employee_gets_no_mail_and_no_error(self):
+		from helixhr.api import comment_on_request
+
+		name = self._file()
+		self._act(self.it_user, name, "Pick up")
+		before = len(self._employee_mails())
+		bells = len(self._bells(name, EMPLOYEE_USER))
+		frappe.db.set_value("Employee", self.employee_name, "status", "Left")
+		self.addCleanup(frappe.db.set_value, "Employee", self.employee_name, "status", "Active")
+		frappe.set_user(self.it_user)
+		result = comment_on_request(name, "Closing your laptop order.")
+		frappe.set_user("Administrator")
+		self.assertEqual(result["status"], "In Progress")
+		self.assertEqual(len(self._employee_mails()), before)
+		self.assertEqual(len(self._bells(name, EMPLOYEE_USER)), bells)
 
 	def test_an_administrator_comment_shows_the_team_label(self):
 		from helixhr.api import get_my_request

@@ -124,3 +124,6 @@ helixhr.patches.v1_0.seed_reminder_last_sent_on
 # Plan 2026-10-14-001 U9: fill `exporter_company` on HelixHR Report Export
 # rows from each owner's Employee, so the export log can filter on it.
 helixhr.patches.v1_0.backfill_export_exporter_company
+# Plan 2026-10-15-003 KTD3: Need info from Open for HR Manager and IT Team on
+# HR Request Handling -- copied from the fixture, idempotent.
+helixhr.patches.v1_0.ensure_need_info_from_open

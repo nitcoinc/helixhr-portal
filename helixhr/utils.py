@@ -1483,28 +1483,47 @@ def _company_role_holders(role, company):
 
 # Plan 2026-10-15-003 KTD7: the bank-number guard, compiled once. Text is
 # NFKC-normalised first, so full-width digits read as ASCII ones.
+# Exactly the three date shapes KTD7 names -- YYYY-MM-DD, DD-MM-YYYY and
+# DD/MM/YYYY -- and only when they are a real calendar date, so "1234-56-78"
+# is still an 8-digit run.
 _DATE_TOKEN_RE = re.compile(
-	r"(?<!\d)(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.]\d{1,2}[-/.]\d{4})(?!\d)"
+	r"(?<![\d\-/])(?<!\d\.)(?:(?P<iso_y>\d{4})-(?P<iso_m>\d{2})-(?P<iso_d>\d{2})"
+	r"|(?P<dmy_d>\d{2})(?P<sep>[-/])(?P<dmy_m>\d{2})(?P=sep)(?P<dmy_y>\d{4}))(?![\d\-/])(?!\.\d)"
 )
 # 8+ digits joined only by single separators. A letter touching either end
 # makes it a reference code ("INV12345678"), not an account number.
 _DIGIT_RUN_RE = re.compile(r"(?<![^\W\d_])\d(?:[ .\-/]?\d){7,}(?![^\W\d_])")
 # IBAN: country code, check digits, then 10-30 alphanumerics, optionally in
-# space-separated groups ("GB82 WEST 1234 5698 7654 32"). Case-sensitive on
-# purpose: an uppercase country code is the shape; lowercase prose is not.
-_IBAN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]){10,30}(?![A-Za-z0-9])")
+# space-separated groups ("GB82 WEST 1234 5698 7654 32"). Case-insensitive:
+# "gb82 west ..." is the same account; the 8-digit floor below keeps prose out.
+_IBAN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2}\d{2}(?: ?[A-Z0-9]){10,30}(?![A-Za-z0-9])", re.IGNORECASE)
+
+
+def _date_break(match):
+	"""A real calendar date becomes a hard break; anything else stays."""
+	import datetime
+
+	if match.group("iso_y"):
+		parts = match.group("iso_y", "iso_m", "iso_d")
+	else:
+		parts = match.group("dmy_y", "dmy_m", "dmy_d")
+	try:
+		datetime.date(*(int(part) for part in parts))
+	except ValueError:
+		return match.group()
+	return "|"
 
 
 def has_bank_number(text):
 	"""Whether ``text`` holds an account-number-shaped value (KTD7): a run of
 	8+ digits joined only by single spaces, dots, hyphens or slashes, or an
-	IBAN, after skipping date-shaped tokens. Callers apply it only to
-	bank-detail correction requests."""
+	IBAN, after skipping real dates written YYYY-MM-DD, DD-MM-YYYY or
+	DD/MM/YYYY. Callers apply it only to bank-detail correction requests."""
 	import unicodedata
 
 	normalised = unicodedata.normalize("NFKC", text or "")
 	# A date becomes a hard break, so it neither matches nor joins a run.
-	normalised = _DATE_TOKEN_RE.sub("|", normalised)
+	normalised = _DATE_TOKEN_RE.sub(_date_break, normalised)
 	if _DIGIT_RUN_RE.search(normalised):
 		return True
 	for match in _IBAN_RE.finditer(normalised):
