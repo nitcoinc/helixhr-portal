@@ -431,6 +431,15 @@ class TestBackgroundExport(IntegrationTestCase):
 		self.assertTrue(frappe.has_permission("File", "read", file, user=self.hr_user))
 		self.assertNotIn(row.name, [r.name for r in _as(hr_manager, list_my_exports)])
 
+	def test_a_pre_existing_single_company_row_still_downloads(self):
+		"""Plan 2026-10-15-001 R7: a row recorded before the stored company
+		set existed has no child rows and keeps the single-company check."""
+		out, enqueue = self._request()
+		self._run_job(enqueue)
+		frappe.db.delete("HelixHR Report Export Company", {"parent": out["export"]})
+		_as(self.hr_user, download_report_export, out["export"])
+		self.assertTrue(frappe.local.response.filecontent.startswith(b"\xef\xbb\xbf"))
+
 	def test_revoked_access_fails_with_no_file(self):
 		out, enqueue = self._request()
 		set_report_access(KEY, hr_user_run=1, hr_user_export=0)

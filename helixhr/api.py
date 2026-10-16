@@ -10974,7 +10974,7 @@ def _clean_grant(level, companies, allow_export, reach):
 	for company in companies:
 		if company not in reach:
 			frappe.throw(_("You can't grant access to {0}.").format(company), frappe.PermissionError)
-	return level, companies, allow_export in (1, True, "1", "true")
+	return level, companies, _flag(allow_export) is True
 
 
 def _apply_grant(user, target, reach, modified, grant, defer=False):
@@ -11237,15 +11237,40 @@ def _toggle_changes(toggles, allowed, held):
 		frappe.throw(_("Invalid roles."))
 	if set(toggles) - set(allowed):
 		frappe.throw(_("That role can't be managed here."), frappe.PermissionError)
-	add = {role for role, on in toggles.items() if on in (1, True, "1", "true") and role not in held}
-	remove = {role for role, on in toggles.items() if on in (0, False, "0", "false") and role in held}
+	add = {role for role, on in toggles.items() if _flag(on) is True and role not in held}
+	remove = {role for role, on in toggles.items() if _flag(on) is False and role in held}
 	return add, remove
+
+
+def _same_timestamp(stored, sent):
+	"""Whether the screen's ``sent`` timestamp is the stored one, compared as
+	datetimes (not strings, which differ on microsecond padding). Both empty
+	is a match; an unparseable value is not."""
+	if not stored or not sent:
+		return not stored and not sent
+	try:
+		return get_datetime(stored) == get_datetime(sent)
+	except (TypeError, ValueError):
+		return False
+
+
+def _flag(value):
+	"""True or False for a boolean-ish request value (1/0, "true"/"false",
+	bools), else None -- so a garbage value is neither on nor off."""
+	value = frappe.utils.sbool(value)
+	if value in (True, False):
+		return bool(value)
+	return None
 
 
 def _set_self_employee_permission(user, employee, scoped):
 	"""R13: an HR Manager is never scoped to their own Employee (preflight
 	`check_hr_manager_self_scope`); anyone else is."""
-	existing = frappe.get_all("User Permission", filters={"user": user, "allow": "Employee"}, pluck="name")
+	# Only the self-scoping row: any other Employee User Permission the user
+	# carries (a manager's reach, an HR-made restriction) is not ours to drop.
+	existing = frappe.get_all(
+		"User Permission", filters={"user": user, "allow": "Employee", "for_value": employee}, pluck="name"
+	)
 	if scoped and not existing:
 		frappe.get_doc(
 			{
@@ -11281,8 +11306,8 @@ def save_person_access(
 	current_grant = frappe.db.get_value("HelixHR Company Access", target.user_id, "modified")
 	if (
 		not user_modified
-		or str(user_doc.modified) != str(user_modified)
-		or str(current_grant or "") != str(grant_modified or "")
+		or not _same_timestamp(user_doc.modified, user_modified)
+		or not _same_timestamp(current_grant, grant_modified)
 	):
 		frappe.throw(_(_PERSON_STALE), frappe.TimestampMismatchError)
 
@@ -11297,13 +11322,16 @@ def save_person_access(
 	grant = frappe.parse_json(grant) if isinstance(grant, str) else grant
 	if grant is not None and not isinstance(grant, dict):
 		frappe.throw(_("Invalid company access."))
+	# "keep" (None and {} both leave the grant alone: revoking needs explicit
+	# intent), "revoke", or "set" with `_clean_grant`'s values.
+	grant_values = None
 	if not grant:
-		# None and {} both leave the grant alone: revoking needs explicit intent.
-		grant_action = False
-	elif grant.get("revoke") in (1, True, "1", "true"):
-		grant_action = None
+		grant_mode = "keep"
+	elif _flag(grant.get("revoke")) is True:
+		grant_mode = "revoke"
 	else:
-		grant_action = _clean_grant(grant.get("level"), grant.get("companies"), grant.get("allow_export"), reach)
+		grant_mode = "set"
+		grant_values = _clean_grant(grant.get("level"), grant.get("companies"), grant.get("allow_export"), reach)
 
 	frappe.db.savepoint("save_person_access")
 	try:
@@ -11314,9 +11342,9 @@ def save_person_access(
 		elif "HR Manager" in removed:
 			_set_self_employee_permission(target.user_id, target.name, scoped=True)
 		grant_changed = False
-		if grant_action is not False:
+		if grant_mode != "keep":
 			doc, grant_changed = _apply_grant(
-				target.user_id, target, reach, grant_modified, grant_action, defer=True
+				target.user_id, target, reach, grant_modified, grant_values, defer=True
 			)
 	except Exception:
 		frappe.db.rollback(save_point="save_person_access")
@@ -11332,9 +11360,9 @@ def save_person_access(
 	if grant_changed:
 		changes.append(
 			_("switched off HelixHR company access")
-			if grant_action is None
+			if grant_mode == "revoke"
 			else _("set HelixHR company access to {0} for {1}{2}").format(
-				_(doc.level), ", ".join(grant_action[1]), _(", with export") if doc.allow_export else ""
+				_(doc.level), ", ".join(grant_values[1]), _(", with export") if doc.allow_export else ""
 			)
 		)
 	if changes:

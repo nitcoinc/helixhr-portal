@@ -165,6 +165,44 @@ class TestPeopleAccess(IntegrationTestCase):
 			self.home,
 		)
 
+	def test_granting_hr_manager_drops_only_the_self_employee_permission(self):
+		"""R13 touches the user's own Employee row only; another Employee
+		User Permission (here: on a colleague) survives."""
+		colleague = make_test_user("people-colleague@helixhr.test", self.company)
+		other = frappe.get_doc(
+			{
+				"doctype": "User Permission",
+				"user": HOME_TARGET,
+				"allow": "Employee",
+				"for_value": colleague,
+				"apply_to_all_doctypes": 1,
+			}
+		).insert(ignore_permissions=True)
+		self.addCleanup(frappe.db.delete, "User Permission", {"name": other.name})
+		self._save(SYSTEM_MANAGER_USER, self.home, hr_roles={"HR Manager": True})
+		self.assertFalse(
+			frappe.db.exists("User Permission", {"user": HOME_TARGET, "allow": "Employee", "for_value": self.home})
+		)
+		self.assertTrue(frappe.db.exists("User Permission", other.name))
+		self._save(SYSTEM_MANAGER_USER, self.home, hr_roles={"HR Manager": False})
+		self.assertTrue(
+			frappe.db.exists("User Permission", {"user": HOME_TARGET, "allow": "Employee", "for_value": self.home})
+		)
+
+	def test_flags_parse_strictly_and_timestamps_compare_as_datetimes(self):
+		self.assertIs(api._flag("true"), True)
+		self.assertIs(api._flag("0"), False)
+		self.assertIs(api._flag(1), True)
+		self.assertIsNone(api._flag("yes please"))
+		self.assertIsNone(api._flag(None))
+		self.assertTrue(api._same_timestamp("2026-10-15 10:00:00", "2026-10-15 10:00:00.000000"))
+		self.assertTrue(api._same_timestamp(None, ""))
+		self.assertFalse(api._same_timestamp("2026-10-15 10:00:00", None))
+		self.assertFalse(api._same_timestamp("2026-10-15 10:00:00", "not a time"))
+		# A garbage toggle value is neither on nor off: nothing changes.
+		self._save(self.admin, self.home, managed_roles={IT: "maybe"})
+		self.assertNotIn(IT, _roles(HOME_TARGET))
+
 	def test_an_unchanged_hr_manager_toggle_leaves_the_user_permission_alone(self):
 		self._save(SYSTEM_MANAGER_USER, self.home, hr_roles={"HR Manager": False}, managed_roles={IT: True})
 		self.assertTrue(frappe.db.exists("User Permission", {"user": HOME_TARGET, "allow": "Employee"}))
@@ -258,6 +296,20 @@ class TestPeopleAccess(IntegrationTestCase):
 				_as(hr, fn, *args)
 
 	# --- R15: who has what -------------------------------------------------
+
+	def test_list_roles_are_the_panels_held_roles(self):
+		"""R15: the list chip and the panel match profiles over the same
+		role set -- every managed and HR role held, nothing else."""
+		_set_roles(HOME_TARGET, add=[IT, "HR User", "Accounts User"])
+		self.addCleanup(_set_roles, HOME_TARGET, remove=[IT, "HR User", "Accounts User"])
+		person = _as(SYSTEM_MANAGER_USER, get_person_access, self.home)
+		panel = sorted(
+			role for toggles in (person["managed_roles"], person["hr_roles"]) for role, on in toggles.items() if on
+		)
+		rows = _as(SYSTEM_MANAGER_USER, list_people_access, query=self.home)["rows"]
+		row = next(row for row in rows if row["employee"] == self.home)
+		self.assertEqual(row["roles"], panel)
+		self.assertEqual(panel, sorted([IT, "HR User"]))
 
 	def test_role_filter_runs_before_paging(self):
 		_set_roles(HOME_TARGET, add=[IT])
