@@ -151,3 +151,30 @@ class TestTimesheetReminder(IntegrationTestCase):
 			self.assertRaises(
 				frappe.RateLimitExceededError, _as, self.hr_user, send_timesheet_reminder, MANAGER
 			)
+
+	def test_a_failure_after_the_claim_releases_it(self):
+		make_timesheet(self, self.report, 3)
+		real_get_doc = frappe.get_doc
+
+		def failing_bell(*args, **kwargs):
+			if args and isinstance(args[0], dict) and args[0].get("doctype") == "Notification Log":
+				raise RuntimeError("bell failed")
+			return real_get_doc(*args, **kwargs)
+
+		with patch("frappe.sendmail") as sendmail, patch("frappe.get_doc", side_effect=failing_bell):
+			self.assertRaises(RuntimeError, _as, self.hr_user, send_timesheet_reminder, MANAGER)
+		sendmail.assert_called_once()
+		self.assertIsNone(reminders.next_reminder_at(MANAGER, self.company))
+		result, sendmail = self._send()
+		self.assertTrue(result["sent"])
+		self.assertEqual(sendmail.call_count, 1)
+
+	def test_the_rate_limit_counts_an_invalid_call(self):
+		limit, _seconds = rate_limit_bounds("send_timesheet_reminder")
+		reset_rate_limit("send_timesheet_reminder", self.hr_user)
+		frappe.flags.helixhr_enforce_rate_limits = True
+		self.addCleanup(reset_rate_limit, "send_timesheet_reminder", self.hr_user)
+		self.addCleanup(setattr, frappe.flags, "helixhr_enforce_rate_limits", False)
+		for _ in range(limit):
+			self.assertRaises(frappe.ValidationError, _as, self.hr_user, send_timesheet_reminder, " ")
+		self.assertRaises(frappe.RateLimitExceededError, _as, self.hr_user, send_timesheet_reminder, " ")

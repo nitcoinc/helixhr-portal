@@ -87,7 +87,7 @@ const VIEW_TABS = computed(() =>
       label: 'Timesheets',
       count: timesheetCount.value,
     },
-    session.canConfigure && { name: 'all-pending', label: 'All pending' },
+    session.canSeeAllPending && { name: 'all-pending', label: 'All pending' },
   ].filter(Boolean),
 )
 const OVERDUE_VISIBLE_ROWS = 5
@@ -1044,7 +1044,9 @@ function dismissBulkResult() {
                   />
                   <p class="min-w-0 flex-1 truncate text-sm text-ink-gray-7">
                     {{ row.employee_name }} · {{ row.label }}
-                    · {{ formatDateRange(row.from_date, row.to_date) }}
+                    <template v-if="row.from_date">
+                      · {{ formatDateRange(row.from_date, row.to_date) }}
+                    </template>
                   </p>
                   <StatusBadge
                     :kind="row.kind"

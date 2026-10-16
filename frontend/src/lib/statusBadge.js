@@ -13,7 +13,7 @@ export const TONE = {
   resting: 'bg-surface-gray-2 text-ink-gray-7',
 }
 
-export const KINDS = ['leave', 'timesheet', 'request', 'attendance']
+export const KINDS = ['leave', 'timesheet', 'request', 'attendance', 'change']
 
 // `waiting: true` marks the one state per kind that names a person when the
 // portal knows who: "Waiting for Priya".
@@ -76,6 +76,14 @@ const MAP = {
     'Sent Back': { label: 'Sent back', tone: 'sentBack' },
     Rejected: { label: 'Rejected', tone: 'sentBack' },
     Cancelled: { label: 'Cancelled', tone: 'resting' },
+  },
+  // Plan 2026-10-15-002 R1: a timesheet change request's decision, as the
+  // approver's Decided-by-me receipt shows it.
+  change: {
+    Open: { label: 'Waiting', tone: 'waiting', waiting: true },
+    Accepted: { label: 'Accepted', tone: 'done' },
+    Declined: { label: 'Declined', tone: 'sentBack' },
+    Withdrawn: { label: 'Withdrawn', tone: 'resting' },
   },
 }
 

@@ -442,6 +442,23 @@ test('a manager sees My team and no HR lane; timesheets have their own tab', asy
   await expect(page.getByTestId('timesheet-oversight')).toHaveCount(0)
 })
 
+/** Plan 2026-10-15-002 R6 (AE2): HR Manager's Timesheets tab lists every
+ * pending week in the company by approver -- here the oversight fixture's
+ * group from `setup_playwright_fixtures`. */
+test('HR sees All pending timesheets grouped by approver on the Timesheets tab', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'this is the HR capability shape')
+
+  await page.goto('/helixhr/approvals')
+  await expect(page.getByRole('tab', { name: 'All pending', exact: true })).toBeVisible()
+  await page.getByRole('tab', { name: /^Timesheets/ }).click()
+  await expect(page).toHaveURL(/view=timesheets/)
+  const oversight = page.getByTestId('timesheet-oversight')
+  await expect(oversight.getByRole('heading', { name: /All pending timesheets/ })).toBeVisible()
+  const group = oversight.locator('[data-testid="oversight-group"][data-approver="oversight-manager@helixhr.test"]')
+  await expect(group).toBeVisible({ timeout: 15000 })
+  await expect(group.getByTestId('oversight-row')).not.toHaveCount(0)
+})
+
 /**
  * P5-U11. The routed-worker capability shape, under the fourth identity
  * (`it-team@helixhr.test`, seeded by `make_test_it_user` -- P5-U2). Runs

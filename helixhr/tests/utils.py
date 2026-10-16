@@ -888,7 +888,56 @@ def setup_playwright_fixtures():
 	# reports-company.spec.ts).
 	ensure_company_access_fixtures()
 
+	# Plan 2026-10-15-002 U6: timesheet-oversight.spec.ts needs a remindable
+	# approver group in the HR User's company on every run.
+	ensure_timesheet_oversight_fixture()
+
 	frappe.db.commit()  # nosemgrep
+
+
+OVERSIGHT_MANAGER_USER = "oversight-manager@helixhr.test"
+OVERSIGHT_REPORT_USER = "oversight-report@helixhr.test"
+OVERSIGHT_WEEK_START = "2016-01-04"
+
+
+def ensure_timesheet_oversight_fixture():
+	"""Plan 2026-10-15-002 U6: one Pending Approval timesheet, nine days
+	waiting, whose approver is a dedicated Active manager in the HR User's
+	company -- so All pending timesheets, Send reminder and the read-only
+	detail have a real row. A past week no other fixture books; raw insert
+	(as `test_pending_by_approver.make_timesheet` does) because only the
+	pending state matters. The reminder slot is released so each run can
+	send again."""
+	from helixhr import reminders
+	from helixhr.events import PENDING_SINCE_FIELD
+
+	company = frappe.db.get_value("Employee", {"user_id": HR_USER_USER}, "company") or ensure_test_company()
+	manager = make_test_user(OVERSIGHT_MANAGER_USER, company, status="Active")
+	report = make_test_user(OVERSIGHT_REPORT_USER, company, reports_to=manager)
+	pending_since = frappe.utils.add_to_date(frappe.utils.now_datetime(), days=-9)
+	existing = frappe.db.get_value("Timesheet", {"employee": report, "start_date": OVERSIGHT_WEEK_START}, "name")
+	if existing:
+		frappe.db.set_value(
+			"Timesheet",
+			existing,
+			{"docstatus": 0, "workflow_state": "Pending Approval", PENDING_SINCE_FIELD: pending_since},
+		)
+	else:
+		doc = frappe.get_doc(
+			{
+				"doctype": "Timesheet",
+				"employee": report,
+				"employee_name": frappe.db.get_value("Employee", report, "employee_name"),
+				"company": company,
+				"start_date": OVERSIGHT_WEEK_START,
+				"end_date": frappe.utils.add_days(OVERSIGHT_WEEK_START, 6),
+				"workflow_state": "Pending Approval",
+				PENDING_SINCE_FIELD: pending_since,
+			}
+		)
+		doc.set_new_name()
+		doc.db_insert()
+	reminders.release_reminder(OVERSIGHT_MANAGER_USER, company)
 
 
 FLAGSHIP_PROJECT = "_Test Flagship Timesheet"

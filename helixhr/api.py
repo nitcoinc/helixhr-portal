@@ -659,6 +659,8 @@ def get_portal_bootstrap():
 		"can_admin_portal": can_admin_portal(frappe.session.user),
 		# Plan 2026-10-15-002 U4: HR User may see pending timesheets.
 		"can_oversee_timesheets": _can_oversee_timesheets(frappe.session.user),
+		# The All pending tab: `get_pending_by_approver`'s non-timesheet gate.
+		"can_see_all_pending": _can_see_all_pending(frappe.session.user),
 		# Documents: the upload/edit/delete controls -- `save_document_link`'s
 		# own gate, asked without a company.
 		"can_manage_documents": _can_manage_documents(frappe.session.user),
@@ -6209,7 +6211,82 @@ def _decided_attendance_requests(employee, since):
 	]
 
 
+def _decided_change_requests(employee, since):
+	"""Plan 2026-10-15-002 R1/KTD8: change requests this caller accepted or
+	declined. `decided_by` is stamped by the decision itself, so it is the
+	scope; `frappe.get_all` because role Employee has no DocPerm here (see
+	`_change_request_summaries`)."""
+	return [
+		_decided_row(
+			"change",
+			row.name,
+			row.employee_name,
+			"Timesheet change",
+			row.week_start,
+			add_days(row.week_start, 6),
+			row.status,
+			row.decided_on,
+		)
+		for row in frappe.get_all(
+			"HelixHR Timesheet Change",
+			filters={
+				"decided_by": frappe.session.user,
+				"employee": ["!=", employee],
+				"status": ["in", ["Accepted", "Declined"]],
+				"decided_on": [">=", str(since)],
+			},
+			fields=["name", "employee_name", "week_start", "status", "decided_on"],
+			order_by="decided_on desc",
+			limit=_DECIDED_LIMIT,
+		)
+	]
+
+
+def _decided_routed_requests(employee, since):
+	"""Plan 2026-10-15-002 R1/KTD8: routed requests this caller picked up and
+	closed. The picker is the decider (`picked_up_by` is stamped on pick-up),
+	so it scopes the read; `frappe.get_all` because a routed-role holder may
+	have no DocPerm on HR Request at all."""
+	rows = frappe.get_all(
+		"HR Request",
+		filters={
+			"picked_up_by": frappe.session.user,
+			"employee": ["!=", employee],
+			"status": ["in", ["Done", "Rejected"]],
+			"closed_on": [">=", str(since)],
+		},
+		fields=["name", "employee", "subject", "status", "closed_on"],
+		order_by="closed_on desc",
+		limit=_DECIDED_LIMIT,
+	)
+	names = dict(
+		frappe.get_all(
+			"Employee",
+			filters={"name": ["in", list({row.employee for row in rows})]},
+			fields=["name", "employee_name"],
+			as_list=True,
+		)
+	) if rows else {}
+	return [
+		_decided_row(
+			"request",
+			row.name,
+			names.get(row.employee) or row.employee,
+			row.subject,
+			None,
+			None,
+			row.status,
+			row.closed_on,
+		)
+		for row in rows
+	]
+
+
+# Workflow kinds read through `frappe.get_list` and need role Employee; the
+# change and routed kinds are scoped by their own decider stamp and run for
+# every caller (a routed-role holder may have no Employee role, P5-KTD10).
 _DECIDED_COLLECTORS = (_decided_leave, _decided_attendance_requests)
+_DECIDED_STAMPED_COLLECTORS = (_decided_change_requests, _decided_routed_requests)
 
 
 def _recently_decided(employee):
@@ -6232,12 +6309,13 @@ def _recently_decided(employee):
 	# Request at all, so `frappe.get_list` inside these collectors answers a
 	# hard PermissionError rather than an empty list -- first reachable here
 	# once `get_my_approvals` served a caller of that shape (P5-U11 is that
-	# caller; HR Request has no decided-receipts collector of its own, see
-	# `_DECIDED_COLLECTORS`, so a routed-role holder's receipt list is empty
-	# rather than missing a kind).
+	# caller; their routed and change decisions come from
+	# `_DECIDED_STAMPED_COLLECTORS`, which need no DocPerm).
 	if "Employee" in frappe.get_roles():
 		for collect in _DECIDED_COLLECTORS:
 			decided.extend(collect(employee, since))
+	for collect in _DECIDED_STAMPED_COLLECTORS:
+		decided.extend(collect(employee, since))
 
 	decided.sort(key=lambda entry: entry["decided_on"] or "", reverse=True)
 	for entry in decided:
@@ -6276,6 +6354,13 @@ def _can_oversee_timesheets(user=None):
 	"""The bootstrap's `can_oversee_timesheets` (U4): `_oversight_scope`'s
 	own gate, so the nav item and the endpoints can never disagree."""
 	return _oversight_scope(user) is not None
+
+
+def _can_see_all_pending(user=None):
+	"""The bootstrap's `can_see_all_pending`: the gate
+	`get_pending_by_approver` applies to the non-timesheet kinds."""
+	scope = _oversight_scope(user)
+	return bool(scope and scope["hr_manager"])
 
 
 def _pending_groups(scope, kinds, overdue_only):
@@ -6443,10 +6528,10 @@ def send_timesheet_reminder(approver_user):
 	claimed atomically before sending (KTD6). Returns ``sent`` and
 	``next_reminder_at``; ``sent`` is False only when every company's slot
 	was already taken."""
+	rate_limit_per_user("send_timesheet_reminder")
 	if not isinstance(approver_user, str) or not approver_user.strip():
 		frappe.throw(_("Choose an approver."))
 	approver_user = approver_user.strip()
-	rate_limit_per_user("send_timesheet_reminder")
 	scope = _oversight_scope()
 	if not scope:
 		frappe.throw(_("Only HR can send reminders."), frappe.PermissionError)
@@ -6475,11 +6560,16 @@ def send_timesheet_reminder(approver_user):
 
 	sender = frappe.utils.get_fullname(frappe.session.user)
 	sent, waits = [], []
-	for company, listed in sorted(by_company.items()):
-		if not reminders.claim_reminder(approver_user, company):
-			waits.append(reminders.next_reminder_at(approver_user, company))
-			continue
-		try:
+	# Every slot this request claimed goes back if anything after the claim
+	# fails: the request's writes (mail queue, bell, comments) roll back with
+	# it, so a held slot would block a reminder that never went.
+	claimed = []
+	try:
+		for company, listed in sorted(by_company.items()):
+			if not reminders.claim_reminder(approver_user, company):
+				waits.append(reminders.next_reminder_at(approver_user, company))
+				continue
+			claimed.append(company)
 			queued = send_notification(
 				"timesheet_approval_reminder",
 				[approver_user],
@@ -6498,43 +6588,45 @@ def send_timesheet_reminder(approver_user):
 					"sender_name": sender,
 				},
 			)
-		except Exception:
+			if not queued:
+				# Switched off in Email templates, or the mail failed (logged by
+				# `send_notification`): nothing went, so the slot goes back.
+				reminders.release_reminder(approver_user, company)
+				claimed.remove(company)
+				continue
+			# KTD7: the bell is its own write, pointing at the oldest timesheet.
+			frappe.get_doc(
+				{
+					"doctype": "Notification Log",
+					"for_user": approver_user,
+					"from_user": frappe.session.user,
+					"type": "Alert",
+					"document_type": "Timesheet",
+					"document_name": listed[0]["name"],
+					"subject": _("{0} timesheet(s) are waiting for your approval").format(len(listed)),
+				}
+			).insert(ignore_permissions=True)
+			# R13: the timesheet's own history shows it was chased.
+			note = _("Approval reminder sent to {0} by {1}.").format(listed[0]["approver_name"], sender)
+			for item in listed:
+				try:
+					frappe.get_doc(
+						{
+							"doctype": "Comment",
+							"comment_type": "Info",
+							"reference_doctype": "Timesheet",
+							"reference_name": item["name"],
+							"content": note,
+						}
+					).insert(ignore_permissions=True)
+				except Exception:
+					frappe.log_error(frappe.get_traceback(), _REMINDER_ERROR_TITLE)
+			sent.append(company)
+			waits.append(reminders.next_reminder_at(approver_user, company))
+	except Exception:
+		for company in claimed:
 			reminders.release_reminder(approver_user, company)
-			raise
-		if not queued:
-			# Switched off in Email templates, or the mail failed (logged by
-			# `send_notification`): nothing went, so the slot goes back.
-			reminders.release_reminder(approver_user, company)
-			continue
-		# KTD7: the bell is its own write, pointing at the oldest timesheet.
-		frappe.get_doc(
-			{
-				"doctype": "Notification Log",
-				"for_user": approver_user,
-				"from_user": frappe.session.user,
-				"type": "Alert",
-				"document_type": "Timesheet",
-				"document_name": listed[0]["name"],
-				"subject": _("{0} timesheet(s) are waiting for your approval").format(len(listed)),
-			}
-		).insert(ignore_permissions=True)
-		# R13: the timesheet's own history shows it was chased.
-		note = _("Approval reminder sent to {0} by {1}.").format(listed[0]["approver_name"], sender)
-		for item in listed:
-			try:
-				frappe.get_doc(
-					{
-						"doctype": "Comment",
-						"comment_type": "Info",
-						"reference_doctype": "Timesheet",
-						"reference_name": item["name"],
-						"content": note,
-					}
-				).insert(ignore_permissions=True)
-			except Exception:
-				frappe.log_error(frappe.get_traceback(), _REMINDER_ERROR_TITLE)
-		sent.append(company)
-		waits.append(reminders.next_reminder_at(approver_user, company))
+		raise
 
 	next_at = max((wait for wait in waits if wait), default=None)
 	if sent:

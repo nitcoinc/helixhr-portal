@@ -132,6 +132,61 @@ class TestApprovalLanes(IntegrationTestCase):
 		self.assertEqual(len(decided), 25)
 		self.assertEqual(str(seen[0]), str(frappe.utils.add_days(api.user_today(), -14)))
 
+	def _raw(self, doctype, **fields):
+		doc = frappe.get_doc({"doctype": doctype, "name": f"LANES-DEC-{frappe.generate_hash(length=8)}", **fields})
+		doc.db_insert()
+		return doc.name
+
+	def test_decided_includes_change_and_routed_decisions(self):
+		_it_employee, it_user = make_test_it_user()
+		now = frappe.utils.now_datetime()
+		old = frappe.utils.add_days(now, -20)
+		other = make_test_user(REPORT, ensure_test_company())
+		change = self._raw(
+			"HelixHR Timesheet Change",
+			employee=other,
+			employee_name="Lanes Report",
+			week_start=frappe.utils.getdate(),
+			status="Accepted",
+			decided_by=self.hr_manager,
+			decided_on=now,
+		)
+		stale = self._raw(
+			"HelixHR Timesheet Change",
+			employee=other,
+			employee_name="Lanes Report",
+			week_start=frappe.utils.getdate(),
+			status="Declined",
+			decided_by=self.hr_manager,
+			decided_on=old,
+		)
+		routed = self._raw(
+			"HR Request", employee=other, subject="Laptop", status="Done", picked_up_by=it_user, closed_on=now
+		)
+		open_routed = self._raw(
+			"HR Request", employee=other, subject="Mouse", status="In Progress", picked_up_by=it_user
+		)
+
+		hr_decided = {row["name"]: row for row in _as(self.hr_manager, api._recently_decided, self.hr_employee)}
+		self.assertEqual(hr_decided[change]["kind"], "change")
+		self.assertEqual(hr_decided[change]["status"], "Accepted")
+		self.assertNotIn(stale, hr_decided)
+		self.assertNotIn(routed, hr_decided)
+
+		# An IT holder has no Employee role: the stamped kinds still reach them.
+		it_decided = {row["name"]: row for row in _as(it_user, api._recently_decided, _it_employee)}
+		self.assertEqual(it_decided[routed]["kind"], "request")
+		self.assertEqual(it_decided[routed]["label"], "Laptop")
+		self.assertEqual(it_decided[routed]["status"], "Done")
+		self.assertNotIn(open_routed, it_decided)
+		self.assertNotIn(change, it_decided)
+
+	def test_all_pending_flag_matches_the_endpoint_gate(self):
+		self.assertTrue(_as(self.hr_manager, get_portal_bootstrap)["can_see_all_pending"])
+		_hr, hr_user = _make_role_user(HR_USER, "HR User", ensure_test_company(), status="Active")
+		self.assertFalse(_as(hr_user, get_portal_bootstrap)["can_see_all_pending"])
+		self.assertRaises(frappe.PermissionError, _as, hr_user, api.get_pending_by_approver)
+
 
 class TestHrUserOversightDetail(IntegrationTestCase):
 	def setUp(self):
