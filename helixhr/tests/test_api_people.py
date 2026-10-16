@@ -217,6 +217,13 @@ class TestSearchPeople(IntegrationTestCase):
 		directly_counted = frappe.db.count("Employee", {"status": "Active", "company": self.company})
 		self.assertEqual(result["total"], directly_counted)
 
+	def test_each_row_carries_its_joining_date_for_the_table_sort(self):
+		"""Plan 2026-10-17-001 U17 (HR-14): the People table sorts by it."""
+		frappe.set_user(self.hr_user)
+		rows = {row["name"]: row for row in search_people(query="Zara Colleague")["people"]}
+		expected = frappe.db.get_value("Employee", self.colleague, "date_of_joining")
+		self.assertEqual(rows[self.colleague]["date_of_joining"], str(expected))
+
 	def test_left_employees_are_excluded_by_default(self):
 		frappe.set_user(self.hr_user)
 		result = search_people(query="Zara Departed")

@@ -11,6 +11,9 @@ defineProps({
   modelValue: { type: [String, Number, Boolean], default: null },
   /** The group's accessible name, e.g. "Filter work by state". */
   label: { type: String, required: true },
+  /** Every chip off at once -- a filter with nothing to filter (U17). Say
+   * why next to it, and point `aria-describedby` at that sentence. */
+  disabled: { type: Boolean, default: false },
 })
 const emit = defineEmits(['update:modelValue'])
 </script>
@@ -25,13 +28,14 @@ const emit = defineEmits(['update:modelValue'])
       v-for="option in options"
       :key="String(option.value)"
       type="button"
-      class="min-h-11 shrink-0 cursor-pointer whitespace-nowrap rounded-full border px-4 text-sm font-medium focus-visible:[outline-offset:-3px]"
+      class="min-h-11 shrink-0 cursor-pointer whitespace-nowrap rounded-full border px-4 text-sm font-medium focus-visible:[outline-offset:-3px] disabled:cursor-not-allowed disabled:opacity-50"
       :class="
         modelValue === option.value
           ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
           : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
       "
       :aria-pressed="modelValue === option.value ? 'true' : 'false'"
+      :disabled="disabled"
       :data-testid="option.testid"
       :aria-label="option.count != null ? `${option.label} (${option.count})` : undefined"
       @click="emit('update:modelValue', option.value)"

@@ -409,6 +409,29 @@ class TestSearchAndGetProject(IntegrationTestCase):
 		self.assertIn("search_projects", RATE_LIMIT_POLICY)
 		self.assertIn("get_project", RATE_LIMIT_POLICY)
 
+	def test_each_listed_project_carries_its_member_and_open_task_counts(self):
+		"""Plan 2026-10-17-001 U17 (HR-15): counted the way `get_project`
+		lists -- every member, and only tasks that are not closed."""
+		from helixhr.api import search_projects
+
+		project = make_test_project(self.company, "_Test U17 Counted Project", members=[self.dm_user])
+		for subject, status in (
+			("_Test U17 Open Task", "Open"),
+			("_Test U17 Working Task", "Working"),
+			("_Test U17 Dropped Task", "Cancelled"),
+		):
+			if not frappe.db.exists("Task", {"project": project, "subject": subject}):
+				frappe.get_doc(
+					{"doctype": "Task", "project": project, "subject": subject, "status": status}
+				).insert(ignore_permissions=True)
+
+		frappe.set_user(self.hr_user)
+		rows = {row["name"]: row for row in search_projects()["projects"]}
+		self.assertEqual(rows[project]["member_count"], 1)
+		self.assertEqual(rows[project]["open_task_count"], 2)
+		self.assertEqual(rows[self.empty_project]["member_count"], 0)
+		self.assertEqual(rows[self.empty_project]["open_task_count"], 0)
+
 
 # --- U4: create_project / save_task / set_project_members --------------------
 

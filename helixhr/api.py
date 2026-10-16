@@ -10529,6 +10529,7 @@ _PEOPLE_SEARCH_FIELDS = (
 	"department",
 	"company",
 	"company_email",
+	"date_of_joining",
 )
 
 
@@ -10541,6 +10542,9 @@ def _people_search_projection(row):
 		"designation": row.designation or None,
 		"department": row.department or None,
 		"company": row.company,
+		# Plan 2026-10-17-001 U17: the People table sorts by it. The person
+		# view already shows it to the same caller.
+		"date_of_joining": str(row.date_of_joining) if row.date_of_joining else None,
 	}
 
 
@@ -12541,6 +12545,33 @@ def _project_search_projection(row):
 	}
 
 
+def _project_list_counts(names):
+	"""`({project: members}, {project: open tasks})` for the list's rows, in
+	two grouped reads (plan 2026-10-17-001 U17, HR-15). "Open" is every task
+	status but `_CLOSED_TASK_STATUSES`, the same rule `get_project` lists by.
+	Called only after the caller's project scope has picked `names`."""
+	if not names:
+		return {}, {}
+	members = frappe.get_all(
+		"Project User",
+		filters={"parenttype": "Project", "parent": ["in", names]},
+		fields=["parent", {"COUNT": "name"}],
+		group_by="parent",
+		ignore_permissions=True,
+	)
+	tasks = frappe.get_all(
+		"Task",
+		filters={"project": ["in", names], "status": ["not in", _CLOSED_TASK_STATUSES]},
+		fields=["project", {"COUNT": "name"}],
+		group_by="project",
+		ignore_permissions=True,
+	)
+	return (
+		{row.parent: _aggregate_count(row) for row in members},
+		{row.project: _aggregate_count(row) for row in tasks},
+	)
+
+
 @frappe.whitelist()
 def search_projects():
 	"""Every project this caller administers, per `resolve_project_scope`
@@ -12584,7 +12615,16 @@ def search_projects():
 			order_by="project_name asc",
 			ignore_permissions=True,
 		)
-		projects = [{**_project_search_projection(row), "can_edit": can_edit(row)} for row in rows]
+		members, open_tasks = _project_list_counts([row.name for row in rows])
+		projects = [
+			{
+				**_project_search_projection(row),
+				"can_edit": can_edit(row),
+				"member_count": members.get(row.name, 0),
+				"open_task_count": open_tasks.get(row.name, 0),
+			}
+			for row in rows
+		]
 
 	# P8-U2: the create form's own option lists, read in the same call so
 	# the page that hosts it needs no second request. `company` mirrors

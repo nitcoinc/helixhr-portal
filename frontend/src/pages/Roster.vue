@@ -10,6 +10,7 @@ import SearchField from '@/components/SearchField.vue'
 import SegmentedChips from '@/components/SegmentedChips.vue'
 import { session } from '@/lib/session'
 import { addCalendarDays, dateTileParts, formatDateRange, mondayOf, today } from '@/lib/dates'
+import { offFirst } from '@/lib/lists'
 import { isEmptyWeek, leaveLabel, rosterModes, shiftHours } from '@/lib/roster'
 import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
 
@@ -64,7 +65,26 @@ const debounced = useDebouncedSearch((value) => {
 watch(search, debounced.search)
 
 const days = computed(() => roster.data?.days || [])
-const rows = computed(() => roster.data?.rows || [])
+const serverRows = computed(() => roster.data?.rows || [])
+
+// Plan 2026-10-17-001 U17 (MH-16), the team view only: people off this week
+// first, and "Only people off" to hide the rest -- Team's toggle. Everyone
+// (HR) stays in the server's paged name order, where a page-local reorder
+// would only confuse the paging.
+const onlyOff = ref(false)
+const OFF_OPTIONS = [
+  { value: false, label: 'Everyone' },
+  { value: true, label: 'Only people off', testid: 'roster-only-off' },
+]
+const anyoneOff = computed(() => serverRows.value.some((row) => row.leaves?.length))
+watch([anyoneOff, mode], ([value, current]) => {
+  if (!value || current !== 'team') onlyOff.value = false
+})
+const rows = computed(() => {
+  if (mode.value !== 'team') return serverRows.value
+  const sorted = offFirst(serverRows.value)
+  return onlyOff.value ? sorted.filter((row) => row.leaves?.length) : sorted
+})
 const total = computed(() => roster.data?.total || 0)
 const limit = computed(() => roster.data?.limit || 50)
 const isCurrentWeek = computed(() =>
@@ -101,6 +121,19 @@ function isOff(day, row) {
 function offLabel(day, row) {
   if (row.holidays.includes(day.date)) return 'Holiday'
   return day.is_weekend ? 'Weekend' : ''
+}
+
+/** HR-21: the phone card's one badge, after the day name -- Weekend, or
+ * Holiday when it is a holiday for everyone on the card. A holiday only some
+ * people have stays on their own line (`rowOffLabel`). */
+function dayLabel(day) {
+  if (day.is_weekend) return 'Weekend'
+  const list = rows.value
+  return list.length && list.every((row) => row.holidays.includes(day.date)) ? 'Holiday' : ''
+}
+
+function rowOffLabel(day, row) {
+  return dayLabel(day) ? '' : offLabel(day, row)
 }
 
 /** What an assistive reader hears for one cell: the person, the day and
@@ -189,6 +222,13 @@ const emptyBody = computed(() =>
   query.value ? 'Try a different name or employee ID.' : 'Ask HR if that looks wrong.',
 )
 const quietWeek = computed(() => !noRows.value && isEmptyWeek(rows.value))
+// MH-17: your own empty week is one card, not seven saying "No shift".
+const mineEmpty = computed(() => quietWeek.value && mode.value === 'mine')
+const mine = computed(() => rows.value[0] || null)
+// The legend's "(default)" note, only when a "(default)" is on screen.
+const showsDefault = computed(() =>
+  rows.value.some((row) => row.default_shift && row.cells.some((cell) => !cell.shift_type)),
+)
 
 const scopeLine = computed(() => {
   if (mode.value === 'hr') return 'Everyone active in the companies you look after.'
@@ -264,18 +304,71 @@ const scopeLine = computed(() => {
       skeleton="card"
       skeleton-height="h-40"
     >
+      <!-- MH-17: one card for your own empty week, with the way out on it. -->
+      <section
+        v-if="mineEmpty"
+        class="surface-card elev-1 p-4"
+        data-testid="roster-quiet"
+      >
+        <p class="font-medium text-ink-gray-9">
+          No shifts are assigned this week.
+        </p>
+        <p
+          v-if="mine?.default_shift"
+          class="mt-1 text-sm text-ink-gray-6"
+        >
+          Check-in uses your default shift,
+          <span class="tabular">{{ [mine.default_shift.shift_type, shiftHours(mine.default_shift)].filter(Boolean).join(' ') }}</span>.
+        </p>
+        <p
+          v-for="leave in mine?.leaves || []"
+          :key="leave.name"
+          class="mt-1 text-sm text-ink-gray-6"
+        >
+          On leave {{ formatDateRange(leave.start, leave.end) }}: {{ leaveLabel(mine, leave.start) }}.
+        </p>
+        <button
+          type="button"
+          class="mt-3 inline-flex min-h-11 cursor-pointer items-center rounded-lg border border-outline-gray-2 px-3 text-sm font-medium text-ink-gray-8 hover:bg-surface-gray-2"
+          @click="nextWeek"
+        >
+          Go to next week
+        </button>
+      </section>
       <p
-        v-if="quietWeek"
+        v-else-if="quietWeek"
         class="mb-3 text-sm text-ink-gray-6"
         data-testid="roster-quiet"
       >
         No shifts are assigned this week. Use the arrows to look at another week.
       </p>
 
+      <!-- U17 (MH-16): the team view's toggle, Team's own. -->
+      <template v-if="mode === 'team'">
+        <SegmentedChips
+          v-model="onlyOff"
+          class="mb-3"
+          label="Whose shifts to show"
+          :options="OFF_OPTIONS"
+          :disabled="!anyoneOff"
+          :aria-describedby="anyoneOff ? undefined : 'roster-nobody-off'"
+        />
+        <p
+          v-if="!anyoneOff"
+          id="roster-nobody-off"
+          class="mb-3 text-sm text-ink-gray-6"
+        >
+          Nobody is off this week.
+        </p>
+      </template>
+
       <!-- Desktop: the week across. Scrolls inside its own container, never
            the page. Table roles so a screen reader can move by row and
            column; the visible header row is the column header. -->
-      <div class="hidden lg:block">
+      <div
+        v-if="!mineEmpty"
+        class="hidden lg:block"
+      >
         <div class="surface-card elev-1 overflow-x-auto p-4">
           <div
             class="min-w-[48rem]"
@@ -381,6 +474,7 @@ const scopeLine = computed(() => {
 
       <!-- Phone: the same week read downwards, one card per day. -->
       <ul
+        v-if="!mineEmpty"
         class="space-y-2 lg:hidden"
         data-testid="roster-days"
       >
@@ -402,9 +496,9 @@ const scopeLine = computed(() => {
             <p class="text-sm font-medium text-ink-gray-9">
               {{ day.weekday }}
               <span
-                v-if="day.is_weekend"
+                v-if="dayLabel(day)"
                 class="ml-1 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-medium text-ink-gray-7"
-              >Weekend</span>
+              >{{ dayLabel(day) }}</span>
             </p>
             <ul class="mt-1.5 space-y-1.5">
               <li
@@ -412,7 +506,9 @@ const scopeLine = computed(() => {
                 :key="row.employee"
                 class="flex min-w-0 items-center gap-2"
               >
+                <!-- HR-21: your own avatar on every day says nothing. -->
                 <Avatar
+                  v-if="mode !== 'mine'"
                   class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-xs font-bold text-ink-gray-7"
                   :photo-url="row.photo_url"
                   :initials="row.initials"
@@ -436,9 +532,9 @@ const scopeLine = computed(() => {
                   <template v-else>No shift</template>
                 </span>
                 <span
-                  v-if="offLabel(day, row) && !day.is_weekend"
+                  v-if="rowOffLabel(day, row)"
                   class="shrink-0 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-medium text-ink-gray-7"
-                >{{ offLabel(day, row) }}</span>
+                >{{ rowOffLabel(day, row) }}</span>
                 <span
                   v-if="leaveLabel(row, day.date)"
                   class="shrink-0 rounded-full bg-surface-green-2 px-2 py-0.5 text-xs font-medium text-ink-green-3"
@@ -483,28 +579,36 @@ const scopeLine = computed(() => {
         </button>
       </div>
 
+      <!-- HR-21: the phone's badges already say "On leave", "Weekend" and
+           "Holiday" in words, so the swatches are the grid's (desktop). -->
       <div
+        v-if="!mineEmpty"
         class="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-ink-gray-6"
         aria-label="Legend"
       >
-        <span class="inline-flex items-center gap-1.5">
+        <span class="hidden items-center gap-1.5 lg:inline-flex">
           <span
             class="h-3 w-6 rounded bg-surface-green-2"
             aria-hidden="true"
           />
           On leave
         </span>
-        <span class="inline-flex items-center gap-1.5">
+        <span class="hidden items-center gap-1.5 lg:inline-flex">
           <span
             class="h-3 w-6 rounded bg-surface-gray-3"
             aria-hidden="true"
           />
           Weekend or holiday
         </span>
-        <span>“(default)” is the shift used when none is assigned.</span>
+        <span v-if="showsDefault">“(default)” is the shift used when none is assigned.</span>
       </div>
 
-      <p class="mt-3 text-sm text-ink-gray-5">
+      <!-- MH-17: with the switcher on screen, "Your own shifts" only repeats
+           the chip that is on. -->
+      <p
+        v-if="mode !== 'mine' || modes.length === 1"
+        class="mt-3 text-sm text-ink-gray-5"
+      >
         {{ scopeLine }} Only this week.
       </p>
     </AsyncState>

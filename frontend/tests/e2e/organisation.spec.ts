@@ -16,6 +16,22 @@ test('an HR identity reaches Organisation and sees the aggregate counts', async 
   await expect(page.getByRole('link', { name: 'Organisation' })).toBeVisible()
 })
 
+// Plan 2026-10-17-001 U17 (HR-13): a queue row is a way to the work, not
+// just a number -- Leave opens Approvals on its leave lane.
+test('U17: the Leave queue row opens Approvals on the leave lane', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'organisation is an HR-only screen')
+
+  await page.goto('/helixhr/organisation')
+  const leave = page.getByTestId('organisation-queue-leave').getByRole('link', { name: /^Leave/ })
+  await expect(leave).toBeVisible()
+  await leave.click()
+
+  await expect(page).toHaveURL(/\/helixhr\/approvals\?view=queue&kind=leave$/)
+  await expect(
+    page.getByRole('group', { name: 'Filter approvals by kind' }).getByRole('button', { name: /^Leave/ }),
+  ).toHaveAttribute('aria-pressed', 'true')
+})
+
 test('an employee identity has no Organisation nav item, and a direct hit is refused server-side', async ({
   page,
 }, testInfo) => {
