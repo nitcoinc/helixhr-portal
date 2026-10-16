@@ -7,9 +7,8 @@ import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
-import { attachToRequestReply } from '@/lib/api'
-import CorrectionReview from '@/components/approvals/CorrectionReview.vue'
-import RequestThread from '@/components/requests/RequestThread.vue'
+import DecisionActions from '@/components/approvals/DecisionActions.vue'
+import KindTag from '@/components/KindTag.vue'
 import TimesheetOversight from '@/components/approvals/TimesheetOversight.vue'
 import { APPROVER_REASON_TEXT, groupByPerson, laneSections, laneSubsections } from '@/lib/approvalLanes'
 import { session } from '@/lib/session'
@@ -40,69 +39,85 @@ const router = useRouter()
 // U6 / R13. The chip lives in the URL query, so a link reproduces the view;
 // the server filters and counts, the browser only says which chip is on.
 const kindFilter = computed(() => route.query.kind || '')
-const categoryFilter = computed(() => route.query.category || '')
 const queue = createResource({
   url: 'helixhr.api.get_my_approvals',
   makeParams: () => ({
     kind: kindFilter.value || undefined,
-    category: categoryFilter.value || undefined,
   }),
   auto: true,
 })
-watch([kindFilter, categoryFilter], () => queue.reload())
+watch(kindFilter, () => queue.reload())
 
 const KIND_CHIP_LABEL = {
   leave: 'Leave',
-  timesheet: 'Timesheets',
   attendance: 'Attendance',
-  request: 'Requests',
-  change: 'Change requests',
 }
-// Plan 2026-10-15-002 R3: timesheets have their own tab, so no chip here.
+// Plan 2026-10-16-001 R16: in Leave & attendance tab, chips filter leave / attendance.
 const kindChips = computed(() =>
   (queue.data?.counts?.kinds || []).filter(
-    (chip) => chip.name !== 'timesheet' && (chip.count || chip.name === kindFilter.value),
+    (chip) => (chip.name === 'leave' || chip.name === 'attendance') && (chip.count || chip.name === kindFilter.value),
   ),
 )
-const categoryChips = computed(() => queue.data?.counts?.categories || [])
 
 /** Turn one chip on (or the All chip, with neither value), keeping any open
  * detail where it is. */
-function filterQueue(kind, category) {
-  router.push({ name: route.name, params: route.params, query: { kind: kind || undefined, category: category || undefined } })
+function filterQueue(kind) {
+  router.push({ name: route.name, params: route.params, query: { ...route.query, kind: kind || undefined } })
 }
 
-// Plan 2026-10-15-002 U5 (R3, R8, R14). Three tabs, each in the URL like the
-// chips: Approvals (every kind but timesheets, in lanes), Timesheets, and --
-// HR Manager only -- All pending, which replaced the Overdue tab. Each tab is
-// drawn only for a caller its server endpoint would serve; the server
-// refuses anyone else regardless.
-const timesheetCount = computed(
-  () => (queue.data?.counts?.kinds || []).find((chip) => chip.name === 'timesheet')?.count || 0,
-)
+// Plan 2026-10-16-001 R16. Approvals has two tabs: Timesheets and Leave & attendance.
+// HR Managers also get All pending. Tab labels carry counts. The default tab is
+// the first one with something waiting.
+const timesheetCount = computed(() => {
+  const kinds = queue.data?.counts?.kinds || []
+  const ts = kinds.find((k) => k.name === 'timesheet')?.count || 0
+  const ch = kinds.find((k) => k.name === 'change')?.count || 0
+  return ts + ch
+})
+const leaveAttendanceCount = computed(() => {
+  const kinds = queue.data?.counts?.kinds || []
+  const lv = kinds.find((k) => k.name === 'leave')?.count || 0
+  const at = kinds.find((k) => k.name === 'attendance')?.count || 0
+  return lv + at
+})
+
 const VIEW_TABS = computed(() =>
   [
-    (session.canApprove || session.canWorkRequests) && { name: 'queue', label: 'Approvals' },
     (session.canApprove || session.canOverseeTimesheets) && {
       name: 'timesheets',
       label: 'Timesheets',
       count: timesheetCount.value,
     },
+    session.canApprove && {
+      name: 'queue',
+      label: 'Leave & attendance',
+      count: leaveAttendanceCount.value,
+    },
     session.canSeeAllPending && { name: 'all-pending', label: 'All pending' },
   ].filter(Boolean),
 )
 const OVERDUE_VISIBLE_ROWS = 5
-/** The open tab: `?view=`, where the old `overdue` is an alias for All
- * pending with its toggle on; a tab this caller does not have falls back to
- * the first one they do (R14). */
-const view = computed(() => {
-  const asked = route.query.view === 'overdue' ? 'all-pending' : route.query.view || 'queue'
+
+const defaultTab = computed(() => {
+  if (timesheetCount.value > 0) return 'timesheets'
+  if (leaveAttendanceCount.value > 0) return 'queue'
   const names = VIEW_TABS.value.map((tab) => tab.name)
-  return names.includes(asked) ? asked : names[0] || 'queue'
+  return names[0] || 'timesheets'
+})
+
+/** The open tab: `?view=`, where the old `overdue` is an alias for All
+ * pending with its toggle on; default tab is the first one with something waiting. */
+const view = computed(() => {
+  if (route.query.view === 'overdue') return 'all-pending'
+  if (route.query.view) {
+    const names = VIEW_TABS.value.map((tab) => tab.name)
+    if (names.includes(route.query.view)) return route.query.view
+  }
+  return defaultTab.value
 })
 const overdueOnly = computed(() => route.query.view === 'overdue' || route.query.overdue === '1')
 function showView(name) {
-  router.push({ path: '/approvals', query: name === 'queue' ? {} : { view: name } })
+  router.push({ path: '/approvals', query: name === defaultTab.value ? {} : { view: name } })
 }
 function toggleOverdue() {
   router.push({ path: '/approvals', query: { view: 'all-pending', overdue: overdueOnly.value ? undefined : '1' } })
@@ -132,25 +147,6 @@ const overflow = computed(() => Math.max(0, (queue.data?.total || 0) - pending.v
 // rows themselves are the honest signal, so the sentence follows them rather
 // than asking the server a second question about roles.
 const hasHrWork = computed(() => pending.value.some((row) => row.for_hr))
-
-// P5-R12: a routed request has a claim state the other three kinds do not --
-// nobody "picks up" a leave application. The counts are read off the one flat
-// queue rather than a second request, so they can never disagree with what is
-// actually in `pending`.
-const requestRows = computed(() => pending.value.filter((row) => row.kind === 'request'))
-const unclaimedRequestCount = computed(
-  () => requestRows.value.filter((row) => !row.picked_up_by).length,
-)
-const myRequestCount = computed(
-  () => requestRows.value.filter((row) => row.picked_up_by === session.user).length,
-)
-
-/** The claim chip on a request row: who has it, or that nobody does yet. */
-function requestClaimLabel(row) {
-  if (row.kind !== 'request') return ''
-  if (!row.picked_up_by) return 'Unclaimed'
-  return row.picked_up_by === session.user ? 'You have this' : 'Picked up'
-}
 
 // --- the selected decision ----------------------------------------------
 
@@ -316,11 +312,6 @@ const REASON_COPY = {
     placeholder: 'Why is the answer final?',
     missing: 'Say why before rejecting this.',
   },
-  'Need info': {
-    heading: 'Ask a question',
-    placeholder: 'What do you need from them?',
-    missing: 'Say what you need before sending this.',
-  },
   Decline: {
     heading: 'Decline with a reason',
     placeholder: 'Why is the week staying as it is?',
@@ -420,34 +411,6 @@ async function decide(action, { confirmed = false } = {}) {
   }
 }
 
-// --- request attachments (P5-R10a) ---------------------------------------
-//
-// The worker's side of the conversation's attachments -- what makes an HR
-// Letter completable without opening Desk. A plain file input rather than a
-// resource: `attachToRequestReply` is a multipart POST, the same shape
-// `RequestForm.vue` already uses for the employee's own upload.
-
-const attachingReply = ref(false)
-const attachReplyError = ref('')
-const requestFileInputMobile = ref(null)
-const requestFileInputDesktop = ref(null)
-
-async function attachReplyFile(event) {
-  const file = event.target.files?.[0]
-  event.target.value = ''
-  if (!file || !selected.value) return
-  attachingReply.value = true
-  attachReplyError.value = ''
-  try {
-    await attachToRequestReply(file, { name: selected.value.name })
-    detail.fetch()
-  } catch (error) {
-    attachReplyError.value = error?.messages?.[0] || 'That file did not upload.'
-  } finally {
-    attachingReply.value = false
-  }
-}
-
 // --- presentation --------------------------------------------------------
 
 const DAY_LETTERS = ['M', 'T', 'W', 'T', 'F', 'S', 'S']
@@ -491,19 +454,6 @@ const KIND = {
     // one to HR is its own button (P4-R5), not this one wearing HR's name.
     approve: (item) => `Approve ${item.total_days} day${item.total_days === 1 ? '' : 's'}`,
     quote: (item) => item.explanation,
-  },
-  // P5-U11: a request has no single "amount" (a leave's days, a timesheet's
-  // hours) and no `Approve` action at all -- `may('Pick up')`/`may('Done')`
-  // draw its buttons instead of `approve`, so that entry is never called.
-  // `quote` is the request's own opening line; the full back-and-forth is the
-  // conversation block below, not this one-line surface.
-  request: {
-    summary: (row) => `${row.category} · ${row.subject}`,
-    amount: (row) => requestClaimLabel(row),
-    approve: () => '',
-    // The full back-and-forth renders as its own conversation block, not the
-    // shared one-line quote surface every other kind uses.
-    quote: () => null,
   },
   // Plan 2026-10-04-003 U3/U7 (R13): the change request is its own lane --
   // the employee's words are the evidence, the approved week's hours the
@@ -609,14 +559,19 @@ function flagLabels(row) {
   return Object.keys(row.flags || {}).map((flag) => FLAG_LABELS[flag] || flag)
 }
 
-// R1-R5: Approvals shows every kind but timesheets, in lanes; Timesheets
-// shows the caller's own timesheet queue as "Waiting on you" (their team)
-// and "Waiting on HR" (the HR stage, HR Manager only).
-const approvalRows = computed(() => pending.value.filter((row) => row.kind !== 'timesheet'))
-const timesheetRows = computed(() => pending.value.filter((row) => row.kind === 'timesheet'))
-const tabRows = computed(() => (view.value === 'timesheets' ? timesheetRows.value : approvalRows.value))
+// Plan 2026-10-16-001 R16: Timesheets holds timesheets and changes;
+// Leave & attendance holds leave and attendance.
+const timesheetRows = computed(() =>
+  pending.value.filter((row) => row.kind === 'timesheet' || row.kind === 'change'),
+)
+const leaveAttendanceRows = computed(() =>
+  pending.value.filter((row) => row.kind === 'leave' || row.kind === 'attendance'),
+)
+const tabRows = computed(() =>
+  view.value === 'timesheets' ? timesheetRows.value : leaveAttendanceRows.value,
+)
 const lanes = computed(() => {
-  if (view.value !== 'timesheets') return laneSections(approvalRows.value, decided.value.length)
+  if (view.value !== 'timesheets') return laneSections(leaveAttendanceRows.value, decided.value.length)
   return [
     { key: 'yours', title: 'Waiting on you', rows: timesheetRows.value.filter((row) => row.lane !== 'hr') },
     { key: 'hr-stage', title: 'Waiting on HR', rows: timesheetRows.value.filter((row) => row.lane === 'hr') },
@@ -889,27 +844,9 @@ function dismissBulkResult() {
       </template>
     </p>
 
-    <!-- P5-R12: requests split into what nobody has claimed and what the
-         viewer already has, counted separately from the rest of the queue. -->
-    <p
-      v-if="view === 'queue' && requestRows.length"
-      class="mb-4 flex flex-wrap gap-x-4 gap-y-1 text-sm text-ink-gray-5"
-      data-testid="request-claim-counts"
-    >
-      <span data-testid="unclaimed-count">
-        <span class="tabular font-medium text-ink-gray-9">{{ unclaimedRequestCount }}</span>
-        unclaimed
-      </span>
-      <span data-testid="my-request-count">
-        <span class="tabular font-medium text-ink-gray-9">{{ myRequestCount }}</span>
-        picked up by you
-      </span>
-    </p>
-
-    <!-- U6 / R13. Kind chips, then -- for requests -- category chips. Same
-         chip shape as the Directory's department filter. -->
+    <!-- Kind chips: Leave / Attendance in Leave & attendance tab -->
     <div
-      v-if="view === 'queue' && (kindChips.length > 1 || kindFilter || categoryFilter)"
+      v-if="view === 'queue' && (kindChips.length > 1 || kindFilter)"
       class="mb-4 flex flex-wrap items-center gap-2"
       role="group"
       aria-label="Filter approvals by kind"
@@ -919,11 +856,11 @@ function dismissBulkResult() {
         type="button"
         class="min-h-11 rounded-full border px-4 text-sm font-medium"
         :class="
-          !kindFilter && !categoryFilter
+          !kindFilter
             ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
             : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
         "
-        :aria-pressed="!kindFilter && !categoryFilter"
+        :aria-pressed="!kindFilter"
         @click="filterQueue()"
       >
         All
@@ -942,30 +879,6 @@ function dismissBulkResult() {
         @click="filterQueue(chip.name)"
       >
         {{ KIND_CHIP_LABEL[chip.name] }}
-        <span class="tabular text-ink-gray-5">{{ chip.count }}</span>
-      </button>
-    </div>
-    <div
-      v-if="view === 'queue' && (kindFilter === 'request' || categoryFilter) && categoryChips.length"
-      class="mb-4 flex flex-wrap items-center gap-2"
-      role="group"
-      aria-label="Filter requests by category"
-      data-testid="approval-category-chips"
-    >
-      <button
-        v-for="chip in categoryChips"
-        :key="chip.name"
-        type="button"
-        class="min-h-11 rounded-full border px-4 text-sm font-medium"
-        :class="
-          categoryFilter === chip.name
-            ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-            : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-        "
-        :aria-pressed="categoryFilter === chip.name"
-        @click="filterQueue('request', chip.name)"
-      >
-        {{ chip.name }}
         <span class="tabular text-ink-gray-5">{{ chip.count }}</span>
       </button>
     </div>
@@ -1159,6 +1072,7 @@ function dismissBulkResult() {
 
                           <span class="min-w-0 flex-1">
                             <span class="flex min-w-0 items-center gap-2">
+                              <KindTag :row="row" />
                               <span class="min-w-0 truncate font-medium text-ink-gray-9">
                                 {{ row.employee_name }}
                               </span>
@@ -1417,65 +1331,6 @@ function dismissBulkResult() {
                               </div>
                             </dl>
 
-                            <!-- P5-R10: the request and every reply after it, one
-                         conversation, oldest first. -->
-                            <div
-                              v-else-if="selected.kind === 'request'"
-                              class="border-t border-outline-gray-2 pt-3"
-                            >
-                              <p class="text-sm text-ink-gray-6">
-                                {{ selected.category }}
-                              </p>
-                              <CorrectionReview
-                                v-if="selected.correction"
-                                :key="selected.name"
-                                :request="selected.name"
-                                :correction="selected.correction"
-                                :attachments="selected.attachments"
-                                :can-reveal="actions.length > 0"
-                              />
-                              <RequestThread
-                                :entries="selected.thread || []"
-                                :can-comment="!!selected.can_comment"
-                                :closed="!!selected.closed"
-                                :request-name="selected.name"
-                                :employee-name="selected.employee_name || ''"
-                                mode="handler"
-                                class="mt-3"
-                                @posted="detail.fetch()"
-                              />
-
-                              <!-- P5-R10a: what makes an HR Letter completable
-                           without opening Desk. -->
-                              <div
-                                v-if="actions.length"
-                                class="mt-3"
-                              >
-                                <Button
-                                  variant="outline"
-                                  :loading="attachingReply"
-                                  :disabled="attachingReply"
-                                  @click="requestFileInputMobile?.click()"
-                                >
-                                  Attach a file
-                                </Button>
-                                <input
-                                  ref="requestFileInputMobile"
-                                  type="file"
-                                  class="sr-only"
-                                  data-testid="attach-reply-input"
-                                  @change="attachReplyFile"
-                                >
-                                <p
-                                  v-if="attachReplyError"
-                                  class="mt-1 text-sm text-signal"
-                                  role="alert"
-                                >
-                                  {{ attachReplyError }}
-                                </p>
-                              </div>
-                            </div>
-
                             <p
                               v-if="quote"
                               class="surface-inset mt-3 p-3 text-sm text-ink-gray-7"
@@ -1568,109 +1423,15 @@ function dismissBulkResult() {
                             >
                               View only: you can't approve timesheets.
                             </p>
-                            <div
-                              class="mt-3 flex flex-wrap items-center gap-2"
-                              data-testid="decision-actions"
-                            >
-                              <!-- R13: the change request's two decisions. Accept
-                           cancels the approved week and returns an editable
-                           copy; Decline is the final no, with a reason. -->
-                              <Button
-                                v-if="shown('Accept')"
-                                variant="solid"
-                                theme="green"
-                                :loading="acting === selected.name"
-                                :disabled="acting === selected.name"
-                                data-testid="accept"
-                                @click="decide('Accept')"
-                              >
-                                Accept
-                              </Button>
-                              <Button
-                                v-if="shown('Approve')"
-                                variant="solid"
-                                theme="green"
-                                :loading="acting === selected.name"
-                                :disabled="acting === selected.name"
-                                @click="decide('Approve')"
-                              >
-                                {{ approveLabel }}
-                              </Button>
-                              <Button
-                                v-if="shown('Pick up')"
-                                variant="solid"
-                                theme="green"
-                                :loading="acting === selected.name"
-                                :disabled="acting === selected.name"
-                                data-testid="pick-up"
-                                @click="decide('Pick up')"
-                              >
-                                Pick up
-                              </Button>
-                              <Button
-                                v-if="shown('Done')"
-                                variant="solid"
-                                theme="green"
-                                :loading="acting === selected.name"
-                                :disabled="acting === selected.name"
-                                data-testid="done"
-                                @click="decide('Done')"
-                              >
-                                Done
-                              </Button>
-                              <Button
-                                v-if="shown('Need info')"
-                                variant="outline"
-                                class="decision-tone decision-tone--return"
-                                :disabled="acting === selected.name"
-                                data-testid="need-info"
-                                @click="decide('Need info')"
-                              >
-                                Need info
-                              </Button>
-                              <Button
-                                v-if="shown('Send Back')"
-                                variant="outline"
-                                class="decision-tone decision-tone--return"
-                                :disabled="acting === selected.name"
-                                data-testid="send-back"
-                                @click="decide('Send Back')"
-                              >
-                                Send back
-                              </Button>
-                              <Button
-                                v-if="shown('Reject')"
-                                variant="outline"
-                                class="decision-tone decision-tone--final"
-                                :disabled="acting === selected.name"
-                                data-testid="reject"
-                                @click="decide('Reject')"
-                              >
-                                Reject
-                              </Button>
-                              <!-- R12: a decline is a final no with a reason; the
-                           week stays as it was. -->
-                              <Button
-                                v-if="shown('Decline')"
-                                variant="outline"
-                                class="decision-tone decision-tone--final"
-                                :disabled="acting === selected.name"
-                                data-testid="decline"
-                                @click="decide('Decline')"
-                              >
-                                Decline
-                              </Button>
-                              <Button
-                                v-if="shown('Send to HR')"
-                                variant="outline"
-                                class="decision-tone decision-tone--handover"
-                                :disabled="acting === selected.name"
-                                data-testid="send-to-hr"
-                                @click="decide('Send to HR')"
-                              >
-                                Send to HR
-                              </Button>
-                            </div>
+                            <DecisionActions
+                              class="mt-3"
+                              :kind="selected.kind"
+                              :actions="actions"
+                              :disabled="acting === selected.name"
+                              :loading="acting === selected.name"
+                              :armed="reasonFor || (noteOpen ? 'Send to HR' : (confirmAccept ? 'Accept' : ''))"
+                              @act="decide"
+                            />
                           </div>
                         </AsyncState>
                       </div>
@@ -2148,108 +1909,15 @@ function dismissBulkResult() {
             >
               View only: you can't approve timesheets.
             </p>
-            <div
-              class="mt-4 flex flex-wrap items-center justify-end gap-2"
-              data-testid="decision-actions"
-            >
-              <Button
-                v-if="shown('Send to HR')"
-                variant="outline"
-                class="decision-tone decision-tone--handover"
+            <div class="mt-4 flex flex-wrap items-center justify-end gap-2">
+              <DecisionActions
+                :kind="selected.kind"
+                :actions="actions"
                 :disabled="acting === selected.name"
-                data-testid="send-to-hr"
-                @click="decide('Send to HR')"
-              >
-                Send to HR
-              </Button>
-              <Button
-                v-if="shown('Reject')"
-                variant="outline"
-                class="decision-tone decision-tone--final"
-                :disabled="acting === selected.name"
-                data-testid="reject"
-                @click="decide('Reject')"
-              >
-                Reject
-              </Button>
-              <!-- R12: a decline is a final no with a reason; the week stays
-                   as it was. -->
-              <Button
-                v-if="shown('Decline')"
-                variant="outline"
-                class="decision-tone decision-tone--final"
-                :disabled="acting === selected.name"
-                data-testid="decline"
-                @click="decide('Decline')"
-              >
-                Decline
-              </Button>
-              <Button
-                v-if="shown('Need info')"
-                variant="outline"
-                class="decision-tone decision-tone--return"
-                :disabled="acting === selected.name"
-                data-testid="need-info"
-                @click="decide('Need info')"
-              >
-                Need info
-              </Button>
-              <Button
-                v-if="shown('Send Back')"
-                variant="outline"
-                class="decision-tone decision-tone--return"
-                :disabled="acting === selected.name"
-                data-testid="send-back"
-                @click="decide('Send Back')"
-              >
-                Send back
-              </Button>
-              <Button
-                v-if="shown('Pick up')"
-                variant="solid"
-                theme="green"
                 :loading="acting === selected.name"
-                :disabled="acting === selected.name"
-                data-testid="pick-up"
-                @click="decide('Pick up')"
-              >
-                Pick up
-              </Button>
-              <Button
-                v-if="shown('Done')"
-                variant="solid"
-                theme="green"
-                :loading="acting === selected.name"
-                :disabled="acting === selected.name"
-                data-testid="done"
-                @click="decide('Done')"
-              >
-                Done
-              </Button>
-              <!-- R13: Accept is the change request's decision -- it cancels
-                   the approved week and returns an editable copy to the
-                   employee. -->
-              <Button
-                v-if="shown('Accept')"
-                variant="solid"
-                theme="green"
-                :loading="acting === selected.name"
-                :disabled="acting === selected.name"
-                data-testid="accept"
-                @click="decide('Accept')"
-              >
-                Accept
-              </Button>
-              <Button
-                v-if="shown('Approve')"
-                variant="solid"
-                theme="green"
-                :loading="acting === selected.name"
-                :disabled="acting === selected.name"
-                @click="decide('Approve')"
-              >
-                {{ approveLabel }}
-              </Button>
+                :armed="reasonFor || (noteOpen ? 'Send to HR' : (confirmAccept ? 'Accept' : ''))"
+                @act="decide"
+              />
             </div>
           </article>
         </AsyncState>

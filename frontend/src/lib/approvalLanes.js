@@ -7,7 +7,6 @@ export const LANE_TITLES = {
   team: 'My team',
   decided: 'Decided by me',
   hr: 'HR',
-  it: 'IT',
 }
 
 /** R8/R11: why an approver group cannot be reminded, in words. Keys are the
@@ -19,7 +18,7 @@ export const APPROVER_REASON_TEXT = {
   no_approver: 'No approver set; set Reports to',
 }
 
-const PENDING_LANES = ['team', 'hr', 'it']
+const PENDING_LANES = ['team', 'hr']
 
 /** Plan 2026-10-04-003 U7 (R13, R19): inside a lane, change requests (never
  * batchable) first, then the rows the server flagged, then everything else.
@@ -54,7 +53,7 @@ export function laneSubsections(rows) {
  * with no lane tag counts as the caller's own team.
  */
 export function laneSections(rows, decidedCount = 0) {
-  const byLane = { team: [], hr: [], it: [] }
+  const byLane = { team: [], hr: [] }
   for (const row of rows || []) (byLane[row.lane] || byLane.team).push(row)
   const lanes = []
   for (const key of PENDING_LANES) {
