@@ -59,8 +59,8 @@ const boxLabel = computed(() => {
   }
   if (isEmployee.value) return 'Add a comment'
   return props.employeeName
-    ? `Message for ${props.employeeName}`
-    : 'Message for the employee'
+    ? `Comment (visible to ${props.employeeName})`
+    : 'Comment (visible to the employee)'
 })
 
 const tooLong = computed(() => message.value.length > detailsMax)
@@ -282,7 +282,7 @@ async function sendAndWait() {
             type="button"
             class="inline-flex min-h-11 cursor-pointer items-center rounded-lg bg-ink-gray-9 px-4 text-sm font-medium text-surface-white hover:bg-ink-gray-8 disabled:opacity-50"
             :disabled="!message.trim() || tooLong || posting"
-            data-testid="thread-send-note"
+            data-testid="thread-post"
             @click="sendNote"
           >
             Send

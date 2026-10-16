@@ -131,3 +131,30 @@ test('IT comments on its request from Approvals at phone width and the employee 
   await employee.dispose()
   expect(mine.thread.map((entry: { message: string }) => entry.message)).toContain('A replacement ships Friday.')
 })
+
+test('handler Send and wait moves to waiting, employee sees Needs your reply banner, handler declines waiting request', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'the HR handler side')
+  test.setTimeout(60000)
+  const name = await fileRequest('HR Letter', 'Conversation spec: AE2/AE3 flow')
+
+  // Handler opens in team inbox
+  await page.goto(`/helixhr/requests/${name}?tab=work`)
+  const detail = page.getByTestId('work-detail')
+  const thread = detail.getByTestId('request-thread')
+
+  // Send and wait for reply from message box
+  await thread.getByTestId('thread-box').fill('Which specific date?')
+  await thread.getByTestId('thread-send-and-wait').click()
+  await expect.poll(() => status(name), { timeout: 15000 }).toBe('Waiting on Employee')
+
+  // Verify thread has question entry
+  await expect(thread.getByTestId('thread-question')).toContainText('Which specific date?')
+
+  // Handler can decline from waiting (R7, AE3)
+  await detail.getByTestId('reject').click()
+  await detail.getByRole('textbox', { name: 'Decline with a reason' }).fill('No response required')
+  await detail.getByTestId('work-reason-confirm').click()
+  await expect.poll(() => status(name), { timeout: 15000 }).toBe('Rejected')
+  await expect(thread.getByTestId('thread-declined')).toContainText('No response required')
+})
+
