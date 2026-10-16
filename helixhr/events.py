@@ -1131,6 +1131,38 @@ def _reconcile_share(doctype, name, employee, keep_user, submit=0):
 # both written and matched in one place. helixhr.api._get_needs_you imports it.
 HR_REPLY_SUBJECT_PREFIX = "HR replied about"
 
+# Plan 2026-10-16-001 KTD5: question and declined markers for HR Request comments.
+HR_REQUEST_QUESTION_PREFIX = "Question:"
+HR_REQUEST_DECLINED_PREFIX = "Declined:"
+
+
+def strip_request_comment_marker(text):
+	"""Plan 2026-10-16-001 KTD5: single helper that strips question and declined
+	markers from stored request comment text."""
+	if not text:
+		return "", "note"
+	stripped = text.strip()
+	if stripped.startswith(HR_REQUEST_QUESTION_PREFIX):
+		return stripped[len(HR_REQUEST_QUESTION_PREFIX) :].strip(), "question"
+	if stripped.startswith(HR_REQUEST_DECLINED_PREFIX):
+		return stripped[len(HR_REQUEST_DECLINED_PREFIX) :].strip(), "declined"
+	return stripped, "note"
+
+
+# Zero width and not whitespace to `str.strip`, so it survives
+# `strip_request_comment_marker` and renders as nothing.
+_MARKER_ESCAPE = "\u200b"
+
+
+def escape_request_comment(text):
+	"""A note someone *typed* starting with "Question:" or "Declined:" must stay
+	a note: only `_decide_one` writes a marker. Every typed-text writer of
+	request comments passes its text through here first."""
+	if text.startswith((HR_REQUEST_QUESTION_PREFIX, HR_REQUEST_DECLINED_PREFIX)):
+		return _MARKER_ESCAPE + text
+	return text
+
+
 HR_REQUEST_OPEN = "Open"
 HR_REQUEST_IN_PROGRESS = "In Progress"
 HR_REQUEST_WAITING_ON_EMPLOYEE = "Waiting on Employee"
@@ -1145,6 +1177,9 @@ HR_REQUEST_STATE_EDGES = frozenset(
 		(HR_REQUEST_IN_PROGRESS, HR_REQUEST_WAITING_ON_EMPLOYEE),
 		(HR_REQUEST_IN_PROGRESS, HR_REQUEST_DONE),
 		(HR_REQUEST_IN_PROGRESS, HR_REQUEST_REJECTED),
+		# Plan 2026-10-16-001 U2 / KTD3: Handlers close from Waiting on Employee.
+		(HR_REQUEST_WAITING_ON_EMPLOYEE, HR_REQUEST_DONE),
+		(HR_REQUEST_WAITING_ON_EMPLOYEE, HR_REQUEST_REJECTED),
 	}
 )
 HR_REQUEST_MUTABLE_FIELDS = {

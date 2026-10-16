@@ -440,7 +440,7 @@ NOTIFICATION_EVENTS = {
 			"category": ("Request category", "IT / Asset"),
 			"subject": ("The request's subject", "Laptop replacement"),
 			"reply_excerpt": ("The start of the reply", "Thanks, the old one is in the drawer."),
-			"action_url": ("Link to the request", "https://hr.example.com/helixhr/requests"),
+			"action_url": ("Link to the request", "https://hr.example.com/helixhr/requests/REQ-2026-00001?tab=work"),
 		},
 		"subject": "{{ employee_name }} replied: {{ subject }}",
 		"body": (
@@ -461,7 +461,7 @@ NOTIFICATION_EVENTS = {
 			"category": ("Request category", "IT / Asset"),
 			"subject": ("The request's subject", "Laptop replacement"),
 			"comment_excerpt": ("The start of the comment (may be empty)", "I've checked this with finance."),
-			"action_url": ("Link to the request", "https://hr.example.com/helixhr/requests"),
+			"action_url": ("Link to the request", "https://hr.example.com/helixhr/requests/REQ-2026-00001?tab=work"),
 		},
 		"subject": "{{ author_name }} commented: {{ subject }}",
 		"body": (
@@ -2214,6 +2214,7 @@ RATE_LIMIT_POLICY = {
 	# Plan 2026-10-15-003 KTD2: a handler comment mails the employee.
 	"comment_on_request": (20, 3600),
 	"attach_to_request_reply": (20, 3600),
+	"get_request_view": (60, 60),
 	"mark_notifications_read": (60, 60),
 	# P3-U1 step 5 / P3-R25. Writes first; the two reads are bounded too
 	# because each one fans out to a per-employee lookup.

@@ -5,10 +5,10 @@ import { groupByPerson, laneSections, laneSubsections } from './approvalLanes'
 const row = (lane, name, extra = {}) => ({ lane, name, employee: `E-${name}`, kind: 'leave', ...extra })
 
 describe('laneSections', () => {
-  it('orders team, decided, hr, it', () => {
+  it('orders team, decided, hr with no it lane', () => {
     const lanes = laneSections([row('it', 'c'), row('hr', 'b'), row('team', 'a')], 2)
-    expect(lanes.map((lane) => lane.key)).toEqual(['team', 'decided', 'hr', 'it'])
-    expect(lanes.map((lane) => lane.title)).toEqual(['My team', 'Decided by me', 'HR', 'IT'])
+    expect(lanes.map((lane) => lane.key)).toEqual(['team', 'decided', 'hr'])
+    expect(lanes.map((lane) => lane.title)).toEqual(['My team', 'Decided by me', 'HR'])
   })
 
   it('drops empty pending lanes', () => {

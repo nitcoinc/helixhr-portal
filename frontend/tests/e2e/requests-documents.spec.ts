@@ -237,7 +237,8 @@ test.describe('employee', () => {
       const detail = detailPanel(page)
       await expect(detail).toContainText(subject)
       await expect(detail).toContainText('Needed for a new bank account.')
-      await expect(detail.locator('[data-testid="request-timeline"]')).toContainText('Sent')
+      // Plan 2026-10-16-001 U7: the timeline is folded into the thread's milestones.
+      await expect(detail.getByTestId('thread-milestone').first()).toContainText('Sent')
 
       await page.reload()
       await expect(detailPanel(page)).toContainText(subject)
@@ -554,11 +555,11 @@ test.describe('employee', () => {
         ).json()
       )?.message?.full_name
 
-      // The employee's timeline names who picked it up -- not a fixed
-      // "Picked up by HR".
+      // The employee's thread milestone names who picked it up -- not a
+      // fixed team name (plan 2026-10-16-001 R10: "Assigned to {name}").
       await page.goto(`/helixhr/requests/${name}`)
-      await expect(page.locator('[data-testid="request-timeline"]')).toContainText(
-        `Picked up by ${fullname}`,
+      await expect(page.getByTestId('thread-milestone').filter({ hasText: 'Assigned to' })).toContainText(
+        `Assigned to ${fullname}`,
       )
     } finally {
       await removeRequest(api, name)

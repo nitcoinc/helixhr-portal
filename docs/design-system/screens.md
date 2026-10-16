@@ -442,11 +442,14 @@ error and relabels the field**, so a sentence written to send something back can
 as a terminal rejection. Send to HR opens a smaller, plainly optional note field inline instead —
 it is not a reason, and a required-looking field would say otherwise.
 
-**HR work is tagged, not separated.** An HR Manager gets one oldest-first queue mixing their own
-reports' work with everything handed to HR; the HR rows carry an "HR" chip beside the name and a
-second line, "Sent by Priya · 'needs policy check'", and the detail head repeats both. Two backlogs
-to poll would be the alternative, and an HR Manager who is also a line manager would have to poll
-both. HR has no Send to HR button anywhere — there is nowhere further to send.
+**Decisions in Approvals, requests in Team inbox (Plan 2026-10-16-001).** Approvals holds yes/no decisions only:
+Timesheets (timesheets and timesheet changes) and Leave & attendance (leave and attendance decisions).
+HR Managers also get All pending. Requests never appear in Approvals; they are worked exclusively from
+Requests → Team inbox (`/requests?tab=work`).
+Inside Approvals, HR decisions carry an "HR" chip beside the name and a second line ("Sent by Priya · 'needs policy check'").
+HR has no Send to HR button anywhere — there is nowhere further to send.
+Action buttons follow a fixed order on both phone and desktop through `DecisionActions.vue`:
+Primary action (Approve / Approve change) -> Return action (Send back) -> Final no (Reject / Decline) -> Quiet hand-over (Send to HR).
 
 *Deviations from the artboard, recorded:*
 

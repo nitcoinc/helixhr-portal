@@ -1,19 +1,22 @@
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
 import RequestForm from '@/components/RequestForm.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
+import KindTag from '@/components/KindTag.vue'
+import CorrectionReview from '@/components/approvals/CorrectionReview.vue'
 import RequestThread from '@/components/requests/RequestThread.vue'
 import Icon from '@/components/Icon.vue'
-import { attachToRequest, keepaliveRequest } from '@/lib/api'
+import { attachToRequest, attachToRequestReply, keepaliveRequest } from '@/lib/api'
 import { session } from '@/lib/session'
 import { formatDate, formatDateTime } from '@/lib/dates'
 import { currentUnread, setUnread, unreadCount } from '@/lib/unread'
 import { useIsDesktop } from '@/lib/useIsDesktop'
 import { CORRECTABLE_FIELDS, spokenValue } from '@/lib/profileCorrection'
+import { getReasonCopy } from '@/lib/workKinds'
 
 // P2-U8 / KTD5. `/requests` and `/requests/:name` are the same component: the
 // selected record is a route parameter, so refresh and browser Back land on
@@ -123,24 +126,33 @@ const detail = createResource({
 
 const WORK_TABS = [
   { name: 'mine', label: 'My requests' },
-  { name: 'work', label: 'To work on' },
+  { name: 'work', label: 'Team inbox' },
 ]
 const WORK_FILTERS = [
   { name: 'open', label: 'Open' },
   { name: 'mine', label: 'Mine' },
-  { name: 'waiting', label: 'Waiting on employee' },
   { name: 'closed', label: 'Closed' },
 ]
-const REASON_HEADINGS = {
-  'Need info': 'Ask a question',
-  Reject: 'Why is this a no?',
-}
+
 
 const tab = computed(() =>
   session.canHandleRequests && route.query.tab === 'work' ? 'work' : 'mine',
 )
-const workFilter = computed(() =>
-  WORK_FILTERS.some((filter) => filter.name === route.query.state) ? route.query.state : 'open',
+const workFilter = computed(() => {
+  if (route.query.state === 'waiting') return 'open'
+  return WORK_FILTERS.some((filter) => filter.name === route.query.state) ? route.query.state : 'open'
+})
+
+watch(
+  () => route.query.state,
+  async (state) => {
+    if (state === 'waiting' && tab.value === 'work') {
+      await nextTick()
+      const el = document.getElementById('waiting-group')
+      if (el) el.scrollIntoView({ behavior: 'smooth' })
+    }
+  },
+  { immediate: true },
 )
 
 function showTab(name) {
@@ -180,8 +192,44 @@ watch(
   { immediate: true },
 )
 const workRows = computed(() => work.data?.work || [])
+// The server names the team from the roles it read (HR or IT); both -> plain.
+const inboxTitle = computed(() => (work.data?.team ? `${work.data.team} team inbox` : 'Team inbox'))
 const workTotal = computed(() => work.data?.total || 0)
+const workNeedsActionCount = computed(() =>
+  work.data?.action_count !== undefined
+    ? work.data.action_count
+    : workRows.value.filter((r) => r.status === 'Open' || r.status === 'In Progress').length,
+)
+/** R6: "Waiting on Ravi · 3 days" -- the badge names the person, this the time. */
+function waitedFor(days) {
+  if (!days) return 'since today'
+  return days === 1 ? '1 day' : `${days} days`
+}
 const workMoreCount = computed(() => Math.max(0, workTotal.value - workRows.value.length))
+
+const workGroups = computed(() => {
+  if (workFilter.value === 'closed') {
+    return [{ key: 'closed', title: 'Closed', rows: workRows.value }]
+  }
+  const newRows = workRows.value.filter((r) => r.status === 'Open')
+  const inProgressRows = workRows.value.filter((r) => r.status === 'In Progress')
+  const waitingRows = workRows.value.filter((r) => r.status === 'Waiting on Employee')
+
+  const list = []
+  if (newRows.length) {
+    list.push({ key: 'new', title: 'New', count: newRows.length, rows: newRows })
+  }
+  if (inProgressRows.length) {
+    list.push({ key: 'in_progress', title: 'In progress', count: inProgressRows.length, rows: inProgressRows })
+  }
+  if (waitingRows.length) {
+    list.push({ key: 'waiting', title: 'Waiting on employee', count: waitingRows.length, rows: waitingRows })
+  }
+  if (!list.length && workRows.value.length) {
+    list.push({ key: 'all', title: 'Requests', count: workRows.value.length, rows: workRows.value })
+  }
+  return list
+})
 
 function showMoreWork() {
   workLimit.value = Math.min(100, workLimit.value + 20)
@@ -199,9 +247,31 @@ const workAct = createResource({ url: 'helixhr.api.act_on_approval', method: 'PO
 const workSelected = computed(() => (props.name && tab.value === 'work' ? workDetail.data : null))
 
 const workActing = ref('')
-const reasonFor = ref('') // 'Need info' or 'Reject' while its box is open
+const reasonFor = ref('') // 'Reject' while its box is open
 const reasonMessage = ref('')
 const reasonError = ref('')
+// The server's action is Reject; the word on screen is Decline (R14).
+const currentReasonCopy = computed(() => getReasonCopy('Decline'))
+
+const attachingReply = ref(false)
+const attachReplyError = ref('')
+const requestFileInput = ref(null)
+
+async function attachReplyFile(event) {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (!file || !workSelected.value) return
+  attachingReply.value = true
+  attachReplyError.value = ''
+  try {
+    await attachToRequestReply(file, { name: workSelected.value.name })
+    workDetail.fetch()
+  } catch (error) {
+    attachReplyError.value = error?.messages?.[0] || 'That file did not upload.'
+  } finally {
+    attachingReply.value = false
+  }
+}
 
 function openReason(action) {
   reasonFor.value = action
@@ -212,11 +282,10 @@ function openReason(action) {
 async function decide(action) {
   const item = workSelected.value
   if (!item || workActing.value) return
-  const wantsReason = action === 'Need info' || action === 'Reject'
+  const wantsReason = action === 'Reject'
   const message = wantsReason ? reasonMessage.value.trim() : ''
   if (wantsReason && !message) {
-    reasonError.value =
-      action === 'Reject' ? 'Say why before rejecting this.' : 'Say what you need from them first.'
+    reasonError.value = currentReasonCopy.value.missing
     return
   }
   workActing.value = item.name
@@ -382,25 +451,57 @@ const isDesktop = useIsDesktop()
 const timeline = computed(() => {
   const request = selected.value
   if (!request) return []
-  return [
-    { key: 'sent', label: 'Sent', at: request.creation },
-    {
-      // Plan 2026-10-04-002 R4: the person who picked it up, not a fixed
-      // "Picked up by HR"; no resolvable picker falls back to the team.
+  const list = [{ key: 'sent', label: 'Sent', at: request.creation }]
+  if (request.picked_up_on) {
+    list.push({
       key: 'picked-up',
-      label: `Picked up by ${request.picked_up_by_name || request.handled_by_team || 'HR'}`,
+      label: `Assigned to ${request.picked_up_by_name || request.handled_by_team || 'team'}`,
       at: request.picked_up_on,
-    },
-    { key: 'replied', label: 'Replied', at: request.replied_on },
-  ].filter((step) => step.at)
+    })
+  }
+  if (request.closed_on) {
+    list.push({
+      key: 'closed',
+      label: 'Closed',
+      at: request.closed_on,
+    })
+  }
+  return list
+})
+
+const workTimeline = computed(() => {
+  const request = workSelected.value
+  if (!request) return []
+  const list = [{ key: 'sent', label: 'Sent', at: request.creation || request.sent_on }]
+  if (request.picked_up_on) {
+    list.push({
+      key: 'picked-up',
+      label: `Assigned to ${request.picked_up_by_name || request.handled_by_team || 'team'}`,
+      at: request.picked_up_on,
+    })
+  }
+  if (request.closed_on) {
+    list.push({
+      key: 'closed',
+      label: 'Closed',
+      at: request.closed_on,
+    })
+  }
+  return list
+})
+
+const latestQuestion = computed(() => {
+  const q = (selected.value?.thread || []).slice().reverse().find((e) => e.kind === 'question')
+  return q ? q.message : ''
 })
 </script>
 
 <template>
   <div>
-    <PageHeader title="Requests">
+    <PageHeader :title="tab === 'work' ? inboxTitle : 'Requests'">
       <template #actions>
         <Button
+          v-if="tab !== 'work'"
           variant="solid"
           theme="blue"
           @click="newRequest"
@@ -426,7 +527,7 @@ const timeline = computed(() => {
         :key="item.name"
         type="button"
         role="tab"
-        class="-mb-px min-h-11 border-b-2 px-3 text-sm font-medium"
+        class="-mb-px flex min-h-11 items-center gap-2 border-b-2 px-3 text-sm font-medium"
         :class="
           tab === item.name
             ? 'border-ink-gray-9 text-ink-gray-9'
@@ -438,7 +539,13 @@ const timeline = computed(() => {
         @keydown.right.prevent="cycleTab(1)"
         @keydown.left.prevent="cycleTab(-1)"
       >
-        {{ item.label }}
+        <span>{{ item.label }}</span>
+        <span
+          v-if="item.name === 'work' && workNeedsActionCount > 0"
+          class="rounded-full bg-surface-gray-3 px-2 py-0.5 text-xs font-semibold tabular text-ink-gray-7"
+        >
+          {{ workNeedsActionCount }}
+        </span>
       </button>
     </div>
 
@@ -483,52 +590,80 @@ const timeline = computed(() => {
             empty-body="Requests routed to you appear here as they arrive."
             :skeleton-rows="3"
           >
-            <ul class="space-y-2">
-              <li
-                v-for="row in workRows"
-                :key="row.name"
-                class="surface-card elev-1 relative p-4"
-                :class="row.name === name ? 'ring-2 ring-field' : ''"
-                data-testid="work-row"
+            <div class="space-y-6">
+              <section
+                v-for="group in workGroups"
+                :id="group.key === 'waiting' ? 'waiting-group' : undefined"
+                :key="group.key"
+                :data-group="group.key"
+                class="space-y-2"
               >
-                <div class="flex items-start justify-between gap-3">
-                  <div class="min-w-0">
-                    <p class="label">
-                      {{ row.employee_name }}
-                    </p>
-                    <router-link
-                      class="-my-2 inline-flex min-h-11 items-center font-medium text-ink-gray-9 after:absolute after:inset-0 after:content-['']"
-                      :class="row.name === name ? 'font-semibold' : ''"
-                      :to="{ name: 'RequestDetail', params: { name: row.name }, query: { tab: 'work', ...(workFilter === 'open' ? {} : { state: workFilter }) } }"
-                    >
-                      {{ row.subject }}
-                    </router-link>
-                    <p class="mt-0.5 text-sm text-ink-gray-5">
-                      {{ row.category }} · sent {{ formatDate(row.sent_on) }}
-                      <template v-if="row.picked_up_by_name">
-                        · picked up by {{ row.picked_up_by_name }}
-                      </template>
-                    </p>
-                  </div>
-                  <div class="flex shrink-0 items-center gap-2">
-                    <span
-                      v-if="row.sla_overdue"
-                      class="rounded-full bg-surface-red-2 px-2 py-0.5 text-xs font-bold text-ink-red-3"
-                      data-testid="work-sla"
-                    >Past SLA</span>
-                    <StatusBadge
-                      kind="request"
-                      :status="row.status"
-                    />
-                    <Icon
-                      name="chevronRight"
-                      size="h-4 w-4"
-                      class="text-ink-gray-4"
-                    />
-                  </div>
+                <div class="flex items-center justify-between">
+                  <h3 class="label text-ink-gray-7">
+                    {{ group.title }}
+                  </h3>
+                  <span
+                    v-if="group.count !== undefined"
+                    class="tabular text-xs text-ink-gray-5"
+                  >{{ group.count }}</span>
                 </div>
-              </li>
-            </ul>
+                <ul class="space-y-2">
+                  <li
+                    v-for="row in group.rows"
+                    :key="row.name"
+                    class="surface-card elev-1 relative p-4"
+                    :class="row.name === name ? 'ring-2 ring-field' : ''"
+                    data-testid="work-row"
+                  >
+                    <div class="flex items-start justify-between gap-3">
+                      <div class="min-w-0">
+                        <div class="flex items-center gap-2">
+                          <KindTag :row="row" />
+                          <p class="label">
+                            {{ row.employee_name }}
+                          </p>
+                        </div>
+                        <router-link
+                          class="-my-2 inline-flex min-h-11 items-center font-medium text-ink-gray-9 after:absolute after:inset-0 after:content-['']"
+                          :class="row.name === name ? 'font-semibold' : ''"
+                          :to="{ name: 'RequestDetail', params: { name: row.name }, query: { tab: 'work', ...(workFilter === 'open' ? {} : { state: workFilter }) } }"
+                        >
+                          {{ row.subject }}
+                        </router-link>
+                        <p class="mt-0.5 text-sm text-ink-gray-5">
+                          {{ row.category }} · sent {{ formatDate(row.sent_on) }}
+                          <template v-if="row.picked_up_by_name">
+                            · picked up by {{ row.picked_up_by_name }}
+                          </template>
+                          <template v-if="row.waiting_since">
+                            · waiting {{ waitedFor(row.waiting_days) }}
+                          </template>
+                        </p>
+                      </div>
+                      <div class="flex shrink-0 items-center gap-2">
+                        <span
+                          v-if="row.sla_overdue"
+                          class="rounded-full bg-surface-red-2 px-2 py-0.5 text-xs font-bold text-ink-red-3"
+                          data-testid="work-sla"
+                        >Past SLA</span>
+                        <StatusBadge
+                          kind="request"
+                          :status="row.status"
+                          audience="handler"
+                          :waiting-on="row.waiting_on"
+                          :assignee="row.picked_up_by_name"
+                        />
+                        <Icon
+                          name="chevronRight"
+                          size="h-4 w-4"
+                          class="text-ink-gray-4"
+                        />
+                      </div>
+                    </div>
+                  </li>
+                </ul>
+              </section>
+            </div>
             <div
               v-if="workMoreCount"
               class="mt-4 text-center"
@@ -759,9 +894,12 @@ const timeline = computed(() => {
             aria-label="Request to work on"
             data-testid="work-detail"
           >
-            <p class="label">
-              {{ workSelected.category }} · {{ workSelected.name }}
-            </p>
+            <div class="flex items-center gap-2">
+              <KindTag :row="workSelected" />
+              <p class="label">
+                {{ workSelected.category }} · {{ workSelected.name }}
+              </p>
+            </div>
             <div class="mt-1 flex flex-wrap items-start justify-between gap-2">
               <h2 class="type-section font-heading text-ink-gray-9">
                 {{ workSelected.subject }}
@@ -769,6 +907,9 @@ const timeline = computed(() => {
               <StatusBadge
                 kind="request"
                 :status="workSelected.status"
+                audience="handler"
+                :waiting-on="workSelected.waiting_on || ''"
+                :assignee="workSelected.picked_up_by_name"
               />
             </div>
             <p class="mt-1 text-sm text-ink-gray-6">
@@ -791,9 +932,17 @@ const timeline = computed(() => {
               Past this category's SLA
             </p>
 
-            <!-- A structured correction's masked proposal, read-only (R28). -->
+            <!-- A structured correction's masked proposal and review -->
+            <CorrectionReview
+              v-if="workSelected.correction"
+              :key="workSelected.name"
+              :request="workSelected.name"
+              :correction="workSelected.correction"
+              :attachments="workSelected.attachments"
+              :can-reveal="!!workSelected.actions?.length"
+            />
             <p
-              v-if="workSelected.correction_field"
+              v-else-if="workSelected.correction_field"
               class="mt-2 text-sm text-ink-gray-7"
               data-testid="request-correction"
             >
@@ -832,6 +981,34 @@ const timeline = computed(() => {
               </li>
             </ul>
 
+            <div
+              v-if="workSelected.actions?.length && !workSelected.closed"
+              class="mt-3"
+            >
+              <Button
+                variant="outline"
+                :loading="attachingReply"
+                :disabled="attachingReply"
+                @click="requestFileInput?.click()"
+              >
+                Attach a file
+              </Button>
+              <input
+                ref="requestFileInput"
+                type="file"
+                class="sr-only"
+                data-testid="attach-reply-input"
+                @change="attachReplyFile"
+              >
+              <p
+                v-if="attachReplyError"
+                class="mt-1 text-sm text-signal"
+                role="alert"
+              >
+                {{ attachReplyError }}
+              </p>
+            </div>
+
             <!-- Plan 2026-10-15-003 KTD8: the shared thread; the handler's
                  box shows only when `comment_on_request` would accept it. -->
             <RequestThread
@@ -841,12 +1018,18 @@ const timeline = computed(() => {
               :closed="!!workSelected.closed"
               :request-name="workSelected.name"
               :employee-name="workSelected.employee_name || ''"
+              :expected-modified="workSelected.modified"
+              :expected-state="workSelected.state || workSelected.status"
+              :can-need-info="may('Need info')"
+              :assigns-on-wait="workSelected.status === 'Open'"
+              :milestones="workTimeline"
               mode="handler"
-              @posted="workDetail.fetch()"
+              @posted="workDetail.fetch(); work.fetch()"
+              @refetch="workDetail.fetch()"
             />
 
-            <!-- Need info / Reject refuse to submit without their words
-                 (P5-U6); the box holds them on the same surface. -->
+            <!-- Decline refuses to submit without a reason (P5-U6). Need info
+                 is the message box's "Send and wait for reply" (R9). -->
             <div
               v-if="reasonFor"
               class="surface-inset mt-4 p-3"
@@ -855,16 +1038,9 @@ const timeline = computed(() => {
               <FormControl
                 v-model="reasonMessage"
                 type="textarea"
-                :label="REASON_HEADINGS[reasonFor]"
-                :placeholder="reasonFor === 'Reject' ? 'Why this is a final no' : 'What do you need from them?'"
+                :label="currentReasonCopy.heading"
+                :placeholder="currentReasonCopy.placeholder"
               />
-              <p
-                v-if="reasonFor === 'Need info' && workSelected.status === 'Open'"
-                class="mt-1 text-sm text-ink-gray-6"
-                data-testid="need-info-assigns"
-              >
-                This also assigns the request to you.
-              </p>
               <p
                 v-if="reasonError"
                 class="mt-1 text-sm font-medium text-signal"
@@ -880,7 +1056,7 @@ const timeline = computed(() => {
                   data-testid="work-reason-confirm"
                   @click="confirmReason"
                 >
-                  {{ reasonFor }}
+                  Decline
                 </Button>
                 <Button
                   variant="ghost"
@@ -905,7 +1081,7 @@ const timeline = computed(() => {
                 data-testid="pick-up"
                 @click="decide('Pick up')"
               >
-                Pick up
+                Assign to me
               </Button>
               <Button
                 v-if="may('Done')"
@@ -916,17 +1092,7 @@ const timeline = computed(() => {
                 data-testid="done"
                 @click="decide('Done')"
               >
-                Done
-              </Button>
-              <Button
-                v-if="may('Need info')"
-                variant="outline"
-                class="decision-tone decision-tone--return"
-                :disabled="workActing === workSelected.name"
-                data-testid="need-info"
-                @click="openReason('Need info')"
-              >
-                Need info
+                Mark done
               </Button>
               <Button
                 v-if="may('Reject')"
@@ -936,7 +1102,7 @@ const timeline = computed(() => {
                 data-testid="reject"
                 @click="openReason('Reject')"
               >
-                Reject
+                Decline
               </Button>
             </div>
           </article>
@@ -961,6 +1127,37 @@ const timeline = computed(() => {
             class="surface-card elev-1 p-4"
             aria-label="Request"
           >
+            <!-- Plan 2026-10-16-001 R11: Needs your reply banner for employee -->
+            <div
+              v-if="selected.status === 'Waiting on Employee'"
+              class="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-4"
+              data-testid="needs-reply-banner"
+            >
+              <div class="flex items-start gap-3">
+                <span class="rounded-full bg-amber-200 p-1 text-amber-800">
+                  <Icon
+                    name="notifications"
+                    size="h-4 w-4"
+                  />
+                </span>
+                <div class="min-w-0 flex-1">
+                  <h3 class="text-sm font-semibold text-amber-900">
+                    Needs your reply
+                  </h3>
+                  <p
+                    v-if="latestQuestion"
+                    class="mt-1 text-sm font-medium italic text-amber-800"
+                    data-testid="highlighted-question"
+                  >
+                    “{{ latestQuestion }}”
+                  </p>
+                  <p class="mt-1 text-xs text-amber-700">
+                    Reply below to return this request to {{ selected.picked_up_by_name || selected.handled_by_team || 'the team' }}.
+                  </p>
+                </div>
+              </div>
+            </div>
+
             <!-- The idempotent retry, told truthfully. The record is the one
                  the first attempt made; a correction typed before the second
                  press of Send is not on it, and no later Send can apply it
@@ -986,31 +1183,9 @@ const timeline = computed(() => {
               <StatusBadge
                 kind="request"
                 :status="selected.status"
+                :team="selected.handled_by_team"
               />
             </div>
-
-            <!-- Sent -> Picked up -> Replied. A step the record has no date
-                 for is not drawn: an undated dot would claim something
-                 happened without being able to say when. -->
-            <ol
-              class="surface-inset mt-4 space-y-2 p-3"
-              data-testid="request-timeline"
-            >
-              <li
-                v-for="step in timeline"
-                :key="step.key"
-                class="flex items-baseline justify-between gap-3 text-sm"
-              >
-                <span class="flex items-center gap-2 text-ink-gray-9">
-                  <span
-                    class="inline-block h-2 w-2 shrink-0 rounded-full bg-field"
-                    aria-hidden="true"
-                  />
-                  {{ step.label }}
-                </span>
-                <span class="tabular shrink-0 text-ink-gray-5">{{ formatDateTime(step.at) }}</span>
-              </li>
-            </ol>
 
             <section class="mt-4">
               <h3 class="label">
@@ -1174,7 +1349,10 @@ const timeline = computed(() => {
               :can-comment="!!selected.can_comment"
               :closed="!!selected.closed"
               :request-name="selected.name"
+              :handler-name="selected.picked_up_by_name || selected.handled_by_team"
+              :employee-name="selected.employee_name || ''"
               :expected-modified="selected.status === 'Waiting on Employee' ? selected.modified : null"
+              :milestones="timeline"
               mode="employee"
               @posted="reloadRequest"
               @new-request="newRequest"

@@ -232,6 +232,11 @@ async function stubNotifications(page: Page, rows: object[], unread: number) {
     '**/api/method/frappe.desk.doctype.notification_log.notification_log.get_notification_logs*',
     (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify(logs(rows)) }),
   )
+  // The stubbed request does not exist, so the real resolver (plan
+  // 2026-10-16-001 KTD8) would answer "none"; this employee owns it.
+  await page.route('**/api/method/helixhr.api.get_request_view*', (route) =>
+    route.fulfill({ contentType: 'application/json', body: JSON.stringify({ message: 'employee' }) }),
+  )
 }
 
 function navBadge(page: Page) {

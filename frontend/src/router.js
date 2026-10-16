@@ -147,12 +147,22 @@ const routes = [
     component: () => import('@/pages/Notifications.vue'),
   },
   {
+    // Plan 2026-10-16-001 KTD8: Old mail carries /approvals/request/:name.
+    // Permanent redirect to Team inbox detail; stays permanently.
+    path: '/approvals/request/:name',
+    redirect: (to) => ({
+      name: 'RequestDetail',
+      params: { name: to.params.name },
+      query: { tab: 'work' },
+    }),
+  },
+  {
     path: '/approvals',
     name: 'Approvals',
     component: () => import('@/pages/Approvals.vue'),
   },
   {
-    path: '/approvals/:kind(leave|timesheet|attendance|request|change)/:name',
+    path: '/approvals/:kind(leave|timesheet|attendance|change)/:name',
     name: 'ApprovalDetail',
     component: () => import('@/pages/Approvals.vue'),
     props: true,
@@ -334,6 +344,12 @@ router.beforeEach(async (to) => {
   // server's guard is still the real gate; the nav item reads the same flag.
   if (to.meta.templatesOnly && !session.canEditEmailTemplates && session.status !== 'unavailable') {
     return { name: 'Dashboard' }
+  }
+
+  // Plan 2026-10-16-001 KTD8: Old links/bookmarks to /approvals?kind=request or
+  // /approvals?category=... redirect permanently to Team inbox.
+  if (to.name === 'Approvals' && (to.query.kind === 'request' || to.query.category)) {
+    return { name: 'Requests', query: { tab: 'work' } }
   }
 
   if (session.status === 'ready') {

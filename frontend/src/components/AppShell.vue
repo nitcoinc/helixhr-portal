@@ -63,16 +63,11 @@ const unreadLabel = computed(() => (unread.value > 9 ? '9+' : String(unread.valu
 // no direct-report leave in sight -- both had no Approvals item at all while
 // this read a direct-report count.
 //
-// P5-U11: `canWorkRequests` is OR'd in rather than folded into `canApprove`
-// itself -- a routed-role holder (IT Team) has requests to work even with an
-// empty queue, the same "always present" rule `canApprove` already gives HR,
-// but IT holds none of the leave/timesheet/attendance approval capability
-// `canApprove` otherwise means.
-//
-// Plan 2026-10-15-002 U4: HR User has no approve right but oversees pending
-// timesheets, so `canOverseeTimesheets` opens the item too.
+// Plan 2026-10-16-001 R3: Approvals nav entry shows only to people with a
+// decision to make or timesheet oversight (canApprove or canOverseeTimesheets).
+// A request handler with no decisions (IT Team) does not see it.
 const isManager = computed(
-  () => session.canApprove || session.canWorkRequests || session.canOverseeTimesheets,
+  () => session.canApprove || session.canOverseeTimesheets,
 )
 const navItems = computed(() =>
   NAV.filter(

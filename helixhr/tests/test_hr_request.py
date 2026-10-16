@@ -705,19 +705,22 @@ class TestRequestApprovalQueue(IntegrationTestCase):
 		return added
 
 	def test_the_queue_filters_to_a_category_and_the_total_matches_its_chip(self):
-		"""U6 / R13: a worker filters to `IT / Asset`; `counts` stays the whole
-		queue and the filtered total equals the chip's count."""
+		"""Plan 2026-10-16-001 U3 / KTD1: requests leave Approvals, so get_my_approvals
+		returns an empty pending list for ?kind=request or category=..., and categories
+		is an empty list."""
 		from helixhr.api import get_my_approvals
 
-		name = self._file()
+		self._file()
 		frappe.set_user(self.it_user)
 		result = get_my_approvals(category="IT / Asset")
-		self.assertIn(name, [row["name"] for row in result["pending"]])
-		self.assertTrue(all(row["category"] == "IT / Asset" for row in result["pending"]))
-		chips = {row["name"]: row["count"] for row in result["counts"]["categories"]}
-		self.assertEqual(result["total"], chips["IT / Asset"])
-		kinds = {row["name"]: row["count"] for row in result["counts"]["kinds"]}
-		self.assertEqual(kinds["request"], sum(chips.values()))
+		self.assertEqual(result["pending"], [])
+		self.assertEqual(result["total"], 0)
+		self.assertEqual(result["counts"]["categories"], [])
+		self.assertNotIn("request", [k["name"] for k in result["counts"]["kinds"]])
+
+		result_kind = get_my_approvals(kind="request")
+		self.assertEqual(result_kind["pending"], [])
+		self.assertEqual(result_kind["total"], 0)
 
 		with self.assertRaisesRegex(frappe.ValidationError, "no request category called"):
 			get_my_approvals(category="No Such Category")
@@ -1524,12 +1527,12 @@ class TestProfileCorrection(IntegrationTestCase):
 
 	def test_queue_detail_and_own_request_carry_the_masked_copies(self):
 		# U14: what the HR view and the employee's request show.
-		from helixhr.api import get_approval_detail, get_my_approvals, get_my_request
+		from helixhr.api import get_approval_detail, get_my_request, get_request_work
 
 		name = self._file()["name"]
 		frappe.set_user(self.hr_user)
 		try:
-			row = next(r for r in get_my_approvals()["pending"] if r["name"] == name)
+			row = next(r for r in get_request_work()["work"] if r["name"] == name)
 			detail = get_approval_detail("request", name)
 		finally:
 			frappe.set_user("Administrator")
@@ -1889,16 +1892,19 @@ class TestRequestWork(IntegrationTestCase):
 
 		# Open: not closed, and not waiting on the employee either (that is
 		# the employee's ball, on its own chip).
+		# Open and mine both include waiting on employee (plan 2026-10-16-001 KTD2).
 		self.assertIn(open_name, names(self._work(self.it_user, state="open")))
-		self.assertNotIn(waiting_name, names(self._work(self.it_user, state="open")))
+		self.assertIn(mine_name, names(self._work(self.it_user, state="open")))
+		self.assertIn(waiting_name, names(self._work(self.it_user, state="open")))
 		self.assertNotIn(closed_name, names(self._work(self.it_user, state="open")))
-		# Mine: what I picked up and still hold.
+		# Mine: what I picked up and still hold, including waiting.
 		self.assertIn(mine_name, names(self._work(self.it_user, state="mine")))
+		self.assertIn(waiting_name, names(self._work(self.it_user, state="mine")))
 		self.assertNotIn(open_name, names(self._work(self.it_user, state="mine")))
-		# Waiting on employee: its own chip, off the default view.
+		# Waiting on employee: its own chip, keeps only waiting requests.
 		self.assertIn(waiting_name, names(self._work(self.it_user, state="waiting")))
 		self.assertNotIn(mine_name, names(self._work(self.it_user, state="waiting")))
-		self.assertNotIn(waiting_name, names(self._work(self.it_user)))
+		self.assertNotIn(open_name, names(self._work(self.it_user, state="waiting")))
 		# Closed arrives only when asked.
 		self.assertIn(closed_name, names(self._work(self.it_user, state="closed")))
 		self.assertNotIn(waiting_name, names(self._work(self.it_user, state="closed")))
@@ -2048,6 +2054,14 @@ class TestRequestConversation(IntegrationTestCase):
 		return frappe.get_all(
 			"Notification Log", filters={"document_name": name, "for_user": user}, pluck="subject"
 		)
+
+	def _watch_mail(self):
+		before = set(frappe.get_all("Email Queue", pluck="name"))
+
+		def added():
+			return set(frappe.get_all("Email Queue", pluck="name")) - before
+
+		return added
 
 	def _user_with_role(self, user, role, company=None):
 		if company:
@@ -2329,3 +2343,280 @@ class TestRequestConversation(IntegrationTestCase):
 		)
 		self.assertIn(self.it_user, recipients)
 		self.assertNotIn(other_it, recipients)
+
+	# --- U2: Handlers close from Waiting on Employee -------------------
+
+	def test_an_hr_manager_marks_a_waiting_hr_request_done(self):
+		name = self._file(category="HR Letter")
+		self._act(self.hr_user, name, "Need info", comment="Which month?")
+		self.assertEqual(frappe.db.get_value("HR Request", name, "status"), "Waiting on Employee")
+
+		self._act(self.hr_user, name, "Done")
+		row = frappe.db.get_value("HR Request", name, ["status", "closed_on"], as_dict=True)
+		self.assertEqual(row.status, "Done")
+		self.assertIsNotNone(row.closed_on)
+
+		bells = self._bells(name, EMPLOYEE_USER)
+		self.assertTrue(any("is done" in b for b in bells))
+
+	def test_an_it_team_user_declines_a_waiting_it_request_with_a_reason(self):
+		from helixhr.events import DECISION_REASON_FIELD
+
+		name = self._file(category="IT / Asset")
+		self._act(self.it_user, name, "Need info", comment="Which model?")
+		self.assertEqual(frappe.db.get_value("HR Request", name, "status"), "Waiting on Employee")
+
+		# Error: decline without reason is refused
+		with self.assertRaises(frappe.ValidationError):
+			self._act(self.it_user, name, "Reject")
+
+		self._act(self.it_user, name, "Reject", comment="No reply after 7 days")
+		row = frappe.db.get_value(
+			"HR Request", name, ["status", "closed_on", DECISION_REASON_FIELD], as_dict=True
+		)
+		self.assertEqual(row.status, "Rejected")
+		self.assertIsNotNone(row.closed_on)
+		self.assertEqual(row.get(DECISION_REASON_FIELD), "No reply after 7 days")
+
+		bells = self._bells(name, EMPLOYEE_USER)
+		self.assertTrue(any("was declined" in b for b in bells))
+
+	def test_close_from_waiting_refusals_and_lifecycle_gates(self):
+		name = self._file(category="HR Letter")
+		self._act(self.hr_user, name, "Need info", comment="Which month?")
+
+		# IT Team cannot act on an HR-routed waiting request
+		with self.assertRaises(frappe.PermissionError):
+			self._act(self.it_user, name, "Done")
+
+		# Employee cannot decide their own waiting request
+		with self.assertRaises(frappe.PermissionError):
+			self._act(EMPLOYEE_USER, name, "Done")
+
+		# hr_request_validate still refuses Waiting on Employee -> Open
+		doc = frappe.get_doc("HR Request", name)
+		doc.status = "Open"
+		with self.assertRaisesRegex(frappe.ValidationError, "can't move from Waiting on Employee to Open"):
+			doc.save(ignore_permissions=True)
+
+	# --- U3: Requests leave Approvals; handler links go to Team inbox ---
+
+	def test_get_request_view_resolver(self):
+		from helixhr.api import get_request_view
+
+		# IT Request
+		it_req = self._file(category="IT / Asset")
+		# 1. The employee asking about their own request -> employee
+		frappe.set_user(EMPLOYEE_USER)
+		self.assertEqual(get_request_view(it_req), "employee")
+
+		# 2. Handler (IT Team user in same company) -> handler
+		frappe.set_user(self.it_user)
+		self.assertEqual(get_request_view(it_req), "handler")
+
+		# 3. IT holder in another company -> none
+		other_it = self._user_with_role("other-company-it-res@helixhr.test", "IT Team", company="_Test Company B")
+		frappe.set_user(other_it)
+		self.assertEqual(get_request_view(it_req), "none")
+
+		# 4. HR Manager asking about an IT request -> none
+		frappe.set_user(self.hr_user)
+		self.assertEqual(get_request_view(it_req), "none")
+
+		# 5. Non-existent request -> none
+		self.assertEqual(get_request_view("NO-SUCH-REQ"), "none")
+
+		# 6. HR Manager on an HR-routed request -> handler (company scope via
+		# resolve_admin_scope, not a hand-rolled company comparison)
+		hr_req = self._file(category="HR Letter")
+		frappe.set_user(self.hr_user)
+		self.assertEqual(get_request_view(hr_req), "handler")
+
+	def test_waiting_detail_names_the_employee(self):
+		from helixhr.api import get_approval_detail
+
+		name = self._file(category="IT / Asset")
+		self._act(self.it_user, name, "Need info", comment="Which model?")
+		frappe.set_user(self.it_user)
+		detail = get_approval_detail("request", name)
+		first_name = frappe.db.get_value("Employee", detail["employee"], "first_name")
+		self.assertEqual(detail["waiting_on"], (first_name or "").strip() or "the employee")
+
+	def test_hr_manager_and_it_user_approvals_and_home_routing(self):
+		from helixhr.api import (
+			_get_needs_you,
+			get_pending_by_approver,
+			get_portal_bootstrap,
+			get_request_work,
+		)
+
+		it_req = self._file(category="IT / Asset")
+
+		# HR Manager Home and Team inbox never list an IT-routed request (R4)
+		hr_employee = frappe.db.get_value("Employee", {"user_id": self.hr_user}, "name")
+		frappe.set_user(self.hr_user)
+		hr_home = _get_needs_you(hr_employee, lambda k, f: f())
+		self.assertNotIn(it_req, [item["name"] for item in hr_home["items"]])
+		hr_work = get_request_work()["work"]
+		self.assertNotIn(it_req, [row["name"] for row in hr_work])
+
+		# IT user with no reports and queued IT request:
+		# can_approve is false, can_work_requests is true (R3)
+		frappe.set_user(self.it_user)
+		boot = get_portal_bootstrap()
+		self.assertFalse(boot["can_approve"])
+		self.assertTrue(boot["can_work_requests"])
+
+		# Home Needs-you for IT Team user lists IT request with route to RequestDetail and tab=work
+		it_home = _get_needs_you(self.it_employee, lambda k, f: f())
+		matching_home = next((item for item in it_home["items"] if item["id"].endswith(it_req)), None)
+		self.assertIsNotNone(matching_home)
+		self.assertEqual(
+			matching_home["to"],
+			{"name": "RequestDetail", "params": {"name": it_req}, "query": {"tab": "work"}},
+		)
+
+		# All pending with overdue_only returns no request rows
+		frappe.set_user(self.hr_user)
+		oversight = get_pending_by_approver(overdue_only=1)
+		for group in oversight["groups"]:
+			for item in group["items"]:
+				self.assertNotEqual(item.get("doctype"), "HR Request")
+
+	def test_employee_reply_mail_carries_team_inbox_url(self):
+		from helixhr.api import reply_to_my_request
+
+		name = self._file(category="IT / Asset")
+		self._act(self.it_user, name, "Need info", comment="Which model?")
+
+		added = self._watch_mail()
+		frappe.set_user(EMPLOYEE_USER)
+		reply_to_my_request(name, "MacBook Pro", expected_modified=self._token(name)["expected_modified"])
+
+		sent = [frappe.get_doc("Email Queue", row) for row in added()]
+		reply_mails = [m for m in sent if "replied" in m.message]
+		self.assertTrue(reply_mails)
+		expected_url = f"/helixhr/requests/{name}?tab=work"
+		self.assertTrue(any(expected_url in m.message.replace("=3D", "=") for m in reply_mails))
+
+	# --- U4: Work feed keeps waiting requests; thread entries know their kind ---
+
+	def test_thread_entry_kinds_and_marker_stripping(self):
+		from helixhr.api import (
+			comment_on_request,
+			get_approval_detail,
+			get_my_request,
+			reply_to_my_request,
+		)
+
+		name = self._file(category="IT / Asset", details="Opening problem statement")
+
+		# 1. Plain handler comment -> kind: note
+		frappe.set_user(self.it_user)
+		comment_on_request(name, "Taking a look at this")
+
+		# 2. Need info -> kind: question with marker stripped
+		self._act(self.it_user, name, "Need info", comment="Which model?")
+
+		# 3. Employee reply -> kind: note
+		frappe.set_user(EMPLOYEE_USER)
+		reply_to_my_request(name, "MacBook Pro M3", expected_modified=self._token(name)["expected_modified"])
+
+		# 4. Handler decline -> kind: declined
+		self._act(self.it_user, name, "Reject", comment="Out of stock for this quarter")
+
+		# Check thread in both employee and handler views
+		frappe.set_user(self.it_user)
+		handler_thread = get_approval_detail("request", name)["thread"]
+		frappe.set_user(EMPLOYEE_USER)
+		employee_thread = get_my_request(name)["thread"]
+
+		for thread in (handler_thread, employee_thread):
+			self.assertEqual(len(thread), 5)
+			self.assertEqual(thread[0]["kind"], "opening")
+			self.assertEqual(thread[0]["message"], "Opening problem statement")
+
+			self.assertEqual(thread[1]["kind"], "note")
+			self.assertEqual(thread[1]["message"], "Taking a look at this")
+
+			self.assertEqual(thread[2]["kind"], "question")
+			self.assertEqual(thread[2]["message"], "Which model?")
+			self.assertFalse(thread[2]["message"].startswith("Question:"))
+
+			self.assertEqual(thread[3]["kind"], "note")
+			self.assertEqual(thread[3]["message"], "MacBook Pro M3")
+
+			self.assertEqual(thread[4]["kind"], "declined")
+			self.assertEqual(thread[4]["message"], "Out of stock for this quarter")
+			self.assertFalse(thread[4]["message"].startswith("Declined:"))
+
+	def test_old_comment_with_no_marker_renders_as_note(self):
+		from helixhr.api import get_approval_detail
+
+		name = self._file()
+		doc = frappe.get_doc("HR Request", name)
+		doc.add_comment("Comment", "Legacy comment before markers")
+
+		frappe.set_user(self.it_user)
+		thread = get_approval_detail("request", name)["thread"]
+		matching = next(t for t in thread if t["message"] == "Legacy comment before markers")
+		self.assertEqual(matching["kind"], "note")
+
+	def test_a_typed_note_starting_with_a_marker_stays_a_note(self):
+		from helixhr.api import comment_on_request, get_approval_detail, reply_to_my_request
+
+		name = self._file()
+		frappe.set_user(self.it_user)
+		comment_on_request(name, "Question: did the courier call?")
+		frappe.set_user(EMPLOYEE_USER)
+		reply_to_my_request(name, "Declined: the courier, not me.")
+
+		frappe.set_user(self.it_user)
+		thread = get_approval_detail("request", name)["thread"]
+		typed = [t for t in thread if t["kind"] != "opening"]
+		self.assertEqual([t["kind"] for t in typed], ["note", "note"])
+		self.assertIn("Question: did the courier call?", typed[0]["message"])
+		self.assertIn("Declined: the courier, not me.", typed[1]["message"])
+
+	def test_waiting_requests_in_feed_and_home_collector_isolation(self):
+		from helixhr.api import _hr_request_summaries, get_request_work
+
+		name = self._file(category="IT / Asset")
+		self._act(self.it_user, name, "Need info", comment="Which model?")
+
+		# After Need info, state="mine" and state="open" both list it with status Waiting on Employee
+		frappe.set_user(self.it_user)
+		feed = get_request_work(state="mine")
+		self.assertEqual(feed["team"], "IT")
+		work_mine = feed["work"]
+		matching_mine = next((r for r in work_mine if r["name"] == name), None)
+		self.assertIsNotNone(matching_mine)
+		self.assertEqual(matching_mine["status"], "Waiting on Employee")
+		self.assertEqual(matching_mine["waiting_on"], "Employee")
+		self.assertIsNotNone(matching_mine["waiting_since"])
+
+		work_open = get_request_work(state="open")["work"]
+		matching_open = next((r for r in work_open if r["name"] == name), None)
+		self.assertIsNotNone(matching_open)
+		self.assertEqual(matching_open["status"], "Waiting on Employee")
+
+		# state="waiting" returns it too
+		work_waiting = get_request_work(state="waiting")["work"]
+		self.assertTrue(any(r["name"] == name for r in work_waiting))
+		self.assertTrue(all(r["status"] == "Waiting on Employee" for r in work_waiting))
+
+		# Collector default states (used by Home count & backlog count) DO NOT include waiting request (R8)
+		default_summary = _hr_request_summaries(self.it_employee, frappe.utils.getdate())
+		self.assertNotIn(name, [r["name"] for r in default_summary])
+
+	def test_mail_excerpt_for_question_never_contains_raw_marker(self):
+		from helixhr.events import HR_REQUEST_QUESTION_PREFIX
+
+		name = self._file(category="IT / Asset")
+		added = self._watch_mail()
+		self._act(self.it_user, name, "Need info", comment="Which model?")
+
+		sent = [frappe.get_doc("Email Queue", row) for row in added()]
+		for m in sent:
+			self.assertNotIn(HR_REQUEST_QUESTION_PREFIX, m.message.replace("=3D", "="))
+

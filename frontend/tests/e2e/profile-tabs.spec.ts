@@ -121,8 +121,8 @@ test.describe('employee', () => {
 
     const hrContext = await browser.newContext({ storageState: 'tests/.auth/hr.json' })
     const hr = await hrContext.newPage()
-    await hr.goto(`/helixhr/approvals/request/${name}`)
-    const panel = hr.getByTestId('approval-detail')
+    await hr.goto(`/helixhr/requests/${name}?tab=work`)
+    const panel = hr.getByTestId('work-detail')
     const review = panel.getByTestId('correction-review')
     await expect(review.getByTestId('correction-proposed')).toHaveText(`••••${tail}`, { timeout: 10000 })
     await expect(review.getByRole('link', { name: /bank-letter\.pdf/ })).toBeVisible()
@@ -134,10 +134,9 @@ test.describe('employee', () => {
     await expect(review.getByTestId('correction-proposed')).toHaveText(`••••${tail}`)
 
     await panel.getByTestId('pick-up').click()
-    await expect(hr).toHaveURL(/\/helixhr\/approvals$/)
-    await hr.goto(`/helixhr/approvals/request/${name}`)
+    await expect(panel.getByTestId('done')).toBeVisible({ timeout: 10000 })
     await panel.getByTestId('done').click()
-    await expect(hr).toHaveURL(/\/helixhr\/approvals$/)
+    await expect(panel.getByTestId('request-thread')).toContainText('This request is closed.', { timeout: 10000 })
     await hrContext.close()
 
     await page.goto('/helixhr/profile/bank')

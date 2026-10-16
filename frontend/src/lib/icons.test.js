@@ -15,6 +15,8 @@ describe('NEEDS_YOU_ICON', () => {
     'request_answered',
     'approval_leave',
     'approval_timesheet',
+    'approval_request',
+    'approval_change',
     'leave_waiting',
     'approval_attendance',
     'attendance_request_rejected',
@@ -42,5 +44,12 @@ describe('NEEDS_YOU_ICON', () => {
     expect(NEEDS_YOU_ICON.attendance_request_rejected).toBe('attendance')
     expect(NEEDS_YOU_ICON.attendance_request_waiting).toBe('attendance')
     expect(NEEDS_YOU_ICON.approval_attendance).toBe('approvals')
+  })
+
+  it('maps IT request and timesheet change glyphs', () => {
+    expect(icons.itRequest).toBeTruthy()
+    expect(icons.timesheetChange).toBeTruthy()
+    expect(NEEDS_YOU_ICON.approval_request).toBe('requests')
+    expect(NEEDS_YOU_ICON.approval_change).toBe('approvals')
   })
 })
