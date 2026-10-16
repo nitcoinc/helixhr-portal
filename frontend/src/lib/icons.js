@@ -22,6 +22,15 @@ export const icons = {
     'm9 16 2 2 4-4',
   ],
   timesheet: ['M12 6v6l4 2', 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18z'],
+  itRequest: [
+    'M20 3H4a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2z',
+    'M8 21h8',
+    'M12 17v4',
+  ],
+  timesheetChange: [
+    'M12 20h9',
+    'M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z',
+  ],
   requests: [
     'M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z',
     'M14 2v6h6',
@@ -107,6 +116,8 @@ export const NEEDS_YOU_ICON = {
   request_answered: 'requests',
   approval_leave: 'approvals',
   approval_timesheet: 'approvals',
+  approval_request: 'requests',
+  approval_change: 'approvals',
   leave_waiting: 'leave',
   // P3-U1 step 2 / P3-R16, P3-R17: the attendance request kinds P3-U5 emits.
   approval_attendance: 'approvals',

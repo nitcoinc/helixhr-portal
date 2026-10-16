@@ -57,7 +57,8 @@ const MAP = {
     // worker's -- worded so neither side reads it as still open on HR/IT.
     'Waiting on Employee': { label: 'Waiting on employee', tone: 'waiting' },
     Done: { label: 'Done', tone: 'done' },
-    Rejected: { label: 'Sent back', tone: 'sentBack' },
+    // Plan 2026-10-16-001 R15: Rejected is "Declined", never "Sent back".
+    Rejected: { label: 'Declined', tone: 'sentBack' },
   },
   // P3-U1 step 3 / P3-R15, P3-R17: Attendance Request `workflow_state`. Two
   // waiting states, and only the manager's names a person -- "Waiting for
@@ -101,7 +102,16 @@ const WAITING_FALLBACK = { timesheet: 'Waiting for manager', attendance: 'Waitin
  * rejection submitted, and the badge is the only place that difference is
  * visible to the employee.
  */
-export function resolveStatus({ kind = 'leave', status = '', approver = '', docstatus = null }) {
+export function resolveStatus({
+  kind = 'leave',
+  status = '',
+  approver = '',
+  docstatus = null,
+  audience = 'employee',
+  waitingOn = '',
+  assignee = '',
+  team = '',
+}) {
   const table = MAP[kind] || {}
   if (docstatus === 2) {
     const cancelled = table.Cancelled || { label: 'Cancelled', tone: 'resting' }
@@ -112,8 +122,41 @@ export function resolveStatus({ kind = 'leave', status = '', approver = '', docs
   // someone adds in Desk should look unfamiliar on screen, not invisible.
   if (!mapped) return { label: status || '—', toneClass: TONE.resting }
   if (mapped.submitted && docstatus === 1) mapped = mapped.submitted
+
   let label = mapped.label
-  if (mapped.waiting && approver) label = `Waiting for ${approver}`
-  else if (mapped.waiting && WAITING_FALLBACK[kind]) label = WAITING_FALLBACK[kind]
-  return { label, toneClass: TONE[mapped.tone] || TONE.resting }
+  let tone = mapped.tone
+
+  // Plan 2026-10-16-001 R15: Request statuses use different words for the
+  // handler and the employee.
+  if (kind === 'request') {
+    if (status === 'Rejected') {
+      label = 'Declined'
+      tone = 'sentBack'
+    } else if (audience === 'handler') {
+      if (status === 'Open') {
+        label = 'New'
+        tone = 'resting'
+      } else if (status === 'In Progress') {
+        label = assignee ? `In progress · ${assignee}` : 'In progress'
+        tone = 'waiting'
+      } else if (status === 'Waiting on Employee') {
+        label = waitingOn ? `Waiting on ${waitingOn}` : 'Waiting on employee'
+        tone = 'waiting'
+      }
+    } else {
+      // audience === 'employee'
+      if (status === 'Open') {
+        label = team ? `Sent to ${team}` : 'Sent to HR'
+        tone = 'resting'
+      } else if (status === 'Waiting on Employee') {
+        label = 'Needs your reply'
+        tone = 'waiting'
+      }
+    }
+  } else {
+    if (mapped.waiting && approver) label = `Waiting for ${approver}`
+    else if (mapped.waiting && WAITING_FALLBACK[kind]) label = WAITING_FALLBACK[kind]
+  }
+
+  return { label, toneClass: TONE[tone] || TONE.resting }
 }

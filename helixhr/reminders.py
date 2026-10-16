@@ -975,13 +975,13 @@ _HR_ROLE = "HR Manager"
 # queries already keep only rows past their threshold, so this is a backstop
 # against a site with a stuck backlog, not a page size.
 _OVERDUE_FETCH = 500
+# Plan 2026-10-16-001 R13: kind labels match R13 vocabulary.
 _KIND_LABELS = {
 	"leave": "Leave",
 	"timesheet": "Timesheet",
-	"attendance": "Attendance request",
-	"request": "Request",
-	# Plan 2026-10-04-003 U3.
-	"change": "Change request",
+	"attendance": "Attendance",
+	"request": "HR request",
+	"change": "Timesheet change",
 }
 
 
@@ -1109,9 +1109,14 @@ def collect_overdue(today=None, cutoff=None, companies=None, kinds=None, resolve
 		return resolve(*args) if resolve_owners else ([], None)
 
 	def add(kind, doctype, row, title, since, owners, owner_name, threshold_days, path, approver, date=None):
+		kind_label = (
+			("IT request" if row.get("routed_to_role") == "IT Team" else "HR request")
+			if kind == "request"
+			else _KIND_LABELS[kind]
+		)
 		items.append(
 			{
-				"kind": _KIND_LABELS[kind],
+				"kind": kind_label,
 				"doctype": doctype,
 				"name": row.name,
 				"title": title,

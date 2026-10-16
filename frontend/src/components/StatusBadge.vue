@@ -41,6 +41,14 @@ const props = defineProps({
    * cancelled (P3-KTD6: a cancelled attendance request keeps its Approved
    * state). 2 renders Cancelled whatever `status` says. */
   docstatus: { type: Number, default: null },
+  /** Audience viewing this status: 'employee' (default) or 'handler'. */
+  audience: { type: String, default: 'employee' },
+  /** Waiting-on person's name for waiting requests. */
+  waitingOn: { type: String, default: '' },
+  /** Handler/assignee name for in-progress requests. */
+  assignee: { type: String, default: '' },
+  /** Target team name ('HR' or 'IT') for open requests. */
+  team: { type: String, default: '' },
 })
 
 const resolved = computed(() => resolveStatus(props))

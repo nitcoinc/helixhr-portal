@@ -49,7 +49,8 @@ describe('resolveStatus', () => {
     expect(resolveStatus({ kind: 'timesheet', status: 'Pending Approval' }).label).toBe(
       'Waiting for manager',
     )
-    expect(resolveStatus({ kind: 'request', status: 'Rejected' }).label).toBe('Sent back')
+    // Plan 2026-10-16-001 R15: Rejected is "Declined", replacing old "Sent back".
+    expect(resolveStatus({ kind: 'request', status: 'Rejected' }).label).toBe('Declined')
     expect(resolveStatus({ kind: 'leave', status: 'Cancelled' }).label).toBe('Withdrawn')
   })
 
@@ -111,12 +112,43 @@ describe('resolveStatus', () => {
     expect(KINDS).toContain('attendance')
   })
 
-  it('words a change request decision for the Decided-by-me receipt', () => {
-    expect(KINDS).toContain('change')
-    expect(resolveStatus({ kind: 'change', status: 'Accepted' })).toEqual({ label: 'Accepted', toneClass: TONE.done })
-    expect(resolveStatus({ kind: 'change', status: 'Declined' })).toEqual({
-      label: 'Declined',
-      toneClass: TONE.sentBack,
-    })
+  it('words request statuses by audience', () => {
+    // Waiting on employee
+    expect(
+      resolveStatus({ kind: 'request', status: 'Waiting on Employee', audience: 'handler', waitingOn: 'Ravi' }).label,
+    ).toBe('Waiting on Ravi')
+    expect(
+      resolveStatus({ kind: 'request', status: 'Waiting on Employee', audience: 'handler' }).label,
+    ).toBe('Waiting on employee')
+    expect(
+      resolveStatus({ kind: 'request', status: 'Waiting on Employee', audience: 'employee' }).label,
+    ).toBe('Needs your reply')
+
+    // Rejected shows Declined to both audiences
+    expect(
+      resolveStatus({ kind: 'request', status: 'Rejected', audience: 'handler' }).label,
+    ).toBe('Declined')
+    expect(
+      resolveStatus({ kind: 'request', status: 'Rejected', audience: 'employee' }).label,
+    ).toBe('Declined')
+
+    // Open
+    expect(
+      resolveStatus({ kind: 'request', status: 'Open', audience: 'handler' }).label,
+    ).toBe('New')
+    expect(
+      resolveStatus({ kind: 'request', status: 'Open', audience: 'employee', team: 'IT' }).label,
+    ).toBe('Sent to IT')
+    expect(
+      resolveStatus({ kind: 'request', status: 'Open', audience: 'employee' }).label,
+    ).toBe('Sent to HR')
+
+    // In progress
+    expect(
+      resolveStatus({ kind: 'request', status: 'In Progress', audience: 'handler', assignee: 'Jane' }).label,
+    ).toBe('In progress · Jane')
+    expect(
+      resolveStatus({ kind: 'request', status: 'In Progress', audience: 'employee' }).label,
+    ).toBe('In progress')
   })
 })
