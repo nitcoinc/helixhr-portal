@@ -154,4 +154,4 @@ Store durable decisions, rejected approaches, recurring bugs and repo preference
 - Global skills live in `~/.claude/skills/`. Installed by `install/setup.ps1` or `install/setup.sh`.
 - Compound Engineering and Ponytail are plugins — check with `/plugin list`.
 - Run `/setup-matt-pocock-skills` once per project. It writes `docs/agents/issue-tracker.md`, which `/to-spec`, `/to-tickets` and `/code-review` all read.
-- `.mcp.json` registers `ccc mcp` and nothing else — no docs or browser MCP by default.
+- `.mcp.json` registers `ccc mcp` and the `shadcn-vue` MCP (`npx shadcn-vue@latest mcp`, component registry lookup) — no docs or browser MCP by default.

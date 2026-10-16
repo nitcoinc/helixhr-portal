@@ -4,6 +4,11 @@
       "type": "stdio",
       "command": "ccc",
       "args": ["mcp"]
+    },
+    "shadcn": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["shadcn-vue@latest", "mcp"]
     }
   }
 }
