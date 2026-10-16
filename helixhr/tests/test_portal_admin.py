@@ -299,13 +299,15 @@ class TestApproverCleanup(IntegrationTestCase):
 		self.assertEqual(frappe.db.get_value("Leave Application", leave, "leave_approver"), CLEANUP_MANAGER)
 
 	def test_a_manager_without_a_login_needs_hr_attention(self):
-		orphan = frappe.db.get_value("Employee", {"employee_number": "_Test Cleanup Orphan Manager"})
+		# Committed on purpose and left behind; no "Manager" in its name or
+		# number, or people.spec.ts's "Manager" search opens it first.
+		orphan = frappe.db.get_value("Employee", {"employee_number": "_Test Cleanup Orphan Approver"})
 		if not orphan:
 			orphan = (
 				frappe.get_doc(
 					{
 						"doctype": "Employee",
-						"employee_number": "_Test Cleanup Orphan Manager",
+						"employee_number": "_Test Cleanup Orphan Approver",
 						"first_name": "Cleanup Orphan",
 						"company": self.company,
 						"date_of_birth": "1990-01-01",
