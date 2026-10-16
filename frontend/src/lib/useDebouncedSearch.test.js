@@ -105,6 +105,26 @@ describe('createDebouncedSearch', () => {
     expect(lookup).toHaveBeenCalledWith('pa')
   })
 
+  it('is loading from the keystroke, not only from the request', async () => {
+    const { lookup, calls } = deferredLookup()
+    const { search, loading } = createDebouncedSearch(lookup)
+    search('p')
+    expect(loading.value).toBe(true)
+    await vi.advanceTimersByTimeAsync(SEARCH_DELAY_MS)
+    calls[0].resolve(['p'])
+    await vi.advanceTimersByTimeAsync(0)
+    expect(loading.value).toBe(false)
+  })
+
+  it('lets one call skip the delay', async () => {
+    const lookup = vi.fn((query) => [query])
+    const { search, results } = createDebouncedSearch(lookup)
+    search('', 0)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(lookup).toHaveBeenCalledWith('')
+    expect(results.value).toEqual([''])
+  })
+
   it('keeps the newest error and clears it on the next good answer', async () => {
     const lookup = vi.fn((query) => (query === 'x' ? Promise.reject(new Error('down')) : [query]))
     const { search, results, error } = createDebouncedSearch(lookup)

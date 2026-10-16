@@ -5,7 +5,8 @@
 // wrapping into a second row; 44px tall at every pointer. Nine pages carry
 // their own copy today -- U15 moves them here.
 defineProps({
-  /** `{ value, label, count? }`. `value` may be null (an "All" chip). */
+  /** `{ value, label, count?, testid? }`. `value` may be null (an "All"
+   * chip); `testid` lands on that chip's button. */
   options: { type: Array, required: true },
   modelValue: { type: [String, Number, Boolean], default: null },
   /** The group's accessible name, e.g. "Filter work by state". */
@@ -31,6 +32,7 @@ const emit = defineEmits(['update:modelValue'])
           : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
       "
       :aria-pressed="modelValue === option.value ? 'true' : 'false'"
+      :data-testid="option.testid"
       :aria-label="option.count != null ? `${option.label} (${option.count})` : undefined"
       @click="emit('update:modelValue', option.value)"
     >

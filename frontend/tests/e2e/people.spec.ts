@@ -113,6 +113,23 @@ test.describe('hr', () => {
     await page.getByLabel('Search').fill('zzz-nobody-by-that-name')
     await expect(page.getByText('Nobody matches that search')).toBeVisible()
   })
+
+  // HR-10 / U15: the shared SearchField, 44px under a coarse pointer.
+  test('the search field is a 44px target on a phone', async ({ browser }) => {
+    const context = await browser.newContext({
+      storageState: 'tests/.auth/hr.json',
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
+    })
+    const page = await context.newPage()
+    await page.goto('/helixhr/people')
+    const field = page.getByLabel('Search', { exact: true })
+    await expect(field).toBeVisible()
+    const box = await field.boundingBox()
+    await context.close()
+    expect(box?.height).toBeGreaterThanOrEqual(44)
+  })
 })
 
 test('an employee identity has no People nav item, and a direct hit is refused server-side', async ({

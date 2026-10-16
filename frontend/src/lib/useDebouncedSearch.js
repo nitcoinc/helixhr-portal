@@ -16,7 +16,9 @@ export const SEARCH_DELAY_MS = 250
 
 /** `lookup(query)` returns the results (or a promise of them). Returns
  * `search(query)` to call on every keystroke, `cancel()`, and refs for
- * `results`, `loading` and `error`. */
+ * `results`, `loading` and `error`. `loading` is true from the keystroke,
+ * not from the request, so a list can say "Loading" instead of showing the
+ * previous query's answers while the delay runs. */
 export function createDebouncedSearch(lookup, { delay = SEARCH_DELAY_MS, initial = null } = {}) {
   const results = ref(initial)
   const loading = ref(false)
@@ -43,14 +45,17 @@ export function createDebouncedSearch(lookup, { delay = SEARCH_DELAY_MS, initial
     timer = null
   }
 
-  /** Schedules `query`, replacing whatever was waiting. */
-  function search(query) {
+  /** Schedules `query`, replacing whatever was waiting. `wait` overrides
+   * the delay for one call -- 0 for a lookup that should not wait, such as
+   * the list a picker shows on focus. */
+  function search(query, wait = delay) {
     clearTimer()
     const mine = ++token
+    loading.value = true
     timer = setTimeout(() => {
       timer = null
       run(query, mine)
-    }, delay)
+    }, wait)
   }
 
   /** Drops the waiting query and any answer still in flight. */

@@ -1,10 +1,13 @@
 <script setup>
 import Avatar from '@/components/Avatar.vue'
-import { computed, ref, watch, onUnmounted } from 'vue'
-import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
+import { computed, ref, watch } from 'vue'
+import { createResource, Button, Dialog } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
+import SearchField from '@/components/SearchField.vue'
+import SegmentedChips from '@/components/SegmentedChips.vue'
+import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
 import { useIsDesktop } from '@/lib/useIsDesktop'
 
 // P3-U8 / P3-R22, P3-R23. Find a colleague: their role, their department,
@@ -38,20 +41,20 @@ const directory = createResource({
 
 // Typing is not a request per keystroke: the field stays instant and the
 // server hears one question when the person stops typing.
-let pending = null
-watch(query, (value) => {
-  clearTimeout(pending)
-  pending = setTimeout(() => {
-    search.value = value.trim()
-    pageLimit.value = PAGE
-    directory.reload()
-  }, 250)
+const debounced = useDebouncedSearch((value) => {
+  search.value = value.trim()
+  pageLimit.value = PAGE
+  directory.reload()
 })
-onUnmounted(() => clearTimeout(pending))
+watch(query, debounced.search)
 
 const rows = computed(() => directory.data?.people || [])
 const total = computed(() => directory.data?.total || 0)
 const departments = computed(() => directory.data?.departments || [])
+const departmentOptions = computed(() => [
+  { value: null, label: 'Everyone' },
+  ...departments.value.map((chip) => ({ value: chip.name, label: chip.name, count: chip.count })),
+])
 const moreCount = computed(() => Math.max(0, total.value - rows.value.length))
 
 function showMore() {
@@ -137,9 +140,8 @@ const emptyBody = computed(() =>
          explanation (the same order Documents uses). -->
     <div class="mb-4 lg:flex lg:flex-row-reverse lg:items-center lg:justify-between lg:gap-6">
       <div class="lg:w-80 lg:shrink-0">
-        <FormControl
+        <SearchField
           v-model="query"
-          type="text"
           label="Search"
           placeholder="Name, employee ID, role, department or email"
           maxlength="60"
@@ -154,42 +156,14 @@ const emptyBody = computed(() =>
     <!-- Department chips. Desktop only: a phone has the search field and no
          room for a second filter beside it, and the chips would push the
          first colleague below the fold. -->
-    <div
+    <SegmentedChips
       v-if="departments.length"
-      class="mb-4 hidden flex-wrap items-center gap-2 lg:flex"
-      role="group"
-      aria-label="Filter the directory by department"
-    >
-      <button
-        type="button"
-        class="min-h-11 rounded-full border px-4 text-sm font-medium"
-        :class="
-          department === null
-            ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-            : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-        "
-        :aria-pressed="department === null"
-        @click="filterByDepartment(null)"
-      >
-        Everyone
-      </button>
-      <button
-        v-for="chip in departments"
-        :key="chip.name"
-        type="button"
-        class="min-h-11 rounded-full border px-4 text-sm font-medium"
-        :class="
-          department === chip.name
-            ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-            : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-        "
-        :aria-pressed="department === chip.name"
-        @click="filterByDepartment(chip.name)"
-      >
-        {{ chip.name }}
-        <span class="tabular text-ink-gray-5">{{ chip.count }}</span>
-      </button>
-    </div>
+      class="mb-4 hidden lg:flex"
+      label="Filter the directory by department"
+      :options="departmentOptions"
+      :model-value="department"
+      @update:model-value="filterByDepartment"
+    />
 
     <AsyncState
       section="directory"

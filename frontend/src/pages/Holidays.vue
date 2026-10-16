@@ -3,6 +3,7 @@ import { ref, computed, watch } from 'vue'
 import { createResource } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
+import SegmentedChips from '@/components/SegmentedChips.vue'
 import { dateTileParts, formatDate, today } from '@/lib/dates'
 import { HOLIDAY_LIST_UNKNOWN } from '@/lib/holidays'
 
@@ -23,6 +24,7 @@ watch(year, () => holidays.fetch())
 
 const rows = computed(() => holidays.data?.holidays || [])
 const years = computed(() => holidays.data?.years || [year.value])
+const yearOptions = computed(() => years.value.map((value) => ({ value, label: String(value) })))
 const next = computed(() => holidays.data?.next || null)
 const listName = computed(() => holidays.data?.holiday_list || '')
 // Only ever false once a response has landed. Before that the region is
@@ -98,28 +100,13 @@ const emptyBody = computed(() =>
          that could leave that year with it (P3-R11). The server sends the
          whole `years` list whether or not the chosen year has anything in
          it, so the chips stay accurate in the empty state. -->
-    <div
+    <SegmentedChips
       v-if="years.length > 1"
-      class="mb-4 flex max-w-xl flex-wrap gap-2"
-      role="group"
-      aria-label="Year"
-    >
-      <button
-        v-for="option in years"
-        :key="option"
-        type="button"
-        class="tabular min-h-11 cursor-pointer rounded-full border px-4 text-sm font-medium"
-        :class="
-          option === year
-            ? 'border-field bg-surface-white text-ink-gray-9 ring-1 ring-field'
-            : 'border-outline-gray-2 bg-surface-white text-ink-gray-7 hover:bg-surface-gray-2'
-        "
-        :aria-pressed="option === year"
-        @click="year = option"
-      >
-        {{ option }}
-      </button>
-    </div>
+      v-model="year"
+      class="mb-4 max-w-xl"
+      label="Year"
+      :options="yearOptions"
+    />
 
     <AsyncState
       class="max-w-xl"

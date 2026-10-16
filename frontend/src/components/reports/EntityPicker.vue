@@ -1,6 +1,7 @@
 <script setup>
-import { onUnmounted, ref, useId, watch } from 'vue'
+import { computed, ref, useId, watch } from 'vue'
 import { call } from '@/lib/api'
+import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
 
 // Plan 2026-10-04-001 U3 (resolved decision 14): one scoped, single-select
 // typeahead for every entity filter. Options come only from
@@ -20,19 +21,12 @@ const props = defineProps({
 })
 const emit = defineEmits(['update:modelValue'])
 
-const DEBOUNCE_MS = 250
-
 const id = useId()
 const listId = `${id}-list`
 const text = ref('')
 const selectedLabel = ref('')
-const options = ref([])
 const open = ref(false)
 const active = ref(-1)
-const loading = ref(false)
-const failed = ref(false)
-let timer = null
-let seq = 0
 
 async function fetchOptions(params) {
   return call('helixhr.api.search_report_options', {
@@ -72,37 +66,29 @@ watch(
 // The text in the box is a search only when it is not the chosen label.
 const needle = () => (text.value === selectedLabel.value ? '' : text.value.trim())
 
-function load(delay) {
-  clearTimeout(timer)
-  loading.value = true
-  timer = setTimeout(async () => {
-    const mine = ++seq
-    try {
-      const result = await fetchOptions({ query: needle() })
-      if (mine !== seq) return
-      options.value = result || []
-      failed.value = false
-    } catch {
-      if (mine !== seq) return
-      options.value = []
-      failed.value = true
-    } finally {
-      if (mine === seq) loading.value = false
-    }
-  }, delay)
-}
+// Latest-wins: an older answer never replaces a newer one. The needle is
+// read when the lookup runs, as it always was.
+const {
+  search,
+  results: options,
+  loading,
+  error,
+} = useDebouncedSearch(async () => (await fetchOptions({ query: needle() })) || [], { initial: [] })
+const failed = computed(() => !!error.value)
+// A failed search offers nothing to arrow onto, not the last answer.
+watch(error, (value) => value && (options.value = []))
 
 function onInput(event) {
   text.value = event.target.value
   open.value = true
   active.value = -1
-  load(DEBOUNCE_MS)
+  search()
 }
 
 function onFocus() {
   open.value = true
   active.value = -1
-  load(0)
+  search(undefined, 0)
 }
 
 function pick(option) {
@@ -142,8 +128,6 @@ function onBlur() {
     text.value = props.modelValue ? selectedLabel.value || props.modelValue : ''
   }, 120)
 }
-
-onUnmounted(() => clearTimeout(timer))
 </script>
 
 <template>

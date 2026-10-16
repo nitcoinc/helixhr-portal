@@ -5,6 +5,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import TabBar from '@/components/TabBar.vue'
+import SegmentedChips from '@/components/SegmentedChips.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
@@ -56,6 +57,11 @@ const kindChips = computed(() =>
     (chip) => (chip.name === 'leave' || chip.name === 'attendance') && (chip.count || chip.name === kindFilter.value),
   ),
 )
+
+const kindOptions = computed(() => [
+  { value: '', label: 'All' },
+  ...kindChips.value.map((chip) => ({ value: chip.name, label: KIND_TAGS[chip.name].label, count: chip.count })),
+])
 
 /** Turn one chip on (or the All chip, with neither value), keeping any open
  * detail where it is. */
@@ -126,8 +132,14 @@ const overdueOnly = computed(() => route.query.view === 'overdue' || route.query
 function showView(name) {
   router.push({ path: '/approvals', query: name === defaultTab.value ? {} : { view: name } })
 }
-function toggleOverdue() {
-  router.push({ path: '/approvals', query: { view: 'all-pending', overdue: overdueOnly.value ? undefined : '1' } })
+// A two-chip filter rather than a lone toggle, so both states are named
+// (U15, R17). The testid stays on the chip that used to be the toggle.
+const OVERDUE_OPTIONS = [
+  { value: false, label: 'All' },
+  { value: true, label: 'Overdue only', testid: 'overdue-toggle' },
+]
+function setOverdue(on) {
+  router.push({ path: '/approvals', query: { view: 'all-pending', overdue: on ? '1' : undefined } })
 }
 
 const allPending = createResource({
@@ -705,20 +717,12 @@ function dismissBulkResult() {
       data-testid="overdue-tab"
     >
       <div class="mb-4 flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          class="min-h-11 rounded-full border px-4 text-sm font-medium"
-          :class="
-            overdueOnly
-              ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-              : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-          "
-          :aria-pressed="overdueOnly"
-          data-testid="overdue-toggle"
-          @click="toggleOverdue"
-        >
-          Overdue only
-        </button>
+        <SegmentedChips
+          label="Filter pending items by age"
+          :options="OVERDUE_OPTIONS"
+          :model-value="overdueOnly"
+          @update:model-value="setOverdue"
+        />
         <p
           v-if="allPending.data?.timesheet_count"
           class="text-sm text-ink-gray-5"
@@ -813,43 +817,15 @@ function dismissBulkResult() {
     </p>
 
     <!-- Kind chips: Leave / Attendance in Leave & attendance tab -->
-    <div
+    <SegmentedChips
       v-if="view === 'queue' && (kindChips.length > 1 || kindFilter)"
-      class="mb-4 flex flex-wrap items-center gap-2"
-      role="group"
-      aria-label="Filter approvals by kind"
+      class="mb-4"
+      label="Filter approvals by kind"
       data-testid="approval-kind-chips"
-    >
-      <button
-        type="button"
-        class="min-h-11 rounded-full border px-4 text-sm font-medium"
-        :class="
-          !kindFilter
-            ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-            : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-        "
-        :aria-pressed="!kindFilter"
-        @click="filterQueue()"
-      >
-        All
-      </button>
-      <button
-        v-for="chip in kindChips"
-        :key="chip.name"
-        type="button"
-        class="min-h-11 rounded-full border px-4 text-sm font-medium"
-        :class="
-          kindFilter === chip.name
-            ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-            : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-        "
-        :aria-pressed="kindFilter === chip.name"
-        @click="filterQueue(chip.name)"
-      >
-        {{ KIND_TAGS[chip.name].label }}
-        <span class="tabular text-ink-gray-5">{{ chip.count }}</span>
-      </button>
-    </div>
+      :options="kindOptions"
+      :model-value="kindFilter"
+      @update:model-value="filterQueue"
+    />
 
     <div
       v-if="view === 'queue' || view === 'timesheets'"

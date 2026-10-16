@@ -5,6 +5,7 @@ import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
 import RequestForm from '@/components/RequestForm.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import TabBar from '@/components/TabBar.vue'
+import SegmentedChips from '@/components/SegmentedChips.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import KindTag from '@/components/KindTag.vue'
@@ -48,6 +49,10 @@ watch(categoryFilter, () => {
   requests.reload()
 })
 const categoryChips = computed(() => requests.data?.counts?.categories || [])
+const categoryOptions = computed(() => [
+  { value: '', label: 'All' },
+  ...categoryChips.value.map((chip) => ({ value: chip.name, label: chip.name, count: chip.count })),
+])
 
 function filterByCategory(category) {
   router.push({ name: route.name, params: route.params, query: { ...route.query, type: category || undefined } })
@@ -130,9 +135,9 @@ const WORK_TABS = [
   { key: 'work', label: 'Team inbox' },
 ]
 const WORK_FILTERS = [
-  { name: 'open', label: 'Open' },
-  { name: 'mine', label: 'Mine' },
-  { name: 'closed', label: 'Closed' },
+  { value: 'open', label: 'Open' },
+  { value: 'mine', label: 'Mine' },
+  { value: 'closed', label: 'Closed' },
 ]
 
 
@@ -141,7 +146,7 @@ const tab = computed(() =>
 )
 const workFilter = computed(() => {
   if (route.query.state === 'waiting') return 'open'
-  return WORK_FILTERS.some((filter) => filter.name === route.query.state) ? route.query.state : 'open'
+  return WORK_FILTERS.some((filter) => filter.value === route.query.state) ? route.query.state : 'open'
 })
 
 watch(
@@ -535,28 +540,14 @@ const latestQuestion = computed(() => {
         <template v-if="tab === 'work'">
           <!-- R7: the feed's state chips, off the same server filter the
                tab read. "Closed" is a deliberate click away, not a default. -->
-          <div
-            class="mb-4 flex flex-wrap items-center gap-2"
-            role="group"
-            aria-label="Filter work by state"
+          <SegmentedChips
+            class="mb-4"
+            label="Filter work by state"
             data-testid="work-filter-chips"
-          >
-            <button
-              v-for="filter in WORK_FILTERS"
-              :key="filter.name"
-              type="button"
-              class="min-h-11 rounded-full border px-4 text-sm font-medium"
-              :class="
-                workFilter === filter.name
-                  ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-                  : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-              "
-              :aria-pressed="workFilter === filter.name"
-              @click="filterWork(filter.name)"
-            >
-              {{ filter.label }}
-            </button>
-          </div>
+            :options="WORK_FILTERS"
+            :model-value="workFilter"
+            @update:model-value="filterWork"
+          />
           <AsyncState
             section="work-list"
             :resource="work"
@@ -656,43 +647,15 @@ const latestQuestion = computed(() => {
         <template v-else>
           <!-- U6 / R13. Category chips, counted over your own requests only;
              an inactive category you used before still has one. -->
-          <div
+          <SegmentedChips
             v-if="categoryChips.length > 1 || categoryFilter"
-            class="mb-4 flex flex-wrap items-center gap-2"
-            role="group"
-            aria-label="Filter requests by category"
+            class="mb-4"
+            label="Filter requests by category"
             data-testid="request-category-chips"
-          >
-            <button
-              type="button"
-              class="min-h-11 rounded-full border px-4 text-sm font-medium"
-              :class="
-                !categoryFilter
-                  ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-                  : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-              "
-              :aria-pressed="!categoryFilter"
-              @click="filterByCategory()"
-            >
-              All
-            </button>
-            <button
-              v-for="chip in categoryChips"
-              :key="chip.name"
-              type="button"
-              class="min-h-11 rounded-full border px-4 text-sm font-medium"
-              :class="
-                categoryFilter === chip.name
-                  ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-                  : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-              "
-              :aria-pressed="categoryFilter === chip.name"
-              @click="filterByCategory(chip.name)"
-            >
-              {{ chip.name }}
-              <span class="tabular text-ink-gray-5">{{ chip.count }}</span>
-            </button>
-          </div>
+            :options="categoryOptions"
+            :model-value="categoryFilter"
+            @update:model-value="filterByCategory"
+          />
           <AsyncState
             section="requests-list"
             :resource="requests"

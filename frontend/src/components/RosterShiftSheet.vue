@@ -4,6 +4,7 @@ import { createResource, Dialog, FormControl, Button } from 'frappe-ui'
 import { FALLBACK_ERROR, toPlainMessage } from '@/lib/errorMap'
 import { formatDate, formatDateRange } from '@/lib/dates'
 import { shiftHours } from '@/lib/roster'
+import SegmentedChips from '@/components/SegmentedChips.vue'
 
 // Plan 2026-09-30-001 U10 / R9, R10. HR's one sheet on a roster cell, the
 // same Dialog pattern as AttendanceRequestSheet: an empty cell assigns, an
@@ -197,23 +198,11 @@ function submit() {
           <legend class="label mb-2">
             What to do
           </legend>
-          <div class="flex flex-wrap gap-2">
-            <button
-              v-for="choice in ACTIONS"
-              :key="choice.value"
-              type="button"
-              class="min-h-11 cursor-pointer rounded-full border px-4 text-sm font-medium transition-colors duration-200"
-              :class="
-                action === choice.value
-                  ? 'border-field bg-field text-white'
-                  : 'border-outline-gray-2 bg-surface-white text-ink-gray-8 hover:bg-surface-gray-2'
-              "
-              :aria-pressed="action === choice.value"
-              @click="action = choice.value"
-            >
-              {{ choice.label }}
-            </button>
-          </div>
+          <SegmentedChips
+            v-model="action"
+            label="What to do"
+            :options="ACTIONS"
+          />
         </fieldset>
 
         <!-- A native select, the same reason as Settings' route picker:

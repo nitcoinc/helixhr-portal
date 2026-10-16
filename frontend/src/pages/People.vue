@@ -1,12 +1,14 @@
 <script setup>
 import Avatar from '@/components/Avatar.vue'
-import { computed, reactive, ref, watch, onUnmounted } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { createResource, Dialog, Button, FormControl } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
+import SearchField from '@/components/SearchField.vue'
 import { formatDate } from '@/lib/dates'
+import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
 import { session } from '@/lib/session'
 
 // P6-U5 / P6-R1, P6-R2, P6-R13. Find a person, then read them.
@@ -39,16 +41,12 @@ const results = createResource({
   auto: true,
 })
 
-let pending = null
-watch(query, (value) => {
-  clearTimeout(pending)
-  pending = setTimeout(() => {
-    search.value = value.trim()
-    pageLimit.value = PAGE
-    results.reload()
-  }, 250)
+const debounced = useDebouncedSearch((value) => {
+  search.value = value.trim()
+  pageLimit.value = PAGE
+  results.reload()
 })
-onUnmounted(() => clearTimeout(pending))
+watch(query, debounced.search)
 
 const rows = computed(() => results.data?.people || [])
 // MH-11: a refused caller gets AsyncState's refusal, not a search box that
@@ -926,9 +924,8 @@ async function submitEdit() {
         v-if="!forbidden"
         class="mb-4 lg:w-80"
       >
-        <FormControl
+        <SearchField
           v-model="query"
-          type="text"
           label="Search"
           placeholder="Name, employee number or work email"
           maxlength="60"

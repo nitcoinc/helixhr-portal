@@ -1,12 +1,14 @@
 <script setup>
 import Avatar from '@/components/Avatar.vue'
-import { computed, ref, watch, onUnmounted } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { createResource, Button, FormControl } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
+import SearchField from '@/components/SearchField.vue'
 import { formatDate } from '@/lib/dates'
+import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
 
 // P7-U5 / P7-R1-R3. Administer the projects a caller can reach, per
 // `resolve_project_scope` -- a HelixHR Delivery Manager sees exactly the
@@ -243,24 +245,23 @@ watch(
   { immediate: true },
 )
 
-let memberPending = null
+const memberDebounced = useDebouncedSearch((trimmed) => {
+  memberSearch.value = trimmed
+  memberResults.reload()
+})
 watch(memberQuery, (value) => {
-  clearTimeout(memberPending)
   const trimmed = value.trim()
   if (trimmed.length < MEMBER_QUERY_MIN) {
     // Below the server's own minimum, `get_directory` would return everyone
     // in the company unfiltered -- clear the panel instead of showing that
     // as a set of "matches" for a query the server never actually ran.
+    memberDebounced.cancel()
     memberSearch.value = ''
     memberResults.data = null
     return
   }
-  memberPending = setTimeout(() => {
-    memberSearch.value = trimmed
-    memberResults.reload()
-  }, 250)
+  memberDebounced.search(trimmed)
 })
-onUnmounted(() => clearTimeout(memberPending))
 
 const memberMatches = computed(() =>
   (memberResults.data?.people || []).filter((person) => !memberEmployeeIds.value.includes(person.name)),
@@ -747,9 +748,8 @@ async function removeMember(member) {
       </div>
 
       <div class="mb-4 lg:w-80">
-        <FormControl
+        <SearchField
           v-model="query"
-          type="text"
           label="Search"
           placeholder="Project name"
           maxlength="140"

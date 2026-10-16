@@ -4,10 +4,11 @@
 // holidays" group on the Email templates page. Each (event, company) has
 // its own switch, template and audience -- one row per company, absent
 // meaning disabled (R1).
-import { computed, reactive, ref, onUnmounted, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { createResource, FormControl, Button } from 'frappe-ui'
 import { session } from '@/lib/session'
+import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
 import TabBar from '@/components/TabBar.vue'
 
 const props = defineProps({
@@ -107,21 +108,20 @@ const memberResults = createResource({
   auto: false,
   transform: (rows) => ({ people: rows || [] }),
 })
-let memberPending = null
+const memberDebounced = useDebouncedSearch((trimmed) => {
+  memberSearch.value = trimmed
+  memberResults.reload()
+})
 function onMemberQuery(value) {
-  clearTimeout(memberPending)
   const trimmed = value.trim()
   if (trimmed.length < MEMBER_QUERY_MIN) {
+    memberDebounced.cancel()
     memberSearch.value = ''
     memberResults.data = null
     return
   }
-  memberPending = setTimeout(() => {
-    memberSearch.value = trimmed
-    memberResults.reload()
-  }, 250)
+  memberDebounced.search(trimmed)
 }
-onUnmounted(() => clearTimeout(memberPending))
 
 const selectedIds = computed(() => form.recipients.map((r) => r.name))
 const memberMatches = computed(() =>

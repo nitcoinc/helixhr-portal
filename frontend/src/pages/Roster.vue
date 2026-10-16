@@ -1,14 +1,17 @@
 <script setup>
 import Avatar from '@/components/Avatar.vue'
-import { ref, computed, watch, nextTick, onUnmounted } from 'vue'
-import { createResource, FormControl } from 'frappe-ui'
+import { ref, computed, watch, nextTick } from 'vue'
+import { createResource } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
 import RosterShiftSheet from '@/components/RosterShiftSheet.vue'
+import SearchField from '@/components/SearchField.vue'
+import SegmentedChips from '@/components/SegmentedChips.vue'
 import { session } from '@/lib/session'
 import { addCalendarDays, dateTileParts, formatDateRange, mondayOf, today } from '@/lib/dates'
 import { isEmptyWeek, leaveLabel, rosterModes, shiftHours } from '@/lib/roster'
+import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
 
 // Plan 2026-09-30-001 U9 / R7, R8, R12. One Monday-first week of shifts:
 // one row per person, one cell per day, naming the shift Active that day.
@@ -54,15 +57,11 @@ function setMode(value) {
 }
 
 // Debounced like Directory's search, so a name is not asked for per key.
-let searchTimer = null
-watch(search, (value) => {
-  clearTimeout(searchTimer)
-  searchTimer = setTimeout(() => {
-    start.value = 0
-    query.value = value.trim()
-  }, 250)
+const debounced = useDebouncedSearch((value) => {
+  start.value = 0
+  query.value = value.trim()
 })
-onUnmounted(() => clearTimeout(searchTimer))
+watch(search, debounced.search)
 
 const days = computed(() => roster.data?.days || [])
 const rows = computed(() => roster.data?.rows || [])
@@ -204,28 +203,14 @@ const scopeLine = computed(() => {
 
     <!-- Whose shifts. Only the modes this session holds; one mode draws no
          switcher at all. -->
-    <div
+    <SegmentedChips
       v-if="modes.length > 1"
-      class="mb-4 flex flex-wrap gap-2"
-      role="group"
-      aria-label="Whose shifts"
-    >
-      <button
-        v-for="option in modes"
-        :key="option.value"
-        type="button"
-        class="min-h-11 cursor-pointer rounded-full border px-4 text-sm font-medium transition-colors duration-200"
-        :class="
-          mode === option.value
-            ? 'border-field bg-field text-white'
-            : 'border-outline-gray-2 bg-surface-white text-ink-gray-8 hover:bg-surface-gray-2'
-        "
-        :aria-pressed="mode === option.value"
-        @click="setMode(option.value)"
-      >
-        {{ option.label }}
-      </button>
-    </div>
+      class="mb-4"
+      label="Whose shifts"
+      :options="modes"
+      :model-value="mode"
+      @update:model-value="setMode"
+    />
 
     <!-- Week navigation, outside the async region like Team's. -->
     <div class="mb-4 flex items-center gap-2">
@@ -262,9 +247,8 @@ const scopeLine = computed(() => {
       v-if="mode === 'hr'"
       class="mb-4 max-w-sm"
     >
-      <FormControl
+      <SearchField
         v-model="search"
-        type="text"
         label="Search"
         placeholder="Name or employee ID"
       />

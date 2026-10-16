@@ -204,7 +204,7 @@ test.describe('employee', () => {
       // P5-KTD2: the category's name is the record name, slash and all.
       await page.goto(`/helixhr/requests?type=${encodeURIComponent('IT / Asset')}`)
       const chips = page.getByRole('group', { name: 'Filter requests by category' })
-      const chip = chips.getByRole('button', { name: /^IT \/ Asset \d+$/ })
+      const chip = chips.getByRole('button', { name: /^IT \/ Asset \(\d+\)$/ })
       await expect(chip).toHaveAttribute('aria-pressed', 'true')
 
       const rows = page.locator('[data-testid="request-row"]')
@@ -227,6 +227,15 @@ test.describe('employee', () => {
           return t && m ? { wraps: t.height > 30, clear: t.y + t.height <= m.y + 0.5 } : null
         })
         .toEqual({ wraps: true, clear: true })
+      // EP-19 / U15: the chips stay one line on a phone and scroll inside
+      // their own row rather than wrapping onto a second.
+      await expect
+        .poll(() =>
+          chips.evaluate(
+            (row) => new Set([...row.children].map((child) => (child as HTMLElement).offsetTop)).size,
+          ),
+        )
+        .toBe(1)
       await page.setViewportSize({ width: 1280, height: 720 })
 
       await chips.getByRole('button', { name: 'All', exact: true }).click()

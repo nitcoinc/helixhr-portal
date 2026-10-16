@@ -7,11 +7,13 @@
 // The server decides everything (U5): which roles and companies this caller
 // may change (`can_edit_roles`, `can_edit_hr_roles`, `can_edit_grant`,
 // `grantable`) and whether the person changed since the panel loaded.
-import { computed, onBeforeUnmount, ref, useId, watch } from 'vue'
+import { computed, ref, useId, watch } from 'vue'
 import { Button } from 'frappe-ui'
 import { call } from '@/lib/api'
 import { getProfiles, matchProfiles } from '@/lib/accessProfiles'
+import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
 import GrantEditor from '@/components/settings/GrantEditor.vue'
+import SearchField from '@/components/SearchField.vue'
 
 const MANAGED_ROLES = ['HelixHR Report Manager', 'HelixHR Delivery Manager', 'HelixHR Notification Manager', 'IT Team']
 const HR_ROLES = ['HR User', 'HR Manager']
@@ -39,7 +41,6 @@ const hasMore = ref(false)
 const listLoading = ref(false)
 const listError = ref('')
 let listSeq = 0
-let timer = null
 
 async function loadList(more = false) {
   const seq = ++listSeq
@@ -63,12 +64,11 @@ async function loadList(more = false) {
   }
 }
 
-watch(query, () => {
-  clearTimeout(timer)
-  timer = setTimeout(() => loadList(), 250)
-})
+// `loadList` keeps its own sequence: filters and "Show more" call it
+// directly, so the debounce only spaces out the keystrokes.
+const debouncedList = useDebouncedSearch(() => loadList())
+watch(query, () => debouncedList.search())
 watch([roleFilter, grantFilter], () => loadList())
-onBeforeUnmount(() => clearTimeout(timer))
 loadList()
 
 const filtered = computed(() => !!(query.value.trim() || roleFilter.value || grantFilter.value))
@@ -255,17 +255,15 @@ async function save() {
         Who has what
       </h2>
       <div class="mt-3 grid gap-2 sm:grid-cols-3">
-        <label class="sm:col-span-3">
-          <span class="mb-1 block text-sm text-ink-gray-7">Find a person</span>
-          <input
+        <div class="sm:col-span-3">
+          <SearchField
             v-model="query"
-            type="search"
-            class="min-h-11 w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
+            label="Find a person"
             placeholder="Name or employee ID"
             autocomplete="off"
             data-testid="people-access-search"
-          >
-        </label>
+          />
+        </div>
         <label>
           <span class="mb-1 block text-sm text-ink-gray-7">Role</span>
           <select

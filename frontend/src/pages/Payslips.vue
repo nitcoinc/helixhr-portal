@@ -6,6 +6,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import PayslipBreakdown from '@/components/PayslipBreakdown.vue'
 import Icon from '@/components/Icon.vue'
+import SegmentedChips from '@/components/SegmentedChips.vue'
 import { dateTileParts, formatDateRange, isCalendarDate } from '@/lib/dates'
 import { formatMoney } from '@/lib/money'
 import { useIsDesktop } from '@/lib/useIsDesktop'
@@ -34,6 +35,10 @@ const payslips = createResource({
 const rows = computed(() => payslips.data?.payslips || [])
 const total = computed(() => payslips.data?.total || 0)
 const years = computed(() => payslips.data?.years || [])
+const yearOptions = computed(() => [
+  { value: null, label: 'All years' },
+  ...years.value.map((value) => ({ value, label: String(value) })),
+])
 // The anchored block is "what the last payroll run paid", so it must not
 // follow the year filter. `rows[0]` read the *filtered* list, which put a
 // 2024 slip under "Latest payslip" with its net pay as the page's headline
@@ -176,41 +181,14 @@ const sheetOpen = computed(() => !!props.name && !isDesktop.value)
 
     <!-- Year filter. Only drawn when there is more than one year to choose
          between; a single-year list needs no control. -->
-    <div
+    <SegmentedChips
       v-if="years.length > 1"
-      class="mb-4 flex flex-wrap items-center gap-2"
-      role="group"
-      aria-label="Filter payslips by year"
-    >
-      <button
-        type="button"
-        class="min-h-11 rounded-full border px-4 text-sm font-medium"
-        :class="
-          year === null
-            ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-            : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-        "
-        :aria-pressed="year === null"
-        @click="filterByYear(null)"
-      >
-        All years
-      </button>
-      <button
-        v-for="option in years"
-        :key="option"
-        type="button"
-        class="tabular min-h-11 rounded-full border px-4 text-sm font-medium"
-        :class="
-          year === option
-            ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-            : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-        "
-        :aria-pressed="year === option"
-        @click="filterByYear(option)"
-      >
-        {{ option }}
-      </button>
-    </div>
+      class="mb-4"
+      label="Filter payslips by year"
+      :options="yearOptions"
+      :model-value="year"
+      @update:model-value="filterByYear"
+    />
 
     <div class="lg:flex lg:items-start lg:gap-6">
       <!-- The list. At lg: it keeps its place while the panel beside it
