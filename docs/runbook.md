@@ -1827,3 +1827,39 @@ access sections. The reach split can confuse:
 | Edit HR roles | System Manager only | Portal Admin toggles are locked |
 | Self-edit | Nobody | "You can't change your own access here." |
 | Role Profile user | Nobody | "This person's roles come from a role profile." |
+
+### Request not in Approvals (Plan 2026-10-16-001 U3 / KTD1)
+
+Requests are tickets needing conversations, not yes/no decisions. They live exclusively
+in Requests → Team inbox (`/requests?tab=work`).
+
+1. `get_my_approvals` deliberately excludes `request` rows, categories, and the `it` lane.
+   `?kind=request` returns an empty list without error.
+2. Old bookmarks or links `/approvals/request/:name` and `/approvals?kind=request|category=`
+   redirect permanently to the Team inbox.
+3. If an HR Manager or IT Team user does not see requests in Approvals, that is correct:
+   direct them to the Team inbox tab on the Requests page.
+
+### Handler bell opens the wrong view (Plan 2026-10-16-001 U3, U6 / KTD8)
+
+Previously, clicking a request notification as a handler opened the employee view `/requests/:name`,
+refusing with "That request isn't yours".
+
+1. The server provides `helixhr.api.get_request_view(name)` which checks whether the caller is
+   the `employee`, a `handler`, or `none`.
+2. `Notifications.vue` uses this resolver to route handlers to `/requests/:name?tab=work`
+   and employees to `/requests/:name`.
+3. If a handler loses their routed role or moves company, the resolver answers `none` and
+   the notification gracefully opens the general Requests list rather than throwing a refusal.
+
+### Stuck waiting request (Plan 2026-10-16-001 U2 / KTD3)
+
+Previously, when a request moved to "Waiting on Employee" via "Need info" and the employee
+never replied, handlers had no exit transition, leaving the ticket open indefinitely.
+
+1. Workflow "HR Request Handling" carries two transitions from "Waiting on Employee":
+   - **Mark done** (`Done` action -> `Done` status)
+   - **Decline** (`Reject` action -> `Rejected` status with reason required)
+2. Transitions are imported by fixture and ensured idempotently by patch
+   `helixhr.patches.v1_0.ensure_close_from_waiting`.
+3. Handlers can now cleanly close abandoned waiting requests from the Team inbox detail.

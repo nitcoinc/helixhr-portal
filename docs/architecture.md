@@ -738,73 +738,80 @@ root of the 2026-10-07 "Only Leave Applications with status 'Approved' and
 
 ### The fourth kind: routed requests
 
-`HR Request` joined the queue as a fourth kind, and it does not fit the
-manager/HR shape above at all -- it has no line manager and no HR-stage
-escalation. Instead it has a **routed role**, stamped onto the record at
-insert from `HelixHR Request Category.route_to_role` and never re-resolved
-(re-pointing a category changes where the *next* request goes, never a
-request already filed). A worker holding that role picks the request up
-(`picked_up_by`, recorded, so a second worker is told it is already taken),
-then moves it through `Need info` / `Done` / `Reject` like any workflow kind
--- `HR Request Handling`'s own transitions are the rule, exactly the way
-`get_transitions` already drives Timesheet and Attendance.
+`HR Request` represents tickets needing conversation, not approval decisions.
+Plan 2026-10-16-001 established **one home per kind of work**: decisions live
+exclusively in Approvals, and requests live exclusively in Requests → Team inbox.
+`get_my_approvals` stops serving request rows entirely (`?kind=request` returns
+an empty list, `counts.categories` is empty, and the IT lane is removed).
 
-Three things about this kind are genuinely different from the other three:
+Requests have a **routed role**, stamped onto the record at insert from
+`HelixHR Request Category.route_to_role` and never re-resolved (re-pointing a
+category changes where the *next* request goes, never a request already filed).
+A worker holding that role picks the request up (`picked_up_by`, recorded, so a
+second worker is told it is already taken), then moves it through `Need info` /
+`Done` / `Reject` like any workflow kind -- `HR Request Handling`'s own
+transitions are the rule.
 
+Key architecture for routed requests:
+
+- **Worked only from /requests (Team inbox) (Plan 2026-10-16-001 KTD1).**
+  Handlers work requests from Requests → Team inbox (`/requests?tab=work`).
+  The default Open view lists active requests in three groups: New, In progress,
+  and Waiting on employee. Mine lists requests the caller picked up (including
+  waiting ones). The tab badge count reflects requests needing team action
+  (New + In progress), matching Home. All handler links (mail, digest, bell)
+  point to `/requests/:name?tab=work`. Permanent redirects route old links
+  `/approvals/request/:name` and `/approvals?kind=request|category=` to the
+  Team inbox.
+- **The resolver (Plan 2026-10-16-001 KTD8).** `helixhr.api.get_request_view(name)`
+  returns `employee`, `handler` or `none` for a request name based on ownership,
+  routed role, company matching, and `_assert_may_act_on`. `Notifications.vue`
+  calls this resolver when opening a notification so handlers land on the Team
+  inbox detail and employees land on My requests, preventing "That request isn't yours"
+  refusals.
+- **Handlers can close waiting requests (Plan 2026-10-16-001 U2, KTD3).**
+  Two new workflow transitions per routed role allow handlers to close a request
+  waiting on the employee: Waiting on Employee → Done (Mark done) and Waiting on
+  Employee → Rejected (Decline with reason). This prevents requests from being
+  stuck indefinitely if the employee never replies.
+- **Thread kinds and comment markers (Plan 2026-10-16-001 KTD5).**
+  Thread entries tell notes, questions, declines, and milestones apart.
+  `_decide_one` prefixes comments with `Question:` for Need info and `Declined:`
+  for Reject/Decline. `strip_request_comment_marker` and `strip_request_comment`
+  strip the marker in `_request_thread` and wherever comment text leaves the
+  server (mail excerpts, bells), while old comments without markers render as
+  notes. Milestones (Sent, Assigned to {name}, Closed) appear in-line in the thread.
 - **Numbering is per category (plan 2026-10-04-002).** Each category carries
   an `ID prefix` (`HelixHR Request Category.name_prefix`, validated as 2-10
   uppercase letters/digits/hyphens, no trailing hyphen), and `HR Request`'s
   `before_insert` builds the naming series from it — so an IT / Asset request
   is `IT-REQ-2026-00001` while the others keep the `HR-REQ` counter they have
-  always shared. An empty or missing prefix falls back to `HR-REQ`; counters
-  run per prefix per year (`-.YYYY.-`), so two categories that deliberately
-  share a prefix deliberately share a counter. A category re-pointed or
-  re-prefixed later changes where the *next* request is numbered, never a
-  request already filed — the seed patch fills only empty prefixes, never an
-  HR edit.
+  always shared.
 - **Surfaces name the picker and the team.** The employee's projections
   (`get_my_request`, `get_my_requests`) resolve `picked_up_by` server-side
   into `picked_up_by_name` (the user's full name; `None` for a request nobody
   picked up, the Administrator account, or a disabled user) and derive
   `handled_by_team` from the category's route (`HR` / `IT`) — the raw user id
-  never crosses the boundary, because an employee has no read on `User`. The
-  timeline, list meta, reply labels and thread fallback read those two fields,
-  never a fixed "HR".
-- **A routed worker works from /requests too.** The Requests page gains a
-  second tab for a holder of a routed role: "To work on" reads
-  `get_request_work`, the **same** collector Approvals' request half shows
-  (`_hr_request_summaries`, extended with optional state / `picked_up_by` /
-  `routed_roles` / paging), so the two views cannot disagree. The chips are
-  Open / Mine / Waiting on employee / Closed, with Closed off by default and
-  Waiting on Employee on its own chip — the employee's ball is not the
-  worker's backlog (P5-R6). Acting on a row opens `get_approval_detail`'s
-  decision detail and calls `act_on_approval`, so the buttons are the
-  workflow's own transitions and the server's own checks; there is no second
-  flow. An HR Manager's feed is narrowed to the routed roles they actually
-  hold (they cannot act on an IT-routed row); the Approvals queue keeps its
-  wider behaviour. Tab and filter live in the URL (`?tab=work&state=…`) so a
-  notification link reproduces the view; `request_arrival` links there. The
-  gate is the bootstrap boolean `can_handle_requests` (`_is_hr() or
-  _holds_routed_role()`), never a role name.
-
+  never crosses the boundary.
 - **The employee's `Reply` is not a workflow transition.** Role `Employee`
-  has no `write` on `HR Request` at all, so `apply_workflow`'s `doc.save()`
-  is unreachable for the requester. `reply_to_my_request` is a whitelisted
-  method that checks ownership and the *stored* status itself, then moves
-  the state with `db_set` after authorizing -- a bounded, documented
-  exception to "the workflow is the rule table," scoped to the one
-  transition the requester owns.
+  has no `write` on `HR Request` at all. `reply_to_my_request` checks ownership
+  and stored status, then moves the state with `db_set` to `In Progress` when
+  replying to a waiting request.
 - **A worker can be `IT Team`, not only HR.** `IT Team` is a portal-only role
-  (`desk_access: 0`) that works only the
-  categories routed to it and reads nothing else -- enforced by a
-  `get_permission_query_conditions` / `has_permission` pair on `HR Request`
-  scoped to the caller's own company, the stored `routed_to_role`, and (for
-  HR Manager / System Manager) the caller's own company rather than every
-  company. Because a routed-role holder is not `_is_hr()`, the queue's HR
-  gate is "is HR **or** holds a routed role with anything queued" --
-  `_holds_routed_role` in `api.py` -- and `get_portal_bootstrap.can_approve`
-  follows the same rule so the nav item and the server's own answer can
-  never disagree.
+  (`desk_access: 0`) that works only the categories routed to it. HR Managers
+  see HR requests only; IT requests belong to IT Team (R4). IT Team users with no
+  decision-making responsibilities do not see the Approvals nav item (`can_approve`
+  is false, `can_work_requests` is true).
+
+### Approvals: decisions only, two tabs (Plan 2026-10-16-001 R16)
+
+Approvals holds yes/no decisions only, organized into two tabs:
+1. **Timesheets:** timesheets and timesheet changes.
+2. **Leave & attendance:** leave and attendance decisions.
+HR Managers also see **All pending** (non-timesheet decisions grouped by approver).
+Tab labels carry counts, and the default tab is the first one with something waiting.
+Decision action buttons use a single unified component (`DecisionActions.vue`, KTD9)
+with a fixed order across both mobile and desktop: Primary -> Return -> Final no -> Hand-over.
 
 ### One queue, tagged
 

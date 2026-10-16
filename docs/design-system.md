@@ -308,6 +308,42 @@ screen.
 
 Every empty state names the next action ("You have no leave requests yet. Ask for leave to get started.").
 
+## Work kinds, action words, and request statuses (Plan 2026-10-16-001)
+
+### Kind tags (R13)
+Every screen uses the same kind tag: an icon plus a neutral word. Neutral tone because colour belongs to status.
+
+| Kind | Tag label | Glyph |
+|---|---|---|
+| Timesheet | Timesheet | `timesheet` |
+| Timesheet change | Timesheet change | `timesheetChange` |
+| Leave | Leave | `leave` |
+| Attendance | Attendance | `attendance` |
+| HR request | HR request | `requests` |
+| IT request | IT request | `itRequest` |
+
+### Action words (R14)
+Buttons are drawn only from the actions the server returns, using a fixed vocabulary.
+
+| Kind | Words shown (server action) |
+|---|---|
+| Timesheet | Approve (Approve), Send back (Send Back), Send to HR (Send to HR) |
+| Timesheet change | Approve change (Accept), Decline (Decline) |
+| Leave | Approve (Approve), Reject (Reject), Send to HR (Send to HR) when offered |
+| Attendance | Approve (Approve), Send back (Send Back), Reject (Reject), Send to HR (Send to HR) |
+| HR / IT request | Assign to me (Pick up), Send, Send and wait for reply (Need info), Mark done (Done), Decline (Reject) |
+
+### Request statuses per audience (R15)
+Request statuses use tailored words for the handler and the employee. "Declined" never shows as "Sent back".
+
+| Stored state | Handler sees | Employee sees |
+|---|---|---|
+| Open | New | Sent to {HR or IT} |
+| In Progress | In progress · {assignee} | In progress |
+| Waiting on Employee | Waiting on {first name} · {duration} | Needs your reply |
+| Done | Done | Done |
+| Rejected | Declined | Declined |
+
 ## The ten plain leave-error sentences (R15, used by `errorMap.js` in U6)
 
 Frappe/HRMS leave validation messages, matched by pattern, mapped to a plain sentence. Anything not matched falls back to Frappe's message with HTML stripped.
