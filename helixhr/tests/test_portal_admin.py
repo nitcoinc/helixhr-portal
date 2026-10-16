@@ -136,6 +136,31 @@ class TestPortalAdminSeesNoHrData(IntegrationTestCase):
 
 	def test_export_log_is_company_scoped(self):
 		other = ensure_baseline_company()
+		# `setup_playwright_fixtures` gives this Portal Admin a Company User
+		# Permission on `other` (reach, plan 2026-10-14-001). On a site seeded
+		# for e2e that makes `other` legitimately visible; take it away for
+		# this test and put it back after.
+		reach = frappe.get_all(
+			"User Permission",
+			filters={"user": self.user, "allow": "Company", "for_value": other},
+			fields=["name", "applicable_for", "apply_to_all_doctypes", "is_default", "hide_descendants"],
+		)
+		for row in reach:
+			frappe.db.delete("User Permission", row.name)
+			self.addCleanup(
+				lambda row=row: frappe.get_doc(
+					{
+						"doctype": "User Permission",
+						"user": self.user,
+						"allow": "Company",
+						"for_value": other,
+						"applicable_for": row.applicable_for,
+						"apply_to_all_doctypes": row.apply_to_all_doctypes,
+						"is_default": row.is_default,
+						"hide_descendants": row.hide_descendants,
+					}
+				).insert(ignore_permissions=True)
+			)
 		mine = frappe.get_doc(
 			{
 				"doctype": "HelixHR Report Export",
