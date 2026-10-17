@@ -143,6 +143,7 @@ from helixhr.utils import (
 	sample_context,
 	send_notification,
 	session_company,
+	shared_admin_scope,
 	validate_email_theme,
 	validate_logo_upload,
 	validate_message_template,
@@ -8825,6 +8826,18 @@ def _picker_display_name(picked_up_by):
 	return row.full_name
 
 
+def _own_requests_filters(employee, category=None, pattern=None):
+	"""The one filter for "`employee`'s own requests": optionally one
+	category, and a subject matching the LIKE `pattern` (U8's bounded
+	`_request_search_pattern`). The employee always comes from the caller's
+	session. `_requests_summary` and `portal_search` both read through it
+	(plan 2026-10-17-001 KTD5)."""
+	filters = {"employee": employee, **({"category": category} if category else {})}
+	if pattern:
+		filters["subject"] = ["like", pattern]
+	return filters
+
+
 def _requests_summary(employee, limit=None, category=None, q=None):
 	"""A bounded page of `employee`'s requests, newest first, optionally of
 	one category (U6 / R13; `counts` is per category across all of them)
@@ -8839,10 +8852,7 @@ def _requests_summary(employee, limit=None, category=None, q=None):
 	"""
 	limit = min(max(cint(limit) or _REQUEST_PAGE, 1), _REQUEST_MAX_PAGE)
 	category = _valid_request_category(category)
-	filters = {"employee": employee, **({"category": category} if category else {})}
-	pattern = _request_search_pattern(q)
-	if pattern:
-		filters["subject"] = ["like", pattern]
+	filters = _own_requests_filters(employee, category, _request_search_pattern(q))
 
 	rows = frappe.get_all(
 		"HR Request",
@@ -10946,6 +10956,33 @@ def _directory_departments(company):
 	]
 
 
+def _directory_scope(company, pattern, department=None):
+	"""The directory's one Employee scope, as `frappe.get_all` keyword
+	arguments: Active people in `company` (optionally one department),
+	matched by the LIKE `pattern`, or everyone in scope when it is None.
+	`get_directory` and `portal_search` both read through it (plan
+	2026-10-17-001 KTD5), so the colleague a page finds and the one the
+	palette finds are the same set."""
+	filters = {"status": "Active", "company": company}
+	if department:
+		filters["department"] = department
+	or_filters = None
+	if pattern:
+		# P8-U3: `name` (the employee id) and `company_email` widen this to
+		# match what the project member picker's own placeholder already
+		# promises ("Name, employee number or work email") -- this reader
+		# is the one it reuses (Projects.vue's own comment explains why:
+		# no admin permission required, every employee's own company).
+		# Purely additive over the existing three fields, so Directory.vue's
+		# own search only ever matches more, never less, and stays scoped
+		# to the caller's own company exactly as before.
+		or_filters = [
+			[field, "like", pattern]
+			for field in ("name", "employee_name", "designation", "department", "company_email")
+		]
+	return {"filters": filters, "or_filters": or_filters, "ignore_permissions": True}
+
+
 @frappe.whitelist()
 def get_directory(query=None, department=None, start=0, limit=None):
 	"""A bounded page of active colleagues in this employee's own company,
@@ -10964,30 +11001,10 @@ def get_directory(query=None, department=None, start=0, limit=None):
 	if not company:
 		return {"people": [], "total": 0, "limit": limit, "start": start, "departments": []}
 
-	filters = {"status": "Active", "company": company}
-	if department:
-		filters["department"] = department
-
 	needle = (query or "").strip()[:_DIRECTORY_QUERY_MAX]
-	or_filters = None
-	if len(needle) >= _DIRECTORY_QUERY_MIN:
-		# P8-U3: `name` (the employee id) and `company_email` widen this to
-		# match what the project member picker's own placeholder already
-		# promises ("Name, employee number or work email") -- this reader
-		# is the one it reuses (Projects.vue's own comment explains why:
-		# no admin permission required, every employee's own company).
-		# Purely additive over the existing three fields, so Directory.vue's
-		# own search only ever matches more, never less, and stays scoped
-		# to the caller's own company exactly as before.
-		or_filters = [
-			["name", "like", f"%{needle}%"],
-			["employee_name", "like", f"%{needle}%"],
-			["designation", "like", f"%{needle}%"],
-			["department", "like", f"%{needle}%"],
-			["company_email", "like", f"%{needle}%"],
-		]
-
-	scope = {"filters": filters, "or_filters": or_filters, "ignore_permissions": True}
+	scope = _directory_scope(
+		company, f"%{needle}%" if len(needle) >= _DIRECTORY_QUERY_MIN else None, department
+	)
 	rows = frappe.get_all(
 		"Employee",
 		fields=list(_DIRECTORY_FIELDS),
@@ -11051,6 +11068,25 @@ def _people_search_projection(row):
 	}
 
 
+def _people_search_scope(scope, pattern):
+	"""People's one Employee scope, as `frappe.get_all` keyword arguments:
+	Active employees inside a granted `resolve_read_scope` answer, matched by
+	the LIKE `pattern` on name, employee number or work email (everyone in
+	scope when None). The caller has already refused scope "none".
+	`search_people` and `portal_search` both read through it (plan
+	2026-10-17-001 KTD5)."""
+	# Left and Inactive employees are excluded by default -- looking somebody
+	# up means a current colleague unless HR says otherwise (P6 Open
+	# Questions: findability of Left employees is deferred until asked).
+	filters = {**(admin_scope_employee_filters(scope) or {}), "status": "Active"}
+	or_filters = None
+	if pattern:
+		or_filters = [
+			[field, "like", pattern] for field in ("employee_name", "employee_number", "company_email")
+		]
+	return {"filters": filters, "or_filters": or_filters, "ignore_permissions": True}
+
+
 @frappe.whitelist()
 def search_people(query=None, start=0, limit=None):
 	"""A bounded page of active employees this caller may read, matched by
@@ -11069,22 +11105,10 @@ def search_people(query=None, start=0, limit=None):
 	limit = min(max(cint(limit) or _PEOPLE_SEARCH_PAGE, 1), _PEOPLE_SEARCH_MAX_PAGE)
 	start = max(cint(start), 0)
 
-	filters = admin_scope_employee_filters(scope)
-	filters = {**(filters or {}), "status": "Active"}
-
-	# Left and Inactive employees are excluded by default -- looking somebody
-	# up means a current colleague unless HR says otherwise (P6 Open
-	# Questions: findability of Left employees is deferred until asked).
 	needle = (query or "").strip()[:_PEOPLE_SEARCH_QUERY_MAX]
-	or_filters = None
-	if len(needle) >= _PEOPLE_SEARCH_QUERY_MIN:
-		or_filters = [
-			["employee_name", "like", f"%{needle}%"],
-			["employee_number", "like", f"%{needle}%"],
-			["company_email", "like", f"%{needle}%"],
-		]
-
-	scope_query = {"filters": filters, "or_filters": or_filters, "ignore_permissions": True}
+	scope_query = _people_search_scope(
+		scope, f"%{needle}%" if len(needle) >= _PEOPLE_SEARCH_QUERY_MIN else None
+	)
 	rows = frappe.get_all(
 		"Employee",
 		fields=list(_PEOPLE_SEARCH_FIELDS),
@@ -11101,6 +11125,136 @@ def search_people(query=None, start=0, limit=None):
 		"limit": limit,
 		"start": start,
 	}
+
+
+# ---------------------------------------------------------------------------
+# The command palette's one server read (plan 2026-10-17-001 U5, KTD5)
+#
+# Built on the same private scope helpers the page endpoints read through
+# (`_directory_scope`, `_people_search_scope`, `_own_requests_filters`,
+# `_request_summaries_filters`), never on the whitelisted wrappers: each of
+# those spends its own page's rate-limit bucket. Rows are cut to an
+# allow-list; there are no totals, facets or photos. Reports are matched in
+# the browser from the page's own `get_report_catalog` read.
+
+_PORTAL_SEARCH_ROWS = 5
+# A subset of `_directory_projection`'s keys: no manager, and never
+# `employee_number`, `company` or `user_id`. `email` only when HR published one.
+_PORTAL_SEARCH_DIRECTORY_KEYS = ("name", "employee_name", "initials", "designation", "department", "email")
+# A subset of `_people_search_projection`'s keys, for a caller People admits.
+_PORTAL_SEARCH_PEOPLE_KEYS = ("name", "employee_name", "initials", "designation", "department", "company")
+# A request row needs no more than its name to route; never `hr_note` or a
+# `correction_*` field.
+_PORTAL_SEARCH_REQUEST_FIELDS = ("name", "subject", "status", "category")
+_PORTAL_SEARCH_REQUEST_STATES = (
+	HR_REQUEST_OPEN,
+	HR_REQUEST_IN_PROGRESS,
+	HR_REQUEST_WAITING_ON_EMPLOYEE,
+	HR_REQUEST_DONE,
+	HR_REQUEST_REJECTED,
+)
+
+
+def _portal_search_people(info, pattern):
+	"""People for the palette: the People scope and projection for a caller
+	`resolve_read_scope` admits (the same gate as `can_see_people`), else the
+	directory's own-company scope and projection. Nobody for a session with
+	neither (a Portal Admin with no Employee)."""
+
+	def read(fields, query):
+		return frappe.get_all(
+			"Employee", fields=list(fields), order_by="employee_name asc", limit=_PORTAL_SEARCH_ROWS, **query
+		)
+
+	def cut(person, keys):
+		return {key: value for key, value in person.items() if key in keys}
+
+	scope = resolve_read_scope(frappe.session.user)
+	if scope["kind"] != "none":
+		rows = read(_PEOPLE_SEARCH_FIELDS, _people_search_scope(scope, pattern))
+		return [cut(_people_search_projection(row), _PORTAL_SEARCH_PEOPLE_KEYS) for row in rows]
+	if info.get("company"):
+		rows = read(_DIRECTORY_FIELDS, _directory_scope(info["company"], pattern))
+		return [cut(_directory_projection(row, {}), _PORTAL_SEARCH_DIRECTORY_KEYS) for row in rows]
+	return []
+
+
+def _portal_search_inbox(employee, pattern):
+	"""Requests this caller works, by subject: `_request_summaries_filters`
+	with the routed roles they hold and their own requests excluded, read
+	permission-aware so `hr_request`'s query conditions still scope the
+	company. A session holding no routing role (System Manager alone) has
+	nothing here."""
+	roles = set(frappe.get_roles())
+	routed_roles = [role for role in ("HR Manager", *_ROUTED_WORKER_ROLES) if role in roles]
+	if not routed_roles:
+		return []
+	filters = _request_summaries_filters(employee, _PORTAL_SEARCH_REQUEST_STATES, routed_roles=routed_roles)
+	filters["subject"] = ["like", pattern]
+	return frappe.get_list(
+		"HR Request",
+		filters=filters,
+		fields=list(_PORTAL_SEARCH_REQUEST_FIELDS),
+		order_by="creation desc",
+		limit=_PORTAL_SEARCH_ROWS,
+	)
+
+
+@frappe.whitelist()
+def portal_search(q=None):
+	"""The command palette's people and requests for `q` (plan 2026-10-17-001
+	U5, KTD5): `{people, requests, inbox, failed}`.
+
+	`q` is the only argument: trimmed, 2-60 characters (anything else answers
+	empty groups without a query) and LIKE-escaped (`_request_search_pattern`).
+	Each group runs only when the bootstrap flag that draws it would be true --
+	a group the caller has no right to is skipped, never refused, so nothing is
+	thrown or logged for it:
+
+	* `people` -- `can_see_people`: People's scope and projection; otherwise
+	  the directory's own company and projection.
+	* `requests` -- the caller's own, by subject; the employee is the session's.
+	* `inbox` -- `can_handle_requests` with an Employee: routed roles held,
+	  own requests excluded.
+
+	At most `_PORTAL_SEARCH_ROWS` allow-listed rows per group. A group that
+	fails is named in `failed` (`get_dashboard`'s `failed_sections` shape)
+	instead of failing the call.
+	"""
+	rate_limit_per_user("portal_search")
+	result = {"people": [], "requests": [], "inbox": [], "failed": []}
+	pattern = _request_search_pattern(q)
+	if not pattern:
+		return result
+
+	missing = object()
+
+	def group(name, fn):
+		value = _safe(fn, title=f"HelixHR portal search group failed: {name}", default=missing)
+		if value is missing:
+			result["failed"].append(name)
+		else:
+			result[name] = value
+
+	info = get_current_employee_info() or {}
+	employee = info.get("name")
+	# People's scope and the inbox's permission hook ask the same question.
+	with shared_admin_scope():
+		group("people", lambda: _portal_search_people(info, pattern))
+		if employee:
+			group(
+				"requests",
+				lambda: frappe.get_all(
+					"HR Request",
+					filters=_own_requests_filters(employee, pattern=pattern),
+					fields=list(_PORTAL_SEARCH_REQUEST_FIELDS),
+					order_by="creation desc",
+					limit=_PORTAL_SEARCH_ROWS,
+				),
+			)
+			if _is_hr() or _holds_routed_role():
+				group("inbox", lambda: _portal_search_inbox(employee, pattern))
+	return result
 
 
 # ---------------------------------------------------------------------------

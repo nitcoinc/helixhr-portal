@@ -8,7 +8,9 @@
 // users' keys are U4/U5's; they find these keys by `RECENT_REPORTS_PREFIX`.
 // Every storage access is in try/catch: `null` means "storage unavailable",
 // and the strip hides rather than guessing.
-export const RECENT_REPORTS_PREFIX = 'helixhr.reports.recent:'
+import { RECENT_REPORTS_PREFIX } from './viewerStorage'
+
+export { RECENT_REPORTS_PREFIX }
 export const RECENT_REPORTS_MAX = 4
 
 function storageKey(user) {

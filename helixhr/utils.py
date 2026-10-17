@@ -1391,6 +1391,37 @@ def resolve_admin_scope(user):
 	to unscoped. Before this rule, marking an HR Manager's Employee as Left
 	silently widened their reach from one company to every company.
 	"""
+	memo = frappe.local.flags.get(_ADMIN_SCOPE_MEMO)
+	if memo is None:
+		return _admin_scope(user)
+	if user not in memo:
+		memo[user] = _admin_scope(user)
+	return dict(memo[user])
+
+
+_ADMIN_SCOPE_MEMO = "helixhr_admin_scope_memo"
+
+
+@contextmanager
+def shared_admin_scope():
+	"""Inside this block, `resolve_admin_scope` reads once per user instead of
+	once per caller: a read that consults it and then lists a doctype whose
+	permission hook consults it again pays for one anchor read, not two (plan
+	2026-10-17-001 U5's query budget). Nothing it reads can change between
+	two callers inside one block, and the memo lives only as long as the
+	block, never across requests -- `api._shared_queue_reads`' rule."""
+	if frappe.local.flags.get(_ADMIN_SCOPE_MEMO) is not None:
+		yield
+		return
+	frappe.local.flags[_ADMIN_SCOPE_MEMO] = {}
+	try:
+		yield
+	finally:
+		frappe.local.flags[_ADMIN_SCOPE_MEMO] = None
+
+
+def _admin_scope(user):
+	"""`resolve_admin_scope`'s answer, read fresh."""
 	if user == "Administrator":
 		return {"kind": "unscoped", "company": None}
 	if set(frappe.get_roles(user)) & _ADMIN_UNSCOPED_ROLES:
@@ -2233,6 +2264,10 @@ RATE_LIMIT_POLICY = {
 	"get_team_member_week": (60, 60),
 	"get_organisation_view": (60, 60),
 	"search_people": (60, 60),
+	# Plan 2026-10-17-001 U5 (KTD5): the command palette's one server read,
+	# debounced 250 ms per keystroke pause like `search_people`, and bounded
+	# the same. Its own bucket: it never spends a page's.
+	"portal_search": (60, 60),
 	"get_person": (60, 60),
 	# Plan 2026-09-29-001 U3: the employee's own profile, read on every visit.
 	"get_my_profile": (60, 60),

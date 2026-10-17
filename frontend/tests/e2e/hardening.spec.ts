@@ -335,3 +335,37 @@ test.describe('toaster queue', () => {
     await context.close()
   })
 })
+
+// Plan 2026-10-17-001 U5 (R4, KTD4). The command palette carries the copied
+// Command components and reka-ui's Listbox, so it is fetched on its first
+// open as `CommandPalette-<hash>.js` -- never with the cold load, and once.
+const isPaletteChunk = (url: string) =>
+  url.startsWith(`${ASSET_PREFIX}CommandPalette-`) && url.endsWith('.js')
+
+test.describe('command palette loading', () => {
+  test.beforeEach(async ({}, testInfo) => {
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenarios')
+  })
+
+  test('the cold load fetches no palette chunk; the first open fetches one, the second none', async ({
+    page,
+  }) => {
+    const requested = scriptUrls(page)
+    await page.goto('/helixhr/')
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+    await page.waitForLoadState('networkidle')
+    expect(requested.filter(isPaletteChunk), 'the palette rode in with the cold load').toEqual([])
+
+    const palette = page.getByRole('dialog', { name: 'Search' })
+    await page.keyboard.press('/')
+    await expect(palette).toBeVisible()
+    await expect.poll(() => requested.filter(isPaletteChunk).length).toBe(1)
+    await page.keyboard.press('Escape')
+    await expect(palette).toHaveCount(0)
+
+    await page.keyboard.press('/')
+    await expect(palette).toBeVisible()
+    await page.waitForLoadState('networkidle')
+    expect(requested.filter(isPaletteChunk).length, 'fetched once').toBe(1)
+  })
+})

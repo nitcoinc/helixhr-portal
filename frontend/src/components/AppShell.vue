@@ -37,6 +37,85 @@ const route = useRoute()
 const router = useRouter()
 const showMore = ref(false)
 
+// Plan 2026-10-17-001 U5 (R7, KTD2, KTD4). The command palette is fetched on
+// its first open (`CommandPalette-<hash>.js`, hardening.spec.ts), so the
+// shell keeps only the shortcut, the triggers and where focus goes back to.
+const CommandPalette = defineAsyncComponent(() => import('@/components/CommandPalette.vue'))
+const paletteWanted = ref(false)
+const paletteOpen = ref(false)
+const moreTab = ref(null)
+const isMac = /Mac|iPhone|iPad/.test(globalThis.navigator?.platform || '')
+const paletteHint = isMac ? '⌘K' : 'Ctrl K'
+let paletteReturn = null
+let paletteFrom = ''
+
+// A dialog playing its close animation (`data-state="closed"`) is already
+// gone for the user: Ctrl-K pressed right after the palette closes must open
+// it again, not be swallowed by the leaving one.
+const anyDialogOpen = () => !!document.querySelector('[role="dialog"]:not([data-state="closed"])')
+
+/** Runs `fn` once `selector` has left the page (an overlay's close
+ * animation), or after a second at most. */
+function whenGone(selector, fn) {
+  let frames = 0
+  const tick = () => {
+    if (document.querySelector(selector) && frames++ < 60) requestAnimationFrame(tick)
+    else fn()
+  }
+  requestAnimationFrame(tick)
+}
+
+function openPalette(returnTo) {
+  if (paletteOpen.value) return
+  paletteReturn = returnTo || document.activeElement
+  paletteFrom = route.fullPath
+  paletteWanted.value = true
+  paletteOpen.value = true
+}
+
+// The More sheet's row: More closes first -- two dialogs never stack -- and
+// focus comes back to the More tab when the palette closes.
+function searchFromMore() {
+  showMore.value = false
+  whenGone('[role="dialog"]', () => openPalette(moreTab.value))
+}
+
+// After a jump, focus starts on the new page (R10), unless the jump opened a
+// sheet of its own (`/leave?ask=1`). After Escape it goes back where it was.
+watch(paletteOpen, (isOpen) => {
+  if (isOpen) return
+  const target = paletteReturn
+  paletteReturn = null
+  whenGone('[data-dialog="Search"]', () => {
+    if (anyDialogOpen()) return
+    if (route.fullPath !== paletteFrom) focusMain()
+    else if (target?.isConnected && target !== document.body) target.focus({ preventScroll: true })
+  })
+})
+
+function isEditable(element) {
+  return (
+    !!element &&
+    (element.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(element.tagName))
+  )
+}
+
+/** ⌘K / Ctrl-K, or `/` outside a text field. Neither while any dialog is
+ * open -- a sheet's own keys win. Ctrl-K inside a rich-text editor is the
+ * editor's (a link). */
+function onPaletteShortcut(event) {
+  if (event.defaultPrevented || event.isComposing || event.repeat) return
+  const chord =
+    (event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key?.toLowerCase() === 'k'
+  const slash = event.key === '/' && !event.ctrlKey && !event.metaKey && !event.altKey
+  if (!chord && !slash) return
+  if (anyDialogOpen()) return
+  const target = event.target
+  if (slash ? isEditable(target) : target?.isContentEditable) return
+  event.preventDefault()
+  openPalette()
+}
+
 const unread = computed(() => currentUnread())
 const unreadLabel = computed(() => (unread.value > 9 ? '9+' : String(unread.value)))
 // KTD8: seeded by the bootstrap, kept by the Approvals page; never polled.
@@ -168,6 +247,7 @@ function closeMore() {
 }
 
 onMounted(() => {
+  window.addEventListener('keydown', onPaletteShortcut)
   stopFocusOnNavigate = router.afterEach((to, from, failure) => {
     if (failure || !from.matched.length || to.meta.title === from.meta.title) return
     nextTick(() => requestAnimationFrame(focusMain))
@@ -182,6 +262,7 @@ onMounted(() => {
   }
 })
 onUnmounted(() => {
+  window.removeEventListener('keydown', onPaletteShortcut)
   stopFocusOnNavigate?.()
   unwatchUnread()
   unwatchDialogs()
@@ -224,29 +305,51 @@ onUnmounted(() => {
           </a>
         </div>
 
-        <router-link
-          :to="identityRoute"
-          class="mx-3 flex cursor-pointer items-center gap-3 rounded-lg px-2 py-2 hover:bg-white/10"
-        >
-          <Avatar
-            class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white/15 font-medium text-white"
-            :photo-url="session.employee?.photo_url"
-            :initials="initials || '—'"
-            :size="36"
-            data-testid="shell-avatar"
-          />
-          <span class="min-w-0">
-            <span class="block truncate text-sm font-medium text-white">
-              {{ employeeName || 'Loading…' }}
+        <!-- U5: the desktop search trigger shares the identity row, so the
+             rail's 800px row budget below is unchanged. -->
+        <div class="mx-3 flex items-center gap-1">
+          <router-link
+            :to="identityRoute"
+            class="flex min-w-0 flex-1 cursor-pointer items-center gap-3 rounded-lg px-2 py-2 hover:bg-white/10"
+          >
+            <Avatar
+              class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-white/15 font-medium text-white"
+              :photo-url="session.employee?.photo_url"
+              :initials="initials || '—'"
+              :size="36"
+              data-testid="shell-avatar"
+            />
+            <span class="min-w-0">
+              <span class="block truncate text-sm font-medium text-white">
+                {{ employeeName || 'Loading…' }}
+              </span>
+              <span
+                v-if="employeeRole"
+                class="block truncate text-xs text-blue-200"
+              >
+                {{ employeeRole }}
+              </span>
             </span>
-            <span
-              v-if="employeeRole"
-              class="block truncate text-xs text-blue-200"
-            >
-              {{ employeeRole }}
-            </span>
-          </span>
-        </router-link>
+          </router-link>
+          <button
+            type="button"
+            class="flex h-9 shrink-0 cursor-pointer items-center gap-1.5 rounded-md border border-white/25 px-2 text-blue-100 hover:bg-white/10 hover:text-white"
+            aria-label="Find a page, person or request"
+            aria-keyshortcuts="Control+K Meta+K /"
+            :title="`Search (${paletteHint})`"
+            data-testid="palette-trigger"
+            @click="openPalette($event.currentTarget)"
+          >
+            <Icon
+              name="search"
+              size="h-4 w-4"
+            />
+            <kbd
+              aria-hidden="true"
+              class="font-sans text-[11px] font-medium text-blue-200"
+            >{{ paletteHint }}</kbd>
+          </button>
+        </div>
 
         <nav
           class="mt-3 flex-1 overflow-y-auto px-3"
@@ -395,6 +498,16 @@ onUnmounted(() => {
         >
           Open Desk
         </a>
+        <button
+          type="button"
+          class="flex h-11 w-11 cursor-pointer items-center justify-center rounded-full text-blue-100 hover:bg-white/10"
+          :class="session.deskUrl ? '' : 'ml-auto'"
+          aria-label="Find a page, person or request"
+          data-testid="palette-trigger-phone"
+          @click="openPalette($event.currentTarget)"
+        >
+          <Icon name="search" />
+        </button>
         <router-link
           v-if="!deskOnly"
           to="/notifications"
@@ -458,6 +571,7 @@ onUnmounted(() => {
         {{ item.label }}
       </router-link>
       <button
+        ref="moreTab"
         class="flex min-h-[56px] flex-1 cursor-pointer flex-col items-center justify-center gap-1 text-[11px] font-medium"
         :class="moreIsActive ? 'text-signal' : 'text-blue-200'"
         :aria-current="moreIsActive ? 'page' : undefined"
@@ -486,6 +600,16 @@ onUnmounted(() => {
     >
       <template #body-content>
         <div class="space-y-0.5">
+          <!-- U5: search from More closes More first, then opens the palette. -->
+          <button
+            type="button"
+            class="flex min-h-11 w-full cursor-pointer items-center gap-3 rounded-lg px-3 py-3 text-sm font-medium text-ink-gray-7 hover:bg-surface-gray-2"
+            data-testid="more-search"
+            @click="searchFromMore"
+          >
+            <Icon name="search" />
+            <span class="flex-1 text-left">Search</span>
+          </button>
           <!-- R9: same groups as the rail, always open, no collapse control. -->
           <section
             v-for="group in moreGroups"
@@ -560,5 +684,9 @@ onUnmounted(() => {
     </Dialog>
 
     <Toaster v-if="toasterWanted" />
+    <CommandPalette
+      v-if="paletteWanted"
+      v-model="paletteOpen"
+    />
   </div>
 </template>

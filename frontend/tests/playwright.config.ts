@@ -29,7 +29,8 @@ export default defineConfig({
     screenshot: 'only-on-failure',
   },
   // Plan 2026-10-17-001 U1: `console-clean.spec.ts` is in every project's
-  // list below. It is read-only and visits only the routes the signed-in
+  // list below, and U5's `command-palette.spec.ts` the same way (each test
+  // gates on the hat it is written for). It is read-only and visits only the routes the signed-in
   // identity's own bootstrap allows, so it never runs another hat's flow.
   // `employee` and `manager` reach it through their ignore-list default.
   projects: [
@@ -71,7 +72,7 @@ export default defineConfig({
       // Plan 2026-10-02-001 U10: email-templates.spec.ts -- HR is the refused
       // hat; the Notification Manager signs in inside the spec itself, the
       // same way login-dashboard.spec.ts does, since it has no Employee.
-      testMatch: /(console-clean|approvals|settings|organisation|people|people-access|reports|reports-company|projects|roster|navigation|email-templates|requests-conversation)\.spec\.ts/,
+      testMatch: /(console-clean|approvals|settings|organisation|people|people-access|reports|reports-company|projects|roster|navigation|email-templates|requests-conversation|command-palette)\.spec\.ts/,
     },
     // P5-U11. The routed-worker identity: `IT Team`, portal-only
     // (desk_access: 0), which never reaches Desk and works only the requests
@@ -90,7 +91,7 @@ export default defineConfig({
       dependencies: ['setup'],
       // Plan 2026-10-17-001 U4: navigation.spec.ts, for KTD7's tab bar and
       // the handler's Team-inbox Requests entry (AI-02).
-      testMatch: /(console-clean|approvals|organisation|people|reports|requests-conversation|navigation)\.spec\.ts/,
+      testMatch: /(console-clean|approvals|organisation|people|reports|requests-conversation|navigation|command-palette)\.spec\.ts/,
     },
     // Plan 2026-10-06-001 U3. The Portal Admin identity (`make_test_portal_admin`,
     // seeded by setup_playwright_fixtures): Report access, People & access and
@@ -102,7 +103,7 @@ export default defineConfig({
       dependencies: ['setup'],
       // Plan 2026-10-17-001 U4: navigation.spec.ts, for the Admin-first rail
       // (AI-15) and KTD7's tab bar.
-      testMatch: /(console-clean|settings|people-access|navigation)\.spec\.ts/,
+      testMatch: /(console-clean|settings|people-access|navigation|command-palette)\.spec\.ts/,
     },
     // Plan 2026-10-15-002 U4/U6. HR User: no approve right, but oversight of
     // pending timesheets in their company (`make_test_hr_user`).
@@ -112,7 +113,7 @@ export default defineConfig({
       dependencies: ['setup'],
       // Plan 2026-10-17-001 U4: navigation.spec.ts, for KTD7's "no badge"
       // row -- oversight decides nothing.
-      testMatch: /(console-clean|timesheet-oversight|navigation)\.spec\.ts/,
+      testMatch: /(console-clean|timesheet-oversight|navigation|command-palette)\.spec\.ts/,
     },
     // P2-U9 step 9. Mobile WebKit is the second mandatory browser: it is the
     // only engine on iOS, it is where a coarse pointer, a real safe-area
@@ -139,7 +140,7 @@ export default defineConfig({
       // design -- one of them signs a session out and another consumes a
       // leave allocation -- so a second pass in the same run would fight the
       // first rather than test a second engine.
-      testMatch: /(console-clean|login-dashboard|navigation|visual-foundation|hardening|roster)\.spec\.ts/,
+      testMatch: /(console-clean|login-dashboard|navigation|visual-foundation|hardening|roster|command-palette)\.spec\.ts/,
     },
     // P2-U0: the pinned quality baseline, present only when BASELINE_MODE
     // is set. The spec owns the viewport, CPU and network profile itself (a

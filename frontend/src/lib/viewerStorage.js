@@ -1,12 +1,25 @@
 // Plan 2026-10-17-001 KTD13. Per-viewer conveniences live in localStorage
 // under keys that end in `session.user`. This module is the one list of them,
 // so sign-out can clear every one and a bootstrap can drop what another
-// account left on a shared browser. U5 (search recents) and U7 (keyboard
-// triage) add their prefixes to VIEWER_KEY_PREFIXES.
+// account left on a shared browser.
 import { NAV_COLLAPSED_PREFIX } from './navGroups'
-import { RECENT_REPORTS_PREFIX } from './recentReports'
 
-export const VIEWER_KEY_PREFIXES = [NAV_COLLAPSED_PREFIX, RECENT_REPORTS_PREFIX]
+// Declared here rather than beside their readers, which load lazily: this
+// module rides in the eager chunk with lib/session.js, and importing the
+// palette's or Approvals' modules for one string would pull them in too.
+/** U11: the Reports page's recently run strip (lib/recentReports.js). */
+export const RECENT_REPORTS_PREFIX = 'helixhr.reports.recent:'
+/** U5: the command palette's recents (lib/paletteSources.js). */
+export const PALETTE_RECENTS_PREFIX = 'helixhr.palette.recent:'
+/** U7: the Approvals keyboard-triage opt-in. */
+export const APPROVALS_SHORTCUTS_PREFIX = 'helixhr.approvals.shortcuts:'
+
+export const VIEWER_KEY_PREFIXES = [
+  NAV_COLLAPSED_PREFIX,
+  RECENT_REPORTS_PREFIX,
+  PALETTE_RECENTS_PREFIX,
+  APPROVALS_SHORTCUTS_PREFIX,
+]
 
 // Written before keys carried a user (plan 2026-10-02-001 U15): nobody's, so
 // always purged.

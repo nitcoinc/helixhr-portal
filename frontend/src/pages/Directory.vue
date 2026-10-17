@@ -1,6 +1,7 @@
 <script setup>
 import Avatar from '@/components/Avatar.vue'
 import { computed, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { createResource, Button, Dialog } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
@@ -24,8 +25,12 @@ const isDesktop = useIsDesktop()
 const PAGE = 50
 const MAX_PAGE = 200
 
-const query = ref('')
-const search = ref('')
+// Plan 2026-10-17-001 U5 (R2): `?q=` -- a person picked in the command
+// palette -- seeds the search, so the first read is already filtered.
+const route = useRoute()
+const seeded = () => (typeof route.query.q === 'string' ? route.query.q.trim().slice(0, 60) : '')
+const query = ref(seeded())
+const search = ref(query.value)
 const department = ref(null)
 const pageLimit = ref(PAGE)
 
@@ -47,6 +52,13 @@ const debounced = useDebouncedSearch((value) => {
   directory.reload()
 })
 watch(query, debounced.search)
+// Picked again while already on the directory: same page, new query.
+watch(
+  () => route.query.q,
+  () => {
+    if (seeded()) query.value = seeded()
+  },
+)
 
 const rows = computed(() => directory.data?.people || [])
 const total = computed(() => directory.data?.total || 0)
