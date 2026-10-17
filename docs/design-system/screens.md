@@ -507,10 +507,13 @@ save or open the file itself.
 
 *Deviations from the artboard, recorded:*
 
-- **The date tile is inverted here**: year over month (`2026` / `AUG`), where every other tile in
-  the portal is month over day. It follows the artboard, and it is right for a row that is about a
-  *month* rather than a day — but it does mean `.date-tile` carries two semantics across screens,
-  which is worth knowing before a third one appears.
+- **The date tile reads month over year** (`AUG` / `2026`): the small top line is the month, as on
+  every other tile, and the bold line carries the year where a day would go, because a payslip is
+  about a month rather than a day. It used to be year over month (`2026` / `AUG`), which gave
+  `.date-tile` two semantics across screens (EP-21, plan 2026-10-17-001 U10).
+- **Every downloadable row has its own `PDF` link** (44px, named "Download August 2026 payslip
+  PDF"), outside the stretched row link, so an older slip downloads without opening the sheet. A
+  withheld row has none (ED-06).
 - **Years are chips plus count paging, not the artboard's "Show 2025" link.** The list is bounded
   at 20 with a "Show N more" carrying the true remainder (the Leave and Past-weeks rule), and the
   year chips only render when the employee actually has slips in more than one year.

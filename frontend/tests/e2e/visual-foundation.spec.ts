@@ -58,6 +58,9 @@ async function undersizedOnPage(page: Page, scope = 'body') {
       if (element.hasAttribute('disabled')) continue
       const style = getComputedStyle(element)
       if (style.display === 'none' || style.visibility === 'hidden') continue
+      // A visually hidden control (the skip link before it takes focus) is
+      // not a tap target; its focused size is asserted on its own.
+      if (style.clip === 'rect(0px, 0px, 0px, 0px)') continue
       // Inline links inside a sentence are text, not targets; `min-height`
       // does not apply to them and WCAG 2.5.8 exempts them.
       if (style.display === 'inline') continue
@@ -903,7 +906,7 @@ test.describe('toast', () => {
     // changed field raises the page's sticky action bar under it.
     await page.getByRole('button', { name: 'More' }).click()
     await page.getByRole('dialog').getByRole('link', { name: 'Profile' }).click()
-    await page.getByRole('link', { name: 'Contact & emergency' }).click()
+    await page.getByTestId('profile-tab-contact').click()
     await page
       .getByTestId('profile-editable-cell_number')
       .getByLabel('Mobile')

@@ -515,6 +515,45 @@ test.describe('employee', () => {
     }
   })
 
+  // Plan 2026-10-17-001 U10 (ED-07, EP-16): no `?tab` opens the first tab
+  // with something in it, and an empty tab names the next action.
+  test('with nothing important and one general document, Documents opens on General', async ({
+    page,
+  }) => {
+    await page.route('**/api/method/helixhr.api.get_my_documents*', (route) =>
+      route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          message: [
+            {
+              name: 'DOC-U10',
+              title: 'U10 handbook',
+              description: '',
+              url: 'https://example.com/handbook.pdf',
+              file: null,
+              category: 'General',
+              company: null,
+              published_on: '2026-10-01',
+            },
+          ],
+        }),
+      }),
+    )
+
+    await page.goto('/helixhr/documents')
+    await expect(page.getByRole('tab', { name: /^General \(1\)$/ })).toHaveAttribute('aria-selected', 'true')
+    await expect(page.getByRole('link', { name: /U10 handbook/ })).toBeVisible()
+
+    // Picking Important on purpose keeps it, and its empty state says what to do.
+    await page.getByRole('tab', { name: /^Important \(0\)$/ }).click()
+    await expect(page).toHaveURL(/tab=important/)
+    const empty = page.getByTestId('documents-important-empty')
+    await expect(empty).toContainText('Nothing marked important.')
+    await expect(empty.getByRole('link', { name: 'ask HR' })).toBeVisible()
+    await empty.getByRole('button', { name: 'Browse General' }).click()
+    await expect(page.getByRole('tab', { name: /^General \(1\)$/ })).toHaveAttribute('aria-selected', 'true')
+  })
+
   // ── AE2, at the routes a browser can actually reach ───────────────────
   test('forged company filters and generic routes cannot widen Documents', async ({ baseURL }) => {
     const api = await admin(baseURL!)
@@ -671,6 +710,9 @@ test.describe('documents publishing', () => {
       await hr.getByTestId('documents-upload').click()
       const editor = hr.getByTestId('document-editor')
       await editor.getByLabel('Title').fill(title)
+      // The editor's category follows the tab the page opened on (U10: the
+      // first non-empty one), so choose Important rather than assume it.
+      await editor.getByLabel('Category').selectOption('Important')
       await expect(editor.getByLabel('Category')).toHaveValue('Important')
       // Category and Date share a row: same top, same height.
       const category = (await editor.getByLabel('Category').boundingBox())!

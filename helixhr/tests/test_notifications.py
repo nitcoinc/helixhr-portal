@@ -376,6 +376,94 @@ class TestNotifications(IntegrationTestCase):
 		self.assertEqual(self._unread_count(EMPLOYEE_USER), 0)
 
 
+class TestMyNotificationsList(IntegrationTestCase):
+	"""Plan 2026-10-17-001 U10 (ED-04 / EP-07): the Notifications page's
+	list, with the Unread filter applied on the server."""
+
+	USER = "u10-notifications@helixhr.test"
+	OTHER = "u10-notifications-other@helixhr.test"
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		for user in (self.USER, self.OTHER):
+			if not frappe.db.exists("User", user):
+				frappe.get_doc(
+					{
+						"doctype": "User",
+						"email": user,
+						"first_name": user.split("@")[0],
+						"send_welcome_email": 0,
+						"roles": [{"doctype": "Has Role", "role": "Employee"}],
+					}
+				).insert(ignore_permissions=True)
+			frappe.db.delete("Notification Log", {"for_user": user})
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _log(self, user, subject, read=0):
+		log = frappe.get_doc(
+			{
+				"doctype": "Notification Log",
+				"for_user": user,
+				"subject": subject,
+				"type": "Alert",
+				"document_type": "HR Request",
+				"document_name": "HR-REQ-U10-LIST",
+			}
+		).insert(ignore_permissions=True)
+		if read:
+			frappe.db.set_value("Notification Log", log.name, "read", 1, update_modified=False)
+		return log.name
+
+	def test_the_unread_view_is_every_unread_row_not_a_filter_over_one_page(self):
+		from helixhr.api import get_my_notifications
+
+		unread = {self._log(self.USER, f"unread {i}") for i in range(60)}
+		read = self._log(self.USER, "already read", read=1)
+
+		frappe.set_user(self.USER)
+		result = get_my_notifications(unread_only=1, limit=200)
+
+		self.assertEqual({row.name for row in result["logs"]}, unread)
+		self.assertNotIn(read, {row.name for row in result["logs"]})
+		self.assertEqual(result["unread"], 60)
+
+		# The All view is still one bounded page, read rows included.
+		everything = get_my_notifications(limit=200)["logs"]
+		self.assertIn(read, {row.name for row in everything})
+		self.assertEqual(len(get_my_notifications()["logs"]), 50)
+
+	def test_only_the_callers_rows_even_for_administrator(self):
+		from helixhr.api import get_my_notifications
+
+		mine = self._log(self.USER, "mine")
+		theirs = self._log(self.OTHER, "theirs")
+
+		frappe.set_user(self.USER)
+		names = {row.name for row in get_my_notifications(unread_only=1)["logs"]}
+		self.assertEqual(names, {mine})
+
+		# Administrator is exempt from Notification Log's permission query;
+		# the explicit `for_user` filter is what keeps this to their own.
+		frappe.set_user("Administrator")
+		names = {row.name for row in get_my_notifications(limit=200)["logs"]}
+		self.assertNotIn(mine, names)
+		self.assertNotIn(theirs, names)
+
+	def test_the_page_size_is_bounded(self):
+		from helixhr.api import _NOTIFICATION_MAX_PAGE, get_my_notifications
+
+		for i in range(3):
+			self._log(self.USER, f"row {i}")
+
+		frappe.set_user(self.USER)
+		self.assertEqual(len(get_my_notifications(limit=1)["logs"]), 1)
+		self.assertEqual(len(get_my_notifications(limit=-5)["logs"]), 1)
+		self.assertEqual(len(get_my_notifications(limit=0)["logs"]), 3)
+		self.assertLessEqual(len(get_my_notifications(limit=10_000)["logs"]), _NOTIFICATION_MAX_PAGE)
+
+
 class TestHrQueueEmails(IntegrationTestCase):
 	"""Plan 2026-10-02-001 U9 (was P4-R12 / P4-KTD9's fixture Notifications).
 

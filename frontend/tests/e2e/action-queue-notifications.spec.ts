@@ -1,4 +1,4 @@
-import { test, expect, Page } from '@playwright/test'
+import { test, expect, request, APIRequestContext, Page } from '@playwright/test'
 
 // P2-U4. Home is a list of exact obligations and Notifications is the loop
 // that clears them, so what these travel are the two things that were wrong:
@@ -362,10 +362,12 @@ const LOG_UNREAD = {
   from_user: null,
 }
 
-function logs(rows: object[]) {
-  return {
-    message: { notification_logs: rows, user_info: {} },
-  }
+type Log = { name: string; read: number } & Record<string, unknown>
+
+/** `helixhr.api.get_my_notifications`'s answer (U10): the page, and the
+ * caller's unread total. */
+function logs(rows: Log[], unread: number) {
+  return { message: { logs: rows, unread } }
 }
 
 /** The server's own "today" (P2-U2's get_portal_bootstrap), not the test
@@ -394,17 +396,23 @@ function stamp(anchor: string, daysAgo: number) {
   return `${noon.getUTCFullYear()}-${pad(noon.getUTCMonth() + 1)}-${pad(noon.getUTCDate())} 09:30:00.000000`
 }
 
-async function stubNotifications(page: Page, rows: object[], unread: number) {
+/** Stubs the list read. `rows` is the whole set; the Unread view gets only
+ * the unread ones, because the filter is the server's (U10). A function
+ * lets a test change the set after a mark-read. */
+async function stubNotifications(page: Page, rows: Log[] | (() => Log[]), unread: number | (() => number)) {
+  const all = () => (typeof rows === 'function' ? rows() : rows)
+  const total = () => (typeof unread === 'function' ? unread() : unread)
   await page.route('**/api/method/helixhr.api.get_portal_bootstrap*', async (route) => {
     const response = await route.fetch()
     const body = await response.json()
-    body.message.unread_notifications = unread
+    body.message.unread_notifications = total()
     await route.fulfill({ response, body: JSON.stringify(body) })
   })
-  await page.route(
-    '**/api/method/frappe.desk.doctype.notification_log.notification_log.get_notification_logs*',
-    (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify(logs(rows)) }),
-  )
+  await page.route('**/api/method/helixhr.api.get_my_notifications*', (route) => {
+    const unreadOnly = Number(route.request().postDataJSON()?.unread_only || 0)
+    const subset = unreadOnly ? all().filter((row) => !row.read) : all()
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(logs(subset, total())) })
+  })
   // The stubbed request does not exist, so the real resolver (plan
   // 2026-10-16-001 KTD8) would answer "none"; this employee owns it.
   await page.route('**/api/method/helixhr.api.get_request_view*', (route) =>
@@ -421,8 +429,9 @@ test.describe('Notifications', () => {
     test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
   })
 
-  test('groups Today and Earlier, and opening a reply clears it everywhere', async ({ page }) => {
+  test('buckets by day, and opening a reply clears it everywhere', async ({ page }) => {
     const today = await siteToday(page)
+    let cleared: Record<string, string> | null = null
     await stubNotifications(
       page,
       [
@@ -435,16 +444,23 @@ test.describe('Notifications', () => {
           document_name: 'TS-OLD',
           type: 'Alert',
           read: 1,
-          creation: stamp(today, 6),
+          creation: stamp(today, 1),
         },
       ],
       2,
     )
+    await page.route('**/api/method/helixhr.api.mark_record_notifications_read*', (route) => {
+      cleared = route.request().postDataJSON()
+      return route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({ message: { cleared: 1, unread: 1 } }),
+      })
+    })
 
     await page.goto('/helixhr/notifications')
 
     await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible()
-    await expect(page.getByRole('heading', { name: 'Earlier' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Yesterday' })).toBeVisible()
     await expect(navBadge(page)).toHaveText(/Notifications\s*2/)
 
     const unreadRow = page.getByTestId('notification-row').first()
@@ -458,6 +474,59 @@ test.describe('Notifications', () => {
     await expect(page).toHaveURL(/\/helixhr\/requests\/HR-REQ-2026-TEST$/)
     // ...and the count moved now, not at the next poll a minute later.
     await expect(navBadge(page)).toHaveText(/Notifications\s*1/)
+    await expect
+      .poll(() => cleared)
+      .toEqual({ reference_doctype: 'HR Request', reference_name: 'HR-REQ-2026-TEST' })
+  })
+
+  // U10 (ED-04, EP-07): six logs about one request are one row, and opening
+  // it clears all six in one call.
+  test('six notifications for one request are one row that clears all six', async ({ page }) => {
+    const today = await siteToday(page)
+    const record = 'HR-REQ-2026-U10'
+    let cleared: Record<string, string> | null = null
+    const six: Log[] = Array.from({ length: 6 }, (_, i) => ({
+      ...LOG_UNREAD,
+      name: `NL-U10-${i}`,
+      subject: i === 0 ? 'HR replied about Address proof' : `Earlier update ${i}`,
+      document_name: record,
+      creation: stamp(today, i === 0 ? 0 : 1),
+    }))
+    await stubNotifications(
+      page,
+      () => (cleared ? [] : six),
+      () => (cleared ? 0 : 6),
+    )
+    await page.route('**/api/method/helixhr.api.mark_record_notifications_read*', (route) => {
+      cleared = route.request().postDataJSON()
+      return route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({ message: { cleared: 6, unread: 0 } }),
+      })
+    })
+
+    await page.goto('/helixhr/notifications?unread=1')
+    await expect(navBadge(page)).toHaveText(/Notifications\s*6/)
+
+    const rows = page.getByTestId('notification-row')
+    await expect(rows).toHaveCount(1)
+    await expect(rows.first()).toContainText('HR replied about Address proof')
+    const toggle = page.getByTestId('notification-earlier-toggle')
+    await expect(toggle).toHaveText('+5 earlier')
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    await expect(page.getByTestId('notification-earlier').getByRole('listitem')).toHaveCount(5)
+
+    await rows.first().click()
+    await expect(page).toHaveURL(new RegExp(`/helixhr/requests/${record}$`))
+    await expect.poll(() => cleared).toEqual({ reference_doctype: 'HR Request', reference_name: record })
+    // All six off the badge at once, not one.
+    await expect(navBadge(page)).toHaveText(/^\s*Notifications\s*$/)
+
+    await page.goBack()
+    await expect(page.getByTestId('notification-row')).toHaveCount(0)
+    await expect(page.getByText('Nothing unread')).toBeVisible()
   })
 
   test('Mark all read updates the list and the badge in one interaction', async ({ page }) => {
@@ -477,5 +546,93 @@ test.describe('Notifications', () => {
     await expect(page.getByTestId('notification-row').first()).toHaveAttribute('data-read', '1')
     // No badge at all, rather than a stale 1.
     await expect(navBadge(page)).toHaveText(/^\s*Notifications\s*$/)
+  })
+
+  test('Mark all read empties the Unread view', async ({ page }) => {
+    const today = await siteToday(page)
+    let markedAll = false
+    const rows: Log[] = [
+      { ...LOG_UNREAD, creation: stamp(today, 0) },
+      { ...LOG_UNREAD, name: 'NL-OTHER', document_name: 'HR-REQ-2026-OTHER', creation: stamp(today, 2) },
+    ]
+    await stubNotifications(
+      page,
+      () => (markedAll ? rows.map((row) => ({ ...row, read: 1 })) : rows),
+      () => (markedAll ? 0 : 2),
+    )
+    await page.route(
+      '**/api/method/frappe.desk.doctype.notification_log.notification_log.mark_all_as_read*',
+      (route) => {
+        markedAll = true
+        return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ message: null }) })
+      },
+    )
+
+    await page.goto('/helixhr/notifications')
+    await page.getByRole('group', { name: 'Show notifications' }).getByRole('button', { name: /Unread/ }).click()
+    await expect(page).toHaveURL(/\/helixhr\/notifications\?unread=1$/)
+    await expect(page.getByTestId('notification-row')).toHaveCount(2)
+
+    await page.getByRole('button', { name: 'Mark all read' }).click()
+    await expect(page.getByTestId('notification-row')).toHaveCount(0)
+    await expect(page.getByText('Nothing unread')).toBeVisible()
+
+    // A reload asks the server again and agrees.
+    await page.reload()
+    await expect(page.getByText('Nothing unread')).toBeVisible()
+  })
+})
+
+// U10 (ED-04): the Unread filter is the server's, so a backlog larger than
+// one page shows whole. Seeded for real, because the point is what the
+// server returns, and removed afterwards.
+const SITE_HOST = process.env.SITE_HOST || 'test_site'
+const EMPLOYEE = 'employee@helixhr.test'
+
+async function admin(baseURL: string): Promise<APIRequestContext> {
+  const api = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+  await api.post('/api/method/login', { form: { usr: 'Administrator', pwd: 'admin' } })
+  return api
+}
+
+test.describe('Notifications at volume', () => {
+  test.beforeEach(async ({}, testInfo) => {
+    test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
+  })
+
+  test('the Unread view shows all 60 unread, not a filter over the newest 50', async ({
+    page,
+    baseURL,
+  }) => {
+    const api = await admin(baseURL!)
+    const tag = `U10-${Date.now()}`
+    let names: string[] = []
+    try {
+      // Sixty different records, so record grouping cannot fold them.
+      const inserted = await api.post('/api/method/frappe.client.insert_many', {
+        data: {
+          docs: Array.from({ length: 60 }, (_, i) => ({
+            doctype: 'Notification Log',
+            for_user: EMPLOYEE,
+            type: 'Alert',
+            subject: `${tag} update ${i}`,
+            document_type: 'HR Request',
+            document_name: `${tag}-${i}`,
+          })),
+        },
+      })
+      expect(inserted.ok()).toBeTruthy()
+      names = (await inserted.json()).message
+
+      await page.goto('/helixhr/notifications?unread=1')
+      await expect(page.getByTestId('notification-row').filter({ hasText: tag })).toHaveCount(60)
+    } finally {
+      for (const name of names) {
+        await api.post('/api/method/frappe.client.delete', {
+          data: { doctype: 'Notification Log', name },
+        })
+      }
+      await api.dispose()
+    }
   })
 })

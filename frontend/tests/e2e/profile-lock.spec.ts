@@ -11,8 +11,10 @@ test.describe('employee', () => {
 
     // Department is locked -- shown as plain text with a way to ask HR to
     // fix it, not as an editable field.
+    // One entry for its section (U10), not one per row.
     const departmentRow = page.getByTestId('profile-field-department')
-    await expect(departmentRow.getByRole('button', { name: /Request a correction/ })).toBeVisible()
+    await expect(page.getByTestId('profile-correct-role')).toBeVisible()
+    await expect(departmentRow.getByRole('button')).toHaveCount(0)
     await expect(departmentRow.getByRole('textbox')).toHaveCount(0)
 
     // Mobile is editable, on the Contact tab. One bar for the whole form: it

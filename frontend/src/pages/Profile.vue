@@ -393,9 +393,25 @@ async function saveChanges() {
             Account and ID numbers show only their last four characters.
           </p>
 
+          <!-- ED-18: what the employee can fix themselves, said where they
+               are looking rather than only on another tab. -->
+          <p
+            v-if="active.key === 'personal'"
+            class="text-sm text-ink-gray-6"
+          >
+            Phone, address and emergency contact you can edit yourself in
+            <router-link
+              class="cursor-pointer text-blue-700 underline underline-offset-2"
+              to="/profile/contact"
+            >
+              Contact &amp; emergency
+            </router-link>.
+          </p>
+
           <ProfileFields
             :fields="sectionData.fields"
             :groups="GROUPS[active.key] || []"
+            :section-label="active.label"
             :can-correct="!!correctionCategory"
             @correct="requestCorrection"
           />

@@ -8970,6 +8970,54 @@ def mark_record_notifications_read(reference_doctype, reference_name):
 	return {"cleared": cleared, "unread": _get_unread_notification_count()}
 
 
+_NOTIFICATION_PAGE = 50
+_NOTIFICATION_MAX_PAGE = 200
+_NOTIFICATION_FIELDS = (
+	"name",
+	"subject",
+	"description",
+	"email_content",
+	"document_type",
+	"document_name",
+	"type",
+	"read",
+	"creation",
+)
+
+
+@frappe.whitelist()
+def get_my_notifications(unread_only=0, limit=None):
+	"""The caller's Notification Logs, newest first (plan 2026-10-17-001 U10,
+	ED-04 / EP-07).
+
+	Frappe's `get_notification_logs` takes only a count, so an "Unread" view
+	built on it was a client filter over the newest 50 rows -- 60 unread
+	notifications showed as however many of them happened to be in that page.
+	`unread_only` is a server filter here, so the Unread view is every unread
+	row up to `_NOTIFICATION_MAX_PAGE`.
+
+	It is also uncached: `get_notification_logs` carries a 60s private HTTP
+	cache on GET, which hands a reload the pre-mark-read answer.
+
+	`for_user` is the session user in the filter -- `frappe.get_all` skips
+	the doctype's permission query, and Administrator is exempt from it
+	anyway, so the filter is the boundary. `unread` is the caller's total,
+	so the badge can agree with the list in the same response.
+	"""
+	limit = min(max(cint(limit) or _NOTIFICATION_PAGE, 1), _NOTIFICATION_MAX_PAGE)
+	filters = {"for_user": frappe.session.user}
+	if cint(unread_only):
+		filters["read"] = 0
+	logs = frappe.get_all(
+		"Notification Log",
+		filters=filters,
+		fields=list(_NOTIFICATION_FIELDS),
+		order_by="creation desc",
+		limit=limit,
+	)
+	return {"logs": logs, "unread": _get_unread_notification_count()}
+
+
 @frappe.whitelist(methods=["POST"])
 def create_my_request(
 	category,

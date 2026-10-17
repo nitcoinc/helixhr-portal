@@ -38,14 +38,36 @@ test.describe('employee', () => {
     await expect(page.locator('body')).not.toContainText('004512345678')
   })
 
+  // Plan 2026-10-17-001 U10 (ED-18, EP-17): one correction entry per section,
+  // not one per row -- and a section with nothing editable still has one.
+  test('a read-only section offers one correction entry that asks which detail', async ({ page }) => {
+    await page.goto('/helixhr/profile')
+    const personal = page.getByRole('region', { name: 'Personal' })
+    expect(await personal.getByTestId(/^profile-field-/).count()).toBeGreaterThan(1)
+    await expect(personal.getByRole('button', { name: /Request a correction/ })).toHaveCount(1)
+    await expect(page.getByTestId('profile-field-date_of_birth').getByRole('button')).toHaveCount(0)
+
+    await personal.getByRole('button', { name: /Request a correction/ }).click()
+    const dialog = page.getByRole('dialog')
+    // Nothing is guessed: the whole section until a detail is picked.
+    await expect(dialog.getByLabel('Which detail is wrong?')).toHaveValue('')
+    await expect(dialog.getByLabel('Subject')).toHaveValue('Correct my personal details')
+    await dialog.getByLabel('Which detail is wrong?').selectOption('date_of_birth')
+    await expect(dialog.getByLabel('Subject')).toHaveValue('Correct my date of birth')
+    await dialog.getByRole('button', { name: 'Cancel' }).click()
+
+    // The Contact tab keeps its inline edit, and Personal says so.
+    await page.getByRole('link', { name: 'Contact & emergency' }).last().click()
+    await expect(page).toHaveURL(/\/helixhr\/profile\/contact$/)
+    await expect(page.getByTestId('profile-editable-cell_number').getByLabel('Mobile')).toBeEditable()
+  })
+
   test('a correction on date of birth files a pre-filled Profile correction request', async ({
     page,
   }) => {
     await page.goto('/helixhr/profile')
-    await page
-      .getByTestId('profile-field-date_of_birth')
-      .getByRole('button', { name: /Request a correction/ })
-      .click()
+    await page.getByTestId('profile-correct-personal').click()
+    await page.getByRole('dialog').getByLabel('Which detail is wrong?').selectOption('date_of_birth')
 
     const dialog = page.getByRole('dialog')
     await expect(dialog.getByLabel('Subject')).toHaveValue('Correct my date of birth')
@@ -65,10 +87,8 @@ test.describe('employee', () => {
   // twice, plus proof; date of birth keeps the free-text draft.
   test('bank account asks for the new value twice and shows a mismatch inline', async ({ page }) => {
     await page.goto('/helixhr/profile/bank')
-    await page
-      .getByTestId('profile-field-bank_ac_no')
-      .getByRole('button', { name: /Request a correction/ })
-      .click()
+    await page.getByTestId('profile-correct-bank').click()
+    await page.getByRole('dialog').getByLabel('Which detail is wrong?').selectOption('bank_ac_no')
     const dialog = page.getByRole('dialog')
     await dialog.getByLabel('New value').fill('111122223333')
     await dialog.getByLabel('Type it again').fill('111122223334')
@@ -83,10 +103,8 @@ test.describe('employee', () => {
     await dialog.getByRole('button', { name: 'Cancel' }).click()
 
     await page.goto('/helixhr/profile')
-    await page
-      .getByTestId('profile-field-date_of_birth')
-      .getByRole('button', { name: /Request a correction/ })
-      .click()
+    await page.getByTestId('profile-correct-personal').click()
+    await page.getByRole('dialog').getByLabel('Which detail is wrong?').selectOption('date_of_birth')
     await expect(page.getByRole('dialog').getByLabel('Subject')).toHaveValue('Correct my date of birth')
     await expect(page.getByRole('dialog').getByLabel('New value')).toHaveCount(0)
   })
@@ -100,10 +118,8 @@ test.describe('employee', () => {
     const iban = `GB${check}${bban}`
     const tail = iban.slice(-4)
     await page.goto('/helixhr/profile/bank')
-    await page
-      .getByTestId('profile-field-iban')
-      .getByRole('button', { name: /Request a correction/ })
-      .click()
+    await page.getByTestId('profile-correct-bank').click()
+    await page.getByRole('dialog').getByLabel('Which detail is wrong?').selectOption('iban')
     const dialog = page.getByRole('dialog')
     await dialog.getByLabel('New value').fill(iban)
     await dialog.getByLabel('Type it again').fill(iban)
@@ -184,7 +200,7 @@ test.describe('employee', () => {
     await expect(page.getByText('Couldn’t load this section.')).toBeVisible()
     await page.getByRole('button', { name: 'Retry' }).click()
     await expect(page.getByTestId('profile-field-bank_ac_no')).toContainText('••••5678')
-    // Retired category: the per-row buttons are gone, the banner speaks instead.
+    // Retired category: the correction entries are gone, the banner speaks instead.
     await expect(page.getByRole('button', { name: /Request a correction/ })).toHaveCount(0)
   })
 
