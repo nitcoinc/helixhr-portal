@@ -1391,18 +1391,39 @@ def resolve_admin_scope(user):
 	to unscoped. Before this rule, marking an HR Manager's Employee as Left
 	silently widened their reach from one company to every company.
 	"""
-	memo = frappe.local.flags.get(_ADMIN_SCOPE_MEMO)
+	return dict(request_memo_get(_ADMIN_SCOPE_MEMO, user, lambda: _admin_scope(user)))
+
+
+@contextmanager
+def request_memo(flag):
+	"""A memo dict at `frappe.local.flags[flag]` for the length of this
+	block: request-local, never across requests, reset to None on the way
+	out. A nested block reuses the outer memo. Read it with
+	`request_memo_get`."""
+	if frappe.local.flags.get(flag) is not None:
+		yield
+		return
+	frappe.local.flags[flag] = {}
+	try:
+		yield
+	finally:
+		frappe.local.flags[flag] = None
+
+
+def request_memo_get(flag, key, read):
+	"""`read()`, answered once per `key` inside a `request_memo(flag)` block,
+	and fresh on every call outside one."""
+	memo = frappe.local.flags.get(flag)
 	if memo is None:
-		return _admin_scope(user)
-	if user not in memo:
-		memo[user] = _admin_scope(user)
-	return dict(memo[user])
+		return read()
+	if key not in memo:
+		memo[key] = read()
+	return memo[key]
 
 
 _ADMIN_SCOPE_MEMO = "helixhr_admin_scope_memo"
 
 
-@contextmanager
 def shared_admin_scope():
 	"""Inside this block, `resolve_admin_scope` reads once per user instead of
 	once per caller: a read that consults it and then lists a doctype whose
@@ -1410,14 +1431,7 @@ def shared_admin_scope():
 	2026-10-17-001 U5's query budget). Nothing it reads can change between
 	two callers inside one block, and the memo lives only as long as the
 	block, never across requests -- `api._shared_queue_reads`' rule."""
-	if frappe.local.flags.get(_ADMIN_SCOPE_MEMO) is not None:
-		yield
-		return
-	frappe.local.flags[_ADMIN_SCOPE_MEMO] = {}
-	try:
-		yield
-	finally:
-		frappe.local.flags[_ADMIN_SCOPE_MEMO] = None
+	return request_memo(_ADMIN_SCOPE_MEMO)
 
 
 def _admin_scope(user):

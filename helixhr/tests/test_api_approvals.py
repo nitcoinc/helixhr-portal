@@ -3105,7 +3105,9 @@ class TestBootstrapApprovalsCount(IntegrationTestCase):
 		(one pending leave, one pending week): manager 18 (+6), HR Manager 30
 		(+8). The count read itself costs about 8 and 15; the bootstrap pays
 		part of it back by reading its timezone, its read scope and the
-		reports once each (`_shared_queue_reads`)."""
+		reports once each (`_shared_queue_reads`). Since the bootstrap runs
+		inside one `shared_admin_scope` (and the count-only collectors select
+		only what they filter on), HR Manager measures 22 (+0); manager 18."""
 		self._pending_leave()
 		self._pending_timesheet()
 		reports = []

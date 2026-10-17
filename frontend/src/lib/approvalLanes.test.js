@@ -2,7 +2,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   BULK_MAX_ITEMS,
-  SHORTCUTS_PREFIX,
   approveAllBatch,
   approveAllLabel,
   batchItem,
@@ -15,6 +14,7 @@ import {
   selectionState,
   writeShortcuts,
 } from './approvalLanes'
+import { APPROVALS_SHORTCUTS_PREFIX } from './viewerStorage'
 
 const row = (lane, name, extra = {}) => ({ lane, name, employee: `E-${name}`, kind: 'leave', ...extra })
 
@@ -161,7 +161,7 @@ describe('keyboard shortcuts flag', () => {
     const storage = memory()
     expect(readShortcuts('a@x', storage)).toBe(false)
     expect(writeShortcuts('a@x', true, storage)).toBe(true)
-    expect(storage.data[`${SHORTCUTS_PREFIX}a@x`]).toBe('1')
+    expect(storage.data[`${APPROVALS_SHORTCUTS_PREFIX}a@x`]).toBe('1')
     expect(readShortcuts('a@x', storage)).toBe(true)
     expect(readShortcuts('b@x', storage)).toBe(false)
     writeShortcuts('a@x', false, storage)

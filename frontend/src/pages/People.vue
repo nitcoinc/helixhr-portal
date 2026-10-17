@@ -48,8 +48,13 @@ const results = createResource({
   auto: true,
 })
 
+// The server ignores a query under 2 characters (_PEOPLE_SEARCH_QUERY_MIN),
+// so a shorter one asks the same question as none, and an unchanged one is
+// not asked again.
 const debounced = useDebouncedSearch((value) => {
-  search.value = value.trim()
+  const next = value.trim().length >= 2 ? value.trim() : ''
+  if (next === search.value) return
+  search.value = next
   results.reload()
 })
 watch(query, debounced.search)

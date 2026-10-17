@@ -1662,7 +1662,7 @@ class TestGetMyWeekNonWorking(IntegrationTestCase):
 
 	def _non_working(self):
 		frappe.set_user(EMPLOYEE_USER)
-		marker = get_my_week(str(self.monday))["non_working"]
+		marker = get_my_week(str(self.monday), include_non_working=1)["non_working"]
 		frappe.set_user("Administrator")
 		return [marker[str(add_days(self.monday, offset))] for offset in range(7)]
 
@@ -1713,9 +1713,11 @@ class TestGetMyWeekNonWorking(IntegrationTestCase):
 		frappe.cache.delete(f"helixhr:rate-limit:save_my_week:{EMPLOYEE_USER}")
 		row = {"date": str(self.monday), "project": project, "task": "", "hours": 3, "note": "x"}
 		save_my_week(str(self.monday), json.dumps([row]))
-		result = get_my_week(str(self.monday))
+		result = get_my_week(str(self.monday), include_non_working=1)
 		for key in ("week_start", "week_end", "approver_name", "full_week_hours", "timesheet", "change"):
 			self.assertIn(key, result)
+		# Opt-in: an ordinary load skips the reads and carries no marker.
+		self.assertNotIn("non_working", get_my_week(str(self.monday)))
 		self.assertEqual(len(result["non_working"]), 7)
 		self.assertTrue(all(isinstance(value, bool) for value in result["non_working"].values()))
 		[saved] = result["timesheet"]["rows"]

@@ -257,6 +257,7 @@ function copyDay(fromIso) {
 
 const previousMonday = computed(() => addCalendarDays(monday.value, -7))
 const previousWeek = createResource({ url: 'helixhr.api.get_my_week' })
+const thisWeekDays = createResource({ url: 'helixhr.api.get_my_week' })
 
 /** Projects are a precondition, not a nicety: the copy drops rows whose
  * project or task is no longer open, which it cannot tell before
@@ -268,7 +269,12 @@ async function copyPreviousWeek() {
   error.value = ''
   copyNote.value = ''
   try {
-    const data = await previousWeek.submit({ week_start: previousMonday.value })
+    // Both weeks' days off (`non_working` is opt-in). This week's is best
+    // effort: a failed read skips no day, as a missing map always has.
+    const [data, target] = await Promise.all([
+      previousWeek.submit({ week_start: previousMonday.value, include_non_working: 1 }),
+      thisWeekDays.submit({ week_start: monday.value, include_non_working: 1 }).catch(() => null),
+    ])
     const rows = data?.timesheet?.rows || []
     if (!rows.length) {
       error.value = 'There is nothing in last week to copy.'
@@ -280,7 +286,7 @@ async function copyPreviousWeek() {
       rows,
       projects: projects.data,
       targetMonday: monday.value,
-      targetNonWorking: week.data?.non_working,
+      targetNonWorking: target?.non_working,
       sourceNonWorking: data?.non_working,
     })
     copyNote.value = copyWeekNote(copied.skipped)

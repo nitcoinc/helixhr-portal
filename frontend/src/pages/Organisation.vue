@@ -6,6 +6,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
 import Celebrations from '@/components/Celebrations.vue'
+import { HANDLER_INBOX } from '@/lib/nav'
 import { session } from '@/lib/session'
 
 // P5-U15 / P5-R20, P5-R23. Management's read-only snapshot of the
@@ -54,7 +55,7 @@ function queueLink(key) {
       ? { path: '/approvals', query: { view: 'timesheets' } }
       : null
   }
-  if (key === 'request') return session.canHandleRequests ? { path: '/requests', query: { tab: 'work' } } : null
+  if (key === 'request') return session.canHandleRequests ? HANDLER_INBOX : null
   return null
 }
 

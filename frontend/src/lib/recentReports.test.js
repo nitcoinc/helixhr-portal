@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { RECENT_REPORTS_MAX, RECENT_REPORTS_PREFIX, readRecentReports, recordRecentReport } from './recentReports'
+import { RECENT_REPORTS_MAX, readRecentReports, recordRecentReport } from './recentReports'
+import { RECENT_REPORTS_PREFIX } from './viewerStorage'
 
 function memoryStorage() {
   const data = new Map()

@@ -307,7 +307,7 @@ How it is hosted, because each choice is load-bearing (KTD2):
 
 **This round supersedes the 2026-09-04 hardening plan's KTD1, KTD9 and R9** ("no other design
 system", "no new dependency without evidence", "no design-framework abstractions") **for these
-named components only**: shadcn-vue's Command (the palette's list) and Kbd. The user opted in on
+named components only**: shadcn-vue's Command (the palette's list). The user opted in on
 2026-10-17, after the gaps were measured: frappe-ui's own CommandPalette renders Feather icons,
 which this app aliases to a stub, and its Toast is always assertive with a viewport over the tab
 bar (`docs/plans/2026-10-17-001-feat-portal-ease-of-use-plan.md`, Sources). frappe-ui stays the
@@ -321,10 +321,11 @@ The rules for anything under `frontend/src/components/ui/`:
 
 - **Copied, then owned.** From the v3 `new-york` registry (`frontend/components.json`), as plain
   JS (`"typescript": false`); `CommandDialog` was left out, because the palette lives in frappe-ui's
-  `Dialog`. Upstream will not update it; the copies are ours. As shipped the palette uses
-  `Command`, `CommandList`, `CommandGroup` and `CommandItem`; `CommandInput` (replaced by reka-ui's
+  `Dialog`. Upstream will not update it; the copies are ours. Only what the palette uses is kept:
+  `Command`, `CommandList`, `CommandGroup` and `CommandItem`. `CommandInput` (replaced by reka-ui's
   `ListboxFilter`, see above), `CommandEmpty`, `CommandSeparator`, `CommandShortcut` and `Kbd`
-  have no caller yet — the rail trigger's shortcut hint is a plain `<kbd>`.
+  had no caller and were deleted — the rail trigger's shortcut hint is a plain `<kbd>`. Copy one
+  back in from the registry when a caller needs it.
 - **Adapted on copy-in:** no TypeScript, `Icon.vue` + `lib/icons.js` in place of
   `lucide-vue-next`, no Tailwind v4 syntax, and **no opacity modifier on a mapped colour**.
 - **Signal-mapped colour names.** shadcn's vocabulary (`foreground`, `popover`, `muted`,

@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { icons, NEEDS_YOU_ICON } from './icons'
+import { icons } from './icons'
+import { NEEDS_YOU_ICON } from './needsYouIcons'
 
 // The Dashboard queue draws one glyph per kind, and an unmapped kind falls
 // back to the Requests glyph without complaining -- which is exactly how a

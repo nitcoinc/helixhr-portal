@@ -1,4 +1,5 @@
 import { createResource } from 'frappe-ui'
+import { keepaliveRequest } from './api'
 import { session } from './session'
 
 // One shared unread count. The bell (mobile app bar) and the sidebar's
@@ -40,6 +41,22 @@ export function currentUnread() {
  */
 export function setUnread(count) {
   unreadCount.setData(Math.max(0, count))
+}
+
+/**
+ * Mark something read with a `keepalive` write (the tap that reads it is
+ * usually also a navigation): the badge drops by `decrement` now, settles to
+ * the server's `unread` when the answer carries one, and re-reads the count
+ * if the write fails. Never rejects.
+ */
+export async function markReadKeepalive(method, params, decrement) {
+  setUnread(currentUnread() - decrement)
+  try {
+    const result = await keepaliveRequest(method, params)
+    if (typeof result?.unread === 'number') setUnread(result.unread)
+  } catch {
+    unreadCount.reload()
+  }
 }
 
 let poll = null

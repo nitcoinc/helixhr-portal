@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { allowedNav } from './nav'
+import { NAV_COLLAPSED_PREFIX } from './viewerStorage'
 import {
-  NAV_COLLAPSED_PREFIX,
   NAV_GROUPS,
   defaultCollapsed,
   groupNav,

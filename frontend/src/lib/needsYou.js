@@ -2,13 +2,14 @@
 // each list's "View all (N)" goes. N is the server's record count (KTD10
 // collapses rows per record before it counts), so the page it opens has to
 // be the one that owns those records for this person (EP-09).
+import { HANDLER_INBOX } from './nav'
 
 /** The queue's owner page by role. A plain employee has no Approvals page,
  * so their queue opens Notifications, every item addressed to them. */
 export function queueDestination(session) {
   if (session?.canApprove) return '/approvals'
   if (session?.canHandleRequests || session?.canWorkRequests) {
-    return { path: '/requests', query: { tab: 'work' } }
+    return HANDLER_INBOX
   }
   return '/notifications'
 }

@@ -1,14 +1,13 @@
 <script setup>
 import { computed } from 'vue'
 import Icon from '@/components/Icon.vue'
+import { HANDLER_INBOX } from '@/lib/nav'
 import { session } from '@/lib/session'
 
-// A labeled row of text actions with dividers, not three icon+heading+text
-// tiles. The tile version was the same same-size-card scaffold this whole
-// redesign existed to remove from the dashboard -- leaving three of them at
-// the bottom of the page was the pattern surviving its own deletion.
+// A labelled row of text actions with dividers.
 const ACTIONS = [
-  { label: 'Ask for leave', to: '/leave', icon: 'leave' },
+  // `?ask=1` opens the form on arrival, as the palette's Ask for leave does.
+  { label: 'Ask for leave', to: { path: '/leave', query: { ask: '1' } }, icon: 'leave' },
   { label: 'Fill timesheet', to: '/timesheet', icon: 'timesheet' },
   { label: 'New request', to: '/requests', icon: 'requests' },
 ]
@@ -22,7 +21,7 @@ const roleActions = computed(() =>
     { label: 'Approvals', to: '/approvals', icon: 'approvals', show: session.canApprove },
     {
       label: 'Team inbox',
-      to: { path: '/requests', query: { tab: 'work' } },
+      to: HANDLER_INBOX,
       icon: 'requests',
       show: session.canHandleRequests,
     },

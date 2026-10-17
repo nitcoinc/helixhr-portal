@@ -812,7 +812,7 @@ single-copy guard below fails on it.
 
 ## shadcn-vue: copying a component in (plan 2026-10-17-001 U2)
 
-Only shadcn-vue's Command and Kbd are in the app (`frontend/src/components/ui/`), as plain JS on
+Only shadcn-vue's Command is in the app (`frontend/src/components/ui/`), as plain JS on
 Tailwind 3; copying in anything else is a design decision first (`docs/design-system.md`,
 "`components/ui/`"). When one is taken, these are the defects the tooling has, each of which cost
 time on 2026-10-17:

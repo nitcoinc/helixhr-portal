@@ -4,6 +4,8 @@
 // desktop rail -- the phone More sheet always shows every group open.
 // `role` marks a group a session holds because of what it does at work, not
 // because it is an employee (plan 2026-10-17-001 U4).
+import { NAV_COLLAPSED_PREFIX, resolveStorage, viewerKey } from './viewerStorage'
+
 export const NAV_GROUPS = [
   { id: 'pinned', label: '' },
   { id: 'work', label: 'My work' },
@@ -68,12 +70,8 @@ export function defaultCollapsed(groups, own) {
 }
 
 // KTD13: per-viewer, so a shared browser never hands one account's rail to
-// the next. lib/viewerStorage.js clears and purges by this prefix.
-export const NAV_COLLAPSED_PREFIX = 'helixhr.nav.collapsed:'
-
-function storageKey(user) {
-  return user ? `${NAV_COLLAPSED_PREFIX}${user}` : ''
-}
+// the next. lib/viewerStorage.js owns the prefix and clears and purges by it.
+const storageKey = (user) => viewerKey(NAV_COLLAPSED_PREFIX, user)
 
 /** Collapsed group ids this user left on this device, or `fallback` when
  * nothing usable is remembered -- first visit, no user, or storage absent,
@@ -83,7 +81,7 @@ export function readCollapsed(user, fallback, storage) {
   const key = storageKey(user)
   if (!key) return fallback
   try {
-    const raw = (storage === undefined ? globalThis.localStorage : storage)?.getItem(key)
+    const raw = resolveStorage(storage)?.getItem(key)
     if (raw == null) return fallback
     const value = JSON.parse(raw)
     return Array.isArray(value) ? value.filter((id) => typeof id === 'string') : fallback
@@ -96,8 +94,7 @@ export function writeCollapsed(user, ids, storage) {
   const key = storageKey(user)
   if (!key) return
   try {
-    const target = storage === undefined ? globalThis.localStorage : storage
-    target?.setItem(key, JSON.stringify(ids))
+    resolveStorage(storage)?.setItem(key, JSON.stringify(ids))
   } catch {
     // Not remembered on this device; the toggle still works for this view.
   }

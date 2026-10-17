@@ -2,8 +2,7 @@
 // Plan 2026-10-17-001 U3 (R17). The one filter-chip row: toggle buttons with
 // `aria-pressed` inside a named group, the style Requests' work filter
 // already uses. One line that scrolls sideways on a phone rather than
-// wrapping into a second row; 44px tall at every pointer. Nine pages carry
-// their own copy today -- U15 moves them here.
+// wrapping into a second row; 44px tall at every pointer.
 defineProps({
   /** `{ value, label, count?, testid? }`. `value` may be null (an "All"
    * chip); `testid` lands on that chip's button. */

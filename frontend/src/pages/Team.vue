@@ -10,7 +10,9 @@ import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
 import SegmentedChips from '@/components/SegmentedChips.vue'
 import { addCalendarDays, dateTileParts, formatDateRange, mondayOf, today } from '@/lib/dates'
+import { trimNumber } from '@/lib/hours'
 import { offFirst } from '@/lib/lists'
+import { WEEKDAYS } from '@/lib/week'
 
 // P3-U7 / P3-R20, P3-R21. One week of the team's leave, and nothing else.
 //
@@ -19,7 +21,6 @@ import { offFirst } from '@/lib/lists'
 // (active direct reports only), which days are non-working, and where each
 // bar starts and stops inside the week; this file lays that out twice, once
 // per device, from the same payload. There is no leave arithmetic here.
-const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 // Plan 2026-10-04-003 R1: the Team page is two tabs -- Leaves | Timesheets
 // -- and both the tab and the week live in the URL, so a manager can send
@@ -133,9 +134,9 @@ function dayHours(row, date) {
 }
 
 function hoursLabel(row) {
-  const total = (row.total_hours || 0).toFixed(1).replace(/\.0$/, '')
+  const total = trimNumber(row.total_hours || 0)
   if (row.expected_hours == null) return `${total} h`
-  const expected = Number(row.expected_hours).toFixed(1).replace(/\.0$/, '')
+  const expected = trimNumber(row.expected_hours)
   return `${total} of ${expected} h`
 }
 
@@ -144,7 +145,7 @@ function hoursLabel(row) {
  * nobody opens (R2). */
 function projectLabel(row) {
   const parts = (row.projects || []).map(
-    (entry) => `${entry.project_name || entry.project} ${Number(entry.hours).toFixed(1).replace(/\.0$/, '')} h`,
+    (entry) => `${entry.project_name || entry.project} ${trimNumber(entry.hours)} h`,
   )
   return parts.join(' · ')
 }
@@ -186,7 +187,6 @@ const memberLines = computed(() => {
   }
   return lines
 })
-const memberHours = computed(() => memberWeek.data?.timesheet?.hours || {})
 const memberDates = computed(() =>
   Array.from({ length: 7 }, (_, offset) => addCalendarDays(weekStart.value, offset)),
 )
@@ -344,8 +344,8 @@ const quietWeek = computed(() => !noReports.value && !hasLeave.value)
   <div>
     <PageHeader title="Team" />
 
-    <!-- Plan 2026-10-04-003 R1. Two tabs, in the URL, arrow-key switchable --
-         the same segmented control the Requests page uses. -->
+    <!-- Plan 2026-10-04-003 R1. Two tabs, in the URL, arrow-key switchable
+         (TabBar). -->
     <TabBar
       v-if="!forbidden"
       class="mb-4"

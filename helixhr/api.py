@@ -2,7 +2,6 @@ import json
 import math
 import os
 import re
-from contextlib import contextmanager
 from urllib.parse import quote
 
 import frappe
@@ -95,7 +94,6 @@ from helixhr.utils import (
 	MANAGED_PORTAL_ROLES,
 	NOTIFICATION_EVENTS,
 	PERSON_EDITABLE_FIELDS,
-	PORTAL_ADMIN_ROLE,
 	PROFILE_CORRECTABLE_FIELDS,
 	PROFILE_CORRECTION_CATEGORY,
 	PROFILE_EDITABLE_FIELDS,
@@ -135,6 +133,8 @@ from helixhr.utils import (
 	rate_limit_per_user,
 	read_companies,
 	render_message,
+	request_memo,
+	request_memo_get,
 	resolve_admin_scope,
 	resolve_portal_admin_scope,
 	resolve_project_read_scope,
@@ -602,7 +602,17 @@ def get_portal_bootstrap():
 	session user and is still refused by Frappe permissions on its own
 	(see docs/architecture.md, "Security model"). A caller who lies to
 	themselves about this response gains nothing.
+
+	Read-only, so the whole read runs inside one `shared_admin_scope`: the
+	admin-scope gates below (read scope, roster, reports, people) and the
+	permission hooks they trigger resolve the caller's anchor once.
 	"""
+	with shared_admin_scope():
+		return _portal_bootstrap()
+
+
+def _portal_bootstrap():
+	"""`get_portal_bootstrap`'s body, run inside one `shared_admin_scope`."""
 	employee = get_current_employee_info() or None
 	time_zone = get_user_time_zone()
 	today = user_today(time_zone=time_zone)
@@ -1900,7 +1910,6 @@ def _leave_names_in_hr_stage(names):
 _QUEUE_READS_FLAG = "helixhr_queue_reads"
 
 
-@contextmanager
 def _shared_queue_reads():
 	"""Inside this block, each queue scope read (`_line_manager_filter`,
 	`_hr_queue_employee_filter`) runs once per employee instead of once per
@@ -1908,24 +1917,12 @@ def _shared_queue_reads():
 	change between two collectors of one queue read, and the memo lives only
 	as long as the block -- never across requests, so a reassignment is seen
 	by the very next read. Nested blocks share the outer memo."""
-	if frappe.local.flags.get(_QUEUE_READS_FLAG) is not None:
-		yield
-		return
-	frappe.local.flags[_QUEUE_READS_FLAG] = {}
-	try:
-		yield
-	finally:
-		frappe.local.flags[_QUEUE_READS_FLAG] = None
+	return request_memo(_QUEUE_READS_FLAG)
 
 
 def _shared_queue_read(key, read):
 	"""`read()`, answered once per `key` inside `_shared_queue_reads`."""
-	reads = frappe.local.flags.get(_QUEUE_READS_FLAG)
-	if reads is None:
-		return read()
-	if key not in reads:
-		reads[key] = read()
-	return reads[key]
+	return request_memo_get(_QUEUE_READS_FLAG, key, read)
 
 
 def _line_manager_filter(employee):
@@ -2113,7 +2110,9 @@ def _timesheet_summaries(employee, today, count_only=False):
 			"docstatus": 0,
 			"employee": scope,
 		},
-		fields=[
+		fields=["name"]
+		if count_only
+		else [
 			"name",
 			"employee",
 			"employee_name",
@@ -2221,7 +2220,9 @@ def _attendance_request_summaries(employee, today, count_only=False):
 			"docstatus": 0,
 			"employee": scope,
 		},
-		fields=[
+		fields=["name"]
+		if count_only
+		else [
 			"name",
 			"employee",
 			"employee_name",
@@ -2470,7 +2471,9 @@ def _hr_leave_summaries(employee, today, count_only=False):
 			"helixhr_stage": LEAVE_STAGE_HR,
 			"employee": employee_filter,
 		},
-		fields=[
+		fields=["name"]
+		if count_only
+		else [
 			"name",
 			"employee",
 			"employee_name",
@@ -2591,7 +2594,9 @@ def _hr_stalled_leave_summaries(employee, today, employee_filter, count_only=Fal
 			"employee": employee_filter,
 			"leave_approver": ["not in", ["", frappe.session.user]],
 		},
-		fields=[
+		fields=["name", "leave_approver", PENDING_SINCE_FIELD]
+		if count_only
+		else [
 			"name",
 			"employee",
 			"employee_name",
@@ -2617,6 +2622,11 @@ def _hr_stalled_leave_summaries(employee, today, employee_filter, count_only=Fal
 			reason = "overdue"
 		else:
 			continue
+		if count_only:
+			# The away/overdue test above is the subtraction, so `count_only`
+			# keeps it, and appends only what `_count_rows` would keep.
+			stalled.append({"kind": "leave", "name": row.name})
+			continue
 		stalled.append(
 			_summary_row(
 				"leave",
@@ -2635,9 +2645,7 @@ def _hr_stalled_leave_summaries(employee, today, employee_filter, count_only=Fal
 				hr_reason=reason,
 			)
 		)
-	# The away/overdue test above is the subtraction, so `count_only` keeps
-	# it; the rows it builds cost no read.
-	return _count_rows("leave", stalled) if count_only else stalled
+	return stalled
 
 
 def _hr_timesheet_summaries(employee, today, count_only=False):
@@ -2653,7 +2661,9 @@ def _hr_timesheet_summaries(employee, today, count_only=False):
 			"docstatus": 0,
 			"employee": employee_filter,
 		},
-		fields=[
+		fields=["name"]
+		if count_only
+		else [
 			"name",
 			"employee",
 			"employee_name",
@@ -2705,7 +2715,9 @@ def _hr_attendance_request_summaries(employee, today, count_only=False):
 			"docstatus": 0,
 			"employee": employee_filter,
 		},
-		fields=[
+		fields=["name"]
+		if count_only
+		else [
 			"name",
 			"employee",
 			"employee_name",
@@ -3160,9 +3172,9 @@ def get_request_work(state=None, limit=None, start=0, q=None, sort=None, categor
 			employee, _REQUEST_WORK_STATES[state], picked_up_by, routed_roles, category
 		),
 		or_filters=or_filters,
-		fields=["name", "category", "creation", "status"] if sort == "sla" else ["name"],
 		order_by="creation asc",
 		limit_page_length=0,
+		**({"fields": ["name", "category", "creation", "status"]} if sort == "sla" else {"pluck": "name"}),
 	)
 	total = len(matching)
 	if sort == "sla":
@@ -3179,7 +3191,7 @@ def get_request_work(state=None, limit=None, start=0, q=None, sort=None, categor
 		rows = _hr_request_summaries(employee, today, limit=page, start=start, **filters)
 	# Plan 2026-10-16-001 R8: Team inbox count is requests needing team action
 	# (New and In progress), matching Home count.
-	action_count = len(
+	action_count = _aggregate_count(
 		frappe.get_list(
 			"HR Request",
 			filters=_request_summaries_filters(
@@ -3188,9 +3200,9 @@ def get_request_work(state=None, limit=None, start=0, q=None, sort=None, categor
 				None,
 				routed_roles,
 			),
-			pluck="name",
+			fields=[{"COUNT": "*"}],
 			limit_page_length=0,
-		)
+		)[0]
 	)
 	return {
 		"work": rows,
@@ -3201,7 +3213,7 @@ def get_request_work(state=None, limit=None, start=0, q=None, sort=None, categor
 		"team": _handled_by_team(routed_roles[0]) if len(routed_roles) == 1 else None,
 		"categories": [row.name for row in categories if row.route_to_role in routed_roles],
 		"limit": page,
-		"today": user_today(),
+		"today": str(today),
 	}
 
 
@@ -5206,11 +5218,14 @@ FULL_WEEK_HOURS = 40
 
 
 @frappe.whitelist()
-def get_my_week(week_start=None):
+def get_my_week(week_start=None, include_non_working=0):
 	"""The one Timesheet for the Monday..Sunday week containing
 	`week_start` (any date in that week; defaults to today), or None if
 	the employee hasn't started one yet (KTD10: one week is one
-	Timesheet -- the newest non-cancelled one for that Monday)."""
+	Timesheet -- the newest non-cancelled one for that Monday).
+
+	`include_non_working` adds `non_working` (U9 / KTD9), which only "Copy
+	last week" reads; every other load skips its reads."""
 	employee = get_current_employee()
 	monday, sunday = get_week_bounds(week_start or user_today())
 
@@ -5285,7 +5300,7 @@ def get_my_week(week_start=None):
 		problem = week_change_problem(current.name)
 		changeable = {"ok": problem is None, "reason": problem}
 
-	return {
+	result = {
 		"week_start": str(monday),
 		"week_end": str(sunday),
 		# Who this week goes to when it is sent. The desktop grid names them
@@ -5293,11 +5308,6 @@ def get_my_week(week_start=None):
 		# they fill a week in rather than by a refusal afterwards.
 		"approver_name": _approver_name(employee),
 		"full_week_hours": FULL_WEEK_HOURS,
-		# U9 / KTD9: `{date: bool}` for all seven days -- True on a holiday,
-		# approved leave, or a day outside joining..relieving. Additive, so
-		# a client that predates it ignores it; "Copy last week" reads it to
-		# keep hours off days the employee is not expected to work.
-		"non_working": _week_non_working(employee, monday, sunday),
 		"timesheet": timesheet,
 		"change": {
 			"name": change.name,
@@ -5316,6 +5326,13 @@ def get_my_week(week_start=None):
 		else None,
 		"changeable": changeable,
 	}
+	if cint(include_non_working):
+		# U9 / KTD9: `{date: bool}` for all seven days -- True on a holiday,
+		# approved leave, or a day outside joining..relieving. "Copy last
+		# week" reads it to keep hours off days the employee is not expected
+		# to work.
+		result["non_working"] = _week_non_working(employee, monday, sunday)
+	return result
 
 
 def _week_non_working(employee, monday, sunday):
@@ -6015,7 +6032,9 @@ def _change_request_summaries(employee, today, count_only=False):
 	rows = frappe.get_all(
 		"HelixHR Timesheet Change",
 		filters={"status": "Open", "approver_user": frappe.session.user},
-		fields=["name", "employee", "employee_name", "timesheet", "week_start", "comment", "creation"],
+		fields=["name"]
+		if count_only
+		else ["name", "employee", "employee_name", "timesheet", "week_start", "comment", "creation"],
 		order_by="creation asc",
 		limit=_QUEUE_FETCH,
 	)
@@ -6067,7 +6086,18 @@ def _hr_change_request_summaries(employee, today, count_only=False):
 			"employee": employee_filter,
 			"approver_user": ["!=", frappe.session.user],
 		},
-		fields=["name", "employee", "employee_name", "timesheet", "week_start", "comment", "approver_user", "creation"],
+		fields=["name"]
+		if count_only
+		else [
+			"name",
+			"employee",
+			"employee_name",
+			"timesheet",
+			"week_start",
+			"comment",
+			"approver_user",
+			"creation",
+		],
 		order_by="creation asc",
 		limit=_QUEUE_FETCH,
 	)
@@ -9052,16 +9082,11 @@ def mark_my_request_read(name):
 	"""
 	rate_limit_per_user("mark_notifications_read")
 	employee = get_current_employee()
-	if frappe.db.get_value("HR Request", name, "employee") != employee:
+	# A string, so the name goes into the shared write's filter as a value,
+	# never as an operator list.
+	if not isinstance(name, str) or frappe.db.get_value("HR Request", name, "employee") != employee:
 		frappe.throw(_("That request isn't yours."), frappe.PermissionError)
-
-	cleared = _unread_request_notifications([name]).get(name, [])
-	for log in cleared:
-		# Scoped to `for_user` by the query above, so this can only ever mark
-		# the caller's own row.
-		frappe.db.set_value("Notification Log", log, "read", 1, update_modified=False)
-
-	return {"cleared": len(cleared), "unread": _get_unread_notification_count()}
+	return _mark_record_read("HR Request", name)
 
 
 @frappe.whitelist(methods=["POST"])
@@ -9084,11 +9109,18 @@ def mark_record_notifications_read(reference_doctype, reference_name):
 	reference_name = reference_name.strip() if isinstance(reference_name, str) else ""
 	if not (0 < len(reference_doctype) <= 140 and 0 < len(reference_name) <= 140):
 		frappe.throw(_("That record couldn't be found."), frappe.ValidationError)
+	return _mark_record_read(reference_doctype, reference_name)
 
+
+def _mark_record_read(doctype, name):
+	"""Mark read every unread Notification Log the caller holds about one
+	record, and answer `{cleared, unread}` (the caller's new total). Scoped
+	to `for_user` in the filter of the one write, so it can only ever mark
+	the caller's own rows. The callers gate and rate-limit."""
 	filters = {
 		"for_user": frappe.session.user,
-		"document_type": reference_doctype,
-		"document_name": reference_name,
+		"document_type": doctype,
+		"document_name": name,
 		"read": 0,
 	}
 	cleared = frappe.db.count("Notification Log", filters)

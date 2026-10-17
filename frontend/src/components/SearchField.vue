@@ -4,7 +4,7 @@
 // person"), so this one does too -- a placeholder is a hint, never the
 // name. 44px at every pointer, like the native inputs Reports and People &
 // access use. Attributes (`maxlength`, `data-testid`, `autocomplete`) land
-// on the input; lay it out with a wrapper. U15 migrates the existing fields.
+// on the input; lay it out with a wrapper.
 import { useId } from 'vue'
 
 defineOptions({ inheritAttrs: false })

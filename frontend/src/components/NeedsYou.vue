@@ -1,12 +1,11 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
-import { keepaliveRequest } from '@/lib/api'
 import { formatDate } from '@/lib/dates'
-import { NEEDS_YOU_ICON } from '@/lib/icons'
+import { NEEDS_YOU_ICON } from '@/lib/needsYouIcons'
 import { queueDestination, sideListDestination } from '@/lib/needsYou'
 import { session } from '@/lib/session'
-import { currentUnread, setUnread, unreadCount } from '@/lib/unread'
+import { markReadKeepalive } from '@/lib/unread'
 
 const props = defineProps({
   // One row per record (plan 2026-10-17-001 KTD10): the server collapses
@@ -94,16 +93,11 @@ watch(
  * just the newest. `keepalive`, because the tap is also the navigation. */
 async function opened(item) {
   if (!item.notification || !item.reference_doctype || !item.reference_name) return
-  setUnread(currentUnread() - (item.count || 1))
-  try {
-    const result = await keepaliveRequest('helixhr.api.mark_record_notifications_read', {
-      reference_doctype: item.reference_doctype,
-      reference_name: item.reference_name,
-    })
-    setUnread(result.unread)
-  } catch {
-    unreadCount.reload()
-  }
+  await markReadKeepalive(
+    'helixhr.api.mark_record_notifications_read',
+    { reference_doctype: item.reference_doctype, reference_name: item.reference_name },
+    item.count || 1,
+  )
 }
 </script>
 
@@ -174,9 +168,10 @@ async function opened(item) {
            row's DOM state when it does (P2-U4 step 1).
 
            EP-03: the whole row is the one link, with the verb as a chip on
-           the title line. The title can wrap, so the link stays a plain
-           block with no `-my-2` (the stretched-link rule in
-           docs/design-system.md): the `after:` layer is the tap target. -->
+           the title line. The title can wrap, so the link carries
+           `-my-2 py-2 min-h-11` (the stretched-link rule in
+           docs/design-system.md): the `after:` layer is the tap target even
+           when the title wraps. -->
       <li
         v-for="item in items"
         :key="item.id"

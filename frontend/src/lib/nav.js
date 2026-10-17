@@ -19,6 +19,9 @@
 // places the item in a sidebar section (lib/navGroups.js). `badge` names the
 // attention count the item carries ('unread' or 'approvals').
 //
+/** A request handler's inbox: Requests on its work tab. */
+export const HANDLER_INBOX = { path: '/requests', query: { tab: 'work' } }
+
 // Each destination has its own glyph (MH-21, AI-23, EP-25): nav.test.js
 // fails on a shared one.
 export const NAV = [
@@ -29,7 +32,7 @@ export const NAV = [
   { label: 'My projects', to: '/my-projects', icon: 'briefcase', group: 'work' },
   { label: 'Attendance', to: '/attendance', icon: 'attendance', group: 'work' },
   // AI-02: a request handler's Requests entry opens the Team inbox.
-  { label: 'Requests', to: '/requests', icon: 'requests', primary: true, handlerQuery: { tab: 'work' }, group: 'work' },
+  { label: 'Requests', to: '/requests', icon: 'requests', primary: true, handlerQuery: HANDLER_INBOX.query, group: 'work' },
   { label: 'Payslips', to: '/payslips', icon: 'wallet', group: 'pay' },
   { label: 'Holidays', to: '/holidays', icon: 'sun', group: 'pay' },
   { label: 'Documents', to: '/documents', icon: 'documents', group: 'pay' },

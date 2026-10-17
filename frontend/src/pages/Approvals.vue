@@ -31,6 +31,8 @@ import {
 import { session } from '@/lib/session'
 import { decrementApprovals, setApprovalsCount } from '@/lib/approvalsCount'
 import { formatDateRange } from '@/lib/dates'
+import { focusNear } from '@/lib/focus'
+import { trimNumber } from '@/lib/hours'
 import { toPlainLeaveError } from '@/lib/errorMap'
 import { notify } from '@/lib/notify'
 import { useIsDesktop } from '@/lib/useIsDesktop'
@@ -481,7 +483,7 @@ const KIND = {
   // amount, and the two decisions are Accept and Decline.
   change: {
     summary: (row) => `Change request · ${formatDateRange(row.from_date, row.to_date)}`,
-    amount: (row) => (row.total_hours != null ? `${Number(row.total_hours).toFixed(1).replace(/\.0$/, '')} h` : ''),
+    amount: (row) => (row.total_hours != null ? `${trimNumber(row.total_hours)} h` : ''),
     approve: () => 'Accept',
     quote: (item) => item.comment,
   },
@@ -854,12 +856,13 @@ function restoreFocus(plan) {
       const rows = rowToggles(lane).filter(
         (toggle) => !plan.names.includes(toggle.closest('[data-approval-name]')?.dataset.approvalName),
       )
-      const target =
-        rows[Math.min(Math.max(plan.index, 0), rows.length - 1)] ||
-        lane?.querySelector('[data-lane-heading]') ||
-        list?.querySelector('[data-lane-heading]') ||
-        document.querySelector('main[tabindex]')
-      target?.focus()
+      focusNear(
+        rows,
+        plan.index,
+        lane?.querySelector('[data-lane-heading]'),
+        list?.querySelector('[data-lane-heading]'),
+        document.querySelector('main[tabindex]'),
+      )
     }),
   )
 }
@@ -892,7 +895,7 @@ function onQueueKey(event) {
     const toggles = rowToggles(queueList.value)
     const index = item ? toggles.indexOf(item.querySelector('[data-row-toggle]')) : -1
     const next = index === -1 ? 0 : index + (event.key === 'j' ? 1 : -1)
-    toggles[Math.min(Math.max(next, 0), toggles.length - 1)]?.focus()
+    focusNear(toggles, next)
   } else if (event.key === 'x') {
     if (!row) return
     toggleBulk(row)
@@ -1426,15 +1429,15 @@ function onQueueKey(event) {
                                 v-if="row.kind === 'timesheet' && row.expected_hours != null"
                                 class="tabular block text-xs text-ink-gray-5"
                               >
-                                {{ Number(row.total_hours).toFixed(1).replace(/\.0$/, '') }} of
-                                {{ Number(row.expected_hours).toFixed(1).replace(/\.0$/, '') }} h expected
+                                {{ trimNumber(row.total_hours) }} of
+                                {{ trimNumber(row.expected_hours) }} h expected
                               </span>
                               <span
                                 v-if="row.kind === 'leave' && row.balance_after != null"
                                 class="block text-xs text-ink-gray-5"
                               >
                                 Balance after:
-                                <span class="tabular">{{ Number(row.balance_after).toFixed(1).replace(/\.0$/, '') }}</span>
+                                <span class="tabular">{{ trimNumber(row.balance_after) }}</span>
                                 <template v-if="row.overlap_count">
                                   · {{ row.overlap_count }}
                                   {{ row.overlap_count === 1 ? 'other person is' : 'other people are' }} off then

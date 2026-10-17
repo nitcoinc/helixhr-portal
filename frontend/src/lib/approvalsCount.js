@@ -25,10 +25,6 @@ export function decrementApprovals(by = 1) {
   setApprovalsCount(state.count - (Number(by) || 0), state.capped)
 }
 
-export function currentApprovals() {
-  return state.count
-}
-
 /** The badge text: "12", or "150+" when the count is a floor; '' at zero. */
 export function approvalsLabel() {
   if (state.count <= 0) return ''

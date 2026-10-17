@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { roundHours } from './hours'
+import { roundHours, trimNumber } from './hours'
 
 describe('roundHours', () => {
   it('leaves a whole number whole', () => {
@@ -32,5 +32,19 @@ describe('roundHours', () => {
 
   it('reads a numeric string, which is what a number input hands back', () => {
     expect(roundHours('7.1')).toBe(7.1)
+  })
+})
+
+describe('trimNumber', () => {
+  it('drops a trailing .0 and keeps one decimal otherwise', () => {
+    expect(trimNumber(8)).toBe('8')
+    expect(trimNumber(7.5)).toBe('7.5')
+    expect(trimNumber('40.0')).toBe('40')
+    expect(trimNumber(0)).toBe('0')
+  })
+
+  it('rounds to one decimal place', () => {
+    expect(trimNumber(7.25)).toBe('7.3')
+    expect(trimNumber(7.04)).toBe('7')
   })
 })

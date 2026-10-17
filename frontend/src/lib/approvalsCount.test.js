@@ -1,7 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import {
   approvalsLabel,
-  currentApprovals,
   decrementApprovals,
   setApprovalsCount,
 } from './approvalsCount'
@@ -13,7 +12,7 @@ describe('approvals count (KTD8)', () => {
     setApprovalsCount(7, false)
     expect(approvalsLabel()).toBe('7')
     setApprovalsCount(4, false)
-    expect(currentApprovals()).toBe(4)
+    expect(approvalsLabel()).toBe('4')
   })
 
   it('says "N+" only when the count is a floor', () => {
@@ -28,13 +27,12 @@ describe('approvals count (KTD8)', () => {
     decrementApprovals()
     expect(approvalsLabel()).toBe('1')
     decrementApprovals(3)
-    expect(currentApprovals()).toBe(0)
     expect(approvalsLabel()).toBe('')
   })
 
   it('reads a missing or garbled answer as zero', () => {
     setApprovalsCount(undefined, undefined)
-    expect(currentApprovals()).toBe(0)
+    expect(approvalsLabel()).toBe('')
     setApprovalsCount('nope')
     expect(approvalsLabel()).toBe('')
   })

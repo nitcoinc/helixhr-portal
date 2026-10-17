@@ -157,9 +157,7 @@ function groupAttention(group) {
 //
 // Row budget at an 800px-tall window, in CSS px, worked from the classes
 // below (frappe-ui's text-sm/xs at line-height 1.15; a 20px icon sets a row
-// height). Cross-check: the same arithmetic puts main's hr rail, HR and Admin
-// both collapsed, at 574 of 574 -- and the 800px spec passed it with nothing
-// to spare. Chrome: brand row 64 + identity 52 + nav top margin 12 + footer
+// height). Chrome: brand row 64 + identity 52 + nav top margin 12 + footer
 // (Ask HR / Sign out row 48, credit 30) 78 = 206, so the nav gets 594. A nav
 // row is 28 + 2 gap; a labelled group adds 8 margin + 22 heading + 2; a
 // collapsed group is 30 in all; Profile's group is 36.

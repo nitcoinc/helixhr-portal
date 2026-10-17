@@ -3,9 +3,10 @@
 // inline in `Approvals.vue`. The server tags each queue row with `lane`
 // ("team", "hr" or "it", KTD1); these functions only group.
 
-import { APPROVALS_SHORTCUTS_PREFIX } from './viewerStorage'
+import { trimNumber } from './hours'
+import { APPROVALS_SHORTCUTS_PREFIX, resolveStorage, viewerKey } from './viewerStorage'
 
-export const LANE_TITLES = {
+const LANE_TITLES = {
   team: 'My team',
   decided: 'Decided by me',
   hr: 'HR',
@@ -133,7 +134,6 @@ export function batchItem(row) {
   }
 }
 
-const trimNumber = (value) => Number(value).toFixed(1).replace(/\.0$/, '')
 
 /** "Approve 8 items · 312 h · 3 days leave" -- the one sentence the bar and
  * the confirm share, so they can never disagree (R17). Hours are the
@@ -163,23 +163,16 @@ export function selectionState(rows, selectedNames) {
 
 // --- keyboard triage opt-in (KTD13) ---------------------------------------
 
-/** Per-viewer: the key ends in `session.user`. `viewerStorage.js` clears it
- * on sign-out and drops another account's on bootstrap by this prefix. */
-// One key, owned by viewerStorage so sign-out clears it (KTD13).
-export const SHORTCUTS_PREFIX = APPROVALS_SHORTCUTS_PREFIX
-
-// Resolved inside each try: with site data blocked, merely reading
-// `window.localStorage` throws.
-function resolveStorage(storage) {
-  return storage === undefined ? globalThis.localStorage : storage
-}
+// Per-viewer: the key ends in `session.user`. `viewerStorage.js` owns the
+// prefix, clears it on sign-out and drops another account's on bootstrap.
 
 /** Whether this user turned keyboard triage on, on this device. Off when
  * there is no user or the storage cannot be read. */
 export function readShortcuts(user, storage) {
-  if (!user) return false
+  const key = viewerKey(APPROVALS_SHORTCUTS_PREFIX, user)
+  if (!key) return false
   try {
-    return resolveStorage(storage)?.getItem(`${SHORTCUTS_PREFIX}${user}`) === '1'
+    return resolveStorage(storage)?.getItem(key) === '1'
   } catch {
     return false
   }
@@ -188,11 +181,12 @@ export function readShortcuts(user, storage) {
 /** Store the flag; `false` when it could not be stored (the toggle then
  * still works for this visit). */
 export function writeShortcuts(user, on, storage) {
-  if (!user) return false
+  const key = viewerKey(APPROVALS_SHORTCUTS_PREFIX, user)
+  if (!key) return false
   try {
     const target = resolveStorage(storage)
-    if (on) target.setItem(`${SHORTCUTS_PREFIX}${user}`, '1')
-    else target.removeItem(`${SHORTCUTS_PREFIX}${user}`)
+    if (on) target.setItem(key, '1')
+    else target.removeItem(key)
     return true
   } catch {
     return false

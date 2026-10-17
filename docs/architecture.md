@@ -436,7 +436,7 @@ company", fall back to the site's default company for that persona only
 | Team | `get_my_team_week` | none | Employee (`reports_to`), Leave Application, Holiday List |
 | Directory | `get_directory` | none | Employee |
 | Roster | `get_roster_week` (`mode` = `mine` / `team` / `hr`) | HR only: `assign_shift`, `end_shift_assignment`, `change_shift_assignment`, `cancel_shift_assignment` | Employee (`reports_to`, `default_shift`), Shift Assignment, Shift Type, Leave Application, Holiday List |
-| Timesheet | `get_my_week` (with `non_working`), `get_my_timesheet_history`, `get_timesheet_week_start`, `get_my_projects` | `save_my_week`, `submit_my_week` | Timesheet + Timesheet Detail, Workflow "Timesheet Approval" |
+| Timesheet | `get_my_week` (`non_working` with `include_non_working=1`), `get_my_timesheet_history`, `get_timesheet_week_start`, `get_my_projects` | `save_my_week`, `submit_my_week` | Timesheet + Timesheet Detail, Workflow "Timesheet Approval" |
 | Requests | `get_my_requests` (`q`, `unread_reply`), `get_my_request`; handlers: `get_request_work` (`q`, `sort`, `category`) | `create_my_request`, `attach_to_my_request`, `mark_my_request_read`; handlers: `act_on_approval` (Assign to me from the list) | HR Request, File, Notification Log |
 | Documents | `get_my_documents` (`frappe.client.get_list` is scoped by the same hooks), `get_document_admin_options` (HR) | HR only: `save_document_link`, `delete_document_link` | HelixHR Document Link, File |
 | Notifications | `get_my_notifications` (`unread_only`; uncached), `get_timesheet_week_start` and `get_request_view` to route a row | `notification_log.mark_all_as_read`, `notification_log.mark_as_read` (a one-log row), `mark_record_notifications_read` (a grouped row) | Notification Log, fed by the Notification fixtures and `events.hr_request_on_update` |
@@ -1502,7 +1502,7 @@ KTD4 — not because of a line count.
   prefixes -- `helixhr.nav.collapsed:`, `helixhr.palette.recent:`,
   `helixhr.reports.recent:`, `helixhr.approvals.shortcuts:` -- cleared on
   sign-out and purged of other users' keys on bootstrap, KTD13), and
-  `lib/nav.js`. `components/ui/` holds the copied shadcn-vue Command and Kbd,
+  `lib/nav.js`. `components/ui/` holds the copied shadcn-vue Command,
   reachable only through async components; the rules are in
   `design-system.md`.
 - `index.css` is the design token layer. frappe-ui hard-codes `blue` as its
@@ -2101,4 +2101,5 @@ approved leave, or a day outside joining..relieving. It is built from
 leave counts as non-working for that reason; the employee adds the half day
 by hand. "Copy last week" (`lib/copyWeek.js`) skips those days and any row
 whose project or task is no longer in `get_my_projects`, and says what it
-skipped.
+skipped. The marker is opt-in (`include_non_working=1`): only the copy asks,
+for both weeks, so an ordinary week load skips its reads.

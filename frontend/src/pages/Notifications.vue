@@ -6,11 +6,11 @@ import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
 import SegmentedChips from '@/components/SegmentedChips.vue'
-import { keepaliveRequest } from '@/lib/api'
 import { formatDateTime, today } from '@/lib/dates'
+import { focusNear } from '@/lib/focus'
 import { bucketGroups } from '@/lib/notificationGroups'
 import { notify } from '@/lib/notify'
-import { currentUnread, setUnread, unreadCount } from '@/lib/unread'
+import { currentUnread, markReadKeepalive, setUnread } from '@/lib/unread'
 
 const route = useRoute()
 const router = useRouter()
@@ -28,6 +28,9 @@ const viewOptions = computed(() => [
   { value: true, label: 'Unread', count: currentUnread() },
 ])
 
+// Above `logs`: `auto: true` may call makeParams before the lines below run.
+const limit = computed(() => (unreadView.value ? UNREAD_LIMIT : LIMIT))
+
 function showView(unread) {
   router.replace({ query: { ...route.query, unread: unread ? '1' : undefined } })
 }
@@ -42,7 +45,7 @@ const logs = createResource({
   url: 'helixhr.api.get_my_notifications',
   makeParams: () => ({
     unread_only: unreadView.value ? 1 : 0,
-    limit: unreadView.value ? UNREAD_LIMIT : LIMIT,
+    limit: limit.value,
   }),
   auto: true,
   // The same response carries the caller's unread total, so the badge
@@ -62,7 +65,6 @@ const rows = computed(() => {
   // read" empties it); the All view keeps it, now in the read style.
   return unreadView.value ? all.filter((row) => !row.read) : all
 })
-const limit = computed(() => (unreadView.value ? UNREAD_LIMIT : LIMIT))
 const atLimit = computed(() => (logs.data?.logs || []).length >= limit.value)
 
 // Today / Yesterday / This week / Older, one row per record (ED-04, EP-07).
@@ -173,21 +175,20 @@ async function openGroup(group) {
     members.forEach((row) => {
       row.read = 1
     })
-    setUnread(currentUnread() - unread)
-    const write =
-      latest.document_type && latest.document_name
-        ? keepaliveRequest('helixhr.api.mark_record_notifications_read', {
-            reference_doctype: latest.document_type,
-            reference_name: latest.document_name,
-          })
-        : keepaliveRequest('frappe.desk.doctype.notification_log.notification_log.mark_as_read', {
-            docname: latest.name,
-          })
-    write
-      .then((result) => {
-        if (typeof result?.unread === 'number') setUnread(result.unread)
-      })
-      .catch(() => unreadCount.reload())
+    // Not awaited: the route change below goes now.
+    if (latest.document_type && latest.document_name) {
+      markReadKeepalive(
+        'helixhr.api.mark_record_notifications_read',
+        { reference_doctype: latest.document_type, reference_name: latest.document_name },
+        unread,
+      )
+    } else {
+      markReadKeepalive(
+        'frappe.desk.doctype.notification_log.notification_log.mark_as_read',
+        { docname: latest.name },
+        unread,
+      )
+    }
   }
   const to = await routeFor(latest)
   if (to) router.push(to)
@@ -199,11 +200,11 @@ async function openGroup(group) {
 
 async function focusRowAt(index) {
   await nextTick()
-  const left = document.querySelectorAll('[data-testid="notification-row"]')
-  const target =
-    left[Math.min(index, left.length - 1)] ||
-    document.querySelector('[aria-label="Show notifications"] button')
-  target?.focus()
+  focusNear(
+    document.querySelectorAll('[data-testid="notification-row"]'),
+    index,
+    document.querySelector('[aria-label="Show notifications"] button'),
+  )
 }
 
 async function markAll() {

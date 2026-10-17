@@ -9,13 +9,15 @@ import StatusBadge from '@/components/StatusBadge.vue'
 import KindTag from '@/components/KindTag.vue'
 import CorrectionReview from '@/components/approvals/CorrectionReview.vue'
 import RequestThread from '@/components/requests/RequestThread.vue'
+import AttachmentLink from '@/components/requests/AttachmentLink.vue'
 import Icon from '@/components/Icon.vue'
 import { attachToRequestReply } from '@/lib/api'
 import { formatDate } from '@/lib/dates'
+import { focusNear } from '@/lib/focus'
 import { useIsDesktop } from '@/lib/useIsDesktop'
 import { CORRECTABLE_FIELDS, spokenValue } from '@/lib/profileCorrection'
 import { notify } from '@/lib/notify'
-import { fileSize, slaOverLabel } from '@/lib/requests'
+import { slaOverLabel } from '@/lib/requests'
 import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
 import { getReasonCopy } from '@/lib/workKinds'
 
@@ -92,8 +94,13 @@ const work = createResource({
     category: category.value || undefined,
   }),
 })
+// The server ignores a query under 2 characters (_REQUEST_SEARCH_MIN),
+// so a shorter one asks the same question as none, and an unchanged one is
+// not asked again.
 const debounced = useDebouncedSearch((value) => {
-  search.value = value.trim()
+  const next = value.trim().length >= 2 ? value.trim() : ''
+  if (next === search.value) return
+  search.value = next
   workLimit.value = 20
   work.fetch()
 })
@@ -185,7 +192,7 @@ const reasonFor = ref('') // 'Reject' while its box is open
 const reasonMessage = ref('')
 const reasonError = ref('')
 // The server's action is Reject; the word on screen is Decline (R14).
-const currentReasonCopy = computed(() => getReasonCopy('Decline'))
+const declineCopy = getReasonCopy('Decline')
 
 const attachingReply = ref(false)
 const attachReplyError = ref('')
@@ -219,7 +226,7 @@ async function decide(action) {
   const wantsReason = action === 'Reject'
   const message = wantsReason ? reasonMessage.value.trim() : ''
   if (wantsReason && !message) {
-    reasonError.value = currentReasonCopy.value.missing
+    reasonError.value = declineCopy.missing
     return
   }
   workActing.value = item.name
@@ -293,11 +300,11 @@ async function focusAfter(groupKey, index) {
   const root = workList.value
   if (!root) return
   const rows = [...root.querySelectorAll(`[data-group="${groupKey}"] [data-testid="work-row"]`)]
-  const next = rows[Math.min(index, rows.length - 1)]
-  const target = next
-    ? next.querySelector('[data-testid="row-pick-up"]') || next.querySelector('a')
-    : root.querySelector('[data-group] h3')
-  target?.focus()
+  focusNear(
+    rows.map((row) => row.querySelector('[data-testid="row-pick-up"]') || row.querySelector('a')),
+    index,
+    root.querySelector('[data-group] h3'),
+  )
 }
 
 watch(
@@ -626,23 +633,7 @@ const workTimeline = computed(() => {
               v-for="attachment in workSelected.attachments"
               :key="attachment.name"
             >
-              <a
-                class="inline-flex min-h-11 items-center gap-2 rounded-full border border-outline-gray-2 px-3 text-sm text-ink-gray-8 hover:bg-surface-gray-2"
-                :href="attachment.file_url"
-                target="_blank"
-                rel="noopener noreferrer"
-              >
-                <Icon
-                  name="requests"
-                  size="h-4 w-4"
-                  class="text-ink-gray-5"
-                />
-                {{ attachment.file_name }}
-                <span
-                  v-if="fileSize(attachment.file_size)"
-                  class="tabular text-ink-gray-5"
-                >{{ fileSize(attachment.file_size) }}</span>
-              </a>
+              <AttachmentLink :attachment="attachment" />
             </li>
           </ul>
 
@@ -703,8 +694,8 @@ const workTimeline = computed(() => {
             <FormControl
               v-model="reasonMessage"
               type="textarea"
-              :label="currentReasonCopy.heading"
-              :placeholder="currentReasonCopy.placeholder"
+              :label="declineCopy.heading"
+              :placeholder="declineCopy.placeholder"
             />
             <p
               v-if="reasonError"

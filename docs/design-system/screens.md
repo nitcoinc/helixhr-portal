@@ -66,7 +66,7 @@ new surfaces. All are specified in `../design-system.md`:
 | Command palette | one search everywhere, `components/ui/command` in frappe-ui `Dialog` | new surface; the one overlay pinned to the top on a phone |
 
 What the conversation decided, so it is not re-litigated: frappe-ui stays the primitive layer;
-shadcn-vue is copied in only for Command and Kbd, on Tailwind 3 and Signal tokens (the
+shadcn-vue is copied in only for Command, on Tailwind 3 and Signal tokens (the
 supersession of the hardening plan's KTD1/KTD9/R9 is recorded in `../design-system.md`); no
 palette, type or surface change; no full shadcn-vue migration, no Tailwind v4. A screen that wants
 an eighth thing still starts with a conversation.

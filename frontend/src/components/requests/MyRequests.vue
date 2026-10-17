@@ -8,13 +8,14 @@ import SearchField from '@/components/SearchField.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import RequestThread from '@/components/requests/RequestThread.vue'
+import AttachmentLink from '@/components/requests/AttachmentLink.vue'
 import Icon from '@/components/Icon.vue'
-import { attachToRequest, keepaliveRequest } from '@/lib/api'
+import { attachToRequest } from '@/lib/api'
 import { formatDate, formatDateTime } from '@/lib/dates'
-import { currentUnread, setUnread, unreadCount } from '@/lib/unread'
+import { markReadKeepalive } from '@/lib/unread'
 import { useIsDesktop } from '@/lib/useIsDesktop'
 import { CORRECTABLE_FIELDS, spokenValue } from '@/lib/profileCorrection'
-import { fileSize, myRequestGroups } from '@/lib/requests'
+import { myRequestGroups } from '@/lib/requests'
 import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
 
 // Plan 2026-10-17-001 U8 (R21, KTD14). The employee's workspace -- their own
@@ -49,8 +50,13 @@ const requests = createResource({
   }),
   auto: true,
 })
+// The server ignores a query under 2 characters (_REQUEST_SEARCH_MIN),
+// so a shorter one asks the same question as none, and an unchanged one is
+// not asked again.
 const debounced = useDebouncedSearch((value) => {
-  search.value = value.trim()
+  const next = value.trim().length >= 2 ? value.trim() : ''
+  if (next === search.value) return
+  search.value = next
   pageLimit.value = 20
   requests.reload()
 })
@@ -154,18 +160,12 @@ async function clearReadObligation(data) {
   const pending = data?.unread_notifications || []
   if (!pending.length) return
   justMarkedRead.value = true
-  setUnread(currentUnread() - pending.length)
   const row = rows.value.find((entry) => entry.name === data.name)
   if (row) {
     row.unread = false
     row.unread_reply = false
   }
-  try {
-    const result = await keepaliveRequest('helixhr.api.mark_my_request_read', { name: data.name })
-    setUnread(result.unread)
-  } catch {
-    unreadCount.reload()
-  }
+  await markReadKeepalive('helixhr.api.mark_my_request_read', { name: data.name }, pending.length)
 }
 
 // --- the request that was sent, and the file that wasn't ----------------
@@ -574,23 +574,7 @@ defineExpose({ newRequest })
                   v-for="attachment in selected.attachments"
                   :key="attachment.name"
                 >
-                  <a
-                    class="inline-flex min-h-11 items-center gap-2 rounded-full border border-outline-gray-2 px-3 text-sm text-ink-gray-8 hover:bg-surface-gray-2"
-                    :href="attachment.file_url"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <Icon
-                      name="requests"
-                      size="h-4 w-4"
-                      class="text-ink-gray-5"
-                    />
-                    {{ attachment.file_name }}
-                    <span
-                      v-if="fileSize(attachment.file_size)"
-                      class="tabular text-ink-gray-5"
-                    >{{ fileSize(attachment.file_size) }}</span>
-                  </a>
+                  <AttachmentLink :attachment="attachment" />
                 </li>
               </ul>
 

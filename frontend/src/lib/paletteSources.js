@@ -8,9 +8,9 @@
 // page's server method refuses on its own.
 //
 // Loaded only by CommandPalette.vue, so none of this reaches the eager chunk.
-import { allowedNav, askHrTarget } from './nav'
+import { allowedNav, askHrTarget, navTarget } from './nav'
 import { resolveStatus } from './statusBadge'
-import { PALETTE_RECENTS_PREFIX } from './viewerStorage'
+import { PALETTE_RECENTS_PREFIX, resolveStorage, viewerKey } from './viewerStorage'
 
 export const PALETTE_MIN_QUERY = 2
 export const PALETTE_RECENTS_MAX = 5
@@ -51,7 +51,7 @@ export function palettePages(session) {
       label: item.label,
       icon: item.icon,
       path: item.to,
-      route: routeString(item.query ? { path: item.to, query: item.query } : item.to),
+      route: routeString(navTarget(item)),
     }))
 }
 
@@ -142,21 +142,13 @@ export function serverGroups(result, session) {
 
 // --- recents (KTD13) --------------------------------------------------------
 
-function storageKey(user) {
-  return user ? `${PALETTE_RECENTS_PREFIX}${user}` : ''
-}
-
-// Resolved inside each try: with site data blocked, reading
-// `window.localStorage` itself throws.
-function resolve(storage) {
-  return storage === undefined ? globalThis.localStorage : storage
-}
+const storageKey = (user) => viewerKey(PALETTE_RECENTS_PREFIX, user)
 
 function readRaw(user, storage) {
   const key = storageKey(user)
   if (!key) return []
   try {
-    const value = JSON.parse(resolve(storage).getItem(key) || '[]')
+    const value = JSON.parse(resolveStorage(storage).getItem(key) || '[]')
     return Array.isArray(value)
       ? value.filter(
           (item) =>
@@ -176,16 +168,17 @@ function write(user, list, storage) {
   const key = storageKey(user)
   if (!key) return
   try {
-    resolve(storage).setItem(key, JSON.stringify(list.slice(0, PALETTE_RECENTS_MAX)))
+    resolveStorage(storage).setItem(key, JSON.stringify(list.slice(0, PALETTE_RECENTS_MAX)))
   } catch {
     // Storage blocked or full: recents are a convenience, never a failure.
   }
 }
 
 /** Whether `session` still holds the group a recent came from: its page is
- * still offered, and a report or inbox recent still has its own flag. */
-export function recentGranted(recent, session) {
-  if (!pageFor(recent.route, palettePages(session))) return false
+ * still offered, and a report or inbox recent still has its own flag.
+ * `pages` is `palettePages(session)`, passed in when the caller has it. */
+export function recentGranted(recent, session, pages = palettePages(session)) {
+  if (!pageFor(recent.route, pages)) return false
   if (recent.type === 'report') return !!session.canRunReports
   if (recent.type === 'inbox') return !!session.canHandleRequests
   return true
@@ -195,7 +188,7 @@ export function recentGranted(recent, session) {
 export function readRecents(session, storage) {
   const pages = palettePages(session)
   return readRaw(session.user, storage)
-    .filter((recent) => recentGranted(recent, session))
+    .filter((recent) => recentGranted(recent, session, pages))
     .map((recent) => ({
       ...recent,
       id: `recent:${recent.route}`,

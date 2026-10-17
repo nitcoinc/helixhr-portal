@@ -13,7 +13,7 @@ import { calendarDateOf, mondayOf, addCalendarDays } from './dates'
 // Pure: the caller passes `today` (`lib/dates.today()`), so the boundaries
 // are the user's calendar. `dayOf` is the seam a test pins.
 
-export const BUCKETS = [
+const BUCKETS = [
   { key: 'today', label: 'Today' },
   { key: 'yesterday', label: 'Yesterday' },
   { key: 'week', label: 'This week' },
@@ -24,7 +24,8 @@ export const BUCKETS = [
  * week, Monday..Sunday (KTD10), so on a Monday it is empty -- the label says
  * what it means. A day the server dated in the future reads as Today. */
 export function bucketOf(date, today) {
-  if (!date || date >= today) return date ? 'today' : 'older'
+  if (!date) return 'older'
+  if (date >= today) return 'today'
   if (date === addCalendarDays(today, -1)) return 'yesterday'
   if (date >= mondayOf(today)) return 'week'
   return 'older'

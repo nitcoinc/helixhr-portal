@@ -46,8 +46,13 @@ const directory = createResource({
 
 // Typing is not a request per keystroke: the field stays instant and the
 // server hears one question when the person stops typing.
+// The server ignores a query under 2 characters (_DIRECTORY_QUERY_MIN),
+// so a shorter one asks the same question as none, and an unchanged one is
+// not asked again.
 const debounced = useDebouncedSearch((value) => {
-  search.value = value.trim()
+  const next = value.trim().length >= 2 ? value.trim() : ''
+  if (next === search.value) return
+  search.value = next
   pageLimit.value = PAGE
   directory.reload()
 })

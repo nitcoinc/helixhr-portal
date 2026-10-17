@@ -13,6 +13,7 @@ import { addCalendarDays, dateTileParts, formatDateRange, mondayOf, today } from
 import { offFirst } from '@/lib/lists'
 import { isEmptyWeek, leaveLabel, rosterModes, shiftHours } from '@/lib/roster'
 import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
+import { WEEKDAYS } from '@/lib/week'
 
 // Plan 2026-09-30-001 U9 / R7, R8, R12. One Monday-first week of shifts:
 // one row per person, one cell per day, naming the shift Active that day.
@@ -22,7 +23,6 @@ import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
 // renders as `forbidden`), what each cell holds, and which days are off for
 // whom. This file lays that payload out twice, like Team: a grid on desktop,
 // a day list on the phone.
-const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 const modes = computed(() => rosterModes(session))
 const mode = ref(modes.value[0]?.value || 'mine')

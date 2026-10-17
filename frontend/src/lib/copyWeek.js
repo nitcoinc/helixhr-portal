@@ -22,7 +22,7 @@ import { WEEKDAYS } from '@/lib/week'
  *   `get_my_projects()`: open projects with their open tasks.
  * @param {string} args.targetMonday the Monday of the week being filled.
  * @param {Object<string, boolean>} [args.targetNonWorking] the target week's
- *   `get_my_week().non_working`; a missing map (an older server) skips nothing.
+ *   `get_my_week(include_non_working=1).non_working`; a missing map (an older server) skips nothing.
  * @param {Object<string, boolean>} [args.sourceNonWorking] the same, for the
  *   week being copied.
  * @returns {{rows: Array, skipped: {projects: string[], tasks: string[],

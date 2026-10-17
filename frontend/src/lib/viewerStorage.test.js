@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { NAV_COLLAPSED_PREFIX } from './navGroups'
 import {
   APPROVALS_SHORTCUTS_PREFIX,
+  NAV_COLLAPSED_PREFIX,
   PALETTE_RECENTS_PREFIX,
   RECENT_REPORTS_PREFIX,
   clearViewerStorage,

@@ -16,6 +16,7 @@ import StatusBadge from '@/components/StatusBadge.vue'
 import DecisionActions from '@/components/approvals/DecisionActions.vue'
 import { getReasonCopy } from '@/lib/workKinds'
 import { formatDate, formatDateRange } from '@/lib/dates'
+import { trimNumber } from '@/lib/hours'
 import { ATTENDANCE_LABEL } from '@/lib/week'
 
 const props = defineProps({
@@ -119,7 +120,7 @@ const reasonPlaceholder = computed(() =>
         </p>
         <p class="tabular mt-2 text-xs text-ink-gray-5">
           The approved week carries
-          {{ Number(selected.total_hours).toFixed(1).replace(/\.0$/, '') }} h ·
+          {{ trimNumber(selected.total_hours) }} h ·
           {{ formatDateRange(selected.week_start, selected.week_end) }}
         </p>
       </div>
@@ -485,7 +486,7 @@ const reasonPlaceholder = computed(() =>
               Hours on it
             </dt>
             <dd class="tabular mt-0.5 text-sm text-ink-gray-9">
-              {{ Number(selected.total_hours).toFixed(1).replace(/\.0$/, '') }} h
+              {{ trimNumber(selected.total_hours) }} h
             </dd>
           </div>
         </dl>

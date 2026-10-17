@@ -8,20 +8,11 @@
 // users' keys are U4/U5's; they find these keys by `RECENT_REPORTS_PREFIX`.
 // Every storage access is in try/catch: `null` means "storage unavailable",
 // and the strip hides rather than guessing.
-import { RECENT_REPORTS_PREFIX } from './viewerStorage'
+import { RECENT_REPORTS_PREFIX, resolveStorage, viewerKey } from './viewerStorage'
 
-export { RECENT_REPORTS_PREFIX }
 export const RECENT_REPORTS_MAX = 4
 
-function storageKey(user) {
-  return user ? `${RECENT_REPORTS_PREFIX}${user}` : ''
-}
-
-// Resolved inside each try: in a browser with site data blocked, merely
-// reading `window.localStorage` throws.
-function resolve(storage) {
-  return storage === undefined ? globalThis.localStorage : storage
-}
+const storageKey = (user) => viewerKey(RECENT_REPORTS_PREFIX, user)
 
 /** This user's recent report keys, or `null` when there is no user or the
  * storage cannot be read. */
@@ -30,7 +21,7 @@ export function readRecentReports(user, storage) {
   if (!key) return null
   let raw
   try {
-    raw = resolve(storage).getItem(key)
+    raw = resolveStorage(storage).getItem(key)
   } catch {
     return null
   }
@@ -53,7 +44,7 @@ export function recordRecentReport(user, reportKey, storage) {
   if (current === null || !reportKey) return current
   const next = [reportKey, ...current.filter((item) => item !== reportKey)].slice(0, RECENT_REPORTS_MAX)
   try {
-    resolve(storage).setItem(storageKey(user), JSON.stringify(next))
+    resolveStorage(storage).setItem(storageKey(user), JSON.stringify(next))
     return next
   } catch {
     return null
