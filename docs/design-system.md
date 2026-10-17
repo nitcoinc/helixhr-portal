@@ -21,7 +21,7 @@ the field, so every page has an identity, not just the dashboard.
 | Primary action | `blue-500` (frappe-ui Button) | `#1E6F53` | white on it **6.08** |
 | Primary hover | `--surface-blue-3` | `#1A6349` | white on it **7.18** |
 | Link / brand text | `blue-700` | `#14523F` | **8.96** on surface, **7.61** on paper |
-| Heading ink | `--ink-gray-9` | `#1A1714` | **14.92** on paper |
+| Heading ink | `--ink-gray-9`; `heading` for borders and fills | `#1A1714` | **14.92** on paper |
 | Body ink | `--ink-gray-6/7` | `#514A43` | **8.59** on surface |
 | Muted ink | `--ink-gray-4/5` | `#70675E` | **4.63** on paper, **5.46** on surface |
 | Hairline | `--outline-gray-2` | `#E2DAD1` | — |
@@ -58,6 +58,15 @@ between them, all twelve pages re-skin without touching their markup.
 
 Anti-patterns: gradients, glass, decorative shadow, and any second accent hue. Signal has one
 accent and it lives on the field.
+
+**`heading` is the one name for a dark rule or fill** (`border-heading`, `bg-heading`; plan
+2026-10-17-001 U1, MH-01, MH-05). frappe-ui registers its `ink-*` colours for text only, so
+`border-ink-gray-9` — the active tab underline and the bulk-select bar — generated no CSS at all
+and the indicators never rendered. `heading` is the same `#1A1714`, registered for every property
+in `tailwind.config.cjs`. Do not register the whole `ink` family there:
+`frontend/src/lib/tokenGuard.test.js` resolves the Tailwind config per property and fails on any
+colour class that generates nothing, and on signal yellow outside the field, and it relies on
+`border-ink-*` staying invalid.
 
 ## Typography
 
@@ -106,10 +115,21 @@ Timesheet and WeekSpine.
 
 **That idiom is for single-line links only.** When the link text can wrap — a request subject, any
 user-written title — the box grows past 44px but the `-my-2` still pulls the next line up by 8px, so
-the second line of the title lands on the meta line under it (audit EP-01, AI-01). A multi-line title
-keeps the link inline, drops `-my-2 inline-flex min-h-11`, and lets the stretched
-`after:absolute after:inset-0` pseudo-element be the 44px target: the whole card is the tap area,
-and an inline link is exempt from the per-element height check.
+the second line of the title lands on the meta line under it (audit EP-01, AI-01). A wrapping title
+has two correct shapes, and nothing in between:
+
+- **Inline, no box** (Requests' list). The link stays inline, drops `-my-2 inline-flex min-h-11`,
+  and the stretched `after:absolute after:inset-0` pseudo-element is the 44px target: the whole
+  card is the tap area, and an inline link is exempt from the per-element height check.
+- **A block box with matching padding: `-my-2 py-2 min-h-11`** (Home's Needs you, Waiting on others
+  and Decided rows, plan 2026-10-17-001 U4/U6). The `py-2` puts back exactly what `-my-2` takes, on
+  every line count, so a two-line title sits where it would sit with neither class and never
+  reaches the meta line; the box is still a real 44px element for the target sweep. Use it when the
+  link is the row's whole first line (a title plus a verb chip) and must measure as a target
+  itself.
+
+`-my-2` without a matching `py-2` on anything that can wrap is the bug, whichever shape the rest of
+the link has.
 
 **Radius is not a Tailwind class in this app.** frappe-ui's preset *redefines* the scale — `rounded`
 is 8px, `rounded-md` 10px, `rounded-lg` 12px, `rounded-xl` 16px — so "use `rounded-lg`" meant
@@ -184,7 +204,7 @@ How it is built, because each choice is load-bearing:
 - **frappe-ui's Toast is not used** (KTD1): it never passes reka's `type`, so every toast is
   assertive, and its viewport is hard-coded over the phone tab bar.
 - `notify.js` is eager and about 1KB: a queue and nothing else. `Toaster.vue` (reka-ui's Toast
-  primitives, ~18KB) loads through `defineAsyncComponent` in AppShell on the first idle moment, so
+  primitives; the built chunk measured 15,791 bytes raw, 5.5KB gzip, plus 1.2KB of CSS) loads through `defineAsyncComponent` in AppShell on the first idle moment, so
   it is never in the eager chunk; a message sent before then waits in the queue and pulls the chunk
   in. Never import `Toaster.vue` statically — `uiComponents.test.js` fails if one is.
 - **Announcing**: Toaster keeps one polite and one assertive `aria-live` region in the DOM from
@@ -203,6 +223,153 @@ How it is built, because each choice is load-bearing:
   toast is showing (a sticky bar rides higher on a short page), plus the safe-area inset; on a
   desktop it is bottom-right, 22rem wide. The close control is a real `<button>` named "Dismiss",
   44 by 44 under a coarse pointer. The entrance slide is skipped under reduced motion.
+
+## Shared controls: one tab bar, one chip row, one search field (plan 2026-10-17-001 U3, U15)
+
+Before this round the portal carried 11 tab implementations with three active-tab styles, 15
+copies of a filter-chip class string and 7 hand-rolled debounced searches (R17). Each is now one
+component, and a page that needs one of these uses it rather than restyling a copy.
+
+- **`TabBar.vue`** — two modes. The default is a `role="tablist"` for views of one page (the
+  selection in `?tab=` or local state): roving tabindex, arrow keys move *and* select, Home/End
+  jump (`lib/tabKeys.js`, unit tested). `nav` is for route-segment sections (`/settings/<key>`,
+  `/profile/<key>`): plain links with `aria-current="page"`, all in the Tab order. The active tab
+  is a `border-heading` underline with heading ink — never signal yellow, which is illegal on
+  paper. Overflow scrolls on one line with an edge fade, the selected tab scrolled into view;
+  it never wraps or clips (HR-09, AI-14). **A bar with one tab renders nothing**: one tab is not
+  a choice (AI-09). `variant="field"` is the week's day picker on the deep field.
+- **`SegmentedChips.vue`** — the one filter-chip row: toggle buttons with `aria-pressed` inside a
+  named `role="group"`, 44px at every pointer, one line that scrolls sideways on a phone. Counts
+  render as a muted `.tabular` figure and are part of the accessible name ("Unread (4)"). An "only
+  X" filter is an `All` / `X only` pair, never a lone toggle. View switchers (Roster's modes) use
+  the same chips — there is no second switcher style (MH-15, HR-17).
+- **`SearchField.vue`** — a labelled `type="search"` input, 44px at every pointer. The label is
+  always visible ("visible labels always" outranks every comp that drew a magnifier and a
+  placeholder); the placeholder is a hint.
+- **`useDebouncedSearch`** (`lib/useDebouncedSearch.js`) — 250ms after the last key, and only the
+  newest query may write the results: a slow answer to "pat" landing after "patel" is dropped.
+  `loading` is true from the keystroke, so a list says it is searching instead of showing the
+  previous query's rows. Disposed with its component.
+
+## Focus after a row leaves a list (plan 2026-10-17-001 KTD16)
+
+After any action that removes or moves a row — a decision, Approve all, Assign to me, a group
+mark-read on Notifications — **focus moves to the row that took its place** (the one before it, when
+the last row went). When the lane or group empties it moves to that lane's heading (Approvals' lane
+`<h2 tabindex="-1">`, the inbox's group heading) or, on Notifications' Unread view, to the view
+filter. It never falls to `<body>`, and it never moves to a toast. Note the row's index *before*
+the row goes: once the list re-renders there is no "next" to ask about. Approvals, the team inbox
+and Notifications follow it.
+
+## Search everywhere: the command palette (plan 2026-10-17-001 U5)
+
+One palette jumps to a permitted page, action, person, own request, inbox request or report
+(R7). Four ways in, all opening the same thing:
+
+- **Ctrl-K / ⌘K**, or **`/`** when focus is not in an editable field — never while any dialog is
+  open, so a sheet's own keys win; a palette still playing its close animation does not swallow
+  the next Ctrl-K.
+- A search button beside the identity block in the desktop rail, with the shortcut as a `<kbd>`
+  hint (`aria-keyshortcuts` carries it for assistive tech).
+- A search icon in the phone app bar, 44px.
+- A **Search** row at the top of More, which closes More before opening the palette.
+
+**The triggers are named "Find a page, person or request"**, not "Search": several pages have their
+own labelled search field, and two controls both named "Search" on one page are one too many for
+a screen reader's control list (and for `getByRole` in a spec). The palette's own dialog title is
+"Search"; its input is "Search pages, people and requests".
+
+Before typing it offers the user's recents (five, per user, KTD13) and the actions the rail
+allows (Ask for leave → `/leave?ask=1`, Fill timesheet, New request). Pages, actions and reports
+match instantly in the browser; from two characters one debounced `portal_search` call adds
+People, Your requests and Team inbox groups (`docs/architecture.md`). A failed server group says
+"Couldn't search people and requests" beside the local matches — never "No results". A person
+opens `/people/<id>` for a People holder and `/directory?q=<name>` for everyone else; a request
+opens the view for the viewer's role, the way a notification does.
+
+How it is hosted, because each choice is load-bearing (KTD2):
+
+- **frappe-ui `Dialog`, not shadcn's `CommandDialog`** — one focus trap, one Escape, and the
+  overlay's load-bearing `z-index: 50` over the tab bar. Dialog's title and `body-content` slot
+  stay, so `aria-labelledby` survives.
+- **On a phone the palette is pinned to the top**, the one overlay that is not a bottom sheet, so
+  the keyboard never covers its results; the list is sized against the visual viewport.
+- **Every list is matched by `lib/paletteSources.js`**, never by Command's client filter: server
+  rows match on fields a row does not print (an employee id, a work email), and that filter would
+  hide them. The input is reka-ui's `ListboxFilter` on the palette's own model, so arrow keys and
+  Enter still drive the list.
+- **Gated by the rail's own `allowedNav`** (`lib/nav.js`) plus the router's predicates, so a
+  desk-only or Portal Admin session is offered exactly the pages its rail shows.
+- Loaded only through `defineAsyncComponent` on first open (`CommandPalette-<hash>.js`);
+  `hardening.spec.ts` asserts the cold load fetches no palette chunk.
+
+## `components/ui/`: copied shadcn-vue, on Tailwind 3 (plan 2026-10-17-001 U2, KTD1-KTD4)
+
+**This round supersedes the 2026-09-04 hardening plan's KTD1, KTD9 and R9** ("no other design
+system", "no new dependency without evidence", "no design-framework abstractions") **for these
+named components only**: shadcn-vue's Command (the palette's list) and Kbd. The user opted in on
+2026-10-17, after the gaps were measured: frappe-ui's own CommandPalette renders Feather icons,
+which this app aliases to a stub, and its Toast is always assertive with a viewport over the tab
+bar (`docs/plans/2026-10-17-001-feat-portal-ease-of-use-plan.md`, Sources). frappe-ui stays the
+primitive layer for everything else; Toast is a local component on reka-ui's primitives, People's
+table follows ReportTable's plain markup, date pickers and bottom sheets stay frappe-ui. Sidebar
+(Tailwind v4 `w-(--x)` syntax, which compiles to nothing on 3.4) and Drawer (`vaul-vue`, last
+published 2025-03) were looked at and not adopted. A next gap — a Combobox when the report
+pickers are rebuilt — is a new decision, not a licence.
+
+The rules for anything under `frontend/src/components/ui/`:
+
+- **Copied, then owned.** From the v3 `new-york` registry (`frontend/components.json`), as plain
+  JS (`"typescript": false`); `CommandDialog` was left out, because the palette lives in frappe-ui's
+  `Dialog`. Upstream will not update it; the copies are ours. As shipped the palette uses
+  `Command`, `CommandList`, `CommandGroup` and `CommandItem`; `CommandInput` (replaced by reka-ui's
+  `ListboxFilter`, see above), `CommandEmpty`, `CommandSeparator`, `CommandShortcut` and `Kbd`
+  have no caller yet — the rail trigger's shortcut hint is a plain `<kbd>`.
+- **Adapted on copy-in:** no TypeScript, `Icon.vue` + `lib/icons.js` in place of
+  `lucide-vue-next`, no Tailwind v4 syntax, and **no opacity modifier on a mapped colour**.
+- **Signal-mapped colour names.** shadcn's vocabulary (`foreground`, `popover`, `muted`,
+  `accent`, `border`) points at existing Signal CSS variables in `tailwind.config.cjs` — never a
+  second palette, so a retune in `index.css` moves them too. Those variables are hex values, not
+  channel triplets, so `bg-muted/50` generates nothing: rewrite it to a solid Signal step.
+  `muted-foreground` is `ink-gray-6` (6.66 on the highlighted row), not gray-5 (4.23).
+- **Async only.** Nothing under `components/ui/`, nor `cn` (`lib/utils.js`: clsx + tailwind-merge
+  v2), nor `Toaster.vue` may be imported by anything the shell or Home load eagerly.
+- **`frontend/src/lib/uiComponents.test.js` guards all of it**: no lucide import or `lang="ts"`
+  under `ui/`, no opacity step on a mapped name, tailwind-merge below 3, exactly one installed
+  reka-ui, and none of those modules in the eager import graph.
+
+How to copy one in safely, and the CLI's defects, are in `docs/runbook.md` ("shadcn-vue: copying a
+component in").
+
+## Bytes: what this round cost (plan 2026-10-17-001 R4)
+
+Measured on 2026-10-17 from clean production builds of the round's base (`14d955b`) and of the
+finished branch, the same way: eager JS is the sum of the `.js` files `helixhr/www/helixhr.html`
+references (the entry plus its modulepreloads); CSS is the one stylesheet it links.
+
+| | Start of round | End of round | Target | Verdict |
+|---|---|---|---|---|
+| Built CSS (`index-*.css`) | 101,195 B | **106,454 B** (+5.3KB) | `main` + 10KB, under the 162,906 B ceiling | **pass** |
+| Eager JS, raw | 273,321 B | **284,754 B** (+11.4KB) | `main` + 3KB (R4) | **missed** |
+| Eager JS, gzip -9 | 97,069 B | **100,955 B** (+3.9KB) | — | — |
+| Eager JS against P2-R24-js | | **1,543 B over** 283,211 | ≤ 283,211 B (354,014 × 0.8) | **over** |
+| Palette chunk (`CommandPalette-*.js`, lazy) | — | 33,992 B raw (12.0KB gzip) | ≤ 30KB raw (U5) | **missed** |
+| Toaster chunk (`Toaster-*.js`, lazy) | — | 15,791 B raw (5.5KB gzip) | out of the eager JS | pass |
+
+**R4's +3KB eager target was missed, by about 8KB raw.** None of the copied shadcn code, `cn`, the
+palette or the Toaster is in it — the guard holds. The growth is the shell itself, which every
+page loads: the role-ordered nav and its gates (`lib/nav.js`, `navGroups.js`), per-user storage
+(`viewerStorage.js`), the approvals count, the toast queue, the skip link and route focus, the
+palette triggers and shortcut, and the new per-destination nav glyphs. The reka-ui shared chunk
+also re-split into `TooltipBubble` + `VisuallyHidden` (85,207 B → 86,668 B together), and the
+entry absorbed the `vue-router` and `Button` chunks the base preloaded separately — so compare
+totals, not chunk names. The palette chunk misses its 30KB target by about 4KB; it is lazy, paid
+once on first open.
+
+**P2-R24-js is now ~1.5KB over on raw eager bytes alone.** That gate measures transferred JS on a
+cold Dashboard load (`performance.spec.ts`, which also counts the Dashboard route's own chunks),
+so a `BASELINE_MODE` run would fail it until bytes are reclaimed. The protocol was not re-run this
+round; reclaiming the overage is open work, not a waiver.
 
 ## Component conventions (frappe-ui)
 

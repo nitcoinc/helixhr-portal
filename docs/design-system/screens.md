@@ -45,7 +45,31 @@ forbidden panel with no Retry. A failed request must never render as an empty li
 
 **Page widths.** Content is capped at `max-w-5xl` inside the shell's `<main>`, at every width. The
 1440px artboards show exactly that: a 256px side nav, then a 1024px column with 80px of air around
-it, not a form stretched across the window.
+it, not a form stretched across the window. Since plan 2026-10-17-001 U16 there is no exception:
+Holidays and Attendance, which used to cap themselves narrower, use the shell width too (ED-20).
+
+## The seventh pattern conversation (plan 2026-10-17-001)
+
+The rule above said a seventh pattern needs a conversation first. This round had it, on
+2026-10-17, because the audit (`docs/reviews/2026-10-17-ui-ease-of-use-audit.md`) found the
+missing patterns had already been invented page by page: eleven tab strips, fifteen chip rows,
+seven debounced searches, a status line per page for write feedback. The outcome was not "more
+patterns" but **one copy of each control the six patterns already needed**, plus two genuinely
+new surfaces. All are specified in `../design-system.md`:
+
+| Added | What | Why it is not a seventh *look* |
+|---|---|---|
+| `TabBar` | the one tab strip, `tablist` or `nav` mode | replaces 11 copies; the heading-ink underline is the old intended style, which never rendered (MH-01) |
+| `SegmentedChips` | the one filter/view chip row | replaces 15 copies and Roster's second switcher style |
+| `SearchField` | the one labelled search input | the Documents/Directory "visible label" rule, made a component |
+| Toaster (`notify`) | one polite/assertive channel for a write's outcome | new surface; a `.surface-card` or the sent-back pair, nothing new to paint |
+| Command palette | one search everywhere, `components/ui/command` in frappe-ui `Dialog` | new surface; the one overlay pinned to the top on a phone |
+
+What the conversation decided, so it is not re-litigated: frappe-ui stays the primitive layer;
+shadcn-vue is copied in only for Command and Kbd, on Tailwind 3 and Signal tokens (the
+supersession of the hardening plan's KTD1/KTD9/R9 is recorded in `../design-system.md`); no
+palette, type or surface change; no full shadcn-vue migration, no Tailwind v4. A screen that wants
+an eighth thing still starts with a conversation.
 
 ---
 
@@ -123,6 +147,22 @@ The whole body is **one** async region (P2-U3). Every element on it reads from t
 0.8431 CLS; the skeleton and the page are alternative subtrees of one region, and nothing that has
 been laid out ever moves.
 
+**One row per record, three groups (plan 2026-10-17-001 U6).** The queue is now **Needs you**,
+**Waiting on others** and **Decided**, and each list is collapsed to one row per record on the
+server before it is sorted and cut (KTD10): six unread replies on one request read as one row,
+"HR replied · 4 · Address proof", with the newest reply quoted and the oldest age, keyed by the
+record so the row keeps its identity when a seventh arrives. A handler's row names the request's
+subject (HR-04). **Decided** holds final rejections and unread status-only changes on a Done or
+Declined request: they wait on nobody, so they left "Waiting on others", but they never drop off by
+time (P4-R4, KTD11) — the list is bounded by count, newest first. A request the employee still
+owes (an unread HR message) is one row under Needs you, never a second under Decided (KTD12).
+**The whole row is one stretched link** with its verb as a chip on the title line (EP-03), using
+the multi-line `-my-2 py-2 min-h-11` box (`../design-system.md`, stretched links); opening a
+collapsed row clears every log for that record in one call. Quick actions gain role rows
+(Approvals, Team inbox, Report access, Email templates) for the roles that hold them. With mobile
+check-in on, Home shows a **Check in / Check out chip** that opens the Attendance check-in sheet
+in place — two taps from Home (EP-10).
+
 > Superseded: six same-size icon+heading+text stat cards in a 2-column grid, where a sent-back
 > timesheet and a leave balance carried identical weight.
 
@@ -147,14 +187,17 @@ Measured at 390x844 the bar's bottom edge lands at 756px with the tab bar at
 
 Identity in the field block: initials monogram in signal yellow, name, then
 `designation · department` and `Reports to X · location` beneath it. Below it five tabs —
-Personal, Job, Contact & emergency, History, Bank & IDs — as router-links with the Settings
-underline (`border-signal`), wrapping on a phone; each is its own URL (`/profile/<tab>`).
+Personal, Job, Contact & emergency, History, Bank & IDs — as the shared `TabBar` in `nav` mode
+(heading-ink underline, one scrolling line on a phone; plan 2026-10-17-001 U3); each is its own
+URL (`/profile/<tab>`).
 
 Each tab is `.label`-headed runs of resting cards, one hairline-divided row per field, value
-right-aligned, **"Not recorded"** in muted ink where HR has nothing, and an always-visible
-**"Request a correction"** on every read-only row (the correction dialog, pre-filled; never
-hover-only). Tables (education, work history) are real tables on a wide screen and stacked cards on
-a phone, with one correction action per table. Bank & IDs says up front that account and ID
+right-aligned, **"Not recorded"** in muted ink where HR has nothing, and **one "Something wrong?
+Request a correction" per section**, always visible, which opens the correction dialog with a
+picker for the field (plan 2026-10-17-001 U10, ED-18, EP-17). It used to be a button on every
+read-only row — a column of identical links that made each section twice as long. Tables
+(education, work history) are real tables on a wide screen and stacked cards on a phone, with one
+correction action per table. Bank & IDs says up front that account and ID
 numbers show only their last four characters; an expired passport carries an "Expired" badge.
 
 Contact & emergency holds the editable fields under "YOU CAN UPDATE", with **one Save bar for the
@@ -268,6 +311,13 @@ workflow status live on the spine. Sticky Save / Submit week above the tab bar.
 
 Chosen over the project-first alternate, which stays on the canvas for reference only.
 
+**Today first on a phone (plan 2026-10-17-001 U9, EP-02).** The week spine and today's editor come
+first; the month overview folds into one summary row under them. On a desktop the week strip is
+the single navigator, with one status badge per week (ED-12, ED-13). "Copy last week" keeps its
+overwrite confirm and now skips rows whose project or task is no longer open and hours that would
+land on a holiday, approved leave or a day outside employment (`get_my_week.non_working`), and
+says what it skipped.
+
 **One model, two layouts.** A *line* is a project + task + note carrying an hours map keyed by
 calendar date. The phone renders the selected day's slice of it; the desktop grid renders it whole.
 Neither layout owns any state, so the two cannot drift — and the wire format stays what the server
@@ -346,9 +396,21 @@ row carries the **Monday** of its week rather than the record's `start_date`: ER
 
 Conversation rows: category as a `.label`, subject, "Sent … · picked up …", status badge, trailing
 chevron. HR's reply is an **attributed bubble** with an initials monogram, not a "HR:" prefix.
-Grouped **Needs you / Open / Closed** — and "Needs you" is *not* a status: it is an unread
-Notification Log row about that request, the same read state the shell badge and Notifications use
-(P2-KTD6). A reply you have read stops needing you while the request stays Done.
+Grouped **Needs you / Open / Closed** — and "Needs you" is *not* a status word. Since plan
+2026-10-17-001 KTD12 it is the one "owed by the employee" rule Home applies too (R19,
+`lib/requests.js` `isOwed`): the request is Waiting on Employee, or it holds an **unread message**
+from the handling team. An unread *status-only* change (Done, Declined) is an update, not an ask:
+the row stays in its Open or Closed group with an unread dot and a caption (ED-01, EP-04). A reply
+you have read stops needing you while the request stays Done. A subject search sits above the
+list (ED-19).
+
+**Two workspaces, one page (plan 2026-10-17-001 U8).** `Requests.vue` is a shell over
+`requests/MyRequests.vue` (the employee's own) and `requests/RequestWorkspace.vue` (a handler's
+Team inbox, `?tab=work`, which a handler's nav entry opens directly). The inbox is worked from the
+list: **Assign to me** on a row when the server's `actions` for that row include Pick up, sent with
+the row's `token_modified` so a stale pick-up is refused; search by subject or requester name; a
+category filter; a "past SLA first" sort; a quantitative SLA pill ("2 d over"). No kind tag in a
+one-kind inbox; the requester in normal case.
 
 The detail view is a timeline (Sent → Picked up by HR → Replied), then what the employee wrote with
 its attachment chips, then HR's reply with its own. A partial failure is told truthfully on the
@@ -451,6 +513,22 @@ HR has no Send to HR button anywhere — there is nowhere further to send.
 Action buttons follow a fixed order on both phone and desktop through `DecisionActions.vue`:
 Primary action (Approve / Approve change) -> Return action (Send back) -> Final no (Reject / Decline) -> Quiet hand-over (Send to HR).
 
+**One evidence component, and Approve all (plan 2026-10-17-001 U7).** The phone's inline expansion
+and the desktop's right panel used to be the same evidence written twice; both now render
+`approvals/ApprovalEvidence.vue`, pinned by a characterization test against the old DOM before the
+move. **"Approve all N that look normal"** heads each lane's Looks normal section at every width:
+it batches that lane's eligible timesheets and leave — never a flagged row, an attendance request
+or a change request — independently of checkbox selection, so a phone (where checkboxes are
+hidden below 640px) gets the bulk path too (MH-04). Past the server's cap of 60 it reads "Approve
+the oldest 60 of 75". It keeps the count-and-total confirm (KTD6: no Undo on a workflow
+transition); a full success is one polite toast, and a partial one keeps the result panel naming
+the rows someone else already decided. The badge drops by what was approved. On ≥640px lanes and
+person groups get a tri-state select-all (MH-06, HR-12). **Keyboard triage** (j/k to move, x to
+select, Enter to open, a to approve) is off until a per-user "Keyboard shortcuts" switch beside the
+first lane turns it on; it works only while focus is in the queue list, and `a` only opens the
+confirm. After a decision focus moves to the next row (KTD16). Day counts carry their unit
+(MH-07), and an oversight-only HR User sees oversight first (MH-09).
+
 *Deviations from the artboard, recorded:*
 
 - The primary button carries the quantity at **both** widths ("Approve 38.5 h", "Approve 3 days"),
@@ -467,21 +545,29 @@ Primary action (Approve / Approve change) -> Return action (Send back) -> Final 
   360px, so the strip carries the shape of the week and the project lines carry the totals; the same
   server projection feeds both.
 
-## Notifications · phone (P2-U4 — **built**)
+## Notifications · phone (P2-U4, reworked by plan 2026-10-17-001 U10 — **built**)
 
-Grouped **Today / Earlier** with `.label`. One resting card per row: an icon tile per kind — a
-**filled field-green tile with a signal-yellow glyph while unread**, a grey tile once read — the
-subject (semibold while unread), a one-line quote of the reply where there is one, the time, and a
-trailing chevron. Under a TODAY heading the row prints the time alone ("16:02"); an Earlier row
-keeps its day ("Yesterday, 10:42"). Opening a row marks that one row read, moves the shell's count
-in the same interaction, and opens the record — the list is *not* reloaded to find that out, because
-`get_notification_logs` is served with a 60s HTTP cache and would hand back the pre-read answer.
+Grouped **Today / Yesterday / This week / Older** with `.label`, and **one row per record**: every
+log about one request, leave or week folds into its newest, with "+N earlier" to expand the rest
+(ED-04, EP-07). One resting card per row: an icon tile per kind — a **filled field-green tile with
+a signal-yellow glyph while unread**, a grey tile once read — the subject (semibold while unread),
+a one-line quote of the reply where there is one, the time, and a trailing chevron. Under the
+Today and Yesterday headings the row prints the time alone ("16:02"); older rows keep their day.
+**All / Unread** chips sit under the header; Unread is `?unread=1`, so it survives a reload, and it
+is a server filter (`get_my_notifications(unread_only=1)`), so a 60-unread backlog shows all 60
+rather than whichever of them were in the newest 50. Opening a row marks **the whole group** read
+in one call (`mark_record_notifications_read`), moves the shell's count by the group's size in the
+same interaction, and opens the record. The list reads `get_my_notifications`, which is uncached:
+Frappe's `get_notification_logs` carries a 60s HTTP cache and handed a reload the pre-read answer.
 
 *Deviations from the artboard, recorded:*
 
-- The footer reads "Showing your 50 most recent." rather than "Showing the last 30 days". The
-  endpoint bounds by count, not by age, and a line that says otherwise is a line that is wrong the
-  first time somebody has a quiet month.
+- The footer reads "Showing your 50 most recent." (or, on Unread, "Showing your 200 newest unread")
+  rather than "Showing the last 30 days". The endpoint bounds by count, not by age, and a line that
+  says otherwise is a line that is wrong the first time somebody has a quiet month.
+- Titles read in people's words since plan 2026-10-17-001 U12: "Your timesheet for Mar 8 is
+  waiting for your manager", not an ISO date and "Pending Approval" (ED-03, EP-06; the
+  `helixhr_date` / `helixhr_state_words` Jinja methods in `docs/architecture.md`).
 - ~~A **timesheet** notification opens **Past weeks**, not the exact week.~~ **Closed in P2-U6.**
   A week is addressed by its Monday and a Notification Log carries the Timesheet's record id, so
   P2-U6 added `helixhr.api.get_timesheet_week_start` — one indexed, session-scoped read, issued
@@ -527,13 +613,17 @@ save or open the file itself.
   neither. A slip is either on hold or a re-run, and the list row carries the fuller
   "Withheld, ask HR" because there is room for it there.
 
-## Holidays · one column at every width (P3-U3 — **built**)
+## Holidays · compact rows, shell width (P3-U3, revised by plan 2026-10-17-001 U16 — **built**)
 
 **Field block**: `NEXT HOLIDAY`, its name, its date, and the countdown in a signal-yellow pill —
-`Today`, `Tomorrow` or `in N days`. Below, `COMING UP` and `EARLIER THIS YEAR` runs of resting
-cards, each led by a date tile, with the holiday's name, the weekday and the date, and a `Half day`
-pill where HRMS says so. Year chips when there is more than one year to show. A footnote naming the
-list the days came from and stating that weekly days off are not listed.
+`Today`, `Tomorrow` or `in N days`. Below, `COMING UP` and `EARLIER THIS YEAR` runs of **compact
+rows** the height of their date tile (name and weekday beside it, not an 80px card; ED-21), with a
+`Half day` pill where HRMS says so — two columns at desktop widths, inside the shell's `max-w-5xl`
+like every other list page (ED-20). Coming up starts *after* the holiday the field block already
+names, so the next holiday is not said twice; the days already gone fold behind **Show past (N)**,
+open by default only when nothing is left to come (EP-22). Year chips when there is more than one
+year to show. A footnote naming the list the days came from and stating that weekly days off are
+not listed.
 
 The whole page is **one** async region, so the field block, the chips, both groups and the footnote
 arrive together — the same rule the Dashboard follows, for the same CLS reason. All date arithmetic
@@ -553,9 +643,10 @@ empty year.
 - The countdown is a signal pill reading `in 23 days`, not the artboard's large yellow `23` with
   `days` beside it. A display figure next to the holiday's name would compete with it; the pill is
   one reading.
-- There is no separate desktop layout. The page is a single `max-w-xl` column at every width —
-  there is one list of at most a couple of dozen dates, and a second column would have nothing in
-  it.
+- ~~There is no separate desktop layout; the page is a single `max-w-xl` column at every width.~~
+  **Reversed in plan 2026-10-17-001 U16.** The narrow column left a desktop with a long single
+  list beside empty paper and, with Attendance, ignored the shell width (ED-20); the rows now flow into
+  two columns inside `max-w-5xl`.
 
 ## Attendance · Today strip and the check-in sheet (P3-U4 — **built**)
 
@@ -714,10 +805,14 @@ The payload never carries a leave `description`, and `status`/`docstatus` are co
 
 *Deviations from the artboard, recorded:*
 
-- **Every day of the week gets a row on the phone, not only the days somebody is out.** The
-  artboard shows three rows and then "Nobody else is out this week." A week with two people out
-  reads as a week when the empty days are visible; a list of only the busy days is a list you have
-  to reconstruct the week from.
+- ~~**Every day of the week gets a row on the phone, not only the days somebody is out.**~~
+  **Reversed in plan 2026-10-17-001 U17 (MH-18).** Seven day cards repeated the same person on
+  every day their leave covered and pushed the week several screens long. The phone now lists one
+  row per leave with its range inside the week ("Mon 13 – Fri 17"), earliest first, with the
+  week's holidays in one line; a quiet week is one sentence, not seven empty cards — which is
+  closer to the artboard. On both widths people who are off sort first, and an **Only people off**
+  chip hides the rest (MH-16); Roster's team view has the same chip, and your own empty roster
+  week is one card rather than seven saying "No shift" (MH-17).
 - **Holiday dimming is per person on desktop and per week on the phone.** R20 asked for "the
   manager's holidays"; the desktop grid dims each row from *that report's own* holiday list, which
   is the only correct answer for a team split across two lists, while the phone's `Holiday` pill
@@ -732,8 +827,9 @@ The payload never carries a leave `description`, and `status`/`docstatus` are co
 
 ## Roster · desktop grid, phone day list (plan 2026-09-30-001 U9, U10 — **built**)
 
-Team's shape, for shifts. A mode switcher of pills (`Mine`, `My team`, `Everyone`) shows only the
-modes the session holds, and none at all when there is only one. Week navigation sits outside the
+Team's shape, for shifts. A mode switcher (`Mine`, `My team`, `Everyone`; the shared
+`SegmentedChips` since plan 2026-10-17-001 U15, not a second pill style) shows only the modes the
+session holds, and none at all when there is only one. Week navigation sits outside the
 async region, as on Team. `Everyone` adds a labelled `Search` field (name or employee ID, debounced,
 server-side) and, past 50 people, `1–50 of N` with Previous / Next.
 
@@ -767,8 +863,12 @@ write without dropping to a skeleton, so focus returns to the cell that opened t
 Search first: a labelled field (`Search`, placeholder `Name, role or department`) that queries the
 **server**, debounced, floored at two characters. Department chips on desktop only, `Everyone`
 plus one per department with its count. Rows grouped per department under a `.label`, each a
-resting card with a green initials monogram, the name, and the role — `Role not published` where
-HRMS has none. Desktop adds department, `Reports to {manager}` and a `mailto:` link inline; a phone
+resting card with a green initials monogram, the name, and the role where HRMS has one — **no
+"Role not published" filler and no empty card footer** since plan 2026-10-17-001 U16 (ED-17,
+EP-20): a line saying nothing is dead height on every card. `/directory?q=<name>` seeds the search,
+which is how the command palette opens a colleague for anyone who cannot open People (U5); a
+People holder's rail shows one "People" entry instead of both (HR-07), and `/directory` stays
+routable. Desktop adds department, `Reports to {manager}` and a `mailto:` link inline; a phone
 row opens a bottom sheet with the same facts and an `Email {first name}` action, or
 `No work email published. Ask HR if you need to reach them.`
 

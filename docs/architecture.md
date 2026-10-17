@@ -317,9 +317,23 @@ include_requests=False, count_only=True)`: every collector keeps its reads,
 its Python subtractions and its bound and skips the enrichment, so the badge
 is the Approvals page's own `total` / `total_is_capped`. The browser never
 polls it: `lib/approvalsCount.js` is seeded here, set whenever Approvals
-loads, and decremented after a decision. The collectors' scope reads
-(`_line_manager_filter`, `_hr_queue_employee_filter`) run once per queue
-read inside `_shared_queue_reads`. Every domain method still resolves
+loads, and decremented after a decision (Approve all decrements by what was
+approved). New arrivals show at the next hard load or Approvals visit; that
+staleness is accepted, because polling the bootstrap would break the
+one-call-per-hard-load rule (P2-R20) and a recurring count endpoint adds
+steady load for a figure the Approvals page refreshes anyway. The
+collectors' scope reads (`_line_manager_filter`, `_hr_queue_employee_filter`)
+run once per queue read inside `_shared_queue_reads`.
+
+The cost is real and was measured: `can_approve` used to short-circuit
+approval work for managers and HR, so the count is new work on each of their
+hard loads -- **+6 queries for a manager, +8 for an HR Manager** over `main`,
+bounded by each collector's own cap (150/150/50). A collector that throws is
+logged through `_safe` and the badge reads 0; the shell never breaks for it,
+and the Error Log row is how it is noticed. Oversight-only HR Users and
+request handlers with no decisions get 0 and no badge, because they decide
+nothing. The bootstrap also carries `mobile_checkin`, which draws Home's
+check-in chip (U6). Every domain method still resolves
 `frappe.session.user` itself and is still refused by Frappe permissions —
 see "Security model" above.
 
@@ -356,7 +370,7 @@ URL that survives refresh and browser Back. One convention, defined in
 | `/attendance` | `/attendance/requests/:name` | Attendance Request name (P3-U6) |
 | `/holidays` | — | the year is page state, not a parameter (P3-U3) |
 | `/team` | — | the week is component state, deliberately neither a parameter nor a query (P3-U7) |
-| `/directory` | — | search, department and the open person are page state (P3-U8) |
+| `/directory` | — | department and the open person are page state (P3-U8); `?q=` seeds the search (plan 2026-10-17-001 U5) |
 | `/notifications` | — | a row links to the target record's route above |
 
 - The parameter is the record's real Frappe name, or for a week its Monday as
@@ -374,12 +388,17 @@ URL that survives refresh and browser Back. One convention, defined in
   department and open person are component state, so a refresh returns to this
   week / this year / the unfiltered first page. Directory goes furthest on
   purpose — a person sheet has no URL at all, because an employee id in a
-  shareable link is a leak with no upside.
+  shareable link is a leak with no upside. The one addition (plan
+  2026-10-17-001 U5) is an *inbound* `?q=<name>` that seeds Directory's search
+  so the command palette can open a colleague; typing does not write it back,
+  and it carries a name the person typed, never an id.
 - Attendance carries one non-record parameter, the query `?fix=<date>`, which
   opens the Fix a day sheet for that day. It is what lets the check-in sheet,
   Home and a notification point at "fix *this* day", and it is
   `router.replace`d away when the sheet closes so browser Back does not reopen
-  it.
+  it. Leave's `?ask=1` (plan 2026-10-17-001 U5, the palette's "Ask for leave")
+  opens the ask sheet the same way and is replaced away on close by the same
+  rule. Both deep links are additive (R2).
 - A detail route renders the same page component as its list, which reads the
   id from its prop and asks the server for that one record
   (`get_my_leave_detail`, `get_my_request`, `get_approval_detail`,
@@ -409,7 +428,7 @@ company", fall back to the site's default company for that persona only
 
 | Screen | Reads | Writes | Backing records |
 |---|---|---|---|
-| Dashboard | `get_portal_bootstrap`, `get_dashboard` | none | Timesheet, Leave Application, HR Request, Attendance, Notification Log |
+| Dashboard | `get_portal_bootstrap`, `get_dashboard` | `mark_record_notifications_read` (opening a collapsed queue row) | Timesheet, Leave Application, HR Request, Attendance, Notification Log |
 | Leave | `get_my_leave`, `get_my_leave_detail`, `get_leave_form_context`, `get_leave_day_count` | `apply_for_leave`, `withdraw_my_leave` | Leave Application, Leave Allocation, Leave Ledger Entry |
 | Attendance | `get_my_attendance` (now with `checkin`), `get_my_checkins`, `get_my_attendance_requests`, `get_my_attendance_request`, `get_attendance_request_preview` | `punch_my_checkin`, `create_my_attendance_request`, `send_my_attendance_request`, `withdraw_my_attendance_request` (a non-fixable problem still opens a prefilled HR Request) | Attendance, Employee Checkin, Holiday List, Leave Application, Attendance Request, Shift Type + Shift Assignment, Workflow "Attendance Request Approval", DocShare, Notification Log |
 | Payslips | `get_my_payslips`, `get_my_payslip` | none (`download_my_payslip` is a GET that returns a PDF) | Salary Slip + its earnings and deductions rows, Print Format |
@@ -417,10 +436,11 @@ company", fall back to the site's default company for that persona only
 | Team | `get_my_team_week` | none | Employee (`reports_to`), Leave Application, Holiday List |
 | Directory | `get_directory` | none | Employee |
 | Roster | `get_roster_week` (`mode` = `mine` / `team` / `hr`) | HR only: `assign_shift`, `end_shift_assignment`, `change_shift_assignment`, `cancel_shift_assignment` | Employee (`reports_to`, `default_shift`), Shift Assignment, Shift Type, Leave Application, Holiday List |
-| Timesheet | `get_my_week`, `get_my_timesheet_history`, `get_timesheet_week_start`, `get_my_projects` | `save_my_week`, `submit_my_week` | Timesheet + Timesheet Detail, Workflow "Timesheet Approval" |
-| Requests | `get_my_requests`, `get_my_request` | `create_my_request`, `attach_to_my_request`, `mark_my_request_read` | HR Request, File, Notification Log |
+| Timesheet | `get_my_week` (with `non_working`), `get_my_timesheet_history`, `get_timesheet_week_start`, `get_my_projects` | `save_my_week`, `submit_my_week` | Timesheet + Timesheet Detail, Workflow "Timesheet Approval" |
+| Requests | `get_my_requests` (`q`, `unread_reply`), `get_my_request`; handlers: `get_request_work` (`q`, `sort`, `category`) | `create_my_request`, `attach_to_my_request`, `mark_my_request_read`; handlers: `act_on_approval` (Assign to me from the list) | HR Request, File, Notification Log |
 | Documents | `get_my_documents` (`frappe.client.get_list` is scoped by the same hooks), `get_document_admin_options` (HR) | HR only: `save_document_link`, `delete_document_link` | HelixHR Document Link, File |
-| Notifications | `notification_log.get_notification_logs` | `notification_log.mark_all_as_read`, `mark_my_request_read` | Notification Log, fed by the Notification fixtures and `events.hr_request_on_update` |
+| Notifications | `get_my_notifications` (`unread_only`; uncached), `get_timesheet_week_start` and `get_request_view` to route a row | `notification_log.mark_all_as_read`, `notification_log.mark_as_read` (a one-log row), `mark_record_notifications_read` (a grouped row) | Notification Log, fed by the Notification fixtures and `events.hr_request_on_update` |
+| Search (command palette, every page) | `portal_search`, `get_report_catalog` (once per palette session) | none | Employee, HR Request; pages and actions come from `lib/nav.js` |
 | Approvals | `get_my_approvals`, `get_approval_detail` | `act_on_approval` | Leave Application, Timesheet, Attendance Request, Workflow actions, DocShare |
 | Profile | `get_my_profile` (five tabs; the correction dialog files through `create_my_request`) | `update_my_profile`, `create_my_request` | Employee + its education and work-history tables, HR Request |
 
@@ -1391,7 +1411,8 @@ and a remembered state wins. State is per user and per device in
 localStorage (`helixhr.nav.collapsed:<user>`, KTD13: cleared on sign-out,
 other users' keys purged on bootstrap by `lib/viewerStorage.js`), and the
 current route's section opens for that view only. Filter chips live in
-the URL: Approvals `?kind=&category=`, Requests `?type=`.
+the URL: Approvals `?kind=&category=`, Requests `?type=`, Notifications
+`?unread=1`.
 
 ## `helixhr/api.py` is one module on purpose
 
@@ -1432,8 +1453,11 @@ KTD4 — not because of a line count.
 - `App.vue` mounts `AppShell` for every route except the three state routes
   (`meta.shell: false`). The shell is a desktop sidebar at 1024px and up, and
   an app bar plus a five-item bottom tab bar below that, with a "More" dialog
-  for the rest. Approvals appears only when the bootstrap says `can_approve`
-  (now true for a routed-role holder with anything queued, not only HR);
+  for the rest. The destinations and their gates live in `lib/nav.js`
+  (`NAV`, `allowedNav`, `tabBar`), shared by the rail, the tab bar and the
+  command palette. Approvals appears when the bootstrap says `can_approve`
+  (reports, HR, or a decision waiting -- request rows no longer count, plan
+  2026-10-16-001 KTD1) or `can_oversee_timesheets`;
   Settings appears on `can_configure` (HR sections) or `can_admin_portal`
   (Report access + Portal roles); Organisation only on
   `can_see_organisation` (HR Manager / System Manager, company-scoped,
@@ -1470,6 +1494,17 @@ KTD4 — not because of a line count.
   set is aliased to. Both are there because the alternative was editing
   `node_modules`; both have a guard next to them that fails if the assumption
   they rest on stops being true.
+- Plan 2026-10-17-001 added four small eager modules, each with a vitest
+  file: `lib/approvalsCount.js` (the approvals badge, mirroring
+  `lib/unread.js` but never polled -- see the bootstrap section),
+  `lib/notify.js` (the toast queue; `Toaster.vue` renders it from a lazy
+  chunk), `lib/viewerStorage.js` (the one list of per-user `localStorage`
+  prefixes -- `helixhr.nav.collapsed:`, `helixhr.palette.recent:`,
+  `helixhr.reports.recent:`, `helixhr.approvals.shortcuts:` -- cleared on
+  sign-out and purged of other users' keys on bootstrap, KTD13), and
+  `lib/nav.js`. `components/ui/` holds the copied shadcn-vue Command and Kbd,
+  reachable only through async components; the rules are in
+  `design-system.md`.
 - `index.css` is the design token layer. frappe-ui hard-codes `blue` as its
   primary palette, so `tailwind.config.cjs` retunes the `blue` scale to the
   brand green; read `blue` as "brand" throughout. The accent yellow may only
@@ -1501,8 +1536,11 @@ routing release.
   Cleanup must be scoped to the fixture employees; a site-wide delete once
   emptied a dev database. Method rollback between tests is not reliable here;
   never assert against an assumed-empty baseline.
-- **Vitest** (`frontend/src/**/*.test.js`): pure functions only, currently the
-  error-message mapping.
+- **Vitest** (`frontend/src/**/*.test.js`): pure functions in `src/lib/`, plus
+  static guards that read source and config rather than render anything --
+  `tokenGuard.test.js` (colour classes that generate no CSS, signal yellow off
+  the field), `uiComponents.test.js` (the copied shadcn-vue rules and the
+  eager-graph boundary), `frappeUiComponents.test.js` and `icons.test.js`.
 - **Playwright** (`frontend/tests/e2e/`): `setup` logs the four fixture users
   (`employee`, `manager`, `hr`, and `it` since phase 5's routed-role queue)
   in once and stores state; `employee` and `manager` reuse it on desktop
@@ -1518,7 +1556,8 @@ routing release.
 ## Extending
 
 Adding a screen: a page in `src/pages/`, a route in `router.js`, a `NAV`
-entry in `AppShell.vue`, a whitelisted method in `api.py` if `frappe.client`
+entry in `lib/nav.js` (the rail, the tab bar and the command palette all read
+it, so a gate written there holds in all three), a whitelisted method in `api.py` if `frappe.client`
 cannot express the read within the user's permissions, a Python test for that
 method that asserts real data, and one clicked navigation in the e2e suite.
 
@@ -1893,3 +1932,173 @@ and cross-company grant, in one screen with one Save.
   files behind.
 - **Profiles.** Frontend-only templates over role and grant toggles. The
   server validates the resulting toggle set, never a profile name (KTD8).
+
+## Ease of use: search, the Home queue, the inbox and notifications (plan 2026-10-17-001)
+
+Every server change in this round is a new read on an existing scope or an
+additive key; nothing widens who may see or do anything (R5). Navigation
+(`lib/nav.js`) is under "Navigation and filters" above, and the approvals
+badge under "Portal bootstrap".
+
+### Search: one read, `portal_search(q)` (U5, KTD5)
+
+The command palette makes one server call per settled query. It never calls
+the whitelisted page endpoints, because each of those spends its own page's
+60/60s bucket and a palette keystroke would drain four of them.
+
+- **One parameter.** `q`, trimmed, 2-60 characters, LIKE-escaped
+  (`_request_search_pattern`); anything shorter answers empty groups without a
+  query. Rate-limited as `portal_search` (60 per 60s, the same bound as
+  `search_people`) in `RATE_LIMIT_POLICY`, so `preflight.check_rate_limits`
+  covers it; without the entry `rate_limit_bounds` raises `KeyError`. The
+  page endpoints keep their own buckets.
+- **Groups are skipped, never refused.** Each runs only when the bootstrap
+  flag that would draw it is true, so nothing is thrown or logged for a group
+  the caller has no right to:
+  - `people` -- for a caller `resolve_read_scope` admits (`can_see_people`):
+    People's scope and projection. Everyone else with an Employee: the
+    directory's own-company scope and projection. Neither (a Portal Admin with
+    no Employee): nobody.
+  - `requests` -- the caller's own, by subject; the employee is the session's.
+  - `inbox` -- `_is_hr() or _holds_routed_role()` with an Employee:
+    `_request_summaries_filters` with the routed roles the caller holds and
+    their own requests excluded, read with `frappe.get_list` so
+    `hr_request`'s permission query still scopes the company.
+- **Rows are allow-listed and few.** At most 5 per group, no totals, facets
+  or photos. People rows are cut to a subset of the projection they came
+  from: the directory cut has no `employee_number`, `company` or `user_id`,
+  and `email` only when HR published a `company_email`. Request rows are
+  `name, subject, status, category` -- never `hr_note` or a `correction_*`
+  field. Reports are matched in the browser from one `get_report_catalog`
+  read per palette session.
+- **One implementation per scope.** The groups read through private helpers
+  pulled out of the page endpoints, and the endpoints were refactored onto the
+  same helpers, so the colleague Directory finds and the one the palette finds
+  are one set: `_directory_scope` (`get_directory`), `_people_search_scope`
+  and `_people_search_projection` (`search_people`), `_own_requests_filters`
+  (`_requests_summary`), and U8's `_request_summaries_filters` /
+  `_request_search_pattern` (the inbox). Their existing tests stayed green
+  unchanged.
+- **A failing group** is named in `failed` (`get_dashboard`'s
+  `failed_sections` shape) and the palette says "Couldn't search people and
+  requests" beside its local matches.
+- **Cost.** At most 8 queries for an HR Manager who handles requests; the
+  groups run inside `shared_admin_scope()`, so People's scope and the inbox's
+  permission hook resolve the admin scope once. **The people match is a LIKE
+  scan, not index-backed**: `%term%` on name, employee number and work email
+  cannot use an index. That is fine at the 200-staff baseline fixture set and
+  is the thing to revisit if headcount grows by an order of magnitude; the
+  upgrade path is a prefix match or a full-text index on Employee, not a
+  cache.
+
+### Home's queue: one row per record, Decided, one owed rule (U6, KTD10-KTD12)
+
+`_get_needs_you` returns three lists, each with its "and N more" count:
+`items`/`more` (Needs you), `waiting`/`waiting_more` and `decided`/
+`decided_more`.
+
+- **One row per record (KTD10).** `_collapse_by_record` folds each list by
+  `(reference_doctype, reference_name)` *before* the sort and the slice, so
+  the sort sees each group's oldest age and `more` counts records, not logs.
+  Same kind: the first row seen (every source is read newest-first, so the
+  newest text) carries a `count` and the group's oldest age. Different kinds
+  on one record: the more urgent wins by `_URGENCY_RANK`. The row `id` is
+  `kind:record`, so the Vue key survives a new reply. A collapsed HR reply
+  reads "HR replied · 4 · <subject>", built from the reply subject the row
+  already has. The queue's SQL count is unchanged (18).
+- **Decided (KTD11).** A final rejection -- a leave submitted at Rejected, an
+  attendance request at Rejected -- is nobody's move, so it left "Waiting on
+  others" (it waits on nobody, EP-08) for the sibling `decided` list, with
+  `owner: "nobody"`. **P4-R4 is kept: decided rows never drop off by time.**
+  The list is bounded by count (`_QUEUE_LIMIT`, newest first) and
+  `decided_more` counts the rest; a recency window would drop a rejection the
+  employee never read, and the reason is the whole content of the row.
+- **One owed rule (KTD12, R19).** A request is owed by the employee when it is
+  Waiting on Employee or holds an unread message from the handling team (a
+  Notification Log whose subject starts with `HR_REPLY_SUBJECT_PREFIX`) --
+  P2-KTD6's Home rule, now also Requests' rule. An unread *status-only* log on
+  the employee's own Done or Declined request is an update: on Home it is a
+  Decided row, on Requests an unread dot in the request's Open or Closed group
+  (`_requests_summary`'s `unread_reply` against `unread`; `lib/requests.js`
+  `isOwed`). Both kinds come from one join on Notification Log and HR
+  Request, and a request that is owed never also appears under Decided.
+- **`mark_record_notifications_read(reference_doctype, reference_name)`**
+  (POST, bucket `mark_notifications_read`) marks every unread log the
+  *caller* holds about one record and returns `{cleared, unread}` so the badge
+  moves in the same interaction. It asks nothing about who owns the record --
+  a manager or handler can hold logs about a record that is not theirs -- and
+  the scope is `for_user` alone, in the filter of the one write: another
+  user's logs are never read or touched, and an unknown record clears
+  nothing. `mark_my_request_read` could not serve here: it refuses anyone but
+  the request's employee. Home and Notifications both call it.
+
+### Notifications: `get_my_notifications` (U10)
+
+`get_my_notifications(unread_only=0, limit=None)` returns the caller's logs
+newest first plus the caller's `unread` total, 50 by default and at most 200.
+It exists for two reasons. Frappe's `get_notification_logs` takes only a
+count, so an Unread view over it was a client filter on the newest 50 rows
+(60 unread showed as however many were in that page); `unread_only` here is a
+server filter. And `get_notification_logs` carries a 60s private HTTP cache
+on GET, which handed a reload the pre-mark-read answer; this read is
+uncached. `for_user = session user` in the filter is the boundary:
+`frappe.get_all` skips the doctype's permission query. Grouping by record and
+the Today/Yesterday/This week/Older buckets are client-side
+(`lib/notificationGroups.js`).
+
+### Notification copy: `helixhr_date` and `helixhr_state_words` (U12)
+
+The fixture Notifications' subjects and messages format dates and state
+words through two Jinja methods registered in `hooks.jinja`
+(`helixhr.events.helixhr_date`, `helixhr.events.helixhr_state_words`):
+"Your timesheet for Mar 8 is waiting for your manager", not an ISO date and
+"Pending Approval" (ED-03, EP-06). They are methods rather than inline Jinja
+because `Notification.subject` is a 140-character Data column and the inline
+mapping overflowed it. `helixhr_date` is "Mar 8", with the year only outside
+the current year, whatever the site's date format; `helixhr_state_words`
+maps a leave status or timesheet `workflow_state` to the status-badge word,
+with a leave Rejected at docstatus 0 reading "Sent back" and a submitted one
+"Rejected". Both are pure formatters that read nothing beyond the document
+they are handed. Attendance request subjects, built in `events.py`, use the
+same date format. The fixture is the source of the wording; patch
+`v1_0/apply_notification_copy` copies its subject and message onto existing
+rows (idempotent, never creates a missing Notification). Deploying it changes
+live bell and email subjects.
+
+### Team inbox triage: `get_request_work` additions (U8)
+
+All additive; an older client ignores them.
+
+- **`q`** matches subject or requester name (`_request_search_or_filters`).
+  The name half is one bounded Employee read (at most 200) inside the caller's
+  requester scope -- the same branches as `hr_request`'s permission query --
+  turned into `employee in (...)` on the same permission-aware `get_list` the
+  page and its count already run, so a name match can only narrow what the
+  caller could already list. **`category`** names one category. Both narrow
+  the page and `total`; `action_count`, the tab's badge, stays unfiltered.
+- **`sort=sla`** puts rows past their category's SLA first, each half oldest
+  first. `get_list` cannot order by a per-category date expression, so the
+  count read (which already lists every matching row) carries `category`,
+  `creation` and `status`, the rows are ordered in Python by the same
+  predicate the row's pill uses (`_request_sla_overdue`), and the page is
+  read by name -- no added query.
+- **Rows carry `token_modified`, `sla_over_days` and `actions`.**
+  `_request_row_actions` derives each row's actions from the `HR Request
+  Handling` transitions (state, held role, self-approval) with no query per
+  row; "Assign to me" shows only when Pick up is among them and sends the
+  row's token, so a stale pick-up is refused. `act_on_approval` re-runs
+  `_allowed_actions` on every click: a row button can be refused, never
+  widened.
+- `get_my_requests` gains `q` (subject) and each row `unread_reply` (KTD12).
+
+### Timesheet: `get_my_week.non_working` (U9, KTD9)
+
+`non_working` is `{date: bool}` for the week's seven days: true on a holiday,
+approved leave, or a day outside joining..relieving. It is built from
+`_working_days_index` clamped to the employment span exactly as
+`get_my_month` clamps it -- the same index the approval flags (`hours_off`,
+`missing_day`) read, so a copied week never raises those flags. A half-day
+leave counts as non-working for that reason; the employee adds the half day
+by hand. "Copy last week" (`lib/copyWeek.js`) skips those days and any row
+whose project or task is no longer in `get_my_projects`, and says what it
+skipped.
