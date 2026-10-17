@@ -372,9 +372,12 @@ test.describe('command palette loading', () => {
   // Review fix: a failed chunk (a flaky network, or a deploy that rotated
   // the hashed names) is retried once, and a second failure leaves Ctrl-K
   // working rather than swallowed by a palette that never mounted. The
-  // retry carries a query string (Chromium caches a failed import), which
-  // the route pattern matches too.
-  test('a palette chunk that fails once is retried, and Ctrl-K opens it', async ({ page }) => {
+  // retry carries a query string (browsers cache a failed import), which
+  // the route pattern matches too. WebKit's import error names no URL, so it
+  // has no fresh URL to ask for: there the chunk returns only with a reload,
+  // and the shell says so instead of swallowing Ctrl-K (AppShell.vue `lazy`).
+  test('a palette chunk that fails once is retried, and Ctrl-K opens it', async ({ page, browserName }) => {
+    test.skip(browserName === 'webkit', "WebKit's import error names no URL to retry; the next test covers its path")
     let aborted = 0
     await page.route(/\/CommandPalette-[\w-]{8}\.js(\?.*)?$/, (route) => {
       if (aborted < 1) {
@@ -392,7 +395,7 @@ test.describe('command palette loading', () => {
     expect(aborted).toBe(1)
   })
 
-  test('after the palette chunk fails twice, a later Ctrl-K loads it again', async ({ page }) => {
+  test('after the palette chunk fails twice, a later Ctrl-K loads it again', async ({ page, browserName }) => {
     let aborted = 0
     let failing = true
     await page.route(/\/CommandPalette-[\w-]{8}\.js(\?.*)?$/, (route) => {
@@ -408,11 +411,22 @@ test.describe('command palette loading', () => {
 
     const palette = page.getByRole('dialog', { name: 'Search' })
     await page.keyboard.press('Control+k')
-    await expect.poll(() => aborted).toBe(2)
-    await page.waitForLoadState('networkidle')
+    // WebKit repeats its remembered failure without a second request.
+    await expect.poll(() => aborted).toBe(browserName === 'webkit' ? 1 : 2)
+    await expect(page.getByTestId('toast').getByText("Search didn't load.")).toBeVisible()
     await expect(palette).toHaveCount(0)
 
     failing = false
+    if (browserName === 'webkit') {
+      // Only a reload brings the chunk back here, which the message says. A
+      // reload is not asserted: WebKit reuses a load Playwright blocked a
+      // moment earlier, which no real network failure does. What is pinned is
+      // that Ctrl-K is not wedged behind a palette that never mounted.
+      await page.keyboard.press('Control+k')
+      await expect(palette).toHaveCount(0)
+      await expect(page.getByTestId('toast').getByText("Search didn't load.").first()).toBeVisible()
+      return
+    }
     await page.keyboard.press('Control+k')
     await expect(palette).toBeVisible()
   })

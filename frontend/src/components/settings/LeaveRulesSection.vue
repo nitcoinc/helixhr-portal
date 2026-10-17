@@ -8,6 +8,11 @@ import { createResource, FormControl, Button } from 'frappe-ui'
 // own validate()), so this form is only the surface.
 const rules = createResource({ url: 'helixhr.api.get_leave_rules', auto: true })
 const form = reactive({ backdated_grace_days: 1, backdated_exempt_role: '' })
+// The form stays locked until the saved rule arrives: the watch below copies
+// it in, and a value typed before then would be overwritten and saved back
+// unchanged (CI caught exactly that). A failed load unlocks it with the
+// defaults, as before.
+const awaitingRules = computed(() => !rules.data && !rules.error)
 const formError = ref('')
 const saved = ref(false)
 
@@ -82,6 +87,7 @@ async function submit() {
         v-model="form.backdated_grace_days"
         type="number"
         label="Working days back"
+        :disabled="awaitingRules"
         description="0 to 365. 0 means no backdating at all."
       />
       <div class="space-y-1.5">
@@ -97,6 +103,7 @@ async function submit() {
           id="settings-leave-rules-role"
           v-model="form.backdated_exempt_role"
           data-testid="settings-leave-rules-role"
+          :disabled="awaitingRules"
           class="block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
         >
           <option value="">
@@ -132,6 +139,7 @@ async function submit() {
           variant="solid"
           theme="blue"
           :loading="save.loading"
+          :disabled="awaitingRules"
           @click="submit"
         >
           Save

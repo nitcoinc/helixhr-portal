@@ -220,6 +220,30 @@ test('U2: HR edits the backdated leave rule and sees it after a reload', async (
   }
 })
 
+// CI run 38938677486: the test above typed into the field while the saved
+// rule was still loading, the answer overwrote the typed value, and Save
+// sent it back unchanged. Held open here, so the order is not left to timing.
+test('the Leave rules form stays locked until the saved rule has loaded', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'the Leave rules tab is HR-only')
+
+  let release: () => void = () => {}
+  const held = new Promise<void>((resolve) => (release = resolve))
+  await page.route('**/api/method/helixhr.api.get_leave_rules', async (route) => {
+    await held
+    await route.continue()
+  })
+
+  await page.goto('/helixhr/settings')
+  await page.getByTestId('settings-tab-leave-rules').click()
+  const section = page.getByTestId('settings-leave-rules')
+  await expect(page.getByLabel('Working days back')).toBeDisabled()
+  await expect(section.getByRole('button', { name: 'Save' })).toBeDisabled()
+
+  release()
+  await expect(page.getByLabel('Working days back')).toBeEnabled()
+  await expect(section.getByRole('button', { name: 'Save' })).toBeEnabled()
+})
+
 test('U3: Report access and People & access are Portal Admin only', async ({ page }, testInfo) => {
   if (testInfo.project.name === 'portal-admin') {
     await page.goto('/helixhr/settings')

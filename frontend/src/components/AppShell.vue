@@ -10,7 +10,7 @@ import { watchDialogs, unwatchDialogs } from '@/lib/dialogA11y'
 import { allowedNav, askHrTarget, navTarget, tabBar } from '@/lib/nav'
 import { defaultCollapsed, groupNav, railGroups, readCollapsed, writeCollapsed } from '@/lib/navGroups'
 import { approvalsLabel } from '@/lib/approvalsCount'
-import { toasts } from '@/lib/notify'
+import { notify, toasts } from '@/lib/notify'
 
 // Plan 2026-10-17-001 U14 (KTD4, R4). The toast UI is reka-ui's Toast, about
 // 18KB, so it never rides in the eager chunk: it is fetched on the first idle
@@ -20,13 +20,15 @@ import { toasts } from '@/lib/notify'
 // names the chunk `Toaster-<hash>.js`, which hardening.spec.ts looks for.
 //
 // A lazy chunk can fail to load (a flaky connection, or a deploy that rotated
-// the hashed names). Chromium remembers a failed dynamic import for the life
+// the hashed names). Browsers remember a failed dynamic import for the life
 // of the page, so asking for the same URL again fails without a request: the
 // next attempt asks for the URL the error names with a fresh query string,
 // which is a new module. The first failure retries at once; after that the
 // shell forgets it asked, so the next message (or Ctrl-K) tries again instead
-// of leaving a dead wrapper mounted. An error that names no URL (WebKit's)
-// retries the plain import.
+// of leaving a dead wrapper mounted. WebKit's error names no URL, so there
+// the retry can only repeat the remembered failure and the chunk comes back
+// with a reload -- which the palette's give-up says (CI's mobile WebKit
+// project pins both paths in hardening.spec.ts).
 function lazy(load, onGiveUp) {
   let attempt = 0
   let fresh = null
@@ -77,6 +79,7 @@ const CommandPalette = lazy(
   () => {
     paletteOpen.value = false
     paletteWanted.value = false
+    notify.error("Search didn't load.", { detail: 'Reload the page to try again.' })
   },
 )
 const paletteWanted = ref(false)
