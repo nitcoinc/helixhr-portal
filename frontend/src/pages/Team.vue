@@ -608,16 +608,18 @@ const quietWeek = computed(() => !noReports.value && !hasLeave.value)
         class="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-ink-gray-6"
         aria-label="Legend"
       >
+        <!-- MH-20: the pastel fills measure ~1.2:1 on paper; each swatch carries
+             its own ink edge (>= 3:1), as Attendance's legend does (ED-16). -->
         <span class="inline-flex items-center gap-1.5">
           <span
-            class="h-3 w-6 rounded bg-surface-green-2"
+            class="h-3 w-6 rounded border bg-surface-green-2 border-[color:var(--ink-green-3)]"
             aria-hidden="true"
           />
           Approved
         </span>
         <span class="inline-flex items-center gap-1.5">
           <span
-            class="h-3 w-6 rounded bg-surface-amber-1"
+            class="h-3 w-6 rounded border bg-surface-amber-1 border-[color:var(--ink-amber-3)]"
             aria-hidden="true"
           />
           Waiting for a decision
@@ -625,7 +627,7 @@ const quietWeek = computed(() => !noReports.value && !hasLeave.value)
         <!-- The phone has no grid to dim, so this one is desktop's. -->
         <span class="hidden items-center gap-1.5 lg:inline-flex">
           <span
-            class="h-3 w-6 rounded bg-surface-gray-3"
+            class="h-3 w-6 rounded border bg-surface-gray-3 border-[color:var(--ink-gray-5)]"
             aria-hidden="true"
           />
           Weekend or holiday

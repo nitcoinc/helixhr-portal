@@ -2,6 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { Button, createResource } from 'frappe-ui'
 import { call } from '@/lib/api'
+import Icon from '@/components/Icon.vue'
 
 // Plan 2026-10-04-001 U6 (R20, R21, resolved decision 14): who may run and
 // export each catalog report. HR Manager and Report Manager always may; HR
@@ -277,9 +278,20 @@ async function save() {
         :data-testid="`access-family-${group.key}`"
         @toggle="openFamilies[group.key] = $event.target.open"
       >
-        <summary class="flex min-h-11 cursor-pointer items-center gap-1 px-3 py-2 text-sm">
-          <span class="font-medium text-ink-gray-9">{{ group.label }}</span>
-          <span class="text-ink-gray-6">· {{ familySummary(group) }}</span>
+        <!-- A flex summary loses the native disclosure marker, so the
+             chevron says it opens (the My projects "Other projects"
+             disclosure); the count runs on as text so a long one wraps
+             under the family name, not beside it. -->
+        <summary class="flex min-h-11 cursor-pointer list-none items-center gap-2 px-3 py-2 text-sm [&::-webkit-details-marker]:hidden">
+          <Icon
+            name="chevronRight"
+            class="shrink-0 text-ink-gray-5 transition-transform duration-200"
+            :class="openFamilies[group.key] ? 'rotate-90' : ''"
+          />
+          <span class="min-w-0">
+            <span class="font-medium text-ink-gray-9">{{ group.label }}</span>
+            <span class="text-ink-gray-6"> · {{ familySummary(group) }}</span>
+          </span>
         </summary>
         <div class="border-t border-outline-gray-1 px-3 pb-1">
           <p class="label pt-2 text-ink-gray-6">

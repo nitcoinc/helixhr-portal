@@ -199,7 +199,10 @@ onBeforeUnmount(() => {
   >
     <template #body-content>
       <Command data-testid="command-palette">
-        <div class="flex items-center gap-2 border-b border-outline-gray-2 px-1">
+        <!-- The row is the field: the input draws no box of its own (the
+             forms reset gave it one that framed the text but not the
+             glyph), and focus darkens the row's rule instead. -->
+        <div class="flex items-center gap-2 border-b border-outline-gray-2 px-1 focus-within:border-heading">
           <Icon
             name="search"
             size="h-4 w-4"
@@ -215,7 +218,7 @@ onBeforeUnmount(() => {
             autocomplete="off"
             enterkeyhint="go"
             data-testid="palette-input"
-            class="h-11 w-full bg-transparent text-base text-ink-gray-9 outline-none placeholder:text-ink-gray-5"
+            class="h-11 w-full border-0 bg-transparent px-1 text-base text-ink-gray-9 outline-none placeholder:text-ink-gray-5 focus:ring-0"
           />
         </div>
         <CommandList

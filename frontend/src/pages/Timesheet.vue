@@ -627,9 +627,12 @@ const savedLabel = computed(() => {
               v-if="selected"
               class="absolute inset-x-0 top-0 h-0.5 bg-signal"
             />
+            <!-- blue-300 reads 5.03:1 on the field but 3.19:1 on the selected
+                 day's white/15 lift, so the selected day steps up one shade
+                 (blue-200 there: 4.56:1). -->
             <span
               class="text-[11px] font-medium uppercase tracking-wide"
-              :class="day.isWeekend ? 'text-blue-300' : 'text-blue-200'"
+              :class="day.isWeekend && !selected ? 'text-blue-300' : 'text-blue-200'"
             >
               {{ day.weekday }}
             </span>
@@ -643,7 +646,7 @@ const savedLabel = computed(() => {
             </span>
             <span
               class="tabular text-[11px]"
-              :class="day.total ? 'text-blue-100' : 'text-blue-300'"
+              :class="day.total ? 'text-blue-100' : selected ? 'text-blue-200' : 'text-blue-300'"
             >
               {{ day.total ? `${day.total}h` : '0h' }}
             </span>
@@ -655,7 +658,9 @@ const savedLabel = computed(() => {
             <span class="tabular font-semibold text-white">{{ weekTotal }}</span>
             of {{ fullWeekHours }} hours this week
           </p>
+          <!-- Only away from this week: on it, the control would do nothing. -->
           <button
+            v-if="monday !== mondayOf(today())"
             class="cursor-pointer text-sm font-medium text-signal hover:underline"
             type="button"
             @click="thisWeek"

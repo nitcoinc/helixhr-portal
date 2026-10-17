@@ -100,7 +100,7 @@ function meta(row) {
   else if (row.picked_up_on) {
     // Plan 2026-10-04-002 R4: the picker is named; a team-resolved request
     // without a resolvable picker falls back to the team label.
-    parts.push(`picked up ${row.picked_up_by_name ? `by ${row.picked_up_by_name} ` : ''}${formatDate(row.picked_up_on)}`)
+    parts.push(`picked up ${row.picked_up_by_name ? `by ${row.picked_up_by_name} ` : ''}on ${formatDate(row.picked_up_on)}`)
   }
   if (row.attachments) {
     parts.push(`${row.attachments} attachment${row.attachments === 1 ? '' : 's'}`)

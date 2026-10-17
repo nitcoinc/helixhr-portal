@@ -27,7 +27,7 @@ const roleActions = computed(() =>
       show: session.canHandleRequests,
     },
     { label: 'Report access', to: '/settings/report-access', icon: 'reports', show: session.canAdminPortal },
-    { label: 'Email templates', to: '/email-templates', icon: 'notifications', show: session.canAdminPortal },
+    { label: 'Email templates', to: '/email-templates', icon: 'mail', show: session.canAdminPortal },
   ].filter((action) => action.show),
 )
 const rows = computed(() => [ACTIONS, roleActions.value].filter((row) => row.length))

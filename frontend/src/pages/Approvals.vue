@@ -1361,16 +1361,22 @@ function onQueueKey(event) {
                             v-if="section.key === 'normal' && canBulkSelect"
                             type="button"
                             class="flex w-11 shrink-0 cursor-pointer items-center justify-center border-r border-outline-gray-2"
-                            :class="selectable(row) ? '' : 'cursor-default opacity-0'"
+                            :class="selectable(row) ? '' : 'cursor-default'"
                             :aria-label="isSelected(row) ? `Unselect ${rowSummary(row)}` : `Select ${rowSummary(row)}`"
                             :aria-pressed="isSelected(row)"
                             :data-testid="`bulk-check-${row.kind}`"
                             :tabindex="selectable(row) ? 0 : -1"
                             @click.stop="toggleBulk(row)"
                           >
+                            <!-- A row the batch can't take keeps the column and its
+                                 rule, so every avatar in the lane lines up; only
+                                 the box is hidden. -->
                             <span
                               class="flex h-5 w-5 items-center justify-center rounded border"
-                              :class="isSelected(row) ? 'border-heading bg-heading text-white' : 'border-outline-gray-3'"
+                              :class="[
+                                isSelected(row) ? 'border-heading bg-heading text-white' : 'border-outline-gray-3',
+                                selectable(row) ? '' : 'invisible',
+                              ]"
                               aria-hidden="true"
                             >
                               <Icon
@@ -1410,7 +1416,10 @@ function onQueueKey(event) {
                                   data-testid="hr-chip"
                                 >HR</span>
                               </span>
-                              <span class="block truncate text-sm text-ink-gray-6">
+                              <!-- MH-02: on a phone the dates are why the row is
+                                   read, so the summary wraps there rather than
+                                   cutting them off; wider screens have room. -->
+                              <span class="block break-words text-sm text-ink-gray-6 sm:truncate">
                                 {{ rowSummary(row) }}
                               </span>
                               <span

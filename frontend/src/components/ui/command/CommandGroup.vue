@@ -44,9 +44,11 @@ onUnmounted(() => {
     "
     :hidden="isRender ? undefined : true"
   >
+    <!-- Adapted: the portal's one grouping device is .label (design-system.md),
+         so palette groups read like every other group heading. -->
     <ListboxGroupLabel
       v-if="heading"
-      class="px-2 py-1.5 text-xs font-medium text-muted-foreground"
+      class="label px-2 py-1.5"
     >
       {{ heading }}
     </ListboxGroupLabel>

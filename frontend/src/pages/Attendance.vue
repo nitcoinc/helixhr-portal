@@ -411,8 +411,10 @@ const LEGEND = [
           </button>
           <div class="flex items-center gap-2">
             <span class="font-medium text-ink-gray-9">{{ monthLabel }}</span>
-            <!-- Navigation, so ghost (U14, EP-13), not a grey pill. -->
+            <!-- Navigation, so ghost (U14, EP-13), not a grey pill; and only
+                 away from this month, where it would do nothing. -->
             <Button
+              v-if="year !== startYear || month !== startMonth - 1"
               variant="ghost"
               @click="goToday"
             >

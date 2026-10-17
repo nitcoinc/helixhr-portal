@@ -248,9 +248,17 @@ const today = new Intl.DateTimeFormat(undefined, {
         <p class="text-sm text-ink-gray-6">
           {{ today }}
         </p>
+        <!-- The identity line belongs to the name above it; the check-in chip
+             is an action and sits after both. -->
+        <p
+          v-if="identityLine"
+          class="w-full text-sm text-ink-gray-5"
+        >
+          {{ identityLine }}
+        </p>
         <div
           v-if="session.mobileCheckin"
-          class="flex w-full flex-wrap items-center gap-x-3 gap-y-1"
+          class="mt-2 flex w-full flex-wrap items-center gap-x-3 gap-y-1"
         >
           <button
             type="button"
@@ -273,12 +281,6 @@ const today = new Intl.DateTimeFormat(undefined, {
             {{ checkinNote }}
           </p>
         </div>
-        <p
-          v-if="identityLine"
-          class="w-full text-sm text-ink-gray-5"
-        >
-          {{ identityLine }}
-        </p>
       </header>
 
       <WeekSpine

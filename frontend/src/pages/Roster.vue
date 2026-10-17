@@ -586,16 +586,18 @@ const scopeLine = computed(() => {
         class="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-ink-gray-6"
         aria-label="Legend"
       >
+        <!-- MH-20: the pastel fills measure ~1.2:1 on paper; each swatch carries
+             its own ink edge (>= 3:1), as Attendance's legend does (ED-16). -->
         <span class="hidden items-center gap-1.5 lg:inline-flex">
           <span
-            class="h-3 w-6 rounded bg-surface-green-2"
+            class="h-3 w-6 rounded border bg-surface-green-2 border-[color:var(--ink-green-3)]"
             aria-hidden="true"
           />
           On leave
         </span>
         <span class="hidden items-center gap-1.5 lg:inline-flex">
           <span
-            class="h-3 w-6 rounded bg-surface-gray-3"
+            class="h-3 w-6 rounded border bg-surface-gray-3 border-[color:var(--ink-gray-5)]"
             aria-hidden="true"
           />
           Weekend or holiday
