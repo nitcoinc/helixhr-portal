@@ -307,7 +307,19 @@ initial unread count, and the calendar contract. It replaced a
 direct reports.
 
 **It is not authorization.** `can_approve` decides whether the Approvals nav
-item is drawn and nothing else. Every domain method still resolves
+item is drawn and nothing else.
+
+**The approvals badge (plan 2026-10-17-001 KTD7, KTD8).** `stable_approver`
+(reports, or `_is_hr`) swaps Approvals into the phone tab bar; it never
+depends on the queue, so no tab comes and goes. `approvals_count` and
+`approvals_count_capped` come from `_approval_summaries(...,
+include_requests=False, count_only=True)`: every collector keeps its reads,
+its Python subtractions and its bound and skips the enrichment, so the badge
+is the Approvals page's own `total` / `total_is_capped`. The browser never
+polls it: `lib/approvalsCount.js` is seeded here, set whenever Approvals
+loads, and decremented after a decision. The collectors' scope reads
+(`_line_manager_filter`, `_hr_queue_employee_filter`) run once per queue
+read inside `_shared_queue_reads`. Every domain method still resolves
 `frappe.session.user` itself and is still refused by Frappe permissions —
 see "Security model" above.
 
@@ -1369,9 +1381,16 @@ padding). Whether to suppress or accept that is not settled.
 ### Navigation and filters
 
 The sidebar is grouped: pinned Home/Notifications, My work, Pay & policies,
-People & team, HR and Admin, pinned Profile. HR and Admin are collapsible and
-**collapsed by default** on first visit; state is per device in localStorage,
-and the current route's section opens for that view only. Filter chips live in
+People & team, HR and Admin, pinned Profile. `lib/nav.js` holds the
+destinations and the one gate predicate (`allowedNav`), shared by the rail,
+the tab bar and the command palette. Since plan 2026-10-17-001 U4 the
+session's own work group (HR; Admin for a Portal Admin who is not HR) sits
+directly under the pinned items and starts open, every other collapsible
+group starts collapsed (Pay & policies included, for those sessions only),
+and a remembered state wins. State is per user and per device in
+localStorage (`helixhr.nav.collapsed:<user>`, KTD13: cleared on sign-out,
+other users' keys purged on bootstrap by `lib/viewerStorage.js`), and the
+current route's section opens for that view only. Filter chips live in
 the URL: Approvals `?kind=&category=`, Requests `?type=`.
 
 ## `helixhr/api.py` is one module on purpose

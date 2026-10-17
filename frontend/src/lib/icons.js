@@ -109,6 +109,34 @@ export const icons = {
   search: ['M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z', 'm21 21-4.3-4.3'],
   // U14: the toast's dismiss control (Lucide `x`).
   close: ['M18 6 6 18', 'm6 6 12 12'],
+  // Plan 2026-10-17-001 U4 (MH-21, AI-23, EP-25): one glyph per destination.
+  // Lucide's `briefcase` (My projects; Projects keeps the folder), `users-round`
+  // (Team; Directory keeps `users`), `calendar-clock` (Roster; Timesheet keeps
+  // the clock) and `mail` (Email templates; Notifications keeps the bell).
+  // Circles and rects are written as paths, because Icon.vue draws paths.
+  briefcase: [
+    'M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16',
+    'M4 6h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z',
+  ],
+  usersRound: [
+    'M18 21a8 8 0 0 0-16 0',
+    'M10 3a5 5 0 1 0 0 10 5 5 0 0 0 0-10z',
+    'M22 20c0-3.37-2-6.5-4-8a5 5 0 0 0-.45-8.3',
+  ],
+  calendarClock: [
+    'M21 7.5V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3.5',
+    'M16 2v4',
+    'M8 2v4',
+    'M3 10h5',
+    'M17.5 17.5 16 16.3V14',
+    'M16 10a6 6 0 1 0 0 12 6 6 0 0 0 0-12z',
+  ],
+  mail: [
+    'M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z',
+    'm22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7',
+  ],
+  // "Ask HR" (R10): Lucide `message-circle-question`.
+  askHr: ['M7.9 20A9 9 0 1 0 4 16.1L2 22z', 'M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3', 'M12 17h.01'],
 }
 
 // Every kind `helixhr.api._get_needs_you` emits, and the glyph its row draws.

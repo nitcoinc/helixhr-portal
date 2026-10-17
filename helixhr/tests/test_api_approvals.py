@@ -2858,3 +2858,290 @@ class TestBulkApproval(IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			self._call(items)
 		self.assertEqual(frappe.db.count("Timesheet", {"workflow_state": "Approved"}), before)
+
+
+class TestBootstrapApprovalsCount(IntegrationTestCase):
+	"""Plan 2026-10-17-001 U4 (KTD7, KTD8). The bootstrap seeds the
+	Approvals badge with a count-only run of the page's own read, and says
+	whether the caller is a *stable* approver (reports, or HR) -- the flag
+	that swaps Approvals into the phone tab bar. The badge must say what the
+	page says, for every identity, and cost the bootstrap a bounded number of
+	reads."""
+
+	LONE_APPROVER = "boot-count-approver@helixhr.test"
+	HR_USER = "boot-count-hr-user@helixhr.test"
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		clear_open_leave(self.employee_name)
+		frappe.db.set_value("Employee", self.employee_name, "reports_to", self.manager_name)
+		frappe.db.set_value("Employee", self.employee_name, "leave_approver", MANAGER_USER)
+		ensure_leave_approver_role(MANAGER_USER)
+		self.company = frappe.db.get_value("Employee", self.employee_name, "company")
+		ensure_holiday_list_assignment(self.company)
+		digest = int(hashlib.md5(self.id().encode()).hexdigest(), 16)
+		self.leave_date = add_days(today(), 120 + digest % 100)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		frappe.db.set_value("Employee", self.employee_name, "leave_approver", MANAGER_USER)
+
+	# helpers
+
+	def _as(self, user, fn, *args, **kwargs):
+		frappe.set_user(user)
+		try:
+			return fn(*args, **kwargs)
+		finally:
+			frappe.set_user("Administrator")
+
+	def _pending_leave(self, approver=MANAGER_USER):
+		ensure_leave_allocation(self.employee_name, "Casual Leave", 5)
+		frappe.set_user(EMPLOYEE_USER)
+		doc = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": self.employee_name,
+				"leave_type": "Casual Leave",
+				"from_date": str(self.leave_date),
+				"to_date": str(self.leave_date),
+				"description": "Badge count",
+				"leave_approver": approver,
+			}
+		).insert()
+		frappe.set_user("Administrator")
+		self.addCleanup(frappe.delete_doc, "Leave Application", doc.name, force=True, ignore_permissions=True)
+		return doc.name
+
+	def _pending_timesheet(self, state="Pending Approval", share_with=MANAGER_USER):
+		from helixhr.tests.test_pending_by_approver import make_timesheet
+
+		name = make_timesheet(self, self.employee_name, 3, state=state)
+		if share_with:
+			frappe.share.add_docshare(
+				"Timesheet", name, share_with, write=1, submit=1, flags={"ignore_share_permission": True}
+			)
+			self.addCleanup(frappe.db.delete, "DocShare", {"share_doctype": "Timesheet", "share_name": name})
+		return name
+
+	def _assert_badge_matches_page(self, user):
+		boot = self._as(user, get_portal_bootstrap)
+		page = self._as(user, get_my_approvals)
+		self.assertEqual(boot["approvals_count"], page["total"])
+		self.assertEqual(boot["approvals_count_capped"], page["total_is_capped"])
+		return boot, page
+
+	def _fake_applications(self, count):
+		"""HRMS's own answer for a manager with `count` pending leaves --
+		the bound under test is ours, not the fixture's ability to book 150
+		non-overlapping leaves."""
+		return [
+			{
+				"name": f"BOOT-COUNT-LEAVE-{index:04d}",
+				"employee": self.employee_name,
+				"employee_name": "Badge Count",
+				"leave_type": "Casual Leave",
+				"from_date": getdate(self.leave_date),
+				"to_date": getdate(self.leave_date),
+				"total_leave_days": 1,
+				"status": "Open",
+				"creation": now_datetime(),
+				"posting_date": getdate(today()),
+			}
+			for index in range(count)
+		]
+
+	# the badge says what the page says
+
+	def test_a_managers_badge_is_the_approvals_total(self):
+		leave = self._pending_leave()
+		timesheet = self._pending_timesheet()
+		boot, page = self._assert_badge_matches_page(MANAGER_USER)
+		self.assertTrue({leave, timesheet} <= {row["name"] for row in page["pending"]})
+		self.assertTrue(boot["stable_approver"])
+		self.assertTrue(boot["can_approve"])
+
+	def test_an_hr_managers_badge_is_the_approvals_total(self):
+		_hr_employee, hr_user = make_test_hr_manager_employee()
+		handed_over = self._pending_timesheet(state="Pending HR", share_with=None)
+		boot, page = self._assert_badge_matches_page(hr_user)
+		self.assertIn(handed_over, [row["name"] for row in page["pending"]])
+		self.assertTrue(boot["stable_approver"])
+
+	def test_a_leave_approver_with_no_reports_is_counted_but_not_stable(self):
+		"""KTD7: the badge follows the queue; the tab bar does not. Two hard
+		loads with different queue states give the same `stable_approver`."""
+		approver_employee = make_test_user(self.LONE_APPROVER, self.company)
+		self.assertEqual(frappe.db.count("Employee", {"reports_to": approver_employee, "status": "Active"}), 0)
+		ensure_leave_approver_role(self.LONE_APPROVER)
+		frappe.db.set_value("Employee", self.employee_name, "leave_approver", self.LONE_APPROVER)
+		leave = self._pending_leave(approver=self.LONE_APPROVER)
+
+		boot, page = self._assert_badge_matches_page(self.LONE_APPROVER)
+		self.assertGreaterEqual(boot["approvals_count"], 1)
+		self.assertIn(leave, [row["name"] for row in page["pending"]])
+		self.assertTrue(boot["can_approve"])
+		self.assertFalse(boot["stable_approver"])
+
+		frappe.delete_doc("Leave Application", leave, force=True, ignore_permissions=True)
+		boot = self._as(self.LONE_APPROVER, get_portal_bootstrap)
+		self.assertEqual(boot["approvals_count"], 0)
+		self.assertFalse(boot["stable_approver"])
+
+	def test_capped_matches_the_page_below_and_at_the_leave_bound(self):
+		from unittest.mock import patch
+
+		# 120 pending leaves sit under the 150 bound: an exact count.
+		with patch("hrms.api.get_leave_applications", return_value=self._fake_applications(120)):
+			boot, _page = self._assert_badge_matches_page(MANAGER_USER)
+		self.assertGreaterEqual(boot["approvals_count"], 120)
+		self.assertFalse(boot["approvals_count_capped"])
+
+		# A full collector makes the total a floor, on both surfaces.
+		with patch("hrms.api.get_leave_applications", return_value=self._fake_applications(150)):
+			boot, _page = self._assert_badge_matches_page(MANAGER_USER)
+		self.assertTrue(boot["approvals_count_capped"])
+
+	# who gets no badge
+
+	def test_oversight_only_hr_user_and_it_count_nothing(self):
+		from helixhr.tests.utils import _make_role_user, make_test_it_user
+
+		_hr, hr_user = _make_role_user(self.HR_USER, "HR User", self.company, status="Active")
+		_it, it_user = make_test_it_user()
+		for user in (hr_user, it_user):
+			with self.subTest(user=user):
+				boot = self._as(user, get_portal_bootstrap)
+				self.assertEqual(boot["approvals_count"], 0)
+				self.assertFalse(boot["approvals_count_capped"])
+				self.assertFalse(boot["stable_approver"])
+		self.assertTrue(self._as(hr_user, get_portal_bootstrap)["can_oversee_timesheets"])
+
+	def test_a_desk_only_session_gets_the_keys_as_zero(self):
+		user = ensure_hr_manager_user()
+		boot = self._as(user, get_portal_bootstrap)
+		self.assertFalse(boot["employee"])
+		self.assertEqual(boot["approvals_count"], 0)
+		self.assertFalse(boot["approvals_count_capped"])
+		self.assertFalse(boot["stable_approver"])
+
+	def test_a_failing_count_still_returns_the_bootstrap(self):
+		from unittest.mock import patch
+
+		from helixhr import api
+
+		with patch.object(api, "_approval_summaries", side_effect=RuntimeError("collector down")):
+			boot = self._as(MANAGER_USER, get_portal_bootstrap)
+		self.assertEqual(boot["approvals_count"], 0)
+		self.assertFalse(boot["approvals_count_capped"])
+		# The stable half does not depend on the read that failed.
+		self.assertTrue(boot["stable_approver"])
+		self.assertTrue(boot["can_approve"])
+
+	# one code path
+
+	def test_count_only_keeps_every_collectors_rows(self):
+		from helixhr import api
+
+		self._pending_leave()
+		self._pending_timesheet()
+		hr_employee, hr_user = make_test_hr_manager_employee()
+		self._pending_timesheet(state="Pending HR", share_with=None)
+
+		def names(user, collect, employee):
+			today_ = api._as_date(api.user_today())
+			full = self._as(user, collect, employee, today_)
+			bare = self._as(user, collect, employee, today_, count_only=True)
+			self.assertEqual(len(full), len(bare))
+			return {row["name"] for row in full}, {row["name"] for row in bare}
+
+		seen = 0
+		for collect, _bound in api._APPROVAL_SUMMARY_COLLECTORS:
+			with self.subTest(collector=collect.__name__):
+				full, bare = names(MANAGER_USER, collect, self.manager_name)
+				self.assertEqual(full, bare)
+				seen += len(full)
+		for doctype, kind in api._APPROVAL_KINDS.items():
+			if doctype == "HR Request":
+				continue
+			with self.subTest(hr_queue=doctype):
+				full, bare = names(hr_user, kind["hr_queue"], hr_employee)
+				self.assertEqual(full, bare)
+				seen += len(full)
+		self.assertGreaterEqual(seen, 3, "the parity check must compare real rows")
+
+	# the read budget
+
+	def _bootstrap_queries(self, user):
+		"""SQL statements one warm bootstrap runs for `user`."""
+		from unittest.mock import patch
+
+		frappe.set_user(user)
+		try:
+			get_portal_bootstrap()  # warm the meta and role caches
+			count = {"n": 0}
+			real_sql = frappe.db.sql
+
+			def counting_sql(*args, **kwargs):
+				count["n"] += 1
+				return real_sql(*args, **kwargs)
+
+			with patch.object(frappe.db, "sql", side_effect=counting_sql):
+				get_portal_bootstrap()
+			return count["n"]
+		finally:
+			frappe.set_user("Administrator")
+
+	# Measured in exactly this scenario against `main` (aaf1840), on test_site
+	# and on a fresh site alike: `main` ran no approval read for either
+	# identity (`can_approve` short-circuited on reports or HR).
+	MAIN_MANAGER_QUERIES = 12
+	MAIN_HR_MANAGER_QUERIES = 22
+
+	def test_the_count_costs_a_bounded_number_of_reads(self):
+		"""U4 performance gate: <= main + 6 for a manager with 50 reports,
+		<= main + 12 for an HR Manager. Measured on this branch, this scenario
+		(one pending leave, one pending week): manager 18 (+6), HR Manager 30
+		(+8). The count read itself costs about 8 and 15; the bootstrap pays
+		part of it back by reading its timezone, its read scope and the
+		reports once each (`_shared_queue_reads`)."""
+		self._pending_leave()
+		self._pending_timesheet()
+		reports = []
+		for index in range(49):
+			number = f"_test-boot-count-{index}"
+			name = frappe.db.get_value("Employee", {"employee_number": number}, "name")
+			if not name:
+				name = (
+					frappe.get_doc(
+						{
+							"doctype": "Employee",
+							"employee_number": number,
+							"first_name": "Badge",
+							"last_name": str(index),
+							"company": self.company,
+							"date_of_birth": "1990-01-01",
+							"date_of_joining": "2020-01-01",
+							"gender": frappe.db.get_value("Gender", {}, "name"),
+							"status": "Active",
+						}
+					)
+					.insert(ignore_permissions=True)
+					.name
+				)
+			frappe.db.set_value("Employee", name, "reports_to", self.manager_name)
+			reports.append(name)
+		self.addCleanup(
+			lambda: [frappe.db.set_value("Employee", name, "reports_to", None) for name in reports]
+		)
+		self.assertGreaterEqual(
+			frappe.db.count("Employee", {"reports_to": self.manager_name, "status": "Active"}), 50
+		)
+
+		counted = self._bootstrap_queries(MANAGER_USER)
+		self.assertLessEqual(counted, self.MAIN_MANAGER_QUERIES + 6, f"manager: {counted} queries")
+
+		_hr_employee, hr_user = make_test_hr_manager_employee()
+		counted = self._bootstrap_queries(hr_user)
+		self.assertLessEqual(counted, self.MAIN_HR_MANAGER_QUERIES + 12, f"HR Manager: {counted} queries")

@@ -88,7 +88,9 @@ export default defineConfig({
       name: 'it',
       use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/it.json' },
       dependencies: ['setup'],
-      testMatch: /(console-clean|approvals|organisation|people|reports|requests-conversation)\.spec\.ts/,
+      // Plan 2026-10-17-001 U4: navigation.spec.ts, for KTD7's tab bar and
+      // the handler's Team-inbox Requests entry (AI-02).
+      testMatch: /(console-clean|approvals|organisation|people|reports|requests-conversation|navigation)\.spec\.ts/,
     },
     // Plan 2026-10-06-001 U3. The Portal Admin identity (`make_test_portal_admin`,
     // seeded by setup_playwright_fixtures): Report access, People & access and
@@ -98,7 +100,9 @@ export default defineConfig({
       name: 'portal-admin',
       use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/portal-admin.json' },
       dependencies: ['setup'],
-      testMatch: /(console-clean|settings|people-access)\.spec\.ts/,
+      // Plan 2026-10-17-001 U4: navigation.spec.ts, for the Admin-first rail
+      // (AI-15) and KTD7's tab bar.
+      testMatch: /(console-clean|settings|people-access|navigation)\.spec\.ts/,
     },
     // Plan 2026-10-15-002 U4/U6. HR User: no approve right, but oversight of
     // pending timesheets in their company (`make_test_hr_user`).
@@ -106,7 +110,9 @@ export default defineConfig({
       name: 'hr-user',
       use: { ...devices['Desktop Chrome'], storageState: 'tests/.auth/hr-user.json' },
       dependencies: ['setup'],
-      testMatch: /(console-clean|timesheet-oversight)\.spec\.ts/,
+      // Plan 2026-10-17-001 U4: navigation.spec.ts, for KTD7's "no badge"
+      // row -- oversight decides nothing.
+      testMatch: /(console-clean|timesheet-oversight|navigation)\.spec\.ts/,
     },
     // P2-U9 step 9. Mobile WebKit is the second mandatory browser: it is the
     // only engine on iOS, it is where a coarse pointer, a real safe-area

@@ -129,7 +129,7 @@ function signalUses(source) {
 // new signal use in one of these files fails until someone has looked at
 // where it lands and raised the number here.
 const SIGNAL_ALLOWED = {
-  'components/AppShell.vue': 7, // side nav, phone app bar and tab bar
+  'components/AppShell.vue': 10, // side nav, phone app bar, tab bar; U4: Approvals tab, More tab and group attention badges
   'components/WeekSpine.vue': 3, // the dashboard's week spine
   'components/requests/MyRequests.vue': 2, // team chip on bg-field beside a reply
   'pages/Attendance.vue': 2, // Today / Exceptions block on the field

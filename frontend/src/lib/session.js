@@ -1,6 +1,8 @@
 import { reactive, readonly } from 'vue'
 import { apiRequest, call } from './api'
+import { setApprovalsCount } from './approvalsCount'
 import { configureCalendar } from './dates'
+import { clearViewerStorage, purgeOtherViewers } from './viewerStorage'
 
 // P2-U2 / P2-R20 / P2-R21 / KTD7. One portal bootstrap per hard load.
 //
@@ -36,6 +38,10 @@ const state = reactive({
   /** P3-KTD11: gates the Team nav item. Direct reports, not approval
    * capability -- a leave approver with no reports has no team to show. */
   hasReports: false,
+  /** Plan 2026-10-17-001 KTD7: reports, or an HR approver -- an answer that
+   * does not change because a queue emptied. Swaps Approvals into the phone
+   * tab bar; a leave approver with no reports keeps the employee bar. */
+  stableApprover: false,
   /** P5-U11: a routed-role holder (IT Team today) has requests to work even
    * when `canApprove`'s queue-derived half is momentarily empty -- the same
    * "present regardless of a pending row" rule P4-R13 already gives HR. */
@@ -147,6 +153,9 @@ function apply(boot) {
   state.user = boot?.user || null
   state.canApprove = !!boot?.can_approve
   state.hasReports = !!boot?.has_reports
+  state.stableApprover = !!boot?.stable_approver
+  // KTD8: the Approvals badge, seeded once per hard load (lib/approvalsCount.js).
+  setApprovalsCount(boot?.approvals_count ?? 0, !!boot?.approvals_count_capped)
   state.canWorkRequests = !!boot?.can_work_requests
   state.canHandleRequests = !!boot?.can_handle_requests
   state.canConfigure = !!boot?.can_configure
@@ -170,6 +179,9 @@ function apply(boot) {
   state.systemTimeZone = boot?.system_time_zone || null
   state.today = boot?.today || null
   state.error = null
+  // KTD13: what another account (or a session since expired) left in this
+  // browser goes before anything reads it.
+  purgeOtherViewers(state.user)
   // The server's timezone answer, not the browser's, is what every date on
   // screen is rendered against from here on (P2-AE3).
   configureCalendar({
@@ -207,5 +219,8 @@ export async function signOut() {
     console.error('Sign out failed; your session may still be open.', error)
     throw error
   }
+  // KTD13: the next person at this browser starts with none of this
+  // account's recents or rail state.
+  clearViewerStorage()
   window.location.href = '/login'
 }

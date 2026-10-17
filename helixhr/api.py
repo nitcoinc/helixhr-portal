@@ -2,6 +2,7 @@ import json
 import math
 import os
 import re
+from contextlib import contextmanager
 from urllib.parse import quote
 
 import frappe
@@ -576,11 +577,12 @@ def get_user_time_zone(user=None):
 	return frappe.db.get_value("User", user, "time_zone") or get_system_timezone()
 
 
-def user_today(user=None):
+def user_today(user=None, time_zone=None):
 	"""Today's date, as a `YYYY-MM-DD` calendar value, in the user's own
 	timezone. This is the server-side half of P2-AE3: every date this API
-	derives from "now" has to agree with what the portal renders."""
-	return get_datetime_in_timezone(get_user_time_zone(user)).strftime("%Y-%m-%d")
+	derives from "now" has to agree with what the portal renders.
+	`time_zone` is that user's zone when the caller has already read it."""
+	return get_datetime_in_timezone(time_zone or get_user_time_zone(user)).strftime("%Y-%m-%d")
 
 
 @frappe.whitelist()
@@ -602,8 +604,10 @@ def get_portal_bootstrap():
 	"""
 	employee = get_current_employee_info() or None
 	time_zone = get_user_time_zone()
-	today = user_today()
+	today = user_today(time_zone=time_zone)
 	monday, sunday = get_week_bounds(today)
+	# Organisation and People share one gate; read it once.
+	read_scope_kind = resolve_read_scope(frappe.session.user)["kind"]
 
 	boot = {
 		"user": frappe.session.user,
@@ -640,7 +644,7 @@ def get_portal_bootstrap():
 		# so the nav item and the server's own gate can never disagree. Since
 		# plan 2026-10-14-001 that is the read scope, which an All-data
 		# company access grant widens.
-		"can_see_organisation": resolve_read_scope(frappe.session.user)["kind"] != "none",
+		"can_see_organisation": read_scope_kind != "none",
 		# The Email templates page (theme, message templates, celebrations &
 		# holidays): Portal Admin and System Manager only -- the predicate
 		# every endpoint behind the page enforces. A boolean, never a role list.
@@ -649,7 +653,7 @@ def get_portal_bootstrap():
 		# gated by `resolve_read_scope` (`resolve_admin_scope` widened by an
 		# All-data grant, plan 2026-10-14-001), so the nav item and the
 		# server's gate agree by construction.
-		"can_see_people": resolve_read_scope(frappe.session.user)["kind"] != "none",
+		"can_see_people": read_scope_kind != "none",
 		# Roster's "Everyone" mode stays on `resolve_admin_scope`: a grant is
 		# read-only and never opens the roster (KTD11).
 		"can_roster_everyone": resolve_admin_scope(frappe.session.user)["kind"] != "none",
@@ -684,6 +688,12 @@ def get_portal_bootstrap():
 		# decision like every flag above; each admin method gates itself.
 		"desk_url": _portal_desk_url(frappe.session.user),
 		"unread_notifications": 0,
+		# Plan 2026-10-17-001 KTD7/KTD8: the approver tab swap and the
+		# Approvals badge. Set below for a caller with an Employee; a desk-only
+		# session has no queue of its own and keeps the zeros.
+		"stable_approver": False,
+		"approvals_count": 0,
+		"approvals_count_capped": False,
 		# Plan 2026-10-17-001 U6 / EP-10: whether Home offers the check-in chip.
 		# HR Settings' own flag, and false with no Employee (nobody to punch).
 		"mobile_checkin": False,
@@ -701,23 +711,46 @@ def get_portal_bootstrap():
 
 	# A leave approver need not be anybody's manager, and a manager's only
 	# pending work may be a timesheet -- gating the Approvals nav item on
-	# direct reports alone hid the entry from both (P2-R11). The count is
-	# still tried first because it is one indexed count and short-circuits
-	# the two list reads for the common case. P3-KTD11 also surfaces it as
-	# `has_reports`, which is what the Team nav item reads.
+	# direct reports alone hid the entry from both (P2-R11). P3-KTD11 also
+	# surfaces the reports as `has_reports`, which is what the Team nav item
+	# reads. Plan 2026-10-17-001 U4: the reports are read as the line-manager
+	# filter itself, inside one `_shared_queue_reads`, so the count read
+	# below reuses them instead of asking again.
 	title = "HelixHR portal bootstrap failed"
-	report_count = _safe(lambda: _count_direct_reports(employee["name"]), title=title) or 0
+	with _shared_queue_reads():
+		reports = _safe(lambda: _line_manager_filter(employee["name"]), title=title)
+		report_count = len(reports[1]) if reports else 0
+		queue = _safe(
+			lambda: _approval_summaries(
+				employee["name"], include_requests=False, count_only=True, today=today
+			),
+			title=title,
+		)
 	boot["has_reports"] = report_count > 0
 	# P4-R13: the Approvals nav item is present for every HR Manager, empty
 	# queue or not -- HR's work arrives without warning and a rail item that
 	# comes and goes is a rail item nobody trusts. Still a nav decision, not
 	# a grant: `_assert_may_act_on` re-checks every read and every action.
 	# Plan 2026-10-16-001 KTD1: can_approve stops counting request rows.
-	boot["can_approve"] = (
-		report_count > 0
-		or _is_hr(frappe.session.user)
-		or bool(_safe(lambda: _approval_summaries(employee["name"], include_requests=False)[0], title=title))
-	)
+	#
+	# Plan 2026-10-17-001 KTD7: `stable_approver` is the half of that answer
+	# that cannot change between two loads because a queue emptied -- reports,
+	# or an HR approver. It swaps Approvals into the phone tab bar; a leave
+	# approver with no reports stays queue-dependent and keeps the employee
+	# bar, so no tab comes and goes (P4-R13's rule, applied to the tab bar).
+	boot["stable_approver"] = report_count > 0 or _is_hr(frappe.session.user)
+	# KTD8: the badge, seeded here once and then kept by the browser. The
+	# count-only read is the Approvals page's own (`get_my_approvals`), so the
+	# two numbers match; it replaces the full read `can_approve` used to make
+	# for a caller with no reports, and for everyone else it is the one added
+	# read (run above, beside the reports). A failure logs and counts 0 --
+	# never a broken shell.
+	if queue:
+		rows, capped, _lane_counts = queue
+		boot["approvals_count"] = len(rows)
+		# `get_my_approvals`' `total_is_capped`, on the same rows.
+		boot["approvals_count_capped"] = bool(capped or len(rows) > _QUEUE_HARD_CAP)
+	boot["can_approve"] = boot["stable_approver"] or boot["approvals_count"] > 0
 	boot["unread_notifications"] = _safe(_get_unread_notification_count, title=title) or 0
 	boot["mobile_checkin"] = bool(_safe(_mobile_checkin_allowed, title=title))
 	return boot
@@ -1694,6 +1727,15 @@ def _summary_row(
 	return row
 
 
+def _count_rows(kind, rows):
+	"""The `count_only` answer of a queue collector (plan 2026-10-17-001
+	KTD8): the same rows the full path keeps -- same reads, same Python
+	subtractions, same bound -- cut to the two keys `_approval_summaries`
+	needs to count and lane them. No enrichment, so the bootstrap's badge
+	costs the reads and nothing else."""
+	return [{"kind": kind, "name": row["name"]} for row in rows]
+
+
 # Plan 2026-10-04-003 KTD7 / R16. The flags live here and nowhere else: the
 # queue computes them once per row, the batch endpoint re-runs the same
 # helpers per item before approving (U6), and the screen only ever reads
@@ -1854,6 +1896,37 @@ def _leave_names_in_hr_stage(names):
 	)
 
 
+_QUEUE_READS_FLAG = "helixhr_queue_reads"
+
+
+@contextmanager
+def _shared_queue_reads():
+	"""Inside this block, each queue scope read (`_line_manager_filter`,
+	`_hr_queue_employee_filter`) runs once per employee instead of once per
+	collector (plan 2026-10-17-001 U4's read budget). Neither answer can
+	change between two collectors of one queue read, and the memo lives only
+	as long as the block -- never across requests, so a reassignment is seen
+	by the very next read. Nested blocks share the outer memo."""
+	if frappe.local.flags.get(_QUEUE_READS_FLAG) is not None:
+		yield
+		return
+	frappe.local.flags[_QUEUE_READS_FLAG] = {}
+	try:
+		yield
+	finally:
+		frappe.local.flags[_QUEUE_READS_FLAG] = None
+
+
+def _shared_queue_read(key, read):
+	"""`read()`, answered once per `key` inside `_shared_queue_reads`."""
+	reads = frappe.local.flags.get(_QUEUE_READS_FLAG)
+	if reads is None:
+		return read()
+	if key not in reads:
+		reads[key] = read()
+	return reads[key]
+
+
 def _line_manager_filter(employee):
 	"""The `employee` filter for the two workflow collectors, and None when
 	this caller has no line-manager queue at all: their direct, Active
@@ -1874,15 +1947,18 @@ def _line_manager_filter(employee):
 	# per-collector `limit=_QUEUE_FETCH` on the reads below is the real bound,
 	# and capping the reports list here instead made the requests of anybody
 	# past the 50th report disappear from the queue altogether.
-	reports = frappe.get_all(
-		"Employee",
-		filters={"reports_to": employee, "status": "Active"},
-		pluck="name",
+	reports = _shared_queue_read(
+		("line_manager", employee),
+		lambda: frappe.get_all(
+			"Employee",
+			filters={"reports_to": employee, "status": "Active"},
+			pluck="name",
+		),
 	)
 	return ["in", reports] if reports else None
 
 
-def _leave_summaries(employee, today):
+def _leave_summaries(employee, today, count_only=False):
 	"""HRMS filters leave by `leave_approver`, so this read is already
 	scoped to decisions this session may make.
 
@@ -1903,6 +1979,8 @@ def _leave_summaries(employee, today):
 		employee, approver_id=frappe.session.user, for_approval=True, limit=_LEAVE_QUEUE_FETCH
 	)
 	with_hr = _leave_names_in_hr_stage([row["name"] for row in applications])
+	if count_only:
+		return _count_rows("leave", [row for row in applications if row["name"] not in with_hr])
 
 	# The overlap count (R15): how many of this caller's *other* reports are
 	# off on overlapping days. One read over the whole scope answers the
@@ -2005,7 +2083,7 @@ def _leave_summaries(employee, today):
 	return rows
 
 
-def _timesheet_summaries(employee, today):
+def _timesheet_summaries(employee, today, count_only=False):
 	"""A timesheet reaches its approver through the Pending-Approval DocShare
 	`timesheet_on_update` grants plus the nested-set User Permission a manager
 	holds over their reports.
@@ -2049,8 +2127,8 @@ def _timesheet_summaries(employee, today):
 		order_by="start_date asc",
 		limit=_TIMESHEET_QUEUE_FETCH,
 	)
-	if not rows:
-		return []
+	if not rows or count_only:
+		return _count_rows("timesheet", rows)
 
 	# `modified` is when the week last moved, which for a Pending
 	# Approval timesheet is when it was sent. Timesheet has no
@@ -2115,7 +2193,7 @@ def _timesheet_summaries(employee, today):
 	return result
 
 
-def _attendance_request_summaries(employee, today):
+def _attendance_request_summaries(employee, today, count_only=False):
 	"""Pending Manager rows only (P3-KTD7, P3-R16).
 
 	A request that has reached Pending HR is not this half of the queue's
@@ -2157,6 +2235,8 @@ def _attendance_request_summaries(employee, today):
 		order_by="modified asc",
 		limit=_QUEUE_FETCH,
 	)
+	if count_only:
+		return _count_rows("attendance", rows)
 	# The Submit transition is a plain field update, so `modified` is when the
 	# employee sent it -- the same reasoning as the timesheet's.
 	shown = _requested_day_status(rows)
@@ -2344,6 +2424,10 @@ def _hr_senders(doctype, rows):
 
 
 def _hr_queue_employee_filter(employee):
+	return _shared_queue_read(("hr_queue", employee), lambda: _read_hr_queue_employee_filter(employee))
+
+
+def _read_hr_queue_employee_filter(employee):
 	"""The `employee` filter for HR's own queue collectors: everyone but the
 	caller, inside the company scope every administrative read uses
 	(`resolve_admin_scope`, P6-R6). `None` means the caller may see nobody.
@@ -2371,7 +2455,7 @@ def _hr_queue_employee_filter(employee):
 	return ["in", names] if names else None
 
 
-def _hr_leave_summaries(employee, today):
+def _hr_leave_summaries(employee, today, count_only=False):
 	"""Leave waiting for HR: status Open at docstatus 0 in stage HR, whether a
 	manager sent it over or the Leave Type routed it there (P4-R5, P4-R7)."""
 	employee_filter = _hr_queue_employee_filter(employee)
@@ -2400,6 +2484,10 @@ def _hr_leave_summaries(employee, today):
 		order_by="creation asc",
 		limit=_QUEUE_FETCH,
 	)
+	if count_only:
+		return _count_rows("leave", rows) + _hr_stalled_leave_summaries(
+			employee, today, employee_filter, count_only=True
+		)
 	senders = _hr_senders("Leave Application", rows)
 
 	def flags_for(row):
@@ -2488,7 +2576,7 @@ def _approvers_away(users, today):
 	return {employees[name] for name in on_leave}
 
 
-def _hr_stalled_leave_summaries(employee, today, employee_filter):
+def _hr_stalled_leave_summaries(employee, today, employee_filter, count_only=False):
 	"""Manager-stage leave HR may decide because the approver is away or the
 	request is overdue (R10, KTD4). Admin-scoped by `employee_filter`, never
 	narrowed by `_line_manager_filter`: these are other managers' reports.
@@ -2546,10 +2634,12 @@ def _hr_stalled_leave_summaries(employee, today, employee_filter):
 				hr_reason=reason,
 			)
 		)
-	return stalled
+	# The away/overdue test above is the subtraction, so `count_only` keeps
+	# it; the rows it builds cost no read.
+	return _count_rows("leave", stalled) if count_only else stalled
 
 
-def _hr_timesheet_summaries(employee, today):
+def _hr_timesheet_summaries(employee, today, count_only=False):
 	"""Weeks a manager handed over. Pending HR carries no DocShare on
 	purpose (P4-U1) -- HR reaches these through the role."""
 	employee_filter = _hr_queue_employee_filter(employee)
@@ -2575,6 +2665,8 @@ def _hr_timesheet_summaries(employee, today):
 		order_by="start_date asc",
 		limit=_QUEUE_FETCH,
 	)
+	if count_only:
+		return _count_rows("timesheet", rows)
 	senders = _hr_senders("Timesheet", rows)
 	return [
 		_summary_row(
@@ -2597,7 +2689,7 @@ def _hr_timesheet_summaries(employee, today):
 	]
 
 
-def _hr_attendance_request_summaries(employee, today):
+def _hr_attendance_request_summaries(employee, today, count_only=False):
 	"""Attendance requests a manager handed over, with the same evidence the
 	manager read before doing so -- including what the calendar shows for
 	each day, which is the whole reason an overwrite is HR's decision and not
@@ -2628,6 +2720,8 @@ def _hr_attendance_request_summaries(employee, today):
 		order_by="modified asc",
 		limit=_QUEUE_FETCH,
 	)
+	if count_only:
+		return _count_rows("attendance", rows)
 	senders = _hr_senders("Attendance Request", rows)
 	shown = _requested_day_status(rows)
 	return [
@@ -3126,7 +3220,7 @@ _APPROVAL_SUMMARY_COLLECTORS = (
 _IT_ROLE = "IT Team"
 
 
-def _approval_summaries(employee, include_requests=True):
+def _approval_summaries(employee, include_requests=True, count_only=False, today=None):
 	"""Every decision the session user may make right now, as one bounded,
 	typed, oldest-first list -- leave, timesheet *and* attendance request
 	(P2-R11, P2-U7 step 1, P3-R16).
@@ -3148,8 +3242,21 @@ def _approval_summaries(employee, include_requests=True):
 	Plan 2026-10-16-001 KTD1: `include_requests=False` is Approvals' read --
 	routed requests are not collected at all, so they can neither show nor
 	fill a collector and mark the decisions as capped. Home keeps the default.
+
+	Plan 2026-10-17-001 KTD8: `count_only=True` is the bootstrap's badge
+	read. Every collector runs the same reads, the same Python subtractions
+	and the same per-kind bound, so `len(rows)` and `capped` are exactly what
+	`get_my_approvals` would answer; the enrichment (balances, overlap,
+	flags, senders, photos) and the sort are skipped, and each row is only
+	`{kind, name, lane}`. `today` saves the caller's own timezone read.
 	"""
-	today = _as_date(user_today())
+	with _shared_queue_reads():
+		return _collect_approval_summaries(employee, include_requests, count_only, today)
+
+
+def _collect_approval_summaries(employee, include_requests, count_only, today):
+	"""`_approval_summaries`' body, run inside one `_shared_queue_reads`."""
+	today = _as_date(today or user_today())
 	rows = []
 	# Whether any collector came back full, and the total is therefore a floor
 	# rather than a count. Each read is bounded at `_QUEUE_FETCH` per kind
@@ -3181,7 +3288,7 @@ def _approval_summaries(employee, include_requests=True):
 	# caller before.
 	if "Employee" in frappe.get_roles():
 		for collect, bound in _APPROVAL_SUMMARY_COLLECTORS:
-			collected = collect(employee, today)
+			collected = collect(employee, today, count_only=count_only)
 			capped = capped or len(collected) >= bound
 			_extend(collected, "team")
 	# P4-R11: one queue. An HR Manager's own reports' work arrived above,
@@ -3194,7 +3301,7 @@ def _approval_summaries(employee, include_requests=True):
 		for doctype, kind in _APPROVAL_KINDS.items():
 			if doctype == "HR Request" and not include_requests:
 				continue
-			collected = kind["hr_queue"](employee, today)
+			collected = kind["hr_queue"](employee, today, count_only=count_only)
 			capped = capped or len(collected) >= _QUEUE_FETCH
 			_extend(collected, "hr")
 	elif include_requests and _holds_routed_role():
@@ -3208,6 +3315,8 @@ def _approval_summaries(employee, include_requests=True):
 		capped = capped or len(collected) >= _QUEUE_FETCH
 		_extend(collected, "hr")
 
+	if count_only:
+		return rows, capped, lane_counts
 	# Oldest first: the queue is a backlog, and the person who has waited
 	# longest is the one the manager is holding up (P2-U7 step 7).
 	rows.sort(key=lambda entry: (entry["sent_on"] or "", entry["name"]))
@@ -5888,7 +5997,7 @@ def _change_request_hours(rows):
 	}
 
 
-def _change_request_summaries(employee, today):
+def _change_request_summaries(employee, today, count_only=False):
 	"""Open change requests addressed to this caller (R13).
 
 	`frappe.get_all` with `ignore_permissions` is deliberate: role Employee
@@ -5909,6 +6018,8 @@ def _change_request_summaries(employee, today):
 		order_by="creation asc",
 		limit=_QUEUE_FETCH,
 	)
+	if count_only:
+		return _count_rows("change", rows)
 	hours = _change_request_hours(rows)
 	return [
 		_summary_row(
@@ -5938,7 +6049,7 @@ _APPROVAL_SUMMARY_COLLECTORS = (
 )
 
 
-def _hr_change_request_summaries(employee, today):
+def _hr_change_request_summaries(employee, today, count_only=False):
 	"""HR's view of open change requests: everything in their admin scope
 	that is not already in their manager half, tagged. A routed request (no
 	manager) is HR's alone; one with a manager shows here because HR
@@ -5959,6 +6070,8 @@ def _hr_change_request_summaries(employee, today):
 		order_by="creation asc",
 		limit=_QUEUE_FETCH,
 	)
+	if count_only:
+		return _count_rows("change", rows)
 	hours = _change_request_hours(rows)
 	return [
 		_summary_row(
@@ -8263,9 +8376,13 @@ def _correction_summary(doc):
 	}
 
 
-def _hr_request_queue(employee, today):
+def _hr_request_queue(employee, today, count_only=False):
 	"""Plan 2026-10-16-001 R4: HR Managers see HR requests only; IT requests
-	belong to IT Team."""
+	belong to IT Team.
+
+	`count_only` is accepted so every `hr_queue` reader shares one signature,
+	and ignored: the one count read (the bootstrap's) never collects requests
+	(`include_requests=False`), so there is no request count to make cheap."""
 	roles = set(frappe.get_roles())
 	routed_roles = [r for r in ("HR Manager", *_ROUTED_WORKER_ROLES) if r in roles]
 	if not routed_roles:

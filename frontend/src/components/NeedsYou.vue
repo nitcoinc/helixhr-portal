@@ -196,7 +196,7 @@ async function opened(item) {
         <div class="min-w-0 flex-1">
           <router-link
             :to="item.to"
-            class="flex flex-wrap items-start justify-between gap-x-2 gap-y-1 text-sm font-medium text-ink-gray-9 after:absolute after:inset-0 after:rounded after:content-['']"
+            class="-my-2 flex min-h-11 flex-wrap items-center justify-between gap-x-2 gap-y-1 py-2 text-sm font-medium text-ink-gray-9 after:absolute after:inset-0 after:rounded after:content-['']"
             @click="opened(item)"
           >
             <!-- The chip rides the title line until the title would be

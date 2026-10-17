@@ -244,6 +244,17 @@ tabs never claim you are nowhere. `<main>`'s bottom padding clears the tab bar *
 `env(safe-area-inset-bottom)`, and the unread badge is seeded from the bootstrap count so it is
 right on the first painted frame rather than a round trip later.
 
+Revised in plan 2026-10-17-001 U4 (`lib/nav.js`, `lib/navGroups.js`). A **stable approver**
+(direct reports, or HR) gets Approvals in Leave's tab slot -- Home, Approvals, Timesheet, Requests,
+More -- and Leave leads "My work" in More; everyone else keeps the employee bar, and a leave
+approver with no reports sees the pending count on More instead. The rail puts the session's own
+work group (HR, or Admin for a Portal Admin who is not HR) directly under Home and Notifications,
+open; every other collapsible group starts closed, and for those sessions Pay & policies collapses
+too, which is what keeps the longest rail inside 800px (row budget in `AppShell.vue`). A remembered
+collapse wins, per user. Group header pills carry attention counts only, never item counts. A skip
+link is the first Tab stop; a move to another page puts focus on `<main>` and sets the tab title
+to "Page · HelixHR"; **Ask HR** sits beside Sign out in the rail footer and in More.
+
 ## Copy rules (plain words, no Frappe terms)
 
 | Never say | Say instead |

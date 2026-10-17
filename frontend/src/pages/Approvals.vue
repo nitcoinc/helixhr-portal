@@ -15,6 +15,7 @@ import { KIND_TAGS, getReasonCopy } from '@/lib/workKinds'
 import TimesheetOversight from '@/components/approvals/TimesheetOversight.vue'
 import { APPROVER_REASON_TEXT, groupByPerson, laneSections, laneSubsections } from '@/lib/approvalLanes'
 import { session } from '@/lib/session'
+import { decrementApprovals, setApprovalsCount } from '@/lib/approvalsCount'
 import { formatDate, formatDateRange } from '@/lib/dates'
 import { toPlainLeaveError } from '@/lib/errorMap'
 import { useIsDesktop } from '@/lib/useIsDesktop'
@@ -50,6 +51,20 @@ const queue = createResource({
   auto: true,
 })
 watch(kindFilter, () => queue.reload())
+
+// Plan 2026-10-17-001 KTD8: every load is the shell's badge, which is never
+// polled. `total` counts the chip's kind only, so a filtered view sums the
+// per-kind counts, which always cover the whole queue.
+watch(
+  () => queue.data,
+  (data) => {
+    if (!data) return
+    const total = kindFilter.value
+      ? (data.counts?.kinds || []).reduce((sum, kind) => sum + (kind.count || 0), 0)
+      : data.total
+    setApprovalsCount(total, data.total_is_capped)
+  },
+)
 
 // Plan 2026-10-16-001 R16: in Leave & attendance tab, chips filter leave / attendance.
 const kindChips = computed(() =>
@@ -388,6 +403,9 @@ async function decide(action, { confirmed = false } = {}) {
     })
     clearDecisionSurfaces()
     closeDetail()
+    // KTD8: the badge moves now; the reload below then answers with the
+    // queue's own total.
+    decrementApprovals(1)
     queue.reload()
   } catch (error) {
     // Stale, already decided, reassigned or refused. The queue is reloaded
@@ -670,6 +688,7 @@ async function runBulk() {
   try {
     const results = await bulkApprove.submit({ items: JSON.stringify(bulkSelected.value) })
     bulkResult.value = Array.isArray(results) ? results : results?.message || results
+    decrementApprovals((Array.isArray(bulkResult.value) ? bulkResult.value : []).filter((row) => row?.ok).length)
     bulkSelected.value = []
     confirmBulk.value = false
     queue.reload()

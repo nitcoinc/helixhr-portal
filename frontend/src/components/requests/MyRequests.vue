@@ -209,6 +209,14 @@ async function retryUpload() {
 // --- asking ------------------------------------------------------------
 
 const showForm = ref(!!route.query.subject || !!route.query.category)
+// Plan 2026-10-17-001 U4: "Ask HR" sends this same prefill while the page is
+// already open, which reuses this component rather than mounting it again.
+watch(
+  () => route.query.subject || route.query.category,
+  (prefill) => {
+    if (prefill) showForm.value = true
+  },
+)
 
 function newRequest() {
   showForm.value = true
