@@ -68,6 +68,15 @@ export function laneSections(rows, decidedCount = 0) {
   return lanes
 }
 
+/** Approvals search: the Decided rows one tab shows. Unsearched, the 14-day
+ * receipt belongs to Leave & attendance (`queue`) only, as it always has;
+ * searched, the all-time matches split by tab -- timesheet decisions on
+ * Timesheets, every other kind on Leave & attendance. */
+export function decidedForTab(rows, view, searched) {
+  if (!searched) return view === 'queue' ? rows || [] : []
+  return (rows || []).filter((row) => (row.kind === 'timesheet') === (view === 'timesheets'))
+}
+
 /** R14 (plan 2026-10-04-003): one group per person, in first-seen order --
  * the rows arrive oldest first, so each group leads with its oldest item. */
 export function groupByPerson(rows) {

@@ -138,6 +138,87 @@ class TestApprovalLanes(IntegrationTestCase):
 		self.assertEqual(len(decided), 25)
 		self.assertEqual(str(seen[0]), str(frappe.utils.add_days(api.user_today(), -14)))
 
+	def test_search_runs_every_collector_with_no_window_and_timesheets(self):
+		"""Approvals search: the receipt's collectors plus timesheets run with
+		`since=None` and the pattern, capped at 50; without a pattern the
+		receipt is exactly what it was."""
+		calls = []
+
+		def collector(label, count):
+			def collect(employee, since, pattern=None):
+				calls.append((label, since, pattern))
+				return [
+					api._decided_row("leave", f"{label}-{index}", "E", "Leave", None, None, "Approved", f"2026-09-{index % 28 + 1:02d}")
+					for index in range(count)
+				]
+
+			return collect
+
+		with (
+			patch.object(api, "_DECIDED_COLLECTORS", (collector("leave", 30),)),
+			patch.object(api, "_DECIDED_STAMPED_COLLECTORS", (collector("change", 5),)),
+			patch.object(api, "_decided_timesheets", collector("timesheet", 30)),
+		):
+			found = _as(self.hr_manager, api._recently_decided, self.hr_employee, "%asha%")
+			self.assertEqual(sorted(calls), [("change", None, "%asha%"), ("leave", None, "%asha%"), ("timesheet", None, "%asha%")])
+			self.assertEqual(len(found), 50)
+			stamps = [row["decided_on"] for row in found]
+			self.assertEqual(stamps, sorted(stamps, reverse=True))
+
+			calls.clear()
+			receipt = _as(self.hr_manager, api._recently_decided, self.hr_employee)
+			self.assertEqual({label for label, _since, _pattern in calls}, {"leave", "change"})
+			self.assertTrue(all(since and pattern is None for _label, since, pattern in calls))
+			self.assertEqual(len(receipt), 25)
+
+	def test_search_narrows_pending_by_person_type_kind_or_name(self):
+		team = [
+			_row("leave", "L-ONE", "E1", employee_name="Asha Rao", leave_type="Casual Leave", doctype="Leave Application"),
+			_row("timesheet", "TS-TWO", "E2", employee_name="Bilal Khan", doctype="Timesheet"),
+			_row("attendance", "AR-THREE", "E3", employee_name="Chen Wu", reason="Work From Home", doctype="Attendance Request"),
+		]
+		patches = self._stubbed(team, [])
+		for active in patches:
+			active.start()
+			self.addCleanup(active.stop)
+		plain = _as(self.hr_manager, get_my_approvals)
+		for q, expected in (
+			("asha", ["L-ONE"]),
+			("CASUAL", ["L-ONE"]),
+			("timesheet", ["TS-TWO"]),
+			("att", ["AR-THREE"]),
+			# The kind matches as a prefix only: "an" is in "attendance", but
+			# here it is Bilal Khan's name being typed.
+			("an", ["TS-TWO"]),
+			("from home", ["AR-THREE"]),
+			("ar-three", ["AR-THREE"]),
+			("nobody", []),
+		):
+			found = _as(self.hr_manager, get_my_approvals, q=q)
+			self.assertTrue(found["searched"], q)
+			self.assertEqual([row["name"] for row in found["pending"]], expected, q)
+			self.assertEqual(found["total"], len(expected), q)
+			self.assertEqual(found["counts"], plain["counts"], q)
+		self.assertEqual(_as(self.hr_manager, get_my_approvals, q="a"), plain)
+
+	def test_search_finds_an_old_timesheet_decision_only_for_its_decider(self):
+		"""Timesheets are out of the receipt (KTD8) but in the history, and
+		`_decided_by_me` still scopes HR's to what HR itself decided."""
+		other = make_test_user(REPORT, ensure_test_company())
+		mine = make_timesheet(self, other, None, state="Approved")
+		theirs = make_timesheet(self, other, None, state="Approved", week_offset=1)
+		old = frappe.utils.add_days(frappe.utils.now_datetime(), -40)
+		frappe.db.set_value("Timesheet", mine, {"modified": old, "modified_by": self.hr_manager}, update_modified=False)
+		frappe.db.set_value("Timesheet", theirs, {"modified": old, "modified_by": "Administrator"}, update_modified=False)
+		person = frappe.db.get_value("Employee", other, "employee_name")
+
+		receipt = _as(self.hr_manager, get_my_approvals)
+		self.assertNotIn(mine, [row["name"] for row in receipt["decided"]])
+		found = {row["name"]: row for row in _as(self.hr_manager, get_my_approvals, q=person)["decided"]}
+		self.assertEqual(found[mine]["kind"], "timesheet")
+		self.assertEqual(found[mine]["status"], "Approved")
+		self.assertNotIn(theirs, found)
+
 	def _raw(self, doctype, **fields):
 		doc = frappe.get_doc({"doctype": doctype, "name": f"LANES-DEC-{frappe.generate_hash(length=8)}", **fields})
 		doc.db_insert()

@@ -304,3 +304,36 @@ test('an IT handler can assign IT rows from the list and never sees an HR-routed
   // One kind in this inbox, so no kind tag repeats "IT request" on every row.
   await expect(inboxRow(page, `${stamp} laptop`)).not.toContainText('IT request')
 })
+
+test('a search from the default chip finds a closed request below the active ones and says so', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'the HR handler side')
+  test.setTimeout(60000)
+  const stamp = `Closed search ${Date.now()}`
+  await fileRequest('HR Letter', `${stamp} still open`)
+  const declined = await fileRequest('HR Letter', `${stamp} declined`)
+  await decide(HR, declined, 'Reject', 'Not this one.')
+  expect(await status(declined)).toBe('Rejected')
+
+  // The Open chip is the default and never lists a closed request...
+  await page.goto('/helixhr/requests?tab=work')
+  await expect(page.locator('[data-async-state="work-list:ready"], [data-async-state="work-list:empty"]')).toBeVisible({
+    timeout: 10000,
+  })
+  await expect(inboxRow(page, `${stamp} declined`)).toHaveCount(0)
+  await expect(page.getByTestId('work-search-hint')).toHaveCount(0)
+
+  // ...but a search covers every state, and says so.
+  await searchInbox(page, stamp)
+  await expect(page.getByTestId('work-search-hint')).toHaveText(/Searching all requests, including closed/)
+  const closedRow = page.locator('[data-group="closed"]').getByTestId('work-row').filter({ hasText: `${stamp} declined` })
+  await expect(closedRow).toHaveCount(1, { timeout: 10000 })
+  await expect(closedRow).toContainText('closed')
+  await expect(page.locator('[data-group="new"]').getByTestId('work-row').filter({ hasText: `${stamp} still open` })).toHaveCount(1)
+  // Active groups first, Closed last.
+  await expect(page.locator('[data-group]').last()).toHaveAttribute('data-group', 'closed')
+
+  // Clearing the search returns to the Open chip's own view.
+  await page.getByTestId('work-search').fill('')
+  await expect(page.getByTestId('work-search-hint')).toHaveCount(0)
+  await expect(inboxRow(page, `${stamp} declined`)).toHaveCount(0)
+})

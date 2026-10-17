@@ -2078,6 +2078,25 @@ def seed_roster_fixtures():
 	return ensure_roster_fixtures()
 
 
+@frappe.whitelist()
+def backdate_decided_leave(name, days=40):
+	"""`approvals.spec.ts`: move a decided Leave Application's `modified`
+	back `days`, past the 14-day Decided receipt, so the Approvals search
+	has an old decision to find. Test sites and System Manager only; refuses
+	a leave that is not decided."""
+	_require_allow_tests()
+	frappe.only_for("System Manager")
+	if frappe.db.get_value("Leave Application", name, "status") not in ("Approved", "Rejected"):
+		frappe.throw("Only a decided Leave Application can be backdated.")
+	frappe.db.set_value(
+		"Leave Application",
+		name,
+		"modified",
+		frappe.utils.add_days(frappe.utils.now_datetime(), -frappe.utils.cint(days)),
+		update_modified=False,
+	)
+
+
 # P4-U5: celebrations. Home's card reads a *projection* of `date_of_birth`
 # and `date_of_joining` (P4-KTD14), so both the Python suite and
 # `login-dashboard.spec.ts` need people whose dates fall in whatever month

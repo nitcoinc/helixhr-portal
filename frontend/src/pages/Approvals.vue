@@ -1,12 +1,13 @@
 <script setup>
 import Avatar from '@/components/Avatar.vue'
-import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, nextTick, onMounted, onUnmounted, useId } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { createResource, Button, Dialog } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import TabBar from '@/components/TabBar.vue'
 import SegmentedChips from '@/components/SegmentedChips.vue'
 import AsyncState from '@/components/AsyncState.vue'
+import SearchField from '@/components/SearchField.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
 import ApprovalEvidence from '@/components/approvals/ApprovalEvidence.vue'
@@ -20,6 +21,7 @@ import {
   approveAllLabel,
   batchItem,
   batchLabel,
+  decidedForTab,
   groupByPerson,
   isBatchable,
   laneSections,
@@ -30,12 +32,13 @@ import {
 } from '@/lib/approvalLanes'
 import { session } from '@/lib/session'
 import { decrementApprovals, setApprovalsCount } from '@/lib/approvalsCount'
-import { formatDateRange } from '@/lib/dates'
+import { formatDate, formatDateRange } from '@/lib/dates'
 import { focusNear } from '@/lib/focus'
 import { trimNumber } from '@/lib/hours'
 import { toPlainLeaveError } from '@/lib/errorMap'
 import { notify } from '@/lib/notify'
 import { useIsDesktop } from '@/lib/useIsDesktop'
+import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
 
 // P2-U7 / KTD5. `/approvals` and `/approvals/:kind/:name` are one component:
 // the selected decision is a route parameter, so a manager can be sent the
@@ -59,24 +62,42 @@ const router = useRouter()
 // U6 / R13. The chip lives in the URL query, so a link reproduces the view;
 // the server filters and counts, the browser only says which chip is on.
 const kindFilter = computed(() => route.query.kind || '')
+// Approvals search: what the field holds, and the term the queue was last
+// asked for -- trimmed, and empty under the server's 2-character minimum
+// (`_request_search_pattern`), so a shorter one asks the same as none.
+const query = ref('')
+const search = ref('')
+const searchHintId = useId()
 const queue = createResource({
   url: 'helixhr.api.get_my_approvals',
   makeParams: () => ({
     kind: kindFilter.value || undefined,
+    q: search.value || undefined,
   }),
-  auto: true,
 })
-watch(kindFilter, () => queue.reload())
+watch(kindFilter, () => reloadQueue())
+
+const debounced = useDebouncedSearch((value) => {
+  const next = value.trim().length >= 2 ? value.trim() : ''
+  if (next === search.value) return
+  search.value = next
+  return reloadQueue()
+})
+watch(query, debounced.search)
+// What is on screen, from the answer itself: a slow reply never relabels it.
+const searching = computed(() => Boolean(queue.data?.searched))
 
 // Plan 2026-10-17-001 KTD8: every load is the shell's badge, which is never
 // polled. `total` counts the chip's kind only, so a filtered view sums the
 // per-kind counts, which always cover the whole queue. Its
 // `total_is_capped` describes the filtered page, not the queue, so a
 // filtered load keeps the badge's current floor flag.
+// A searched load is not the queue either, and its counts are not read here:
+// only an unsearched load may move the badge.
 watch(
   () => queue.data,
   (data) => {
-    if (!data) return
+    if (!data || data.searched) return
     if (kindFilter.value) {
       setApprovalsCount((data.counts?.kinds || []).reduce((sum, kind) => sum + (kind.count || 0), 0))
     } else {
@@ -191,9 +212,17 @@ watch(view, () => {
   bulkSelected.value = []
   refusedReasons.value = {}
 })
+// A new search shows other rows; a selection of rows it hid must not ride
+// along into a batch, and an open confirm (which re-reads its lane every
+// render) must not grow to the unsearched lane when the reload lands.
+watch(search, () => {
+  bulkSelected.value = []
+  if (!bulkRunning.value) confirmSource.value = null
+})
 
 const pending = computed(() => queue.data?.pending || [])
 const decided = computed(() => queue.data?.decided || [])
+const decidedRows = computed(() => decidedForTab(decided.value, view.value, searching.value))
 const overflow = computed(() => Math.max(0, (queue.data?.total || 0) - pending.value.length))
 
 // P4-R11. The queue's own sentence used to promise "you only see people who
@@ -443,7 +472,7 @@ async function decide(action, { confirmed = false } = {}) {
     // is refused once a day in the range already has attendance (P4-KTD5).
     actionError.value =
       toPlainLeaveError(error) || "We couldn't record that decision. Reload and try again."
-    queue.reload()
+    reloadQueue()
     if (props.name) detail.fetch()
   } finally {
     acting.value = ''
@@ -600,17 +629,23 @@ const tabRows = computed(() =>
   view.value === 'timesheets' ? timesheetRows.value : leaveAttendanceRows.value,
 )
 const lanes = computed(() => {
-  if (view.value !== 'timesheets') return laneSections(leaveAttendanceRows.value, decided.value.length)
+  if (view.value !== 'timesheets') return laneSections(leaveAttendanceRows.value, decidedRows.value.length)
   return [
     { key: 'yours', title: 'Waiting on you', rows: timesheetRows.value.filter((row) => row.lane !== 'hr') },
     { key: 'hr-stage', title: 'Waiting on HR', rows: timesheetRows.value.filter((row) => row.lane === 'hr') },
   ]
     .filter((lane) => lane.rows.length)
     .map((lane) => ({ ...lane, sections: laneSubsections(lane.rows) }))
+    .concat(decidedRows.value.length ? [{ key: 'decided', title: 'Decided by me', rows: [], sections: [] }] : [])
 })
 // A row opened from the oversight list is not in this caller's own queue;
 // its detail then takes the column the queue would have used on a phone.
 const decidedOpen = ref(false)
+// A search's answers are the point, so its Decided matches open themselves;
+// clearing it folds the receipt back to its normal, collapsed view.
+watch(searching, (on) => {
+  decidedOpen.value = on
+})
 const openInQueue = computed(() => !!props.name && pending.value.some((row) => row.name === props.name))
 
 // R20: selection exists from 640px up. A phone queue is one column of
@@ -831,10 +866,28 @@ function openRefused(result) {
 }
 
 /** The queue's reload, as a promise that never rejects: AsyncState already
- * shows a failed load. */
+ * shows a failed load. One load at a time: asked again mid-flight, it runs
+ * once more when the current one settles, so the newest search, chip or
+ * decision is always the last answer -- a slow search can never land over
+ * the cleared one (or the badge's own read). */
+let queueInflight = null
+let queueAgain = false
 function reloadQueue() {
-  return Promise.resolve(queue.reload()).catch(() => {})
+  if (queueInflight) {
+    queueAgain = true
+    return queueInflight
+  }
+  queueInflight = Promise.resolve(queue.reload())
+    .catch(() => {})
+    .then(() => {
+      queueInflight = null
+      if (!queueAgain) return undefined
+      queueAgain = false
+      return reloadQueue()
+    })
+  return queueInflight
 }
+reloadQueue()
 
 // --- focus after a row leaves (KTD16) --------------------------------------
 
@@ -928,7 +981,7 @@ function onQueueKey(event) {
     <PageHeader title="Approvals">
       <template #actions>
         <span
-          v-if="pending.length"
+          v-if="pending.length && !searching"
           class="rounded-full bg-surface-amber-1 px-3 py-1 text-sm font-medium text-ink-amber-3"
         >
           <span class="tabular">{{ pending.length }}</span> waiting
@@ -1064,6 +1117,34 @@ function onQueueKey(event) {
       @update:model-value="filterQueue"
     />
 
+    <!-- Approvals search: everything waiting on you, and everything you have
+         ever decided, by person, leave type or record. Outside the queue's
+         AsyncState so a reload never takes the field (or its focus) away. -->
+    <template v-if="view === 'queue' || (view === 'timesheets' && !oversightOnly)">
+      <SearchField
+        v-model="query"
+        class="mb-4 sm:max-w-sm"
+        label="Search approvals"
+        placeholder="Person, leave type or record"
+        maxlength="60"
+        data-testid="approvals-search"
+        :aria-describedby="searchHintId"
+      />
+      <!-- Always rendered: a live region inserted with its text already in
+           it is often not announced. Only the text comes and goes. -->
+      <p
+        :id="searchHintId"
+        class="text-sm text-ink-gray-6"
+        :class="searching ? '-mt-2 mb-4' : ''"
+        role="status"
+      >
+        <span
+          v-if="searching"
+          data-testid="approvals-search-hint"
+        >Searching what's waiting on you and everything you've decided, including older decisions.</span>
+      </p>
+    </template>
+
     <div
       v-if="view === 'queue' || view === 'timesheets'"
       class="lg:flex lg:items-start lg:gap-6"
@@ -1083,12 +1164,19 @@ function onQueueKey(event) {
           v-if="!(view === 'timesheets' && oversightOnly)"
           section="approvals-queue"
           :resource="queue"
-          :empty="!tabRows.length && !(view === 'queue' && decided.length)"
-          :empty-title="view === 'timesheets' ? 'No timesheets waiting on you' : 'Nothing waiting on you'"
+          :loading="queue.loading && !queue.data"
+          :empty="!tabRows.length && !decidedRows.length"
+          :empty-title="
+            searching
+              ? `No approvals match “${search}”`
+              : view === 'timesheets' ? 'No timesheets waiting on you' : 'Nothing waiting on you'
+          "
           :empty-body="
-            view === 'timesheets'
-              ? 'Weeks your team sends for approval appear here.'
-              : 'Leave, attendance, change requests and requests waiting on you appear here.'
+            searching
+              ? 'Nothing waiting on you and nothing you have decided matches. Try a name, a leave type or a record number.'
+              : view === 'timesheets'
+                ? 'Weeks your team sends for approval appear here.'
+                : 'Leave, attendance, change requests and requests waiting on you appear here.'
           "
           :skeleton-rows="3"
         >
@@ -1098,7 +1186,12 @@ function onQueueKey(event) {
             v-if="!tabRows.length"
             class="surface-inset mb-6 p-4 text-sm text-ink-gray-7"
           >
-            Nothing waiting on you.
+            <template v-if="searching">
+              Nothing waiting on you matches “{{ search }}”.
+            </template>
+            <template v-else>
+              Nothing waiting on you.
+            </template>
           </p>
           <!-- KTD13: keyboard triage listens here and nowhere else, so a key
                typed outside the list is just a key. -->
@@ -1117,7 +1210,8 @@ function onQueueKey(event) {
               :data-lane="lane.key"
             >
               <!-- KTD8: the last 14 days of this caller's own decisions,
-                   collapsed. Directly after My team, or first without it. -->
+                   collapsed. Directly after My team, or first without it.
+                   Searched: every matching decision, of any age, open. -->
               <template v-if="lane.key === 'decided'">
                 <button
                   type="button"
@@ -1133,7 +1227,10 @@ function onQueueKey(event) {
                     :class="decidedOpen ? 'rotate-90' : ''"
                   />
                   <span class="label">{{ lane.title }}</span>
-                  <span class="tabular text-sm text-ink-gray-5">{{ decided.length }}</span>
+                  <span class="text-sm text-ink-gray-5">
+                    {{ searching ? 'all time' : 'last 14 days' }} ·
+                    <span class="tabular">{{ decidedRows.length }}{{ searching && queue.data?.decided_is_capped ? '+' : '' }}</span>
+                  </span>
                 </button>
                 <ul
                   v-show="decidedOpen"
@@ -1141,9 +1238,11 @@ function onQueueKey(event) {
                   class="mt-2 space-y-2"
                 >
                   <li
-                    v-for="row in decided"
+                    v-for="row in decidedRows"
                     :key="row.id"
                     class="surface-card elev-1 flex items-center gap-3 p-3"
+                    data-testid="decided-row"
+                    :data-decided-name="row.name"
                   >
                     <Avatar
                       class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-xs font-bold text-ink-gray-7"
@@ -1156,6 +1255,10 @@ function onQueueKey(event) {
                       <template v-if="row.from_date">
                         · {{ formatDateRange(row.from_date, row.to_date) }}
                       </template>
+                      <span
+                        v-if="searching && row.decided_on"
+                        class="block text-xs text-ink-gray-5"
+                      >Decided {{ formatDate(row.decided_on) }}</span>
                     </p>
                     <StatusBadge
                       :kind="row.kind"

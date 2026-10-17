@@ -2776,6 +2776,7 @@ def _hr_request_summaries(
 	names=None,
 	sla_days=None,
 	with_actions=False,
+	order_by="creation asc",
 ):
 	"""Every routed request the session user may work right now (P5-R11,
 	P5-R12).
@@ -2824,6 +2825,10 @@ def _hr_request_summaries(
 	`actions` (`_request_row_actions`). Every row carries `token_modified`
 	and `sla_over_days`.
 
+	`order_by` lets the work feed's Closed chip read most-recently-closed
+	first (`_REQUEST_CLOSED_ORDER`); every other caller keeps oldest first.
+	Rows carry `closed_on`, so a closed row can say when it closed.
+
 	Rows always carry `picked_up_by_name` (resolved server-side, KTD4) and
 	`sla_overdue` (the category's SLA against age, `is_overdue`'s predicate)
 	-- keys the queue's consumers ignore and the feed renders.
@@ -2850,13 +2855,14 @@ def _hr_request_summaries(
 			"picked_up_by",
 			"creation",
 			"modified",
+			"closed_on",
 			"hr_note",
 			# Plan 2026-10-02-001 U14 / R28: the masked copy only -- the
 			# Password fields are never read into a queue.
 			"correction_field",
 			"correction_proposed_masked",
 		],
-		order_by="creation asc",
+		order_by=order_by,
 		limit=_QUEUE_FETCH if limit is None else min(max(cint(limit), 1), _REQUEST_MAX_PAGE),
 		**({"limit_start": max(cint(start), 0)} if start is not None else {}),
 	)
@@ -2942,6 +2948,7 @@ def _hr_request_summaries(
 				waiting_on=waiting_on,
 				waiting_since=waiting_since,
 				waiting_days=_age_in_days(waiting_since, today) if waiting_since else None,
+				closed_on=str(row.closed_on) if row.closed_on else None,
 			)
 		)
 	return result
@@ -3081,6 +3088,20 @@ _REQUEST_WORK_STATES = {
 	"waiting": (HR_REQUEST_WAITING_ON_EMPLOYEE,),
 	"closed": (HR_REQUEST_DONE, HR_REQUEST_REJECTED),
 }
+# Closed-order and search fix (2026-10-17): a search ignores the state chip and covers
+# every status the chips above can already list -- never more.
+_REQUEST_SEARCH_STATES = tuple(dict.fromkeys(s for states in _REQUEST_WORK_STATES.values() for s in states))
+_REQUEST_CLOSED_STATES = _REQUEST_WORK_STATES["closed"]
+# The Closed chip reads most recently closed first; a row closed before
+# `closed_on` was stamped falls back to its last change, after the dated ones
+# (MariaDB sorts NULL last on DESC).
+_REQUEST_CLOSED_ORDER = "closed_on desc, modified desc"
+
+
+def _request_closed_first_key(row):
+	"""Python twin of `_REQUEST_CLOSED_ORDER`, for the name-list paths:
+	used with `reverse=True`, dated rows first, newest first, then `modified`."""
+	return (row.closed_on is not None, row.closed_on or row.modified, row.modified)
 
 
 @frappe.whitelist()
@@ -3113,6 +3134,19 @@ def get_request_work(state=None, limit=None, start=0, q=None, sort=None, categor
 	  read by name. No query is added for it.
 	* Rows carry `token_modified` and the caller's `actions` for the row, so
 	  "Assign to me" works from the list.
+
+	Closed order and all-state search (2026-10-17 fix):
+
+	* `state=closed` lists the most recently closed first
+	  (`_REQUEST_CLOSED_ORDER`); the other chips keep oldest-first triage.
+	* A real search (`q` of 2+ characters) ignores the state chip -- `mine`
+	  included -- and covers every status the chips can list
+	  (`_REQUEST_SEARCH_STATES`), through the same permission-aware read and
+	  role/route filters, so it can only find what some chip already shows.
+	  Active rows come first (oldest first, or SLA order under `sort=sla`),
+	  then closed rows most recently closed first; the page is cut from that
+	  one ordered name list, as `sort=sla` already does. `searched` says
+	  which mode answered.
 	"""
 	rate_limit_per_user("get_request_work")
 	if not (_is_hr() or _holds_routed_role()):
@@ -3144,8 +3178,11 @@ def get_request_work(state=None, limit=None, start=0, q=None, sort=None, categor
 	today = _as_date(user_today())
 	page = min(max(cint(limit) or _REQUEST_PAGE, 1), _REQUEST_MAX_PAGE)
 	start = max(cint(start), 0)
-	picked_up_by = frappe.session.user if state == "mine" else None
 	or_filters = _request_search_or_filters(q, frappe.session.user)
+	searched = or_filters is not None
+	states = _REQUEST_SEARCH_STATES if searched else _REQUEST_WORK_STATES[state]
+	picked_up_by = frappe.session.user if state == "mine" and not searched else None
+	order_by = _REQUEST_CLOSED_ORDER if state == "closed" and not searched else "creation asc"
 	# One category read serves the SLA order, every row's pill and the
 	# inbox's category chips (the categories routed to a role held here).
 	categories = frappe.get_all(
@@ -3153,7 +3190,7 @@ def get_request_work(state=None, limit=None, start=0, q=None, sort=None, categor
 	)
 	sla_days = {row.name: cint(row.sla_days) for row in categories}
 	filters = {
-		"states": _REQUEST_WORK_STATES[state],
+		"states": states,
 		"routed_roles": routed_roles,
 		"picked_up_by": picked_up_by,
 		"category": category,
@@ -3168,19 +3205,31 @@ def get_request_work(state=None, limit=None, start=0, q=None, sort=None, categor
 	# page below was scoped to.
 	matching = frappe.get_list(
 		"HR Request",
-		filters=_request_summaries_filters(
-			employee, _REQUEST_WORK_STATES[state], picked_up_by, routed_roles, category
-		),
+		filters=_request_summaries_filters(employee, states, picked_up_by, routed_roles, category),
 		or_filters=or_filters,
-		order_by="creation asc",
+		order_by=order_by,
 		limit_page_length=0,
-		**({"fields": ["name", "category", "creation", "status"]} if sort == "sla" else {"pluck": "name"}),
+		**(
+			{"fields": ["name", "category", "creation", "status", "closed_on", "modified"]}
+			if sort == "sla" or searched
+			else {"pluck": "name"}
+		),
 	)
 	total = len(matching)
-	if sort == "sla":
-		overdue = [row.name for row in matching if _request_sla_overdue(row, today, sla_days)]
-		late = set(overdue)
-		ordered = overdue + [row.name for row in matching if row.name not in late]
+	if sort == "sla" or searched:
+		# Active rows (oldest first, overdue lifted under `sort=sla`), then
+		# closed rows most recently closed first. Without a search only one
+		# half is ever non-empty, so the plain chips read as before.
+		active = [row for row in matching if row.status not in _REQUEST_CLOSED_STATES]
+		closed = sorted(
+			(row for row in matching if row.status in _REQUEST_CLOSED_STATES),
+			key=_request_closed_first_key,
+			reverse=True,
+		)
+		if sort == "sla":
+			late = {row.name for row in active if _request_sla_overdue(row, today, sla_days)}
+			active = [row for row in active if row.name in late] + [row for row in active if row.name not in late]
+		ordered = [row.name for row in active] + [row.name for row in closed]
 		names = ordered[start : start + page]
 		position = {name: index for index, name in enumerate(names)}
 		rows = sorted(
@@ -3188,7 +3237,7 @@ def get_request_work(state=None, limit=None, start=0, q=None, sort=None, categor
 			key=lambda row: position[row["name"]],
 		)
 	else:
-		rows = _hr_request_summaries(employee, today, limit=page, start=start, **filters)
+		rows = _hr_request_summaries(employee, today, limit=page, start=start, order_by=order_by, **filters)
 	# Plan 2026-10-16-001 R8: Team inbox count is requests needing team action
 	# (New and In progress), matching Home count.
 	action_count = _aggregate_count(
@@ -3214,6 +3263,7 @@ def get_request_work(state=None, limit=None, start=0, q=None, sort=None, categor
 		"categories": [row.name for row in categories if row.route_to_role in routed_roles],
 		"limit": page,
 		"today": str(today),
+		"searched": searched,
 	}
 
 
@@ -6439,6 +6489,9 @@ _APPROVAL_PAGE = 25
 # a manager can see that the thing they just did actually happened.
 _DECIDED_DAYS = 14
 _DECIDED_LIMIT = 25
+# A search of Decided is a history, not a receipt: no date window, so it is
+# bounded by rows instead -- per collector and in total.
+_DECIDED_SEARCH_LIMIT = 50
 # What a handed-over leave reads as in the receipt list. Leave has no workflow
 # state of its own (P2-KTD17), so this is the one place the word lives -- the
 # same word `TIMESHEET_PENDING_HR` and `REQUEST_PENDING_HR` already carry, so
@@ -6472,7 +6525,7 @@ def _count_by(values):
 
 
 @frappe.whitelist()
-def get_my_approvals(kind=None, category=None):
+def get_my_approvals(kind=None, category=None, q=None):
 	"""The manager's queue: everything waiting on them, oldest first, plus
 	the handful of decisions they made this week (P2-U7 step 1).
 
@@ -6483,8 +6536,16 @@ def get_my_approvals(kind=None, category=None):
 	U6 / R13: `kind` and `category` narrow the page; `counts` is always the
 	caller's whole queue, so every chip says what choosing it would show.
 	A category implies kind "request" -- only requests have one.
+
+	`q` (2+ characters, `_request_search_pattern`'s rules) searches: pending
+	narrows to rows whose person, leave type or reason, kind or record name
+	contains it -- `counts` stays the whole queue, as above -- and `decided`
+	becomes an all-time history of this caller's own decisions matching it
+	(`_recently_decided`), timesheets included. `searched` says which answer
+	this is; a shorter `q` is no search at all.
 	"""
 	rate_limit_per_user("get_my_approvals")
+	pattern = _request_search_pattern(q)
 	if kind and kind not in _APPROVAL_FILTER_KINDS and kind != "request":
 		frappe.throw(_("There is no approval kind called {0}.").format(kind))
 	category = _valid_request_category(category)
@@ -6509,10 +6570,14 @@ def get_my_approvals(kind=None, category=None):
 		pending = [row for row in pending if row["kind"] == kind]
 	if category:
 		pending = [row for row in pending if row.get("category") == category]
+	if pattern:
+		term = q.strip()[:_REQUEST_SEARCH_MAX].lower()
+		pending = [row for row in pending if _approval_row_matches(row, term)]
 	# Plan 2026-10-04-003 KTD8 / R19: the 25-row page is gone for the kinds
 	# the redesign groups per person (timesheet, leave, and the mixed view
 	# those live in); attendance keeps theirs. The hard cap stands behind all of it.
 	shown = pending[:_APPROVAL_PAGE] if kind == "attendance" else pending[:_QUEUE_HARD_CAP]
+	decided = _recently_decided(employee, pattern)
 
 	# R14: the queue is grouped per person on the server, oldest waiting
 	# first -- the rows are already oldest-first, so the first time each
@@ -6545,8 +6610,36 @@ def get_my_approvals(kind=None, category=None):
 		# lets the screen say "50+" rather than lie about 50; a real COUNT per
 		# kind on every poll is the thing being avoided (P2-R22, P3-R25).
 		"total_is_capped": capped or len(pending) > len(shown),
-		"decided": _recently_decided(employee),
+		"decided": decided,
+		"searched": bool(pattern),
+		# A search's history is bounded by rows, not by date: at the bound
+		# there may be older matches, so the screen says "50+", not "50".
+		"decided_is_capped": bool(pattern) and len(decided) >= _DECIDED_SEARCH_LIMIT,
 	}
+
+
+def _approval_row_matches(row, term):
+	"""Whether a pending row answers the search `term` (already trimmed and
+	lower-cased): a case-insensitive substring of the person, the leave type
+	or attendance reason or the record name, or a prefix of the kind. Only a
+	prefix for the kind: as a substring, "an" or "tim" typed toward a
+	person's name would match every attendance or timesheet row."""
+	return str(row.get("kind") or "").startswith(term) or any(
+		term in str(row.get(field) or "").lower() for field in ("employee_name", "leave_type", "reason", "name")
+	)
+
+
+def _decided_window(since, pattern, date_field="modified", fields=("employee_name", "name")):
+	"""One decided collector's extra `filters`, `or_filters` and `limit`.
+
+	With `since`, the receipt: rows decided since then, `_DECIDED_LIMIT` of
+	them. With `since=None`, the search: no date window, narrowed to rows
+	whose `fields` match the LIKE `pattern`, `_DECIDED_SEARCH_LIMIT` of them.
+	The caller's own scoping filters are untouched either way, so a search
+	can only narrow what the receipt would read."""
+	filters = {date_field: [">=", str(since)]} if since else {}
+	or_filters = {field: ["like", pattern] for field in fields} if pattern else None
+	return filters, or_filters, _DECIDED_LIMIT if since else _DECIDED_SEARCH_LIMIT
 
 
 def _decided_row(
@@ -6570,7 +6663,7 @@ def _decided_row(
 	}
 
 
-def _decided_leave(employee, since):
+def _decided_leave(employee, since, pattern=None):
 	"""What this approver decided, plus what they handed to HR.
 
 	The handover row is the same receipt a timesheet and an attendance
@@ -6578,6 +6671,7 @@ def _decided_leave(employee, since):
 	with the record and needs to see that their step happened. It was the one
 	kind of the three that reported nothing at all.
 	"""
+	window, or_filters, limit = _decided_window(since, pattern, fields=("employee_name", "name", "leave_type"))
 	handed_over = []
 	# Empty for an HR caller: for them this row is the top of their own
 	# pending queue, not a receipt (see `_decided_hr_handover_states`).
@@ -6603,8 +6697,9 @@ def _decided_leave(employee, since):
 					"status": "Open",
 					"docstatus": 0,
 					"helixhr_stage": LEAVE_STAGE_HR,
-					"modified": [">=", str(since)],
+					**window,
 				},
+				or_filters=or_filters,
 				fields=[
 					"name",
 					"employee_name",
@@ -6615,7 +6710,7 @@ def _decided_leave(employee, since):
 					"modified",
 				],
 				order_by="modified desc",
-				limit=_DECIDED_LIMIT,
+				limit=limit,
 			)
 		]
 
@@ -6637,8 +6732,9 @@ def _decided_leave(employee, since):
 				"leave_approver": frappe.session.user,
 				"employee": ["!=", employee],
 				"status": ["in", ["Approved", "Rejected"]],
-				"modified": [">=", str(since)],
+				**window,
 			},
+			or_filters=or_filters,
 			fields=[
 				"name",
 				"employee_name",
@@ -6650,7 +6746,7 @@ def _decided_leave(employee, since):
 				"modified",
 			],
 			order_by="modified desc",
-			limit=_DECIDED_LIMIT,
+			limit=limit,
 		)
 	]
 
@@ -6692,7 +6788,7 @@ def _decided_by_me():
 	return {"modified_by": frappe.session.user} if _is_hr() else {}
 
 
-def _decided_timesheets(employee, since):
+def _decided_timesheets(employee, since, pattern=None):
 	"""Plan 2026-10-04-003 KTD2: a cancelled week reads "Cancelled" here.
 
 	The Cancelled workflow state (docstatus 2) joins the receipt list, and
@@ -6700,6 +6796,7 @@ def _decided_timesheets(employee, since):
 	a week cancelled in Desk before the state existed keeps
 	`workflow_state = "Approved"`, and an approver must never see that
 	row as an approval."""
+	window, or_filters, limit = _decided_window(since, pattern)
 	return [
 		_decided_row(
 			"timesheet",
@@ -6725,9 +6822,14 @@ def _decided_timesheets(employee, since):
 						*_decided_hr_handover_states(TIMESHEET_PENDING_HR),
 					],
 				],
-				"modified": [">=", str(since)],
-				**_decided_by_me(),
+				**window,
+				# A search lists timesheets for every caller, and a line
+				# manager's nested-set read reaches weeks other approvers
+				# decided, so "Decided by me" keys on the decider (the last
+				# writer) for everyone there, as `_decided_by_me` does for HR.
+				**({"modified_by": frappe.session.user} if pattern else _decided_by_me()),
 			},
+			or_filters=or_filters,
 			fields=[
 				"name",
 				"employee_name",
@@ -6738,18 +6840,19 @@ def _decided_timesheets(employee, since):
 				"modified",
 			],
 			order_by="modified desc",
-			limit=_DECIDED_LIMIT,
+			limit=limit,
 		)
 	]
 
 
-def _decided_attendance_requests(employee, since):
+def _decided_attendance_requests(employee, since, pattern=None):
 	"""A request the manager sent on reads "Waiting for HR" here, which is
 	the honest receipt: their step is done and HR's has not happened yet
 	(P3-KTD7). Approved, Sent Back and Rejected are the later outcomes of the
 	same row. See `_decided_hr_handover_states` for why HR's own queue does
 	not appear in HR's receipt.
 	"""
+	window, or_filters, limit = _decided_window(since, pattern)
 	return [
 		_decided_row(
 			"attendance",
@@ -6775,9 +6878,10 @@ def _decided_attendance_requests(employee, since):
 						*_decided_hr_handover_states(REQUEST_PENDING_HR),
 					],
 				],
-				"modified": [">=", str(since)],
+				**window,
 				**_decided_by_me(),
 			},
+			or_filters=or_filters,
 			fields=[
 				"name",
 				"employee_name",
@@ -6788,16 +6892,17 @@ def _decided_attendance_requests(employee, since):
 				"modified",
 			],
 			order_by="modified desc",
-			limit=_DECIDED_LIMIT,
+			limit=limit,
 		)
 	]
 
 
-def _decided_change_requests(employee, since):
+def _decided_change_requests(employee, since, pattern=None):
 	"""Plan 2026-10-15-002 R1/KTD8: change requests this caller accepted or
 	declined. `decided_by` is stamped by the decision itself, so it is the
 	scope; `frappe.get_all` because role Employee has no DocPerm here (see
 	`_change_request_summaries`)."""
+	window, or_filters, limit = _decided_window(since, pattern, date_field="decided_on")
 	return [
 		_decided_row(
 			"change",
@@ -6815,11 +6920,12 @@ def _decided_change_requests(employee, since):
 				"decided_by": frappe.session.user,
 				"employee": ["!=", employee],
 				"status": ["in", ["Accepted", "Declined"]],
-				"decided_on": [">=", str(since)],
+				**window,
 			},
+			or_filters=or_filters,
 			fields=["name", "employee_name", "week_start", "status", "decided_on"],
 			order_by="decided_on desc",
-			limit=_DECIDED_LIMIT,
+			limit=limit,
 		)
 	]
 
@@ -6872,8 +6978,15 @@ _DECIDED_COLLECTORS = (_decided_leave, _decided_attendance_requests)
 _DECIDED_STAMPED_COLLECTORS = (_decided_change_requests,)
 
 
-def _recently_decided(employee):
+def _recently_decided(employee, pattern=None):
 	"""What this approver decided in the last week, newest first.
+
+	With a search `pattern` (`get_my_approvals`' `q`), the same collectors
+	plus timesheets run with no date window, narrowed to records whose
+	person or name matches -- an all-time history of this caller's own
+	decisions, `_DECIDED_SEARCH_LIMIT` rows at most. The same scoping
+	(`_decided_by_me`, the HR-handover rule, the decider stamps) applies,
+	so it never lists a record the receipt could not.
 
 	Best effort by design. A Timesheet's DocShare is removed the moment it
 	is decided (P2-U7 scenario 8), and an Attendance Request's the moment it
@@ -6883,7 +6996,11 @@ def _recently_decided(employee):
 	leave decisions here and nothing else, which is correct: the group is a
 	receipt for work this user did, not a record they own.
 	"""
-	since = add_days(user_today(), -_DECIDED_DAYS)
+	since = None if pattern else add_days(user_today(), -_DECIDED_DAYS)
+	# Timesheets left the receipt (plan 2026-10-15-002 KTD8: they have their
+	# own tab), but a search of history has to reach them.
+	collectors = (*_DECIDED_COLLECTORS, _decided_timesheets) if pattern else _DECIDED_COLLECTORS
+	search = {"pattern": pattern} if pattern else {}
 	today = _as_date(user_today())
 	decided = []
 	# P5-U11: the same gate `_approval_summaries` needed for its line-manager
@@ -6895,15 +7012,15 @@ def _recently_decided(employee):
 	# caller; their routed and change decisions come from
 	# `_DECIDED_STAMPED_COLLECTORS`, which need no DocPerm).
 	if "Employee" in frappe.get_roles():
-		for collect in _DECIDED_COLLECTORS:
-			decided.extend(collect(employee, since))
+		for collect in collectors:
+			decided.extend(collect(employee, since, **search))
 	for collect in _DECIDED_STAMPED_COLLECTORS:
-		decided.extend(collect(employee, since))
+		decided.extend(collect(employee, since, **search))
 
 	decided.sort(key=lambda entry: entry["decided_on"] or "", reverse=True)
 	for entry in decided:
 		entry["age_days"] = _age_in_days(entry["decided_on"], today)
-	return _with_photo_urls(decided[:_DECIDED_LIMIT])
+	return _with_photo_urls(decided[: _DECIDED_SEARCH_LIMIT if pattern else _DECIDED_LIMIT])
 
 
 def _oversight_scope(user=None):
