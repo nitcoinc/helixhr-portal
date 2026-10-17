@@ -1,4 +1,4 @@
-import { test, expect, request, APIRequestContext } from '@playwright/test'
+import { test, expect, request, APIRequestContext, Locator } from '@playwright/test'
 
 // P2-U7. The two things the Python suite cannot prove: that the evidence is
 // on screen *before* the decision is available (P2-AE6 in the browser), and
@@ -433,12 +433,17 @@ test('an employee has no All pending tab, even by URL', async ({ page }, testInf
 test('a manager sees My team and no HR lane; timesheets have their own tab', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'manager', 'this is the line-manager capability shape')
 
-  await page.goto('/helixhr/approvals')
+  // Start on Leave & attendance by URL: which tab is the default depends on
+  // what happens to be waiting (Approvals.vue `firstWaitingTab`), and the
+  // default tab's own URL carries no `?view=`.
+  await page.goto('/helixhr/approvals?view=queue')
   await expect(page.getByRole('heading', { name: 'Approvals' })).toBeVisible()
+  await expect(page.getByRole('tab', { name: /^Leave & attendance/ })).toHaveAttribute('aria-selected', 'true')
   await expect(page.getByTestId('lane-hr')).toHaveCount(0)
   await expect(page.getByTestId('approvals-queue').locator('[data-approval-kind="timesheet"]')).toHaveCount(0)
   await page.getByRole('tab', { name: /^Timesheets/ }).click()
-  await expect(page).toHaveURL(/view=timesheets/)
+  await expect(page).not.toHaveURL(/view=queue/)
+  await expect(page.getByRole('tab', { name: /^Timesheets/ })).toHaveAttribute('aria-selected', 'true')
   await expect(page.getByTestId('timesheet-oversight')).toHaveCount(0)
 
   // MH-01: the active tab carries a real 2px heading-ink bar. `border-ink-*`
@@ -458,10 +463,13 @@ test('a manager sees My team and no HR lane; timesheets have their own tab', asy
 test('HR sees All pending timesheets grouped by approver on the Timesheets tab', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'hr', 'this is the HR capability shape')
 
-  await page.goto('/helixhr/approvals')
-  await expect(page.getByRole('tab', { name: 'All pending', exact: true })).toBeVisible()
+  // From All pending by URL, for the same reason as the manager test above:
+  // the default tab depends on what is waiting and carries no `?view=`.
+  await page.goto('/helixhr/approvals?view=all-pending')
+  await expect(page.getByRole('tab', { name: 'All pending', exact: true })).toHaveAttribute('aria-selected', 'true')
   await page.getByRole('tab', { name: /^Timesheets/ }).click()
-  await expect(page).toHaveURL(/view=timesheets/)
+  await expect(page).not.toHaveURL(/view=all-pending/)
+  await expect(page.getByRole('tab', { name: /^Timesheets/ })).toHaveAttribute('aria-selected', 'true')
   const oversight = page.getByTestId('timesheet-oversight')
   await expect(oversight.getByRole('heading', { name: /All pending timesheets/ })).toBeVisible()
   const group = oversight.locator('[data-testid="oversight-group"][data-approver="oversight-manager@helixhr.test"]')
@@ -684,4 +692,349 @@ test('Accept needs a confirm: cancel leaves it open, confirm reopens the week', 
   const week = await employee.get(`/api/method/helixhr.api.get_my_week?week_start=${monday}`)
   expect((await week.json()).message.timesheet.workflow_state).toBe('Draft')
   await employee.dispose()
+})
+
+// ── Plan 2026-10-17-001 U7 ────────────────────────────────────────────────
+// Approvals: one evidence surface for phone and desktop, then Approve all,
+// select-all, keyboard triage and focus after a row leaves. Every row these
+// tests assert on is seeded here and removed in `finally`; counts that the
+// site's leftovers could move are read from the server first rather than
+// assumed.
+
+const MANAGER = 'manager@helixhr.test'
+const PHONE = { width: 390, height: 844 }
+const DESKTOP = { width: 1440, height: 900 }
+
+/** A clean one-day leave for the employee, with the manager as approver:
+ * far enough ahead for no short-notice flag, one day of a five-day balance. */
+async function seedLeave(baseURL: string, date: string, description: string) {
+  const admin = await adminContext(baseURL)
+  const employee = await getValue(admin, 'Employee', { user_id: EMPLOYEE }, 'name')
+  const inserted = await admin.post('/api/method/frappe.client.insert', {
+    data: {
+      doc: JSON.stringify({
+        doctype: 'Leave Application',
+        employee,
+        leave_type: 'Casual Leave',
+        from_date: date,
+        to_date: date,
+        description,
+        leave_approver: MANAGER,
+      }),
+    },
+  })
+  expect(inserted.ok(), await inserted.text()).toBeTruthy()
+  const name = (await inserted.json()).message.name as string
+  await admin.dispose()
+  return name
+}
+
+async function removeRecord(baseURL: string, doctype: string, name: string) {
+  const admin = await adminContext(baseURL)
+  if ((await getValue(admin, doctype, { name }, 'docstatus')) === 1) {
+    await admin.post('/api/method/frappe.client.cancel', { form: { doctype, name } })
+  }
+  await admin.post('/api/method/frappe.client.delete', { form: { doctype, name } })
+  await admin.dispose()
+}
+
+/** A weekday about 40 weeks back: nothing else on this site books it. */
+function pastWeekday(): string {
+  const day = new Date()
+  day.setUTCDate(day.getUTCDate() - 284)
+  while (day.getUTCDay() === 0 || day.getUTCDay() === 6) day.setUTCDate(day.getUTCDate() - 1)
+  return day.toISOString().slice(0, 10)
+}
+
+/** One attendance request already with the manager, through the portal's
+ * own two methods. Never batchable: `approve_clean_items` refuses it. */
+async function seedAttendanceRequest(baseURL: string) {
+  const day = pastWeekday()
+  const admin = await adminContext(baseURL)
+  const employee = await getValue(admin, 'Employee', { user_id: EMPLOYEE }, 'name')
+  const listed = await admin.get(
+    '/api/method/frappe.client.get_list?doctype=Attendance%20Request&filters=' +
+      encodeURIComponent(JSON.stringify({ employee, from_date: ['<=', day], to_date: ['>=', day] })) +
+      '&fields=' +
+      encodeURIComponent(JSON.stringify(['name'])) +
+      '&limit_page_length=0',
+  )
+  // Read before dispose: a disposed context's responses are gone with it.
+  const rows: { name: string }[] = (await listed.json())?.message || []
+  await admin.dispose()
+  for (const row of rows) await removeRecord(baseURL, 'Attendance Request', row.name)
+
+  const api = await loginAs(baseURL, EMPLOYEE)
+  const created = await api.post('/api/method/helixhr.api.create_my_attendance_request', {
+    form: { from_date: day, to_date: day, reason: 'Work From Home', explanation: 'u7 approve all' },
+  })
+  expect(created.ok(), await created.text()).toBeTruthy()
+  const draft = (await created.json()).message
+  const sent = await api.post('/api/method/helixhr.api.send_my_attendance_request', {
+    form: { name: draft.name, expected_modified: draft.modified },
+  })
+  expect(sent.ok(), await sent.text()).toBeTruthy()
+  await api.dispose()
+  return draft.name as string
+}
+
+/** The queue row fields these tests read (`get_my_approvals().pending`). */
+type QueueRow = { name: string; kind: string; lane?: string; needs_look?: boolean }
+
+/** The manager's queue as the server answers it right now. */
+async function managerQueue(baseURL: string) {
+  const api = await loginAs(baseURL, MANAGER)
+  const response = await api.get('/api/method/helixhr.api.get_my_approvals')
+  const message = (await response.json()).message
+  await api.dispose()
+  return message as { total: number; total_is_capped: boolean; pending: QueueRow[] }
+}
+
+/** What Approve all would take from the manager's My team lane on the
+ * Leave & attendance tab (lib/approvalLanes.js `isBatchable`). */
+function eligibleLeave(pending: QueueRow[]) {
+  return pending.filter(
+    (row) => (row.lane || 'team') === 'team' && row.kind === 'leave' && !row.needs_look,
+  )
+}
+
+test('characterization: phone inline and desktop panel show the same evidence and decisions', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'manager', 'this is the manager capability shape')
+  test.setTimeout(120000)
+  const baseURL = process.env.BASE_URL || 'http://localhost:8080'
+  const { name: week } = await seedPendingWeek(baseURL, 13)
+  const leave = await seedLeave(baseURL, addDays(futureWeekday(), 35), 'u7 characterization leave')
+
+  /** The evidence both layouts must carry, and the decision ids. */
+  async function expectEvidence(scope: Locator, texts: (string | RegExp)[], present: string[], absent: string[]) {
+    for (const text of texts) await expect(scope).toContainText(text, { timeout: 10000 })
+    for (const id of present) await expect(scope.getByTestId(id)).toBeVisible()
+    for (const id of absent) await expect(scope.getByTestId(id)).toHaveCount(0)
+  }
+
+  try {
+    const weekTexts = [PROJECT_NAME, '14.5', 'Long Monday, doctor on Friday']
+    const weekIds = ['approve', 'send-back', 'send-to-hr']
+
+    await page.setViewportSize(PHONE)
+    await page.goto('/helixhr/approvals?view=timesheets')
+    const weekRow = page.getByTestId('approvals-queue').locator(`[data-approval-name="${week}"]`)
+    await expect(weekRow).toBeVisible({ timeout: 15000 })
+    await weekRow.locator('button[aria-expanded]').click()
+    await expect(page).toHaveURL(new RegExp(`/approvals/timesheet/${week}`))
+    // The phone opens the record under its own row; the aside is desktop's.
+    await expectEvidence(weekRow, weekTexts, weekIds, ['reject'])
+    await expect(page.getByTestId('approval-detail')).toHaveCount(0)
+
+    await page.setViewportSize(DESKTOP)
+    const panel = page.getByTestId('approval-detail')
+    await expectEvidence(panel, weekTexts, weekIds, ['reject'])
+    await expect(weekRow.getByTestId('decision-actions')).toHaveCount(0)
+
+    const leaveTexts = ['Casual Leave', 'Days', 'u7 characterization leave']
+    const leaveIds = ['approve', 'reject']
+
+    await page.setViewportSize(PHONE)
+    await page.goto('/helixhr/approvals?view=queue')
+    const leaveRow = page.getByTestId('approvals-queue').locator(`[data-approval-name="${leave}"]`)
+    await expect(leaveRow).toBeVisible({ timeout: 15000 })
+    await leaveRow.locator('button[aria-expanded]').click()
+    await expectEvidence(leaveRow, leaveTexts, leaveIds, [])
+    await expect(page.getByTestId('approval-detail')).toHaveCount(0)
+
+    await page.setViewportSize(DESKTOP)
+    await expectEvidence(page.getByTestId('approval-detail'), leaveTexts, leaveIds, [])
+  } finally {
+    await removeRecord(baseURL, 'Timesheet', week)
+    await removeRecord(baseURL, 'Leave Application', leave)
+  }
+})
+
+test('Approve all on a phone: two taps, a polite toast, the badge drops, attendance stays', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'manager', 'this is the manager capability shape')
+  test.setTimeout(120000)
+  const baseURL = process.env.BASE_URL || 'http://localhost:8080'
+  const start = futureWeekday()
+  // Seeded inside `try`, so a seed that fails part-way still removes what it
+  // made: a leftover leave holds a day of the five-day balance and an
+  // overlap on its date for the rest of the run.
+  const leaves: string[] = []
+  let attendance = ''
+  try {
+    leaves.push(await seedLeave(baseURL, addDays(start, 21), 'u7 approve all one'))
+    leaves.push(await seedLeave(baseURL, addDays(start, 28), 'u7 approve all two'))
+    attendance = await seedAttendanceRequest(baseURL)
+
+    // On a fresh site this is exactly the two leaves above; a long-lived
+    // site's own clean leftovers join the batch, and the count follows them.
+    const before = await managerQueue(baseURL)
+    const eligible = eligibleLeave(before.pending)
+    for (const name of leaves) {
+      expect(eligible.map((row) => row.name), `${name} should look normal`).toContain(name)
+    }
+    const count = eligible.length
+    expect(count).toBeLessThanOrEqual(60)
+
+    await page.setViewportSize(PHONE)
+    const loaded = page.waitForResponse((r) => r.url().includes('helixhr.api.get_my_approvals'))
+    await page.goto('/helixhr/approvals?view=queue')
+    const first = (await (await loaded).json()).message
+    const queue = page.getByTestId('approvals-queue')
+    await expect(queue.locator(`[data-approval-name="${attendance}"]`)).toBeVisible({ timeout: 15000 })
+
+    // No checkboxes on a phone (R20), but the lane still has its batch.
+    await expect(queue.getByTestId('bulk-check-leave')).toHaveCount(0)
+    const approveAll = page.getByTestId('lane-team').getByTestId('approve-all')
+    await expect(approveAll).toHaveText(`Approve all ${count} that look normal`)
+
+    await approveAll.click()
+    const dialog = page.getByRole('dialog')
+    const label = dialog.getByTestId('bulk-confirm-label')
+    await expect(label).toContainText(`Approve ${count} ${count === 1 ? 'item' : 'items'}`)
+    const sentence = await label.textContent()
+
+    // Rotating with the confirm open keeps the batch: it came from the
+    // lane, not from checkboxes that 640px would clear.
+    await page.setViewportSize({ width: 700, height: 390 })
+    await expect(dialog.getByTestId('bulk-confirm-label')).toHaveText(sentence || '')
+    await expect(dialog.getByTestId('bulk-confirm')).toHaveText(`Approve ${count}`)
+
+    await dialog.getByTestId('bulk-confirm').click()
+    await expect(page.locator('[data-testid="toast"][data-tone="success"]').filter({ hasText: `${count} approved` })).toBeVisible({
+      timeout: 15000,
+    })
+    await expect(page.locator('[data-testid="toast"]').filter({ hasText: 'approved' })).toHaveCount(1)
+    await expect(page.locator('[data-testid="toast"][data-tone="error"]')).toHaveCount(0)
+
+    for (const name of leaves) await expect(queue.locator(`[data-approval-name="${name}"]`)).toHaveCount(0)
+    await expect(queue.locator(`[data-approval-name="${attendance}"]`)).toBeVisible()
+    await expect(page.getByTestId('lane-team').getByTestId('approve-all')).toHaveCount(0)
+    // The two leaves are Decided by me now.
+    await expect(page.getByTestId('decided-toggle')).toBeVisible()
+
+    const expected = first.total - count
+    const badge = page.getByTestId('tab-badge-approvals')
+    if (expected > 0) await expect(badge).toHaveText(`${expected}${first.total_is_capped ? '+' : ''}`)
+    else await expect(badge).toHaveCount(0)
+
+    const admin = await adminContext(baseURL)
+    for (const name of leaves) expect(await getValue(admin, 'Leave Application', { name }, 'status')).toBe('Approved')
+    expect(await getValue(admin, 'Attendance Request', { name: attendance }, 'docstatus')).toBe(0)
+    await admin.dispose()
+  } finally {
+    for (const name of leaves) await removeRecord(baseURL, 'Leave Application', name)
+    if (attendance) await removeRecord(baseURL, 'Attendance Request', attendance)
+  }
+})
+
+test('Approve all never counts a flagged week, and hides when nothing is eligible', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'manager', 'this is the manager capability shape')
+  test.setTimeout(90000)
+  const baseURL = process.env.BASE_URL || 'http://localhost:8080'
+  // 14.5 hours against a full week: "Hours differ from expected".
+  const { name } = await seedPendingWeek(baseURL, 15)
+
+  try {
+    const before = await managerQueue(baseURL)
+    const mine = before.pending.find((row) => row.name === name)
+    expect(mine?.needs_look, 'the seeded week should be flagged').toBeTruthy()
+    const eligible = before.pending.filter(
+      (row) => row.kind === 'timesheet' && row.lane !== 'hr' && !row.needs_look,
+    ).length
+
+    await page.setViewportSize(PHONE)
+    await page.goto('/helixhr/approvals?view=timesheets')
+    const lane = page.getByTestId('lane-yours')
+    await expect(lane.getByTestId('queue-section-flagged').locator(`[data-approval-name="${name}"]`)).toBeVisible({
+      timeout: 15000,
+    })
+    if (eligible) await expect(lane.getByTestId('approve-all')).toHaveText(`Approve all ${eligible} that look normal`)
+    else await expect(lane.getByTestId('approve-all')).toHaveCount(0)
+    // Change requests and flagged rows have no Approve all of their own.
+    await expect(lane.getByTestId('queue-section-flagged').getByTestId('approve-all')).toHaveCount(0)
+    await expect(lane.getByTestId('queue-section-change').getByTestId('approve-all')).toHaveCount(0)
+  } finally {
+    await removeRecord(baseURL, 'Timesheet', name)
+  }
+})
+
+test('keyboard triage is off until turned on, then `a` opens the confirm and approves nothing', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'manager', 'this is the manager capability shape')
+  test.setTimeout(90000)
+  const baseURL = process.env.BASE_URL || 'http://localhost:8080'
+  const leave = await seedLeave(baseURL, addDays(futureWeekday(), 42), 'u7 keyboard')
+
+  try {
+    await page.setViewportSize(DESKTOP)
+    await page.goto('/helixhr/approvals?view=queue')
+    const toggle = page.locator(`[data-approval-name="${leave}"] [data-row-toggle]`)
+    await expect(toggle).toBeVisible({ timeout: 15000 })
+
+    // Off: no key acts.
+    await toggle.focus()
+    await page.keyboard.press('a')
+    await page.keyboard.press('x')
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+    await expect(page.getByTestId('bulk-bar')).toHaveCount(0)
+
+    await page.getByTestId('shortcuts-hint').click()
+    await expect(page.locator('#approvals-shortcuts')).toContainText('Approve, after the confirm')
+    await page.getByTestId('shortcuts-toggle').click()
+    await expect(page.getByTestId('shortcuts-toggle')).toHaveAttribute('aria-checked', 'true')
+
+    // On, but focus outside the list: a key is just a key.
+    await page.getByRole('heading', { name: 'Approvals', level: 1 }).click()
+    await page.keyboard.press('a')
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+
+    // Inside the list: `a` opens the confirm, and nothing is approved by it.
+    await toggle.focus()
+    await page.keyboard.press('a')
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByTestId('bulk-confirm')).toHaveText('Approve 1')
+    await dialog.getByRole('button', { name: 'Back' }).click()
+    await expect(dialog).toHaveCount(0)
+    const admin = await adminContext(baseURL)
+    expect(await getValue(admin, 'Leave Application', { name: leave }, 'status')).toBe('Open')
+    await admin.dispose()
+
+    // The flag is this user's, and survives a reload.
+    await page.reload()
+    await page.getByTestId('shortcuts-hint').click()
+    await expect(page.getByTestId('shortcuts-toggle')).toHaveAttribute('aria-checked', 'true')
+    const stored = await page.evaluate((user) => localStorage.getItem(`helixhr.approvals.shortcuts:${user}`), MANAGER)
+    expect(stored).toBe('1')
+  } finally {
+    await removeRecord(baseURL, 'Leave Application', leave)
+  }
+})
+
+test('after a decision, focus moves to the next row (KTD16)', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'manager', 'this is the manager capability shape')
+  test.setTimeout(90000)
+  const baseURL = process.env.BASE_URL || 'http://localhost:8080'
+  const start = futureWeekday()
+  // Same person, older first: the two rows sit next to each other.
+  const first = await seedLeave(baseURL, addDays(start, 49), 'u7 focus one')
+  const second = await seedLeave(baseURL, addDays(start, 56), 'u7 focus two')
+
+  try {
+    await page.setViewportSize(DESKTOP)
+    await page.goto(`/helixhr/approvals/leave/${first}?view=queue`)
+    const panel = page.getByTestId('approval-detail')
+    await panel.getByTestId('approve').click()
+    await expect(page.locator(`[data-approval-name="${first}"]`)).toHaveCount(0, { timeout: 15000 })
+    await expect(page.locator(`[data-approval-name="${second}"] [data-row-toggle]`)).toBeFocused()
+  } finally {
+    await removeRecord(baseURL, 'Leave Application', first)
+    await removeRecord(baseURL, 'Leave Application', second)
+  }
 })

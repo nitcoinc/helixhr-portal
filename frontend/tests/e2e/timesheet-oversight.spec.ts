@@ -43,3 +43,16 @@ test('opening a timesheet is view only', async ({ page }) => {
   await expect(page.getByTestId('view-only-note').first()).toBeVisible({ timeout: 15000 })
   await expect(page.getByRole('button', { name: /^Approve/ })).toHaveCount(0)
 })
+
+// Plan 2026-10-17-001 U7 (MH-09). HR User approves nothing, so there is no
+// personal "nothing waiting on you" card above the work they do have:
+// oversight leads the page.
+test('oversight leads the page, with no empty personal queue above it', async ({ page }) => {
+  const oversight = page.getByTestId('timesheet-oversight')
+  await expect(oversight.getByRole('heading', { name: /All pending timesheets/ })).toBeVisible({ timeout: 15000 })
+  await expect(page.getByText('No timesheets waiting on you')).toHaveCount(0)
+  await expect(page.getByText('Nothing waiting on you.')).toHaveCount(0)
+  // The oversight heading is the first heading after the page title.
+  const headings = page.getByTestId('approvals-queue').getByRole('heading')
+  await expect(headings.first()).toHaveText(/All pending timesheets/)
+})
