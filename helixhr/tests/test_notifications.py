@@ -1,13 +1,15 @@
 import hashlib
 import json
+import re
 import uuid
 
 import frappe
+from frappe.email.doctype.notification.notification import get_context
 from frappe.model.workflow import apply_workflow
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, today
 
-from helixhr.events import HR_REPLY_SUBJECT_PREFIX
+from helixhr.events import HR_REPLY_SUBJECT_PREFIX, helixhr_date, helixhr_state_words
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	MANAGER_USER,
@@ -967,6 +969,105 @@ class TestNotificationTemplateEscaping(IntegrationTestCase):
 
 		self.assertIn("&lt;script&gt;", rendered)
 		self.assertNotIn("<script>", rendered)
+
+
+# --- Plan 2026-10-17-001 U12: notification copy -------------------------------
+
+_ISO_DATE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# The "Never say" workflow words in docs/design-system.md's copy table.
+# "Approved" is absent on purpose: the table keeps it as the portal word.
+_WORKFLOW_WORDS = ("Pending Approval", "Pending Manager", "Pending HR", "Sent Back", "Submitted")
+
+
+class TestNotificationCopy(IntegrationTestCase):
+	"""ED-03 / EP-06: titles say "Mar 8" and "waiting for your manager",
+	never a raw ISO date or a workflow-state word. Rendered through
+	`Notification.get_context`, the exact namespace a real send gets."""
+
+	def _render(self, name, field="subject", **fields):
+		template = frappe.db.get_value("Notification", name, field)
+		return frappe.render_template(template, {**get_context(frappe._dict(fields)), "comments": None})
+
+	def test_a_pending_week_reads_as_a_date_and_waiting_for_your_manager(self):
+		subject = self._render(
+			"HelixHR Timesheet Status Changed",
+			doctype="Timesheet",
+			start_date="2027-03-08",
+			end_date="2027-03-14",
+			workflow_state="Pending Approval",
+		)
+
+		self.assertEqual(subject, f"Your timesheet for {helixhr_date('2027-03-08')} is waiting for your manager")
+		self.assertTrue(subject.startswith("Your timesheet for Mar 8"))
+		self.assertNotIn("Pending Approval", subject)
+		self.assertNotIn("2027-03-08", subject)
+
+	def test_dates_carry_the_year_only_outside_the_current_year(self):
+		this_year = frappe.utils.getdate(today()).year
+		self.assertEqual(helixhr_date(f"{this_year}-03-08"), "Mar 8")
+		self.assertEqual(helixhr_date(f"{this_year + 1}-01-12"), f"Jan 12, {this_year + 1}")
+		self.assertEqual(helixhr_date(None), "")
+
+	def test_state_words_are_plain_words(self):
+		timesheet = {"doctype": "Timesheet"}
+		self.assertEqual(helixhr_state_words({**timesheet, "workflow_state": "Pending HR"}), "waiting for HR")
+		self.assertEqual(helixhr_state_words({**timesheet, "workflow_state": "Draft"}), "Not sent")
+		self.assertEqual(helixhr_state_words({**timesheet, "workflow_state": "Sent Back"}), "Sent back")
+		leave = {"doctype": "Leave Application"}
+		self.assertEqual(helixhr_state_words({**leave, "status": "Open"}), "waiting for your manager")
+		self.assertEqual(helixhr_state_words({**leave, "status": "Rejected", "docstatus": 0}), "Sent back")
+		self.assertEqual(helixhr_state_words({**leave, "status": "Rejected", "docstatus": 1}), "Rejected")
+
+	def test_the_patch_run_twice_changes_nothing_the_second_time(self):
+		from helixhr.patches.v1_0.apply_notification_copy import execute
+
+		name = "HelixHR Timesheet Status Changed"
+		frappe.db.set_value("Notification", name, "subject", "Your timesheet for {{ doc.start_date }}")
+
+		execute()
+		with open(frappe.get_app_path("helixhr", "fixtures", "notification.json")) as handle:
+			fixture = next(row for row in json.load(handle) if row["name"] == name)
+		first = frappe.db.get_value("Notification", name, ["subject", "message", "modified"], as_dict=True)
+		self.assertEqual(first.subject, fixture["subject"])
+		self.assertEqual(first.message, fixture["message"])
+
+		execute()
+		second = frappe.db.get_value("Notification", name, ["subject", "message", "modified"], as_dict=True)
+		self.assertEqual(second, first)
+
+	def _representative_docs(self, document_type):
+		dates = {
+			"doctype": document_type,
+			"from_date": "2027-02-12",
+			"to_date": "2027-02-13",
+			"start_date": "2027-03-08",
+			"end_date": "2027-03-14",
+			"leave_type": "Casual Leave",
+			"helixhr_stage": "HR",
+		}
+		if document_type == "Leave Application":
+			statuses = frappe.get_meta("Leave Application").get_field("status").options.split("\n")
+			return [{**dates, "status": s, "docstatus": d} for s in statuses if s for d in (0, 1)]
+		if document_type == "Timesheet":
+			states = frappe.get_all(
+				"Workflow Document State", filters={"parent": "Timesheet Approval"}, pluck="state"
+			)
+			return [{**dates, "workflow_state": state} for state in states]
+		self.fail(f"No representative {document_type} -- add one so its notification copy is checked")
+
+	def test_no_helixhr_notification_leaks_an_iso_date_or_a_workflow_word(self):
+		notifications = frappe.get_all(
+			"Notification", filters={"module": "HelixHR", "enabled": 1}, fields=["name", "document_type"]
+		)
+		self.assertTrue(notifications)
+		for row in notifications:
+			for fields in self._representative_docs(row.document_type):
+				for field in ("subject", "message"):
+					rendered = self._render(row.name, field, **fields)
+					with self.subTest(notification=row.name, field=field, state=fields):
+						self.assertIsNone(_ISO_DATE.search(rendered), rendered)
+						for word in _WORKFLOW_WORDS:
+							self.assertNotIn(word, rendered)
 
 
 # --- Plan 2026-10-02-001 U8: the HelixHR template sandbox --------------------

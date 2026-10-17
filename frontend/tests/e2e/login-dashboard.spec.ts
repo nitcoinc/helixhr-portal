@@ -288,7 +288,7 @@ function stubQueue(page, count) {
 }
 
 test.describe('five-row queue (R12)', () => {
-  test('12 items: five visible, the rest scroll, View all (12) goes to Approvals', async ({
+  test('12 items: five visible, the rest scroll, View all (12) goes to Notifications', async ({
     page,
   }, testInfo) => {
     test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
@@ -315,9 +315,13 @@ test.describe('five-row queue (R12)', () => {
     await list.evaluate((el) => el.scrollTo(0, el.scrollHeight))
     await expect.poll(async () => (await shownRows()).at(-1)).toBe(12)
 
+    // Plan 2026-10-17-001 U1 (EP-09): this employee has no Approvals page,
+    // so their own queue's View all opens Notifications instead of a
+    // route the rail does not offer them.
     const viewAll = queue.getByRole('link', { name: 'View all (12)' })
     await viewAll.click()
-    await expect(page).toHaveURL(/\/helixhr\/approvals$/)
+    await expect(page).toHaveURL(/\/helixhr\/notifications$/)
+    await expect(page.getByRole('heading', { level: 1, name: 'Notifications' })).toBeVisible()
   })
 
   test('3 items: no scroll chrome and no View all', async ({ page }, testInfo) => {

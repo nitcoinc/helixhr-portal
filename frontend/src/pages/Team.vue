@@ -94,6 +94,12 @@ const notShown = computed(() => Math.max(0, totalReports.value - reports.value.l
 
 const hasLeave = computed(() => reports.value.some((row) => row.leaves.length))
 
+// ED-25: once the server refuses the week, the tabs and arrows have nothing
+// left to act on, so only AsyncState's refusal stays on screen.
+const forbidden = computed(() =>
+  [team, teamTimesheets].some((resource) => /PermissionError/.test(resource.error?.exc_type || '')),
+)
+
 // --- the timesheets tab (plan 2026-10-04-003 U4, R2) -----------------------
 
 const timesheetReports = computed(() => teamTimesheets.data?.reports || [])
@@ -321,6 +327,7 @@ const quietWeek = computed(() => !noReports.value && !hasLeave.value)
     <!-- Plan 2026-10-04-003 R1. Two tabs, in the URL, arrow-key switchable --
          the same segmented control the Requests page uses. -->
     <div
+      v-if="!forbidden"
       class="mb-4 flex gap-2 border-b border-outline-gray-2"
       role="tablist"
       aria-label="Team views"
@@ -334,7 +341,7 @@ const quietWeek = computed(() => !noReports.value && !hasLeave.value)
         class="-mb-px min-h-11 border-b-2 px-3 text-sm font-medium"
         :class="
           tab === item.name
-            ? 'border-ink-gray-9 text-ink-gray-9'
+            ? 'border-heading text-ink-gray-9'
             : 'border-transparent text-ink-gray-6 hover:text-ink-gray-9'
         "
         :aria-selected="tab === item.name"
@@ -352,7 +359,10 @@ const quietWeek = computed(() => !noReports.value && !hasLeave.value)
          outside the async region on purpose: the week is this page's own
          state, so the arrows keep working while the week behind them is
          loading, failing, or empty. -->
-    <div class="mb-4 flex items-center gap-2">
+    <div
+      v-if="!forbidden"
+      class="mb-4 flex items-center gap-2"
+    >
       <button
         class="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-lg border border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2"
         type="button"
@@ -618,7 +628,7 @@ const quietWeek = computed(() => !noReports.value && !hasLeave.value)
         </span>
         <span class="inline-flex items-center gap-1.5">
           <span
-            class="h-3 w-6 rounded bg-surface-gray-2"
+            class="h-3 w-6 rounded bg-surface-gray-3"
             aria-hidden="true"
           />
           Weekend or holiday

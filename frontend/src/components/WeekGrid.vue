@@ -94,7 +94,7 @@ function projectSelectClass(line) {
   return [
     SELECT_FIELD,
     'font-medium',
-    line.project ? 'border-outline-gray-2' : 'border-outline-blue-2 bg-surface-blue-2/40',
+    line.project ? 'border-outline-gray-2' : 'border-blue-300 bg-surface-blue-1',
   ]
 }
 
@@ -432,7 +432,7 @@ function focusIfPending(key) {
                 v-for="day in days"
                 :key="day.iso"
                 class="label px-1.5 py-3 text-center"
-                :class="day.isWeekend ? 'bg-surface-gray-2/70' : ''"
+                :class="day.isWeekend ? 'bg-surface-gray-1' : ''"
                 scope="col"
               >
                 {{ day.weekday }} {{ day.dayOfMonth }}
@@ -519,7 +519,7 @@ function focusIfPending(key) {
                 v-for="day in days"
                 :key="day.iso"
                 class="px-1.5 py-2 text-center"
-                :class="day.isWeekend ? 'bg-surface-gray-2/70' : ''"
+                :class="day.isWeekend ? 'bg-surface-gray-1' : ''"
               >
                 <input
                   v-if="!readOnly"
@@ -590,7 +590,7 @@ function focusIfPending(key) {
                 v-for="day in days"
                 :key="day.iso"
                 class="px-1.5 py-3 text-center align-top"
-                :class="day.isWeekend ? 'bg-surface-gray-3/50' : ''"
+                :class="day.isWeekend ? 'bg-surface-gray-2' : ''"
               >
                 <span class="tabular block font-semibold text-ink-gray-9">{{ day.total }}</span>
                 <!-- The bar is read against an 8h day, the same rule the

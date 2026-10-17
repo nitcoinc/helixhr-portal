@@ -64,7 +64,7 @@ function ageLabel(days) {
   <div>
     <PageHeader
       title="Organisation"
-      subtitle="A read-only view of your company -- counts, never names, and nothing to act on here."
+      subtitle="A read-only view of your company: counts, never names, and nothing to act on here."
     />
 
     <div

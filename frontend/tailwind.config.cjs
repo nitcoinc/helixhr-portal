@@ -90,6 +90,13 @@ module.exports = {
           soft: '#FDEFC9',
         },
         paper: '#EFEAE4',
+        // Heading ink (`--ink-gray-9`, 14.92 on paper) as a colour every
+        // property can use. frappe-ui registers `ink-*` for text only, so
+        // `border-ink-gray-9` -- the active tab bar -- generated no CSS
+        // (MH-01). This is the one name for a dark rule or fill: `border-heading`,
+        // `bg-heading`. Do not register the whole `ink` family here;
+        // src/lib/tokenGuard.test.js relies on `border-ink-*` staying invalid.
+        heading: '#1A1714',
         field: {
           DEFAULT: '#143D33',
           deep: '#0E2C25',

@@ -95,7 +95,7 @@ function reload() {
   <div>
     <PageHeader
       title="Settings"
-      :subtitle="portalOnly ? 'Report access, people and their access, and approvers -- without Desk.' : 'Request categories and the day-to-day HRMS masters -- without Desk.'"
+      :subtitle="portalOnly ? 'Who can run reports, who has which access, and who approves.' : 'Request categories, leave types, holiday lists, shift types and leave rules.'"
     >
       <template #actions>
         <!-- P8-U6: the server's own gate (`_can_open_desk`), not merely
@@ -134,7 +134,7 @@ function reload() {
             :aria-current="activeSection === tab.key ? 'page' : undefined"
             :class="
               activeSection === tab.key
-                ? 'border-b-2 border-signal text-ink-gray-9'
+                ? 'border-b-2 border-heading text-ink-gray-9'
                 : 'text-ink-gray-6 hover:text-ink-gray-9'
             "
             :data-testid="`settings-tab-${tab.key}`"

@@ -8,6 +8,7 @@
 // may change (`can_edit_roles`, `can_edit_hr_roles`, `can_edit_grant`,
 // `grantable`) and whether the person changed since the panel loaded.
 import { computed, onBeforeUnmount, ref, useId, watch } from 'vue'
+import { Button } from 'frappe-ui'
 import { call } from '@/lib/api'
 import { getProfiles, matchProfiles } from '@/lib/accessProfiles'
 import GrantEditor from '@/components/settings/GrantEditor.vue'
@@ -446,7 +447,7 @@ async function save() {
               :key="profile.key"
               type="button"
               class="min-h-11 cursor-pointer rounded-full border px-3 text-sm aria-disabled:cursor-not-allowed aria-disabled:opacity-50 sm:min-h-9"
-              :class="profileActive(profile) ? 'border-signal bg-surface-gray-2 text-ink-gray-9' : 'border-outline-gray-2 text-ink-gray-7'"
+              :class="profileActive(profile) ? 'border-heading bg-surface-gray-2 text-ink-gray-9' : 'border-outline-gray-2 text-ink-gray-7'"
               :aria-pressed="profileActive(profile) ? 'true' : 'false'"
               :aria-disabled="profileLocked(profile) ? 'true' : undefined"
               @click="toggleProfile(profile)"
@@ -565,15 +566,16 @@ async function save() {
           class="sticky bottom-[calc(56px+env(safe-area-inset-bottom))] z-[5] mt-4 flex items-center gap-3 border-t border-outline-gray-2 bg-surface-white py-3 lg:bottom-0"
           data-testid="people-access-save-bar"
         >
-          <button
-            type="button"
-            class="inline-flex min-h-11 cursor-pointer items-center justify-center rounded-lg bg-signal px-4 text-sm font-medium text-white disabled:cursor-not-allowed disabled:opacity-50"
+          <Button
+            variant="solid"
+            theme="blue"
+            class="min-h-11"
             :disabled="!dirty || busy"
             data-testid="people-access-save"
             @click="save"
           >
             {{ busy ? 'Saving…' : 'Save changes' }}
-          </button>
+          </Button>
           <button
             v-if="dirty && !busy"
             type="button"

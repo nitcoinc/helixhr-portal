@@ -10,6 +10,9 @@ import { ref, watch } from 'vue'
 //
 // The caller's `class` carries the size and the monogram's colours, so a
 // surface without a photo renders the same markup it always did.
+//
+// The hairline ring keeps a flat or near-blank photo reading as an avatar
+// rather than a status dot (MH-25).
 const props = defineProps({
   photoUrl: { type: String, default: null },
   initials: { type: String, default: '' },
@@ -44,7 +47,7 @@ watch(
     :height="size"
     loading="lazy"
     decoding="async"
-    class="shrink-0 rounded-full object-cover"
+    class="shrink-0 rounded-full object-cover ring-1 ring-outline-gray-2"
     data-testid="avatar-img"
     @error="failed = true"
   >

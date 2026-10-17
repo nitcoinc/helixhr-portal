@@ -50,7 +50,7 @@ function hoursLabel(hours) {
         >
           <div class="flex items-start justify-between gap-3">
             <div class="min-w-0">
-              <h2 class="font-heading text-base font-bold text-ink-gray-9">
+              <h2 class="break-words font-heading text-base font-bold text-ink-gray-9">
                 {{ project.project_name || project.name }}
               </h2>
               <p class="text-sm text-ink-gray-6">

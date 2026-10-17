@@ -82,8 +82,11 @@ const routes = [
     component: () => import('@/pages/Holidays.vue'),
   },
   {
+    // EP-24: the rail hides Team without direct reports (`hasReports`), and
+    // an old link or the back stack lands Home instead of on a refusal.
     path: '/team',
     name: 'Team',
+    meta: { reportsOnly: true },
     component: () => import('@/pages/Team.vue'),
   },
   {
@@ -356,7 +359,8 @@ router.beforeEach(async (to) => {
     // Reaching a state page with a healthy session (a stale bookmark, or a
     // Back into /unavailable after a successful retry) means the state is
     // over; go where the user actually wanted to be.
-    return STATE_ROUTES.includes(to.name) ? { name: 'Dashboard' } : true
+    if (STATE_ROUTES.includes(to.name)) return { name: 'Dashboard' }
+    return to.meta.reportsOnly && !session.hasReports ? { name: 'Dashboard' } : true
   }
 
   // An HR or System Manager with no Employee record: the pages whose

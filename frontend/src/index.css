@@ -127,6 +127,13 @@
   --outline-blue-2: #7fb29f;
 }
 
+/* EP-26: the shell paints paper only as tall as its content, so a short page
+   showed a white band under it, and iOS overscroll showed the same strip.
+   The document itself is paper. */
+html {
+  background-color: var(--surface-gray-1);
+}
+
 /*
  * Touch sizing. frappe-ui's default control height is 28px and its `lg` size
  * is still only 40px, so on a phone almost every control -- Save, Withdraw,

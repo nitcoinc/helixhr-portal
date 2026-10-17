@@ -530,7 +530,7 @@ const latestQuestion = computed(() => {
         class="-mb-px flex min-h-11 items-center gap-2 border-b-2 px-3 text-sm font-medium"
         :class="
           tab === item.name
-            ? 'border-ink-gray-9 text-ink-gray-9'
+            ? 'border-heading text-ink-gray-9'
             : 'border-transparent text-ink-gray-6 hover:text-ink-gray-9'
         "
         :aria-selected="tab === item.name"
@@ -624,7 +624,7 @@ const latestQuestion = computed(() => {
                           </p>
                         </div>
                         <router-link
-                          class="-my-2 inline-flex min-h-11 items-center font-medium text-ink-gray-9 after:absolute after:inset-0 after:content-['']"
+                          class="break-words font-medium text-ink-gray-9 after:absolute after:inset-0 after:content-['']"
                           :class="row.name === name ? 'font-semibold' : ''"
                           :to="{ name: 'RequestDetail', params: { name: row.name }, query: { tab: 'work', ...(workFilter === 'open' ? {} : { state: workFilter }) } }"
                         >
@@ -772,13 +772,13 @@ const latestQuestion = computed(() => {
                       <!-- One link per row, stretched over the whole card. Two
                          nested interactive elements would be the alternative,
                          and that is neither valid markup nor navigable. -->
-                      <!-- P2-U9: `-my-2 min-h-11` for the same reason as the
-                         Leave row -- the stretched pseudo-element makes the
-                         card tappable, but an automated target-size check
-                         reads the link's own 24px box. The negative margin
-                         keeps the list's density unchanged. -->
+                      <!-- A subject wraps, so this link stays inline: the 44px
+                         target is the stretched pseudo-element over the whole
+                         card. `-my-2 inline-flex min-h-11` is for single-line
+                         links only -- on two lines its negative margin pulled
+                         the meta line up into the title (EP-01). -->
                       <router-link
-                        class="-my-2 inline-flex min-h-11 items-center font-medium text-ink-gray-9 after:absolute after:inset-0 after:content-['']"
+                        class="break-words font-medium text-ink-gray-9 after:absolute after:inset-0 after:content-['']"
                         :class="row.unread ? 'font-semibold' : ''"
                         :to="{ name: 'RequestDetail', params: { name: row.name }, query: categoryFilter ? { type: categoryFilter } : {} }"
                       >
@@ -792,6 +792,7 @@ const latestQuestion = computed(() => {
                       <StatusBadge
                         kind="request"
                         :status="row.status"
+                        :team="row.handled_by_team"
                       />
                       <Icon
                         name="chevronRight"
@@ -926,7 +927,7 @@ const latestQuestion = computed(() => {
             </p>
             <p
               v-if="workSelected.sla_overdue"
-              class="mt-1 text-sm font-medium text-signal"
+              class="mt-1 text-sm font-medium text-ink-amber-3"
               data-testid="work-sla-overdue"
             >
               Past this category's SLA
@@ -1002,7 +1003,7 @@ const latestQuestion = computed(() => {
               >
               <p
                 v-if="attachReplyError"
-                class="mt-1 text-sm text-signal"
+                class="mt-1 text-sm text-ink-red-4"
                 role="alert"
               >
                 {{ attachReplyError }}
@@ -1043,7 +1044,7 @@ const latestQuestion = computed(() => {
               />
               <p
                 v-if="reasonError"
-                class="mt-1 text-sm font-medium text-signal"
+                class="mt-1 text-sm font-medium text-ink-red-4"
                 role="alert"
               >
                 {{ reasonError }}

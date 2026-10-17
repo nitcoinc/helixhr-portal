@@ -55,6 +55,21 @@ test.describe('desktop side nav', () => {
     await expect(mainNav(page).getByRole('link', { name: 'Team' })).toHaveCount(0)
   })
 
+  test('sends an employee with no reports from /team to Home, with no 403 (EP-24)', async ({
+    page,
+  }, testInfo) => {
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
+    const refused: string[] = []
+    page.on('response', (response) => {
+      if (response.status() === 403) refused.push(response.url())
+    })
+    await page.goto('/helixhr/team')
+    await expect(page).toHaveURL(/\/helixhr\/?$/)
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+    await page.waitForLoadState('networkidle')
+    expect(refused, refused.join('\n')).toEqual([])
+  })
+
   test('shows Team to a manager with reports and opens it (P3-KTD11)', async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== 'manager', 'manager-only scenario')
     await page.setViewportSize({ width: 1440, height: 900 })

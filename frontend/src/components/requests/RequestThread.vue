@@ -4,6 +4,7 @@
 import { ref, computed, nextTick, useId } from 'vue'
 import { call } from '@/lib/api'
 import { formatDateTime } from '@/lib/dates'
+import { Button } from 'frappe-ui'
 import Icon from '@/components/Icon.vue'
 
 const props = defineProps({
@@ -190,9 +191,9 @@ async function sendAndWait() {
           class="flex items-center justify-center py-2 text-xs text-ink-gray-5"
           data-testid="thread-milestone"
         >
-          <span class="mr-3 h-px flex-grow bg-outline-gray-2" />
+          <span class="mr-3 flex-grow border-t border-outline-gray-2" />
           <span>{{ item.label }} · {{ formatDateTime(item.on) }}</span>
-          <span class="ml-3 h-px flex-grow bg-outline-gray-2" />
+          <span class="ml-3 flex-grow border-t border-outline-gray-2" />
         </div>
 
         <!-- Question entry -->
@@ -285,15 +286,16 @@ async function sendAndWait() {
         class="mt-2 space-y-2"
       >
         <div class="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            class="inline-flex min-h-11 cursor-pointer items-center rounded-lg bg-ink-gray-9 px-4 text-sm font-medium text-surface-white hover:bg-ink-gray-8 disabled:opacity-50"
+          <Button
+            variant="solid"
+            theme="blue"
+            class="min-h-11"
             :disabled="!message.trim() || tooLong || posting"
             data-testid="thread-post"
             @click="sendNote"
           >
             Send
-          </button>
+          </Button>
           <button
             v-if="canNeedInfo"
             type="button"
@@ -323,18 +325,19 @@ async function sendAndWait() {
         v-else
         class="mt-2 flex items-center gap-2"
       >
-        <button
-          type="button"
-          class="inline-flex min-h-11 cursor-pointer items-center rounded-lg bg-ink-gray-9 px-4 text-sm font-medium text-surface-white hover:bg-ink-gray-8 disabled:opacity-50"
+        <Button
+          variant="solid"
+          theme="blue"
+          class="min-h-11"
           :disabled="!message.trim() || tooLong || posting"
           data-testid="thread-post"
           @click="sendNote"
         >
           {{ isWaiting ? 'Reply' : 'Send' }}
-        </button>
+        </Button>
         <span
           v-if="message.length > detailsMax * 0.8"
-          class="text-xs text-ink-amber-6"
+          class="text-xs text-ink-amber-3"
         >{{ message.length }}/{{ detailsMax }}</span>
       </div>
 

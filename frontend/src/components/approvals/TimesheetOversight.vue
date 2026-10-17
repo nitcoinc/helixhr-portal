@@ -151,6 +151,7 @@ function rowAge(row) {
             <Button
               v-if="showsButton(group)"
               variant="solid"
+              theme="blue"
               class="min-h-11"
               :aria-disabled="!canRemind(group)"
               :aria-describedby="statusId(group)"

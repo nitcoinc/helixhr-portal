@@ -149,7 +149,7 @@ async function exportAs(format) {
     >
       <span
         v-if="working"
-        class="size-3.5 animate-spin rounded-full border-2 border-outline-gray-3 border-t-ink-gray-7"
+        class="size-3.5 animate-spin rounded-full border-2 border-outline-gray-3 border-t-heading"
         aria-hidden="true"
       />
       {{ working ? 'Exporting…' : 'Export' }}

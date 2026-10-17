@@ -130,3 +130,6 @@ helixhr.patches.v1_0.ensure_need_info_from_open
 # Plan 2026-10-16-001 U2 / KTD3: Mark done and Decline from Waiting on Employee
 # for HR Manager and IT Team on HR Request Handling -- copied from the fixture, idempotent.
 helixhr.patches.v1_0.ensure_close_from_waiting
+# Plan 2026-10-17-001 U12: notification titles say "Mar 8" and "waiting for
+# your manager" -- subject and message copied from the fixture, idempotent.
+helixhr.patches.v1_0.apply_notification_copy

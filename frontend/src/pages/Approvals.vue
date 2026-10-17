@@ -701,7 +701,7 @@ function dismissBulkResult() {
         class="-mb-px min-h-11 shrink-0 border-b-2 px-3 text-sm font-medium"
         :class="
           view === tab.name
-            ? 'border-ink-gray-9 text-ink-gray-9'
+            ? 'border-heading text-ink-gray-9'
             : 'border-transparent text-ink-gray-6 hover:text-ink-gray-9'
         "
         :aria-selected="view === tab.name"
@@ -1020,7 +1020,7 @@ function dismissBulkResult() {
                          the two kinds the batch takes, and only while the
                          server still calls the row clean. -->
                         <button
-                          v-if="section.key === 'normal'"
+                          v-if="section.key === 'normal' && canBulkSelect"
                           type="button"
                           class="flex w-11 shrink-0 cursor-pointer items-center justify-center border-r border-outline-gray-2"
                           :class="selectable(row) ? '' : 'cursor-default opacity-0'"
@@ -1032,7 +1032,7 @@ function dismissBulkResult() {
                         >
                           <span
                             class="flex h-5 w-5 items-center justify-center rounded border"
-                            :class="isSelected(row) ? 'border-ink-gray-9 bg-ink-gray-9 text-field' : 'border-outline-gray-3'"
+                            :class="isSelected(row) ? 'border-heading bg-heading text-white' : 'border-outline-gray-3'"
                             aria-hidden="true"
                           >
                             <Icon
@@ -1361,7 +1361,7 @@ function dismissBulkResult() {
                               />
                               <p
                                 v-if="reasonError"
-                                class="mt-1 text-sm font-medium text-signal"
+                                class="mt-1 text-sm font-medium text-ink-red-4"
                                 role="alert"
                               >
                                 {{ reasonError }}
@@ -1789,7 +1789,7 @@ function dismissBulkResult() {
                 >
                 <p
                   v-if="attachReplyError"
-                  class="mt-1 text-sm text-signal"
+                  class="mt-1 text-sm text-ink-red-4"
                   role="alert"
                 >
                   {{ attachReplyError }}
@@ -1844,7 +1844,7 @@ function dismissBulkResult() {
               />
               <p
                 v-if="reasonError"
-                class="mt-1 text-sm font-medium text-signal"
+                class="mt-1 text-sm font-medium text-ink-red-4"
                 role="alert"
               >
                 {{ reasonError }}

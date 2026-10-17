@@ -301,10 +301,10 @@ doc_events = {
 # ----------
 
 # add methods and filters to jinja environment
-# jinja = {
-# 	"methods": "helixhr.utils.jinja_methods",
-# 	"filters": "helixhr.utils.jinja_filters"
-# }
+# Plan 2026-10-17-001 U12: the HelixHR Notification fixture's dates and state words.
+jinja = {
+	"methods": ["helixhr.events.helixhr_date", "helixhr.events.helixhr_state_words"],
+}
 
 # Installation
 # ------------

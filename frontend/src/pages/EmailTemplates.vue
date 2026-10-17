@@ -15,6 +15,13 @@ import { useIsDesktop } from '@/lib/useIsDesktop'
 // predicate server-side.
 
 const AUDIENCES = ['Employee', 'Approver', 'HR', 'Route role', 'Security']
+// AI-13: the server's audience keys are internal ("route role" is the team a
+// request is routed to). Shown in plain words; the keys stay the grouping.
+const AUDIENCE_LABELS = {
+  'Route role': 'Team handling the request',
+  'Employee or route role': 'Employee or team handling the request',
+}
+const audienceLabel = (audience) => AUDIENCE_LABELS[audience] || audience
 
 const isDesktop = useIsDesktop()
 
@@ -355,7 +362,7 @@ watch(
               :key="group.audience"
             >
               <h2 class="label mb-2">
-                {{ group.audience }}
+                {{ audienceLabel(group.audience) }}
               </h2>
               <ul class="space-y-1">
                 <li
@@ -411,7 +418,7 @@ watch(
                 {{ selected.label }}
               </h2>
               <p class="text-sm text-ink-gray-6">
-                {{ selected.audience }} · {{ selected.state }}
+                {{ audienceLabel(selected.audience) }} · {{ selected.state }}
               </p>
             </div>
 

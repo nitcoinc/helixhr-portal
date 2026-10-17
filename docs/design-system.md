@@ -104,6 +104,13 @@ target-size check measures. Give it a real box:
 added, so the row's density does not change. The same idiom is used on the inline links in
 Timesheet and WeekSpine.
 
+**That idiom is for single-line links only.** When the link text can wrap — a request subject, any
+user-written title — the box grows past 44px but the `-my-2` still pulls the next line up by 8px, so
+the second line of the title lands on the meta line under it (audit EP-01, AI-01). A multi-line title
+keeps the link inline, drops `-my-2 inline-flex min-h-11`, and lets the stretched
+`after:absolute after:inset-0` pseudo-element be the 44px target: the whole card is the tap area,
+and an inline link is exempt from the per-element height check.
+
 **Radius is not a Tailwind class in this app.** frappe-ui's preset *redefines* the scale — `rounded`
 is 8px, `rounded-md` 10px, `rounded-lg` 12px, `rounded-xl` 16px — so "use `rounded-lg`" meant
 different things depending on whose Tailwind you had in your head, and the portal shipped with

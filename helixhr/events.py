@@ -1808,16 +1808,59 @@ def _is_hr(user=None):
 	return user == "Administrator" or bool(set(frappe.get_roles(user)) & _HR_ROLES)
 
 
-def _request_dates(from_date, to_date):
-	""""3 September" for one day, "3 to 5 September" for a range. Plain
-	words, no Frappe vocabulary (P3-R24)."""
-	from frappe.utils import formatdate
+def helixhr_date(value):
+	"""A date for people, not machines: "Mar 8", or "Mar 8, 2027" when it is
+	not in the current year. The one date format every HelixHR notification
+	uses, whatever the site's own date format is (Plan 2026-10-17-001 U12).
+	A Jinja global via `hooks.jinja`."""
+	from frappe.utils import formatdate, getdate, nowdate
 
+	if not value:
+		return ""
+	day = getdate(value)
+	if day.year == getdate(nowdate()).year:
+		return formatdate(day, "MMM d")
+	return formatdate(day, "MMM d, yyyy")
+
+
+def _request_dates(from_date, to_date):
+	""""Sep 3" for one day, "Sep 3 to Sep 5" for a range. Plain words, no
+	Frappe vocabulary (P3-R24), in the notification date format."""
 	if not from_date:
 		return ""
 	if not to_date or str(from_date) == str(to_date):
-		return formatdate(from_date)
-	return f"{formatdate(from_date)} to {formatdate(to_date)}"
+		return helixhr_date(from_date)
+	return f"{helixhr_date(from_date)} to {helixhr_date(to_date)}"
+
+
+_TIMESHEET_STATE_WORDS = {
+	"Draft": "Not sent",
+	"Pending Approval": "waiting for your manager",
+	"Pending HR": "waiting for HR",
+	"Sent Back": "Sent back",
+}
+
+_LEAVE_STATUS_WORDS = {
+	"Open": "waiting for your manager",
+}
+
+
+def helixhr_state_words(doc):
+	"""The employee's word for a leave or timesheet state in the HelixHR
+	Notification titles and messages (docs/design-system.md copy table,
+	Plan 2026-10-17-001 U12). An outcome keeps its status-badge word
+	("Approved", "Sent back"); a wait reads as a phrase ("waiting for your
+	manager"). A Jinja global via `hooks.jinja`, because Notification.subject is a
+	140-character Data field with no room for the mapping inline. A leave
+	Rejected at docstatus 0 is the recoverable send-back; submitted, it is
+	the final rejection."""
+	if doc.get("doctype") == "Leave Application":
+		status = doc.get("status") or ""
+		if status == "Rejected":
+			return "Rejected" if doc.get("docstatus") else "Sent back"
+		return _LEAVE_STATUS_WORDS.get(status, status)
+	state = doc.get("workflow_state") or ""
+	return _TIMESHEET_STATE_WORDS.get(state, state)
 
 
 def attendance_request_subject(state, from_date, to_date, manager_name=None):

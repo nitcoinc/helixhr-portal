@@ -191,7 +191,14 @@ test.describe('employee', () => {
     const names: string[] = []
 
     try {
-      names.push(await seedRequest(employeeApi, `U6 asset ${stamp}`, { category: 'IT / Asset' }))
+      // Long enough to wrap at 360px, for the EP-01 overlap check below.
+      names.push(
+        await seedRequest(
+          employeeApi,
+          `U6 asset ${stamp} with a subject long enough to wrap onto two lines`,
+          { category: 'IT / Asset' },
+        ),
+      )
       names.push(await seedRequest(employeeApi, `U6 letter ${stamp}`))
 
       // P5-KTD2: the category's name is the record name, slash and all.
@@ -206,9 +213,26 @@ test.describe('employee', () => {
       const count = Number((await chip.innerText()).match(/(\d+)$/)![1])
       await expect(rows).toHaveCount(Math.min(count, 20))
 
+      // ED-02 / EP-15: the list badge names the team, as the detail does.
+      const asset = rows.filter({ hasText: `U6 asset ${stamp}` })
+      await expect(asset).toContainText('Sent to IT')
+
+      // EP-01: a wrapped subject ends above its meta line, not on top of it.
+      await page.setViewportSize({ width: 360, height: 800 })
+      const title = asset.getByRole('link')
+      const meta = asset.locator('p.text-sm').first()
+      await expect
+        .poll(async () => {
+          const [t, m] = [await title.boundingBox(), await meta.boundingBox()]
+          return t && m ? { wraps: t.height > 30, clear: t.y + t.height <= m.y + 0.5 } : null
+        })
+        .toEqual({ wraps: true, clear: true })
+      await page.setViewportSize({ width: 1280, height: 720 })
+
       await chips.getByRole('button', { name: 'All', exact: true }).click()
       await expect(page).not.toHaveURL(/type=/)
       await expect(rows.filter({ hasText: `U6 letter ${stamp}` })).toHaveCount(1)
+      await expect(rows.filter({ hasText: `U6 letter ${stamp}` })).toContainText('Sent to HR')
     } finally {
       for (const name of names) await removeRequest(api, name)
       await employeeApi.dispose()

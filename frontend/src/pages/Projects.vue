@@ -139,18 +139,6 @@ const detail = createResource({
 })
 const canEdit = computed(() => !!detail.data?.can_edit)
 
-watch(
-  () => props.project,
-  (project) => {
-    if (project) detail.reload()
-    memberQuery.value = ''
-    taskError.value = ''
-    memberError.value = ''
-    showCreateForm.value = false
-  },
-  { immediate: true },
-)
-
 const tasks = computed(() => detail.data?.tasks || [])
 const members = computed(() => detail.data?.members || [])
 const memberEmployeeIds = computed(() => members.value.map((m) => m.employee).filter(Boolean))
@@ -239,6 +227,21 @@ const memberResults = createResource({
 })
 const memberError = ref('')
 const setMembers = createResource({ url: 'helixhr.api.set_project_members', method: 'POST' })
+
+// Declared after every ref it resets: `immediate` runs it during setup, and a
+// ref still in its temporal dead zone throws there, skipping the first mount's
+// resets (HR-01).
+watch(
+  () => props.project,
+  (project) => {
+    if (project) detail.reload()
+    memberQuery.value = ''
+    taskError.value = ''
+    memberError.value = ''
+    showCreateForm.value = false
+  },
+  { immediate: true },
+)
 
 let memberPending = null
 watch(memberQuery, (value) => {

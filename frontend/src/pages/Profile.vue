@@ -366,7 +366,7 @@ async function saveChanges() {
             :aria-current="active.key === tab.key ? 'page' : undefined"
             :class="
               active.key === tab.key
-                ? 'border-b-2 border-signal text-ink-gray-9'
+                ? 'border-b-2 border-heading text-ink-gray-9'
                 : 'text-ink-gray-6 hover:text-ink-gray-9'
             "
             :data-testid="`profile-tab-${tab.key}`"

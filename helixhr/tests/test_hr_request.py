@@ -1,5 +1,6 @@
 import base64
 import io
+import quopri
 import uuid
 
 import frappe
@@ -25,6 +26,13 @@ from helixhr.tests.utils import (
 # Plan 2026-10-15-003 KTD7: "123456789012" in full-width digits (U+FF10..).
 _FULL_WIDTH_DIGITS = "".join(chr(0xFF10 + int(digit)) for digit in "123456789012")
 
+
+def _decoded(message):
+	"""An Email Queue body as the reader sees it. The queue stores the MIME
+	text quoted-printable, so a long URL can be split by a soft line break
+	("=" at the end of a line) as well as by "=3D"; how it splits depends on
+	the site name's length, which made a raw substring check site-dependent."""
+	return quopri.decodestring(message.encode()).decode(errors="replace")
 
 class _UploadedFile:
 	"""The shape `frappe.request.files["file"]` has: a name and a stream.
@@ -2497,7 +2505,7 @@ class TestRequestConversation(IntegrationTestCase):
 		reply_mails = [m for m in sent if "replied" in m.message]
 		self.assertTrue(reply_mails)
 		expected_url = f"/helixhr/requests/{name}?tab=work"
-		self.assertTrue(any(expected_url in m.message.replace("=3D", "=") for m in reply_mails))
+		self.assertTrue(any(expected_url in _decoded(m.message) for m in reply_mails))
 
 	# --- U4: Work feed keeps waiting requests; thread entries know their kind ---
 
@@ -2618,5 +2626,5 @@ class TestRequestConversation(IntegrationTestCase):
 
 		sent = [frappe.get_doc("Email Queue", row) for row in added()]
 		for m in sent:
-			self.assertNotIn(HR_REQUEST_QUESTION_PREFIX, m.message.replace("=3D", "="))
+			self.assertNotIn(HR_REQUEST_QUESTION_PREFIX, _decoded(m.message))
 
