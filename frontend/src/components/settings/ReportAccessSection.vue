@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { Button, createResource } from 'frappe-ui'
 import { call } from '@/lib/api'
 
@@ -20,7 +20,10 @@ const CELLS = [
   { flag: 'dm_run', tier: 'Delivery Manager', right: 'run' },
   { flag: 'dm_export', tier: 'Delivery Manager', right: 'export' },
 ]
-const DM_REASON = 'Not for Delivery Manager: this report has no project scope.'
+// AI-05: one footnote under the Delivery Manager header instead of the same
+// sentence under 17 report names. Cells it covers render a dash, not a dead
+// checkbox, and are described by it.
+const NA_NOTE = "— means the report has no project scope, so a Delivery Manager can't be given it."
 
 const resource = createResource({ url: 'helixhr.api.get_report_access', auto: true })
 const draft = ref([])
@@ -48,8 +51,8 @@ const groups = computed(() =>
   ),
 )
 
-function disabled(row, flag) {
-  return flag.startsWith('dm_') && !row.dm_allowed
+function applicable(row, flag) {
+  return !flag.startsWith('dm_') || !!row.dm_allowed
 }
 
 function setCell(row, flag, on) {
@@ -63,6 +66,32 @@ function setCell(row, flag, on) {
 function cellName(row, cell) {
   return `${row.label}: ${cell.tier} ${cell.right}`
 }
+
+// AI-05: a select-all per family and column, tri-state when some are on.
+// It goes through `setCell`, so export still implies run, and the rows it
+// touches reach the server through the same `changed` batch as single cells.
+function column(group, cell) {
+  const rows = group.rows.filter((row) => applicable(row, cell.flag))
+  const on = rows.filter((row) => row[cell.flag]).length
+  return { rows, on, all: rows.length > 0 && on === rows.length, some: on > 0 && on < rows.length }
+}
+function setColumn(group, cell, on) {
+  for (const row of column(group, cell).rows) setCell(row, cell.flag, on)
+}
+function columnName(group, cell) {
+  return `All ${group.label} reports: ${cell.tier} ${cell.right}`
+}
+
+// AI-06: on a phone each family folds to one line that says where it stands.
+function familySummary(group) {
+  // Counted on "run": export is never on without it.
+  const hr = column(group, CELLS[0])
+  const dm = column(group, CELLS[2])
+  let text = `${hr.on} of ${hr.rows.length} on for HR User`
+  if (dm.rows.length) text += `, ${dm.on} of ${dm.rows.length} for Delivery Manager`
+  return text
+}
+const openFamilies = reactive({})
 
 async function save() {
   saving.value = true
@@ -79,7 +108,9 @@ async function save() {
   } catch (failure) {
     error.value = failure?.messages?.[0] || "Those changes didn't save. Try again."
     // The server names the report it rejected ("Leave ledger: ...").
-    rejectedKey.value = draft.value.find((row) => error.value.startsWith(`${row.label}:`))?.key || ''
+    const rejected = draft.value.find((row) => error.value.startsWith(`${row.label}:`))
+    rejectedKey.value = rejected?.key || ''
+    if (rejected) openFamilies[rejected.family] = true
   } finally {
     saving.value = false
   }
@@ -106,119 +137,210 @@ async function save() {
       Report access didn't load. Reload the page to try again.
     </p>
 
-    <section
-      v-for="group in groups"
-      :key="group.key"
-      :aria-labelledby="`access-family-${group.key}`"
+    <!-- Wide screens: one table, one header row, a select-all row per family. -->
+    <div
+      v-if="groups.length"
+      class="surface-card elev-1 hidden overflow-x-auto sm:block"
     >
-      <h3
-        :id="`access-family-${group.key}`"
-        class="mb-2 text-sm font-medium text-ink-gray-7"
-      >
-        {{ group.label }}
-      </h3>
-
-      <!-- Wide screens: one table row per report. -->
-      <div class="surface-card elev-1 hidden overflow-x-auto sm:block">
-        <table class="w-full text-sm">
-          <thead class="text-left text-ink-gray-6">
-            <tr class="border-b border-outline-gray-1">
-              <th
-                scope="col"
-                class="px-4 py-2 font-medium"
-              >
-                Report
-              </th>
-              <th
-                v-for="cell in CELLS"
-                :key="cell.flag"
-                scope="col"
-                class="px-3 py-2 text-center font-medium"
-              >
-                {{ cell.tier }}<br><span class="font-normal">{{ cell.right }}</span>
-              </th>
-            </tr>
-          </thead>
-          <tbody class="divide-y divide-outline-gray-1">
-            <tr
-              v-for="row in group.rows"
-              :key="row.key"
-              :class="rejectedKey === row.key ? 'bg-red-50' : ''"
-              :data-testid="`access-row-${row.key}`"
+      <table class="w-full text-sm">
+        <thead class="text-left text-ink-gray-6">
+          <tr>
+            <th
+              scope="col"
+              rowspan="2"
+              class="px-4 py-2 align-bottom font-medium"
             >
-              <th
-                scope="row"
-                class="px-4 py-2 text-left font-medium text-ink-gray-9"
+              Report
+            </th>
+            <th
+              scope="colgroup"
+              colspan="2"
+              class="px-3 pt-2 text-center align-top font-medium"
+            >
+              HR User
+            </th>
+            <th
+              scope="colgroup"
+              colspan="2"
+              class="px-3 pt-2 text-center align-top font-medium"
+            >
+              Delivery Manager
+              <p
+                id="access-dm-note"
+                class="mx-auto max-w-[17rem] text-xs font-normal text-ink-gray-5"
               >
-                {{ row.label }}
-                <p
-                  v-if="!row.dm_allowed"
-                  :id="`access-why-${row.key}`"
-                  class="text-xs font-normal text-ink-gray-5"
-                >
-                  {{ DM_REASON }}
-                </p>
-              </th>
-              <td
-                v-for="cell in CELLS"
-                :key="cell.flag"
-                class="px-3 py-2 text-center"
+                {{ NA_NOTE }}
+              </p>
+            </th>
+          </tr>
+          <tr class="border-b border-outline-gray-1">
+            <th
+              v-for="cell in CELLS"
+              :key="cell.flag"
+              scope="col"
+              class="px-3 pb-2 text-center font-normal"
+            >
+              {{ cell.right }}
+            </th>
+          </tr>
+        </thead>
+        <tbody
+          v-for="group in groups"
+          :key="group.key"
+          class="divide-y divide-outline-gray-1 border-b border-outline-gray-1 last:border-b-0"
+        >
+          <tr class="bg-surface-gray-1">
+            <th
+              :id="`access-family-${group.key}`"
+              scope="rowgroup"
+              class="label px-4 py-2 text-left text-ink-gray-7"
+            >
+              {{ group.label }}
+            </th>
+            <td
+              v-for="cell in CELLS"
+              :key="cell.flag"
+              class="px-3 py-2 text-center"
+            >
+              <input
+                v-if="column(group, cell).rows.length"
+                type="checkbox"
+                class="size-5 cursor-pointer"
+                :aria-label="columnName(group, cell)"
+                :checked="column(group, cell).all"
+                :indeterminate="column(group, cell).some"
+                :data-testid="`access-all-${group.key}-${cell.flag}`"
+                @change="setColumn(group, cell, $event.target.checked)"
+              >
+              <span
+                v-else
+                role="img"
+                class="text-ink-gray-5"
+                :aria-label="`${columnName(group, cell)}: not available`"
+                aria-describedby="access-dm-note"
+              >—</span>
+            </td>
+          </tr>
+          <tr
+            v-for="row in group.rows"
+            :key="row.key"
+            :class="rejectedKey === row.key ? 'bg-red-50' : ''"
+            :data-testid="`access-row-${row.key}`"
+          >
+            <th
+              scope="row"
+              class="px-4 py-2 text-left font-medium text-ink-gray-9"
+            >
+              {{ row.label }}
+            </th>
+            <td
+              v-for="cell in CELLS"
+              :key="cell.flag"
+              class="px-3 py-2 text-center"
+            >
+              <input
+                v-if="applicable(row, cell.flag)"
+                type="checkbox"
+                class="size-5 cursor-pointer"
+                :aria-label="cellName(row, cell)"
+                :checked="!!row[cell.flag]"
+                @change="setCell(row, cell.flag, $event.target.checked)"
+              >
+              <span
+                v-else
+                role="img"
+                class="text-ink-gray-5"
+                :aria-label="`${cellName(row, cell)}: not available`"
+                aria-describedby="access-dm-note"
+                :data-testid="`access-na-${row.key}-${cell.flag}`"
+              >—</span>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Phones: one folded section per family, its count in the summary.
+         Delivery Manager controls appear only where they can apply. -->
+    <div
+      v-if="groups.length"
+      class="space-y-2 sm:hidden"
+    >
+      <p class="text-xs text-ink-gray-5">
+        Delivery Manager shows only on reports with project scope.
+      </p>
+      <details
+        v-for="group in groups"
+        :key="group.key"
+        class="surface-card elev-1"
+        :open="!!openFamilies[group.key]"
+        :data-testid="`access-family-${group.key}`"
+        @toggle="openFamilies[group.key] = $event.target.open"
+      >
+        <summary class="flex min-h-11 cursor-pointer items-center gap-1 px-3 py-2 text-sm">
+          <span class="font-medium text-ink-gray-9">{{ group.label }}</span>
+          <span class="text-ink-gray-6">· {{ familySummary(group) }}</span>
+        </summary>
+        <div class="border-t border-outline-gray-1 px-3 pb-1">
+          <p class="label pt-2 text-ink-gray-6">
+            All {{ group.label }} reports
+          </p>
+          <div class="grid grid-cols-2 gap-x-3">
+            <template
+              v-for="cell in CELLS"
+              :key="cell.flag"
+            >
+              <label
+                v-if="column(group, cell).rows.length"
+                class="flex min-h-11 items-center gap-2 text-sm text-ink-gray-8"
               >
                 <input
                   type="checkbox"
-                  class="size-5 cursor-pointer disabled:cursor-not-allowed"
-                  :aria-label="cellName(row, cell)"
-                  :aria-describedby="disabled(row, cell.flag) ? `access-why-${row.key}` : undefined"
-                  :checked="!!row[cell.flag]"
-                  :disabled="disabled(row, cell.flag)"
-                  @change="setCell(row, cell.flag, $event.target.checked)"
+                  class="size-5"
+                  :aria-label="columnName(group, cell)"
+                  :checked="column(group, cell).all"
+                  :indeterminate="column(group, cell).some"
+                  @change="setColumn(group, cell, $event.target.checked)"
                 >
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-
-      <!-- Phones: one card per report. -->
-      <ul class="space-y-2 sm:hidden">
-        <li
-          v-for="row in group.rows"
-          :key="row.key"
-          class="surface-card elev-1 p-3"
-          :class="rejectedKey === row.key ? 'ring-2 ring-red-400' : ''"
-        >
-          <p class="font-medium text-ink-gray-9">
-            {{ row.label }}
-          </p>
-          <p
-            v-if="!row.dm_allowed"
-            :id="`access-why-m-${row.key}`"
-            class="text-xs text-ink-gray-5"
-          >
-            {{ DM_REASON }}
-          </p>
-          <div class="mt-2 grid grid-cols-2 gap-1">
-            <label
-              v-for="cell in CELLS"
-              :key="cell.flag"
-              class="flex min-h-11 items-center gap-2 text-sm"
-              :class="disabled(row, cell.flag) ? 'text-ink-gray-4' : 'text-ink-gray-8'"
-            >
-              <input
-                type="checkbox"
-                class="size-5"
-                :aria-label="cellName(row, cell)"
-                :aria-describedby="disabled(row, cell.flag) ? `access-why-m-${row.key}` : undefined"
-                :checked="!!row[cell.flag]"
-                :disabled="disabled(row, cell.flag)"
-                @change="setCell(row, cell.flag, $event.target.checked)"
-              >
-              {{ cell.tier }} {{ cell.right }}
-            </label>
+                {{ cell.tier }} {{ cell.right }}
+              </label>
+            </template>
           </div>
-        </li>
-      </ul>
-    </section>
+          <ul class="divide-y divide-outline-gray-1">
+            <li
+              v-for="row in group.rows"
+              :key="row.key"
+              class="py-2"
+              :class="rejectedKey === row.key ? 'bg-red-50' : ''"
+            >
+              <p class="text-sm font-medium text-ink-gray-9">
+                {{ row.label }}
+              </p>
+              <div class="grid grid-cols-2 gap-x-3">
+                <template
+                  v-for="cell in CELLS"
+                  :key="cell.flag"
+                >
+                  <label
+                    v-if="applicable(row, cell.flag)"
+                    class="flex min-h-11 items-center gap-2 text-sm text-ink-gray-8"
+                  >
+                    <input
+                      type="checkbox"
+                      class="size-5"
+                      :aria-label="cellName(row, cell)"
+                      :checked="!!row[cell.flag]"
+                      @change="setCell(row, cell.flag, $event.target.checked)"
+                    >
+                    {{ cell.tier }} {{ cell.right }}
+                  </label>
+                </template>
+              </div>
+            </li>
+          </ul>
+        </div>
+      </details>
+    </div>
 
     <p
       v-if="saved && !dirty"

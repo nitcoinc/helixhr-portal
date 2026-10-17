@@ -17,6 +17,7 @@ import { presetRange } from '@/lib/datePresets'
 import { today } from '@/lib/dates'
 import { ALL_COMPANIES, fromQuery, toQuery } from '@/lib/reportQuery'
 import { roundHours } from '@/lib/hours'
+import { readRecentReports, recordRecentReport } from '@/lib/recentReports'
 
 // Plan 2026-10-04-001 U4. Two routes, one page:
 //   /reports              the catalog: what `get_report_catalog` says this
@@ -105,10 +106,19 @@ function cleanFilters() {
   )
 }
 
+// U11 (HR-16, KTD13): the catalog's "Recently run" strip. Keys only, read
+// back through the catalog so a report no longer granted drops out; null
+// (storage unavailable) hides the strip.
+const recentKeys = ref(readRecentReports(session.user))
+const recentEntries = computed(() =>
+  (recentKeys.value || []).map((key) => catalog.value.find((item) => item.key === key)).filter(Boolean),
+)
+
 function run() {
   if (!entry.value) return
   syncUrl()
   lastRun.value = snapshot()
+  recentKeys.value = recordRecentReport(session.user, entry.value.key)
   reportResource.submit({
     report_key: entry.value.key,
     filters: cleanFilters(),
@@ -326,6 +336,7 @@ async function openInDesk() {
         <ReportCatalog
           v-else
           :catalog="catalog"
+          :recent="recentEntries"
           :carry-query="carryQuery"
         />
       </template>

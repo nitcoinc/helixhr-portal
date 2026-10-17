@@ -1,11 +1,14 @@
 <script setup>
 import { computed, ref } from 'vue'
+import SearchField from '@/components/SearchField.vue'
 
 // Plan 2026-10-04-001 U4: the /reports landing page -- every entry the
 // server says this caller may run (`get_report_catalog`), in families,
 // with a search over label and question. The page never decides access.
 const props = defineProps({
   catalog: { type: Array, required: true },
+  /** U11 (HR-16): catalog entries this viewer ran lately, newest first. */
+  recent: { type: Array, default: () => [] },
   /** Query carried onto each report link (People.vue's `?employee=`). */
   carryQuery: { type: Object, default: () => ({}) },
 })
@@ -18,6 +21,8 @@ const FAMILIES = [
 ]
 
 const search = ref('')
+// The strip is for before you type; a search is the other way in.
+const showRecent = computed(() => props.recent.length > 0 && !search.value.trim())
 
 const matches = computed(() => {
   const needle = search.value.trim().toLowerCase()
@@ -35,17 +40,40 @@ const families = computed(() =>
 
 <template>
   <div>
-    <label
-      for="report-catalog-search"
-      class="mb-1 block text-sm text-ink-gray-7"
-    >Find a report</label>
-    <input
-      id="report-catalog-search"
-      v-model="search"
-      type="search"
-      placeholder="Search by name or question"
-      class="mb-5 min-h-11 w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8 sm:max-w-md"
+    <div class="mb-5 sm:max-w-md">
+      <SearchField
+        v-model="search"
+        label="Find a report"
+        placeholder="Search by name or question"
+      />
+    </div>
+
+    <section
+      v-if="showRecent"
+      class="mb-6"
+      aria-labelledby="report-recent-heading"
+      data-testid="report-recent"
     >
+      <h2
+        id="report-recent-heading"
+        class="label mb-2 text-ink-gray-6"
+      >
+        Recently run
+      </h2>
+      <ul class="flex flex-wrap gap-2">
+        <li
+          v-for="entry in recent"
+          :key="entry.key"
+        >
+          <router-link
+            :to="{ name: 'ReportView', params: { reportKey: entry.key }, query: carryQuery }"
+            class="inline-flex min-h-11 items-center rounded-full border border-outline-gray-2 bg-surface-white px-4 text-sm font-medium text-ink-gray-8 hover:bg-surface-gray-2"
+          >
+            {{ entry.label }}
+          </router-link>
+        </li>
+      </ul>
+    </section>
 
     <p
       class="sr-only"

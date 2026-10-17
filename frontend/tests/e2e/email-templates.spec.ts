@@ -141,6 +141,30 @@ test.describe('Portal Admin', () => {
     await expect(page.getByTestId('email-theme-status')).toHaveText('Logo removed.')
   })
 
+  // U11 (AI-12, AI-18): a desktop never opens on an empty editor, and the
+  // one badge left is the StatusBadge pill.
+  test('on a desktop the first customised email (else the first) opens without a click', async ({ page }) => {
+    await page.setViewportSize({ width: 1280, height: 800 })
+    await page.goto('/helixhr/email-templates')
+    const editor = page.getByTestId('email-template-editor')
+    await expect(editor).toBeVisible()
+    const list = page.getByTestId('email-template-list')
+    const current = list.locator('[aria-current="true"]')
+    await expect(current).toHaveCount(1)
+    const custom = list.getByTestId('email-template-state').filter({ hasText: 'Custom' })
+    const expected = (await custom.count())
+      ? list.locator('button', { has: page.getByTestId('email-template-state').filter({ hasText: 'Custom' }) }).first()
+      : list.locator('button').first()
+    await expect(current).toHaveAttribute('data-testid', (await expected.getAttribute('data-testid')) || '')
+    await expect(editor.locator('#email-template-editor-title')).toHaveText(
+      ((await current.locator('span').first().textContent()) || '').trim(),
+    )
+    await expect(list.getByTestId('email-template-state').filter({ hasText: 'Default' })).toHaveCount(0)
+    for (const badge of await list.getByTestId('email-template-state').all()) {
+      await expect(badge).toHaveClass(/rounded-full/)
+    }
+  })
+
   test('edits, previews, saves and resets Leave approved', async ({ page }) => {
     await page.goto('/helixhr/email-templates')
     const item = page.getByTestId('email-template-leave_approved')
@@ -154,7 +178,8 @@ test.describe('Portal Admin', () => {
       await resetButton.click()
       await page.getByRole('button', { name: 'Reset', exact: true }).click()
     }
-    await expect(item.getByTestId('email-template-state')).toHaveText('Default')
+    // U11 (AI-18): Default is the resting state and carries no badge.
+    await expect(item.getByTestId('email-template-state')).toHaveCount(0)
 
     const stamp = `E2E ${Date.now()}`
     await editor.getByLabel('Subject').fill(`${stamp} {{ leave_type }}`)
@@ -177,7 +202,7 @@ test.describe('Portal Admin', () => {
 
     await editor.getByRole('button', { name: 'Reset to default' }).click()
     await page.getByRole('button', { name: 'Reset', exact: true }).click()
-    await expect(item.getByTestId('email-template-state')).toHaveText('Default')
+    await expect(item.getByTestId('email-template-state')).toHaveCount(0)
     await expect(editor.getByLabel('Subject')).toHaveValue('Your {{ leave_type }} was approved')
   })
 
@@ -190,9 +215,7 @@ test.describe('Portal Admin', () => {
     await expect(editor.getByRole('alert')).toContainText('aprover_name')
     await expect(editor.getByLabel('Body')).toHaveAttribute('aria-invalid', 'true')
     await expect(editor.getByRole('button', { name: 'Save' })).toBeEnabled()
-    await expect(page.getByTestId('email-template-leave_rejected').getByTestId('email-template-state')).toHaveText(
-      'Default',
-    )
+    await expect(page.getByTestId('email-template-leave_rejected').getByTestId('email-template-state')).toHaveCount(0)
   })
 
   test('a script in the preview runs nothing in the portal', async ({ page }) => {

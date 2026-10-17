@@ -170,11 +170,15 @@ async function reset() {
 
 async function refreshPreview() {
   preview.error = ''
+  // A slower answer for the email just left must not land on the next one.
+  const key = selectedKey.value
   try {
     const result = await previewResource.submit(payload())
+    if (key !== selectedKey.value) return
     preview.html = result.html
     preview.subject = result.subject
   } catch (error) {
+    if (key !== selectedKey.value) return
     preview.html = ''
     preview.error = messageOf(error, 'Something went wrong.')
   }
@@ -242,8 +246,9 @@ async function copy(text) {
   }
 }
 
+// AI-18: StatusBadge's pill shape. Default is the resting state of every
+// email, so it carries no badge; only Custom and Off say something.
 const BADGE = {
-  Default: 'bg-surface-gray-3 text-ink-gray-8',
   Custom: 'bg-surface-blue-2 text-ink-blue-2',
   Off: 'bg-surface-red-2 text-ink-red-4',
 }
@@ -270,6 +275,19 @@ const TEMPLATE_GROUPS = [
 ]
 const GROUPS = TEMPLATE_GROUPS.map((group) => group.key)
 const activeGroup = computed(() => (GROUPS.includes(route.query.group) ? route.query.group : 'messages'))
+
+// U11 (AI-12): on a desktop the list sits beside the editor, and an empty
+// editor beside a truncated list is a click spent before anything shows. Open
+// the first customised email, else the first one listed.
+watch(
+  [isDesktop, events, activeGroup],
+  ([desktop, list, group]) => {
+    if (!desktop || group !== 'messages' || selectedKey.value || !list.length) return
+    const ordered = groups.value.flatMap((item) => item.items)
+    open((ordered.find((event) => event.state === 'Custom') || ordered[0]).key)
+  },
+  { immediate: true },
+)
 
 function chooseGroup(group) {
   const query = { ...route.query, group }
@@ -369,7 +387,8 @@ watch(
                   >
                     <span class="min-w-0 truncate">{{ event.label }}</span>
                     <span
-                      class="shrink-0 rounded px-1.5 py-0.5 text-xs font-medium"
+                      v-if="BADGE[event.state]"
+                      class="inline-flex shrink-0 items-center whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-medium"
                       :class="BADGE[event.state]"
                       data-testid="email-template-state"
                     >{{ event.state }}</span>
@@ -378,13 +397,6 @@ watch(
               </ul>
             </div>
           </nav>
-
-          <p
-            v-if="isDesktop && !selected"
-            class="text-sm text-ink-gray-6 lg:col-span-2"
-          >
-            Choose an email on the left to edit its wording.
-          </p>
 
           <section
             v-if="showEditor"
