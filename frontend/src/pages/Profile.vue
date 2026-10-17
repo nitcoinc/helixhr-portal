@@ -4,6 +4,7 @@ import { createResource, FormControl, Button, Dialog } from 'frappe-ui'
 import Avatar from '@/components/Avatar.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
+import TabBar from '@/components/TabBar.vue'
 import ProfileFields from '@/components/profile/ProfileFields.vue'
 import ProfileTable from '@/components/profile/ProfileTable.vue'
 import CorrectionDialog from '@/components/profile/CorrectionDialog.vue'
@@ -63,9 +64,11 @@ const correctionCategory = computed(() => profile.data?.correction_category || n
 // `helixhr_hr_contact`, rendered as a window global by the portal shell.
 const hrContactEmail = window.helixhr_hr_contact || ''
 
-function tabRoute(key) {
-  return key === 'personal' ? '/profile' : `/profile/${key}`
-}
+const sectionTabs = SECTIONS.map((tab) => ({
+  ...tab,
+  to: tab.key === 'personal' ? '/profile' : `/profile/${tab.key}`,
+  testid: `profile-tab-${tab.key}`,
+}))
 
 // ── The identity band ──────────────────────────────────────────────────
 // Who you are, on the deep field, with the initials monogram in signal
@@ -245,7 +248,7 @@ async function saveChanges() {
           :href="profile.data.desk_url"
           target="_blank"
           rel="noopener noreferrer"
-          class="inline-flex min-h-11 items-center rounded-lg border border-outline-gray-2 px-3 text-sm font-medium text-ink-gray-7 hover:bg-surface-gray-2"
+          class="inline-flex min-h-11 items-center rounded px-3 text-sm font-medium text-ink-gray-8 hover:bg-surface-gray-3"
           data-testid="profile-desk-link"
         >
           Open in Desk
@@ -354,26 +357,12 @@ async function saveChanges() {
           </template>.
         </p>
 
-        <nav
-          class="flex flex-wrap gap-1 border-b border-outline-gray-1"
-          aria-label="Profile sections"
-        >
-          <router-link
-            v-for="tab in SECTIONS"
-            :key="tab.key"
-            :to="tabRoute(tab.key)"
-            class="inline-flex min-h-11 cursor-pointer items-center rounded-t-lg px-3 py-2 text-sm font-medium"
-            :aria-current="active.key === tab.key ? 'page' : undefined"
-            :class="
-              active.key === tab.key
-                ? 'border-b-2 border-heading text-ink-gray-9'
-                : 'text-ink-gray-6 hover:text-ink-gray-9'
-            "
-            :data-testid="`profile-tab-${tab.key}`"
-          >
-            {{ tab.label }}
-          </router-link>
-        </nav>
+        <TabBar
+          nav
+          :tabs="sectionTabs"
+          :model-value="active.key"
+          label="Profile sections"
+        />
 
         <h2 class="type-section font-heading text-ink-gray-9">
           {{ active.label }}
@@ -404,9 +393,25 @@ async function saveChanges() {
             Account and ID numbers show only their last four characters.
           </p>
 
+          <!-- ED-18: what the employee can fix themselves, said where they
+               are looking rather than only on another tab. -->
+          <p
+            v-if="active.key === 'personal'"
+            class="text-sm text-ink-gray-6"
+          >
+            Phone, address and emergency contact you can edit yourself in
+            <router-link
+              class="cursor-pointer text-blue-700 underline underline-offset-2"
+              to="/profile/contact"
+            >
+              Contact &amp; emergency
+            </router-link>.
+          </p>
+
           <ProfileFields
             :fields="sectionData.fields"
             :groups="GROUPS[active.key] || []"
+            :section-label="active.label"
             :can-correct="!!correctionCategory"
             @correct="requestCorrection"
           />

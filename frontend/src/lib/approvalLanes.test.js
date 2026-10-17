@@ -1,6 +1,20 @@
 // Plan 2026-10-15-002 U5: the Approvals page's lane helpers.
 import { describe, expect, it } from 'vitest'
-import { groupByPerson, laneSections, laneSubsections } from './approvalLanes'
+import {
+  BULK_MAX_ITEMS,
+  approveAllBatch,
+  approveAllLabel,
+  batchItem,
+  batchLabel,
+  groupByPerson,
+  isBatchable,
+  laneSections,
+  laneSubsections,
+  readShortcuts,
+  selectionState,
+  writeShortcuts,
+} from './approvalLanes'
+import { APPROVALS_SHORTCUTS_PREFIX } from './viewerStorage'
 
 const row = (lane, name, extra = {}) => ({ lane, name, employee: `E-${name}`, kind: 'leave', ...extra })
 
@@ -53,5 +67,126 @@ describe('groupByPerson', () => {
     expect(groups.map((group) => group.employee)).toEqual(['E-1', 'E-2'])
     expect(groups[0].rows.map((r) => r.name)).toEqual(['a1', 'a2'])
     expect(groups[0].oldest.name).toBe('a1')
+  })
+})
+
+// Plan 2026-10-17-001 U7: Approve all, select-all and the keyboard opt-in.
+const clean = (name, kind = 'timesheet', extra = {}) => ({ name, kind, needs_look: false, ...extra })
+
+describe('isBatchable', () => {
+  it('takes clean timesheets and leave only', () => {
+    expect(isBatchable(clean('t'))).toBe(true)
+    expect(isBatchable(clean('l', 'leave'))).toBe(true)
+    // approve_clean_items refuses these, so they never join a batch.
+    expect(isBatchable(clean('a', 'attendance'))).toBe(false)
+    expect(isBatchable(clean('c', 'change'))).toBe(false)
+    expect(isBatchable(clean('f', 'timesheet', { needs_look: true }))).toBe(false)
+    expect(isBatchable(null)).toBe(false)
+  })
+
+  it('takes only rows the server called clean, not rows it never flagged', () => {
+    // An HR-lane timesheet or stalled leave: no flags, no token.
+    expect(isBatchable(clean('h', 'timesheet', { needs_look: null }))).toBe(false)
+    expect(isBatchable({ name: 'u', kind: 'leave' })).toBe(false)
+    expect(isBatchable(clean('t', 'timesheet', { needs_look: false }))).toBe(true)
+  })
+})
+
+describe('approveAllBatch', () => {
+  it('keeps eligible rows in their oldest-first order', () => {
+    const batch = approveAllBatch([clean('t1'), clean('a', 'attendance'), clean('l1', 'leave'), clean('f', 'leave', { needs_look: true })])
+    expect(batch.rows.map((row) => row.name)).toEqual(['t1', 'l1'])
+    expect(batch.eligible).toBe(2)
+    expect(approveAllLabel(batch)).toBe('Approve all 2 that look normal')
+  })
+
+  it('cuts at the server limit and says so', () => {
+    const rows = Array.from({ length: 75 }, (_, index) => clean(`t${index}`))
+    const batch = approveAllBatch(rows)
+    expect(BULK_MAX_ITEMS).toBe(60)
+    expect(batch.rows).toHaveLength(60)
+    expect(batch.rows[0].name).toBe('t0')
+    expect(batch.rows[59].name).toBe('t59')
+    expect(approveAllLabel(batch)).toBe('Approve the oldest 60 of 75')
+  })
+
+  it('has no label when nothing is eligible', () => {
+    expect(approveAllLabel(approveAllBatch([clean('a', 'attendance')]))).toBe('')
+    expect(approveAllLabel(approveAllBatch(undefined))).toBe('')
+  })
+})
+
+describe('batchItem and batchLabel', () => {
+  it('carries the row token as the expected state', () => {
+    expect(batchItem({ doctype: 'Timesheet', name: 'TS-1', token_modified: 'm', status: 'Pending Approval' })).toEqual({
+      doctype: 'Timesheet',
+      name: 'TS-1',
+      expected_modified: 'm',
+      expected_state: 'Pending Approval',
+    })
+  })
+
+  it('sums hours and leave days', () => {
+    expect(
+      batchLabel([
+        clean('t1', 'timesheet', { total_hours: 40 }),
+        clean('t2', 'timesheet', { total_hours: 37.5 }),
+        clean('l1', 'leave', { total_days: 2 }),
+        clean('l2', 'leave', { total_days: 0.5 }),
+      ]),
+    ).toBe('Approve 4 items · 77.5 h · 2.5 days leave')
+    expect(batchLabel([clean('l1', 'leave', { total_days: 1 })])).toBe('Approve 1 item · 1 day leave')
+  })
+})
+
+describe('selectionState', () => {
+  const rows = [clean('t1'), clean('t2'), clean('a', 'attendance')]
+  it('reads none, some and all over the batchable rows only', () => {
+    expect(selectionState(rows, [])).toBe('none')
+    expect(selectionState(rows, ['t1'])).toBe('some')
+    expect(selectionState(rows, ['t1', 't2'])).toBe('all')
+    expect(selectionState([clean('a', 'attendance')], ['a'])).toBe('none')
+  })
+})
+
+describe('keyboard shortcuts flag', () => {
+  const memory = () => {
+    const data = {}
+    return {
+      getItem: (key) => (key in data ? data[key] : null),
+      setItem: (key, value) => {
+        data[key] = String(value)
+      },
+      removeItem: (key) => {
+        delete data[key]
+      },
+      data,
+    }
+  }
+
+  it('is off by default and keyed by user', () => {
+    const storage = memory()
+    expect(readShortcuts('a@x', storage)).toBe(false)
+    expect(writeShortcuts('a@x', true, storage)).toBe(true)
+    expect(storage.data[`${APPROVALS_SHORTCUTS_PREFIX}a@x`]).toBe('1')
+    expect(readShortcuts('a@x', storage)).toBe(true)
+    expect(readShortcuts('b@x', storage)).toBe(false)
+    writeShortcuts('a@x', false, storage)
+    expect(readShortcuts('a@x', storage)).toBe(false)
+  })
+
+  it('stays off with no user or a throwing storage', () => {
+    const broken = {
+      getItem: () => {
+        throw new Error('blocked')
+      },
+      setItem: () => {
+        throw new Error('blocked')
+      },
+    }
+    expect(readShortcuts('', memory())).toBe(false)
+    expect(readShortcuts('a@x', broken)).toBe(false)
+    expect(writeShortcuts('a@x', true, broken)).toBe(false)
+    expect(writeShortcuts('', true, memory())).toBe(false)
   })
 })

@@ -1,10 +1,11 @@
 <script setup>
-import { ref, computed, reactive, nextTick } from 'vue'
+import { ref, computed, reactive } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
+import TabBar from '@/components/TabBar.vue'
 import { session } from '@/lib/session'
 import { call, saveDocumentWithFile } from '@/lib/api'
 import { formatDate, today } from '@/lib/dates'
@@ -33,19 +34,23 @@ const TABS = [
   { name: 'important', label: 'Important', category: 'Important' },
   { name: 'general', label: 'General', category: 'General' },
 ]
-const tab = computed(() => (route.query.tab === 'general' ? 'general' : 'important'))
+// Plan 2026-10-17-001 U10 (ED-07, EP-16). With no `?tab`, the page opens on
+// the first tab that has something in it: landing on "Important (0)" while
+// General holds the only document cost a tap on every visit. An explicit
+// `?tab` always wins, so a picked tab stays picked -- which is why
+// `showTab` now always writes the query, Important included.
+const filled = computed(() =>
+  Object.fromEntries(
+    TABS.map((item) => [item.name, rows.value.some((row) => row.category === item.category)]),
+  ),
+)
+const tab = computed(() => {
+  if (TABS.some((item) => item.name === route.query.tab)) return route.query.tab
+  return TABS.find((item) => filled.value[item.name])?.name || 'important'
+})
 
 function showTab(name) {
-  router.replace({ query: { ...route.query, tab: name === 'important' ? undefined : name } })
-}
-
-/** Arrow keys move between the tabs, the way a `role="tablist"` is expected
- * to behave; focus follows the selection. */
-function cycleTab(delta) {
-  const names = TABS.map((item) => item.name)
-  const next = names[(names.indexOf(tab.value) + delta + names.length) % names.length]
-  showTab(next)
-  nextTick(() => document.getElementById(`documents-tab-${next}`)?.focus())
+  router.replace({ query: { ...route.query, tab: name } })
 }
 
 const query = ref('')
@@ -106,7 +111,7 @@ const groups = computed(() =>
     today(),
   ),
 )
-const tabIsEmpty = computed(() => !rows.value.some((row) => row.category === activeCategory.value))
+const tabIsEmpty = computed(() => !filled.value[tab.value])
 
 // Where "Ask HR" goes: one request, with the search that found nothing
 // already written into its subject.
@@ -265,6 +270,7 @@ async function confirmDelete() {
       >
         <Button
           variant="solid"
+          theme="blue"
           data-testid="documents-upload"
           @click="openEditor()"
         >
@@ -296,39 +302,20 @@ async function confirmDelete() {
       </p>
     </div>
 
-    <div
-      class="mb-4 flex gap-2 border-b border-outline-gray-2"
-      role="tablist"
-      aria-label="Document categories"
+    <TabBar
+      class="mb-4"
+      :tabs="TABS.map((item) => ({ key: item.name, label: item.label, count: counts[item.name] }))"
+      :model-value="tab"
+      label="Document categories"
+      panel-id="documents-panel"
       data-testid="documents-tabs"
-    >
-      <button
-        v-for="item in TABS"
-        :id="`documents-tab-${item.name}`"
-        :key="item.name"
-        type="button"
-        role="tab"
-        aria-controls="documents-panel"
-        class="-mb-px min-h-11 border-b-2 px-3 text-sm font-medium"
-        :class="
-          tab === item.name
-            ? 'border-heading text-ink-gray-9'
-            : 'border-transparent text-ink-gray-6 hover:text-ink-gray-9'
-        "
-        :aria-selected="tab === item.name"
-        :tabindex="tab === item.name ? 0 : -1"
-        @click="showTab(item.name)"
-        @keydown.right.prevent="cycleTab(1)"
-        @keydown.left.prevent="cycleTab(-1)"
-      >
-        {{ item.label }} ({{ counts[item.name] }})
-      </button>
-    </div>
+      @update:model-value="showTab"
+    />
 
     <div
       id="documents-panel"
       role="tabpanel"
-      :aria-labelledby="`documents-tab-${tab}`"
+      :aria-labelledby="`documents-panel-tab-${tab}`"
     >
       <AsyncState
         section="documents"
@@ -423,7 +410,33 @@ async function confirmDelete() {
             class="surface-card p-5 text-sm text-ink-gray-6"
             :data-testid="`documents-${tab}-empty`"
           >
-            {{ tab === 'important' ? 'No important documents right now.' : 'No general documents yet.' }}
+            <!-- Every empty state names the next action (ED-07). -->
+            {{ tab === 'important' ? 'Nothing marked important.' : 'No general documents yet.' }}
+            <template v-if="tab === 'important' && filled.general">
+              <button
+                type="button"
+                class="cursor-pointer text-blue-700 underline underline-offset-2"
+                @click="showTab('general')"
+              >
+                Browse General
+              </button>
+              or
+              <router-link
+                class="cursor-pointer text-blue-700 underline underline-offset-2"
+                :to="askHr"
+              >
+                ask HR
+              </router-link>.
+            </template>
+            <template v-else>
+              <router-link
+                class="cursor-pointer text-blue-700 underline underline-offset-2"
+                :to="askHr"
+              >
+                Ask HR
+              </router-link>
+              if you're looking for something.
+            </template>
             <template v-if="session.canManageDocuments">
               Use “Upload document” to add one.
             </template>

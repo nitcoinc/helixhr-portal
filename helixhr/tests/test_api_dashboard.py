@@ -388,3 +388,315 @@ class TestHelixHRCelebrations(IntegrationTestCase):
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
+
+
+class TestHomeQueueOneRowPerRecord(IntegrationTestCase):
+	"""Plan 2026-10-17-001 U6: KTD10's per-record dedupe, KTD11's "Decided"
+	list and KTD12's owed rule, asserted on the queue builder's payload, and
+	the record-scoped mark-read that opening a collapsed row calls."""
+
+	PREFIX = "_TEST-U6-"
+
+	def setUp(self):
+		from helixhr.tests.utils import MANAGER_USER
+
+		self.manager_user = MANAGER_USER
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		self._clear()
+		frappe.set_user(EMPLOYEE_USER)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		self._clear()
+
+	def _clear(self):
+		"""The queue reads everything the fixture employee holds, and this
+		stack does not roll back between methods (docs/runbook.md)."""
+		frappe.set_user("Administrator")
+		employees = [self.employee_name, self.manager_name]
+		frappe.db.delete("Notification Log", {"document_name": ["like", f"{self.PREFIX}%"]})
+		requests = frappe.get_all("HR Request", filters={"employee": ["in", employees]}, pluck="name")
+		if requests:
+			frappe.db.delete("Notification Log", {"document_type": "HR Request", "document_name": ["in", requests]})
+			frappe.db.delete("HR Request", {"name": ["in", requests]})
+		for doctype in ("Leave Application", "Timesheet", "Attendance Request"):
+			names = frappe.get_all(doctype, filters={"employee": ["in", employees]}, pluck="name")
+			if names:
+				frappe.db.delete("Comment", {"reference_doctype": doctype, "reference_name": ["in", names]})
+				frappe.db.delete(doctype, {"name": ["in", names]})
+		frappe.db.commit()
+
+	def _log(self, record, text, days_ago=0, minutes_ago=0, user=None, subject=None):
+		"""One unread bell row about `record`, `days_ago` old. Inserted as
+		Administrator, the way the doc events write them."""
+		from helixhr.api import HR_REPLY_SUBJECT_PREFIX
+
+		current = frappe.session.user
+		frappe.set_user("Administrator")
+		doc = frappe.get_doc(
+			{
+				"doctype": "Notification Log",
+				"for_user": user or EMPLOYEE_USER,
+				"type": "Alert",
+				"document_type": "HR Request",
+				"document_name": record,
+				"subject": subject or f"{HR_REPLY_SUBJECT_PREFIX} {record} subject",
+				"description": text,
+			}
+		)
+		doc.flags.ignore_links = True
+		doc.insert(ignore_permissions=True)
+		stamp = add_to_date(frappe.utils.now_datetime(), days=-days_ago, minutes=-minutes_ago)
+		frappe.db.set_value("Notification Log", doc.name, "creation", stamp, update_modified=False)
+		frappe.set_user(current)
+		return doc.name
+
+	def _replies(self, record, count, oldest_days=0):
+		"""`count` replies, the first `oldest_days` old and each later one a
+		minute newer, so "newest" is the last one written."""
+		for index in range(count):
+			self._log(
+				record,
+				f"reply {index}",
+				days_ago=oldest_days if index == 0 else 0,
+				minutes_ago=0 if index == 0 else count - index,
+			)
+
+	def _queue(self, user=EMPLOYEE_USER):
+		frappe.set_user(user)
+		return get_dashboard()["needs_you"]
+
+	def _request(self, subject):
+		import uuid
+
+		from helixhr.api import create_my_request
+
+		frappe.set_user(EMPLOYEE_USER)
+		return create_my_request(
+			category="HR Letter", subject=subject, details="U6", operation_key=str(uuid.uuid4())
+		)["name"]
+
+	def test_sixty_unread_replies_on_one_request_are_one_row(self):
+		record = f"{self.PREFIX}SIXTY"
+		self._replies(record, 60, oldest_days=12)
+
+		queue = self._queue()
+
+		rows = [item for item in queue["items"] if item["reference_name"] == record]
+		self.assertEqual(len(rows), 1)
+		row = rows[0]
+		self.assertEqual(row["count"], 60)
+		self.assertEqual(row["detail"], "reply 59", "the newest reply is the one quoted")
+		self.assertEqual(row["title"], f"HR replied · 60 · {record} subject")
+		self.assertEqual(row["age_days"], 12, "the group is as old as its oldest reply")
+		self.assertEqual(row["id"], f"request_answered:{record}")
+		self.assertEqual(row["reference_doctype"], "HR Request")
+		self.assertEqual(queue["more"], 0)
+
+	def test_a_single_reply_keeps_its_own_subject_line(self):
+		record = f"{self.PREFIX}ONE"
+		self._replies(record, 1)
+
+		row = self._queue()["items"][0]
+
+		self.assertEqual(row["count"], 1)
+		self.assertTrue(row["title"].startswith("HR replied about"))
+
+	def test_sorting_uses_the_groups_oldest_age(self):
+		"""A request answered ten days ago and again today is ten days old;
+		judged by its newest reply it would sort under a five-day-old one."""
+		old_group = f"{self.PREFIX}OLD"
+		middle = f"{self.PREFIX}MIDDLE"
+		self._log(old_group, "first", days_ago=10)
+		self._log(old_group, "again")
+		self._log(middle, "only", days_ago=5)
+
+		names = [item["reference_name"] for item in self._queue()["items"]]
+
+		self.assertEqual(names, [old_group, middle])
+
+	def test_more_counts_records_after_dedupe(self):
+		for index in range(22):
+			self._replies(f"{self.PREFIX}MORE-{index:02d}", 3)
+
+		queue = self._queue()
+
+		self.assertEqual(len(queue["items"]), 20)
+		self.assertEqual(queue["more"], 2, "22 records, not 66 notifications")
+
+	def test_the_row_id_survives_a_fifth_reply(self):
+		record = f"{self.PREFIX}FIVE"
+		self._replies(record, 4)
+		before = self._queue()["items"][0]
+
+		self._log(record, "the fifth")
+		after = self._queue()["items"][0]
+
+		self.assertEqual(after["id"], before["id"])
+		self.assertEqual(after["count"], 5)
+		self.assertEqual(after["detail"], "the fifth")
+
+	def test_the_queue_reads_no_more_than_before(self):
+		"""The collapse and the Decided read add no query: the pre-U6 builder
+		ran 18 SQL statements for this employee (measured on test_site), and
+		the count does not grow with the number of replies."""
+		from unittest.mock import patch
+
+		from helixhr.api import _get_needs_you
+
+		def counted():
+			frappe.set_user(EMPLOYEE_USER)
+			_get_needs_you(self.employee_name, lambda key, fetch: fetch())  # warm the meta caches
+			count = {"n": 0}
+			real_sql = frappe.db.sql
+
+			def counting_sql(*args, **kwargs):
+				count["n"] += 1
+				return real_sql(*args, **kwargs)
+
+			with patch.object(frappe.db, "sql", side_effect=counting_sql):
+				_get_needs_you(self.employee_name, lambda key, fetch: fetch())
+			return count["n"]
+
+		empty = counted()
+		self._replies(f"{self.PREFIX}COUNT", 1)
+		one = counted()
+		self._replies(f"{self.PREFIX}COUNT", 59)
+		sixty = counted()
+
+		self.assertEqual(empty, one)
+		self.assertEqual(one, sixty, "no per-row read")
+		self.assertLessEqual(sixty, 18, "no read added over the pre-U6 builder")
+
+	def test_a_final_rejection_is_decided_and_never_expires(self):
+		"""KTD11 / P4-R4: a year-old final rejection is still on Home, under
+		"Decided" and not "Waiting on others"."""
+		frappe.set_user("Administrator")
+		leave_type = frappe.db.get_value("Leave Type", {"name": "Casual Leave"}) or frappe.get_doc(
+			{"doctype": "Leave Type", "leave_type_name": "Casual Leave"}
+		).insert(ignore_permissions=True).name
+		old = add_to_date(getdate(), days=-400)
+		doc = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": self.employee_name,
+				"leave_type": leave_type,
+				"from_date": str(old),
+				"to_date": str(old),
+				"status": "Rejected",
+			}
+		)
+		doc.flags.ignore_validate = True
+		doc.flags.ignore_mandatory = True
+		doc.insert(ignore_permissions=True)
+		frappe.db.set_value("Leave Application", doc.name, "docstatus", 1)
+
+		queue = self._queue()
+
+		decided = [item for item in queue["decided"] if item["reference_name"] == doc.name]
+		self.assertEqual([item["kind"] for item in decided], ["leave_final_rejected"])
+		self.assertEqual(decided[0]["owner"], "nobody")
+		self.assertGreaterEqual(decided[0]["age_days"], 400)
+		self.assertFalse([item for item in queue["waiting"] if item["reference_name"] == doc.name])
+		self.assertFalse([item for item in queue["items"] if item["reference_name"] == doc.name])
+		self.assertEqual(queue["decided_more"], 0)
+
+	def test_an_unread_status_only_done_is_decided_not_needs_you(self):
+		"""KTD12: a status change is an update; only an unread message from
+		the team is owed."""
+		name = self._request("Done with no reply")
+		frappe.set_user("Administrator")
+		frappe.db.set_value("HR Request", name, "status", "Done")
+		self._log(name, None, subject="Your request is done: Done with no reply")
+
+		queue = self._queue()
+
+		self.assertFalse([item for item in queue["items"] if item["reference_name"] == name])
+		decided = [item for item in queue["decided"] if item["reference_name"] == name]
+		self.assertEqual(len(decided), 1)
+		self.assertEqual(decided[0]["kind"], "request_decided")
+		self.assertEqual(decided[0]["title"], "Your request is done: Done with no reply")
+		self.assertEqual(decided[0]["to"], {"name": "RequestDetail", "params": {"name": name}})
+
+	def test_an_unread_message_on_a_done_request_stays_owed_and_is_one_row(self):
+		name = self._request("Done with a reply")
+		frappe.set_user("Administrator")
+		frappe.db.set_value("HR Request", name, "status", "Done")
+		self._log(name, None, subject="Your request is done: Done with a reply")
+		self._log(name, "Here it is.")
+
+		queue = self._queue()
+
+		self.assertEqual(
+			[item["kind"] for item in queue["items"] if item["reference_name"] == name], ["request_answered"]
+		)
+		self.assertFalse([item for item in queue["decided"] if item["reference_name"] == name])
+
+	def test_an_open_requests_status_change_stays_off_home(self):
+		"""Only Done and Declined are outcomes; "is being worked on" is noise."""
+		name = self._request("Still open")
+		self._log(name, None, subject="Your request is being worked on: Still open")
+
+		queue = self._queue()
+
+		self.assertFalse([item for item in queue["decided"] if item["reference_name"] == name])
+		self.assertFalse([item for item in queue["items"] if item["reference_name"] == name])
+
+	def test_record_mark_read_clears_only_the_callers_logs(self):
+		from helixhr.api import mark_record_notifications_read
+
+		record = f"{self.PREFIX}MARK"
+		mine = [self._log(record, f"mine {i}") for i in range(3)]
+		theirs = [self._log(record, f"theirs {i}", user=self.manager_user) for i in range(2)]
+		other_record = self._log(f"{self.PREFIX}OTHER", "elsewhere")
+
+		frappe.set_user(EMPLOYEE_USER)
+		result = mark_record_notifications_read("HR Request", record)
+
+		self.assertEqual(result["cleared"], 3)
+		self.assertTrue(all(frappe.db.get_value("Notification Log", log, "read") for log in mine))
+		self.assertFalse(any(frappe.db.get_value("Notification Log", log, "read") for log in theirs))
+		self.assertFalse(frappe.db.get_value("Notification Log", other_record, "read"))
+		self.assertFalse([item for item in self._queue()["items"] if item["reference_name"] == record])
+
+		# Asking again clears nothing and is not an error.
+		frappe.set_user(EMPLOYEE_USER)
+		self.assertEqual(mark_record_notifications_read("HR Request", record)["cleared"], 0)
+
+	def test_a_managers_collapsed_row_on_a_record_they_do_not_own_clears(self):
+		"""The manager does not own the request, which `mark_my_request_read`
+		would refuse; the record-scoped mark-read only asks whose logs."""
+		from helixhr.api import mark_record_notifications_read
+
+		name = self._request("Not the manager's")
+		for index in range(2):
+			self._log(name, f"to the manager {index}", user=self.manager_user, minutes_ago=2 - index)
+
+		rows = [item for item in self._queue(self.manager_user)["items"] if item["reference_name"] == name]
+		self.assertEqual([row["count"] for row in rows], [2])
+
+		frappe.set_user(self.manager_user)
+		self.assertEqual(mark_record_notifications_read("HR Request", name)["cleared"], 2)
+		self.assertFalse(
+			[item for item in self._queue(self.manager_user)["items"] if item["reference_name"] == name]
+		)
+
+	def test_a_handlers_request_row_names_the_subject(self):
+		"""HR-04 / AI-03: five rows that read "filed a IT / Asset request"
+		could not be told apart; the subject is on the row already."""
+		from helixhr.api import _QUEUE_TITLE
+
+		row = {"employee_name": "Ana", "category": "IT / Asset", "subject": "New laptop"}
+		other = {**row, "subject": "Broken charger"}
+
+		self.assertEqual(_QUEUE_TITLE["request"](row), "Ana's IT / Asset request: New laptop")
+		self.assertNotEqual(_QUEUE_TITLE["request"](row), _QUEUE_TITLE["request"](other))
+		self.assertNotIn(" a IT", _QUEUE_TITLE["request"](row))
+
+	def test_record_mark_read_refuses_a_blank_record(self):
+		from helixhr.api import mark_record_notifications_read
+
+		with self.assertRaises(frappe.ValidationError):
+			mark_record_notifications_read("HR Request", "  ")
+		with self.assertRaises(frappe.ValidationError):
+			mark_record_notifications_read(None, "x")

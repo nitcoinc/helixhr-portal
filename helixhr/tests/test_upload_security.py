@@ -336,6 +336,8 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"get_my_team_timesheets": (60, 60),
 			"get_team_member_week": (60, 60),
 			"search_people": (60, 60),
+			# Plan 2026-10-17-001 U5 (KTD5): the command palette's one read.
+			"portal_search": (60, 60),
 			"get_person": (60, 60),
 			"get_report_link": (60, 60),
 			"search_projects": (60, 60),

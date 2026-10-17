@@ -616,6 +616,89 @@ the Werkzeug reloader (`touch apps/helixhr/helixhr/__init__.py`) after `bench us
 confirm which site answers (e.g. an Administrator `frappe.client.get_count` on a seeded doctype)
 before trusting the run.
 
+**As of plan 2026-10-17-001 this trick no longer applies to :8000.** The dev container's :8000 is
+`bench --site test_site serve --port 8000`, pinned to `test_site` by `--site`, so neither
+`bench use` nor a reload moves it. Run a fresh site's e2e on a second, Host-routed server instead
+(next section).
+
+### Fresh-site e2e: a second, Host-routed server on :8001
+
+The final run must be on a fresh site with strict user permissions (memory: test_site drift
+masked two real regressions). With :8000 pinned, the method that works on this bench is a second
+server that picks the site from the `Host` header, plus sites whose names resolve to loopback:
+
+1. **Name the site `uxN.localhost`** (`ux0.localhost`, `ux1.localhost`, …). Chromium and WebKit
+   resolve any `*.localhost` name to 127.0.0.1 with no `/etc/hosts` edit, and the browser sends
+   that name as `Host`, which is the site directory Frappe looks for.
+2. **Create it** in the container, with strict permissions and a raised queue bound (see "No job
+   worker" below):
+
+   ```bash
+   bench new-site ux3.localhost --db-root-password <root> --admin-password <admin> \
+     --install-app erpnext --install-app hrms --install-app helixhr
+   bench --site ux3.localhost set-config allow_tests true
+   bench --site ux3.localhost set-config max_queued_jobs 100000
+   bench --site ux3.localhost execute frappe.db.set_single_value \
+     --args '["System Settings","apply_strict_user_permissions",1]'
+   bench --site ux3.localhost execute helixhr.tests.utils.setup_playwright_fixtures
+   ```
+
+3. **Start the Host-routed server** inside the container, from `sites/`:
+
+   ```bash
+   cd sites && ../env/bin/python -c 'import frappe.app; frappe.app.serve(port=8001, site=None, sites_path=".", no_reload=True)'
+   ```
+
+   `site=None` is what makes it route by `Host`. `no_reload=True` keeps it from fighting the :8000
+   server's reloader — and means it **does not pick up Python changes: restart it after every
+   `api.py` (or any `helixhr/*.py`) edit**, or the e2e run tests the old server code against the
+   new frontend.
+4. **Forward the port.** The container publishes :8000 but not :8001, so forward the host's
+   127.0.0.1:8001 to the container's :8001 (a 20-line socket relay or `socat`; the container's IP
+   is `docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'
+   frappe_docker_dev-frappe-1`).
+5. **Run** from `frontend/`, with the Chromium projects listed explicitly (mobile WebKit is a CI
+   gate here):
+
+   ```bash
+   rm -rf tests/.auth
+   BASE_URL=http://ux3.localhost:8001 SITE_HOST=ux3.localhost npx playwright test \
+     -c tests/playwright.config.ts --workers=1 --project=setup --project=employee \
+     --project=manager --project=hr --project=it --project=portal-admin --project=hr-user
+   ```
+
+   Delete `tests/.auth` first: stored sessions belong to the last site you ran against.
+
+A spec that fails here must be proved pre-existing by running it against a fresh site built from
+`main` the same way — never by comparing failure counts.
+
+### No job worker in the dev container, and `QueueOverloaded`
+
+The dev container runs the two `serve` processes and nothing else: no RQ worker, no scheduler. Every
+`frappe.enqueue` (notification mail, background exports, the email queue flush) lands in Redis and
+stays there. The queue is shared by every site on the bench, and `frappe.enqueue` refuses once it
+holds `max_queued_jobs` (default 500, plus 50 per site) with `frappe.QueueOverloaded` — "Too many
+queued background jobs". On this bench, with a couple of dozen verification sites, a few e2e runs
+fill it and every write that sends a notification starts failing in ways that look like app bugs.
+Set `max_queued_jobs` high on any test site (`bench --site <site> set-config max_queued_jobs
+100000`), or start a worker (`bench worker`) for a run that needs queued jobs to actually execute.
+Neither belongs on a real site.
+
+### Playwright wipes `frontend/test-results/`; audit captures go to `.audit-shots/`
+
+Every Playwright run empties `frontend/test-results/` before it starts. The U18 capture script
+(`frontend/tests/audit-shots.mjs`) used to write its "before" set there, and the next e2e run deleted
+it. Captures now land in `.audit-shots/<label>/` at the repo root (gitignored):
+
+```bash
+cd frontend
+BASE_URL=http://localhost:8000 node tests/audit-shots.mjs before
+BASE_URL=http://localhost:8000 node tests/audit-shots.mjs after
+```
+
+Anything else you want to keep across a run — the `/impeccable` probe's `test-results/audit/`
+screenshots included — must not live under `test-results/` either.
+
 ### Full local Playwright runs need low parallelism, and a data reset between runs (U11)
 
 `bench start`'s Werkzeug dev server (used both here and in CI) isn't built for the kind of
@@ -718,6 +801,58 @@ Frappe's Python and JSON conventions), Prettier honours `.editorconfig`, and the
 collapsed the one-attribute-per-line style `eslint-plugin-vue` enforces. `yarn lint`
 (`eslint src`, with `--fix`) is the formatter for this directory; there is no prettier script in
 `package.json` for a reason.
+
+### The package manager is Yarn 1, whatever AGENTS.md's dependency section says
+
+`frontend/` has a `yarn.lock` and is Yarn 1 (`yarn install`, `yarn add`). AGENTS.md's "Dependency
+safety" list still says "Node: pnpm, commit the lockfile" — that line is wrong for this repo and
+correcting it is tracked separately (plan 2026-10-17-001, Deferred). Do not run `pnpm install`
+here: it writes a second lockfile and a different `node_modules` layout, and the reka-ui
+single-copy guard below fails on it.
+
+## shadcn-vue: copying a component in (plan 2026-10-17-001 U2)
+
+Only shadcn-vue's Command is in the app (`frontend/src/components/ui/`), as plain JS on
+Tailwind 3; copying in anything else is a design decision first (`docs/design-system.md`,
+"`components/ui/`"). When one is taken, these are the defects the tooling has, each of which cost
+time on 2026-10-17:
+
+- **The shadcn-vue MCP's `view` is not a source of truth.** It drops dependencies and prints an
+  add command that is wrong for this repo. Read the real dependency list with the CLI:
+  `npx shadcn-vue@latest view @shadcn/<item>` (its `dependencies` and `registryDependencies`).
+- **`shadcn-vue add` has no `--dry-run`, and it writes.** It installs packages, rewrites
+  `package.json` ranges and adds files in one go. **Never run `add` in `frontend/`.** Preview in a
+  scratch copy instead — copy `package.json`, `yarn.lock`, `components.json`, `jsconfig.json`,
+  `tailwind.config.cjs`, `vite.config.js` and `src/` to a temp directory, run `add` there, and diff.
+  In that preview, adding `command` rewrote the ranges to `reka-ui ^2.11.0` and `@vueuse/core
+  ^15.0.0` and added `@lucide/vue` — none of which this app wants.
+- **`view` prints TypeScript** (`<script setup lang="ts">`, typed `defineProps<...>()`) even with
+  `"typescript": false` in `components.json`. Convert by hand: plain `defineProps({...})`, no type
+  imports.
+- **The CLI writes props for the newest reka-ui**, not the installed one. Check every forwarded
+  prop and emit against the reka-ui version `yarn.lock` resolves.
+- **It needs `frontend/jsconfig.json`** with the `@/*` → `./src/*` path; without it the CLI cannot
+  resolve the `components.json` aliases. The file is there now; keep it.
+- **Rewrite on copy-in** (the `uiComponents.test.js` guard fails otherwise): lucide imports to
+  `Icon.vue` + `lib/icons.js`; any Tailwind v4 syntax (`w-(--x)`, `size-*` inside arbitrary
+  selectors) to v3; `dark:` variants dropped (the portal has no dark mode); any opacity step on a mapped colour (`bg-muted/50`,
+  `bg-background/20`) to a solid Signal step — the mapped names are hex variables and the modifier
+  generates nothing.
+
+**`tailwind-merge` must stay on 2.x.** 3.x understands only Tailwind v4 class names, so on this
+app's Tailwind 3 it would silently mis-merge (or fail to merge) classes `cn()` is asked to
+combine. `package.json` declares `^2.6.1`; `uiComponents.test.js` fails on an installed 3.x, so
+a bump to 3 is refused, not merged.
+
+**Yarn 1 does not dedupe reka-ui by itself.** Declaring `reka-ui ^2.10.4` next to frappe-ui's own
+`^2.5.0` made Yarn 1 resolve a second, newer copy instead of reusing the installed one. Two copies
+are a bundle-size cost and a correctness risk: reka-ui's components find each other through
+provide/inject keys created per copy, so a Command from one copy and a `ListboxFilter` from the
+other would not connect. Merge the entries by hand in `yarn.lock` into one block
+(`reka-ui@^2.10.4, reka-ui@^2.5.0:`) resolving to the version already installed, then `yarn
+install --frozen-lockfile` to prove it holds. `uiComponents.test.js` asserts exactly one installed
+copy. `@vueuse/core` is the opposite case: its two majors (10 for frappe-ui, 14 for reka-ui)
+coexist by design, and a copied file may only use APIs that exist in 10.11.
 
 ## Re-running the `/impeccable` UI audit
 

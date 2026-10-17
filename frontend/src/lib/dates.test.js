@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   addCalendarDays,
+  calendarDateOf,
   configureCalendar,
   dateTileParts,
   formatDate,
@@ -277,6 +278,13 @@ describe('timestamps are instants, rendered in the user timezone (P2-R5)', () =>
       locale: LOCALE,
     })
     expect(formatDate('2026-09-04 01:30:00')).toBe('3 Sept 2026')
+  })
+
+  it('names the user-calendar day of an instant, and leaves a date alone', () => {
+    configureCalendar({ timeZone: 'America/Los_Angeles', systemTimeZone: 'Asia/Kolkata' })
+    expect(calendarDateOf('2026-09-04 01:30:00')).toBe('2026-09-03')
+    expect(calendarDateOf('2026-09-04')).toBe('2026-09-04')
+    expect(calendarDateOf('not a date')).toBeNull()
   })
 
   it('does not read the host timezone', () => {

@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { createResource, Dialog } from 'frappe-ui'
+import { Button, createResource, Dialog } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
@@ -36,6 +36,33 @@ const STATUS_COLOR = {
   // reading of it.
   'Work From Home': 'bg-surface-green-2',
   Holiday: 'bg-surface-gray-4',
+}
+
+// ED-16 / EP-12. On paper and on the card the light fills all but vanish --
+// Work from home's #DCEFE5 measures 1.18:1 on the card and Absent's #FFD8D8
+// 1.29:1, under the 3:1 a non-text indicator needs -- so every dot drawn
+// there carries a 1px edge in its status's own ink, which is what measures:
+// 4.63:1 (gray-5 on paper) to 8.96:1 (blue-3 on the card). Arbitrary `var()` values
+// because frappe-ui registers `ink-*` for text only (tokenGuard.test.js), and
+// this keeps the edge on the retuned token rather than a copied hex. The
+// field block's summary dots keep their plain fills: there the light fills
+// are what contrast with the dark ground.
+const STATUS_EDGE = {
+  Present: 'border border-[color:var(--ink-green-3)]',
+  Absent: 'border border-[color:var(--ink-red-3)]',
+  'Half Day': 'border border-[color:var(--ink-amber-3)]',
+  'On Leave': 'border border-[color:var(--ink-blue-3)]',
+  'Work From Home': 'border border-[color:var(--ink-green-3)]',
+  Holiday: 'border border-[color:var(--ink-gray-5)]',
+}
+// The late ring and the no-record outline, in ink for the same reason:
+// `ring-amber-500` measured 2.31:1 on the card and `outline-gray-3` 1.69:1.
+const LATE_RING = 'ring-2 ring-[color:var(--ink-amber-3)]'
+const NO_RECORD_EDGE = 'border border-dashed border-[color:var(--ink-gray-5)]'
+
+/** The paper-ground dot for a status: its fill plus its ink edge. */
+function dotClass(status) {
+  return [STATUS_COLOR[status] || STATUS_COLOR.Holiday, STATUS_EDGE[status] || STATUS_EDGE.Holiday]
 }
 
 // P2-R5 / P2-AE3. "This month" is the *user's* month, from the same server
@@ -156,6 +183,7 @@ const firstWeekday = computed(() => (utc(year.value, month.value, 1).getUTCDay()
 
 const days = computed(() => {
   const list = []
+  const todayIso = today()
   for (let i = 0; i < firstWeekday.value; i++) list.push(null)
   for (let d = 1; d <= daysInMonth.value; d++) {
     const iso = isoDate(year.value, month.value, d)
@@ -166,6 +194,7 @@ const days = computed(() => {
       status: record?.status,
       late: !!record?.late,
       missing: missingDays.value.has(iso),
+      isToday: iso === todayIso,
     })
   }
   return list
@@ -338,11 +367,13 @@ function onRequestChanged() {
 }
 
 const LEGEND = [
-  { label: 'Present', class: STATUS_COLOR.Present },
-  { label: 'Work from home', class: STATUS_COLOR['Work From Home'] },
-  { label: 'Half day', class: STATUS_COLOR['Half Day'] },
-  { label: 'Absent', class: STATUS_COLOR.Absent },
-  { label: 'On leave', class: STATUS_COLOR['On Leave'] },
+  { label: 'Present', class: dotClass('Present') },
+  { label: 'Work from home', class: dotClass('Work From Home') },
+  { label: 'Half day', class: dotClass('Half Day') },
+  { label: 'Absent', class: dotClass('Absent') },
+  { label: 'On leave', class: dotClass('On Leave') },
+  // The grid draws a Holiday dot too; without this it explained nothing.
+  { label: 'Holiday', class: dotClass('Holiday') },
 ]
 </script>
 
@@ -352,221 +383,241 @@ const LEGEND = [
       <template #actions>
         <!-- P3-U6 step 1. The page-level way in, for a day the employee has
              to scroll to find. The day sheet offers the same thing with the
-             day already named. -->
-        <button
-          class="min-h-11 cursor-pointer rounded-full border border-outline-gray-2 bg-surface-white px-4 text-sm font-medium text-ink-gray-8 hover:bg-surface-gray-2"
+             day already named. U14 (ED-15): the page's primary action, so the
+             brand solid Button every other page header uses, not a pill. -->
+        <Button
+          variant="solid"
+          theme="blue"
           @click="fixADay(today())"
         >
           Fix a day
-        </button>
+        </Button>
       </template>
     </PageHeader>
 
-    <div class="flex max-w-xl items-center justify-between">
-      <button
-        class="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-md text-ink-gray-6 hover:bg-surface-gray-2"
-        aria-label="Previous month"
-        @click="prevMonth"
-      >
-        <Icon name="chevronLeft" />
-      </button>
-      <div class="flex items-center gap-2">
-        <span class="font-medium text-ink-gray-9">{{ monthLabel }}</span>
-        <button
-          class="min-h-11 cursor-pointer rounded-full bg-surface-gray-2 px-3 text-xs text-ink-gray-7 hover:bg-surface-gray-3"
-          @click="goToday"
-        >
-          This month
-        </button>
-      </div>
-      <button
-        class="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-md text-ink-gray-6 hover:bg-surface-gray-2"
-        aria-label="Next month"
-        @click="nextMonth"
-      >
-        <Icon name="chevronRight" />
-      </button>
-    </div>
-
+    <!-- ED-20. The page runs to the shell's max-w-5xl like every other
+         page; the calendar column takes what the requests column leaves, so
+         the requests column ends on the header's right edge. The month
+         stepper lives in that column, over the grid it steps. -->
     <div class="lg:flex lg:items-start lg:gap-6">
-      <AsyncState
-        class="max-w-xl lg:flex-1"
-        section="attendance-month"
-        :resource="calendar"
-        :empty="false"
-        skeleton="field"
-        skeleton-height="h-[26rem]"
-      >
-        <!-- The anchored region: this month, counted, on the field. The dot is
-           a second reading of a word that is always present, so nothing here
-           is carried by colour alone. -->
-        <section
-          class="surface-field elev-2 mb-4 p-4"
-          aria-label="This month"
-        >
-          <div
-            v-if="Object.keys(summary).length"
-            class="flex flex-wrap gap-x-5 gap-y-2"
+      <div class="min-w-0 space-y-4 lg:flex-1">
+        <div class="flex items-center justify-between">
+          <button
+            class="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-md text-ink-gray-6 hover:bg-surface-gray-2"
+            aria-label="Previous month"
+            @click="prevMonth"
           >
+            <Icon name="chevronLeft" />
+          </button>
+          <div class="flex items-center gap-2">
+            <span class="font-medium text-ink-gray-9">{{ monthLabel }}</span>
+            <!-- Navigation, so ghost (U14, EP-13), not a grey pill; and only
+                 away from this month, where it would do nothing. -->
+            <Button
+              v-if="year !== startYear || month !== startMonth - 1"
+              variant="ghost"
+              @click="goToday"
+            >
+              This month
+            </Button>
+          </div>
+          <button
+            class="flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center rounded-md text-ink-gray-6 hover:bg-surface-gray-2"
+            aria-label="Next month"
+            @click="nextMonth"
+          >
+            <Icon name="chevronRight" />
+          </button>
+        </div>
+
+        <AsyncState
+          section="attendance-month"
+          :resource="calendar"
+          :empty="false"
+          skeleton="field"
+          skeleton-height="h-[26rem]"
+        >
+          <!-- The anchored region: this month, counted, on the field. The dot is
+             a second reading of a word that is always present, so nothing here
+             is carried by colour alone. -->
+          <section
+            class="surface-field elev-2 mb-4 p-4"
+            aria-label="This month"
+          >
+            <div
+              v-if="Object.keys(summary).length"
+              class="flex flex-wrap gap-x-5 gap-y-2"
+            >
+              <p
+                v-for="(count, status) in summary"
+                :key="status"
+                class="flex items-center gap-2 text-sm text-blue-100"
+              >
+                <span
+                  class="h-2 w-2 shrink-0 rounded-full"
+                  :class="STATUS_COLOR[status] || 'bg-surface-gray-4'"
+                  aria-hidden="true"
+                />
+                <span class="tabular font-heading text-base font-bold text-white">{{ count }}</span>
+                {{ ATTENDANCE_LABEL[status] || status }}
+              </p>
+            </div>
             <p
-              v-for="(count, status) in summary"
-              :key="status"
-              class="flex items-center gap-2 text-sm text-blue-100"
+              v-else
+              class="text-sm text-blue-100"
+            >
+              No attendance recorded yet this month.
+            </p>
+
+            <!-- P3-R5. The Today strip: the next punch, the last one, and
+               whether it carried a location. Inside the field block because
+               it is this page's one anchored action, which is also the only
+               place signal yellow is legal. -->
+            <div class="mt-4 border-t border-white/15 pt-3">
+              <h2 class="label !text-blue-200 mb-2">
+                Today
+              </h2>
+              <template v-if="checkin.enabled">
+                <button
+                  class="min-h-11 cursor-pointer rounded-full bg-signal px-5 text-sm font-bold text-field hover:brightness-95"
+                  @click="sheetOpen = true"
+                >
+                  {{ punchLabel }}
+                </button>
+                <p class="mt-2 flex items-center gap-1.5 text-sm text-blue-100">
+                  <Icon
+                    v-if="checkin.last?.has_location"
+                    name="pin"
+                    size="h-3.5 w-3.5"
+                    class="shrink-0 text-blue-200"
+                  />
+                  {{ lastPunchLine }}
+                </p>
+              </template>
+              <p
+                v-else
+                class="text-sm text-blue-200"
+              >
+                {{ checkin.reason }}
+              </p>
+            </div>
+
+            <!-- R16's exceptions. Dormant by design: with no check-in device the
+               server reports nothing missing, so this resolves to the one
+               explanatory line rather than a wall of red. It starts working the
+               day real records arrive, with no change here. -->
+            <div class="mt-4 border-t border-white/15 pt-3">
+              <h2 class="label !text-blue-200 mb-2">
+                Exceptions
+              </h2>
+              <div
+                v-if="exceptionEntries.length"
+                class="flex flex-wrap gap-2 text-sm"
+              >
+                <span
+                  v-for="[label, count] in exceptionEntries"
+                  :key="label"
+                  class="rounded-full bg-signal px-3 py-1 font-medium text-field"
+                >
+                  {{ label }}: <span class="tabular">{{ count }}</span>
+                </span>
+              </div>
+              <p
+                v-else-if="!isTracked"
+                class="text-sm text-blue-200"
+              >
+                Check-in isn't set up yet, so there's nothing to flag. Once it is,
+                late arrivals and days with no record will show up here.
+              </p>
+              <p
+                v-else
+                class="text-sm text-blue-200"
+              >
+                Nothing to flag this month.
+              </p>
+            </div>
+          </section>
+
+          <div class="surface-card elev-1 p-3">
+            <div class="grid grid-cols-7 gap-1 text-center text-xs text-ink-gray-5">
+              <span
+                v-for="d in ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']"
+                :key="d"
+              >{{ d }}</span>
+            </div>
+            <div class="mt-1 grid grid-cols-7 gap-1">
+              <!-- The blanks before the 1st are spacing, not controls. They used to
+               render as disabled <button>s with no text, which put four unnamed
+               buttons per month into the accessibility tree.
+               ED-16 / EP-12: today is findable at a glance -- a ring in brand
+               ink (8.96:1 on the card), inset so it never reads as the
+               near-black focus outline outside the cell -- and announced with
+               aria-current="date". Square cells on a phone; a fixed 56px row
+               at desktop widths, where the wider column would otherwise make
+               each day a 90px square. -->
+              <component
+                :is="day ? 'button' : 'span'"
+                v-for="(day, index) in days"
+                :key="index"
+                class="tabular flex aspect-square min-h-11 flex-col items-center justify-center rounded-md text-sm lg:aspect-auto lg:h-14"
+                :class="[
+                  day ? 'cursor-pointer text-ink-gray-8 hover:bg-surface-gray-2' : '',
+                  day?.missing ? NO_RECORD_EDGE : '',
+                  day?.isToday ? 'font-bold ring-2 ring-inset ring-blue-700' : '',
+                ]"
+                :data-day="day?.iso"
+                :aria-current="day?.isToday ? 'date' : undefined"
+                :aria-label="day ? dayLabel(day) : undefined"
+                @click="day && openDay(day)"
+              >
+                <span>{{ day?.day }}</span>
+                <span
+                  v-if="day?.status"
+                  class="mt-0.5 h-2 w-2 rounded-full"
+                  :class="[dotClass(day.status), day.late ? `${LATE_RING} ring-offset-1` : '']"
+                />
+              </component>
+            </div>
+          </div>
+
+          <!-- The legend. The grid's dots are a second reading of a word that
+             lives in the day's accessible name and in the sheet; without this
+             they are a second reading of nothing (P2-R5). -->
+          <ul
+            class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-gray-6"
+            aria-label="Legend"
+          >
+            <li
+              v-for="entry in LEGEND"
+              :key="entry.label"
+              class="flex items-center gap-1.5"
             >
               <span
                 class="h-2 w-2 shrink-0 rounded-full"
-                :class="STATUS_COLOR[status] || 'bg-surface-gray-4'"
+                :class="entry.class"
                 aria-hidden="true"
               />
-              <span class="tabular font-heading text-base font-bold text-white">{{ count }}</span>
-              {{ ATTENDANCE_LABEL[status] || status }}
-            </p>
-          </div>
-          <p
-            v-else
-            class="text-sm text-blue-100"
-          >
-            No attendance recorded yet this month.
-          </p>
-
-          <!-- P3-R5. The Today strip: the next punch, the last one, and
-             whether it carried a location. Inside the field block because
-             it is this page's one anchored action, which is also the only
-             place signal yellow is legal. -->
-          <div class="mt-4 border-t border-white/15 pt-3">
-            <h2 class="label !text-blue-200 mb-2">
-              Today
-            </h2>
-            <template v-if="checkin.enabled">
-              <button
-                class="min-h-11 cursor-pointer rounded-full bg-signal px-5 text-sm font-bold text-field hover:brightness-95"
-                @click="sheetOpen = true"
-              >
-                {{ punchLabel }}
-              </button>
-              <p class="mt-2 flex items-center gap-1.5 text-sm text-blue-100">
-                <Icon
-                  v-if="checkin.last?.has_location"
-                  name="pin"
-                  size="h-3.5 w-3.5"
-                  class="shrink-0 text-blue-200"
-                />
-                {{ lastPunchLine }}
-              </p>
-            </template>
-            <p
-              v-else
-              class="text-sm text-blue-200"
-            >
-              {{ checkin.reason }}
-            </p>
-          </div>
-
-          <!-- R16's exceptions. Dormant by design: with no check-in device the
-             server reports nothing missing, so this resolves to the one
-             explanatory line rather than a wall of red. It starts working the
-             day real records arrive, with no change here. -->
-          <div class="mt-4 border-t border-white/15 pt-3">
-            <h2 class="label !text-blue-200 mb-2">
-              Exceptions
-            </h2>
-            <div
-              v-if="exceptionEntries.length"
-              class="flex flex-wrap gap-2 text-sm"
-            >
+              {{ entry.label }}
+            </li>
+            <li class="flex items-center gap-1.5">
               <span
-                v-for="[label, count] in exceptionEntries"
-                :key="label"
-                class="rounded-full bg-signal px-3 py-1 font-medium text-field"
-              >
-                {{ label }}: <span class="tabular">{{ count }}</span>
-              </span>
-            </div>
-            <p
-              v-else-if="!isTracked"
-              class="text-sm text-blue-200"
-            >
-              Check-in isn't set up yet, so there's nothing to flag. Once it is,
-              late arrivals and days with no record will show up here.
-            </p>
-            <p
-              v-else
-              class="text-sm text-blue-200"
-            >
-              Nothing to flag this month.
-            </p>
-          </div>
-        </section>
-
-        <div class="surface-card elev-1 p-3">
-          <div class="grid grid-cols-7 gap-1 text-center text-xs text-ink-gray-5">
-            <span
-              v-for="d in ['Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa', 'Su']"
-              :key="d"
-            >{{ d }}</span>
-          </div>
-          <div class="mt-1 grid grid-cols-7 gap-1">
-            <!-- The blanks before the 1st are spacing, not controls. They used to
-             render as disabled <button>s with no text, which put four unnamed
-             buttons per month into the accessibility tree. -->
-            <component
-              :is="day ? 'button' : 'span'"
-              v-for="(day, index) in days"
-              :key="index"
-              class="tabular flex aspect-square min-h-11 flex-col items-center justify-center rounded-md text-sm"
-              :class="[
-                day ? 'cursor-pointer text-ink-gray-8 hover:bg-surface-gray-2' : '',
-                day?.missing ? 'border border-dashed border-outline-gray-3' : '',
-              ]"
-              :data-day="day?.iso"
-              :aria-label="day ? dayLabel(day) : undefined"
-              @click="day && openDay(day)"
-            >
-              <span>{{ day?.day }}</span>
-              <span
-                v-if="day?.status"
-                class="mt-0.5 h-2 w-2 rounded-full"
-                :class="[
-                  STATUS_COLOR[day.status] || 'bg-surface-gray-4',
-                  day.late ? 'ring-2 ring-amber-500 ring-offset-1' : '',
-                ]"
+                class="h-2 w-2 shrink-0 rounded-full"
+                :class="LATE_RING"
+                aria-hidden="true"
               />
-            </component>
-          </div>
-        </div>
-
-        <!-- The legend. The grid's dots are a second reading of a word that
-           lives in the day's accessible name and in the sheet; without this
-           they are a second reading of nothing (P2-R5). -->
-        <ul class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-ink-gray-6">
-          <li
-            v-for="entry in LEGEND"
-            :key="entry.label"
-            class="flex items-center gap-1.5"
-          >
-            <span
-              class="h-2 w-2 shrink-0 rounded-full"
-              :class="entry.class"
-              aria-hidden="true"
-            />
-            {{ entry.label }}
-          </li>
-          <li class="flex items-center gap-1.5">
-            <span
-              class="h-2 w-2 shrink-0 rounded-full ring-2 ring-amber-500"
-              aria-hidden="true"
-            />
-            Late
-          </li>
-          <li class="flex items-center gap-1.5">
-            <span
-              class="h-3 w-3 shrink-0 rounded-sm border border-dashed border-outline-gray-3"
-              aria-hidden="true"
-            />
-            No record
-          </li>
-        </ul>
-      </AsyncState>
+              Late
+            </li>
+            <li class="flex items-center gap-1.5">
+              <span
+                class="h-3 w-3 shrink-0 rounded-sm"
+                :class="NO_RECORD_EDGE"
+                aria-hidden="true"
+              />
+              No record
+            </li>
+          </ul>
+        </AsyncState>
+      </div>
 
       <!-- P3-U6 step 1 / P3-R17. The employee's own requests, each with its
            two steps and, when it came back, the reason inline -- so following

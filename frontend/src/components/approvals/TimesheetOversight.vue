@@ -7,6 +7,7 @@
 import { computed, ref } from 'vue'
 import { createResource, Button, Dialog } from 'frappe-ui'
 import AsyncState from '@/components/AsyncState.vue'
+import SegmentedChips from '@/components/SegmentedChips.vue'
 import { session } from '@/lib/session'
 import { formatDate, formatDateTime } from '@/lib/dates'
 import { APPROVER_REASON_TEXT } from '@/lib/approvalLanes'
@@ -19,8 +20,13 @@ const pending = createResource({
 })
 const groups = computed(() => pending.data?.groups || [])
 
-function toggleOverdue() {
-  overdueOnly.value = !overdueOnly.value
+// The same two-chip filter as Approvals' All pending view (U15, R17).
+const OVERDUE_OPTIONS = [
+  { value: false, label: 'All' },
+  { value: true, label: 'Overdue only', testid: 'oversight-overdue-toggle' },
+]
+function setOverdue(on) {
+  overdueOnly.value = on
   pending.reload()
 }
 
@@ -94,20 +100,12 @@ function rowAge(row) {
           class="tabular text-sm font-normal text-ink-gray-5"
         >{{ pending.data.count }}</span>
       </h2>
-      <button
-        type="button"
-        class="min-h-11 rounded-full border px-4 text-sm font-medium"
-        :class="
-          overdueOnly
-            ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-            : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-        "
-        :aria-pressed="overdueOnly"
-        data-testid="oversight-overdue-toggle"
-        @click="toggleOverdue"
-      >
-        Overdue only
-      </button>
+      <SegmentedChips
+        label="Filter pending timesheets by age"
+        :options="OVERDUE_OPTIONS"
+        :model-value="overdueOnly"
+        @update:model-value="setOverdue"
+      />
     </div>
 
     <AsyncState

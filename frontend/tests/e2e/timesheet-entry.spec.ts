@@ -565,6 +565,33 @@ test.describe.serial('timesheet entry', () => {
     await context.close()
   })
 
+  // Plan 2026-10-17-001 U9 (R14, EP-02). The daily visit needs no scroll:
+  // on a phone, /timesheet opens on this week with today's day editor in the
+  // first screen, and the month waits underneath as one summary row.
+  test("on a phone, today's day editor is in the first screen and the month folds under it", async ({
+    browser,
+  }: {
+    browser: Browser
+  }) => {
+    const context = await phone(browser)
+    const page = await context.newPage()
+    await page.goto('/helixhr/timesheet')
+    const editor = page.getByTestId('week-days').getByRole('heading', { level: 2 }).first()
+    await expect(editor).toBeVisible({ timeout: 10000 })
+    const box = (await editor.boundingBox())!
+    // Above the fixed bottom tab bar (56px), without scrolling.
+    expect(box.y + box.height).toBeLessThanOrEqual(PHONE.height - 56)
+
+    const summary = page.getByTestId('month-summary')
+    await expect(summary).toHaveAttribute('aria-expanded', 'false')
+    expect((await summary.boundingBox())!.y).toBeGreaterThan(box.y)
+    await expect(page.getByTestId('month-weeks')).toBeHidden()
+    await summary.click()
+    await expect(summary).toHaveAttribute('aria-expanded', 'true')
+    await expect(page.getByTestId('month-weeks').getByRole('link').first()).toBeVisible()
+    await context.close()
+  })
+
   // Phone: the overview is a vertical list of the same links.
   test('the month overview is a vertical list on a phone', async ({
     browser,
@@ -574,6 +601,8 @@ test.describe.serial('timesheet entry', () => {
     const context = await phone(browser)
     const page = await context.newPage()
     await page.goto(`/helixhr/timesheet/${SOURCE_WEEK}`)
+    // U9 (EP-02): on a phone the month folds into one row under the week.
+    await page.getByTestId('month-summary').click()
     const links = page.getByTestId('month-weeks').getByRole('link')
     await expect(links.first()).toBeVisible({ timeout: 10000 })
     const [a, b] = [await links.nth(0).boundingBox(), await links.nth(1).boundingBox()]

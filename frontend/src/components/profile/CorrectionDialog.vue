@@ -14,7 +14,12 @@ import {
 //
 // `field` is what the employee picked -- `{ label, display, masked, table }`
 // -- and `category` the Profile correction category the server reported
-// active. RequestForm owns every send state (busy, refusal, lost response);
+// active. A whole run of fields (plan 2026-10-17-001 U10: one entry per
+// section) arrives as `{ label, section, masked, choices }`, and the dialog
+// asks which detail is wrong. It starts on "Several, or something else" --
+// the section-wide draft -- rather than guessing a field, and picking one
+// gives exactly the draft that field's own button used to (the structured
+// bank-detail form included). RequestForm owns every send state (busy, refusal, lost response);
 // this only frames it and says where the request went. frappe-ui's Dialog
 // traps focus, closes on Esc and hands focus back to the button that opened
 // it.
@@ -30,7 +35,12 @@ const open = computed({
 })
 
 const sent = ref(null)
-const draft = computed(() => (props.field ? correctionDraft(props.field) : null))
+// The fieldname picked from a section's choices; '' is the whole section.
+const picked = ref('')
+const current = computed(
+  () => props.field?.choices?.find((choice) => choice.fieldname === picked.value) || props.field,
+)
+const draft = computed(() => (current.value ? correctionDraft(current.value) : null))
 
 // Plan 2026-10-02-001 U14: a correctable field (bank details) takes the new
 // value typed twice plus a required proof, sent in one multipart call. The
@@ -70,8 +80,12 @@ function reset() {
 // props once, so it is re-keyed per field rather than reused.
 watch(open, (isOpen) => {
   reset()
+  picked.value = ''
   if (isOpen) sent.value = null
 })
+// A different detail is a different request: nothing typed for one carries
+// over to the next.
+watch(picked, reset)
 
 async function sendCorrection() {
   if (!canSend.value) return
@@ -122,8 +136,34 @@ function onCreated({ name }) {
           View your request
         </router-link>
       </div>
+      <div
+        v-if="!sent && field?.choices"
+        class="mb-4"
+      >
+        <label
+          class="label mb-1 block"
+          for="correction-detail"
+        >Which detail is wrong?</label>
+        <select
+          id="correction-detail"
+          v-model="picked"
+          class="min-h-11 w-full cursor-pointer rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-ink-gray-9 focus:border-outline-gray-4"
+          data-testid="correction-detail"
+        >
+          <option value="">
+            Several, or something else
+          </option>
+          <option
+            v-for="choice in field.choices"
+            :key="choice.fieldname"
+            :value="choice.fieldname"
+          >
+            {{ choice.label }}
+          </option>
+        </select>
+      </div>
       <form
-        v-else-if="draft?.correction_field"
+        v-if="!sent && draft?.correction_field"
         class="space-y-4"
         data-testid="structured-correction"
         @submit.prevent="sendCorrection"
@@ -226,8 +266,8 @@ function onCreated({ name }) {
         </div>
       </form>
       <RequestForm
-        v-else-if="draft"
-        :key="`${field.label}-${field.display}`"
+        v-else-if="!sent && draft"
+        :key="`${current.label}-${current.display}`"
         :initial-category="category"
         :initial-subject="draft.subject"
         :initial-details="draft.details"

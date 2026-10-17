@@ -49,6 +49,14 @@ const MAP = {
     Approved: { label: 'Approved', tone: 'done' },
     'Sent Back': { label: 'Sent back', tone: 'sentBack' },
     Cancelled: { label: 'Cancelled', tone: 'resting' },
+    // Plan 2026-10-17-001 U9 (ED-13, EP-14): the month overview's week
+    // states that no workflow_state can say. Keys no Frappe workflow uses,
+    // so the week card goes through this table like every other badge
+    // instead of hand-rolling its own chips. `lib/month.js weekCardStatus`
+    // decides which one a week is.
+    'Not Started': { label: 'Not started', tone: 'resting' },
+    Missing: { label: 'Missing', tone: 'sentBack' },
+    'Change Requested': { label: 'Change requested', tone: 'waiting' },
   },
   request: {
     Open: { label: 'Open', tone: 'resting' },

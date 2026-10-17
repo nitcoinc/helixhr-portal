@@ -113,6 +113,90 @@ test.describe('hr', () => {
     await page.getByLabel('Search').fill('zzz-nobody-by-that-name')
     await expect(page.getByText('Nobody matches that search')).toBeVisible()
   })
+
+  // Plan 2026-10-17-001 U17 (HR-14): at desktop width a compact table, its
+  // sortable headers carrying aria-sort the way ReportTable's do.
+  test('U17: the desktop table sorts by name and by joining date, with aria-sort', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/helixhr/people')
+    const table = page.getByTestId('people-table')
+    await expect(table.getByTestId('people-row').first()).toBeVisible()
+
+    const name = table.getByRole('columnheader', { name: 'Name', exact: true })
+    const joined = table.getByRole('columnheader', { name: 'Joined', exact: true })
+    // The server sends rows by name, so that is the starting sort.
+    await expect(name).toHaveAttribute('aria-sort', 'ascending')
+    await expect(joined).toHaveAttribute('aria-sort', 'none')
+
+    const names = () => table.getByTestId('people-name').allTextContents()
+    const ascending = await names()
+    await name.getByRole('button').click()
+    await expect(name).toHaveAttribute('aria-sort', 'descending')
+    // Equal names read the same, so the reversed text is exact even with ties.
+    expect(await names()).toEqual([...ascending].reverse())
+
+    // Joining date starts newest first; blanks sit last either way.
+    const dates = async () =>
+      (await table.getByTestId('people-joined').evaluateAll((cells) =>
+        cells.map((cell) => cell.getAttribute('data-date') || ''),
+      )).filter(Boolean)
+    await joined.getByRole('button').click()
+    await expect(joined).toHaveAttribute('aria-sort', 'descending')
+    await expect(name).toHaveAttribute('aria-sort', 'none')
+    const newestFirst = await dates()
+    expect(newestFirst.length).toBeGreaterThan(1)
+    expect(newestFirst).toEqual([...newestFirst].sort().reverse())
+
+    await joined.getByRole('button').click()
+    await expect(joined).toHaveAttribute('aria-sort', 'ascending')
+    const oldestFirst = await dates()
+    expect(oldestFirst).toEqual([...oldestFirst].sort())
+  })
+
+  // U17 (HR-14): the department chips and the count, at both widths -- the
+  // phone keeps its cards, the desktop its table, and both narrow the same.
+  for (const width of [390, 1440]) {
+    test(`U17: the department filter narrows the count at ${width}px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 })
+      await page.goto('/helixhr/people')
+      const count = page.getByTestId('people-count')
+      await expect(count).toContainText(/\d+ (person|people)/)
+      const everyone = Number((await count.textContent())!.match(/\d+/)![0])
+
+      // The seeded directory colleague has a department and most fixtures
+      // have none, so there are at least two chips besides All.
+      const chips = page.getByRole('group', { name: 'Filter people by department' })
+      const chip = chips.getByRole('button').nth(1)
+      const chipCount = Number((await chip.getAttribute('aria-label'))!.match(/\((\d+)\)$/)![1])
+      expect(chipCount).toBeLessThan(everyone)
+
+      await chip.click()
+      await expect(chip).toHaveAttribute('aria-pressed', 'true')
+      await expect(count).toContainText(`${chipCount} of ${everyone}`)
+      await expect(page.getByTestId('people-row')).toHaveCount(chipCount)
+      await expect(page.getByTestId('people-table')).toHaveCount(width >= 1024 ? 1 : 0)
+
+      await chips.getByRole('button').first().click()
+      await expect(page.getByTestId('people-row')).toHaveCount(everyone)
+    })
+  }
+
+  // HR-10 / U15: the shared SearchField, 44px under a coarse pointer.
+  test('the search field is a 44px target on a phone', async ({ browser }) => {
+    const context = await browser.newContext({
+      storageState: 'tests/.auth/hr.json',
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
+    })
+    const page = await context.newPage()
+    await page.goto('/helixhr/people')
+    const field = page.getByLabel('Search', { exact: true })
+    await expect(field).toBeVisible()
+    const box = await field.boundingBox()
+    await context.close()
+    expect(box?.height).toBeGreaterThanOrEqual(44)
+  })
 })
 
 test('an employee identity has no People nav item, and a direct hit is refused server-side', async ({

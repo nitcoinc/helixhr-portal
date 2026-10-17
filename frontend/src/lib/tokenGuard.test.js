@@ -129,15 +129,15 @@ function signalUses(source) {
 // new signal use in one of these files fails until someone has looked at
 // where it lands and raised the number here.
 const SIGNAL_ALLOWED = {
-  'components/AppShell.vue': 7, // side nav, phone app bar and tab bar
+  'components/AppShell.vue': 10, // side nav, phone app bar, tab bar; U4: Approvals tab, More tab and group attention badges
   'components/WeekSpine.vue': 3, // the dashboard's week spine
+  'components/requests/MyRequests.vue': 2, // team chip on bg-field beside a reply
   'pages/Attendance.vue': 2, // Today / Exceptions block on the field
   'pages/Holidays.vue': 1, // countdown pill on the next-holiday field
   'pages/Leave.vue': 1, // balance bar on bg-field-deep
   'pages/Notifications.vue': 1, // unread icon tile on bg-field
   'pages/Payslips.vue': 1, // Download PDF on the latest-payslip field
   'pages/Profile.vue': 2, // identity band: avatar initials and photo error
-  'pages/Requests.vue': 2, // team chip on bg-field beside a reply
   'pages/Team.vue': 2, // out-today field: This week link, waiting pill
   'pages/Timesheet.vue': 3, // phone day strip on the field
 }

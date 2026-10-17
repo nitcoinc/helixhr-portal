@@ -12,6 +12,19 @@ Input to `docs/plans/2026-10-17-001-feat-portal-ease-of-use-plan.md`. Captured f
 
 Severity counts: 27 high, 60 medium, 40 low.
 
+## Closure (U13, 2026-10-17)
+
+Each finding below carries a **Closure** line: fixed, deferred or won't fix, with the commit and unit that closed it or the plan section that defers it. High findings were checked against the after capture (`.audit-shots/after/`, 198 shots, no console errors and no horizontal scroll on any shot) and against the code. "Remainder" notes a low-impact part of a fixed finding that did not ship. `test_site` has accumulated test data since the before set, so heights are not comparable; structure and behaviour are.
+
+| Severity | Fixed | Deferred | Won't fix | Total |
+|---|---|---|---|---|
+| High | 27 | 0 | 0 | 27 |
+| Medium | 58 | 2 | 0 | 60 |
+| Low | 34 | 5 | 1 | 40 |
+| **All** | **119** | **7** | **1** | **127** |
+
+Deferred: ED-14, ED-23, MH-10, MH-24, MH-27, HR-22, HR-23. Won't fix: AI-20.
+
 ## Employee — desktop
 
 For a desktop employee the portal is calm and readable, and the home queue and side nav make most jobs 1-2 clicks away. Volume breaks it, though. Home, Requests and Notifications have no grouping, no dedupe and no filters, so 50 near-identical notifications or 11 'Needs you' request rows push the real work out of view. The 'Needs you' group on Requests is driven by unread state, not by an action being owed, so Done/Declined/Sent rows get mixed in with the 'Needs your reply' ones. Raw ISO dates and Frappe words ('Pending Approval') leak through notification text. The biggest time sinks: finding which request actually needs a reply, opening every payslip one by one to download it, landing on an empty Documents tab, and reading three redundant week navigators on Timesheet. Visual drift is real but fixable in small steps: three heading styles on Home, hand-rolled pill buttons and badges outside StatusBadge/Button, mixed content widths (Holidays/Attendance capped at max-w-xl, everything else at full width), and project titles overflowing into the hours column on My projects.
@@ -20,95 +33,121 @@ For a desktop employee the portal is calm and readable, and the home queue and s
   - **Fix:** Make 'Needs you' = status 'Waiting on Employee' (always shown, unread or not). Show unread-but-informational rows (Done/Declined replies) in their natural Open/Closed group with the unread dot, or in a separate 'New replies' group.
   - **Evidence:** employee__desk__requests.png rows 1-11; frontend/src/pages/Requests.vue:68-75 (filter row.unread)
   - **Saves:** ~10-20s scanning per visit; stops replies from being missed
+  - **Closure:** fixed. e905f58 U8: "Needs you" follows the one owed rule (KTD12: Waiting on Employee or an unread HR/IT message); status-only Done/Declined updates sit in Open/Closed with a dot. Verified in after shot employee__desk__requests.png.
 - ED-02. **high · bug · both — Requests.** Every IT / ASSET row is badged 'Sent to HR'. The list endpoint returns handled_by_team, but the list StatusBadge is never given it, so the label always falls back to 'HR'. The design system says Open should read 'Sent to {HR or IT}'. The detail view (line 1186) does pass it, so list and detail disagree.
   - **Fix:** Add :team="row.handled_by_team" to the list-row StatusBadge at Requests.vue:792 (one-line fix). Add a vitest/e2e assertion for an IT category.
   - **Evidence:** employee__desk__requests.png (IT/ASSET rows: 'Sent to HR'); frontend/src/pages/Requests.vue:792-795 (no :team); lib/statusBadge.js:149; helixhr/api.py:8394
   - **Saves:** n/a (correctness: employee chases the wrong team)
+  - **Closure:** fixed. de252a2 U1: the list StatusBadge gets the team, so IT rows read "Sent to IT", matching the detail. Verified in employee__desk__requests.png.
 - ED-03. **high · copy · both — Notifications.** Notification titles show raw ISO dates and Frappe workflow words: 'Your timesheet for 2027-03-08 is Pending Approval', 'Your Casual Leave for 2027-02-12 is Approved', 'Your attendance request for 2026-03-23 is with HR'. This breaks the copy rules ('Waiting for [manager]', dates for people). The Jinja template only replaces 'Sent Back' and 'Pending HR'.
   - **Fix:** Format dates in the Notification templates with frappe.utils.format_date (e.g. 'Mar 8') and map Pending Approval to 'waiting for your manager'. Ship it as a patch that updates the fixture, not as an in-place edit.
   - **Evidence:** employee__desk__notifications.png bottom 10 rows; helixhr/fixtures/notification.json:68 and :95 ({{ doc.start_date }}, workflow_state.replace only maps Sent Back/Pending HR)
   - **Saves:** n/a (comprehension)
+  - **Closure:** fixed. 14eaa50 U12: subjects render "Mar 8" dates and plain state words through helixhr_date / helixhr_state_words; fixture plus idempotent patch; test_notifications.py covers every HelixHR subject.
 - ED-04. **high · information-density · desk · fixture — Notifications.** Page is 4076px tall: 50 cards in one 'EARLIER' group. Several requests appear 4-6 times ('Your request is done: Correct my IBAN', 'HR replied about Conversation spec: IT side'). There is no grouping per request, no Unread filter and no day buckets beyond Today/Earlier, so 'read HR reply' means scrolling a wall of near-identical rows.
   - **Fix:** Collapse consecutive notifications for the same document into one row showing the latest state plus a '+3 earlier' count. Add an 'Unread' toggle. Bucket by Today / Yesterday / This week / Older. Use compact 48px rows on desktop.
   - **Evidence:** employee__desk__notifications.png; capture-log h=4076; frontend/src/pages/Notifications.vue:96-97,172-175
   - **Saves:** ~15-30s per visit at real volume
+  - **Closure:** fixed. f8ae34f U10: one row per record with "+N earlier", Today/Yesterday/This week/Older buckets, server-side Unread view. The after shot's wall of "U10-… update N" rows is 60 deliberately distinct records left by an e2e run (one record each, so nothing to fold); the Unread view and buckets cope.
 - ED-05. **high · bug · desk — My projects.** Long project names don't wrap. They overflow their column and paint over the right-hand '0 h / this month' figure (e.g. '..._flags_resubmitted' over 'this month', '..._nothing_else' running past the card edge at x~1343). The name block has min-w-0, but the h2 has no break-words, so underscore/long tokens don't break.
   - **Fix:** Add break-words / [overflow-wrap:anywhere] to the h2, or line-clamp-2 with a title attribute. Fixture names are extreme, but real client project codes hit the same path.
   - **Evidence:** employee__desk__my-projects.png rows 2-6; frontend/src/pages/MyProjects.vue:52-53
+  - **Closure:** fixed. de252a2 U1: the project name wraps (break-words in a min-w-0 column); no horizontal scroll in any after shot. Long fixture names no longer exist on test_site, so verified in code and the console/overflow log.
 - ED-06. **medium · time-saving · desk — Payslips.** Only the latest payslip has a 'Download PDF' button (in the field band). Older rows show just a chevron, so downloading Aug means: open the row, find the button in the sheet, download, close. The field band also repeats the Sep row directly below it.
   - **Fix:** Add a secondary 'PDF' icon-button (44px, aria-label 'Download Sep 2026 payslip') to every row whose pdfHref exists, outside the stretched link. Keep Withheld rows without it, per the copy rules.
   - **Evidence:** employee__desk__payslips.png; frontend/src/pages/Payslips.vue:168-172 (pdfHref only on latest), :337/:373 (detail only)
   - **Saves:** 2 clicks + ~5s per older payslip
+  - **Closure:** fixed. f8ae34f U10: every payslip with a PDF has a 44px download link outside the row link; withheld slips get none.
 - ED-07. **medium · empty-or-error-state · desk — Documents.** Page opens on 'Important (0)' with 'No important documents right now.' while 'General (1)' holds the only document. That's an extra click to reach anything, and the empty state names no next action (copy rule: every empty state names the next action).
   - **Fix:** Default to the first non-empty tab when ?tab is absent. Or drop the tabs and list Important first, then General, under .label headings, which is the design system's only grouping device. Empty copy: 'Nothing marked important. Browse General or ask HR.'
   - **Evidence:** employee__desk__documents.png; frontend/src/pages/Documents.vue:36 (defaults to 'important'), :426
   - **Saves:** 1 click per visit
+  - **Closure:** fixed. f8ae34f U10: Documents opens on the first non-empty tab, and empty states name a next step.
 - ED-08. **medium · information-density · desk · fixture — Home.** 'Needs you' shows 4 identical 'HR replied about Conversation spec: IT side' rows (~80px each), then 'Waiting on others' repeats a rejected leave twice. With no collapse by source document, one busy thread fills the queue and pushes 'Start something' to y~940, below the fold at 900px.
   - **Fix:** Dedupe queue items server-side by (doctype, name), keeping the latest, and show a count chip ('3 replies'). Move 'Start something' up next to the page heading as compact buttons so frequent jobs stay above the fold.
   - **Evidence:** employee__desk__home.png y=342-660
   - **Saves:** ~1 scroll per visit
+  - **Closure:** fixed. a9be177 U6: one row per record ("HR replied · 4"), server-side before sort and slice. "Start something" stays below the queue; the dedupe is what frees the height.
 - ED-09. **medium · copy · desk — Home.** 'WAITING ON OTHERS' lists 'Your Casual Leave was rejected', which is a final decision, not something waiting on anyone. The backend appends final rejections to the waiting list on purpose, so the heading contradicts its rows, and old rejections sit on Home with no expiry.
   - **Fix:** Rename the section 'Waiting or decided', or split out a 'Recently decided' row group that expires after 14 days, linking to Leave history.
   - **Evidence:** employee__desk__home.png y=765-905; helixhr/api.py:1196-1225 (leave_final_rejected appended to waiting)
+  - **Closure:** fixed. a9be177 U6: final rejections move under a "Decided" label. The 14-day expiry is won't-fix by design: KTD11 keeps P4-R4 (final rejections never drop off by time).
 - ED-10. **medium · visual-inconsistency · desk — Home.** Four section headings on one screen use three styles: 'Needs you' (text-base semibold heading), 'WAITING ON OTHERS' (uppercase 11px .label), 'Start something' (text-sm medium gray-7) and 'Celebrating this month' (text-base semibold). None use the .type-section class the design system defines.
   - **Fix:** Use .type-section for the peer sections (Needs you, Start something, Celebrating) and .label only for sub-groups inside one (Waiting on others, Birthdays).
   - **Evidence:** employee__desk__home.png y=325/686/940/1033; components/NeedsYou.vue:83-84, :222; components/QuickActions.vue:19-21; components/Celebrations.vue:63-64
+  - **Closure:** fixed. a9be177 U6: Needs you, Start something and Celebrating use .type-section; sub-groups use .label.
 - ED-11. **medium · copy · desk — Home.** Rail card reads 'Attendance / Holiday this month / 10': the largest status count is shown as the headline number, so the employee reads '10 attendance' when it means 10 holidays. Meanwhile the Attendance calendar for the same month shows no holiday markers and the 'No attendance recorded yet' banner, so the two screens disagree.
   - **Fix:** Show 'Present X of Y working days' (or 'Days present') as the figure. If holidays are counted, show them on the calendar with the existing Holiday tone and add 'Holiday' to the legend.
   - **Evidence:** employee__desk__home.png rail; employee__desk__attendance.png; frontend/src/pages/Dashboard.vue:271-279
+  - **Closure:** fixed. a9be177 U6: the attendance tile names its figure ("Holidays this month" / "Present") instead of a bare count.
 - ED-12. **medium · navigation · desk — Timesheet.** Three overlapping week navigators stack on one screen: month arrows + 'October 2026', a strip of 5 week cards, then prev/next week arrows + 'Week of Oct 12-18' + 'This week' link, plus a 'Past weeks' link top-right. Status 'Approved' is shown three times (week card, heading badge, green banner). About 180px of chrome before the grid.
   - **Fix:** Keep the week strip as the single navigator (scrollable, with month label inline), drop the second prev/next pair, and show status once, in the banner with its action. 'Past weeks' can be the strip's overflow link.
   - **Evidence:** employee__desk__timesheet.png y=80-355
   - **Saves:** ~150px vertical; fewer decisions per visit
+  - **Closure:** fixed. 42702fd U9: the week strip is the single desktop navigator; the second prev/next pair is gone; status shows once per week.
 - ED-13. **medium · visual-inconsistency · desk — Timesheet.** Week cards stack two status chips ('Not started' filled grey + 'Missing' red outline). The outline style exists nowhere else, and the chips are hand-rolled spans, not StatusBadge. The copy '0h, not measured' is jargon. The current-week card wraps '· This week' onto its own line with a leading dot. Grid is lg:grid-cols-6 with 5 weeks, leaving an empty column (cards end at x~1170 of 1336).
   - **Fix:** Render one StatusBadge per week ('Missing' replacing 'Not started' for past weeks), put 'This week' as a .label above the range, and replace 'not measured' with just '0 h' (or 'X of 40 h' when expected). Use lg:grid-cols-5, or let weeks size to the count.
   - **Evidence:** employee__desk__timesheet.png y=122-222; frontend/src/components/MonthOverview.vue:41, :102, :121-142
+  - **Closure:** fixed. 42702fd U9: one StatusBadge per week on surface-card, "This week" as a label, no "not measured", grid sized to the weeks.
 - ED-14. **medium · bug · desk — Timesheet history.** Past weeks lists only Oct 12, Aug 10 and Jul 27. The Timesheet strip marks Sep 28 and Oct 5 as 'Missing', but those weeks are absent from history, so the one list an employee would check for gaps hides them. 'Avg 11.0 h' sits top-right with no label, and the 'Draft' badge is Frappe vocabulary.
   - **Fix:** Include missing working weeks as rows with a 'Missing · Fill now' link to /timesheet?week=. Label the average 'Average per week'. Map Draft to 'Not sent'.
   - **Evidence:** employee__desk__timesheet_history.png vs employee__desk__timesheet.png
   - **Saves:** 1-2 clicks to find and fill a missed week
+  - **Closure:** deferred. Plan "Deferred to Follow-Up Work": missing working weeks in history need a new server derivation outside R14. The unlabeled average and "Draft" wording ride with it.
 - ED-15. **medium · visual-inconsistency · desk — Attendance.** Primary page action 'Fix a day' is a hand-rolled white rounded-full pill, and 'This month' is a grey pill. Every other page uses a frappe-ui solid green 8px Button top-right ('Ask for leave', 'New request'). The Check in button is a third shape (yellow pill).
   - **Fix:** Use frappe-ui Button for 'Fix a day' (variant subtle, since Check in is the primary in the field) and Button ghost for 'This month'. Keep the signal-yellow Check in as the field's one primary.
   - **Evidence:** employee__desk__attendance.png top-right vs employee__desk__leave.png; frontend/src/pages/Attendance.vue:357, :376, :442
+  - **Closure:** fixed. 0253a64 U14: "Fix a day" is the brand solid Button in PageHeader's actions; "This month" is a ghost Button, now shown only away from the current month (U13 polish).
 - ED-16. **medium · accessibility · desk — Attendance.** Calendar has no 'today' marker (Oct 17 looks like every other cell). Legend dots for 'Work from home' (pale green) and 'Absent' (pale pink) are close to invisible on paper/white, under the 3:1 non-text contrast an indicator needs.
   - **Fix:** Add a today ring (outline-ink-gray-9) to the cell where day.iso === today(). Give the light status dots a 1px darker ring (ring-ink-green-3 / ring-ink-red-3) so they pass 3:1.
   - **Evidence:** employee__desk__attendance.png calendar + legend y=858; frontend/src/pages/Attendance.vue:37, :512-520
+  - **Closure:** fixed. aaf1840 U16: today ring with aria-current="date"; every legend swatch carries an ink border measured ≥ 3:1.
 - ED-17. **medium · information-density · desk · fixture — Directory.** Every card has a footer band with a top border, rendered even when it's empty (no department/manager/email), so most cards carry a blank 45px strip. 'Role not published' repeats on ~29 of 30 cards. Search sits detached top-right while department chips sit left. Directory Colleague's avatar renders as a solid green disc with no initials or photo.
   - **Fix:** Render the footer only when department, manager_name or email exist. Drop the 'Role not published' fallback (leave the line empty). Put search inline with the chips as the first control. Fall back to initials when photo_url fails to load (Avatar @error).
   - **Evidence:** employee__desk__directory.png; frontend/src/pages/Directory.vue:263-265 (v-if isDesktop only), :253
   - **Saves:** ~40% less scroll at 100+ people
+  - **Closure:** fixed. aaf1840 U16: no empty footer band, no "Role not published" filler; Avatar falls back to initials on image error (de252a2 U1).
 - ED-18. **medium · information-density · desk — Profile.** 'Request a correction' is repeated on all 11 rows of the Personal tab, including Status and Employee number, so there's a column of identical dotted links. The fields the employee can edit themselves (contact, address, emergency) sit on another tab with no hint on Personal.
   - **Fix:** Use one 'Request a correction' button per section (the dialog already takes a field picker), or show the per-row link only on hover/focus-within with an always-visible section-level button for touch. Add a line: 'Phone, address and emergency contact you can edit yourself in Contact & emergency.'
   - **Evidence:** employee__desk__profile.png; frontend/src/components/profile/ProfileFields.vue:91-99
   - **Saves:** n/a (scan time)
+  - **Closure:** fixed. f8ae34f U10: one "Something wrong? Request a correction" per section with a field picker, plus a hint pointing to Contact & emergency.
 - ED-19. **medium · time-saving · desk · fixture — Requests.** With 30+ requests the list is 2312px with 'Show 10 more'. There's no search by subject and no status filter (only category chips), and category tags read 'IT / ASSET' / 'HR LETTER' rather than the kind-tag vocabulary (icon + 'IT request' / 'HR request'). Duplicated rows have nothing to tell them apart but date.
   - **Fix:** Add a subject search box next to the chips, and a 'Needs reply' quick chip. Use KindTag for the team plus the category as plain secondary text.
   - **Evidence:** employee__desk__requests.png; frontend/src/pages/Requests.vue:742-760
   - **Saves:** ~10s per lookup
+  - **Closure:** fixed. e905f58 U8: subject search, and "Needs you" now means owed. Remainder (low): the category still reads as an uppercase label rather than KindTag.
 - ED-20. **low · visual-inconsistency · desk — Attendance / Holidays.** Content width differs per page. Attendance's calendar column and Holidays' list are capped at max-w-xl (~576px, ending x~936), while the 'Fix a day' header button and every other page run to x=1336. On Attendance the right 'Your requests' column ends at x=1280, out of line with the header button at 1336.
   - **Fix:** Pick one rule: full max-w-5xl for list pages, with the Holidays desktop list as a 2-column grid or a denser table. Align Attendance's right column to the header edge.
   - **Evidence:** employee__desk__holidays.png, employee__desk__attendance.png; frontend/src/pages/Holidays.vue:103,125; Attendance.vue:365,393
+  - **Closure:** fixed. aaf1840 U16: Holidays and Attendance use the shell width; Attendance's right column ends on the header edge.
 - ED-21. **low · information-density · desk · fixture — Holidays.** Each holiday is an 80px card, so 10 holidays fill 1227px. The 'Next holiday' field says 'NEXT HOLIDAY' over a holiday tagged 'Today'. There is no link from a holiday to 'Ask for leave' for a bridge day, the most common reason to open this page.
   - **Fix:** Use compact 56px rows (date tile + name + weekday) on desktop. Label the field 'Today' when it is today. Add a quiet 'Plan leave around this' link that opens LeaveForm prefilled with adjacent dates.
   - **Evidence:** employee__desk__holidays.png
   - **Saves:** ~3 clicks when planning a long weekend
+  - **Closure:** fixed. aaf1840 U16: compact date-tile rows, past holidays behind "Show past", next holiday not repeated. The "plan leave around this" link was not built (LeaveForm already previews working days).
 - ED-22. **low · visual-inconsistency · desk — Leave.** The manager's rejection reason renders as a full-width red .surface-alert block. The design system reserves alert for destructive/blocking callouts and names .surface-inset for 'a manager's reason'. The date tile on these rows stretches to the full row height (~130px) instead of the fixed 56px tile, and 'Apply again' is a grey subtle Button styled differently from row actions elsewhere.
   - **Fix:** Swap to surface-inset (the Rejected badge already carries the tone). Add self-start to the date tile. Keep 'Apply again' as the row's only action.
   - **Evidence:** employee__desk__leave.png rows 3-4; frontend/src/pages/Leave.vue:405-407 (surface-alert), :358 (date-tile), :437-441
+  - **Closure:** fixed. de252a2 U1: the reason sits on surface-inset and the date tile is self-start.
 - ED-23. **low · time-saving · desk — Leave.** Balance band shows only Casual and Privilege bars. Nothing on the page shows upcoming holidays or the team's leave for the week, so before asking for leave the employee has to visit Holidays (and has no team view at all) to pick dates.
   - **Fix:** In LeaveForm, mark holidays and weekends in the date picker, and show 'X working days' as dates are chosen (holidays.js already exists).
   - **Evidence:** employee__desk__leave.png
   - **Saves:** 2-3 page switches per request
+  - **Closure:** deferred. Plan "Deferred to Follow-Up Work": upcoming holidays and team leave beside the balance band. LeaveForm already previews working days.
 - ED-24. **low · time-saving · desk — Directory.** Cards offer email only when published, and nothing else. There is no 'copy email' and no phone/Teams action. Search isn't focusable by '/' or reachable from other pages, so 'find a colleague' always needs nav click + mouse into the search box.
   - **Fix:** Autofocus search on desktop on page load. Add a global '/' or Ctrl+K quick finder in AppShell that searches people and pages (one command palette; frappe-ui has no built-in, so it's a small new component).
   - **Evidence:** employee__desk__directory.png
   - **Saves:** 1-2 clicks per lookup
+  - **Closure:** fixed. 717e50e U5: Ctrl/Cmd-K or "/" opens one palette over pages, people, requests and reports; /directory?q= seeds the Directory search.
 - ED-25. **low · empty-or-error-state · desk — Team.** An employee with no reports who opens /team (direct link) gets the full page chrome (Leaves/Timesheets tabs and week arrows) above a 'You don't have access to this' card with Reload. The data request 403s (console error). The controls do nothing.
   - **Fix:** When the resource is forbidden, hide the tabs and week nav and show only the forbidden region with a 'Go to Home' link. Reload doesn't help an employee without reports.
   - **Evidence:** employee__desk__team.png; capture-log console 403
+  - **Closure:** fixed. de252a2 U1: /team without reports redirects Home; the forbidden state no longer renders the tabs and week stepper.
 - ED-26. **low · navigation · desk — App shell (all pages).** Side nav lists 13 destinations in 4 groups with no search or shortcuts. 'Roster' and 'Timesheet' share the same clock icon, and 'My projects' and 'Documents' share the folder icon, so icon-scanning fails. The notification badge caps at '9+' with no way to jump to unread.
   - **Fix:** Give Roster a calendar-clock glyph and My projects a briefcase glyph in lib/icons.js. Make the bell badge open Notifications filtered to unread.
   - **Evidence:** all employee__desk__*.png side nav y=260 vs 560, y=290 vs 470
+  - **Closure:** fixed. a7e953a U4: every destination has its own glyph. Remainder (low): the bell still opens all notifications; Unread is one tap away on the page (U10).
 
 ## Employee — phone
 
@@ -118,94 +157,120 @@ For a phone-first employee the portal has a solid skeleton (5-slot tab bar, bott
   - **Fix:** Keep the 44px target without the negative margin on multi-line text: put `min-h-11` on a block wrapper and drop `-my-2`, or use `block py-2 -my-2` with `leading-snug` and `mt-1` on the meta <p>. Better: let the stretched `after:inset-0` carry the target and mark the link `block` (the whole card is already the target). Add a Playwright check: title bottom <= meta top for a 2-line subject at 360px.
   - **Evidence:** employee__phone__requests.png (Open section y~1640-1830 in original px; Needs you row 2 y~400-480); frontend/src/pages/Requests.vue:781 (employee row) and :627 (work row), same idiom at Leave.vue:383
   - **Saves:** n/a (legibility)
+  - **Closure:** fixed. de252a2 U1: -my-2 is limited to single-line links; wrapped request titles carry the target on the stretched link. Probe at 390 and 360px finds no title/meta overlap (employee__phone__requests.png).
 - EP-02. **high · time-saving · phone — Timesheet.** Opening Timesheet (daily job) shows the month navigator and 5 week rows first (~290px) and the week spine below. Today's day panel ('Sat, Oct 17, 2026 0h') starts at ~y=860, under the tab bar at 844. Logging today's hours means scrolling every time. The month list also shows future weeks (Oct 19-Nov 1, 'Not started 0h, not measured') that carry no action.
   - **Fix:** On phone, render the current week spine and today's day editor first. Collapse the month list into a single 'October: 2 weeks missing' row under it that expands, or keep it behind 'Past weeks'. Hide future weeks, or show only weeks with Missing/Sent back. Saves 1 scroll (~300px) on every visit.
   - **Evidence:** employee__phone__timesheet.png; frontend/src/pages/Timesheet.vue:534 (<MonthOverview> rendered before the spine section); components/MonthOverview.vue:105-112
   - **Saves:** 1 scroll gesture, ~2-3 s per daily visit
+  - **Closure:** fixed. 42702fd U9: on a phone the week spine and today's editor come first; the month folds into one "October 2026: 2 weeks missing" row. Today's day panel starts at y≈560 of 844 (employee__phone__timesheet.png).
 - EP-03. **high · information-density · phone · fixture — Home.** Each 'Needs you' card is ~125px tall. On phone the action link ('Read >') wraps to its own line with ml-11 (`flex-wrap ... sm:flex-nowrap`), and only that small link navigates: the card itself is not tappable. 'Waiting on others' rows directly below are whole-row links with a chevron. Two interaction models sit next to each other, and the queue takes 4 screens of thumb travel. Four identical 'HR replied about Conversation spec: IT side' items are not collapsed into one.
   - **Fix:** Make each Needs-you row one stretched link (same pattern as Waiting rows and Leave rows) with the action word as a right-aligned chip on the title line. Target ~72px per row. Group items by target record (same `to`) and show 'HR replied 4 times' with the latest quote. Roughly halves the queue height.
   - **Evidence:** employee__phone__home.png (y 405-930); frontend/src/components/NeedsYou.vue:144 (flex-wrap li), :190-193 (ml-11 link), vs :238-240 (whole-row link for waiting)
   - **Saves:** ~250px scroll per 4 items; larger tap target
+  - **Closure:** fixed. a9be177 U6: each Needs-you row is one stretched link with its verb as a chip on the title line; repeats collapse by record. Verified in employee__phone__home.png.
 - EP-04. **high · copy · phone — Requests.** The 'Needs you' group lists rows with status 'Sent to HR', 'Done' and 'Declined'. The group is really 'has an unread notification', so the heading promises an action the rows don't have. 9 rows sit in 'Needs you' while only the 2 'Needs your reply' rows need the employee. The real asks get lost in a 2,829px page.
   - **Fix:** Split by meaning: 'Needs your reply' (status Waiting on Employee) pinned on top; 'Updates' (unread, other statuses) as a lighter, collapsible group with Mark read; then Open / Closed. Or keep unread as a dot only and drop it as a grouping key.
   - **Evidence:** employee__phone__requests.png (Needs you section y~250-1100); frontend/src/pages/Requests.vue:64-75 (rows.filter(row => row.unread))
   - **Saves:** finds the 1-2 real asks without scanning 9 rows
+  - **Closure:** fixed. e905f58 U8: the employee "Needs you" group follows KTD12; unread status-only rows show a dot in Open/Closed. Verified in employee__phone__requests.png.
 - EP-05. **high · bug · phone · fixture — My projects.** Long project names without spaces ('_Test Timesheet Project flags-test_a_full_week_that_matches_expectation_carries_no_flags') overflow the card. The text runs past the right edge and draws over the '0h this month' column. The page rendered 504px wide on a 390 viewport (screenshot width 504).
   - **Fix:** Add `break-words [overflow-wrap:anywhere]` (or `line-clamp-2` plus a title attribute) to the h2. Add a hardening e2e check with an unbroken 80-char name at 360px. The names are fixtures, but real project codes like 'PRJ-2026-CLIENT_ALPHA_PHASE2' break the same way.
   - **Evidence:** employee__phone__my-projects.png (y~480-1500); frontend/src/pages/MyProjects.vue:53 (h2 has no break-words; parent min-w-0 at :52 is present but the text has no break opportunity)
+  - **Closure:** fixed. de252a2 U1: same fix as ED-05; no 390px shot in the after set has horizontal scroll (log.tsv hscroll=false on all 198).
 - EP-06. **medium · copy · phone — Notifications.** Notification titles leak Frappe workflow words and ISO dates: 'Your timesheet for 2027-03-08 is Pending Approval', 'Your Casual Leave for 2027-02-12 is Approved', 'Your attendance request for 2026-03-23 is with HR'. The body is cut mid-ISO-date ('2027-0…'). This breaks the copy table ('Pending Approval' -> 'Waiting for [manager]') and the dates rule in lib/dates.js.
   - **Fix:** Map 'Pending Approval' -> 'waiting for your manager' and format dates with frappe.utils.formatdate in the subject template. Fixtures are applied, so ship it as a patch, not an in-place edit. Alternatively, render the title client-side from reference doctype + state through statusBadge.js.
   - **Evidence:** employee__phone__notifications.png (bottom 1,400px); helixhr/fixtures/notification.json:95 (subject uses doc.start_date and workflow_state with only Sent Back/Pending HR replaced), :68 message
+  - **Closure:** fixed. 14eaa50 U12: same fix as ED-03.
 - EP-07. **medium · information-density · phone · fixture — Notifications.** 50 rows at ~95px each make a 4,856px page. Everything is under one 'EARLIER' label even though all rows say 'Yesterday'. The same request appears 5-6 times ('Conversation spec: employee side' done / needs info / done…). There is no unread-only filter, and read and unread rows differ only by weight and icon tint.
   - **Fix:** Group by day (Today / Yesterday / This week / Older). Collapse consecutive rows with the same reference document into one row showing the latest event and '+4 earlier'. Add an 'Unread' segmented filter next to 'Mark all read'. Cuts the list ~60% on real data.
   - **Evidence:** employee__phone__notifications.png; frontend/src/pages/Notifications.vue:92-97,173-174 (only Today / Earlier groups)
   - **Saves:** ~3-4 screens of scroll
+  - **Closure:** fixed. f8ae34f U10: same fix as ED-04 (record grouping, day buckets, server-side Unread filter).
 - EP-08. **medium · copy · phone — Home.** 'Waiting on others' contains 'Your Casual Leave was rejected', a final, terminal outcome with owner 'nobody'. It isn't waiting on anyone, it never leaves the list (fetch limited only by _QUEUE_FETCH), and it duplicates the rejected rows on Leave.
   - **Fix:** Show a final rejection once in Needs you as an 'acknowledge' item (or for N days after the decision), then drop it. Don't put it in Waiting on others.
   - **Evidence:** employee__phone__home.png (y~1035-1180); helixhr/api.py:1200-1225 (leave_final_rejected appended to `waiting`, owner='nobody')
+  - **Closure:** fixed. a9be177 U6: final rejections sit under "Decided", not "Waiting on others". Dropping them after N days is won't-fix (KTD11 keeps P4-R4).
 - EP-09. **medium · navigation · phone — Home.** With more than 5 Needs-you items, 'View all (N)' links to /approvals for any user who is neither approver nor handler, i.e. a plain employee. Employees have no Approvals page (nav hides it via managerOnly).
   - **Fix:** For a plain employee, point to /requests (or /notifications?unread=1). Add a unit test for the destination by role.
   - **Evidence:** frontend/src/components/NeedsYou.vue:59-63 (viewAllDestination falls back to '/approvals'), :207-212; components/AppShell.vue:43 managerOnly
   - **Saves:** avoids a dead-end tap
+  - **Closure:** fixed. de252a2 U1: "View all" for a plain employee goes to the page that owns the rows, not /approvals.
 - EP-10. **medium · time-saving · phone — Attendance.** Check in, the most frequent attendance action, takes Home > More > Attendance > Check in (3 taps). Home has no check-in control, and the button sits mid-page inside the field card.
   - **Fix:** Where check-in is configured for the employee, add a compact 'Check in / Check out' chip to the Home week-spine footer or app bar (reuse CheckInSheet.vue). Saves 2 taps twice a day.
   - **Evidence:** employee__phone__attendance.png; frontend/src/components/AppShell.vue:31 (Attendance not primary); grep: no check-in in pages/Dashboard.vue
   - **Saves:** 2 taps x 2 per day
+  - **Closure:** fixed. a9be177 U6: with mobile check-in on, Home offers a check-in chip that opens the existing CheckInSheet (bootstrap mobile_checkin).
 - EP-11. **medium · visual-inconsistency · phone — Leave.** Date tiles stretch to the full card height. On rejected rows the 'NOV 28' tile is ~170px tall while it is 64px on other rows. The status badge also moves around: on 'Coming up' it wraps below the title ('Waiting for Manager'), on Past rows it sits top-right.
   - **Fix:** Add `self-start` to the date tile (or `items-start` on the li). Put the badge on its own line under the title consistently (or reserve right-side space with `flex-nowrap` + truncating title) so every row reads the same.
   - **Evidence:** employee__phone__leave.png (y 535-910); frontend/src/pages/Leave.vue:353 (li is `flex` with default align-items: stretch), :358 date-tile, :370 `flex flex-wrap` title row
+  - **Closure:** fixed. de252a2 U1: the date tile is self-start. Remainder (low): the status badge still sits differently on Coming up and Past rows.
 - EP-12. **medium · accessibility · phone — Attendance.** The calendar has no 'today' marker: Oct 17 looks like every other day, and the cells carry no aria-current. The 'Work from home' legend dot (#DCEFE5 on white) and the 'Absent' pink dot are nearly invisible, roughly 1.2:1 against the card, below the 3:1 non-text contrast minimum.
   - **Fix:** Ring today's cell (`ring-2 ring-ink-gray-9` + aria-current='date'). For WFH use an outlined dot (border-ink-green-3, hollow) and a darker red token for Absent, so the dots stay distinct without a new hue.
   - **Evidence:** employee__phone__attendance.png (calendar y 485-765, legend y~780); frontend/src/pages/Attendance.vue:516-519 (no today class), :29 & :37 (bg-surface-red-3, bg-surface-green-2)
+  - **Closure:** fixed. aaf1840 U16: same fix as ED-16.
 - EP-13. **medium · visual-inconsistency · phone — Attendance / Leave / Requests / Timesheet.** Page-header primary actions differ on each page. Leave and Requests use a solid green frappe Button ('Ask for leave', 'New request', ~32px tall). Attendance uses a hand-rolled white rounded-full pill ('Fix a day', 44px). Timesheet uses an underlined text link ('Past weeks'). Month navigators also differ: on Timesheet the chevrons hug the title, on Attendance they sit at the edges with an extra 'This month' chip that shows even when you're already on this month.
   - **Fix:** Add an `actions` convention to PageHeader: one solid Button for the create action, ghost Button for navigation. Pull the month stepper into one small MonthStepper component used by Timesheet and Attendance. Show 'This month' only when the month is not the current one.
   - **Evidence:** employee__phone__attendance.png, employee__phone__leave.png, employee__phone__requests.png, employee__phone__timesheet.png; frontend/src/pages/Attendance.vue:356-361 and :364-390; components/MonthOverview.vue:72-92
+  - **Closure:** fixed. 0253a64 U14: one PageHeader action convention (solid create, ghost navigation); U13 polish hides Attendance's "This month" and Timesheet's "This week" when already there. Not built: a shared MonthStepper (the two steppers sit on different surfaces).
 - EP-14. **medium · visual-inconsistency · phone — Timesheet.** Week rows in the month list use `rounded-lg border` with no elevation instead of `.surface-card`. The selected row gets a grey ring. The status/hours column starts at a different x on each row (x≈147, 145, 203, 180) because two-line date ranges wrap. 'Missing' is an outlined red pill next to filled pills. Hours read '4h' here, '4.0 h' on Past weeks and '4 hours' on Home.
   - **Fix:** Use surface-card. Use a fixed two-column grid (date | status+hours) so columns align. Render Missing through StatusBadge (sent-back tone). Use one hours formatter (roundHours + 'h') everywhere.
   - **Evidence:** employee__phone__timesheet.png (y 185-470), employee__phone__timesheet_history.png, employee__phone__home.png; frontend/src/components/MonthOverview.vue:41,111
+  - **Closure:** fixed. 42702fd U9: surface-card rows, StatusBadge for Missing, aligned columns. Remainder (low): history still prints "4.0 h" (TimesheetHistory.vue) against "4h" elsewhere.
 - EP-15. **medium · copy · phone — Requests.** Open IT / Asset requests read 'Sent to HR'. The design system's R15 table says employees should see 'Sent to {HR or IT}'. The employee list row never passes `team` to StatusBadge, so the default 'HR' always wins.
   - **Fix:** Pass `:team="row.team"` (or derive it from the category's routing, which is already on the row as category). Add a vitest case for an IT row.
   - **Evidence:** employee__phone__requests.png (IT / ASSET rows); frontend/src/pages/Requests.vue:792-795 (StatusBadge kind='request' :status only); lib/statusBadge.js:149
+  - **Closure:** fixed. de252a2 U1: same fix as ED-02.
 - EP-16. **medium · empty-or-error-state · phone — Documents.** The page opens on the 'Important (0)' tab with 'No important documents right now.' while 'General (1)' has the only document. The employee lands on an empty state and needs a tap to reach content.
   - **Fix:** Default to the first non-empty tab. With fewer than ~10 documents, drop the tabs and show one list with an 'Important' group label on top.
   - **Evidence:** employee__phone__documents.png; frontend/src/pages/Documents.vue:36 (defaults to 'important' unless ?tab=general)
   - **Saves:** 1 tap per visit
+  - **Closure:** fixed. f8ae34f U10: same fix as ED-07.
 - EP-17. **medium · information-density · phone — Profile.** 'Request a correction' repeats on all 11 Personal rows, and on every tab. Rows with a longer value wrap differently: 'Employee number' and 'Marital status' stack label above value while the rest stay inline. The value column jumps between right-aligned and left-aligned. The section tabs wrap to two rows (History / Bank & IDs on line 2).
   - **Fix:** Use one 'Something wrong? Request a correction' button per section (the CorrectionDialog already takes a field picker), or a small pencil icon button (44px, aria-labelled) per row. Use a stacked label-over-value layout for every row on phone. Put the tabs on one scrollable line.
   - **Evidence:** employee__phone__profile.png (y 515-1130, tabs y 350-440); frontend/src/components/profile/ProfileFields.vue:75 (flex-wrap row), :92-100; pages/Profile.vue:358 (flex-wrap tabs)
   - **Saves:** visual noise; ~11 links -> 1
+  - **Closure:** fixed. f8ae34f U10 + 9f6cda3 U3: one correction entry per section; Profile tabs on one scrolling TabBar line.
 - EP-18. **low · visual-inconsistency · phone — Home.** Home uses three heading styles for sibling sections: 'Needs you' (16px semibold sentence case), 'WAITING ON OTHERS' (11px uppercase .label), 'Start something' and 'Celebrating this month' (another semibold style). The design system says .label is the only grouping device and type-section is the section heading.
   - **Fix:** Use `.type-section` for top-level Home sections (Needs you, Start something, Celebrating) and `.label` only for subgroups (Waiting on others, Birthdays).
   - **Evidence:** employee__phone__home.png; frontend/src/components/NeedsYou.vue:84, :222; components/QuickActions.vue:17-21; components/Celebrations.vue:62-66
+  - **Closure:** fixed. a9be177 U6: same fix as ED-10.
 - EP-19. **low · information-density · phone · fixture — Requests.** Filter chips wrap to two rows ('Profile correction 10' alone on line 2), using ~95px before the first row. Each row repeats 'Sent Oct 16, 2026' plus closed date, which wraps to 3 lines. The page is 2,829px for 22 requests.
   - **Fix:** Make the chip row one horizontally scrolling line (`flex-nowrap overflow-x-auto`, its own container, no page scroll). Shorten meta to a relative 'Sent 1d ago · closed 1d ago' with the full date in title/aria. Collapse Closed behind 'Show closed (N)' by default.
   - **Evidence:** employee__phone__requests.png (y 130-235); frontend/src/pages/Requests.vue:693,708 chips
   - **Saves:** ~100px + ~1/3 of the list height
+  - **Closure:** fixed. 6968cca U15: chips on one scrolling line. Shorter relative meta and a collapsed Closed group were not built; the remaining height is fixture volume.
 - EP-20. **low · information-density · phone · fixture — Directory.** Every row shows 'Role not published' as its second line, so the line carries no information. ~45 people sit under one 'NO DEPARTMENT' group at ~55px each (2,672px) with no alphabet index or quick filter. Avatars mix 1-letter and 2-letter initials.
   - **Fix:** Omit the second line when designation is empty (or show department/office). Add A-Z section labels or a sticky search for lists over ~20. Always use 2-letter initials.
   - **Evidence:** employee__phone__directory.png; frontend/src/pages/Directory.vue:253
   - **Saves:** faster scanning
+  - **Closure:** fixed. aaf1840 U16: no "Role not published" line. No A-Z index; the palette and the page search cover lookup.
 - EP-21. **low · visual-inconsistency · phone — Payslips.** Payslip rows use a different date tile (year over large month, '2026 / SEP') than the documented .date-tile (month over day) used on Leave and Holidays. Amounts are formatted two ways: '$4,500' in the field card and '$4,500.00' in rows.
   - **Fix:** Drop the redundant year from the tile (the '2026' group label already says it) and use month-only in .date-tile styling. Pick one currency format (no decimals for whole amounts, or always 2 decimals).
   - **Evidence:** employee__phone__payslips.png; design-system.md .date-tile definition
+  - **Closure:** fixed. f8ae34f U10: one date-tile form. Remainder (low): the field card prints whole amounts without decimals, rows with two.
 - EP-22. **low · information-density · phone · fixture — Holidays.** 'Next holiday' field card duplicates the first 'Coming up' row (both _Test Holiday Oct 17). 'Earlier this year' lists every past holiday at full row height (~88px each), pushing the source note to the bottom.
   - **Fix:** Start Coming up from the second holiday when the first is in the field card. Collapse 'Earlier this year' behind a 'Show past (N)' toggle.
   - **Evidence:** employee__phone__holidays.png
   - **Saves:** ~450px scroll
+  - **Closure:** fixed. aaf1840 U16: same fix as ED-21.
 - EP-23. **low · information-density · phone · fixture — My projects.** Every card shows 'MY OPEN TASKS / No open tasks' and '0h this month'. For 19 projects that makes 19 ~120px cards with nothing to act on, and the 1 project with hours is not distinguished.
   - **Fix:** Sort by hours/tasks, show projects with activity first, and fold the rest into 'Other projects (N)' as compact one-line rows. Hide the empty tasks block.
   - **Evidence:** employee__phone__my-projects.png; frontend/src/pages/MyProjects.vue:70-76
   - **Saves:** ~1,800px scroll
+  - **Closure:** fixed. aaf1840 U16: active projects first, the rest folded into "Other projects (N)" as compact rows.
 - EP-24. **low · empty-or-error-state · phone — Team (employee).** A plain employee who opens /team directly (old link, back stack) gets a 403 panel 'You don't have access to this' with a Reload button. Reload cannot help, and the tabs and week stepper still render above the panel. Nav hides Team (reportsOnly), but the route has no guard.
   - **Fix:** Add a router guard using session.hasReports that redirects to Home (or shows the forbidden state without the page chrome and with a 'Go home' link instead of Reload).
   - **Evidence:** employee__phone__team.png; capture-log.tsv (403 FORBIDDEN on /team); frontend/src/components/AppShell.vue:37
+  - **Closure:** fixed. de252a2 U1: router guard sends /team without reports to Home.
 - EP-25. **low · visual-inconsistency · phone — More sheet / nav.** Several destinations share a glyph: Directory and Team both 'users', My projects and Projects both 'folder', Roster reuses 'timesheet', Email templates reuses 'notifications'. In the More sheet that makes rows harder to tell apart by shape.
   - **Fix:** Add distinct Lucide paths to lib/icons.js (users-round, calendar-range for Roster, briefcase for Projects, mail for Email templates).
   - **Evidence:** frontend/src/components/AppShell.vue:30,36-37,42,47,51
   - **Saves:** faster recognition
+  - **Closure:** fixed. a7e953a U4: distinct glyphs (briefcase, calendarClock, usersRound, mail); U13 polish gives Home's Email templates quick action the same mail glyph.
 - EP-26. **low · bug · phone — Leave / Timesheet / Profile.** The full-page captures show a white band under the paper ground at the bottom of several pages (Leave y>1002, Timesheet y>1020, Profile y>1222). The paper colour stops where content ends. On iOS overscroll the same white strip would show.
   - **Fix:** Set `html { background: var(--surface-gray-1) }` (not only the shell/main) and give the shell `min-h-dvh`. Check whether this is a capture artifact before fixing.
   - **Evidence:** employee__phone__leave.png, employee__phone__timesheet.png, employee__phone__profile.png (bottom edge)
+  - **Closure:** fixed. de252a2 U1: html carries the paper background.
 
 ## Manager and HR User
 
@@ -215,100 +280,127 @@ Manager and HR User screens are clean and calm, but the frequent jobs cost more 
   - **Fix:** Replace `border-ink-gray-9` with a token that exists (e.g. `border-outline-gray-5` or an explicit `border-[#1A1714]`), or add an `ink` entry to borderColor in tailwind.config.cjs. Extract one TabBar component so the four copies cannot drift again.
   - **Evidence:** manager__desk__approvals.png, manager__desk__team.png, manager__phone__approvals.png; frontend/src/pages/Approvals.vue:704, Team.vue:337, Requests.vue:533, Documents.vue:315; grep of helixhr/public/helixhr/assets/*.css finds no .border-ink-gray-9
   - **Saves:** n/a (wayfinding)
+  - **Closure:** fixed. de252a2 U1 + 9f6cda3 U3: one TabBar with a 2px border-heading indicator; tokenGuard.test.js fails on colour classes that generate no CSS. Verified in manager__desk__approvals.png and manager__phone__approvals.png.
 - MH-02. **high · bug · phone — Approvals.** Each 'Looks normal' row keeps an invisible 44px checkbox column on phone. The button is rendered whenever section.key==='normal' and only hidden with `opacity-0` when selection is off (<640px). Avatar starts at x≈73 instead of ≈29, so on a 390px screen the summary truncates to 'Casual Leave · May 20, ...', hiding the leave date the manager needs.
   - **Fix:** Change the condition to `v-if="section.key === 'normal' && canBulkSelect"` so the column does not render at all on phone.
   - **Evidence:** manager__phone__approvals.png (blank gutter left of the 'E' avatar); frontend/src/pages/Approvals.vue:1022-1027 and :575, :592
   - **Saves:** removes truncation; 0 taps to read dates
+  - **Closure:** fixed. de252a2 U1: no checkbox column below 640px. U13 polish lets the row summary wrap on a phone, because the new "waiting N d" column (MH-07) had taken the freed width back and dates still truncated. Verified at 390px.
 - MH-03. **high · navigation · both — App shell (phone tab bar + desk sidebar).** For a manager, Approvals is not a primary tab. On phone it sits behind More (More → Approvals = 2 taps plus a sheet). Neither the sidebar nor the More sheet shows a pending count on Approvals; only Notifications has `badge: true`. Team and Roster are also behind More.
   - **Fix:** For sessions with canApprove, swap a primary slot (e.g. Requests → More) for Approvals, or add the pending count as a badge on Approvals in the sidebar and More, and on the More tab itself. The count is already on the page (`pending.length`); expose it via bootstrap like the unread count.
   - **Evidence:** manager__phone__home.png, manager__desk__home.png (Approvals row has no count while '9+' sits on Notifications); frontend/src/components/AppShell.vue:26-50 (only Notifications has badge), :87-88 primaryItems
   - **Saves:** 1 tap + 1-2s per visit; makes pending work visible from any page
+  - **Closure:** fixed. a7e953a U4: stable approvers get Approvals in Leave's tab slot with the pending count (bootstrap approvals_count, KTD7/KTD8); count in the rail and More. Verified in manager__phone__approvals.png (tab "Approvals 12").
 - MH-04. **high · time-saving · phone — Approvals.** Bulk approve is turned off below 640px (R20), so a manager on phone, the primary device, must expand each row, read it and press Approve one by one. With 10 clean timesheets that is about 20+ taps. No swipe action and no 'Approve all that look normal' exist.
   - **Fix:** Keep checkboxes off on phone, but add one 'Approve all N that look normal' action at the top of the 'Looks normal' section. It opens the existing confirm sheet with the bulkBarLabel summary and reuses bulkApprove; flagged rows stay excluded.
   - **Evidence:** manager__phone__approvals.png; frontend/src/pages/Approvals.vue:573-586 (canBulkSelect gated on min-width:640px), :592
   - **Saves:** ~2 taps per item → 2 taps total for the clean lane
+  - **Closure:** fixed. b86c69e U7: "Approve all N that look normal" heads the lane at every width, behind the count-and-total confirm, capped at 60. Verified at 390px ("Approve all 3 that look normal").
 - MH-05. **medium · bug · desk — Approvals.** Selected bulk checkbox uses `border-ink-gray-9 bg-ink-gray-9 text-field`. Neither border-ink-gray-9 nor bg-ink-gray-9 is generated, so a selected box keeps a default hairline border and transparent fill with a small dark-green check. Selected and unselected rows look almost the same, which is risky before a bulk approve.
   - **Fix:** Use existing tokens (`bg-field border-field text-white`, or frappe-ui's Checkbox) and give the selected row a visible tint, e.g. `bg-surface-gray-2`.
   - **Evidence:** frontend/src/pages/Approvals.vue:1035; built CSS has no .bg-ink-gray-9
   - **Saves:** n/a (prevents wrong bulk decisions)
+  - **Closure:** fixed. de252a2 U1: the selected box uses the named heading colour, visibly filled.
 - MH-06. **medium · time-saving · desk — Approvals.** Desk bulk selection is per-row only: no select-all for the 'Looks normal' section or per person group, and no keyboard shortcuts (no keydown handlers in Approvals.vue). The page also keeps 4 heading levels (My team → LOOKS NORMAL → person header → row) even for 1 item.
   - **Fix:** Add a tri-state 'Select all' checkbox on the 'Looks normal' h3 and on each person-group header. Add j/k to move, x to select, a to approve the open row. Collapse the person header when a person has only 1 row (the row already shows avatar and name).
   - **Evidence:** manager__desk__approvals.png; frontend/src/pages/Approvals.vue (grep: no selectAll, no keydown); :960-1000 nesting
   - **Saves:** N-1 clicks per bulk run; ~3-5s per item with keys
+  - **Closure:** fixed. b86c69e U7: tri-state select-all per lane and per person group (≥ 640px); opt-in j/k/x/Enter/a keys.
 - MH-07. **medium · copy · both — Approvals row.** The right column stacks '1 day' (request amount) over '1 d' (time waiting). Both are unlabeled day counts in near-identical wording, and the group header repeats 'waiting 1 d'. A manager cannot tell duration from age at a glance.
   - **Fix:** Render age as 'waiting 1 d' (or a clock glyph plus '1 d') on the row and drop it from the person header when the group has 1 row.
   - **Evidence:** manager__desk__approvals.png, manager__phone__approvals.png; frontend/src/pages/Approvals.vue:476-480 (ageLabel returns `${n} d`), :1120-1126
   - **Saves:** n/a (scan speed)
+  - **Closure:** fixed. b86c69e U7: the row reads "waiting N d"; the group header shows age only for more than one row.
 - MH-08. **medium · visual-inconsistency · both — Approvals (HR User oversight).** 'Send reminder' renders as a black filled button. It is frappe-ui Button variant=solid with no theme, so it falls back to gray-900 instead of the brand green #1E6F53 used by every other primary action (e.g. People Save uses theme="blue").
   - **Fix:** Add theme="blue". With one reminder button per approver group, consider variant="subtle" so a page with many groups does not show many primary buttons, against the one-primary-per-screen rule.
   - **Evidence:** hr-user__desk__approvals.png, hr-user__phone__approvals.png; frontend/src/components/approvals/TimesheetOversight.vue:151-159 vs frontend/src/pages/People.vue:896-898
+  - **Closure:** fixed. de252a2 U1: Send reminder is the brand Button.
 - MH-09. **medium · information-density · both — Approvals (HR User oversight).** HR User holds no approve right, yet the page opens with an 84px card 'No timesheets waiting on you / Weeks your team sends…', which is irrelevant to the oversight role. The real work (All pending timesheets) starts below it. There are no tabs or page-level count, unlike the manager view's '1 waiting' pill.
   - **Fix:** When canApprove is false and canOverseeTimesheets is true, hide the personal empty queue and lead with oversight. Move the count into the PageHeader actions slot ('1 pending · 1 overdue') to match the manager layout.
   - **Evidence:** hr-user__desk__approvals.png, hr-user__phone__approvals.png
   - **Saves:** ~90px above the fold on phone
+  - **Closure:** fixed. b86c69e U7: oversight-only HR Users lead with oversight; no empty personal card.
 - MH-10. **medium · time-saving · both — Approvals (HR User oversight).** Reminders go one approver group at a time. No 'Remind all overdue approvers' action exists, and the oversight row ('Oversight-report · week of Jan …') offers no visible link to the timesheet or the employee. On phone the week label truncates. Age also shows twice: 'oldest 10 days' on the group and '10 days' plus 'Overdue' on the row.
   - **Fix:** Add a single 'Remind all overdue (N)' button next to the 'Overdue only' toggle that reuses askToRemind per group. Make each timesheet line a link to its detail. Drop the duplicate age from the line when the group has 1 timesheet.
   - **Evidence:** hr-user__phone__approvals.png, hr-user__desk__approvals.png; frontend/src/components/approvals/TimesheetOversight.vue:139-160
   - **Saves:** N-1 taps per reminder round
+  - **Closure:** deferred. Plan "Deferred to Follow-Up Work": "Remind all overdue" is a new bulk write path with its own partial-failure surface.
 - MH-11. **medium · empty-or-error-state · both — People (HR User).** An HR User opening /people gets the forbidden panel, but the live 'Search' input still renders above it and invites typing that can never return results. The forbidden panel also offers 'Reload'. People is gated to HR Manager/System Manager only, so the persona's 'look up people' job has no screen beyond Directory.
   - **Fix:** Move the search FormControl inside the AsyncState ready slot, or hide it when results is forbidden. Make a product decision on HR User: either grant a read-only People scope through resolve_read_scope, or point the forbidden copy at Directory ('Use Directory to find a colleague').
   - **Evidence:** hr-user__desk__people.png, hr-user__phone__people.png, capture-log.tsv (403 on /people); frontend/src/pages/People.vue:921-929 (FormControl outside AsyncState), helixhr/utils.py:1366 (_ADMIN_UNSCOPED_ROLES = HR Manager, System Manager)
   - **Saves:** avoids a dead-end visit
+  - **Closure:** fixed. de252a2 U1: the search is hidden when People is forbidden and the forbidden state has no Reload. Granting HR User a People scope is won't-fix here (Scope Boundaries: no change to who may see anything).
 - MH-12. **medium · navigation · desk — Sidebar (HR User).** The 'HR' section, the HR User's own work area, starts collapsed on first visit (readCollapsed falls back to collapsing every collapsible group) and shows only 'HR 1' with a chevron. Reaching it costs an extra click, and its item is hidden.
   - **Fix:** Collapse by default only when the rail would overflow (more than about 6 items across HR plus Admin), or keep a group open when it holds 1-2 items. Remember the user's choice as today.
   - **Evidence:** hr-user__desk__home.png, hr-user__desk__approvals.png; frontend/src/lib/navGroups.js:5-13, :29-40
   - **Saves:** 1 click on every new device
+  - **Closure:** fixed. a7e953a U4: the user's own work group opens by default; a remembered choice wins.
 - MH-13. **medium · time-saving · both — Home (manager).** A pending leave in 'Needs you' only offers 'Review →', which routes to Approvals where the row must be opened again. 'Start something' offers Ask for leave / Fill timesheet / New request, with no manager shortcut (Approvals, Team week). On phone the Review link wraps to its own line with `ml-11`, adding about 48px per item.
   - **Fix:** Deep-link Review to /approvals/<name> so the detail opens directly (the route already supports a name param). On phone keep the action on the title row (`sm:flex-nowrap` → always nowrap with truncation). For canApprove sessions, show 'Approvals (N)' and 'Team this week' in Start something.
   - **Evidence:** manager__desk__home.png, manager__phone__home.png; frontend/src/components/NeedsYou.vue:147, :190
   - **Saves:** 1 tap per decision from Home
+  - **Closure:** fixed. a9be177 U6: a manager's leave row deep-links to its Approvals detail; Quick actions gain Approvals.
 - MH-14. **medium · visual-inconsistency · both — Home vs other pages (page title).** Home's h1 ('Manager', 'Hr-user') is about 20px semibold (`text-xl font-semibold`), while Approvals, Team, Roster and People use PageHeader's `.type-page-title` (26px/700). The jump is visible when switching pages. design-system.md says page titles were unified in P2-U3.
   - **Fix:** Use `type-page-title` (or PageHeader) on Dashboard for both branches.
   - **Evidence:** manager__desk__home.png vs manager__desk__approvals.png; frontend/src/pages/Dashboard.vue:125, :185 vs frontend/src/components/PageHeader.vue:23
+  - **Closure:** fixed. a9be177 U6: Home h1 uses .type-page-title.
 - MH-15. **medium · visual-inconsistency · both — Roster vs Team/Approvals (view switcher).** The same job (switch between views of one page) uses two controls. Roster's 'Mine / My team' is a filled dark pill group (role=group, aria-pressed). Team's 'Leaves / Timesheets' and Approvals' tabs are underline tabs (role=tablist). Oversight's 'Overdue only' is a third, lighter pill. Users must learn three affordances.
   - **Fix:** Make Roster's mode switch the same tab component as Team (once the underline bug is fixed). Keep pills only for filters such as 'Overdue only'.
   - **Evidence:** manager__desk__roster.png, manager__desk__team.png, hr-user__desk__approvals.png; frontend/src/pages/Roster.vue:208-226, Team.vue:322-346, TimesheetOversight.vue:97-110
+  - **Closure:** fixed. 6968cca U15: Roster's mode switch is SegmentedChips, like every other view switch.
 - MH-16. **medium · information-density · desk · fixture — Team (Leaves grid).** With 12 reports, the grid gives each person a 57px row of seven empty grey cells. The only person actually out ('Team Member') is the last row, because sorting is alphabetical, about 650px down. No filter for 'only people with leave' and no sort by 'out this week'.
   - **Fix:** Sort people with leave or pending leave this week to the top, and add a 'Show everyone / Only people off' toggle (default off-only when more than 8 reports). Reduce empty-row height to about 36px.
   - **Evidence:** manager__desk__team.png
   - **Saves:** ~1 scroll per visit; scan time on large teams
+  - **Closure:** fixed. 79c1ff3 U17: people who are off sort first; "Only people off" toggle.
 - MH-17. **medium · empty-or-error-state · phone — Roster (Mine, empty week).** When no shifts exist, the page says 'No shifts are assigned this week' and then still renders 7 full day cards, each with the user's own 'M' avatar and 'No shift' (about 700px). The legend explains '(default)', which appears nowhere on the page. The footer 'Your own shifts. Only this week.' repeats the selected tab.
   - **Fix:** When every day is empty, show one empty-state card with the next-week arrow and 'Ask your manager' hint instead of 7 cards. Drop the self-avatar in 'Mine' mode. Render the '(default)' legend line only when a default shift is shown.
   - **Evidence:** manager__phone__roster.png, manager__desk__roster.png; frontend/src/pages/Roster.vue:197, :505-524
   - **Saves:** ~600px of scroll on phone
+  - **Closure:** fixed. 79c1ff3 U17: one empty card for an empty week; no self-avatar in Mine; "(default)" legend only when shown.
 - MH-18. **medium · information-density · phone · fixture — Team (Leaves, phone).** The phone day list repeats one week-long leave seven times ('TM Team Member · Casual Leave' on every card), right after the 'Out today' field card that already says the same. With 5 people on multi-day leave this becomes 35 near-identical rows.
   - **Fix:** Show each leave once as a range row ('Team Member · Casual Leave · Mon 12 – Sun 18') under the first day it touches, and list only days with changes. Alternatively, group by person on phone with a 7-dot mini week.
   - **Evidence:** manager__phone__team.png
   - **Saves:** ~5 screen-heights of scroll per busy week
+  - **Closure:** fixed. 79c1ff3 U17: one range row per leave on a phone.
 - MH-19. **low · bug · desk — Team (legend).** The legend swatch for 'Weekend or holiday' is `bg-surface-gray-2`, but off-day cells are painted `bg-surface-gray-3` and working days `bg-surface-gray-1`. The legend matches neither cell tone. Roster's legend correctly uses gray-3.
   - **Fix:** Change Team.vue:621 to bg-surface-gray-3.
   - **Evidence:** manager__desk__team.png (legend swatch lighter than the grey cells); frontend/src/pages/Team.vue:236 vs :621; Roster.vue:363 vs :516
+  - **Closure:** fixed. de252a2 U1: Team's legend swatch is bg-surface-gray-3, matching the cells.
 - MH-20. **low · accessibility · both — Team / Roster legends.** Legend swatches are 12px pastel bars (#DCEFE5 approved/on-leave, #FDEFC9 waiting) on paper #EFEAE4. They are near-invisible, well under the 3:1 non-text contrast guideline. The 'On leave' swatch on Roster is barely distinguishable from the ground.
   - **Fix:** Add a 1px border in the matching ink (`border-ink-green-3`, `border-ink-amber-3`) to each swatch, or render the legend as the same chip used in cells ('Casual Leave' text on tint).
   - **Evidence:** manager__desk__roster.png, manager__desk__team.png legend rows
+  - **Closure:** fixed. U13 polish (this pass): Team and Roster legend swatches carry an ink edge in their own hue (≥ 3:1), as U16 did for Attendance.
 - MH-21. **low · visual-inconsistency · desk — Sidebar icons.** Icons are reused for different destinations. Roster uses the 'timesheet' clock (same as Timesheet), Team and Directory share 'users', and Email templates reuses the 'notifications' bell. In the People & team group, two identical person glyphs sit stacked.
   - **Fix:** Add distinct Lucide paths to lib/icons.js: calendar-clock for Roster, users-round or user-check for Team, mail for Email templates.
   - **Evidence:** manager__desk__home.png sidebar (Directory/Team icons identical; Roster = Timesheet clock); frontend/src/components/AppShell.vue:36-37, :41, :49
   - **Saves:** n/a (recognition)
+  - **Closure:** fixed. a7e953a U4: distinct glyphs per destination.
 - MH-22. **low · visual-inconsistency · both — Home section headings.** Three neighbouring section headings use three styles. 'Needs you' and 'Celebrating this month' are ink-9 semibold, 'Start something' is muted regular weight, and inside the card 'BIRTHDAYS' is the 11px uppercase label. Approvals adds a fourth ('My team' bold plus 'LOOKS NORMAL' label).
   - **Fix:** Use `.type-section` for all page-level section headings and `.label` only for sub-groups, as design-system.md defines.
   - **Evidence:** manager__desk__home.png, manager__phone__home.png, manager__desk__approvals.png
+  - **Closure:** fixed. a9be177 U6: Home uses .type-section; Approvals keeps .label for lanes and sub-groups, as the design system allows.
 - MH-23. **low · copy · both · fixture — Home rail (Attendance tile).** The Attendance tile reads 'Attendance / Holiday this month / 10'. It is unclear whether 10 means holidays, days present, or days counted. The 'Leave left: Nothing allocated yet' tile has a chevron but nothing actionable for a manager.
   - **Fix:** Label the figure explicitly ('10 holiday days this month' or the most relevant count, such as 'Present 8 of 10'). Point the Leave tile to Leave with 'Ask HR about allocation' when empty.
   - **Evidence:** manager__desk__home.png, hr-user__desk__home.png
+  - **Closure:** fixed. a9be177 U6: the attendance figure is labelled. The empty Leave tile was left as is.
 - MH-24. **low · copy · both · fixture — Home week spine.** Day dots under the week spine are filled on six days and hollow on Wed 14, with no legend or label. With '0 hours logged this week' the dots cannot mean hours, so the hollow dot is unexplained.
   - **Fix:** Add an aria-visible title/tooltip per dot ('Working day, nothing logged' / 'Holiday') and a one-line legend under the spine on first use, or drop the dots when hours are 0 everywhere.
   - **Evidence:** manager__desk__home.png, hr-user__phone__home.png
+  - **Closure:** deferred. Not in any unit: the week-spine dots are unchanged and still unexplained. Follow-up: a title per dot or a one-line legend.
 - MH-25. **low · visual-inconsistency · desk · fixture — Team grid / directory avatars.** 'Directory Colleague' shows a solid dark-green disc with no initials (photo is a flat colour), while every other row shows initials on a beige disc. A broken or blank photo reads like a status dot.
   - **Fix:** In Avatar.vue, fall back to initials on image error and add a 1px outline-gray-2 ring around photos so flat images still read as avatars.
   - **Evidence:** manager__desk__team.png row 'Directory Colleague'
+  - **Closure:** fixed. de252a2 U1: Avatar falls back to initials on image error, with a ring.
 - MH-26. **low · visual-inconsistency · both — Approvals header pill.** The '1 waiting' amber pill sits top-right at a different vertical baseline than the 26px title (title baseline ~y=45, pill centre ~y=34 on desk). The tab counts ('Leave & attendance 1') carry the same number twice in one viewport.
   - **Fix:** Align the actions slot to the title baseline in PageHeader (`items-baseline`), and drop the header pill when tabs already show per-tab counts.
   - **Evidence:** manager__desk__approvals.png, manager__phone__approvals.png; frontend/src/pages/Approvals.vue:678-686
+  - **Closure:** fixed. 0253a64 U14: PageHeader aligns actions to the title baseline. Remainder (low): the "N waiting" pill still repeats the tab counts.
 - MH-27. **low · information-density · both · fixture — Approvals queue volume.** Fixture names (Bulk-leave-2302 … Probe-leave-emp3) show how a 12+ person queue would render: one person header plus one card per item, each about 80px. Thirty items would need about 3,000px with no search or person filter on the queue.
   - **Fix:** Add a compact density (single-line rows: avatar · name · kind · dates · amount · age) for queues over 10, plus a person/kind filter input above the lanes.
   - **Evidence:** manager__desk__team.png (12 reports), manager__desk__approvals.png row height
   - **Saves:** scroll time on large queues
+  - **Closure:** deferred. Not in any unit: no compact density or person/kind filter for large queues. Approve all and select-all (U7) cut the cost of volume.
 
 ## HR Manager
 
@@ -317,83 +409,106 @@ For an HR Manager, the portal covers every frequent job, but each one costs extr
 - HR-01. **high · bug · both — projects.** Console shows 'ReferenceError: Cannot access q before initialization' on every /projects load. The `watch(() => props.project, ..., { immediate: true })` at Projects.vue:142-152 runs at once and writes `memberQuery.value`, `taskError.value` and `memberError.value`, but those are declared later (memberQuery :233, taskError :161, memberError :240). They are still in the temporal dead zone, so the callback throws on line 146 and Vue logs the error. On the first mount the resets on lines 146-149 never run, including `showCreateForm = false`. Any reset added to this watcher later will also silently skip its first run.
   - **Fix:** Move the watcher below the declarations of taskError, memberQuery and memberError (after line ~241), or move those three refs above line 135. Add an e2e assertion that /projects logs no console errors.
   - **Evidence:** capture-log.tsv rows for /projects (desk+phone) 'CONSOLE:ReferenceError'; frontend/src/pages/Projects.vue:142-152 vs :161, :233, :240
+  - **Closure:** fixed. de252a2 U1: the watcher no longer reads refs before they exist; console-clean.spec.ts sweeps every route per identity, and the after log has no console errors on /projects.
 - HR-02. **high · bug · phone — requests_tab_work.** In the Team inbox on phone, the requester name label ('EMPLOYEE', uppercase .label) overflows under the 'Past SLA' / 'Waiting on Employee' badges and gets cut off ('EMPLOYEF', 'EMPLOY'). The right-hand badge column (shrink-0) leaves about 170px for the subject, so 'Correct my date of birth' wraps to two lines and the meta line to two or three. Each card is 120-150px tall, and 11 rows make the page 1,964px.
   - **Fix:** Below sm, put the badges on their own line under the subject (flex-col sm:flex-row), add `min-w-0 truncate` to the requester label, and write the requester name in normal case. People's names should not use the 11px uppercase group-label style.
   - **Evidence:** hr-manager-employee__phone__requests_tab_work.png (y≈300, 432, 565, 1263); frontend/src/pages/Requests.vue:618-624 (`<div class="flex items-center gap-2">` + `<p class="label">` with no min-w-0/truncate) and :640-660 (shrink-0 badge column)
   - **Saves:** ~40% less scroll per queue screen on phone
+  - **Closure:** fixed. e905f58 U8: below sm the badges wrap under the subject and the requester is normal-case text. Verified in hr-manager-employee__phone__requests_tab_work.png and at 360px.
 - HR-03. **high · accessibility · both — approvals / requests / settings dialogs (error text).** Validation and failure messages use `text-signal` (#FFD24A) on white card or dialog surfaces. The design system measures that at 1.21:1 and says signal 'never touches paper'. Examples: the reason-required error in the Approvals send-back form, the attachment error, the 'Past this category's SLA' warning in the request detail, and errors in CorrectionDialog and CorrectionReview. For an HR Manager this means a failed send-back or a blocked attachment shows a message that is effectively invisible.
   - **Fix:** Change these to `text-ink-red-3` (#A8351A, 5.28:1) for errors and to the amber ink (#8A5A00) for the SLA warning. Add a lint/grep check that fails on `text-signal` outside `.bg-field` contexts.
   - **Evidence:** frontend/src/pages/Approvals.vue:1364, :1792, :1847; frontend/src/pages/Requests.vue:929, :1005, :1046; frontend/src/components/profile/CorrectionDialog.vue:167; frontend/src/components/approvals/CorrectionReview.vue:134; tailwind.config.cjs:84-90 (signal rule)
+  - **Closure:** fixed. de252a2 U1: errors use the sent-back ink and the SLA warning the amber ink; tokenGuard.test.js fails on text/border/bg-signal outside field-surface components. Remaining text-signal uses are all on the field.
 - HR-04. **high · information-density · both — home.** In 'Needs you', every HR request row reads 'Employee filed a Profile correction request · waiting for HR'. The request subject ('Correct my date of birth' vs another subject) is never shown, so four of the five rows cannot be told apart. The HR Manager has to open each one to know what it is. On phone, each row also drops its 'Review' link onto a second line (flex-wrap + ml-11), so each card is about 108px and five cards take about 600px inside a nested scroll container (.scroll-queue).
   - **Fix:** Add the subject to the request title (`{employee} · {subject}` with the category as meta), group same-kind items ('4 profile corrections waiting for HR → open inbox'), and keep 'Review' on the same row on phone as a chevron/icon button.
   - **Evidence:** hr-manager-employee__desk__home.png (rows y≈230-610); hr-manager-employee__phone__home.png (y≈295-875); helixhr/api.py:2986 (_QUEUE_TITLE['request'] omits subject); frontend/src/components/NeedsYou.vue:147, :190, :283-288
   - **Saves:** 1 open+back per ambiguous item (~5-8 s each)
+  - **Closure:** fixed. a9be177 U6: handler titles name the subject ("Employee's Profile correction request: Correct my date of birth"); one stretched link per row. Verified in hr-manager-employee__phone__home.png.
 - HR-05. **high · time-saving · both — requests_tab_work.** The HR team inbox, the role's main daily screen, has only the Open/Mine/Closed chips. There is no text search, no filter by category or requester, no sort (for example 'Past SLA first'), no bulk 'Pick up', and no inline Pick up/assign on a row. Every row carries the same 'HR request' KindTag, which tells you nothing inside an HR-only inbox. Picking up 7 new items means 7 open-detail → pick-up → back cycles.
   - **Fix:** Add a search field and a category filter above the list, a row-level 'Pick up' button (or bulk select + 'Pick up selected' like Approvals' bulk bar), and hide the KindTag when the whole list is one kind. Default sort: Past SLA, then oldest.
   - **Evidence:** hr-manager-employee__desk__requests_tab_work.png; frontend/src/pages/Requests.vue:560-583 (only state chips), :621 (KindTag on every row)
   - **Saves:** ~2 clicks + 1 page load per item picked up
+  - **Closure:** fixed. e905f58 U8: server-side search, category filter, "past SLA first" sort, row-level "Assign to me", no KindTag in a one-kind inbox. Verified in hr-manager-employee__desk__requests_tab_work.png.
 - HR-06. **medium · navigation · desk — all (side nav).** With the HR group expanded (People, Reports, Organisation, Projects), the 900px-tall side nav overflows. ADMIN and a half-cut row (Profile/Settings) show just above 'Sign out', with no fade or scroll hint. On Home and Approvals the HR group starts collapsed (HR 4) under My work, Pay & policies and People & team, so the HR Manager's own tools are the deepest items and need an extra click each session.
   - **Fix:** For roles with HR access, put the HR group directly under pinned items and expand it by default. Add a bottom fade/shadow to the scrolling nav, or move Profile into the identity block (it already links there), which frees a row.
   - **Evidence:** hr-manager-employee__desk__reports.png and __organisation.png (cut row at y≈800); __home.png (HR 4 collapsed at y≈623); frontend/src/components/AppShell.vue:93-116 (admin groups start collapsed), :215-216 (nav overflow-y-auto)
   - **Saves:** 1 click per session; avoids hidden Profile
+  - **Closure:** fixed. a7e953a U4: the HR group sits under the pinned items and opens; the rail fits 800px (navigation.spec.ts).
 - HR-07. **medium · navigation · desk — all (side nav).** There are two people lookups: 'Directory' (People & team) and 'People' (HR). There are also two project entries, 'My projects' and 'Projects', both with the same folder icon. Roster reuses the Timesheet clock icon, and Email templates reuses the Notifications bell. The HR Manager has to learn which 'people' or 'projects' screen does what, and the icons give no help.
   - **Fix:** Merge Directory into People for HR roles (one search; HR sees the record link), or rename them 'Colleagues' / 'Employee records'. Give Projects, Roster and Email templates their own icons (e.g. briefcase, calendar-range, mail).
   - **Evidence:** hr-manager-employee__desk__people.png sidebar; frontend/src/components/AppShell.vue:30, :36, :41, :43, :46, :50
   - **Saves:** wrong-turn avoidance, ~3-5 s
+  - **Closure:** fixed. a7e953a U4: Directory and People are one entry for People holders; distinct icons.
 - HR-08. **medium · visual-inconsistency · both — settings.** Settings tabs mark the active tab with a yellow `border-signal` underline on paper, which breaks the design system's rule 'signal yellow never touches paper' (1.21:1). Approvals and Requests use a dark `border-ink-gray-9` underline. That makes three tab treatments: the Settings yellow, the dark underline, and a gray pill count in Requests vs a plain number in Approvals.
   - **Fix:** Extract one tab-strip class (or a small Tabs.vue) with the dark underline and a single count style, and use it in Settings, Approvals and Requests.
   - **Evidence:** hr-manager-employee__desk__settings.png (Categories underline y≈130); frontend/src/pages/Settings.vue:133-138 vs Approvals.vue:701-705 and Requests.vue:530-545
+  - **Closure:** fixed. de252a2 U1 + 9f6cda3 U3: one TabBar with the heading-ink underline; no signal yellow on paper.
 - HR-09. **medium · visual-inconsistency · phone — settings / approvals.** Overflowing tab strips behave differently on each page. In Settings the five tabs wrap onto two rows (Categories / Leave types / Holiday lists, then Shift types / Leave rules), so the active underline floats mid-block. In Approvals the third tab 'All pending' is cut off at the right edge with no scroll cue.
   - **Fix:** Use one horizontal-scroll tab strip with an edge fade and scroll the active tab into view. On phone in Settings, consider a select/segmented control for its five sections.
   - **Evidence:** hr-manager-employee__phone__settings.png (y≈230-310); hr-manager-employee__phone__approvals.png (y≈153 'All pending' clipped); Settings.vue:126 (flex-wrap)
+  - **Closure:** fixed. 9f6cda3 U3: one scrolling line with an edge fade; the active tab scrolls into view.
 - HR-10. **medium · visual-inconsistency · both — people / projects / reports.** There are two search field styles. People and Projects use frappe-ui FormControl: gray filled, about 28px tall (about 24px rendered on phone, below the 44px touch rule), capped at lg:w-80. Reports uses a white, bordered, 44px raw input up to max-w-md. The label wording differs too: 'Search' vs 'Find a report'.
   - **Fix:** Standardise on one search field (type=search, min-h-11, white bordered, search icon, clear button) and use it on all three pages.
   - **Evidence:** hr-manager-employee__desk__people.png (y≈98), __desk__projects.png (y≈87), __desk__reports.png (y≈128); People.vue:922-930, Projects.vue:746-754, components/reports/ReportCatalog.vue:42-48
+  - **Closure:** fixed. 6968cca U15: one SearchField, 44px under a coarse pointer.
 - HR-11. **medium · information-density · phone — approvals.** On phone, bulk select is turned off (<640px), but the 44px checkbox column still renders with `opacity-0`. That leaves an empty gutter on the left of every row, so the employee name truncates to 'E…' next to the Leave and HR chips. Three nested group headers (HR 1 → LOOKS NORMAL 1 → Employee 1 item · waiting 1 d) wrap one row, and the right column says '1 day' and '1 d'.
   - **Fix:** Render the checkbox button only when `canBulkSelect`. Collapse the person sub-header when a person has one item, and drop one of the two duration figures.
   - **Evidence:** hr-manager-employee__phone__approvals.png (row y≈305-380, gutter x≈16-70); hr-manager-employee__desk__approvals.png (y≈168-300); Approvals.vue:1022-1026, :575-592
+  - **Closure:** fixed. de252a2 U1 + b86c69e U7: no phone checkbox column; one labelled duration.
 - HR-12. **medium · time-saving · desk — approvals.** 'Looks normal' rows can be bulk-approved, but only one checkbox at a time. There is no 'Select all in Looks normal' or per-person select. With a real fallback queue (Organisation shows Leave 37), the HR Manager needs N checkbox clicks before 'Approve'.
   - **Fix:** Add a tri-state 'Select all (n)' checkbox on the Looks normal group header and on each person sub-header.
   - **Evidence:** hr-manager-employee__desk__approvals.png; Approvals.vue:595-611 (toggleBulk only), no select-all in template (grep 'Select all' → none)
   - **Saves:** N-1 clicks per batch
+  - **Closure:** fixed. b86c69e U7: tri-state select-all on lane and person headers.
 - HR-13. **medium · navigation · both — organisation.** The Queues card shows Leave 37, Timesheets 1, Requests 18 with ages, but the rows are not links. The HR Manager sees a backlog and has to find Approvals or Requests in the nav on their own. Leave 37 here also sits next to Approvals showing '1 waiting' for this user, and nothing explains the difference (company-wide vs routed to me).
   - **Fix:** Make each queue row a link to the matching Approvals tab or Requests Team inbox, and add 'company-wide' to the card caption (e.g. 'Across the company; yours: 1').
   - **Evidence:** hr-manager-employee__desk__organisation.png (y≈250-390); hr-manager-employee__desk__approvals.png ('1 waiting'); frontend/src/pages/Organisation.vue:130-160 (no router-link)
   - **Saves:** 2-3 clicks per drill-down
+  - **Closure:** fixed. 79c1ff3 U17: queue rows link to the Approvals lane or the inbox; the caption says company-wide.
 - HR-14. **medium · information-density · both — people.** People renders every employee as a 60px full-width card with a chevron and no filters (company, department, designation, status), no A-Z index, and no count. Desktop is 2,479px for 31 people. At the stated 100-200 staff, that is roughly 8,000-12,000px of scroll unless the user types a search. On desktop the card leaves about 700px of empty space to the right of each name.
   - **Fix:** On desktop, use a compact table (name, ID, department, designation, company) with 44px rows plus department and company filter selects and a result count. Keep cards on phone. Autofocus search on desktop.
   - **Evidence:** hr-manager-employee__desk__people.png; hr-manager-employee__phone__people.png; People.vue:38 (limit paging), :955-980
   - **Saves:** ~5-10 s per lookup without exact name
+  - **Closure:** fixed. 79c1ff3 U17: desktop compact sortable table, department chips and a count.
 - HR-15. **medium · information-density · both · fixture — projects.** The list shows 37 projects as 52px cards, all 'Open · _Test Company'. There is no status filter (Open/Completed), no sort, no member or task count, and no pagination. Long names truncate on phone ('flags-test_a_re…'). Search filters by project_name only, on the client.
   - **Fix:** Add a status filter chip set (Open default), show the task and member counts in the meta line in place of the repeated company, and paginate or 'Show more' after 25.
   - **Evidence:** hr-manager-employee__desk__projects.png (2,810px tall); hr-manager-employee__phone__projects.png; Projects.vue:43-47
+  - **Closure:** fixed. 79c1ff3 U17: status filter, sort, member and open-task counts. No pagination; client-side is fine at this scale.
 - HR-16. **medium · time-saving · both — reports.** All 25 report cards have the same weight, sorted by category. There is no 'Recent' or 'Pinned' row, so the HR Manager re-finds the same 2-3 reports (Leave balance summary, HR request aging, Missing timesheets) every visit by search or by scrolling. On phone the catalog is 2,595px.
   - **Fix:** Add a 'Recently run' strip (last 4, kept per user in localStorage or a user default) above the categories, and an optional pin toggle on each card.
   - **Evidence:** hr-manager-employee__desk__reports.png; hr-manager-employee__phone__reports.png
   - **Saves:** ~1 search or ~3 screens of scroll per visit
+  - **Closure:** fixed. a4d0059 U11: per-user "Recently run" strip, hidden without storage.
 - HR-17. **low · visual-inconsistency · both — requests_tab_work / roster.** There are two filter-chip styles. Requests' Open/Mine/Closed active chip is light gray (bg-surface-gray-3). Roster's Mine/Everyone active chip is solid field green with white text. Both are large 44px pills that take a full row above the list.
   - **Fix:** Pick one segmented-control style. On desktop, put the chips on the same row as the group header or the search to save about 60px.
   - **Evidence:** hr-manager-employee__desk__requests_tab_work.png (y≈150); hr-manager-employee__desk__roster.png (y≈90); Requests.vue:569-578, Roster.vue:209
+  - **Closure:** fixed. 6968cca U15: one SegmentedChips style.
 - HR-18. **low · copy · both · fixture — people.** The second line repeats the name as the employee number for most rows ('Bulk-leave-2302 / bulk-leave-2302'), and on phone the company name is truncated ('_T…'). The repetition comes from the fixture IDs, but the layout has no way to drop a field that adds nothing.
   - **Fix:** Hide the company when the viewer has only one company. Hide the employee number when it equals the slugified name.
   - **Evidence:** hr-manager-employee__desk__people.png; hr-manager-employee__phone__people.png (y≈655-950)
+  - **Closure:** fixed. 79c1ff3 U17: company hidden when all rows share one; employee number hidden when it repeats the name.
 - HR-19. **low · visual-inconsistency · desk — home.** Home's h1 (the user's name) is text-xl semibold (about 18px), while every other page uses `.type-page-title` (26px/700). This is the exact drift the design system says P2-U3 removed. Home also has no greeting or role context, so for an HR Manager the h1 just repeats the identity block already in the sidebar.
   - **Fix:** Use `.type-page-title`. Consider 'Good morning, {first name}' with the date as the subtitle, the same way PageHeader works.
   - **Evidence:** hr-manager-employee__desk__home.png (y≈30) vs __desk__approvals.png (y≈34); frontend/src/pages/Dashboard.vue:125, :185
+  - **Closure:** fixed. a9be177 U6: same fix as MH-14.
 - HR-20. **low · copy · both — settings / organisation.** Subtitles use an ASCII double hyphen as a dash ('HRMS masters -- without Desk', 'your company -- counts, never names'). 'HRMS masters' is also Frappe vocabulary, which PRODUCT.md's plain-words rule forbids. Settings also shows 'Open in Desk' as a 44px button next to the sidebar's own 'Open Desk', which duplicates it.
   - **Fix:** Use an em dash and plain words ('leave types, holiday lists and shift types'). Make 'Open in Desk' a ghost text link that deep-links to the current tab's DocType list.
   - **Evidence:** hr-manager-employee__desk__settings.png (y≈60, button y≈44); __desk__organisation.png (y≈60); Settings.vue:98, :106-112; Organisation.vue:67
+  - **Closure:** fixed. de252a2 U1: plain subtitles with no "--"; "Open in Desk" is a ghost link to the current tab's list.
 - HR-21. **low · visual-inconsistency · phone — roster.** The 'Holiday' badge is right-aligned on the shift line for Mon-Fri, but the 'Weekend' badge sits inline after the day name for Sat and Sun. In 'Mine' view every day repeats the same 'H' avatar. The legend below (On leave / Weekend or holiday swatches) repeats what the badges already say, and the mint 'On leave' swatch is nearly invisible on paper.
   - **Fix:** Put day-type badges in one place (next to the day name). Drop the avatar in Mine view and hide the legend on phone, where text badges are used.
   - **Evidence:** hr-manager-employee__phone__roster.png (y≈340 vs y≈758); hr-manager-employee__desk__roster.png legend (y≈374)
+  - **Closure:** fixed. 79c1ff3 U17: one badge after the day name; no avatar in Mine; legend desktop-only.
 - HR-22. **low · navigation · desk — roster.** For an HR Manager, Roster opens on 'Mine', a single row that is all '—', with two helper lines ('No shifts are assigned this week…', 'Your own shifts. Only this week.'). The name column truncates 'Hr-manager-emplo…' while the grid has room to spare. Today (Sat 17) is not highlighted in the grid, although the week spine on Home highlights it.
   - **Fix:** Remember the last Mine/Everyone choice per user (default Everyone for HR/managers), highlight today's column, widen the name column or wrap names, and merge the two helper sentences into one.
   - **Evidence:** hr-manager-employee__desk__roster.png (y≈150-400)
   - **Saves:** 1 click per visit
+  - **Closure:** deferred. Plan "Deferred to Follow-Up Work" (remembered Roster mode). The today-column highlight and name width ride with it.
 - HR-23. **low · information-density · desk · fixture — requests_tab_work.** Each inbox row is about 95px tall with three stacked lines: tag + uppercase requester, subject, meta. A desktop screen holds about 7 rows, and the duplicate subjects ('Correct my date of birth' ×5) show there is no way to tell same-subject requests apart other than the requester. The page title 'HR team inbox' also differs from the nav label 'Requests' and the tab label 'Team inbox'.
   - **Fix:** On desktop, use a 2-line row: subject plus requester on line 1, then category · sent · age on line 2 with the badges right-aligned. Keep the page title 'Requests' and let the tab say 'Team inbox'.
   - **Evidence:** hr-manager-employee__desk__requests_tab_work.png; Requests.vue:501 (inboxTitle)
   - **Saves:** ~30% more rows per screen
+  - **Closure:** deferred. Not in any unit: desktop inbox rows are still three lines, and the title still reads "{team} team inbox". Follow-up.
 
 ## Portal Admin and IT Team
 
@@ -403,91 +518,116 @@ For Portal Admin and IT Team, the portal is still an employee portal with admin 
   - **Fix:** Below sm, stack the badges on their own row under the title (flex-col sm:flex-row, or flex-wrap with the badges first at order-first and w-full). Give the KindTag/name row flex-wrap and min-w-0 truncate. Drop the -my-2 offset on multi-line titles, or switch to the after:inset-0 stretched-link pattern with line-clamp-2 on the title.
   - **Evidence:** it-team__phone__requests_tab_work.png (rows at y≈290-1340); frontend/src/pages/Requests.vue:619-623 (top row flex items-center, no wrap), :625-631 (-my-2 inline-flex min-h-11 link), :643 (badge cluster flex shrink-0)
   - **Saves:** n/a (legibility; stops misreads of status)
+  - **Closure:** fixed. de252a2 U1 + e905f58 U8: badges wrap onto their own line below sm, the requester line is normal case, no -my-2 on multi-line titles. Verified in it-team__phone__requests_tab_work.png.
 - AI-02. **high · navigation · both — Requests (nav entry) for IT Team.** The Requests nav item and phone tab always open the 'My requests' tab. The Team inbox opens only when ?tab=work is in the URL. IT Team's frequent job is the inbox, so every visit costs one extra tap on the 'Team inbox' tab. The page heading also switches between 'Requests' and 'IT team inbox' depending on the tab, while the nav still says 'Requests'.
   - **Fix:** When session.canHandleRequests is true and the work queue has open items, default the tab to 'work' (or remember the last tab per device in localStorage, which is a per-viewer convenience). Alternatively, point the Requests nav item to {path:'/requests', query:{tab:'work'}} for handlers, as NeedsYou.vue:57 already does.
   - **Evidence:** it-team__desk__requests_tab_work.png; frontend/src/pages/Requests.vue:138-140 (tab defaults to 'mine' unless route.query.tab==='work'); :501 (title switches); AppShell.vue:32 (nav item to '/requests' with no query)
   - **Saves:** 1 tap per inbox visit, several times a day
+  - **Closure:** fixed. a7e953a U4: for handlers the Requests entry opens ?tab=work (lib/nav.js handlerQuery).
 - AI-03. **high · information-density · both — Home / Needs you (IT Team).** Every inbox item on home reads 'Employee filed a IT / Asset request'. There is no subject, no age, no SLA flag, the article is wrong ('a IT'), and each card is about 70px tall on desk and about 110px on phone because 'Review' wraps to its own row. Five cards look identical, so home cannot help IT choose which one to open. The inbox shows the subject and Past SLA, but home drops both.
   - **Fix:** Make the request title '{subject}' with '{employee_name} · {category} · {age}' as the secondary line, and carry sla_overdue into the item so the existing Past SLA pill renders. On phone, use the whole card as a stretched link with a trailing chevron instead of a separate 'Review' row. That halves the card height.
   - **Evidence:** it-team__desk__home.png, it-team__phone__home.png; helixhr/api.py:2986 (_QUEUE_TITLE['request'] = f"{employee_name} filed a {category} request"); frontend/src/components/NeedsYou.vue:147,160,190 (flex-wrap + basis forces the action onto a new row with ml-11 on phone)
   - **Saves:** saves opening the wrong item; about 50% less vertical space per card on phone
+  - **Closure:** fixed. a9be177 U6: the request title carries the subject ("Employee's IT / Asset request: New laptop request") and the row is one link. Verified in it-team__desk__home.png.
 - AI-04. **high · time-saving · both — Requests / Team inbox.** There is no way to take or triage requests from the list. 'Assign to me' exists only inside the detail panel. Picking up the five New items takes 5 x (open row + Assign to me) = 10 clicks, and on phone the detail replaces the list, so it also takes 5 back-navigations. There is no search, no sort (for example oldest or most overdue first) and no multi-select.
   - **Fix:** Add a small 'Assign to me' ghost button on each New row (desk) or a swipe/overflow action (phone). It calls the same decide('Pick up'). Add a sort toggle 'Most overdue first' and a subject/requester search box above the Open/Mine/Closed chips. Bulk-assign checkboxes are optional later.
   - **Evidence:** it-team__desk__requests_tab_work.png; frontend/src/pages/Requests.vue:1076-1084 ('Assign to me' only in the detail panel); list rows at :614-660 have no actions
   - **Saves:** about 2 clicks plus 1 navigation per request picked up; about 10 to 15 clicks for a morning triage of 5
+  - **Closure:** fixed. e905f58 U8: "Assign to me" on each row whose server actions include Pick up, sent with the row token; search and SLA sort. Verified in hr-manager-employee__desk__requests_tab_work.png.
 - AI-05. **high · information-density · both — Settings / Report access.** 17 of 19 reports repeat the same sentence, 'Not for Delivery Manager: this report has no project scope.', under the title, and their two Delivery Manager checkboxes are disabled. At 1x, a native disabled checkbox looks almost identical to an enabled empty one, so the matrix seems to offer 76 choices when only about 42 exist. The column header row also repeats in each of the 4 tables.
   - **Fix:** Render disabled cells as an em dash or a muted 'n/a' with an aria-label instead of an inert checkbox. Move DM_REASON into one footnote under the Delivery Manager column header (keep aria-describedby pointing to it). Optionally add a 'Select all' checkbox per column per family. The per-row reason text then goes away, which cuts about 40% of the page height.
   - **Evidence:** portal-admin__desk__settings.png (y≈380-1520); frontend/src/components/settings/ReportAccessSection.vue:23 (DM_REASON), :154-160 (reason printed per row), :167-175 (disabled checkbox, only cursor change)
   - **Saves:** about 30% faster scan; up to 15 clicks saved with column select-all
+  - **Closure:** fixed. a4d0059 U11: not-applicable Delivery Manager cells are an em dash with one column footnote; tri-state column select-all per family. Verified in portal-admin__desk__settings.png.
 - AI-06. **high · information-density · phone — Settings / Report access.** On phone, each report becomes its own card with the repeated reason paragraph and four checkbox labels, two of them dead. The page is 4,546px tall, the longest screen in the capture, and the sticky save bar shows only after a change, so a Portal Admin scrolls about 5 screens to review access.
   - **Fix:** On phone, hide the DM cells for rows where dm_allowed=0, so the card shows only 'HR User run / export'. Drop the per-row reason (use one family-level note), and make each family a collapsible section that shows a count like 'Leave · 5 of 5 on for HR User'. Expected height is about 1,500px.
   - **Evidence:** portal-admin__phone__settings.png; capture-log.tsv 'portal-admin phone /settings h=4546'; ReportAccessSection.vue:195-217 (mobile card cells, disabled ones still rendered)
   - **Saves:** about 3,000px less scroll
+  - **Closure:** fixed. a4d0059 U11: on a phone each family folds to one line with a count; the page drops from 4,546px. U13 polish adds the disclosure chevron the flex summary had lost.
 - AI-07. **high · visual-inconsistency · both — Settings, Reports, Profile tabs vs Requests and Email templates tabs.** Three different active-tab styles. Settings, Reports and Profile underline the active tab in signal yellow (#FFD24A) on paper. The design system forbids this ('signal yellow never touches paper', 1.21:1), so the active indicator is nearly invisible. Email templates uses a grey outline-gray-4 underline. Requests uses an ink-gray-9 underline with a count pill. The keyboard models also differ: Requests has role=tablist with arrow keys, Settings and Reports use buttons with aria-current, Email templates uses role=tab without arrow keys.
   - **Fix:** Extract one small TabBar.vue (role=tablist, arrow keys, optional count, ink-gray-9 2px underline, overflow-x-auto with fade edges) from the Requests implementation and use it on all five pages. Remove border-signal from paper surfaces.
   - **Evidence:** portal-admin__desk__settings.png (faint yellow under 'Report access'), portal-admin__desk__reports.png, portal-admin__desk__email-templates.png (grey underline), it-team__desk__requests_tab_work.png (dark underline); Settings.vue:137, Reports.vue:318, Profile.vue:369 (border-signal); EmailTemplates.vue:319 (border-outline-gray-4); Requests.vue:530-535 (border-ink-gray-9)
   - **Saves:** n/a (wayfinding plus maintainability: one tab component instead of 5 copies)
+  - **Closure:** fixed. de252a2 U1 + 9f6cda3 U3: one TabBar, one heading-ink underline, one keyboard model on all ten pages. Verified in portal-admin__desk__settings.png.
 - AI-08. **high · information-density · phone — Reports / Export log.** The export log is a 6-column table inside overflow-x-auto at 390px. Only When, Who and Report are visible, Format is clipped at the edge, and Rows and Filters are off-screen with no scroll affordance. Each row is about 100px tall because the off-screen Filters text wraps, and Who/Report wrap to 3 lines. 20 rows make the page 3,323px tall.
   - **Fix:** Below md, render each entry as a 2-line row: 'Leave ledger · CSV · 127 rows' over 'Hr-manager-employee · Oct 16, 22:44', with the filters in a line-clamp-1 muted third line that expands on tap. Keep the table at md and up. Give the desk Filters column a max-w with line-clamp-2.
   - **Evidence:** portal-admin__phone__reports.png; capture-log.tsv h=3323; frontend/src/components/reports/ExportLog.vue:59-61 (overflow-x-auto table, no mobile layout), :129-131 (filters cell, no width cap)
   - **Saves:** about 2,000px less scroll on phone; all columns readable
+  - **Closure:** fixed. a4d0059 U11: below md the export log is two-line rows with a readable filter line. Verified in portal-admin__phone__reports.png.
 - AI-09. **medium · navigation · both — Reports (Portal Admin).** A Portal Admin who cannot run reports gets a page titled 'Reports' with the subtitle 'Named questions, answered inside the portal.'. Below it is a tab bar containing a single tab, 'Export log', and then an h2 that repeats 'Export log'. That is three headings and a one-item tab bar before any data, and the subtitle promises something this user cannot do.
   - **Fix:** When tabs.length===1, render no tab bar. Set the PageHeader title to 'Export log' with the subtitle 'Who exported which report, newest first.' and hide ExportLog's own h2 (prop). Consider naming the nav item 'Export log' for admins who can't run reports.
   - **Evidence:** portal-admin__desk__reports.png (y≈20-170); Reports.vue:172-176 (tabs = only Export log when !canRunReports), :272 (subtitle), :308-323 (tab bar rendered whenever showExportLog); ExportLog.vue:45-50 (h2 'Export log')
   - **Saves:** about 110px vertical; removes a dead control
+  - **Closure:** fixed. 9f6cda3 U3 + a4d0059 U11: no one-tab bar, and the subtitle says what the log is.
 - AI-10. **medium · copy · desk — Reports / Export log.** The Filters column prints raw keys and ISO sentinels: 'company: _Test Company, from date: 2000-01-01, to date: 2100-01-01', 'basis: All hours, month: 2016-03, project: PROJ-0016 ; grouped by date'. The dates are not formatted, the 2000-2100 range means 'all time' but reads as data, the project shows an ID instead of a name, and there is a stray space before the ';'. This is Frappe-shaped text on a plain-words product.
   - **Fix:** Map known keys to labels and format dates with formatDate. Collapse open-ended ranges to 'All dates'. Show project_name when available. Render the summary as small key-value chips, not one comma string.
   - **Evidence:** portal-admin__desk__reports.png (Filters column); ExportLog.vue:36-41 (filterSummary does key.replace(/_/g,' ') + raw value), :130 (group_by suffix)
   - **Saves:** n/a (faster audit reading)
+  - **Closure:** fixed. a4d0059 U11: labelled filter keys, "All dates" for open ranges, project names where present.
 - AI-11. **medium · time-saving · both · fixture — Reports / Export log.** The log has no filter or search by person, report or date, and no grouping of repeats. The fixture shows bursts of identical exports (the same Leave ledger CSV, same filters, 3 times within 2 minutes on Oct 16 02:40-02:42), and each takes a full row. At real volume, the only way to answer 'who exported payroll-sensitive data last month' is to page through 50 rows at a time.
   - **Fix:** Add a Report select and a Person search (the API takes extra filters). Collapse consecutive rows that share who, report, filters and format within 10 minutes into one row with a 'x3' count.
   - **Evidence:** portal-admin__desk__reports.png rows 4-6 and 7-9; ExportLog.vue:7-31 (PAGE=50, load-more only, no filter params)
   - **Saves:** minutes per audit question
+  - **Closure:** fixed. a4d0059 U11: report and person filters. Remainder (low): repeated identical exports are not collapsed.
 - AI-12. **medium · information-density · desk — Email templates / Message templates.** With nothing selected, the 16rem list truncates labels ('Change request on an app...', 'Timesheet approval remin...', 'Attendance request waitin...', 'Bank detail change reques...'). Meanwhile about 700px of the two editor and preview columns to the right hold only one line of text, 'Choose an email on the left to edit its wording.', placed at the top. Opening the page always takes a click before anything useful shows.
   - **Fix:** On desk, auto-select the first Custom template (or the first one) on load so the editor and preview are populated. Widen the list column to 18-20rem, or let labels wrap to 2 lines instead of truncating.
   - **Evidence:** portal-admin__desk__email-templates.png (list x≈360-605, empty pane x≈636-1336); EmailTemplates.vue:346 (grid-cols-[16rem_...]), :373 (truncate), :386-390 (empty prompt)
   - **Saves:** 1 click per visit; no hover needed to read names
+  - **Closure:** fixed. a4d0059 U11: desktop opens the first customised email. Remainder (low): the 16rem list still truncates long labels.
 - AI-13. **medium · copy · both — Email templates / Message templates.** The audience group labels use internal vocabulary: 'ROUTE ROLE' and 'EMPLOYEE OR ROUTE ROLE'. A Portal Admin can't tell who receives 'New request' or 'Comment on a request'. There is also no search or 'Custom only' filter across 22 templates, so finding the 2 customised ones means scanning every badge.
   - **Fix:** Rename the labels to 'Request handlers (IT, HR…)' and 'Requester or handler'. Add a 'Show customised only (2)' toggle or filter chip above the list.
   - **Evidence:** portal-admin__desk__email-templates.png (y≈1070, 1330), portal-admin__phone__email-templates.png; EmailTemplates.vue:17 (AUDIENCES incl. 'Route role'); helixhr/utils.py:412,437,458
   - **Saves:** about 5 to 10s of scanning per edit
+  - **Closure:** fixed. de252a2 U1: audience labels in plain words. Remainder (low): no "customised only" filter.
 - AI-14. **medium · navigation · phone — Email templates tabs.** The third tab, 'Celebrations & holidays', is clipped at the right edge ('Celebrations & holiday') with no fade, arrow or other sign that the bar scrolls.
   - **Fix:** Shorten the labels on phone ('Theme', 'Messages', 'Celebrations'), or use the shared TabBar with a right-edge fade mask and scroll-snap.
   - **Evidence:** portal-admin__phone__email-templates.png (y≈173, x≈245-390); EmailTemplates.vue:309-319 (shrink-0 buttons in an overflow row)
   - **Saves:** n/a (prevents a hidden tab)
+  - **Closure:** fixed. 9f6cda3 U3: TabBar scrolls with an edge fade.
 - AI-15. **medium · navigation · desk — Sidebar (Portal Admin).** The Admin group (Settings, Email templates) is collapsed by default and shows a grey count pill '2'. The HR group shows '1' the same way. Those pills sit where users expect unread or attention counts (the Notifications badge, the Team inbox '7'), so '2' reads as '2 things need you'. The two Admin pages are this role's whole job, yet reaching them costs an extra click on the group toggle whenever the current route isn't already inside it.
   - **Fix:** Start a group expanded when the user holds that group's role (Portal Admin: Admin open). Replace the count pill with a muted inline item list or a plain chevron, and keep numeric pills for actionable counts only.
   - **Evidence:** portal-admin__desk__home.png (sidebar y≈593-623); portal-admin__desk__reports.png (Admin collapsed while on Reports); AppShell.vue:93-116 (admin sections start collapsed), :244-250 (count pill)
   - **Saves:** 1 click per admin-page visit
+  - **Closure:** fixed. a7e953a U4: Admin opens for Portal Admin; group pills show attention counts only.
 - AI-16. **medium · time-saving · both — Home (Portal Admin).** Portal Admin's home is identical to an employee's: a week strip with 0 hours, timesheets sent back, 'Start something: Ask for leave / Fill timesheet / New request', leave and attendance tiles. There are no shortcuts to Report access, Email templates or Export log, and no admin signals such as 'last template change' or 'exports this week'. Reaching any admin job takes the sidebar plus the group expand.
   - **Fix:** Add role-aware rows to QuickActions: for canAdminPortal, 'Report access', 'Email templates' and 'Export log'; for canHandleRequests, 'Team inbox (7)'. This is one small conditional list, not a new dashboard.
   - **Evidence:** portal-admin__desk__home.png, portal-admin__phone__home.png; components/QuickActions.vue:21 (fixed employee actions); Dashboard.vue renders the same rail for every role
   - **Saves:** 1 to 2 clicks per admin task; on phone about 3 taps (More, then scroll, then item)
+  - **Closure:** fixed. a9be177 U6: role rows in Quick actions (Approvals, Team inbox, Report access, Email templates).
 - AI-17. **medium · information-density · both — Requests / Team inbox.** Every row says IT three times: the page title 'IT team inbox', the KindTag 'IT request', and the meta 'IT / Asset'. 'Past SLA' is on all 7 rows without saying by how much, so it no longer helps rank work. In progress rows say the assignee twice ('In progress · It-team' pill plus '· picked up by It-team'), even when the assignee is the viewer.
   - **Fix:** Hide the KindTag when the inbox has a single kind. Make the SLA pill quantitative ('2d over') and sort the New group most-overdue first. Show the assignee only once, as 'You' when it is the viewer.
   - **Evidence:** it-team__desk__requests_tab_work.png; Requests.vue:621 (KindTag), :633-639 (meta incl. picked up by), :644-656 (Past SLA + StatusBadge with assignee)
   - **Saves:** faster scan; fewer wrong-order picks
+  - **Closure:** fixed. e905f58 U8: KindTag hidden in a one-kind inbox, quantitative SLA pill, SLA sort. Remainder (low): the assignee still shows twice and never as "You".
 - AI-18. **low · visual-inconsistency · both — Email templates list vs every other screen.** The Default and Custom state badges are 8px rounded rectangles (frappe-ui 'rounded'). Every other status badge in the portal (StatusBadge, Past SLA, the team inbox count) is a rounded-full pill. Default and Custom are also equally loud: grey 'Default' appears 20 times and visually outweighs the 2 meaningful 'Custom' tags.
   - **Fix:** Use rounded-full to match. Show no badge for Default (the normal state) and keep a pill only for Custom, so the exceptions stand out.
   - **Evidence:** portal-admin__desk__email-templates.png vs it-team__desk__requests_tab_work.png; EmailTemplates.vue:237-240 (BADGE map), :374-378 (rounded px-1.5)
+  - **Closure:** fixed. a4d0059 U11: one rounded-full pill; no badge for Default.
 - AI-19. **low · information-density · both · fixture — Requests / Team inbox.** The requester's name renders in the 11px uppercase tracked .label style ('EMPLOYEE'), the same style used for group headings 'NEW' and 'IN PROGRESS'. People's names are hard to read in all caps at 11px and get confused with section labels. The fixture uses the literal name 'Employee', which makes it look like a role label.
   - **Fix:** Render the requester as normal-case 13px text-ink-gray-6, optionally with a 20px Avatar, and keep .label for group headings only, per the design system's 'the only grouping device' rule.
   - **Evidence:** it-team__desk__requests_tab_work.png (x≈477, each row); Requests.vue:622-624 (<p class="label">{{ row.employee_name }}</p>)
+  - **Closure:** fixed. e905f58 U8: requester in normal-case 13px gray-6.
 - AI-20. **low · information-density · both · fixture — Home / Needs you (Portal Admin).** Two identical 'Your timesheet was sent back · "not yours" · 2 weeks ago · Sep 28, 2026' cards appear with no week range to tell them apart. The 'sent back' icon uses a clock on a red tint instead of a distinct icon. At volume, nothing groups or differentiates repeats of the same kind.
   - **Fix:** Include the week range in the title ('Week of Sep 22 sent back'). When there are 3 or more items of the same kind, collapse them into one row ('3 timesheets sent back') that links to Timesheet history.
   - **Evidence:** portal-admin__desk__home.png (y≈230-395); NeedsYou.vue:147-190
+  - **Closure:** won't fix. Fixture data: two sent-back weeks only happen in fixtures. Rows dedupe by record (U6) and name the week; a same-kind collapse was not built.
 - AI-21. **low · visual-inconsistency · both · fixture — Home header vs other pages.** The home heading is text-xl/600 (about 20px) and shows the raw username for desk-only users ('Portal-admin', 'It-team'). Every other page uses PageHeader's .type-page-title (26px/700). So the heading jumps in size between Home and Settings, Email templates, Reports and Requests, and the home heading is not a person's name.
   - **Fix:** Use the employee/user full name (session.fullName) instead of session.user. Keep the deliberate smaller identity line if wanted, but write it as a named role in index.css so it is a documented exception, not a stray text-xl.
   - **Evidence:** portal-admin__desk__home.png vs portal-admin__desk__settings.png; Dashboard.vue:125-127 ({{ session.user }}), :185-187; PageHeader.vue:23 (type-page-title)
+  - **Closure:** fixed. a9be177 U6: .type-page-title with the employee name. Remainder (low): desk-only sessions with no Employee still show session.user.
 - AI-22. **low · visual-inconsistency · both — Settings / Report access save bar.** The Save button is a hand-rolled <button> in bg-surface-gray-7 (near-black), not frappe-ui Button variant=solid in brand green. Every other screen's primary action is the green solid Button (for example 'New request'), so the only commit action on the admin's main screen looks different from every other primary action.
   - **Fix:** Replace both save-bar buttons with frappe-ui <Button variant="solid" theme="blue"> and <Button variant="ghost">, which already handle disabled and loading states.
   - **Evidence:** frontend/src/components/settings/ReportAccessSection.vue:257-264; design-system.md 'Primary action: one filled Button (brand color) per screen'
+  - **Closure:** fixed. de252a2 U1: Save is the brand Button.
 - AI-23. **low · visual-inconsistency · desk — Sidebar icons.** Icons are reused for different destinations. Email templates uses the bell from Notifications, so two adjacent items look the same, and Roster uses the Timesheet clock. People who scan the sidebar by icon get misled.
   - **Fix:** Add a Lucide 'mail' path for Email templates and a 'calendar-clock' or 'calendar-range' path for Roster to lib/icons.js.
   - **Evidence:** portal-admin__desk__settings.png (sidebar Email templates bell vs Notifications bell); AppShell.vue:41 (Roster icon 'timesheet'), :50 (Email templates icon 'notifications')
+  - **Closure:** fixed. a7e953a U4: Email templates uses "mail" and Roster "calendarClock" (Home's quick action too, U13 polish).
 - AI-24. **low · copy · both — Settings header copy.** The subtitle reads 'Report access, people and their access, and approvers -- without Desk.' It uses an ASCII double hyphen and mentions 'Desk', which is Frappe vocabulary that a plain-words product should keep off the screen.
   - **Fix:** Change it to 'Who can run and export reports, who has which portal role, and who approves.'
   - **Evidence:** portal-admin__desk__settings.png (y≈60)
+  - **Closure:** fixed. de252a2 U1: "Who can run reports, who has which access, and who approves."
 - AI-25. **low · copy · both · fixture — Home rail / Attendance tile.** The tile reads 'Attendance / Holiday this month / 10'. The lead status is 'Holiday', so the tile says 10 holidays this month, which reads as wrong or confusing next to 0 hours logged. For admin or IT staff without real attendance, the most common status is often Holiday or Absent filler.
   - **Fix:** Prefer 'Present' as the lead status, or show 'Present 0 · Holiday 10'. Hide the tile when only Holiday counts exist.
   - **Evidence:** portal-admin__desk__home.png, it-team__desk__home.png (rail y≈288); Dashboard.vue:268-279 (leadAttendance[0] + ' this month')
+  - **Closure:** fixed. a9be177 U6: "Present" leads, and the figure is labelled ("Holidays this month" when only holidays exist).

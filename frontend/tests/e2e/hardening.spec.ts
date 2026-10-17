@@ -238,3 +238,196 @@ test.describe('employee', () => {
     }
   })
 })
+
+// Plan 2026-10-17-001 U14 (R4, KTD4). The toast UI is reka-ui's Toast, kept
+// out of the eager chunk: AppShell fetches `Toaster-<hash>.js` on the first
+// idle callback, or sooner if a message is queued first. The init script
+// holds every idle callback until the test releases it, so "before idle" is
+// a state the test can stand in rather than a race it hopes to win.
+function holdIdleCallbacks() {
+  const held: Array<() => void> = []
+  const w = window as unknown as {
+    requestIdleCallback: (callback: IdleRequestCallback) => number
+    __runIdle: () => void
+  }
+  w.requestIdleCallback = (callback) => {
+    held.push(() => callback({ didTimeout: false, timeRemaining: () => 50 } as IdleDeadline))
+    return held.length
+  }
+  w.__runIdle = () => held.splice(0).forEach((run) => run())
+}
+
+const isToasterChunk = (url: string) => url.startsWith(`${ASSET_PREFIX}Toaster-`) && url.endsWith('.js')
+
+test.describe('toaster loading', () => {
+  test.beforeEach(async ({}, testInfo) => {
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenarios')
+  })
+
+  test('the cold load fetches no Toaster chunk before idle, and fetches it once after', async ({
+    page,
+  }) => {
+    await page.addInitScript(holdIdleCallbacks)
+    const requested = scriptUrls(page)
+
+    await page.goto('/helixhr/')
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+    await page.waitForLoadState('networkidle')
+    expect(requested.filter(isToasterChunk), 'the Toaster rode in with the cold load').toEqual([])
+    await expect(page.locator('[data-toast-live]')).toHaveCount(0)
+
+    await page.evaluate(() => (window as unknown as { __runIdle: () => void }).__runIdle())
+    await expect.poll(() => requested.filter(isToasterChunk).length).toBe(1)
+    // Mounted: both live regions now exist, empty, before any message.
+    await expect(page.locator('[data-toast-live]')).toHaveCount(2)
+    await page.waitForLoadState('networkidle')
+    expect(requested.filter(isToasterChunk).length, 'fetched once').toBe(1)
+  })
+})
+
+test.describe('toaster queue', () => {
+  test.beforeEach(async ({}, testInfo) => {
+    // Signs in as HR itself (the export menu is the first real caller); once
+    // per run is enough.
+    test.skip(testInfo.project.name !== 'employee', 'run once, as HR, from the employee project')
+  })
+
+  test('a message sent before the Toaster mounts is shown and announced once it does', async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ storageState: 'tests/.auth/hr.json' })
+    const page = await context.newPage()
+    await page.addInitScript(holdIdleCallbacks)
+
+    // Hold the chunk too, so the message provably lands in the queue first.
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const requested: string[] = []
+    await page.route(/\/Toaster-[\w-]{8}\.js$/, async (route) => {
+      requested.push(route.request().url())
+      await held
+      return route.continue()
+    })
+    // A real flow: Export answered "Queued" (stubbed; a large export is not a
+    // fixture), which the export menu reports through `notify`.
+    await page.route('**/api/method/helixhr.api.request_export', (route) =>
+      route.fulfill({ json: { message: { status: 'Queued' } } }),
+    )
+    await page.route('**/api/method/helixhr.api.list_my_exports*', (route) =>
+      route.fulfill({ json: { message: [] } }),
+    )
+
+    await page.goto('/helixhr/reports/leave_ledger?from_date=2000-01-01&to_date=2100-01-01')
+    await expect(page.getByRole('heading', { name: 'Leave ledger', exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Export', exact: true }).click()
+    await page.getByRole('menuitem', { name: /CSV/ }).click()
+
+    // The queued message asked for the chunk itself, idle still held.
+    await expect.poll(() => requested.length).toBe(1)
+    await expect(page.getByTestId('toast')).toHaveCount(0)
+
+    release()
+    const message = "This export is large, so it's being prepared."
+    await expect(page.getByTestId('toast')).toContainText(message)
+    await expect(page.locator('[data-toast-live="polite"]')).toContainText(message)
+    await context.close()
+  })
+})
+
+// Plan 2026-10-17-001 U5 (R4, KTD4). The command palette carries the copied
+// Command components and reka-ui's Listbox, so it is fetched on its first
+// open as `CommandPalette-<hash>.js` -- never with the cold load, and once.
+const isPaletteChunk = (url: string) =>
+  url.startsWith(`${ASSET_PREFIX}CommandPalette-`) && url.endsWith('.js')
+
+test.describe('command palette loading', () => {
+  test.beforeEach(async ({}, testInfo) => {
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenarios')
+  })
+
+  test('the cold load fetches no palette chunk; the first open fetches one, the second none', async ({
+    page,
+  }) => {
+    const requested = scriptUrls(page)
+    await page.goto('/helixhr/')
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+    await page.waitForLoadState('networkidle')
+    expect(requested.filter(isPaletteChunk), 'the palette rode in with the cold load').toEqual([])
+
+    const palette = page.getByRole('dialog', { name: 'Search' })
+    await page.keyboard.press('/')
+    await expect(palette).toBeVisible()
+    await expect.poll(() => requested.filter(isPaletteChunk).length).toBe(1)
+    await page.keyboard.press('Escape')
+    await expect(palette).toHaveCount(0)
+
+    await page.keyboard.press('/')
+    await expect(palette).toBeVisible()
+    await page.waitForLoadState('networkidle')
+    expect(requested.filter(isPaletteChunk).length, 'fetched once').toBe(1)
+  })
+
+  // Review fix: a failed chunk (a flaky network, or a deploy that rotated
+  // the hashed names) is retried once, and a second failure leaves Ctrl-K
+  // working rather than swallowed by a palette that never mounted. The
+  // retry carries a query string (browsers cache a failed import), which
+  // the route pattern matches too. WebKit's import error names no URL, so it
+  // has no fresh URL to ask for: there the chunk returns only with a reload,
+  // and the shell says so instead of swallowing Ctrl-K (AppShell.vue `lazy`).
+  test('a palette chunk that fails once is retried, and Ctrl-K opens it', async ({ page, browserName }) => {
+    test.skip(browserName === 'webkit', "WebKit's import error names no URL to retry; the next test covers its path")
+    let aborted = 0
+    await page.route(/\/CommandPalette-[\w-]{8}\.js(\?.*)?$/, (route) => {
+      if (aborted < 1) {
+        aborted += 1
+        return route.abort()
+      }
+      return route.continue()
+    })
+    await page.goto('/helixhr/')
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+    await page.waitForLoadState('networkidle')
+
+    await page.keyboard.press('Control+k')
+    await expect(page.getByRole('dialog', { name: 'Search' })).toBeVisible()
+    expect(aborted).toBe(1)
+  })
+
+  test('after the palette chunk fails twice, a later Ctrl-K loads it again', async ({ page, browserName }) => {
+    let aborted = 0
+    let failing = true
+    await page.route(/\/CommandPalette-[\w-]{8}\.js(\?.*)?$/, (route) => {
+      if (failing) {
+        aborted += 1
+        return route.abort()
+      }
+      return route.continue()
+    })
+    await page.goto('/helixhr/')
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+    await page.waitForLoadState('networkidle')
+
+    const palette = page.getByRole('dialog', { name: 'Search' })
+    await page.keyboard.press('Control+k')
+    // WebKit repeats its remembered failure without a second request.
+    await expect.poll(() => aborted).toBe(browserName === 'webkit' ? 1 : 2)
+    await expect(page.getByTestId('toast').getByText("Search didn't load.")).toBeVisible()
+    await expect(palette).toHaveCount(0)
+
+    failing = false
+    if (browserName === 'webkit') {
+      // Only a reload brings the chunk back here, which the message says. A
+      // reload is not asserted: WebKit reuses a load Playwright blocked a
+      // moment earlier, which no real network failure does. What is pinned is
+      // that Ctrl-K is not wedged behind a palette that never mounted.
+      await page.keyboard.press('Control+k')
+      await expect(palette).toHaveCount(0)
+      await expect(page.getByTestId('toast').getByText("Search didn't load.").first()).toBeVisible()
+      return
+    }
+    await page.keyboard.press('Control+k')
+    await expect(palette).toBeVisible()
+  })
+})

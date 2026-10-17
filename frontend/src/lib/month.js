@@ -3,7 +3,7 @@
 // (`helixhr.api.get_my_month`) has a client twin a unit test can hold.
 
 import { addCalendarDays, mondayOf } from '@/lib/dates'
-import { TONE, resolveStatus } from '@/lib/statusBadge'
+import { resolveStatus } from '@/lib/statusBadge'
 
 const MONTH = /^(\d{4})-(0[1-9]|1[0-2])$/
 
@@ -45,11 +45,16 @@ export function formatMonth(month) {
   })
 }
 
-/** The word and tone pair for one week card. "Not started" and "Change
- * requested" are the two states a week has that its Timesheet's
- * workflow_state cannot say on its own; every other word is the badge's. */
+/** The one status a week card shows (U9, ED-13): `status` is what the card
+ * hands StatusBadge (kind `timesheet`), `label` and `toneClass` are the
+ * badge's own answer for it. "Not started", "Missing" and "Change requested"
+ * are the states a week has that its Timesheet's workflow_state cannot say;
+ * a week that is over and was never sent reads "Missing" rather than "Not
+ * started" or "Draft". A sent-back week keeps its own word. */
 export function weekCardStatus(week) {
-  if (week.change_open) return { label: 'Change requested', toneClass: TONE.waiting }
-  if (!week.state) return { label: 'Not started', toneClass: TONE.resting }
-  return resolveStatus({ kind: 'timesheet', status: week.state })
+  let status = week.state
+  if (week.change_open) status = 'Change Requested'
+  else if (week.missing && (!week.state || week.state === 'Draft')) status = 'Missing'
+  else if (!week.state) status = 'Not Started'
+  return { status, ...resolveStatus({ kind: 'timesheet', status }) }
 }

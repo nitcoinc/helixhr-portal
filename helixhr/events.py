@@ -1853,11 +1853,14 @@ def helixhr_state_words(doc):
 	manager"). A Jinja global via `hooks.jinja`, because Notification.subject is a
 	140-character Data field with no room for the mapping inline. A leave
 	Rejected at docstatus 0 is the recoverable send-back; submitted, it is
-	the final rejection."""
+	the final rejection. An Open leave in the HR stage (a resend after HR's
+	send-back keeps the stage) is waiting for HR, not the manager."""
 	if doc.get("doctype") == "Leave Application":
 		status = doc.get("status") or ""
 		if status == "Rejected":
 			return "Rejected" if doc.get("docstatus") else "Sent back"
+		if status == "Open" and doc.get("helixhr_stage") == LEAVE_STAGE_HR:
+			return "waiting for HR"
 		return _LEAVE_STATUS_WORDS.get(status, status)
 	state = doc.get("workflow_state") or ""
 	return _TIMESHEET_STATE_WORDS.get(state, state)

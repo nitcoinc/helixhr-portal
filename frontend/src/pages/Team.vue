@@ -5,9 +5,14 @@ import { ref, computed, watch } from 'vue'
 import { createResource, Dialog, Button } from 'frappe-ui'
 import { useRoute, useRouter } from 'vue-router'
 import PageHeader from '@/components/PageHeader.vue'
+import TabBar from '@/components/TabBar.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
+import SegmentedChips from '@/components/SegmentedChips.vue'
 import { addCalendarDays, dateTileParts, formatDateRange, mondayOf, today } from '@/lib/dates'
+import { trimNumber } from '@/lib/hours'
+import { offFirst } from '@/lib/lists'
+import { WEEKDAYS } from '@/lib/week'
 
 // P3-U7 / P3-R20, P3-R21. One week of the team's leave, and nothing else.
 //
@@ -16,7 +21,6 @@ import { addCalendarDays, dateTileParts, formatDateRange, mondayOf, today } from
 // (active direct reports only), which days are non-working, and where each
 // bar starts and stops inside the week; this file lays that out twice, once
 // per device, from the same payload. There is no leave arithmetic here.
-const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 // Plan 2026-10-04-003 R1: the Team page is two tabs -- Leaves | Timesheets
 // -- and both the tab and the week live in the URL, so a manager can send
@@ -24,8 +28,8 @@ const WEEKDAYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 const route = useRoute()
 const router = useRouter()
 const TABS = [
-  { name: 'leaves', label: 'Leaves' },
-  { name: 'timesheets', label: 'Timesheets' },
+  { key: 'leaves', label: 'Leaves' },
+  { key: 'timesheets', label: 'Timesheets' },
 ]
 const tab = computed(() => (route.query.tab === 'timesheets' ? 'timesheets' : 'leaves'))
 const weekStart = computed(() => {
@@ -39,12 +43,6 @@ function pushQuery(query) {
 }
 function showTab(name) {
   pushQuery({ ...route.query, tab: name, week: weekStart.value })
-}
-/** Arrow keys move between the two tabs, the way a `role="tablist"` is
- * expected to (the same pattern the Requests page uses). */
-function cycleTab(delta) {
-  const names = TABS.map((item) => item.name)
-  showTab(names[(names.indexOf(tab.value) + delta + names.length) % names.length])
 }
 function goToWeek(iso) {
   pushQuery({ ...route.query, tab: tab.value, week: iso })
@@ -94,6 +92,23 @@ const notShown = computed(() => Math.max(0, totalReports.value - reports.value.l
 
 const hasLeave = computed(() => reports.value.some((row) => row.leaves.length))
 
+// Plan 2026-10-17-001 U17 (MH-16): whoever is off this week -- approved or
+// still waiting -- sorts to the top of the grid, and "Only people off" hides
+// the rest. With nobody off the toggle is disabled and says so; moving to a
+// week like that turns it back off rather than leaving an empty grid.
+const onlyOff = ref(false)
+const OFF_OPTIONS = [
+  { value: false, label: 'Everyone' },
+  { value: true, label: 'Only people off', testid: 'team-only-off' },
+]
+watch(hasLeave, (value) => {
+  if (!value) onlyOff.value = false
+})
+const gridReports = computed(() => {
+  const sorted = offFirst(reports.value)
+  return onlyOff.value ? sorted.filter((row) => row.leaves.length) : sorted
+})
+
 // ED-25: once the server refuses the week, the tabs and arrows have nothing
 // left to act on, so only AsyncState's refusal stays on screen.
 const forbidden = computed(() =>
@@ -119,9 +134,9 @@ function dayHours(row, date) {
 }
 
 function hoursLabel(row) {
-  const total = (row.total_hours || 0).toFixed(1).replace(/\.0$/, '')
+  const total = trimNumber(row.total_hours || 0)
   if (row.expected_hours == null) return `${total} h`
-  const expected = Number(row.expected_hours).toFixed(1).replace(/\.0$/, '')
+  const expected = trimNumber(row.expected_hours)
   return `${total} of ${expected} h`
 }
 
@@ -130,7 +145,7 @@ function hoursLabel(row) {
  * nobody opens (R2). */
 function projectLabel(row) {
   const parts = (row.projects || []).map(
-    (entry) => `${entry.project_name || entry.project} ${Number(entry.hours).toFixed(1).replace(/\.0$/, '')} h`,
+    (entry) => `${entry.project_name || entry.project} ${trimNumber(entry.hours)} h`,
   )
   return parts.join(' · ')
 }
@@ -172,7 +187,6 @@ const memberLines = computed(() => {
   }
   return lines
 })
-const memberHours = computed(() => memberWeek.data?.timesheet?.hours || {})
 const memberDates = computed(() =>
   Array.from({ length: 7 }, (_, offset) => addCalendarDays(weekStart.value, offset)),
 )
@@ -242,14 +256,6 @@ function cellTone(day, report) {
   return isOff(day, report) ? 'bg-surface-gray-3' : 'bg-surface-gray-1'
 }
 
-/** The reason a day is dimmed, in a word. The phone list has no per-person
- * column to dim, so it reads the week's own shading -- the manager's holiday
- * list, which is what the desktop column headers use too. */
-function offLabel(day) {
-  if (day.is_holiday) return 'Holiday'
-  return day.is_weekend ? 'Weekend' : ''
-}
-
 // The date tile (index.css, `.date-tile`). `|| {}` so a value that is not a
 // calendar date renders as an empty tile rather than throwing -- the week's
 // dates are the server's, so it never happens.
@@ -257,29 +263,43 @@ function tile(date) {
   return dateTileParts(date) || {}
 }
 
-// --- the phone's day-first shape ----------------------------------------
+// --- the phone's leave list ---------------------------------------------
 
-/** The same week, read down instead of across: seven days, each naming who
- * is out on it. A day nobody is booked off on still gets a row -- "nobody
- * booked off on Wednesday" is the answer to the question this page is
- * asked, and a list that only shows the days with leave in them cannot be
- * told apart from a list that failed to load part of the week. */
-const dayRows = computed(() =>
-  days.value.map((day) => ({
-    ...day,
-    people: reports.value.flatMap((report) =>
-      report.leaves
-        .filter((leave) => leave.start <= day.date && leave.end >= day.date)
-        .map((leave) => ({
-          key: `${report.employee}-${leave.name}`,
-          employee_name: report.employee_name,
-          initials: report.initials,
-          photo_url: report.photo_url,
-          label: barLabel(leave),
-          waiting: leave.waiting,
-        })),
-    ),
-  })),
+/** "Mon 13" or "Mon 13 – Fri 17": where a leave sits inside this week. The
+ * server has already clipped every leave to the week. */
+function weekRange(leave) {
+  const from = `${WEEKDAYS[(columnOf.value[leave.start] || 1) - 1]} ${tile(leave.start).day}`
+  if (leave.end === leave.start) return from
+  return `${from} – ${WEEKDAYS[(columnOf.value[leave.end] || 1) - 1]} ${tile(leave.end).day}`
+}
+
+/** MH-18: one row per leave, with its range, rather than the same person
+ * repeated on every day card it covers. Earliest first. A quiet week has no
+ * rows and the sentence above says why. */
+const leaveRows = computed(() =>
+  reports.value
+    .flatMap((report) =>
+      report.leaves.map((leave) => ({
+        key: `${report.employee}-${leave.name}`,
+        employee_name: report.employee_name,
+        initials: report.initials,
+        photo_url: report.photo_url,
+        start: leave.start,
+        range: weekRange(leave),
+        label: barLabel(leave),
+        waiting: leave.waiting,
+      })),
+    )
+    .sort((a, b) => a.start.localeCompare(b.start) || a.employee_name.localeCompare(b.employee_name)),
+)
+
+/** The week's holidays on the manager's own list, in one line -- the day
+ * cards used to carry them one by one. */
+const holidayLine = computed(() =>
+  days.value
+    .filter((day) => day.is_holiday)
+    .map((day) => `${WEEKDAYS[days.value.indexOf(day)]} ${tile(day.date).day}`)
+    .join(', '),
 )
 
 // --- the field block ----------------------------------------------------
@@ -324,35 +344,17 @@ const quietWeek = computed(() => !noReports.value && !hasLeave.value)
   <div>
     <PageHeader title="Team" />
 
-    <!-- Plan 2026-10-04-003 R1. Two tabs, in the URL, arrow-key switchable --
-         the same segmented control the Requests page uses. -->
-    <div
+    <!-- Plan 2026-10-04-003 R1. Two tabs, in the URL, arrow-key switchable
+         (TabBar). -->
+    <TabBar
       v-if="!forbidden"
-      class="mb-4 flex gap-2 border-b border-outline-gray-2"
-      role="tablist"
-      aria-label="Team views"
+      class="mb-4"
+      :tabs="TABS"
+      :model-value="tab"
+      label="Team views"
       data-testid="team-tabs"
-    >
-      <button
-        v-for="item in TABS"
-        :key="item.name"
-        type="button"
-        role="tab"
-        class="-mb-px min-h-11 border-b-2 px-3 text-sm font-medium"
-        :class="
-          tab === item.name
-            ? 'border-heading text-ink-gray-9'
-            : 'border-transparent text-ink-gray-6 hover:text-ink-gray-9'
-        "
-        :aria-selected="tab === item.name"
-        :tabindex="tab === item.name ? 0 : -1"
-        @click="showTab(item.name)"
-        @keydown.right.prevent="cycleTab(1)"
-        @keydown.left.prevent="cycleTab(-1)"
-      >
-        {{ item.label }}
-      </button>
-    </div>
+      @update:model-value="showTab"
+    />
 
     <!-- Week navigation. Both arrows and a way back, because a manager who
          has paged three weeks out should not have to page back. It sits
@@ -465,11 +467,23 @@ const quietWeek = computed(() => !noReports.value && !hasLeave.value)
         </p>
       </section>
 
+      <!-- U17 (MH-16): the toggle narrows the grid, so it is a desktop
+           control; the phone list below already holds only people off. -->
+      <div class="mb-3 hidden lg:block">
+        <SegmentedChips
+          v-model="onlyOff"
+          label="Whose week to show"
+          :options="OFF_OPTIONS"
+          :disabled="!hasLeave"
+          :aria-describedby="quietWeek ? 'team-quiet-week' : undefined"
+        />
+      </div>
       <p
         v-if="quietWeek"
+        id="team-quiet-week"
         class="mb-3 text-sm text-ink-gray-6"
       >
-        Nobody on your team is booked off this week. Use the arrows to look at another week.
+        Nobody is off this week. Use the arrows to look at another week.
       </p>
 
       <!-- Desktop: the week across, one row per report. Wide content
@@ -505,7 +519,7 @@ const quietWeek = computed(() => !noReports.value && !hasLeave.value)
             </div>
 
             <div
-              v-for="report in reports"
+              v-for="report in gridReports"
               :key="report.employee"
               class="mt-3 grid grid-cols-[11rem_1fr] items-start gap-3 border-t border-outline-gray-2 pt-3"
               data-testid="team-row"
@@ -542,6 +556,7 @@ const quietWeek = computed(() => !noReports.value && !hasLeave.value)
                   :key="leave.name"
                   class="flex items-center overflow-hidden truncate rounded px-2 text-xs font-medium"
                   :class="barTone(leave)"
+                  data-testid="team-bar"
                   :style="barStyle(leave, position)"
                 >{{ barLabel(leave) }}</span>
               </div>
@@ -550,61 +565,42 @@ const quietWeek = computed(() => !noReports.value && !hasLeave.value)
         </div>
       </div>
 
-      <!-- Phone: the same week read downwards, a date tile per day. -->
-      <ul class="space-y-2 lg:hidden">
+      <!-- Phone: one row per leave with its range (MH-18), then the
+           week's holidays in one line. -->
+      <ul
+        v-if="leaveRows.length"
+        class="space-y-2 lg:hidden"
+        data-testid="team-leave-list"
+      >
         <li
-          v-for="day in dayRows"
-          :key="day.date"
-          class="surface-card elev-1 flex gap-3 p-3"
+          v-for="row in leaveRows"
+          :key="row.key"
+          class="surface-card elev-1 flex items-center gap-3 p-3"
+          data-testid="team-leave-row"
+          :data-employee="row.employee_name"
         >
-          <span
-            class="date-tile mt-0.5"
-            aria-hidden="true"
-          >
-            <span class="date-tile-month">{{ tile(day.date).month }}</span>
-            <span class="date-tile-day">{{ tile(day.date).day }}</span>
+          <Avatar
+            class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-xs font-bold text-ink-gray-7"
+            :photo-url="row.photo_url"
+            :initials="row.initials"
+            :size="32"
+          />
+          <span class="min-w-0 flex-1">
+            <span class="block truncate text-sm font-medium text-ink-gray-9">{{ row.employee_name }}</span>
+            <span class="tabular block text-sm text-ink-gray-6">{{ row.range }}</span>
           </span>
-          <div class="min-w-0 flex-1">
-            <p class="text-sm font-medium text-ink-gray-9">
-              {{ day.weekday }}
-              <span
-                v-if="offLabel(day)"
-                class="ml-1 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-medium text-ink-gray-7"
-              >{{ offLabel(day) }}</span>
-            </p>
-            <ul
-              v-if="day.people.length"
-              class="mt-1.5 space-y-1.5"
-            >
-              <li
-                v-for="person in day.people"
-                :key="person.key"
-                class="flex items-center gap-2"
-              >
-                <Avatar
-                  class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-xs font-bold text-ink-gray-7"
-                  :photo-url="person.photo_url"
-                  :initials="person.initials"
-                  :size="28"
-                />
-                <span class="min-w-0 flex-1 truncate text-sm text-ink-gray-7">
-                  {{ person.employee_name }}
-                </span>
-                <span
-                  class="shrink-0 rounded-full px-2 py-0.5 text-xs font-medium"
-                  :class="barTone(person)"
-                >{{ person.label }}</span>
-              </li>
-            </ul>
-            <p
-              v-else
-              class="mt-0.5 text-sm text-ink-gray-5"
-            >
-              Nobody booked off.
-            </p>
-          </div>
+          <span
+            class="shrink-0 rounded-full px-2 py-0.5 text-xs font-medium"
+            :class="barTone(row)"
+          >{{ row.label }}</span>
         </li>
       </ul>
+      <p
+        v-if="holidayLine"
+        class="mt-3 text-sm text-ink-gray-6 lg:hidden"
+      >
+        Holiday: {{ holidayLine }}
+      </p>
 
       <!-- Legend, then the scope. Both are the same kind of statement: what
            this screen is showing, and what it is deliberately not. -->
@@ -612,23 +608,26 @@ const quietWeek = computed(() => !noReports.value && !hasLeave.value)
         class="mt-4 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-ink-gray-6"
         aria-label="Legend"
       >
+        <!-- MH-20: the pastel fills measure ~1.2:1 on paper; each swatch carries
+             its own ink edge (>= 3:1), as Attendance's legend does (ED-16). -->
         <span class="inline-flex items-center gap-1.5">
           <span
-            class="h-3 w-6 rounded bg-surface-green-2"
+            class="h-3 w-6 rounded border bg-surface-green-2 border-[color:var(--ink-green-3)]"
             aria-hidden="true"
           />
           Approved
         </span>
         <span class="inline-flex items-center gap-1.5">
           <span
-            class="h-3 w-6 rounded bg-surface-amber-1"
+            class="h-3 w-6 rounded border bg-surface-amber-1 border-[color:var(--ink-amber-3)]"
             aria-hidden="true"
           />
           Waiting for a decision
         </span>
-        <span class="inline-flex items-center gap-1.5">
+        <!-- The phone has no grid to dim, so this one is desktop's. -->
+        <span class="hidden items-center gap-1.5 lg:inline-flex">
           <span
-            class="h-3 w-6 rounded bg-surface-gray-3"
+            class="h-3 w-6 rounded border bg-surface-gray-3 border-[color:var(--ink-gray-5)]"
             aria-hidden="true"
           />
           Weekend or holiday

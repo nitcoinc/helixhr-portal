@@ -1,12 +1,17 @@
 <script setup>
 import Avatar from '@/components/Avatar.vue'
-import { computed, reactive, ref, watch, onUnmounted } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { createResource, Dialog, Button, FormControl } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
+import SearchField from '@/components/SearchField.vue'
+import SegmentedChips from '@/components/SegmentedChips.vue'
 import { formatDate } from '@/lib/dates'
+import { employeeNumberAddsNothing, fieldOptions, filterByField, sortRows } from '@/lib/lists'
+import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
+import { useIsDesktop } from '@/lib/useIsDesktop'
 import { session } from '@/lib/session'
 
 // P6-U5 / P6-R1, P6-R2, P6-R13. Find a person, then read them.
@@ -25,41 +30,96 @@ const props = defineProps({
 const router = useRouter()
 
 // --- search --------------------------------------------------------------
-
-const PAGE = 50
-const MAX_PAGE = 200
+//
+// Plan 2026-10-17-001 U17 (HR-14): one request at the server's own cap, 200
+// rows -- the stated headcount -- so the department chips, the count and the
+// table's sort cover everyone the search matched, all client-side. Past 200
+// the count line says only the first 200 are loaded and a search narrows it.
+// The server returns Active employees only, so there is no status filter to
+// offer here.
+const LIMIT = 200
 
 const query = ref('')
 const search = ref('')
-const pageLimit = ref(PAGE)
 
 const results = createResource({
   url: 'helixhr.api.search_people',
-  makeParams: () => ({ query: search.value || undefined, limit: pageLimit.value }),
+  makeParams: () => ({ query: search.value || undefined, limit: LIMIT }),
   auto: true,
 })
 
-let pending = null
-watch(query, (value) => {
-  clearTimeout(pending)
-  pending = setTimeout(() => {
-    search.value = value.trim()
-    pageLimit.value = PAGE
-    results.reload()
-  }, 250)
+// The server ignores a query under 2 characters (_PEOPLE_SEARCH_QUERY_MIN),
+// so a shorter one asks the same question as none, and an unchanged one is
+// not asked again.
+const debounced = useDebouncedSearch((value) => {
+  const next = value.trim().length >= 2 ? value.trim() : ''
+  if (next === search.value) return
+  search.value = next
+  results.reload()
 })
-onUnmounted(() => clearTimeout(pending))
+watch(query, debounced.search)
 
 const rows = computed(() => results.data?.people || [])
 // MH-11: a refused caller gets AsyncState's refusal, not a search box that
 // can never return anything.
 const forbidden = computed(() => /PermissionError/.test(results.error?.exc_type || ''))
 const total = computed(() => results.data?.total || 0)
-const moreCount = computed(() => Math.max(0, total.value - rows.value.length))
 
-function showMore() {
-  pageLimit.value = Math.min(MAX_PAGE, pageLimit.value + PAGE)
-  results.reload()
+const isDesktop = useIsDesktop()
+
+const department = ref(null)
+const departmentOptions = computed(() =>
+  fieldOptions(rows.value, 'department', { blankLabel: 'No department' }),
+)
+// A search that leaves the chosen department with nobody in it goes back to
+// All, rather than an empty list under a chip that is no longer drawn.
+watch(departmentOptions, (options) => {
+  if (department.value !== null && !options.some((option) => option.value === department.value)) {
+    department.value = null
+  }
+})
+
+// The table's sort, in the same aria-sort shape as ReportTable. Text starts
+// A-Z; the joining date starts newest first. The server already sends rows
+// by name, so that is the starting state.
+const FIRST_ORDER = { employee_name: 'asc', department: 'asc', date_of_joining: 'desc' }
+const sort = ref({ field: 'employee_name', order: 'asc' })
+
+function ariaSort(field) {
+  if (sort.value.field !== field) return 'none'
+  return sort.value.order === 'desc' ? 'descending' : 'ascending'
+}
+
+function sortArrow(field) {
+  return { ascending: '↑', descending: '↓' }[ariaSort(field)] || ''
+}
+
+function toggleSort(field) {
+  const current = sort.value.field === field ? sort.value.order : null
+  const order = current ? (current === 'asc' ? 'desc' : 'asc') : FIRST_ORDER[field]
+  sort.value = { field, order }
+}
+
+const shown = computed(() =>
+  sortRows(filterByField(rows.value, 'department', department.value), sort.value.field, sort.value.order),
+)
+
+// HR-18: the company says nothing when every row has the same one, and an
+// employee number that only repeats the name says nothing either.
+const manyCompanies = computed(() => new Set(rows.value.map((row) => row.company)).size > 1)
+
+function personNumber(row) {
+  return employeeNumberAddsNothing(row) ? '' : row.employee_number
+}
+
+function cardLine(row) {
+  return [personNumber(row), row.designation, manyCompanies.value ? row.company : null]
+    .filter(Boolean)
+    .join(' · ')
+}
+
+function peopleCount(count) {
+  return `${count} ${count === 1 ? 'person' : 'people'}`
 }
 
 function openPerson(person) {
@@ -230,7 +290,7 @@ async function submitEdit() {
       >
         <template #actions>
           <Button
-            variant="outline"
+            variant="ghost"
             @click="router.push('/people')"
           >
             Back to search
@@ -240,7 +300,7 @@ async function submitEdit() {
             :href="person.data.desk_url"
             target="_blank"
             rel="noopener noreferrer"
-            class="inline-flex min-h-11 items-center rounded-lg border border-outline-gray-2 px-3 text-sm font-medium text-ink-gray-7 hover:bg-surface-gray-2"
+            class="inline-flex min-h-11 items-center rounded px-3 text-sm font-medium text-ink-gray-8 hover:bg-surface-gray-3"
           >
             Open in Desk
           </a>
@@ -926,9 +986,8 @@ async function submitEdit() {
         v-if="!forbidden"
         class="mb-4 lg:w-80"
       >
-        <FormControl
+        <SearchField
           v-model="query"
-          type="text"
           label="Search"
           placeholder="Name, employee number or work email"
           maxlength="60"
@@ -944,14 +1003,177 @@ async function submitEdit() {
         skeleton="row"
         :skeleton-rows="6"
       >
-        <ul class="space-y-2">
+        <!-- U17 (HR-14): the department chips and the count, at every width.
+             One department draws no chips -- there is nothing to choose. -->
+        <SegmentedChips
+          v-if="departmentOptions.length > 2"
+          v-model="department"
+          class="mb-3"
+          label="Filter people by department"
+          :options="departmentOptions"
+        />
+        <p
+          class="mb-3 text-sm text-ink-gray-6"
+          aria-live="polite"
+          data-testid="people-count"
+        >
+          <span class="tabular">{{ department === null ? peopleCount(shown.length) : `${shown.length} of ${peopleCount(rows.length)}` }}</span>.
+          <template v-if="total > rows.length">
+            Only the first <span class="tabular">{{ rows.length }}</span> of
+            <span class="tabular">{{ total }}</span> are loaded; search to narrow.
+          </template>
+        </p>
+
+        <!-- Desktop: a compact table in plain markup, sortable headers with
+             `aria-sort` the way ReportTable does it (KTD1). The name is the
+             same button the phone card is, so a row opens exactly as before. -->
+        <div
+          v-if="isDesktop"
+          class="surface-card elev-1 overflow-x-auto"
+        >
+          <table
+            class="w-full border-separate border-spacing-0 text-sm"
+            data-testid="people-table"
+          >
+            <caption class="sr-only">
+              People
+            </caption>
+            <thead>
+              <tr>
+                <th
+                  scope="col"
+                  :aria-sort="ariaSort('employee_name')"
+                  class="label border-b border-outline-gray-2 px-3 py-2 text-left"
+                >
+                  <button
+                    type="button"
+                    class="inline-flex min-h-9 cursor-pointer items-center gap-1 uppercase"
+                    @click="toggleSort('employee_name')"
+                  >
+                    Name
+                    <span
+                      aria-hidden="true"
+                      class="w-3"
+                    >{{ sortArrow('employee_name') }}</span>
+                  </button>
+                </th>
+                <th
+                  scope="col"
+                  class="label border-b border-outline-gray-2 px-3 py-2 text-left"
+                >
+                  Designation
+                </th>
+                <th
+                  scope="col"
+                  :aria-sort="ariaSort('department')"
+                  class="label border-b border-outline-gray-2 px-3 py-2 text-left"
+                >
+                  <button
+                    type="button"
+                    class="inline-flex min-h-9 cursor-pointer items-center gap-1 uppercase"
+                    @click="toggleSort('department')"
+                  >
+                    Department
+                    <span
+                      aria-hidden="true"
+                      class="w-3"
+                    >{{ sortArrow('department') }}</span>
+                  </button>
+                </th>
+                <th
+                  v-if="manyCompanies"
+                  scope="col"
+                  class="label border-b border-outline-gray-2 px-3 py-2 text-left"
+                >
+                  Company
+                </th>
+                <th
+                  scope="col"
+                  :aria-sort="ariaSort('date_of_joining')"
+                  class="label border-b border-outline-gray-2 px-3 py-2 text-left"
+                >
+                  <button
+                    type="button"
+                    class="inline-flex min-h-9 cursor-pointer items-center gap-1 uppercase"
+                    @click="toggleSort('date_of_joining')"
+                  >
+                    Joined
+                    <span
+                      aria-hidden="true"
+                      class="w-3"
+                    >{{ sortArrow('date_of_joining') }}</span>
+                  </button>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="row in shown"
+                :key="row.name"
+                class="text-ink-gray-7 hover:bg-surface-gray-2"
+                data-testid="people-row"
+              >
+                <td class="border-b border-outline-gray-2 px-3 py-0.5">
+                  <button
+                    type="button"
+                    class="flex min-h-11 w-full min-w-0 cursor-pointer items-center gap-2 text-left"
+                    @click="openPerson(row)"
+                  >
+                    <Avatar
+                      class="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-xs font-bold text-ink-green-3"
+                      :photo-url="row.photo_url"
+                      :initials="row.initials"
+                      :size="28"
+                    />
+                    <span class="min-w-0">
+                      <span
+                        class="block truncate font-medium text-ink-gray-9"
+                        data-testid="people-name"
+                      >{{ row.employee_name }}</span>
+                      <span
+                        v-if="personNumber(row)"
+                        class="block truncate text-xs text-ink-gray-6"
+                      >{{ personNumber(row) }}</span>
+                    </span>
+                  </button>
+                </td>
+                <td class="border-b border-outline-gray-2 px-3 py-2">
+                  {{ row.designation || '—' }}
+                </td>
+                <td class="border-b border-outline-gray-2 px-3 py-2">
+                  {{ row.department || '—' }}
+                </td>
+                <td
+                  v-if="manyCompanies"
+                  class="border-b border-outline-gray-2 px-3 py-2"
+                >
+                  {{ row.company }}
+                </td>
+                <td
+                  class="tabular whitespace-nowrap border-b border-outline-gray-2 px-3 py-2"
+                  data-testid="people-joined"
+                  :data-date="row.date_of_joining || ''"
+                >
+                  {{ row.date_of_joining ? formatDate(row.date_of_joining) : '—' }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Phone: the cards, in the same order the table would show. -->
+        <ul
+          v-else
+          class="space-y-2"
+        >
           <li
-            v-for="row in rows"
+            v-for="row in shown"
             :key="row.name"
           >
             <button
               type="button"
               class="surface-card elev-1 flex w-full min-w-0 items-center gap-3 p-3 text-left"
+              data-testid="people-row"
               @click="openPerson(row)"
             >
               <Avatar
@@ -962,8 +1184,11 @@ async function submitEdit() {
               />
               <span class="min-w-0 flex-1">
                 <span class="block truncate font-medium text-ink-gray-9">{{ row.employee_name }}</span>
-                <span class="block truncate text-sm text-ink-gray-6">
-                  {{ [row.employee_number, row.designation, row.company].filter(Boolean).join(' · ') }}
+                <span
+                  v-if="cardLine(row)"
+                  class="block truncate text-sm text-ink-gray-6"
+                >
+                  {{ cardLine(row) }}
                 </span>
               </span>
               <Icon
@@ -973,19 +1198,6 @@ async function submitEdit() {
             </button>
           </li>
         </ul>
-
-        <div
-          v-if="moreCount"
-          class="mt-4 text-center"
-        >
-          <Button
-            variant="ghost"
-            :loading="results.loading"
-            @click="showMore"
-          >
-            Show {{ moreCount }} more
-          </Button>
-        </div>
       </AsyncState>
     </template>
   </div>

@@ -277,6 +277,42 @@ test.describe('hr', () => {
     await popup.close()
   })
 
+  // Plan 2026-10-17-001 U11 (HR-16, KTD13): the catalog remembers what this
+  // viewer ran, on this device, and says nothing when it cannot.
+  test('U11: Recently run appears after a run and steps aside while searching', async ({ page }) => {
+    await page.goto('/helixhr/reports')
+    await expect(page.getByRole('heading', { name: 'Leave', exact: true })).toBeVisible()
+    await expect(page.getByTestId('report-recent')).toHaveCount(0)
+
+    await page.goto(LEDGER_URL)
+    await expect(page.locator('table').getByRole('cell', { name: 'Casual Leave' }).first()).toBeVisible()
+    await page.getByRole('link', { name: /All reports/ }).click()
+
+    const strip = page.getByTestId('report-recent')
+    await expect(strip.getByRole('heading', { name: 'Recently run' })).toBeVisible()
+    await expect(strip.getByRole('link', { name: 'Leave ledger' })).toBeVisible()
+    // Survives a reload: it lives in this user's storage, not the page.
+    await page.reload()
+    await expect(strip.getByRole('link', { name: 'Leave ledger' })).toBeVisible()
+    await page.getByLabel('Find a report').fill('ledger')
+    await expect(strip).toHaveCount(0)
+  })
+
+  test('U11: Recently run hides when localStorage is unavailable', async ({ page }) => {
+    await page.addInitScript(() => {
+      const deny = () => {
+        throw new DOMException('Storage is blocked', 'SecurityError')
+      }
+      Storage.prototype.getItem = deny
+      Storage.prototype.setItem = deny
+    })
+    await page.goto(LEDGER_URL)
+    await expect(page.locator('table').getByRole('cell', { name: 'Casual Leave' }).first()).toBeVisible()
+    await page.getByRole('link', { name: /All reports/ }).click()
+    await expect(page.getByRole('heading', { name: 'Leave', exact: true })).toBeVisible()
+    await expect(page.getByTestId('report-recent')).toHaveCount(0)
+  })
+
   test('the table scrolls inside itself at phone width; filters fold away', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 700 })
     await page.goto(LEDGER_URL)
@@ -374,7 +410,10 @@ test.describe('export', () => {
     // as the Portal Admin to read the row back.
     await signInAs(page, baseURL, PORTAL_ADMIN)
     await page.goto('/helixhr/reports')
-    await page.getByRole('button', { name: 'Export log' }).click()
+    // The Portal Admin has no report role, so the log is the page's only
+    // view: shown straight away, with no one-item tab bar (AI-09).
+    await expect(page.getByRole('heading', { name: 'Export log' })).toBeVisible()
+    await expect(page.getByRole('tablist', { name: 'Reports sections' })).toHaveCount(0)
     await expect(page.getByTestId('export-log-row').first()).toContainText('Leave ledger')
     await expect(page.getByTestId('export-log-row').first()).toContainText('CSV')
   })
@@ -392,7 +431,8 @@ test.describe('report tiers', () => {
     await page.goto('/helixhr/reports')
     await expect(page.getByRole('link', { name: /Hours by project/ })).toBeVisible()
     await expect(page.getByRole('link', { name: /Leave ledger/ })).toHaveCount(0)
-    await expect(page.getByRole('button', { name: 'Export log' })).toHaveCount(0)
+    await expect(page.getByRole('tab', { name: 'Export log' })).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Export log' })).toHaveCount(0)
   })
 
   test('a Report Manager sees every family and may export', async ({ page, baseURL }) => {
@@ -429,8 +469,10 @@ test.describe('report tiers', () => {
       await page.goto('/helixhr/settings/report-access')
       const cell = page.getByRole('checkbox', { name: 'Leave ledger: HR User export' })
       await cell.check()
-      // Delivery Manager cells on a company-only report are disabled, with the reason.
-      await expect(page.getByRole('checkbox', { name: 'Leave ledger: Delivery Manager run' })).toBeDisabled()
+      // Delivery Manager cells on a company-only report are a dash, not a
+      // dead checkbox, described by the column footnote (U11, AI-05).
+      await expect(page.getByRole('checkbox', { name: 'Leave ledger: Delivery Manager run' })).toHaveCount(0)
+      await expect(page.getByTestId('access-na-leave_ledger-dm_run')).toHaveAccessibleDescription(/no project scope/)
       await expect(page.getByTestId('access-save-bar')).toContainText('1 unsaved change')
       await page.getByRole('button', { name: 'Save', exact: true }).click()
       await expect(page.getByText('Saved 1 report.')).toBeVisible()
@@ -489,6 +531,56 @@ test.describe('report tiers', () => {
     }
   })
 
+  // Plan 2026-10-17-001 U11 (AI-08, AI-10, AI-11): on a phone the export log
+  // is two-line rows with readable filters, and it can be narrowed.
+  test('U11: the export log at 390px is two-line rows, readable filters, no sideways scroll', async ({
+    page,
+    baseURL,
+  }) => {
+    const hr = await apiAs(baseURL, HR_MANAGER)
+    const exported = await hr.post('/api/method/helixhr.api.request_export', {
+      data: {
+        report_key: 'leave_ledger',
+        format: 'csv',
+        filters: JSON.stringify({ from_date: WIDE_FROM, to_date: WIDE_TO }),
+      },
+    })
+    expect(exported.ok(), 'HR Manager exports the ledger').toBeTruthy()
+    await hr.dispose()
+
+    await signInAs(page, baseURL, PORTAL_ADMIN)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/helixhr/reports')
+    const item = page.getByTestId('export-log-item').first()
+    await expect(item).toBeVisible()
+    await expect(page.getByTestId('export-log-row').first()).toBeHidden()
+
+    const lines = item.locator('p')
+    await expect(lines).toHaveCount(2)
+    await expect(lines.nth(0)).toHaveText(/^Leave ledger · CSV · \d+ rows?$/)
+    await expect(lines.nth(1)).toContainText(' · ')
+    const filters = item.getByTestId('export-log-filters')
+    await expect(filters).toContainText('All dates')
+    await expect(filters).not.toContainText('2000-01-01')
+    await expect(filters).not.toContainText('from date')
+    await expect(filters).toHaveAttribute('aria-expanded', 'false')
+    await filters.click()
+    await expect(filters).toHaveAttribute('aria-expanded', 'true')
+
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    expect(overflow).toBeLessThanOrEqual(0)
+
+    // Report and Person narrow the loaded rows.
+    await page.getByTestId('export-log-report').selectOption('leave_ledger')
+    for (const row of await page.getByTestId('export-log-item').all()) {
+      await expect(row).toContainText('Leave ledger')
+    }
+    await page.getByLabel('Person', { exact: true }).fill('zzzz-nobody')
+    await expect(page.getByText('No loaded export matches these filters.')).toBeVisible()
+    await page.getByRole('button', { name: 'Clear filters' }).click()
+    await expect(page.getByTestId('export-log-item').first()).toBeVisible()
+  })
+
   // HelixHR Portal Admin: Settings with only its admin sections,
   // Reports with only the export log, and no HR data.
   test('a Portal Admin manages people\'s roles and reads the export log, nothing more', async ({ page, baseURL }) => {
@@ -539,7 +631,8 @@ test.describe('report tiers', () => {
       await expect(page.getByTestId('people-access-summary')).not.toContainText('IT Team')
 
       await page.goto('/helixhr/reports')
-      await expect(page.getByRole('button', { name: 'Export log' })).toBeVisible()
+      await expect(page.getByRole('heading', { name: 'Export log' })).toBeVisible()
+      await expect(page.getByRole('tablist', { name: 'Reports sections' })).toHaveCount(0)
       await expect(page.getByRole('heading', { name: 'Leave', exact: true })).toHaveCount(0)
       await expect(page.getByText("You don't have access to this")).toHaveCount(0)
 

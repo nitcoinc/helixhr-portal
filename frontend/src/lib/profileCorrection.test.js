@@ -59,6 +59,17 @@ describe('correctionDraft', () => {
     })
   })
 
+  it('drafts a whole run of fields when no one field is picked yet (U10)', () => {
+    expect(correctionDraft({ label: 'Personal', section: true })).toEqual({
+      subject: 'Correct my personal details',
+      details: 'Something in my personal details is wrong:\n',
+    })
+    const bank = correctionDraft({ label: 'Bank', section: true, masked: true })
+    expect(bank.subject).toBe('Correct my bank details')
+    expect(bank.details).toMatch(/don’t type a full number/)
+    expect(bank.correction_field).toBeUndefined()
+  })
+
   it('keeps the subject inside HR Request’s limit', () => {
     const { subject } = correctionDraft({ label: 'x'.repeat(300), display: 'y' })
     expect(subject.length).toBeLessThanOrEqual(SUBJECT_MAX)

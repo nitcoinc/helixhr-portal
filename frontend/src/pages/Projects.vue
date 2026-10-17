@@ -1,12 +1,16 @@
 <script setup>
 import Avatar from '@/components/Avatar.vue'
-import { computed, ref, watch, onUnmounted } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { createResource, Button, FormControl } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
+import SearchField from '@/components/SearchField.vue'
+import SegmentedChips from '@/components/SegmentedChips.vue'
 import { formatDate } from '@/lib/dates'
+import { fieldOptions, filterByField, sortRows } from '@/lib/lists'
+import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
 
 // P7-U5 / P7-R1-R3. Administer the projects a caller can reach, per
 // `resolve_project_scope` -- a HelixHR Delivery Manager sees exactly the
@@ -40,17 +44,54 @@ const rows = computed(() => projects.data?.projects || [])
 // changes them. Both flags mirror the gates `create_project`, `save_task`
 // and `set_project_members` enforce; hiding is only to not offer a refusal.
 const canCreate = computed(() => !!projects.data?.can_create)
+
+// Plan 2026-10-17-001 U17 (HR-15): a status filter built from the statuses
+// the list holds, a sort, and each project's member and open-task counts
+// (`search_projects` counts both). All of it client-side over the one
+// response, like the name search. The chips count the whole list, so a chip
+// does not move while the search is being typed.
+const status = ref(null)
+const statusOptions = computed(() => fieldOptions(rows.value, 'status'))
+const SORTS = [
+  { value: 'name', label: 'Name', field: 'project_name', order: 'asc' },
+  { value: 'tasks', label: 'Most open tasks', field: 'open_task_count', order: 'desc' },
+  { value: 'members', label: 'Most people', field: 'member_count', order: 'desc' },
+]
+const sortBy = ref('name')
+const manyCompanies = computed(
+  () => new Set(rows.value.map((row) => row.company).filter(Boolean)).size > 1,
+)
+
 const filteredRows = computed(() => {
   const needle = query.value.trim().toLowerCase()
-  if (!needle) return rows.value
-  return rows.value.filter((row) => (row.project_name || '').toLowerCase().includes(needle))
+  const named = needle
+    ? rows.value.filter((row) => (row.project_name || '').toLowerCase().includes(needle))
+    : rows.value
+  const picked = SORTS.find((option) => option.value === sortBy.value) || SORTS[0]
+  return sortRows(filterByField(named, 'status', status.value), picked.field, picked.order)
 })
+const narrowed = computed(() => !!query.value.trim() || status.value !== null)
+
+function projectCount(count) {
+  return `${count} ${count === 1 ? 'project' : 'projects'}`
+}
+
+/** "Open · 3 people · 5 open tasks". A row just created here has no counts
+ * yet, so it shows none rather than a wrong zero. */
+function projectLine(row) {
+  const parts = [row.status, manyCompanies.value ? row.company : null]
+  if (row.member_count != null) parts.push(`${row.member_count} ${row.member_count === 1 ? 'person' : 'people'}`)
+  if (row.open_task_count != null) {
+    parts.push(`${row.open_task_count} open ${row.open_task_count === 1 ? 'task' : 'tasks'}`)
+  }
+  return parts.filter(Boolean).join(' · ')
+}
 const emptyTitle = computed(() =>
-  query.value.trim() ? 'Nothing matches that search' : 'No projects yet',
+  narrowed.value ? 'Nothing matches that search' : 'No projects yet',
 )
 const emptyBody = computed(() =>
-  query.value.trim()
-    ? 'Try a different name.'
+  narrowed.value
+    ? 'Try a different name or status.'
     : canCreate.value
       ? 'Create a project to start assigning tasks and people.'
       : 'There are no projects for you to see yet.',
@@ -243,24 +284,23 @@ watch(
   { immediate: true },
 )
 
-let memberPending = null
+const memberDebounced = useDebouncedSearch((trimmed) => {
+  memberSearch.value = trimmed
+  memberResults.reload()
+})
 watch(memberQuery, (value) => {
-  clearTimeout(memberPending)
   const trimmed = value.trim()
   if (trimmed.length < MEMBER_QUERY_MIN) {
     // Below the server's own minimum, `get_directory` would return everyone
     // in the company unfiltered -- clear the panel instead of showing that
     // as a set of "matches" for a query the server never actually ran.
+    memberDebounced.cancel()
     memberSearch.value = ''
     memberResults.data = null
     return
   }
-  memberPending = setTimeout(() => {
-    memberSearch.value = trimmed
-    memberResults.reload()
-  }, 250)
+  memberDebounced.search(trimmed)
 })
-onUnmounted(() => clearTimeout(memberPending))
 
 const memberMatches = computed(() =>
   (memberResults.data?.people || []).filter((person) => !memberEmployeeIds.value.includes(person.name)),
@@ -323,7 +363,7 @@ async function removeMember(member) {
       >
         <template #actions>
           <Button
-            variant="outline"
+            variant="ghost"
             @click="router.push('/projects')"
           >
             Back to projects
@@ -746,15 +786,58 @@ async function removeMember(member) {
         </div>
       </div>
 
-      <div class="mb-4 lg:w-80">
-        <FormControl
-          v-model="query"
-          type="text"
-          label="Search"
-          placeholder="Project name"
-          maxlength="140"
-        />
+      <div class="mb-4 flex flex-wrap items-end gap-3">
+        <div class="w-full lg:w-80">
+          <SearchField
+            v-model="query"
+            label="Search"
+            placeholder="Project name"
+            maxlength="140"
+          />
+        </div>
+        <div v-if="rows.length > 1">
+          <label
+            for="projects-sort"
+            class="text-sm text-ink-gray-7"
+          >
+            Sort
+          </label>
+          <select
+            id="projects-sort"
+            v-model="sortBy"
+            class="mt-1 block min-h-11 rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
+            data-testid="projects-sort"
+          >
+            <option
+              v-for="option in SORTS"
+              :key="option.value"
+              :value="option.value"
+            >
+              {{ option.label }}
+            </option>
+          </select>
+        </div>
       </div>
+
+      <!-- U17 (HR-15): outside AsyncState, so a status with nothing in it
+           shows the empty sentence with the chips still there to undo it.
+           One status draws no chips. -->
+      <template v-if="rows.length">
+        <SegmentedChips
+          v-if="statusOptions.length > 2"
+          v-model="status"
+          class="mb-3"
+          label="Filter projects by status"
+          :options="statusOptions"
+        />
+        <p
+          class="mb-3 text-sm text-ink-gray-6"
+          aria-live="polite"
+          data-testid="projects-count"
+        >
+          <span class="tabular">{{ narrowed ? `${filteredRows.length} of ${projectCount(rows.length)}` : projectCount(rows.length) }}</span>.
+        </p>
+      </template>
 
       <AsyncState
         section="projects"
@@ -776,9 +859,9 @@ async function removeMember(member) {
               @click="openProject(row)"
             >
               <span class="min-w-0 flex-1">
-                <span class="block truncate font-medium text-ink-gray-9">{{ row.project_name }}</span>
+                <span class="block break-words font-medium text-ink-gray-9">{{ row.project_name }}</span>
                 <span class="block truncate text-sm text-ink-gray-6">
-                  {{ [row.status, row.company].filter(Boolean).join(' · ') }}
+                  {{ projectLine(row) }}
                 </span>
               </span>
               <Icon

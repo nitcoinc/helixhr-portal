@@ -1391,6 +1391,51 @@ def resolve_admin_scope(user):
 	to unscoped. Before this rule, marking an HR Manager's Employee as Left
 	silently widened their reach from one company to every company.
 	"""
+	return dict(request_memo_get(_ADMIN_SCOPE_MEMO, user, lambda: _admin_scope(user)))
+
+
+@contextmanager
+def request_memo(flag):
+	"""A memo dict at `frappe.local.flags[flag]` for the length of this
+	block: request-local, never across requests, reset to None on the way
+	out. A nested block reuses the outer memo. Read it with
+	`request_memo_get`."""
+	if frappe.local.flags.get(flag) is not None:
+		yield
+		return
+	frappe.local.flags[flag] = {}
+	try:
+		yield
+	finally:
+		frappe.local.flags[flag] = None
+
+
+def request_memo_get(flag, key, read):
+	"""`read()`, answered once per `key` inside a `request_memo(flag)` block,
+	and fresh on every call outside one."""
+	memo = frappe.local.flags.get(flag)
+	if memo is None:
+		return read()
+	if key not in memo:
+		memo[key] = read()
+	return memo[key]
+
+
+_ADMIN_SCOPE_MEMO = "helixhr_admin_scope_memo"
+
+
+def shared_admin_scope():
+	"""Inside this block, `resolve_admin_scope` reads once per user instead of
+	once per caller: a read that consults it and then lists a doctype whose
+	permission hook consults it again pays for one anchor read, not two (plan
+	2026-10-17-001 U5's query budget). Nothing it reads can change between
+	two callers inside one block, and the memo lives only as long as the
+	block, never across requests -- `api._shared_queue_reads`' rule."""
+	return request_memo(_ADMIN_SCOPE_MEMO)
+
+
+def _admin_scope(user):
+	"""`resolve_admin_scope`'s answer, read fresh."""
 	if user == "Administrator":
 		return {"kind": "unscoped", "company": None}
 	if set(frappe.get_roles(user)) & _ADMIN_UNSCOPED_ROLES:
@@ -2233,6 +2278,10 @@ RATE_LIMIT_POLICY = {
 	"get_team_member_week": (60, 60),
 	"get_organisation_view": (60, 60),
 	"search_people": (60, 60),
+	# Plan 2026-10-17-001 U5 (KTD5): the command palette's one server read,
+	# debounced 250 ms per keystroke pause like `search_people`, and bounded
+	# the same. Its own bucket: it never spends a page's.
+	"portal_search": (60, 60),
 	"get_person": (60, 60),
 	# Plan 2026-09-29-001 U3: the employee's own profile, read on every visit.
 	"get_my_profile": (60, 60),

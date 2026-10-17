@@ -1,6 +1,6 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { createResource, Button, Dialog } from 'frappe-ui'
 import LeaveForm from '@/components/LeaveForm.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -19,6 +19,7 @@ const props = defineProps({
   name: { type: String, default: '' },
 })
 
+const route = useRoute()
 const router = useRouter()
 
 // P2-U5 / P2-R22 / P2-R27. One session-scoped read where the page used to
@@ -180,6 +181,21 @@ function askForLeave() {
   formInitial.value = null
   showForm.value = true
 }
+
+// Plan 2026-10-17-001 U5 (R2): `?ask=1` -- the palette's "Ask for leave" --
+// opens the form once. Closing it replaces the URL (Attendance's `?fix`
+// rule), so Back never reopens a form the employee dismissed and opening it
+// adds no history entry of its own.
+watch(
+  () => route.query.ask,
+  (ask) => {
+    if (ask) askForLeave()
+  },
+  { immediate: true },
+)
+watch(showForm, (open) => {
+  if (!open && route.query.ask) router.replace({ query: { ...route.query, ask: undefined } })
+})
 
 /** "Edit and resend": the sent-back request's own values, back in the sheet.
  * A new application, not an edit of the old one -- the rejected record is the

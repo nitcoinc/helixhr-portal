@@ -51,4 +51,18 @@ describe('month helpers', () => {
     expect(weekCardStatus({ state: 'Sent Back' }).label).toBe('Sent back')
     expect(weekCardStatus({ state: 'Approved' }).label).toBe('Approved')
   })
+
+  // U9 (ED-13, EP-14): one badge per week, keyed for StatusBadge.
+  it('shows one status per week, and Missing replaces Not started and Draft', () => {
+    expect(weekCardStatus({ state: null, missing: true })).toMatchObject({
+      status: 'Missing',
+      label: 'Missing',
+      toneClass: 'bg-surface-red-2 text-ink-red-4',
+    })
+    expect(weekCardStatus({ state: 'Draft', missing: true }).label).toBe('Missing')
+    expect(weekCardStatus({ state: 'Sent Back', missing: true }).label).toBe('Sent back')
+    expect(weekCardStatus({ state: null, missing: false }).status).toBe('Not Started')
+    expect(weekCardStatus({ state: 'Approved', change_open: true }).status).toBe('Change Requested')
+    expect(weekCardStatus({ state: 'Pending Approval' }).status).toBe('Pending Approval')
+  })
 })

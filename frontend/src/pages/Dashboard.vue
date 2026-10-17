@@ -1,12 +1,15 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { createResource } from 'frappe-ui'
 import AsyncState from '@/components/AsyncState.vue'
+import CheckInSheet from '@/components/CheckInSheet.vue'
 import Icon from '@/components/Icon.vue'
 import WeekSpine from '@/components/WeekSpine.vue'
 import NeedsYou from '@/components/NeedsYou.vue'
 import QuickActions from '@/components/QuickActions.vue'
 import Celebrations from '@/components/Celebrations.vue'
+import { apiRequest } from '@/lib/api'
+import { notify } from '@/lib/notify'
 import { session } from '@/lib/session'
 
 // An HR or System Manager with no Employee record ('desk-only') has no
@@ -50,6 +53,8 @@ const needsYou = computed(() => dashboard.data?.needs_you?.items || [])
 const needsYouMore = computed(() => dashboard.data?.needs_you?.more || 0)
 const needsYouWaiting = computed(() => dashboard.data?.needs_you?.waiting || [])
 const needsYouWaitingMore = computed(() => dashboard.data?.needs_you?.waiting_more || 0)
+const needsYouDecided = computed(() => dashboard.data?.needs_you?.decided || [])
+const needsYouDecidedMore = computed(() => dashboard.data?.needs_you?.decided_more || 0)
 // P2-R25. `get_dashboard` names the sections that failed rather than letting
 // a null pass for "nothing recorded yet" -- one broken reference rail must
 // not make the rest of the page look empty, and it must be labelled as
@@ -83,10 +88,64 @@ const attendanceEntries = computed(() => Object.entries(dashboard.data?.attendan
 // person holding three leave types saw one balance presented as their total.
 const leadLeave = computed(() => leaveTypeEntries.value[0] || null)
 const otherLeaveCount = computed(() => Math.max(0, leaveTypeEntries.value.length - 1))
+// ED-11 / MH-23: the figure names itself. Days present lead when there are
+// any; otherwise the largest count, labelled as what it counts -- "10" under
+// "Attendance" read as ten days attended when it meant ten holidays.
 const leadAttendance = computed(() => {
+  const present = attendanceEntries.value.find(([status]) => status === 'Present')
   const entries = [...attendanceEntries.value].sort((a, b) => b[1] - a[1])
-  return entries[0] || null
+  return present || entries[0] || null
 })
+const ATTENDANCE_FIGURE = {
+  Present: 'Days present',
+  Absent: 'Days absent',
+  'Half Day': 'Half days',
+  'On Leave': 'Days on leave',
+  'Work From Home': 'Days worked from home',
+  Holiday: 'Holidays',
+}
+
+// EP-10. Check in from Home in two taps: this chip, then the sheet's own
+// button. Drawn only where HR Settings allows portal check-in (the
+// bootstrap's `mobile_checkin`, false with no Employee). The sheet is the
+// Attendance page's, unchanged: it asks for a location when it opens. What
+// it needs to know -- whether a punch is possible now, and which one -- is
+// read live on the tap, never on page load, from the same server answer the
+// Attendance strip renders.
+const checkinLoading = ref(false)
+const checkinOpen = ref(false)
+const checkinLogType = ref('IN')
+const checkinNote = ref('')
+async function startCheckin() {
+  if (checkinLoading.value) return
+  checkinNote.value = ''
+  checkinLoading.value = true
+  const day = session.today
+  try {
+    // A plain request rather than a resource: a failed read must not fall
+    // back to an earlier answer and offer a stale punch type.
+    const data = await apiRequest({
+      url: 'helixhr.api.get_my_attendance',
+      params: { from_date: day, to_date: day },
+      method: 'GET',
+    })
+    const state = data?.checkin
+    if (state?.enabled) {
+      checkinLogType.value = state.next_log_type || 'IN'
+      checkinOpen.value = true
+    } else {
+      checkinNote.value = state?.reason || "Check-in isn't open right now."
+    }
+  } catch {
+    checkinNote.value = "We couldn't check your shift. Try again."
+  } finally {
+    checkinLoading.value = false
+  }
+}
+function onPunched() {
+  notify.success(checkinLogType.value === 'OUT' ? 'Checked out' : 'Checked in')
+}
+const checkinFixRoute = computed(() => ({ name: 'Attendance', query: { fix: session.today } }))
 
 const today = new Intl.DateTimeFormat(undefined, {
   weekday: 'long',
@@ -122,7 +181,7 @@ const today = new Intl.DateTimeFormat(undefined, {
     data-portal-state="desk-only"
   >
     <header class="mb-4 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-      <h1 class="font-heading text-xl font-semibold tracking-tight text-ink-gray-9">
+      <h1 class="type-page-title font-heading text-ink-gray-9">
         {{ session.user }}
       </h1>
       <p class="text-sm text-ink-gray-6">
@@ -182,18 +241,46 @@ const today = new Intl.DateTimeFormat(undefined, {
            it. Designation, department and manager stay here but small; the
            profile page is where you go to read them. -->
       <header class="mb-4 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1">
-        <h1 class="font-heading text-xl font-semibold tracking-tight text-ink-gray-9">
+        <!-- MH-14 / HR-19: the page-title role every other page uses. -->
+        <h1 class="type-page-title font-heading text-ink-gray-9">
           {{ employee?.employee_name }}
         </h1>
         <p class="text-sm text-ink-gray-6">
           {{ today }}
         </p>
+        <!-- The identity line belongs to the name above it; the check-in chip
+             is an action and sits after both. -->
         <p
           v-if="identityLine"
           class="w-full text-sm text-ink-gray-5"
         >
           {{ identityLine }}
         </p>
+        <div
+          v-if="session.mobileCheckin"
+          class="mt-2 flex w-full flex-wrap items-center gap-x-3 gap-y-1"
+        >
+          <button
+            type="button"
+            class="inline-flex min-h-11 cursor-pointer items-center gap-2 rounded-full border border-outline-gray-2 bg-surface-white px-4 text-sm font-medium text-ink-gray-8 transition-colors duration-200 hover:border-blue-600 hover:text-blue-700 disabled:cursor-wait disabled:opacity-60"
+            :disabled="checkinLoading"
+            :aria-busy="checkinLoading ? 'true' : undefined"
+            @click="startCheckin"
+          >
+            <Icon
+              name="pin"
+              size="h-4 w-4"
+              class="shrink-0"
+            />
+            Check in / Check out
+          </button>
+          <p
+            class="text-sm text-ink-gray-6"
+            aria-live="polite"
+          >
+            {{ checkinNote }}
+          </p>
+        </div>
       </header>
 
       <WeekSpine
@@ -208,6 +295,8 @@ const today = new Intl.DateTimeFormat(undefined, {
             :more="needsYouMore"
             :waiting="needsYouWaiting"
             :waiting-more="needsYouWaitingMore"
+            :decided="needsYouDecided"
+            :decided-more="needsYouDecidedMore"
             :week-hours="week?.total_hours || 0"
             :timesheet-state="week?.timesheet_state"
           />
@@ -272,7 +361,7 @@ const today = new Intl.DateTimeFormat(undefined, {
               <span class="min-w-0">
                 <span class="block text-sm text-ink-gray-6">Attendance</span>
                 <span class="block truncate text-xs text-ink-gray-5">
-                  {{ leadAttendance[0] }} this month
+                  {{ ATTENDANCE_FIGURE[leadAttendance[0]] || leadAttendance[0] }} this month
                 </span>
               </span>
               <span class="tabular font-heading text-2xl font-semibold text-ink-gray-9">
@@ -370,6 +459,16 @@ const today = new Intl.DateTimeFormat(undefined, {
           :anniversaries="anniversaries"
         />
       </AsyncState>
+
+      <!-- Mounted with the chip and kept closed, like on Attendance: it asks
+           for a location when it *opens*, and opening it is a tap (P3-R6). -->
+      <CheckInSheet
+        v-if="session.mobileCheckin"
+        v-model="checkinOpen"
+        :log-type="checkinLogType"
+        :fix-a-day-to="checkinFixRoute"
+        @punched="onPunched"
+      />
     </div>
   </AsyncState>
 </template>

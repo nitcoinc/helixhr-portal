@@ -2,6 +2,7 @@
 import { ref, computed, watch, onUnmounted } from 'vue'
 import { createResource, Dialog, FormControl, Button } from 'frappe-ui'
 import AsyncState from '@/components/AsyncState.vue'
+import SegmentedChips from '@/components/SegmentedChips.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import StepStrip from '@/components/StepStrip.vue'
 import { FALLBACK_ERROR, toPlainMessage } from '@/lib/errorMap'
@@ -56,6 +57,7 @@ const error = ref('')
 const sending = ref(false)
 
 const reasonChoices = computed(() => (props.reasons.length ? props.reasons : ['Work From Home', 'On Duty']))
+const reasonOptions = computed(() => reasonChoices.value.map((value) => ({ value, label: value })))
 
 function reset() {
   const start = props.date || today()
@@ -420,23 +422,11 @@ const decisionLabel = computed(() => (isRejected.value ? 'Rejected' : 'Sent back
           <legend class="label mb-2">
             What happened
           </legend>
-          <div class="flex flex-wrap gap-2">
-            <button
-              v-for="choice in reasonChoices"
-              :key="choice"
-              type="button"
-              class="min-h-11 cursor-pointer rounded-full border px-4 text-sm font-medium transition-colors duration-200"
-              :class="
-                reason === choice
-                  ? 'border-field bg-field text-white'
-                  : 'border-outline-gray-2 bg-surface-white text-ink-gray-8 hover:bg-surface-gray-2'
-              "
-              :aria-pressed="reason === choice"
-              @click="reason = choice"
-            >
-              {{ choice }}
-            </button>
-          </div>
+          <SegmentedChips
+            v-model="reason"
+            label="What happened"
+            :options="reasonOptions"
+          />
         </fieldset>
 
         <div class="grid grid-cols-2 gap-3">

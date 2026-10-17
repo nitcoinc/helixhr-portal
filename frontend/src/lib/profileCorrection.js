@@ -59,11 +59,30 @@ export function spokenValue(display) {
 /**
  * The subject and details a correction request starts with.
  *
- * @param {{label: string, display?: string, masked?: boolean, table?: boolean}} field
+ * @param {{label: string, display?: string, masked?: boolean, table?: boolean, section?: boolean}} field
  *   `display` is the value exactly as the page shows it; `table` marks a
- *   whole section (education, work history) rather than one field.
+ *   whole section (education, work history) rather than one field, and
+ *   `section` a run of fields nobody has narrowed to one yet (U10) --
+ *   `masked` then says whether any of them is a masked identifier.
  */
-export function correctionDraft({ label, display, masked = false, table = false, fieldname = '' }) {
+export function correctionDraft({
+  label,
+  display,
+  masked = false,
+  table = false,
+  section = false,
+  fieldname = '',
+}) {
+  if (section) {
+    return {
+      subject: `Correct my ${inSentence(label)} details`.slice(0, SUBJECT_MAX),
+      details: masked
+        ? `Something in my ${inSentence(label)} details is wrong:\n\n` +
+          'HR will check this against your documents — please don’t type a full number here.'
+        : `Something in my ${inSentence(label)} details is wrong:\n`,
+    }
+  }
+
   const subject = `Correct my ${inSentence(label)}`.slice(0, SUBJECT_MAX)
 
   if (Object.hasOwn(CORRECTABLE_FIELDS, fieldname)) {

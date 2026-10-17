@@ -1,5 +1,6 @@
 <script setup>
 import { onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
+import { Button } from 'frappe-ui'
 import { call } from '@/lib/api'
 
 // Plan 2026-10-04-001 U12 (resolved decision 10). A saved view is the
@@ -183,13 +184,15 @@ async function remove(view) {
           >
           Share with my company
         </label>
-        <button
+        <Button
           type="submit"
-          class="mt-2 inline-flex min-h-11 cursor-pointer items-center rounded-md bg-surface-gray-7 px-3 text-sm font-medium text-ink-white disabled:opacity-60 sm:min-h-9"
+          variant="solid"
+          theme="blue"
+          class="mt-2 min-h-11 sm:min-h-9"
           :disabled="saving"
         >
           {{ saving ? 'Saving…' : 'Save view' }}
-        </button>
+        </Button>
       </form>
 
       <p

@@ -100,6 +100,23 @@ test.describe('hr', () => {
     )
     expect(hasHorizontalScroll).toBe(false)
   })
+
+  // HR-10 / U15: the shared SearchField, 44px under a coarse pointer.
+  test('the search field is a 44px target on a phone', async ({ browser }) => {
+    const context = await browser.newContext({
+      storageState: 'tests/.auth/hr.json',
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
+    })
+    const page = await context.newPage()
+    await page.goto('/helixhr/projects')
+    const field = page.getByLabel('Search', { exact: true })
+    await expect(field).toBeVisible()
+    const box = await field.boundingBox()
+    await context.close()
+    expect(box?.height).toBeGreaterThanOrEqual(44)
+  })
 })
 
 test('an employee identity has no Projects nav item, and a direct hit is refused server-side', async ({
@@ -125,9 +142,62 @@ test('an employee reaches My projects from the nav and sees cards or the empty s
   await page.getByRole('link', { name: 'My projects', exact: true }).first().click()
   await expect(page).toHaveURL(/\/helixhr\/my-projects$/)
   await expect(page.getByRole('heading', { name: 'My projects' })).toBeVisible()
+  // U16 (EP-23): a project with nothing of mine this month is a one-line
+  // row under "Other projects", open by default when no card is active.
   const cards = page.getByTestId('my-project-card')
+  const rows = page.getByTestId('my-project-row')
   const empty = page.locator('[data-async-state="my-projects:empty"]')
-  await expect(cards.first().or(empty)).toBeVisible()
+  await expect(cards.first().or(rows.first()).or(empty)).toBeVisible()
   // No money on this page, ever.
   await expect(page.getByText(/billable|billing|cost/i)).toHaveCount(0)
+})
+
+// U16 (EP-23). Projects with my hours or open tasks this month come first as
+// cards; the rest fold under "Other projects (N)", a real disclosure. Stubbed:
+// which projects carry hours this month is the site's data, not this spec's.
+test('My projects shows active projects before the fold', async ({ page }, testInfo) => {
+  test.skip(!testInfo.project.name.startsWith('employee'), 'My projects is the employee view')
+
+  const project = (name: string, hours: number, tasks: object[] = []) => ({
+    name,
+    project_name: name,
+    customer: null,
+    status: 'Open',
+    hours_this_month: hours,
+    tasks,
+  })
+  await page.route('**/api/method/helixhr.api.get_my_project_overview*', (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        message: [
+          project('_Spec Booked', 6),
+          project('_Spec Quiet', 0),
+          project('_Spec Tasked', 0, [{ name: 'T-1', subject: 'Write it', status: 'Open', due: null }]),
+        ],
+      }),
+    }),
+  )
+
+  await page.goto('/helixhr/my-projects')
+  await page.waitForLoadState('networkidle')
+
+  // The two active projects are the cards, in the server's order.
+  const cards = page.getByTestId('my-project-card')
+  await expect(cards).toHaveCount(2)
+  await expect(cards.nth(0)).toContainText('_Spec Booked')
+  await expect(cards.nth(1)).toContainText('_Spec Tasked')
+  // A card here for its hours has no empty tasks block.
+  await expect(cards.nth(0).getByText('My open tasks')).toHaveCount(0)
+  await expect(page.getByText('No open tasks')).toHaveCount(0)
+
+  // The quiet one is folded, and the fold says so.
+  const toggle = page.getByRole('button', { name: 'Other projects (1)' })
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(page.getByText('_Spec Quiet')).toBeHidden()
+
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  await expect(page.getByTestId('my-project-row').filter({ hasText: '_Spec Quiet' })).toBeVisible()
 })

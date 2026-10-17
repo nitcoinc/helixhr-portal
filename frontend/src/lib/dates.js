@@ -284,6 +284,14 @@ function calendarPartsFor(value) {
   return { y: w.year, m: w.month, d: w.day }
 }
 
+/** The `YYYY-MM-DD` the *user* sees for a calendar date or a Frappe
+ * timestamp, or null when the value is neither -- what a list buckets by
+ * (Notifications' Today / Yesterday / This week / Older). */
+export function calendarDateOf(value) {
+  const p = calendarPartsFor(value)
+  return p ? iso(p) : null
+}
+
 /** "3 Sep 2026" — falls back to the raw value rather than showing nothing. */
 export function formatDate(value) {
   const p = calendarPartsFor(value)

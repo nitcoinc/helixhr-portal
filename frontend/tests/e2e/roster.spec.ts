@@ -73,8 +73,16 @@ test.describe('employee', () => {
       route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ message: quiet }) }),
     )
     await openRoster(page)
-    await expect(page.getByTestId('roster-quiet')).toContainText('No shifts are assigned this week')
-    await expect(page.locator('[data-testid="roster-row"]')).toHaveCount(1)
+    // Plan 2026-10-17-001 U17 (MH-17): your own empty week is one card --
+    // no grid row and no seven "No shift" day cards -- at both widths.
+    const card = page.getByTestId('roster-quiet')
+    await expect(card).toHaveCount(1)
+    await expect(card).toContainText('No shifts are assigned this week')
+    await expect(page.locator('[data-testid="roster-row"]')).toHaveCount(0)
+    await expect(page.getByTestId('roster-day')).toHaveCount(0)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await expect(card).toBeVisible()
+    await expect(page.getByTestId('roster-day')).toHaveCount(0)
 
     await page.unroute('**/api/method/helixhr.api.get_roster_week*')
     await page.route('**/api/method/helixhr.api.get_roster_week*', (route) =>
@@ -84,7 +92,10 @@ test.describe('employee', () => {
         body: JSON.stringify({ message: { ...real, rows: [], total: 0 } }),
       }),
     )
-    await page.getByRole('button', { name: 'Next week' }).click()
+    // The card's own way out moves the week, the same as the arrow.
+    const label = await weekLabel(page).textContent()
+    await card.getByRole('button', { name: 'Go to next week' }).click()
+    await expect(weekLabel(page)).not.toHaveText(label!)
     await expect(page.getByText('Nobody to show on this roster')).toBeVisible()
   })
 })

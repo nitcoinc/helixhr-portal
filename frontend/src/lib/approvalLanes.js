@@ -3,7 +3,10 @@
 // inline in `Approvals.vue`. The server tags each queue row with `lane`
 // ("team", "hr" or "it", KTD1); these functions only group.
 
-export const LANE_TITLES = {
+import { trimNumber } from './hours'
+import { APPROVALS_SHORTCUTS_PREFIX, resolveStorage, viewerKey } from './viewerStorage'
+
+const LANE_TITLES = {
   team: 'My team',
   decided: 'Decided by me',
   hr: 'HR',
@@ -87,4 +90,108 @@ export function groupByPerson(rows) {
     group.rows.push(row)
   }
   return groups
+}
+
+// --- batch approval (plan 2026-10-17-001 U7, MH-04 / MH-06 / HR-12) -------
+
+/** The server's own cap on one `approve_clean_items` call (`_BULK_MAX_ITEMS`);
+ * the call is also rate-limited to 10 per 60s. */
+export const BULK_MAX_ITEMS = 60
+
+/** The rows `approve_clean_items` takes: timesheets and leave the server
+ * still calls clean (R17). Attendance requests and change requests are
+ * decided one at a time, and the server refuses them in a batch anyway.
+ * Clean means the server said so (`needs_look: false`): an HR-lane timesheet
+ * or stalled leave carries no flags (`null`) and no stale-write token, and
+ * the batch endpoint would re-flag it and refuse. */
+export function isBatchable(row) {
+  return !!row && (row.kind === 'timesheet' || row.kind === 'leave') && row.needs_look === false
+}
+
+/** MH-04: the "Approve all" batch for one lane's rows. Built from the rows
+ * themselves, never from checkbox selection (there is none on a phone). The
+ * rows arrive oldest first, so a cut keeps the oldest; `eligible` is the
+ * uncapped count. */
+export function approveAllBatch(rows, max = BULK_MAX_ITEMS) {
+  const eligible = (rows || []).filter(isBatchable)
+  return { rows: eligible.slice(0, max), eligible: eligible.length }
+}
+
+/** The button's words: "Approve all 2 that look normal", or "Approve the
+ * oldest 60 of 75" past the cap; '' when nothing is eligible. */
+export function approveAllLabel(batch) {
+  if (!batch?.rows?.length) return ''
+  return batch.eligible > batch.rows.length
+    ? `Approve the oldest ${batch.rows.length} of ${batch.eligible}`
+    : `Approve all ${batch.eligible} that look normal`
+}
+
+/** One row as `approve_clean_items` takes it: the concurrency token the row
+ * was drawn from travels with it, so a row that moved is refused. */
+export function batchItem(row) {
+  return {
+    doctype: row.doctype,
+    name: row.name,
+    expected_modified: row.token_modified,
+    expected_state: row.status,
+  }
+}
+
+
+/** "Approve 8 items · 312 h · 3 days leave" -- the one sentence the bar and
+ * the confirm share, so they can never disagree (R17). Hours are the
+ * timesheets'; days are the leave applications' own day counts. */
+export function batchLabel(rows) {
+  const list = rows || []
+  let hours = 0
+  let days = 0
+  for (const row of list) {
+    if (row.kind === 'timesheet') hours += Number(row.total_hours || 0)
+    if (row.kind === 'leave') days += Number(row.total_days || 0)
+  }
+  const parts = [`${list.length} ${list.length === 1 ? 'item' : 'items'}`]
+  if (hours) parts.push(`${trimNumber(hours)} h`)
+  if (days) parts.push(`${trimNumber(days)} ${days === 1 ? 'day' : 'days'} leave`)
+  return `Approve ${parts.join(' · ')}`
+}
+
+/** MH-06 / HR-12: a tri-state select-all over `rows`' batchable members --
+ * 'all', 'some' or 'none' of them are in `selectedNames`. */
+export function selectionState(rows, selectedNames) {
+  const names = (rows || []).filter(isBatchable).map((row) => row.name)
+  const chosen = names.filter((name) => selectedNames.includes(name)).length
+  if (!names.length || !chosen) return 'none'
+  return chosen === names.length ? 'all' : 'some'
+}
+
+// --- keyboard triage opt-in (KTD13) ---------------------------------------
+
+// Per-viewer: the key ends in `session.user`. `viewerStorage.js` owns the
+// prefix, clears it on sign-out and drops another account's on bootstrap.
+
+/** Whether this user turned keyboard triage on, on this device. Off when
+ * there is no user or the storage cannot be read. */
+export function readShortcuts(user, storage) {
+  const key = viewerKey(APPROVALS_SHORTCUTS_PREFIX, user)
+  if (!key) return false
+  try {
+    return resolveStorage(storage)?.getItem(key) === '1'
+  } catch {
+    return false
+  }
+}
+
+/** Store the flag; `false` when it could not be stored (the toggle then
+ * still works for this visit). */
+export function writeShortcuts(user, on, storage) {
+  const key = viewerKey(APPROVALS_SHORTCUTS_PREFIX, user)
+  if (!key) return false
+  try {
+    const target = resolveStorage(storage)
+    if (on) target.setItem(key, '1')
+    else target.removeItem(key)
+    return true
+  } catch {
+    return false
+  }
 }

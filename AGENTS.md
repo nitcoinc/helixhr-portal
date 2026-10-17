@@ -23,7 +23,7 @@ Response style: cut filler, keep technical substance, no hedging unless the unce
 - Database: MariaDB via the bench. Never edit Frappe/ERPNext/HRMS core; never edit an applied migration or fixture in place without a patch.
 - Package manager: Yarn 1 with `yarn.lock` in `frontend/`; Python deps come from the bench (`uv pip install -e`).
 - Tests: Python `IntegrationTestCase` under `helixhr/tests/`, vitest for pure functions, Playwright in `frontend/tests/e2e/`.
-- Dev bench: `frappe_docker` devcontainer, this repo bind-mounted at `apps/helixhr`, `bench start` serving `test_site` on :8000. Run bench commands inside that container.
+- Dev bench: `frappe_docker` devcontainer, this repo bind-mounted at `apps/helixhr`, `bench --site test_site serve` on :8000 (pinned to `test_site`; no job worker or scheduler). Fresh-site e2e uses a second, Host-routed server: `docs/runbook.md`. Run bench commands inside that container.
 
 ## Verification commands
 

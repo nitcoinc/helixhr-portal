@@ -38,23 +38,26 @@ const routes = [
   {
     path: '/',
     name: 'Dashboard',
-    meta: { deskOnly: true },
+    meta: { title: 'Home', deskOnly: true },
     component: () => import('@/pages/Dashboard.vue'),
   },
   {
     path: '/leave',
     name: 'Leave',
+    meta: { title: 'Leave' },
     component: () => import('@/pages/Leave.vue'),
   },
   {
     path: '/leave/:name',
     name: 'LeaveDetail',
+    meta: { title: 'Leave' },
     component: () => import('@/pages/Leave.vue'),
     props: true,
   },
   {
     path: '/attendance',
     name: 'Attendance',
+    meta: { title: 'Attendance' },
     component: () => import('@/pages/Attendance.vue'),
   },
   {
@@ -62,23 +65,27 @@ const routes = [
     // request detail.
     path: '/attendance/requests/:name',
     name: 'AttendanceRequestDetail',
+    meta: { title: 'Attendance' },
     component: () => import('@/pages/Attendance.vue'),
     props: true,
   },
   {
     path: '/payslips',
     name: 'Payslips',
+    meta: { title: 'Payslips' },
     component: () => import('@/pages/Payslips.vue'),
   },
   {
     path: '/payslips/:name',
     name: 'PayslipDetail',
+    meta: { title: 'Payslips' },
     component: () => import('@/pages/Payslips.vue'),
     props: true,
   },
   {
     path: '/holidays',
     name: 'Holidays',
+    meta: { title: 'Holidays' },
     component: () => import('@/pages/Holidays.vue'),
   },
   {
@@ -86,7 +93,7 @@ const routes = [
     // an old link or the back stack lands Home instead of on a refusal.
     path: '/team',
     name: 'Team',
-    meta: { reportsOnly: true },
+    meta: { title: 'Team', reportsOnly: true },
     component: () => import('@/pages/Team.vue'),
   },
   {
@@ -96,22 +103,25 @@ const routes = [
     // 'forbidden' region.
     path: '/roster',
     name: 'Roster',
-    meta: { deskOnly: true },
+    meta: { title: 'Roster', deskOnly: true },
     component: () => import('@/pages/Roster.vue'),
   },
   {
     path: '/directory',
     name: 'Directory',
+    meta: { title: 'Directory' },
     component: () => import('@/pages/Directory.vue'),
   },
   {
     path: '/timesheet',
     name: 'Timesheet',
+    meta: { title: 'Timesheet' },
     component: () => import('@/pages/Timesheet.vue'),
   },
   {
     path: '/timesheet/history',
     name: 'TimesheetHistory',
+    meta: { title: 'Timesheet history' },
     component: () => import('@/pages/TimesheetHistory.vue'),
   },
   {
@@ -119,6 +129,7 @@ const routes = [
     // (`helixhr.utils.get_week_bounds`, KTD10).
     path: '/timesheet/:weekStart(\\d{4}-\\d{2}-\\d{2})',
     name: 'TimesheetWeek',
+    meta: { title: 'Timesheet' },
     component: () => import('@/pages/Timesheet.vue'),
     props: true,
   },
@@ -126,27 +137,32 @@ const routes = [
     // Plan 2026-10-05-001 U6: any linked employee's own projects.
     path: '/my-projects',
     name: 'MyProjects',
+    meta: { title: 'My projects' },
     component: () => import('@/pages/MyProjects.vue'),
   },
   {
     path: '/requests',
     name: 'Requests',
+    meta: { title: 'Requests' },
     component: () => import('@/pages/Requests.vue'),
   },
   {
     path: '/requests/:name',
     name: 'RequestDetail',
+    meta: { title: 'Requests' },
     component: () => import('@/pages/Requests.vue'),
     props: true,
   },
   {
     path: '/documents',
     name: 'Documents',
+    meta: { title: 'Documents' },
     component: () => import('@/pages/Documents.vue'),
   },
   {
     path: '/notifications',
     name: 'Notifications',
+    meta: { title: 'Notifications' },
     component: () => import('@/pages/Notifications.vue'),
   },
   {
@@ -162,11 +178,13 @@ const routes = [
   {
     path: '/approvals',
     name: 'Approvals',
+    meta: { title: 'Approvals' },
     component: () => import('@/pages/Approvals.vue'),
   },
   {
     path: '/approvals/:kind(leave|timesheet|attendance|change)/:name',
     name: 'ApprovalDetail',
+    meta: { title: 'Approvals' },
     component: () => import('@/pages/Approvals.vue'),
     props: true,
   },
@@ -177,13 +195,14 @@ const routes = [
     // edit -- rather than remounting it.
     path: '/profile/:section(personal|job|contact|history|bank)?',
     name: 'Profile',
+    meta: { title: 'Profile' },
     component: () => import('@/pages/Profile.vue'),
     props: true,
   },
   {
     path: '/settings',
     name: 'Settings',
-    meta: { deskOnly: true },
+    meta: { title: 'Settings', deskOnly: true },
     component: () => import('@/pages/Settings.vue'),
   },
   {
@@ -193,7 +212,7 @@ const routes = [
     // AsyncState's 'forbidden' region, not a client-side redirect.
     path: '/settings/:section(categories|leave-types|holiday-lists|shift-types|leave-rules|report-access|people-access|approvers)',
     name: 'SettingsSection',
-    meta: { deskOnly: true },
+    meta: { title: 'Settings', deskOnly: true },
     component: () => import('@/pages/Settings.vue'),
     props: true,
   },
@@ -218,7 +237,7 @@ const routes = [
     // The route gate is the bootstrap flag `can_edit_email_templates`
     // (Portal Admin or System Manager) -- never a role list; every endpoint
     // behind the page checks the same predicate.
-    meta: { deskOnly: true, templatesOnly: true },
+    meta: { title: 'Email templates', deskOnly: true, templatesOnly: true },
     component: () => import('@/pages/EmailTemplates.vue'),
   },
   {
@@ -228,7 +247,7 @@ const routes = [
     // /settings above).
     path: '/organisation',
     name: 'Organisation',
-    meta: { deskOnly: true },
+    meta: { title: 'Organisation', deskOnly: true },
     component: () => import('@/pages/Organisation.vue'),
   },
   {
@@ -236,7 +255,7 @@ const routes = [
     // scope`) -- same posture as /organisation and /settings above.
     path: '/people',
     name: 'People',
-    meta: { deskOnly: true },
+    meta: { title: 'People', deskOnly: true },
     component: () => import('@/pages/People.vue'),
   },
   {
@@ -244,7 +263,7 @@ const routes = [
     // route (P2-R12): a reload or a shared link lands on the same person.
     path: '/people/:employee',
     name: 'PersonDetail',
-    meta: { deskOnly: true },
+    meta: { title: 'People', deskOnly: true },
     component: () => import('@/pages/People.vue'),
     props: true,
   },
@@ -254,7 +273,7 @@ const routes = [
     // path segment (P6-R10).
     path: '/reports',
     name: 'Reports',
-    meta: { deskOnly: true },
+    meta: { title: 'Reports', deskOnly: true },
     component: () => import('@/pages/Reports.vue'),
   },
   {
@@ -262,7 +281,7 @@ const routes = [
     // query (lib/reportQuery.js) so a link reopens -- and re-runs -- it.
     path: '/reports/:reportKey',
     name: 'ReportView',
-    meta: { deskOnly: true },
+    meta: { title: 'Reports', deskOnly: true },
     component: () => import('@/pages/Reports.vue'),
     props: true,
   },
@@ -271,7 +290,7 @@ const routes = [
     // scope`) -- same posture as /people, /organisation and /settings above.
     path: '/projects',
     name: 'Projects',
-    meta: { deskOnly: true },
+    meta: { title: 'Projects', deskOnly: true },
     component: () => import('@/pages/Projects.vue'),
   },
   {
@@ -279,7 +298,7 @@ const routes = [
     // route (P2-R12): a reload or a shared link lands on the same project.
     path: '/projects/:project',
     name: 'ProjectDetail',
-    meta: { deskOnly: true },
+    meta: { title: 'Projects', deskOnly: true },
     component: () => import('@/pages/Projects.vue'),
     props: true,
   },
@@ -291,19 +310,19 @@ const routes = [
     path: '/not-linked',
     name: 'NotLinked',
     component: () => import('@/pages/NotLinked.vue'),
-    meta: { shell: false },
+    meta: { title: 'Account not set up', shell: false },
   },
   {
     path: '/unavailable',
     name: 'Unavailable',
     component: () => import('@/pages/NotLinked.vue'),
-    meta: { shell: false },
+    meta: { title: 'Unavailable', shell: false },
   },
   {
     path: '/:pathMatch(.*)*',
     name: 'NotFound',
     component: () => import('@/pages/NotLinked.vue'),
-    meta: { shell: false },
+    meta: { title: 'Page not found', shell: false },
   },
 ]
 
@@ -384,6 +403,14 @@ router.beforeEach(async (to) => {
   return to.name === 'Unavailable'
     ? true
     : { name: 'Unavailable', query: { 'retry-to': to.fullPath } }
+})
+
+// Plan 2026-10-17-001 U4 (R10, WCAG 2.4.2): every page names itself in the
+// tab title, from its route's `meta.title`. Focus after a route change is the
+// shell's (AppShell.vue), because only the shell owns <main>.
+router.afterEach((to, from, failure) => {
+  if (failure) return
+  document.title = to.meta.title ? `${to.meta.title} · HelixHR` : 'HelixHR'
 })
 
 export default router

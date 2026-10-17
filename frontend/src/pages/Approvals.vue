@@ -2,21 +2,40 @@
 import Avatar from '@/components/Avatar.vue'
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
+import { createResource, Button, Dialog } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
+import TabBar from '@/components/TabBar.vue'
+import SegmentedChips from '@/components/SegmentedChips.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
-import DecisionActions from '@/components/approvals/DecisionActions.vue'
+import ApprovalEvidence from '@/components/approvals/ApprovalEvidence.vue'
 import KindTag from '@/components/KindTag.vue'
 import { KIND_TAGS, getReasonCopy } from '@/lib/workKinds'
 import TimesheetOversight from '@/components/approvals/TimesheetOversight.vue'
-import { APPROVER_REASON_TEXT, groupByPerson, laneSections, laneSubsections } from '@/lib/approvalLanes'
+import {
+  APPROVER_REASON_TEXT,
+  BULK_MAX_ITEMS,
+  approveAllBatch,
+  approveAllLabel,
+  batchItem,
+  batchLabel,
+  groupByPerson,
+  isBatchable,
+  laneSections,
+  laneSubsections,
+  readShortcuts,
+  selectionState,
+  writeShortcuts,
+} from '@/lib/approvalLanes'
 import { session } from '@/lib/session'
-import { formatDate, formatDateRange } from '@/lib/dates'
+import { decrementApprovals, setApprovalsCount } from '@/lib/approvalsCount'
+import { formatDateRange } from '@/lib/dates'
+import { focusNear } from '@/lib/focus'
+import { trimNumber } from '@/lib/hours'
 import { toPlainLeaveError } from '@/lib/errorMap'
+import { notify } from '@/lib/notify'
 import { useIsDesktop } from '@/lib/useIsDesktop'
-import { ATTENDANCE_LABEL } from '@/lib/week'
 
 // P2-U7 / KTD5. `/approvals` and `/approvals/:kind/:name` are one component:
 // the selected decision is a route parameter, so a manager can be sent the
@@ -49,12 +68,34 @@ const queue = createResource({
 })
 watch(kindFilter, () => queue.reload())
 
+// Plan 2026-10-17-001 KTD8: every load is the shell's badge, which is never
+// polled. `total` counts the chip's kind only, so a filtered view sums the
+// per-kind counts, which always cover the whole queue. Its
+// `total_is_capped` describes the filtered page, not the queue, so a
+// filtered load keeps the badge's current floor flag.
+watch(
+  () => queue.data,
+  (data) => {
+    if (!data) return
+    if (kindFilter.value) {
+      setApprovalsCount((data.counts?.kinds || []).reduce((sum, kind) => sum + (kind.count || 0), 0))
+    } else {
+      setApprovalsCount(data.total, data.total_is_capped)
+    }
+  },
+)
+
 // Plan 2026-10-16-001 R16: in Leave & attendance tab, chips filter leave / attendance.
 const kindChips = computed(() =>
   (queue.data?.counts?.kinds || []).filter(
     (chip) => (chip.name === 'leave' || chip.name === 'attendance') && (chip.count || chip.name === kindFilter.value),
   ),
 )
+
+const kindOptions = computed(() => [
+  { value: '', label: 'All' },
+  ...kindChips.value.map((chip) => ({ value: chip.name, label: KIND_TAGS[chip.name].label, count: chip.count })),
+])
 
 /** Turn one chip on (or the All chip, with neither value), keeping any open
  * detail where it is. */
@@ -81,16 +122,16 @@ const leaveAttendanceCount = computed(() => {
 const VIEW_TABS = computed(() =>
   [
     (session.canApprove || session.canOverseeTimesheets) && {
-      name: 'timesheets',
+      key: 'timesheets',
       label: 'Timesheets',
-      count: timesheetCount.value,
+      count: timesheetCount.value || null,
     },
     session.canApprove && {
-      name: 'queue',
+      key: 'queue',
       label: 'Leave & attendance',
-      count: leaveAttendanceCount.value,
+      count: leaveAttendanceCount.value || null,
     },
-    session.canSeeAllPending && { name: 'all-pending', label: 'All pending' },
+    session.canSeeAllPending && { key: 'all-pending', label: 'All pending' },
   ].filter(Boolean),
 )
 const OVERDUE_VISIBLE_ROWS = 5
@@ -98,7 +139,7 @@ const OVERDUE_VISIBLE_ROWS = 5
 const firstWaitingTab = computed(() => {
   if (timesheetCount.value > 0) return 'timesheets'
   if (leaveAttendanceCount.value > 0) return 'queue'
-  const names = VIEW_TABS.value.map((tab) => tab.name)
+  const names = VIEW_TABS.value.map((tab) => tab.key)
   return names[0] || 'queue'
 })
 // Chosen once, on the first answer: deciding the last timesheet must not
@@ -119,14 +160,20 @@ const view = computed(() => {
   // A tab this caller does not have -- the `overdue` alias included -- falls
   // back to the default (R14); the server refuses them regardless.
   const asked = route.query.view === 'overdue' ? 'all-pending' : route.query.view
-  return VIEW_TABS.value.some((tab) => tab.name === asked) ? asked : defaultTab.value
+  return VIEW_TABS.value.some((tab) => tab.key === asked) ? asked : defaultTab.value
 })
 const overdueOnly = computed(() => route.query.view === 'overdue' || route.query.overdue === '1')
 function showView(name) {
   router.push({ path: '/approvals', query: name === defaultTab.value ? {} : { view: name } })
 }
-function toggleOverdue() {
-  router.push({ path: '/approvals', query: { view: 'all-pending', overdue: overdueOnly.value ? undefined : '1' } })
+// A two-chip filter rather than a lone toggle, so both states are named
+// (U15, R17). The testid stays on the chip that used to be the toggle.
+const OVERDUE_OPTIONS = [
+  { value: false, label: 'All' },
+  { value: true, label: 'Overdue only', testid: 'overdue-toggle' },
+]
+function setOverdue(on) {
+  router.push({ path: '/approvals', query: { view: 'all-pending', overdue: on ? '1' : undefined } })
 }
 
 const allPending = createResource({
@@ -138,9 +185,11 @@ watch(
   ([value]) => value === 'all-pending' && allPending.fetch(),
   { immediate: true },
 )
-// Bulk selection belongs to one tab's rows and clears when the tab changes.
+// Bulk selection belongs to one tab's rows and clears when the tab changes,
+// as do the reasons a batch left on its refused rows.
 watch(view, () => {
   bulkSelected.value = []
+  refusedReasons.value = {}
 })
 
 const pending = computed(() => queue.data?.pending || [])
@@ -153,6 +202,10 @@ const overflow = computed(() => Math.max(0, (queue.data?.total || 0) - pending.v
 // rows themselves are the honest signal, so the sentence follows them rather
 // than asking the server a second question about roles.
 const hasHrWork = computed(() => pending.value.some((row) => row.for_hr))
+
+// MH-09: an HR User approves nothing, so an empty "waiting on you" card would
+// only push the work they do have -- oversight -- below the fold.
+const oversightOnly = computed(() => !session.canApprove && session.canOverseeTimesheets)
 
 // --- the selected decision ----------------------------------------------
 
@@ -304,15 +357,10 @@ function openNote() {
   noteOpen.value = true
 }
 
-// What the reason field is called, per outcome: the one kind map's copy (KTD6).
+// What the reason field is called, per outcome: the one kind map's copy
+// (KTD6). The page reads only its "missing" sentence; ApprovalEvidence draws
+// the rest.
 const reasonCopy = computed(() => getReasonCopy(reasonFor.value))
-
-/** The field's own label, naming the person the sentence is written to. */
-const reasonPlaceholder = computed(() =>
-  reasonFor.value === 'Send Back'
-    ? `What should ${firstName.value || 'they'} change?`
-    : reasonCopy.value.placeholder,
-)
 
 /**
  * P2-U7 steps 3 and 4. One decision at a time, always carrying the `modified`
@@ -364,6 +412,8 @@ async function decide(action, { confirmed = false } = {}) {
   actionError.value = ''
   reasonError.value = ''
   acting.value = item.name
+  // KTD16: read before the row goes, so the row after it takes focus.
+  const plan = focusPlan([item.name])
   try {
     await act.submit({
       doctype: item.doctype,
@@ -375,7 +425,10 @@ async function decide(action, { confirmed = false } = {}) {
     })
     clearDecisionSurfaces()
     closeDetail()
-    queue.reload()
+    // KTD8: the badge moves now; the reload below then answers with the
+    // queue's own total.
+    decrementApprovals(1)
+    reloadQueue().then(() => restoreFocus(plan))
   } catch (error) {
     // Stale, already decided, reassigned or refused. The queue is reloaded
     // so the item that is genuinely gone leaves -- but nothing else on the
@@ -398,19 +451,6 @@ async function decide(action, { confirmed = false } = {}) {
 }
 
 // --- presentation --------------------------------------------------------
-
-const DAY_LETTERS = ['M', 'T', 'W', 'T', 'F', 'S', 'S']
-
-/** The tallest bar in the 7-day strip. Scaled against a full day, so a light
- * week reads as a light week rather than being stretched to fill the strip. */
-const dayScale = computed(() => {
-  const hours = (selected.value?.day_totals || []).map((day) => day.hours)
-  return Math.max(8, ...hours, 0)
-})
-
-function barHeight(hours) {
-  return `${Math.round((Math.min(hours, dayScale.value) / dayScale.value) * 100)}%`
-}
 
 // P3-U6 step 0. One entry per kind, named explicitly. These three used to
 // branch on `kind === 'leave'` and let everything else fall through to the
@@ -446,7 +486,7 @@ const KIND = {
   // amount, and the two decisions are Accept and Decline.
   change: {
     summary: (row) => `Change request · ${formatDateRange(row.from_date, row.to_date)}`,
-    amount: (row) => (row.total_hours != null ? `${Number(row.total_hours).toFixed(1).replace(/\.0$/, '')} h` : ''),
+    amount: (row) => (row.total_hours != null ? `${trimNumber(row.total_hours)} h` : ''),
     approve: () => 'Accept',
     quote: (item) => item.comment,
   },
@@ -488,18 +528,21 @@ const approveLabel = computed(() =>
 /** The employee's own words, wherever this kind keeps them. */
 const quote = computed(() => (selected.value ? spec(selected.value.kind).quote(selected.value) : null))
 
-const firstName = computed(() => (selected.value?.employee_name || '').split(/\s+/)[0])
-
-/** P3-R16. What the calendar shows for each day a request names -- the
- * difference between a correction and a request over a day that is already
- * accounted for. */
-const DAY_SHOWS = { holiday: 'holiday', weekly_off: 'weekly off' }
-
-function requestedDayLabel(day) {
-  if (day.holiday) return DAY_SHOWS[day.holiday] || day.holiday
-  if (day.status) return ATTENDANCE_LABEL[day.status] || day.status
-  return 'nothing recorded'
-}
+/** Everything ApprovalEvidence draws, the same for the phone's inline block
+ * and the desktop panel (U7, R21). */
+const evidence = computed(() => ({
+  selected: selected.value,
+  actions: actions.value,
+  busy: !!selected.value && acting.value === selected.value.name,
+  armed: reasonFor.value || (noteOpen.value ? 'Send to HR' : confirmAccept.value ? 'Accept' : ''),
+  approveLabel: approveLabel.value,
+  quote: quote.value || '',
+  hrLine: hrLine(selected.value),
+  actionError: actionError.value,
+  reasonFor: reasonFor.value,
+  reasonError: reasonError.value,
+  noteOpen: noteOpen.value,
+}))
 
 /** P4-R11. Who handed this to HR, and what they said -- one line, on the
  * queue row and again on the detail head, so the HR chip is never the only
@@ -571,12 +614,18 @@ const decidedOpen = ref(false)
 const openInQueue = computed(() => !!props.name && pending.value.some((row) => row.name === props.name))
 
 // R20: selection exists from 640px up. A phone queue is one column of
-// single decisions; the checkboxes would only crowd it.
+// single decisions; the checkboxes would only crowd it. Approve all (MH-04)
+// is the phone's batch, and it never reads the checkboxes.
 const canBulkSelect = ref(window.matchMedia('(min-width: 640px)').matches)
 let bulkMediaQuery = null
 function bulkMediaChanged(event) {
   canBulkSelect.value = event.matches
-  if (!event.matches) bulkSelected.value = []
+  if (!event.matches) {
+    bulkSelected.value = []
+    // A confirm over a selection that just went away has nothing left to
+    // say. An Approve-all confirm keeps its batch: it came from the lane.
+    if (confirmSource.value?.type === 'selection') confirmSource.value = null
+  }
 }
 onMounted(() => {
   bulkMediaQuery = window.matchMedia('(min-width: 640px)')
@@ -589,87 +638,288 @@ onUnmounted(() => bulkMediaQuery?.removeEventListener('change', bulkMediaChanged
  * still calls clean (R17). A flagged row has no checkbox, and neither does
  * a change request -- Accept and Decline are never offered for bulk. */
 function selectable(row) {
-  return canBulkSelect.value && (row.kind === 'timesheet' || row.kind === 'leave') && !row.needs_look
+  return canBulkSelect.value && isBatchable(row)
 }
 
+// Each entry is `batchItem(row)` as it was when it was ticked, so the token
+// the manager saw is the one the server checks.
 const bulkSelected = ref([])
+const selectedNames = computed(() => bulkSelected.value.map((item) => item.name))
 
 function isSelected(row) {
-  return bulkSelected.value.some((item) => item.name === row.name)
+  return selectedNames.value.includes(row.name)
 }
 
 function toggleBulk(row) {
   if (!selectable(row)) return
-  bulkSelected.value = isSelected(row)
-    ? bulkSelected.value.filter((item) => item.name !== row.name)
-    : [
-        ...bulkSelected.value,
-        {
-          doctype: row.doctype,
-          name: row.name,
-          expected_modified: row.token_modified,
-          expected_state: row.status,
-        },
-      ]
+  if (isSelected(row)) {
+    bulkSelected.value = bulkSelected.value.filter((item) => item.name !== row.name)
+  } else if (bulkSelected.value.length < BULK_MAX_ITEMS) {
+    bulkSelected.value = [...bulkSelected.value, batchItem(row)]
+  }
 }
 
-const bulkHours = computed(() => {
-  let hours = 0
-  for (const item of bulkSelected.value) {
-    const row = pending.value.find((candidate) => candidate.name === item.name)
-    if (row?.kind === 'timesheet') hours += Number(row.total_hours || 0)
+/** MH-06 / HR-12: the tri-state select-all on Looks normal and on each
+ * person in it. Ticking adds what is missing, up to the server's cap;
+ * unticking a full set clears it. */
+const ARIA_CHECKED = { all: 'true', some: 'mixed', none: 'false' }
+
+function selectAllState(rows) {
+  return selectionState(rows, selectedNames.value)
+}
+
+function selectableCount(rows) {
+  return rows.filter(isBatchable).length
+}
+
+function toggleAll(rows) {
+  const targets = rows.filter(selectable)
+  if (selectAllState(rows) === 'all') {
+    const drop = targets.map((row) => row.name)
+    bulkSelected.value = bulkSelected.value.filter((item) => !drop.includes(item.name))
+    return
   }
-  return hours
-})
-const bulkDays = computed(() => bulkSelected.value.filter((item) => item.doctype === 'Leave Application').length)
+  const next = [...bulkSelected.value]
+  for (const row of targets) {
+    if (next.length >= BULK_MAX_ITEMS) break
+    if (!next.some((item) => item.name === row.name)) next.push(batchItem(row))
+  }
+  bulkSelected.value = next
+}
 
-/** "Approve 8 items · 312 h · 3 days leave" -- the sentence the confirm
- * repeats, so the bar and the confirm can never disagree (R17). */
-const bulkBarLabel = computed(() => {
-  const parts = [`${bulkSelected.value.length} ${bulkSelected.value.length === 1 ? 'item' : 'items'}`]
-  if (bulkHours.value) parts.push(`${Number(bulkHours.value).toFixed(1).replace(/\.0$/, '')} h`)
-  if (bulkDays.value) parts.push(`${bulkDays.value} ${bulkDays.value === 1 ? 'day' : 'days'} leave`)
-  return `Approve ${parts.join(' · ')}`
-})
+/** Queue rows by record name, in the order asked, skipping any that left. */
+function rowsByName(names) {
+  return names.map((name) => pending.value.find((row) => row.name === name)).filter(Boolean)
+}
 
-const confirmBulk = ref(false)
+const bulkBarLabel = computed(() => batchLabel(rowsByName(selectedNames.value)))
+
+/** The Looks normal rows of one lane, as the queue holds them now. */
+function laneNormalRows(laneKey) {
+  const lane = lanes.value.find((candidate) => candidate.key === laneKey)
+  return lane?.sections.find((section) => section.key === 'normal')?.rows || []
+}
+
+/** MH-04: the batch Approve all would send for one lane. */
+function laneBatch(laneKey) {
+  return approveAllBatch(laneNormalRows(laneKey))
+}
+
+// --- the one bulk confirm (R17, KTD6) ---------------------------------------
+//
+// Three ways in: the checkbox bar ('selection'), a lane's Approve all
+// ('lane'), and the keyboard's `a` on one row ('row'). The confirm keeps only
+// *where* its batch comes from and re-derives the rows from the queue every
+// render, so a reload underneath an open confirm changes the sentence rather
+// than leaving a stale count -- and a phone rotating to 700px keeps it.
+const confirmSource = ref(null)
 const bulkRunning = ref(false)
+const confirmBulk = computed({
+  get: () => !!confirmSource.value,
+  set: (open) => {
+    if (!open && !bulkRunning.value) confirmSource.value = null
+  },
+})
+
+function openConfirm(source) {
+  if (!bulkRunning.value) confirmSource.value = source
+}
+
+const confirmBatch = computed(() => {
+  const source = confirmSource.value
+  if (!source) return { rows: [], eligible: 0 }
+  if (source.type === 'lane') return laneBatch(source.lane)
+  const names = source.type === 'row' ? [source.name] : selectedNames.value
+  const rows = rowsByName(names).filter(isBatchable)
+  return { rows, eligible: rows.length }
+})
+
+const confirmLabel = computed(() => batchLabel(confirmBatch.value.rows))
+
+/** The people the confirm names (R17): count, people and total before
+ * deciding. */
+const confirmPeople = computed(() => [...new Set(confirmBatch.value.rows.map((row) => row.employee_name))])
+
 const bulkResult = ref(null)
+// A refused row that is still pending keeps its reason on the row until the
+// next batch (R18).
+const refusedReasons = ref({})
 const bulkApprove = createResource({
   url: 'helixhr.api.approve_clean_items',
   method: 'POST',
 })
 
-/** The people the confirm names (R17): the confirm states the count, people
- * and total before deciding. */
-const bulkPeople = computed(() => {
-  const names = []
-  for (const item of bulkSelected.value) {
-    const row = pending.value.find((candidate) => candidate.name === item.name)
-    if (row && !names.includes(row.employee_name)) names.push(row.employee_name)
-  }
-  return names
+/** "2 approved. 1 was already decided. 1 wasn't approved and stays in the
+ * queue." -- the persistent half of a partial result (R18). */
+const bulkSummary = computed(() => {
+  const result = bulkResult.value
+  if (!result) return ''
+  const parts = [`${result.approved} approved.`]
+  const decidedCount = result.decided.length
+  if (decidedCount) parts.push(`${decidedCount} ${decidedCount === 1 ? 'was' : 'were'} already decided.`)
+  const stayed = result.stayed.length
+  if (stayed) parts.push(`${stayed} ${stayed === 1 ? "wasn't approved and stays" : "weren't approved and stay"} in the queue.`)
+  return parts.join(' ')
 })
 
 async function runBulk() {
-  if (bulkRunning.value || !bulkSelected.value.length) return
+  const source = confirmSource.value
+  const rows = confirmBatch.value.rows
+  if (bulkRunning.value || !source || !rows.length) return
+  const fromSelection = source.type === 'selection'
+  const items = rows.map(
+    (row) => (fromSelection && bulkSelected.value.find((item) => item.name === row.name)) || batchItem(row),
+  )
+  const labels = Object.fromEntries(rows.map((row) => [row.name, `${row.employee_name} · ${rowSummary(row)}`]))
+  const kinds = Object.fromEntries(rows.map((row) => [row.name, row.kind]))
+  const plan = focusPlan(rows.map((row) => row.name))
   bulkRunning.value = true
+  refusedReasons.value = {}
   try {
-    const results = await bulkApprove.submit({ items: JSON.stringify(bulkSelected.value) })
-    bulkResult.value = Array.isArray(results) ? results : results?.message || results
-    bulkSelected.value = []
-    confirmBulk.value = false
-    queue.reload()
+    const answer = await bulkApprove.submit({ items: JSON.stringify(items) })
+    const results = (Array.isArray(answer) ? answer : answer?.message || []).filter(Boolean)
+    const approvedNames = results.filter((result) => result.ok).map((result) => result.name)
+    decrementApprovals(approvedNames.length)
+    bulkSelected.value = fromSelection
+      ? []
+      : bulkSelected.value.filter((item) => !approvedNames.includes(item.name))
+    confirmSource.value = null
+    await reloadQueue()
+    const refused = results.filter((result) => !result.ok)
+    if (!refused.length) {
+      // KTD6: the confirm was the guard; the toast only reports.
+      notify.success(`${approvedNames.length} approved`)
+      restoreFocus(plan)
+      return
+    }
+    // R18: a partial result is never only a success toast. A refused row
+    // still pending stays, with its reason; one that left the queue was
+    // decided by somebody else, and the summary names it.
+    const stillPending = new Set(pending.value.map((row) => row.name))
+    const stayed = refused.filter((result) => stillPending.has(result.name))
+    refusedReasons.value = Object.fromEntries(stayed.map((result) => [result.name, result.message]))
+    bulkResult.value = {
+      approved: approvedNames.length,
+      stayed: stayed.map((result) => ({ ...result, label: labels[result.name], kind: kinds[result.name] })),
+      decided: refused
+        .filter((result) => !stillPending.has(result.name))
+        .map((result) => ({ name: result.name, label: labels[result.name] })),
+      plan,
+    }
   } catch (error) {
-    actionError.value = toPlainLeaveError(error) || 'Could not run the bulk approval. Try again.'
-    confirmBulk.value = false
+    confirmSource.value = null
+    // The call may have failed after some rows were approved, so the queue
+    // (and through its watcher, the badge) is read again before saying so.
+    await reloadQueue()
+    notify.error(toPlainLeaveError(error) || 'Could not finish the bulk approval.', {
+      detail: 'Some items may already be approved; the list was refreshed.',
+    })
   } finally {
     bulkRunning.value = false
   }
 }
 
 function dismissBulkResult() {
+  const plan = bulkResult.value?.plan
   bulkResult.value = null
+  restoreFocus(plan)
+}
+
+function openRefused(result) {
+  bulkResult.value = null
+  open({ name: result.name, kind: result.kind || 'timesheet' })
+}
+
+/** The queue's reload, as a promise that never rejects: AsyncState already
+ * shows a failed load. */
+function reloadQueue() {
+  return Promise.resolve(queue.reload()).catch(() => {})
+}
+
+// --- focus after a row leaves (KTD16) --------------------------------------
+
+const queueList = ref(null)
+
+function rowToggles(scope) {
+  return scope ? [...scope.querySelectorAll('[data-row-toggle]')] : []
+}
+
+/** Where focus should go once `names` leave: the same position in their
+ * lane, so the row after them takes it. Read before the rows go. */
+function focusPlan(names) {
+  const row = queueList.value?.querySelector(`[data-approval-name="${CSS.escape(names[0] || '')}"]`)
+  const lane = row?.closest('[data-lane]')
+  if (!lane) return null
+  return { lane: lane.dataset.lane, index: rowToggles(lane).indexOf(row.querySelector('[data-row-toggle]')), names }
+}
+
+/** The next row in the lane, else the lane heading, else the first lane
+ * heading left, else the page's main region. A toast never takes focus. */
+function restoreFocus(plan) {
+  if (!plan) return
+  nextTick(() =>
+    requestAnimationFrame(() => {
+      const list = queueList.value
+      const lane = list?.querySelector(`[data-lane="${CSS.escape(plan.lane)}"]`)
+      const rows = rowToggles(lane).filter(
+        (toggle) => !plan.names.includes(toggle.closest('[data-approval-name]')?.dataset.approvalName),
+      )
+      focusNear(
+        rows,
+        plan.index,
+        lane?.querySelector('[data-lane-heading]'),
+        list?.querySelector('[data-lane-heading]'),
+        document.querySelector('main[tabindex]'),
+      )
+    }),
+  )
+}
+
+// --- keyboard triage (KTD13, MH-06) ----------------------------------------
+//
+// Off by default, per user and per device. When on, keys act only while
+// focus is inside the queue list (the handler sits on it) and never while
+// someone is typing. `a` opens the bulk confirm; nothing is approved
+// without it.
+const shortcutsOn = ref(readShortcuts(session.user))
+const shortcutsOpen = ref(false)
+const firstPendingLane = computed(() => lanes.value.find((lane) => lane.key !== 'decided')?.key)
+
+function toggleShortcuts() {
+  shortcutsOn.value = !shortcutsOn.value
+  writeShortcuts(session.user, shortcutsOn.value)
+}
+
+const TYPING = 'input, textarea, select, [contenteditable]:not([contenteditable="false"])'
+
+function onQueueKey(event) {
+  if (!shortcutsOn.value || event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return
+  const target = event.target
+  if (!(target instanceof Element) || target.closest(TYPING) || target.isContentEditable) return
+  if (!['j', 'k', 'x', 'a', 'Enter'].includes(event.key)) return
+  const item = target.closest('[data-approval-name]')
+  const row = item ? pending.value.find((candidate) => candidate.name === item.dataset.approvalName) : null
+  if (event.key === 'j' || event.key === 'k') {
+    const toggles = rowToggles(queueList.value)
+    const index = item ? toggles.indexOf(item.querySelector('[data-row-toggle]')) : -1
+    const next = index === -1 ? 0 : index + (event.key === 'j' ? 1 : -1)
+    focusNear(toggles, next)
+  } else if (event.key === 'x') {
+    if (!row) return
+    toggleBulk(row)
+  } else if (event.key === 'Enter') {
+    // Only on the row itself: Enter on a button inside the open detail is
+    // that button's own.
+    if (!row || !target.hasAttribute('data-row-toggle')) return
+    if (row.name !== props.name) open(row)
+  } else if (bulkSelected.value.length) {
+    openConfirm({ type: 'selection' })
+  } else if (isBatchable(row)) {
+    openConfirm({ type: 'row', name: row.name })
+  } else {
+    return
+  }
+  event.preventDefault()
 }
 </script>
 
@@ -686,34 +936,15 @@ function dismissBulkResult() {
       </template>
     </PageHeader>
 
-    <!-- Plan 2026-10-15-002 U5. One visible tab hides the bar (R14). -->
-    <div
-      v-if="VIEW_TABS.length > 1"
-      class="mb-4 flex gap-2 overflow-x-auto border-b border-outline-gray-2"
-      role="tablist"
-      aria-label="Approvals views"
-    >
-      <button
-        v-for="tab in VIEW_TABS"
-        :key="tab.name"
-        type="button"
-        role="tab"
-        class="-mb-px min-h-11 shrink-0 border-b-2 px-3 text-sm font-medium"
-        :class="
-          view === tab.name
-            ? 'border-heading text-ink-gray-9'
-            : 'border-transparent text-ink-gray-6 hover:text-ink-gray-9'
-        "
-        :aria-selected="view === tab.name"
-        @click="showView(tab.name)"
-      >
-        {{ tab.label }}
-        <span
-          v-if="tab.count"
-          class="tabular ml-1 text-ink-gray-5"
-        >{{ tab.count }}</span>
-      </button>
-    </div>
+    <!-- Plan 2026-10-15-002 U5. One visible tab hides the bar (R14); TabBar
+         renders nothing for a single tab. -->
+    <TabBar
+      class="mb-4"
+      :tabs="VIEW_TABS"
+      :model-value="view"
+      label="Approvals views"
+      @update:model-value="showView"
+    />
 
     <!-- R8: every pending non-timesheet item in HR's company, by approver.
          Overdue only reproduces the old Overdue tab; `?view=overdue` lands
@@ -723,20 +954,12 @@ function dismissBulkResult() {
       data-testid="overdue-tab"
     >
       <div class="mb-4 flex flex-wrap items-center gap-3">
-        <button
-          type="button"
-          class="min-h-11 rounded-full border px-4 text-sm font-medium"
-          :class="
-            overdueOnly
-              ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-              : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-          "
-          :aria-pressed="overdueOnly"
-          data-testid="overdue-toggle"
-          @click="toggleOverdue"
-        >
-          Overdue only
-        </button>
+        <SegmentedChips
+          label="Filter pending items by age"
+          :options="OVERDUE_OPTIONS"
+          :model-value="overdueOnly"
+          @update:model-value="setOverdue"
+        />
         <p
           v-if="allPending.data?.timesheet_count"
           class="text-sm text-ink-gray-5"
@@ -831,43 +1054,15 @@ function dismissBulkResult() {
     </p>
 
     <!-- Kind chips: Leave / Attendance in Leave & attendance tab -->
-    <div
+    <SegmentedChips
       v-if="view === 'queue' && (kindChips.length > 1 || kindFilter)"
-      class="mb-4 flex flex-wrap items-center gap-2"
-      role="group"
-      aria-label="Filter approvals by kind"
+      class="mb-4"
+      label="Filter approvals by kind"
       data-testid="approval-kind-chips"
-    >
-      <button
-        type="button"
-        class="min-h-11 rounded-full border px-4 text-sm font-medium"
-        :class="
-          !kindFilter
-            ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-            : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-        "
-        :aria-pressed="!kindFilter"
-        @click="filterQueue()"
-      >
-        All
-      </button>
-      <button
-        v-for="chip in kindChips"
-        :key="chip.name"
-        type="button"
-        class="min-h-11 rounded-full border px-4 text-sm font-medium"
-        :class="
-          kindFilter === chip.name
-            ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-            : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-        "
-        :aria-pressed="kindFilter === chip.name"
-        @click="filterQueue(chip.name)"
-      >
-        {{ KIND_TAGS[chip.name].label }}
-        <span class="tabular text-ink-gray-5">{{ chip.count }}</span>
-      </button>
-    </div>
+      :options="kindOptions"
+      :model-value="kindFilter"
+      @update:model-value="filterQueue"
+    />
 
     <div
       v-if="view === 'queue' || view === 'timesheets'"
@@ -881,7 +1076,11 @@ function dismissBulkResult() {
         class="min-w-0 lg:flex-1"
         data-testid="approvals-queue"
       >
+        <!-- MH-09: oversight-only (HR User) has no personal queue to show, so
+             the page leads with All pending timesheets instead of an empty
+             "waiting on you" card. -->
         <AsyncState
+          v-if="!(view === 'timesheets' && oversightOnly)"
           section="approvals-queue"
           :resource="queue"
           :empty="!tabRows.length && !(view === 'queue' && decided.length)"
@@ -901,533 +1100,448 @@ function dismissBulkResult() {
           >
             Nothing waiting on you.
           </p>
-          <section
-            v-for="lane in lanes"
-            :key="lane.key"
-            class="mb-8"
-            :data-testid="`lane-${lane.key}`"
+          <!-- KTD13: keyboard triage listens here and nowhere else, so a key
+               typed outside the list is just a key. -->
+          <div
+            ref="queueList"
+            class="focus:outline-none"
+            tabindex="-1"
+            data-testid="approvals-list"
+            @keydown="onQueueKey"
           >
-            <!-- KTD8: the last 14 days of this caller's own decisions,
-                 collapsed. Directly after My team, or first without it. -->
-            <template v-if="lane.key === 'decided'">
-              <button
-                type="button"
-                class="flex min-h-11 w-full cursor-pointer items-center gap-2 text-left"
-                :aria-expanded="decidedOpen"
-                aria-controls="approvals-decided-list"
-                data-testid="decided-toggle"
-                @click="decidedOpen = !decidedOpen"
-              >
-                <Icon
-                  name="chevronRight"
-                  class="shrink-0 text-ink-gray-5 transition-transform duration-200"
-                  :class="decidedOpen ? 'rotate-90' : ''"
-                />
-                <span class="label">{{ lane.title }}</span>
-                <span class="tabular text-sm text-ink-gray-5">{{ decided.length }}</span>
-              </button>
-              <ul
-                v-show="decidedOpen"
-                id="approvals-decided-list"
-                class="mt-2 space-y-2"
-              >
-                <li
-                  v-for="row in decided"
-                  :key="row.id"
-                  class="surface-card elev-1 flex items-center gap-3 p-3"
+            <section
+              v-for="lane in lanes"
+              :key="lane.key"
+              class="mb-8"
+              :data-testid="`lane-${lane.key}`"
+              :data-lane="lane.key"
+            >
+              <!-- KTD8: the last 14 days of this caller's own decisions,
+                   collapsed. Directly after My team, or first without it. -->
+              <template v-if="lane.key === 'decided'">
+                <button
+                  type="button"
+                  class="flex min-h-11 w-full cursor-pointer items-center gap-2 text-left"
+                  :aria-expanded="decidedOpen"
+                  aria-controls="approvals-decided-list"
+                  data-testid="decided-toggle"
+                  @click="decidedOpen = !decidedOpen"
                 >
-                  <Avatar
-                    class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-xs font-bold text-ink-gray-7"
-                    :photo-url="row.photo_url"
-                    :initials="row.initials"
-                    :size="32"
+                  <Icon
+                    name="chevronRight"
+                    class="shrink-0 text-ink-gray-5 transition-transform duration-200"
+                    :class="decidedOpen ? 'rotate-90' : ''"
                   />
-                  <p class="min-w-0 flex-1 truncate text-sm text-ink-gray-7">
-                    {{ row.employee_name }} · {{ row.label }}
-                    <template v-if="row.from_date">
-                      · {{ formatDateRange(row.from_date, row.to_date) }}
-                    </template>
-                  </p>
-                  <StatusBadge
-                    :kind="row.kind"
-                    :status="row.status"
-                    :docstatus="row.docstatus"
-                  />
-                </li>
-              </ul>
-            </template>
-            <template v-else>
-              <h2 class="mb-3 text-base font-semibold text-ink-gray-9">
-                {{ lane.title }}
-                <span class="tabular text-sm font-normal text-ink-gray-5">{{ lane.rows.length }}</span>
-              </h2>
-              <!-- Plan 2026-10-04-003 U7 (R13, R19): inside a lane, oldest waiting
-               first -- change requests (never batchable), the rows the
-               server flagged, and everything else. -->
-              <section
-                v-for="section in lane.sections"
-                :key="section.key"
-                class="mb-6"
-                :data-testid="`queue-section-${section.key}`"
-              >
-                <h3 class="label mb-2">
-                  {{ section.title }}
-                  <span class="tabular text-ink-gray-5">{{ section.rows.length }}</span>
-                </h3>
-                <p
-                  v-if="section.note"
-                  class="mb-2 text-sm text-ink-gray-5"
+                  <span class="label">{{ lane.title }}</span>
+                  <span class="tabular text-sm text-ink-gray-5">{{ decided.length }}</span>
+                </button>
+                <ul
+                  v-show="decidedOpen"
+                  id="approvals-decided-list"
+                  class="mt-2 space-y-2"
                 >
-                  {{ section.note }}
-                </p>
-
-                <!-- R14: one header per person, their oldest item leading. -->
-                <div
-                  v-for="group in groupByPerson(section.rows)"
-                  :key="group.employee"
-                  class="mb-4"
-                  :data-testid="`person-group-${section.key}`"
-                  :data-person="group.employee_name"
-                >
-                  <div class="mb-1.5 flex items-center gap-2 px-1">
+                  <li
+                    v-for="row in decided"
+                    :key="row.id"
+                    class="surface-card elev-1 flex items-center gap-3 p-3"
+                  >
                     <Avatar
-                      class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-[10px] font-bold text-ink-gray-7"
-                      :photo-url="group.photo_url"
-                      :initials="group.initials"
-                      :size="24"
+                      class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-xs font-bold text-ink-gray-7"
+                      :photo-url="row.photo_url"
+                      :initials="row.initials"
+                      :size="32"
                     />
-                    <span class="min-w-0 truncate text-sm font-medium text-ink-gray-9">
-                      {{ group.employee_name }}
-                    </span>
-                    <span class="tabular text-xs text-ink-gray-5">
-                      {{ group.rows.length }} {{ group.rows.length === 1 ? 'item' : 'items' }} · waiting
-                      {{ ageLabel(group.oldest) }}
-                    </span>
-                  </div>
-
-                  <ul class="space-y-2">
-                    <li
-                      v-for="row in group.rows"
-                      :key="row.id"
-                      class="surface-card elev-1"
-                      :class="row.name === name ? 'ring-2 ring-field' : ''"
-                      data-testid="approval-row"
-                      :data-approval-kind="row.kind"
-                      :data-approval-name="row.name"
+                    <p class="min-w-0 flex-1 truncate text-sm text-ink-gray-7">
+                      {{ row.employee_name }} · {{ row.label }}
+                      <template v-if="row.from_date">
+                        · {{ formatDateRange(row.from_date, row.to_date) }}
+                      </template>
+                    </p>
+                    <StatusBadge
+                      :kind="row.kind"
+                      :status="row.status"
+                      :docstatus="row.docstatus"
+                    />
+                  </li>
+                </ul>
+              </template>
+              <template v-else>
+                <div class="relative mb-3 flex flex-wrap items-center gap-2">
+                  <!-- KTD16: focus lands here when the lane's last row leaves. -->
+                  <h2
+                    class="text-base font-semibold text-ink-gray-9 focus:outline-none"
+                    tabindex="-1"
+                    data-lane-heading
+                  >
+                    {{ lane.title }}
+                    <span class="tabular text-sm font-normal text-ink-gray-5">{{ lane.rows.length }}</span>
+                  </h2>
+                  <!-- KTD13 / MH-06: the opt-in, beside the first lane only. -->
+                  <template v-if="canBulkSelect && lane.key === firstPendingLane">
+                    <button
+                      type="button"
+                      class="ml-auto inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded px-2 text-sm text-ink-gray-6 hover:bg-surface-gray-2"
+                      :aria-expanded="shortcutsOpen"
+                      aria-controls="approvals-shortcuts"
+                      data-testid="shortcuts-hint"
+                      @click="shortcutsOpen = !shortcutsOpen"
                     >
-                      <div class="flex items-stretch">
-                        <!-- R17: selection exists only in Looks normal, only for
-                         the two kinds the batch takes, and only while the
-                         server still calls the row clean. -->
-                        <button
-                          v-if="section.key === 'normal' && canBulkSelect"
-                          type="button"
-                          class="flex w-11 shrink-0 cursor-pointer items-center justify-center border-r border-outline-gray-2"
-                          :class="selectable(row) ? '' : 'cursor-default opacity-0'"
-                          :aria-label="isSelected(row) ? `Unselect ${rowSummary(row)}` : `Select ${rowSummary(row)}`"
-                          :aria-pressed="isSelected(row)"
-                          :data-testid="`bulk-check-${row.kind}`"
-                          :tabindex="selectable(row) ? 0 : -1"
-                          @click.stop="toggleBulk(row)"
-                        >
-                          <span
-                            class="flex h-5 w-5 items-center justify-center rounded border"
-                            :class="isSelected(row) ? 'border-heading bg-heading text-white' : 'border-outline-gray-3'"
-                            aria-hidden="true"
-                          >
-                            <Icon
-                              v-if="isSelected(row)"
-                              name="check"
-                              class="h-3 w-3"
-                            />
-                          </span>
-                        </button>
-
-                        <button
-                          type="button"
-                          class="flex w-full min-w-0 cursor-pointer items-center gap-3 p-3 text-left"
-                          :aria-expanded="row.name === name"
-                          @click="row.name === name ? closeDetail() : open(row)"
-                        >
-                          <Avatar
-                            class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-sm font-bold text-ink-green-3"
-                            :photo-url="row.photo_url"
-                            :initials="row.initials"
-                            :size="40"
-                          />
-
-                          <span class="min-w-0 flex-1">
-                            <span class="flex min-w-0 items-center gap-2">
-                              <KindTag :row="row" />
-                              <span class="min-w-0 truncate font-medium text-ink-gray-9">
-                                {{ row.employee_name }}
-                              </span>
-                              <!-- P4-R11. One queue, two hats. The chip is a word, not
-                               a tint, because it is the only thing that says whether
-                               this row is HR's work or this manager's own. -->
-                              <span
-                                v-if="row.for_hr"
-                                class="shrink-0 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-bold text-ink-gray-7"
-                                data-testid="hr-chip"
-                              >HR</span>
-                            </span>
-                            <span class="block truncate text-sm text-ink-gray-6">
-                              {{ rowSummary(row) }}
-                            </span>
-                            <span
-                              v-if="row.kind === 'timesheet' && row.expected_hours != null"
-                              class="tabular block text-xs text-ink-gray-5"
-                            >
-                              {{ Number(row.total_hours).toFixed(1).replace(/\.0$/, '') }} of
-                              {{ Number(row.expected_hours).toFixed(1).replace(/\.0$/, '') }} h expected
-                            </span>
-                            <span
-                              v-if="row.kind === 'leave' && row.balance_after != null"
-                              class="block text-xs text-ink-gray-5"
-                            >
-                              Balance after:
-                              <span class="tabular">{{ Number(row.balance_after).toFixed(1).replace(/\.0$/, '') }}</span>
-                              <template v-if="row.overlap_count">
-                                · {{ row.overlap_count }}
-                                {{ row.overlap_count === 1 ? 'other person is' : 'other people are' }} off then
-                              </template>
-                            </span>
-                            <!-- R16: the flags in words, never colour alone. -->
-                            <span
-                              v-if="row.needs_look"
-                              class="mt-1 flex flex-wrap gap-1"
-                              data-testid="flag-chips"
-                            >
-                              <span
-                                v-for="flag in flagLabels(row)"
-                                :key="flag"
-                                class="rounded-full bg-surface-amber-1 px-2 py-0.5 text-xs font-medium text-ink-amber-3"
-                              >
-                                {{ flag }}
-                              </span>
-                            </span>
-                            <span
-                              v-if="hrLine(row)"
-                              class="block truncate text-xs text-ink-gray-5"
-                            >
-                              {{ hrLine(row) }}
-                            </span>
-                          </span>
-
-                          <span class="shrink-0 text-right">
-                            <span
-                              class="tabular block font-medium text-ink-gray-9"
-                              :data-testid="row.kind === 'request' ? 'request-claim' : null"
-                            >{{ rowAmount(row) }}</span>
-                            <span class="tabular block text-xs text-ink-gray-5">{{ ageLabel(row) }}</span>
-                          </span>
-
-                          <Icon
-                            v-if="!isDesktop"
-                            name="chevronRight"
-                            class="shrink-0 text-ink-gray-4 transition-transform duration-200"
-                            :class="row.name === name ? 'rotate-90' : ''"
-                          />
-                        </button>
-                      </div>
-
-                      <!-- Phone: the selected item opens where it is, so the manager
-                       never loses their place in the queue (P2-U7 step 7). -->
-                      <div
-                        v-if="!isDesktop && row.name === name"
-                        class="border-t border-outline-gray-2 px-3 pb-3"
+                      Keyboard shortcuts
+                      <span class="text-ink-gray-5">{{ shortcutsOn ? 'on' : 'off' }}</span>
+                    </button>
+                    <div
+                      v-if="shortcutsOpen"
+                      id="approvals-shortcuts"
+                      class="surface-card elev-2 absolute right-0 top-full z-10 mt-1 w-72 p-3 text-sm"
+                      role="group"
+                      aria-label="Keyboard shortcuts"
+                      @keydown.esc.stop="shortcutsOpen = false"
+                    >
+                      <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-ink-gray-7">
+                        <dt class="tabular font-medium text-ink-gray-9">
+                          j / k
+                        </dt>
+                        <dd>Next / previous row</dd>
+                        <dt class="tabular font-medium text-ink-gray-9">
+                          x
+                        </dt>
+                        <dd>Select the row</dd>
+                        <dt class="tabular font-medium text-ink-gray-9">
+                          Enter
+                        </dt>
+                        <dd>Open it</dd>
+                        <dt class="tabular font-medium text-ink-gray-9">
+                          a
+                        </dt>
+                        <dd>Approve, after the confirm</dd>
+                      </dl>
+                      <p class="mt-2 text-xs text-ink-gray-5">
+                        Keys work only while focus is in the list.
+                      </p>
+                      <button
+                        type="button"
+                        role="switch"
+                        class="mt-2 flex min-h-11 w-full cursor-pointer items-center justify-between gap-3 text-left font-medium text-ink-gray-9"
+                        :aria-checked="shortcutsOn ? 'true' : 'false'"
+                        data-testid="shortcuts-toggle"
+                        @click="toggleShortcuts"
                       >
-                        <AsyncState
-                          section="approvals-detail"
-                          class="pt-3"
-                          :resource="detail"
-                          :empty="!detail.data"
-                          empty-title="That request isn't here any more"
-                          empty-body="It may have been withdrawn or already decided."
-                          skeleton="block"
-                          skeleton-height="h-40"
+                        Use keyboard shortcuts
+                        <span
+                          class="flex h-6 w-10 shrink-0 items-center rounded-full p-0.5 transition-colors duration-200"
+                          :class="shortcutsOn ? 'justify-end bg-heading' : 'justify-start bg-surface-gray-3'"
+                          aria-hidden="true"
                         >
-                          <template #error-title>
-                            We couldn't load this request
-                          </template>
-                          <div v-if="selected">
-                            <!-- R13: the change request's own words are the
-                             evidence; the approved week's hours sit beside
-                             them. -->
-                            <div
-                              v-if="selected.kind === 'change'"
-                              class="surface-inset p-3 text-sm"
-                            >
-                              <p class="font-medium text-ink-gray-9">
-                                What they asked to change
-                              </p>
-                              <p class="mt-1 text-ink-gray-7">
-                                {{ selected.comment }}
-                              </p>
-                              <p class="tabular mt-2 text-xs text-ink-gray-5">
-                                The approved week carries
-                                {{ Number(selected.total_hours).toFixed(1).replace(/\.0$/, '') }} h ·
-                                {{ formatDateRange(selected.week_start, selected.week_end) }}
-                              </p>
-                            </div>
+                          <span class="h-5 w-5 rounded-full bg-white" />
+                        </span>
+                      </button>
+                    </div>
+                  </template>
+                </div>
+                <!-- Plan 2026-10-04-003 U7 (R13, R19): inside a lane, oldest waiting
+                 first -- change requests (never batchable), the rows the
+                 server flagged, and everything else. -->
+                <section
+                  v-for="section in lane.sections"
+                  :key="section.key"
+                  class="mb-6"
+                  :data-testid="`queue-section-${section.key}`"
+                >
+                  <div class="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1">
+                    <!-- MH-06 / HR-12: select the whole of Looks normal. -->
+                    <button
+                      v-if="section.key === 'normal' && canBulkSelect && selectableCount(section.rows) > 1"
+                      type="button"
+                      role="checkbox"
+                      class="-my-2 flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center"
+                      :aria-checked="ARIA_CHECKED[selectAllState(section.rows)]"
+                      :aria-label="`Select all ${selectableCount(section.rows)} that look normal`"
+                      data-testid="select-all-normal"
+                      @click="toggleAll(section.rows)"
+                    >
+                      <span
+                        class="flex h-5 w-5 items-center justify-center rounded border"
+                        :class="selectAllState(section.rows) === 'none' ? 'border-outline-gray-3' : 'border-heading bg-heading text-white'"
+                        aria-hidden="true"
+                      >
+                        <Icon
+                          v-if="selectAllState(section.rows) === 'all'"
+                          name="check"
+                          class="h-3 w-3"
+                        />
+                        <span
+                          v-else-if="selectAllState(section.rows) === 'some'"
+                          class="h-0.5 w-2.5 rounded bg-white"
+                        />
+                      </span>
+                    </button>
+                    <h3 class="label">
+                      {{ section.title }}
+                      <span class="tabular text-ink-gray-5">{{ section.rows.length }}</span>
+                    </h3>
+                    <!-- MH-04: the clean lane in two taps, at every width. The
+                         batch is the lane's own eligible rows, never the
+                         checkboxes, and it always goes through the confirm. -->
+                    <Button
+                      v-if="section.key === 'normal' && approveAllLabel(laneBatch(lane.key))"
+                      class="ml-auto"
+                      variant="subtle"
+                      theme="green"
+                      data-testid="approve-all"
+                      @click="openConfirm({ type: 'lane', lane: lane.key })"
+                    >
+                      {{ approveAllLabel(laneBatch(lane.key)) }}
+                    </Button>
+                  </div>
+                  <p
+                    v-if="section.note"
+                    class="mb-2 text-sm text-ink-gray-5"
+                  >
+                    {{ section.note }}
+                  </p>
 
-                            <!-- The 7-day hours strip: the shape of the week, before
-                         the numbers under it. -->
-                            <div
-                              v-if="selected.kind === 'timesheet'"
-                              class="flex gap-1.5"
+                  <!-- R14: one header per person, their oldest item leading. -->
+                  <div
+                    v-for="group in groupByPerson(section.rows)"
+                    :key="group.employee"
+                    class="mb-4"
+                    :data-testid="`person-group-${section.key}`"
+                    :data-person="group.employee_name"
+                  >
+                    <div class="mb-1.5 flex items-center gap-2 px-1">
+                      <!-- HR-12: one person's clean rows together. -->
+                      <button
+                        v-if="section.key === 'normal' && canBulkSelect && selectableCount(group.rows) > 1"
+                        type="button"
+                        role="checkbox"
+                        class="-my-2 -ml-1 flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center"
+                        :aria-checked="ARIA_CHECKED[selectAllState(group.rows)]"
+                        :aria-label="`Select all of ${group.employee_name}'s ${selectableCount(group.rows)}`"
+                        data-testid="select-all-person"
+                        @click="toggleAll(group.rows)"
+                      >
+                        <span
+                          class="flex h-5 w-5 items-center justify-center rounded border"
+                          :class="selectAllState(group.rows) === 'none' ? 'border-outline-gray-3' : 'border-heading bg-heading text-white'"
+                          aria-hidden="true"
+                        >
+                          <Icon
+                            v-if="selectAllState(group.rows) === 'all'"
+                            name="check"
+                            class="h-3 w-3"
+                          />
+                          <span
+                            v-else-if="selectAllState(group.rows) === 'some'"
+                            class="h-0.5 w-2.5 rounded bg-white"
+                          />
+                        </span>
+                      </button>
+                      <Avatar
+                        class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-[10px] font-bold text-ink-gray-7"
+                        :photo-url="group.photo_url"
+                        :initials="group.initials"
+                        :size="24"
+                      />
+                      <span class="min-w-0 truncate text-sm font-medium text-ink-gray-9">
+                        {{ group.employee_name }}
+                      </span>
+                      <!-- MH-07: with one row, the row already says how long. -->
+                      <span class="tabular text-xs text-ink-gray-5">
+                        {{ group.rows.length }} {{ group.rows.length === 1 ? 'item' : 'items' }}
+                        <template v-if="group.rows.length > 1 && ageLabel(group.oldest)">
+                          · waiting {{ ageLabel(group.oldest) }}
+                        </template>
+                      </span>
+                    </div>
+
+                    <ul class="space-y-2">
+                      <li
+                        v-for="row in group.rows"
+                        :key="row.id"
+                        class="surface-card elev-1"
+                        :class="row.name === name ? 'ring-2 ring-field' : ''"
+                        data-testid="approval-row"
+                        :data-approval-kind="row.kind"
+                        :data-approval-name="row.name"
+                      >
+                        <div class="flex items-stretch">
+                          <!-- R17: selection exists only in Looks normal, only for
+                           the two kinds the batch takes, and only while the
+                           server still calls the row clean. -->
+                          <button
+                            v-if="section.key === 'normal' && canBulkSelect"
+                            type="button"
+                            class="flex w-11 shrink-0 cursor-pointer items-center justify-center border-r border-outline-gray-2"
+                            :class="selectable(row) ? '' : 'cursor-default'"
+                            :aria-label="isSelected(row) ? `Unselect ${rowSummary(row)}` : `Select ${rowSummary(row)}`"
+                            :aria-pressed="isSelected(row)"
+                            :data-testid="`bulk-check-${row.kind}`"
+                            :tabindex="selectable(row) ? 0 : -1"
+                            @click.stop="toggleBulk(row)"
+                          >
+                            <!-- A row the batch can't take keeps the column and its
+                                 rule, so every avatar in the lane lines up; only
+                                 the box is hidden. -->
+                            <span
+                              class="flex h-5 w-5 items-center justify-center rounded border"
+                              :class="[
+                                isSelected(row) ? 'border-heading bg-heading text-white' : 'border-outline-gray-3',
+                                selectable(row) ? '' : 'invisible',
+                              ]"
                               aria-hidden="true"
                             >
-                              <div
-                                v-for="(day, index) in selected.day_totals"
-                                :key="day.date"
-                                class="min-w-0 flex-1 text-center"
-                              >
-                                <p class="label mb-1">
-                                  {{ DAY_LETTERS[index] }}
-                                </p>
-                                <div class="flex h-10 items-end justify-center rounded bg-surface-gray-2">
-                                  <div
-                                    class="w-full rounded bg-blue-500"
-                                    :style="{ height: day.hours ? barHeight(day.hours) : '0' }"
-                                  />
-                                </div>
-                                <p class="tabular mt-1 text-xs text-ink-gray-6">
-                                  {{ day.hours || '–' }}
-                                </p>
-                              </div>
-                            </div>
-                            <p
-                              v-if="selected.kind === 'timesheet'"
-                              class="sr-only"
-                            >
-                              <span
-                                v-for="(day, index) in selected.day_totals"
-                                :key="day.date"
-                              >{{ DAY_LETTERS[index] }} {{ day.hours }} hours.
-                              </span>
-                            </p>
-
-
-                            <!-- Evidence, then the decision. Never the other way
-                         round: the buttons live below everything that
-                         justifies them (P2-AE6). -->
-                            <dl
-                              v-if="selected.kind === 'timesheet'"
-                              class="mt-3 divide-y divide-outline-gray-2 border-t border-outline-gray-2"
-                            >
-                              <div
-                                v-for="line in selected.lines"
-                                :key="`${line.project}:${line.task}`"
-                                class="flex items-baseline justify-between gap-3 py-2"
-                              >
-                                <dt class="min-w-0 text-sm">
-                                  <span class="font-medium text-ink-gray-9">{{ line.project_name }}</span>
-                                  <span
-                                    v-if="line.task_subject"
-                                    class="text-ink-gray-6"
-                                  > · {{ line.task_subject }}</span>
-                                </dt>
-                                <dd class="tabular shrink-0 text-sm text-ink-gray-9">
-                                  {{ line.total }}
-                                </dd>
-                              </div>
-                              <div class="flex items-baseline justify-between gap-3 py-2">
-                                <dt class="text-sm font-medium text-ink-gray-9">
-                                  Week total
-                                </dt>
-                                <dd class="tabular shrink-0 font-bold text-ink-gray-9">
-                                  {{ selected.total_hours }}
-                                </dd>
-                              </div>
-                            </dl>
-
-                            <dl
-                              v-else-if="selected.kind === 'leave'"
-                              class="border-t border-outline-gray-2 pt-3 text-sm"
-                            >
-                              <div class="flex justify-between gap-3">
-                                <dt class="text-ink-gray-6">
-                                  {{ selected.leave_type }}
-                                </dt>
-                                <dd class="text-ink-gray-9">
-                                  {{ formatDateRange(selected.from_date, selected.to_date) }}
-                                </dd>
-                              </div>
-                              <div class="mt-1 flex justify-between gap-3">
-                                <dt class="text-ink-gray-6">
-                                  Days
-                                </dt>
-                                <dd class="tabular text-ink-gray-9">
-                                  {{ selected.total_days }}
-                                  <span v-if="selected.half_day">(half day)</span>
-                                </dd>
-                              </div>
-                              <div class="mt-1 flex justify-between gap-3">
-                                <dt class="text-ink-gray-6">
-                                  Status
-                                </dt>
-                                <dd>
-                                  <StatusBadge
-                                    kind="leave"
-                                    :status="selected.status"
-                                    :docstatus="selected.docstatus"
-                                  />
-                                </dd>
-                              </div>
-                            </dl>
-
-                            <!-- P3-R16. The days themselves, and what the calendar
-                         already shows for each: the manager is agreeing that
-                         these particular days were worked. -->
-                            <dl
-                              v-else-if="selected.kind === 'attendance'"
-                              class="border-t border-outline-gray-2 pt-3 text-sm"
-                            >
-                              <div class="flex justify-between gap-3">
-                                <dt class="text-ink-gray-6">
-                                  {{ selected.reason }}
-                                </dt>
-                                <dd class="text-ink-gray-9">
-                                  {{ formatDateRange(selected.from_date, selected.to_date) }}
-                                </dd>
-                              </div>
-                              <div
-                                v-for="day in selected.days"
-                                :key="day.date"
-                                class="mt-1 flex justify-between gap-3"
-                              >
-                                <dt class="tabular text-ink-gray-6">
-                                  {{ formatDate(day.date) }}
-                                </dt>
-                                <dd class="text-ink-gray-9">
-                                  {{ requestedDayLabel(day) }}
-                                </dd>
-                              </div>
-                              <div
-                                v-if="selected.half_day"
-                                class="mt-1 flex justify-between gap-3"
-                              >
-                                <dt class="text-ink-gray-6">
-                                  Half day
-                                </dt>
-                                <dd class="text-ink-gray-9">
-                                  {{ formatDate(selected.half_day_date) }}
-                                </dd>
-                              </div>
-                            </dl>
-
-                            <p
-                              v-if="quote"
-                              class="surface-inset mt-3 p-3 text-sm text-ink-gray-7"
-                            >
-                              {{ firstName }}: “{{ quote }}”
-                            </p>
-
-                            <p
-                              v-if="actionError"
-                              class="surface-alert mt-3 p-3 text-sm"
-                              role="alert"
-                            >
-                              {{ actionError }}
-                            </p>
-
-                            <!-- P4-U4. One reason surface, armed for one outcome at a
-                         time, on the deep field where the portal's other
-                         anchored write regions live. -->
-                            <div
-                              v-if="reasonFor"
-                              class="surface-field elev-2 mt-3 p-3"
-                              data-testid="decision-reason"
-                            >
-                              <p class="text-sm font-medium text-white">
-                                {{ reasonCopy.heading }}
-                              </p>
-                              <!-- Plan 2026-10-15-003 R6: Need info from Open is a pick-up. -->
-                              <p
-                                v-if="reasonFor === 'Need info' && selected.kind === 'request' && selected.status === 'Open'"
-                                class="mt-1 text-sm text-white"
-                                data-testid="need-info-assigns"
-                              >
-                                This also assigns the request to you.
-                              </p>
-                              <FormControl
-                                v-model="reason"
-                                class="mt-2"
-                                type="textarea"
-                                :placeholder="reasonPlaceholder"
-                                :aria-label="reasonCopy.heading"
-                                required
+                              <Icon
+                                v-if="isSelected(row)"
+                                name="check"
+                                class="h-3 w-3"
                               />
-                              <p
-                                v-if="reasonError"
-                                class="mt-1 text-sm font-medium text-ink-red-4"
-                                role="alert"
-                              >
-                                {{ reasonError }}
-                              </p>
-                              <!-- Plan 2026-10-05-001 U3: closing the reason puts the other
-                               outcomes (Accept among them) back. -->
-                              <Button
-                                class="mt-2"
-                                variant="subtle"
-                                data-testid="reason-cancel"
-                                @click="closeReason"
-                              >
-                                Cancel
-                              </Button>
-                            </div>
+                            </span>
+                          </button>
 
-                            <!-- Send to HR is a routing act, so its words are a note
-                         to a colleague and optional (P4-R5). -->
-                            <div
-                              v-if="noteOpen"
-                              class="mt-3"
-                              data-testid="hr-note"
-                            >
-                              <FormControl
-                                v-model="note"
-                                type="textarea"
-                                label="Anything HR should know? (optional)"
-                                placeholder="Why this needs HR"
-                              />
-                              <Button
-                                class="mt-2"
-                                variant="subtle"
-                                data-testid="note-cancel"
-                                @click="closeNote"
-                              >
-                                Cancel
-                              </Button>
-                            </div>
-
-                            <!-- Plan 2026-10-15-002 R7: HR User reads, never decides. -->
-                            <p
-                              v-if="selected.read_only"
-                              class="surface-inset mt-3 p-3 text-sm text-ink-gray-7"
-                              data-testid="view-only-note"
-                            >
-                              View only: you can't approve timesheets.
-                            </p>
-                            <DecisionActions
-                              class="mt-3"
-                              :kind="selected.kind"
-                              :actions="actions"
-                              :disabled="acting === selected.name"
-                              :loading="acting === selected.name"
-                              :armed="reasonFor || (noteOpen ? 'Send to HR' : (confirmAccept ? 'Accept' : ''))"
-                              :approve-label="approveLabel"
-                              @act="decide"
+                          <button
+                            type="button"
+                            class="flex w-full min-w-0 cursor-pointer items-center gap-3 p-3 text-left"
+                            data-row-toggle
+                            :aria-expanded="row.name === name"
+                            @click="row.name === name ? closeDetail() : open(row)"
+                          >
+                            <Avatar
+                              class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-sm font-bold text-ink-green-3"
+                              :photo-url="row.photo_url"
+                              :initials="row.initials"
+                              :size="40"
                             />
-                          </div>
-                        </AsyncState>
-                      </div>
-                    </li>
-                  </ul>
-                </div>
-              </section>
-            </template>
-          </section>
+
+                            <span class="min-w-0 flex-1">
+                              <span class="flex min-w-0 items-center gap-2">
+                                <KindTag :row="row" />
+                                <span class="min-w-0 truncate font-medium text-ink-gray-9">
+                                  {{ row.employee_name }}
+                                </span>
+                                <!-- P4-R11. One queue, two hats. The chip is a word, not
+                                 a tint, because it is the only thing that says whether
+                                 this row is HR's work or this manager's own. -->
+                                <span
+                                  v-if="row.for_hr"
+                                  class="shrink-0 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-bold text-ink-gray-7"
+                                  data-testid="hr-chip"
+                                >HR</span>
+                              </span>
+                              <!-- MH-02: on a phone the dates are why the row is
+                                   read, so the summary wraps there rather than
+                                   cutting them off; wider screens have room. -->
+                              <span class="block break-words text-sm text-ink-gray-6 sm:truncate">
+                                {{ rowSummary(row) }}
+                              </span>
+                              <span
+                                v-if="row.kind === 'timesheet' && row.expected_hours != null"
+                                class="tabular block text-xs text-ink-gray-5"
+                              >
+                                {{ trimNumber(row.total_hours) }} of
+                                {{ trimNumber(row.expected_hours) }} h expected
+                              </span>
+                              <span
+                                v-if="row.kind === 'leave' && row.balance_after != null"
+                                class="block text-xs text-ink-gray-5"
+                              >
+                                Balance after:
+                                <span class="tabular">{{ trimNumber(row.balance_after) }}</span>
+                                <template v-if="row.overlap_count">
+                                  · {{ row.overlap_count }}
+                                  {{ row.overlap_count === 1 ? 'other person is' : 'other people are' }} off then
+                                </template>
+                              </span>
+                              <!-- R16: the flags in words, never colour alone. -->
+                              <span
+                                v-if="row.needs_look"
+                                class="mt-1 flex flex-wrap gap-1"
+                                data-testid="flag-chips"
+                              >
+                                <span
+                                  v-for="flag in flagLabels(row)"
+                                  :key="flag"
+                                  class="rounded-full bg-surface-amber-1 px-2 py-0.5 text-xs font-medium text-ink-amber-3"
+                                >
+                                  {{ flag }}
+                                </span>
+                              </span>
+                              <span
+                                v-if="hrLine(row)"
+                                class="block truncate text-xs text-ink-gray-5"
+                              >
+                                {{ hrLine(row) }}
+                              </span>
+                              <!-- R18: a batch refused this row and it is still
+                                   pending; the reason stays with it. -->
+                              <span
+                                v-if="refusedReasons[row.name]"
+                                class="block text-xs font-medium text-ink-red-4"
+                                data-testid="bulk-refused-reason"
+                              >
+                                Not approved: {{ refusedReasons[row.name] }}
+                              </span>
+                            </span>
+
+                            <span class="shrink-0 text-right">
+                              <span
+                                class="tabular block font-medium text-ink-gray-9"
+                                :data-testid="row.kind === 'request' ? 'request-claim' : null"
+                              >{{ rowAmount(row) }}</span>
+                              <!-- MH-07: the amount above is the request's; this is
+                                   how long it has waited, and says so. -->
+                              <span
+                                v-if="ageLabel(row)"
+                                class="tabular block text-xs text-ink-gray-5"
+                              >waiting {{ ageLabel(row) }}</span>
+                            </span>
+
+                            <Icon
+                              v-if="!isDesktop"
+                              name="chevronRight"
+                              class="shrink-0 text-ink-gray-4 transition-transform duration-200"
+                              :class="row.name === name ? 'rotate-90' : ''"
+                            />
+                          </button>
+                        </div>
+
+                        <!-- Phone: the selected item opens where it is, so the manager
+                         never loses their place in the queue (P2-U7 step 7). -->
+                        <div
+                          v-if="!isDesktop && row.name === name"
+                          class="border-t border-outline-gray-2 px-3 pb-3"
+                        >
+                          <AsyncState
+                            section="approvals-detail"
+                            class="pt-3"
+                            :resource="detail"
+                            :empty="!detail.data"
+                            empty-title="That request isn't here any more"
+                            empty-body="It may have been withdrawn or already decided."
+                            skeleton="block"
+                            skeleton-height="h-40"
+                          >
+                            <template #error-title>
+                              We couldn't load this request
+                            </template>
+                            <ApprovalEvidence
+                              v-if="selected"
+                              v-bind="evidence"
+                              v-model:reason="reason"
+                              v-model:note="note"
+                              layout="inline"
+                              @act="decide"
+                              @close-reason="closeReason"
+                              @close-note="closeNote"
+                            />
+                          </AsyncState>
+                        </div>
+                      </li>
+                    </ul>
+                  </div>
+                </section>
+              </template>
+            </section>
+          </div>
 
           <p
             v-if="overflow"
@@ -1442,7 +1556,7 @@ function dismissBulkResult() {
              by approver, with Send reminder. -->
         <TimesheetOversight
           v-if="view === 'timesheets' && session.canOverseeTimesheets"
-          class="mt-8"
+          :class="oversightOnly ? '' : 'mt-8'"
         />
       </div>
 
@@ -1468,446 +1582,16 @@ function dismissBulkResult() {
             We couldn't load this request
           </template>
 
-          <article
+          <ApprovalEvidence
             v-if="selected"
-            class="surface-card elev-1 p-4"
-            aria-label="Request detail"
-          >
-            <div class="flex items-start gap-3">
-              <Avatar
-                class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-sm font-bold text-ink-green-3"
-                :photo-url="selected.photo_url"
-                :initials="selected.initials"
-                :size="40"
-              />
-              <div class="min-w-0 flex-1">
-                <h2 class="flex min-w-0 items-center gap-2 font-heading text-lg font-bold text-ink-gray-9">
-                  <span class="min-w-0 truncate">{{ selected.employee_name }}</span>
-                  <span
-                    v-if="selected.for_hr"
-                    class="shrink-0 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-bold text-ink-gray-7"
-                    data-testid="hr-chip"
-                  >HR</span>
-                </h2>
-                <!-- P4-R11: the same line the queue row carries, so opening
-                     an HR row does not lose who handed it over or why. -->
-                <p
-                  v-if="hrLine(selected)"
-                  class="text-sm text-ink-gray-5"
-                >
-                  {{ hrLine(selected) }}
-                </p>
-                <p class="text-sm text-ink-gray-6">
-                  <template v-if="selected.kind === 'timesheet'">
-                    Timesheet · {{ formatDateRange(selected.week_start, selected.week_end) }}
-                  </template>
-                  <template v-else-if="selected.kind === 'attendance'">
-                    {{ selected.reason }} ·
-                    {{ formatDateRange(selected.from_date, selected.to_date) }}
-                  </template>
-                  <template v-else-if="selected.kind === 'request'">
-                    {{ selected.category }} · {{ selected.subject }}
-                  </template>
-                  <template v-else-if="selected.kind === 'change'">
-                    Change request ·
-                    {{ formatDateRange(selected.week_start, selected.week_end) }}
-                  </template>
-                  <template v-else>
-                    {{ selected.leave_type }} ·
-                    {{ formatDateRange(selected.from_date, selected.to_date) }}
-                  </template>
-                  <template v-if="selected.sent_on">
-                    · sent {{ formatDate(selected.sent_on) }}
-                  </template>
-                </p>
-              </div>
-              <p
-                v-if="selected.kind === 'timesheet'"
-                class="shrink-0 text-right"
-              >
-                <span class="tabular font-heading text-2xl font-bold text-ink-gray-9">
-                  {{ selected.total_hours }}
-                </span>
-                <span class="tabular text-sm text-ink-gray-5"> / {{ selected.full_week_hours }} h</span>
-              </p>
-              <StatusBadge
-                v-else
-                :kind="selected.kind"
-                :status="selected.status"
-                :docstatus="selected.docstatus"
-              />
-            </div>
-
-            <!-- The week, project by project and day by day. This table is
-                 the evidence; it scrolls inside its own container rather than
-                 widening the page (P2-R3). -->
-            <div
-              v-if="selected.kind === 'timesheet'"
-              class="mt-4 overflow-x-auto"
-            >
-              <table class="w-full min-w-[34rem] text-sm">
-                <thead>
-                  <tr class="border-b border-outline-gray-2">
-                    <th
-                      scope="col"
-                      class="label py-2 text-left"
-                    >
-                      Project / task
-                    </th>
-                    <th
-                      v-for="(day, index) in selected.day_totals"
-                      :key="day.date"
-                      scope="col"
-                      class="label py-2 text-right"
-                    >
-                      {{ DAY_LETTERS[index] }}
-                    </th>
-                    <th
-                      scope="col"
-                      class="label py-2 text-right"
-                    >
-                      Total
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr
-                    v-for="line in selected.lines"
-                    :key="`${line.project}:${line.task}`"
-                    class="border-b border-outline-gray-2"
-                  >
-                    <th
-                      scope="row"
-                      class="py-2 pr-3 text-left font-medium text-ink-gray-9"
-                    >
-                      {{ line.project_name }}
-                      <span
-                        v-if="line.task_subject"
-                        class="block text-xs font-normal text-ink-gray-6"
-                      >{{ line.task_subject }}</span>
-                    </th>
-                    <td
-                      v-for="day in selected.day_totals"
-                      :key="day.date"
-                      class="tabular py-2 text-right text-ink-gray-7"
-                    >
-                      {{ line.hours_by_date[day.date] || '–' }}
-                    </td>
-                    <td class="tabular py-2 text-right font-medium text-ink-gray-9">
-                      {{ line.total }}
-                    </td>
-                  </tr>
-                  <tr class="bg-surface-gray-2">
-                    <th
-                      scope="row"
-                      class="py-2 pr-3 text-left font-medium text-ink-gray-9"
-                    >
-                      Day total
-                    </th>
-                    <td
-                      v-for="day in selected.day_totals"
-                      :key="day.date"
-                      class="tabular py-2 text-right text-ink-gray-9"
-                    >
-                      {{ day.hours }}
-                    </td>
-                    <td class="tabular py-2 text-right font-bold text-ink-gray-9">
-                      {{ selected.total_hours }}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-
-            <!-- P3-R16. One row per day the request names, with what the
-                 calendar shows for it beside the date. -->
-            <div
-              v-else-if="selected.kind === 'attendance'"
-              class="mt-4"
-            >
-              <p
-                v-if="!selected.working_days_known"
-                class="surface-alert mb-3 p-3 text-sm"
-              >
-                We can't tell which of these are working days --
-                {{ firstName }} has no holiday list. Ask HR before deciding.
-              </p>
-              <dl class="divide-y divide-outline-gray-2 border-t border-outline-gray-2">
-                <div
-                  v-for="day in selected.days"
-                  :key="day.date"
-                  class="flex items-baseline justify-between gap-3 py-2"
-                >
-                  <dt class="tabular text-sm text-ink-gray-9">
-                    {{ formatDate(day.date) }}
-                  </dt>
-                  <dd class="text-sm text-ink-gray-6">
-                    the calendar shows {{ requestedDayLabel(day) }}
-                  </dd>
-                </div>
-                <div
-                  v-if="selected.half_day"
-                  class="flex items-baseline justify-between gap-3 py-2"
-                >
-                  <dt class="text-sm text-ink-gray-9">
-                    Half day
-                  </dt>
-                  <dd class="text-sm text-ink-gray-6">
-                    {{ formatDate(selected.half_day_date) }}
-                  </dd>
-                </div>
-              </dl>
-            </div>
-
-            <!-- R13: the change request's evidence is the employee's words
-                 plus the approved week's hours it proposes to undo. -->
-            <div
-              v-else-if="selected.kind === 'change'"
-              class="mt-4"
-            >
-              <div class="surface-inset p-3 text-sm">
-                <p class="font-medium text-ink-gray-9">
-                  What they asked to change
-                </p>
-                <p class="mt-1 text-ink-gray-7">
-                  {{ selected.comment }}
-                </p>
-              </div>
-              <dl class="mt-3 grid grid-cols-2 gap-4">
-                <div>
-                  <dt class="label">
-                    Approved week
-                  </dt>
-                  <dd class="mt-0.5 text-sm text-ink-gray-9">
-                    {{ formatDateRange(selected.week_start, selected.week_end) }}
-                  </dd>
-                </div>
-                <div>
-                  <dt class="label">
-                    Hours on it
-                  </dt>
-                  <dd class="tabular mt-0.5 text-sm text-ink-gray-9">
-                    {{ Number(selected.total_hours).toFixed(1).replace(/\.0$/, '') }} h
-                  </dd>
-                </div>
-              </dl>
-              <p
-                v-if="selected.decision_note"
-                class="surface-inset mt-3 p-3 text-sm text-ink-gray-7"
-              >
-                <span class="font-medium text-ink-gray-9">Decision:</span>
-                {{ selected.decision_note }}
-              </p>
-            </div>
-
-            <dl
-              v-else-if="selected.kind === 'leave'"
-              class="mt-4 grid grid-cols-2 gap-4"
-            >
-              <div>
-                <dt class="label">
-                  From
-                </dt>
-                <dd class="mt-0.5 text-sm text-ink-gray-9">
-                  {{ formatDate(selected.from_date) }}
-                </dd>
-              </div>
-              <div>
-                <dt class="label">
-                  To
-                </dt>
-                <dd class="mt-0.5 text-sm text-ink-gray-9">
-                  {{ formatDate(selected.to_date) }}
-                </dd>
-              </div>
-              <div>
-                <dt class="label">
-                  Days
-                </dt>
-                <dd class="tabular mt-0.5 text-sm text-ink-gray-9">
-                  {{ selected.total_days }}
-                  <span v-if="selected.half_day">(half day)</span>
-                </dd>
-              </div>
-              <div>
-                <dt class="label">
-                  Left after this
-                </dt>
-                <dd class="tabular mt-0.5 text-sm text-ink-gray-9">
-                  {{ selected.leave_balance }}
-                </dd>
-              </div>
-            </dl>
-
-            <!-- P5-R10 / P5-R10a: the request and every reply after it, plus
-                 the routed worker's own attach affordance -- the desktop twin
-                 of the phone conversation block above. -->
-            <div
-              v-else-if="selected.kind === 'request'"
-              class="mt-4"
-            >
-              <p class="text-sm text-ink-gray-6">
-                {{ selected.category }}
-              </p>
-              <CorrectionReview
-                v-if="selected.correction"
-                :key="selected.name"
-                :request="selected.name"
-                :correction="selected.correction"
-                :attachments="selected.attachments"
-                :can-reveal="actions.length > 0"
-              />
-              <RequestThread
-                :entries="selected.thread || []"
-                :can-comment="!!selected.can_comment"
-                :closed="!!selected.closed"
-                :request-name="selected.name"
-                :employee-name="selected.employee_name || ''"
-                mode="handler"
-                class="mt-3"
-                @posted="detail.fetch()"
-              />
-
-              <div
-                v-if="actions.length"
-                class="mt-3"
-              >
-                <Button
-                  variant="outline"
-                  :loading="attachingReply"
-                  :disabled="attachingReply"
-                  @click="requestFileInputDesktop?.click()"
-                >
-                  Attach a file
-                </Button>
-                <input
-                  ref="requestFileInputDesktop"
-                  type="file"
-                  class="sr-only"
-                  data-testid="attach-reply-input"
-                  @change="attachReplyFile"
-                >
-                <p
-                  v-if="attachReplyError"
-                  class="mt-1 text-sm text-ink-red-4"
-                  role="alert"
-                >
-                  {{ attachReplyError }}
-                </p>
-              </div>
-            </div>
-
-            <p
-              v-if="quote"
-              class="surface-inset mt-4 p-3 text-sm text-ink-gray-7"
-            >
-              {{ firstName }}: “{{ quote }}”
-            </p>
-
-            <p
-              v-if="actionError"
-              class="surface-alert mt-4 p-3 text-sm"
-              role="alert"
-            >
-              {{ actionError }}
-            </p>
-
-            <!-- Send back and Reject need their reason on the same surface as
-                 the button, not behind a dialog: the employee reads this
-                 sentence, so it is written next to the evidence it is about
-                 (P2-U7 step 4).
-                 P4-U4: one surface for both, armed by whichever button opened
-                 it and relabelled -- and emptied -- if the other one does. -->
-            <div
-              v-if="reasonFor"
-              class="surface-field elev-2 mt-4 p-4"
-              data-testid="decision-reason"
-            >
-              <p class="text-sm font-medium text-white">
-                {{ reasonCopy.heading }}
-              </p>
-              <!-- Plan 2026-10-15-003 R6: Need info from Open is a pick-up. -->
-              <p
-                v-if="reasonFor === 'Need info' && selected.kind === 'request' && selected.status === 'Open'"
-                class="mt-1 text-sm text-white"
-                data-testid="need-info-assigns"
-              >
-                This also assigns the request to you.
-              </p>
-              <FormControl
-                v-model="reason"
-                class="mt-2"
-                type="textarea"
-                :placeholder="reasonPlaceholder"
-                :aria-label="reasonCopy.heading"
-                required
-              />
-              <p
-                v-if="reasonError"
-                class="mt-1 text-sm font-medium text-ink-red-4"
-                role="alert"
-              >
-                {{ reasonError }}
-              </p>
-              <!-- Plan 2026-10-05-001 U3: closing the reason puts the other
-                   outcomes (Accept among them) back. -->
-              <Button
-                class="mt-2"
-                variant="subtle"
-                data-testid="reason-cancel"
-                @click="closeReason"
-              >
-                Cancel
-              </Button>
-            </div>
-
-            <div
-              v-if="noteOpen"
-              class="mt-4"
-              data-testid="hr-note"
-            >
-              <FormControl
-                v-model="note"
-                type="textarea"
-                label="Anything HR should know? (optional)"
-                placeholder="Why this needs HR"
-              />
-              <Button
-                class="mt-2"
-                variant="subtle"
-                data-testid="note-cancel"
-                @click="closeNote"
-              >
-                Cancel
-              </Button>
-            </div>
-
-            <!-- P4-R1. Exactly the outcomes the server allows, in one order
-                 on every kind: the decision, the recoverable no, the final no,
-                 the hand-over. An outcome missing from `actions` is not
-                 rendered rather than rendered disabled -- a greyed-out Reject
-                 on a timesheet would still teach a manager that a week can be
-                 rejected, which it cannot (P4-KTD2). -->
-            <!-- Plan 2026-10-15-002 R7: HR User reads, never decides. -->
-            <p
-              v-if="selected.read_only"
-              class="surface-inset mt-3 p-3 text-sm text-ink-gray-7"
-              data-testid="view-only-note"
-            >
-              View only: you can't approve timesheets.
-            </p>
-            <div class="mt-4 flex flex-wrap items-center justify-end gap-2">
-              <DecisionActions
-                :kind="selected.kind"
-                :actions="actions"
-                :disabled="acting === selected.name"
-                :loading="acting === selected.name"
-                :armed="reasonFor || (noteOpen ? 'Send to HR' : (confirmAccept ? 'Accept' : ''))"
-                :approve-label="approveLabel"
-                @act="decide"
-              />
-            </div>
-          </article>
+            v-bind="evidence"
+            v-model:reason="reason"
+            v-model:note="note"
+            layout="panel"
+            @act="decide"
+            @close-reason="closeReason"
+            @close-note="closeNote"
+          />
         </AsyncState>
       </aside>
     </div>
@@ -1932,7 +1616,7 @@ function dismissBulkResult() {
         variant="solid"
         theme="green"
         data-testid="bulk-approve"
-        @click="confirmBulk = true"
+        @click="openConfirm({ type: 'selection' })"
       >
         Approve together
       </Button>
@@ -1946,9 +1630,29 @@ function dismissBulkResult() {
       :options="{ title: 'Approve these together?' }"
     >
       <template #body-content>
-        <p class="text-sm text-ink-gray-7">
-          {{ bulkBarLabel }} for
-          {{ bulkPeople.join(', ') }}.
+        <p
+          v-if="confirmBatch.rows.length"
+          class="text-sm text-ink-gray-7"
+          data-testid="bulk-confirm-label"
+        >
+          {{ confirmLabel }} for
+          {{ confirmPeople.join(', ') }}.
+        </p>
+        <p
+          v-else
+          class="text-sm text-ink-gray-7"
+        >
+          Nothing here can be approved together any more.
+        </p>
+        <!-- MH-04: past the server's cap the batch is the oldest 60, and
+             the rest wait for the next run. -->
+        <p
+          v-if="confirmBatch.eligible > confirmBatch.rows.length"
+          class="mt-2 text-sm text-ink-gray-7"
+        >
+          The oldest <span class="tabular">{{ confirmBatch.rows.length }}</span> of
+          <span class="tabular">{{ confirmBatch.eligible }}</span>; the other
+          <span class="tabular">{{ confirmBatch.eligible - confirmBatch.rows.length }}</span> stay in the queue.
         </p>
         <p class="mt-2 text-sm text-ink-gray-6">
           Only rows that still look normal to the server will be approved; anything that changed
@@ -1959,6 +1663,7 @@ function dismissBulkResult() {
         <div class="flex justify-end gap-2">
           <Button
             variant="subtle"
+            :disabled="bulkRunning"
             @click="confirmBulk = false"
           >
             Back
@@ -1967,10 +1672,11 @@ function dismissBulkResult() {
             variant="solid"
             theme="green"
             :loading="bulkRunning"
+            :disabled="!confirmBatch.rows.length"
             data-testid="bulk-confirm"
             @click="runBulk"
           >
-            Approve {{ bulkSelected.length }}
+            Approve {{ confirmBatch.rows.length }}
           </Button>
         </div>
       </template>
@@ -2022,33 +1728,54 @@ function dismissBulkResult() {
       </template>
     </Dialog>
 
-    <!-- R18: the result names every refused item, with a way back to it. -->
+    <!-- R18: a partial result stays until dismissed. It says how many went
+         through, names what somebody else already decided, and gives a way
+         back to each row that is still waiting. A full success is a toast
+         instead. -->
     <Dialog
       :model-value="!!bulkResult"
       :options="{ title: 'Bulk approval' }"
       @update:model-value="(value) => !value && dismissBulkResult()"
     >
       <template #body-content>
-        <ul class="space-y-2">
+        <p
+          class="text-sm text-ink-gray-7"
+          data-testid="bulk-result-summary"
+        >
+          {{ bulkSummary }}
+        </p>
+        <ul
+          v-if="bulkResult?.decided.length"
+          class="mt-3 space-y-2"
+        >
           <li
-            v-for="result in bulkResult || []"
+            v-for="result in bulkResult.decided"
+            :key="result.name"
+            class="surface-inset p-2 text-sm"
+            data-testid="bulk-result-decided"
+          >
+            <span class="block truncate">{{ result.label || result.name }}</span>
+            <span class="block text-xs text-ink-gray-5">Already decided by someone else</span>
+          </li>
+        </ul>
+        <ul
+          v-if="bulkResult?.stayed.length"
+          class="mt-3 space-y-2"
+        >
+          <li
+            v-for="result in bulkResult.stayed"
             :key="result.name"
             class="surface-inset flex items-center justify-between gap-3 p-2 text-sm"
-            :data-testid="`bulk-result-${result.ok ? 'ok' : 'refused'}`"
+            data-testid="bulk-result-refused"
           >
-            <span class="min-w-0 flex-1 truncate">
-              <template v-if="result.ok">
-                Approved
-              </template>
-              <template v-else>
-                {{ result.message }}
-              </template>
+            <span class="min-w-0 flex-1">
+              <span class="block truncate">{{ result.label || result.name }}</span>
+              <span class="block text-xs text-ink-gray-6">{{ result.message }}</span>
             </span>
             <button
-              v-if="!result.ok"
-              class="shrink-0 cursor-pointer text-sm font-medium text-ink-blue-link underline underline-offset-2"
+              class="min-h-11 shrink-0 cursor-pointer text-sm font-medium text-ink-blue-link underline underline-offset-2"
               type="button"
-              @click="dismissBulkResult(); open({ name: result.name, kind: (pending.find((row) => row.name === result.name) || {}).kind || 'timesheet' })"
+              @click="openRefused(result)"
             >
               Open it
             </button>
@@ -2058,6 +1785,7 @@ function dismissBulkResult() {
       <template #actions>
         <Button
           variant="solid"
+          theme="blue"
           @click="dismissBulkResult"
         >
           Done

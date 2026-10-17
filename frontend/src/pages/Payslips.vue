@@ -6,8 +6,10 @@ import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import PayslipBreakdown from '@/components/PayslipBreakdown.vue'
 import Icon from '@/components/Icon.vue'
+import SegmentedChips from '@/components/SegmentedChips.vue'
 import { dateTileParts, formatDateRange, isCalendarDate } from '@/lib/dates'
 import { formatMoney } from '@/lib/money'
+import { formatMonth, monthOf } from '@/lib/month'
 import { useIsDesktop } from '@/lib/useIsDesktop'
 
 // P3-U2 / P3-R1 to P3-R4. `/payslips` and `/payslips/:name` are one
@@ -34,6 +36,10 @@ const payslips = createResource({
 const rows = computed(() => payslips.data?.payslips || [])
 const total = computed(() => payslips.data?.total || 0)
 const years = computed(() => payslips.data?.years || [])
+const yearOptions = computed(() => [
+  { value: null, label: 'All years' },
+  ...years.value.map((value) => ({ value, label: String(value) })),
+])
 // The anchored block is "what the last payroll run paid", so it must not
 // follow the year filter. `rows[0]` read the *filtered* list, which put a
 // 2024 slip under "Latest payslip" with its net pay as the page's headline
@@ -62,12 +68,19 @@ function filterByYear(value) {
   payslips.reload()
 }
 
-// The tile the canvas puts on every row: 56px, the year over the month
-// (`.date-tile` in index.css) -- so this row reads the shared splitter's
-// `year` and `month` and not its `day`. `null` for a period the server could
-// not date, which the template already guards with `v-if`.
+// The documented `.date-tile` (index.css): the short month in the small top
+// line, as on Leave and Holidays, and -- because a payslip is about a month,
+// not a day -- the year in the bold line where a day would go (EP-21). The
+// tile still carries the year, so a slip under "Earlier" or on a phone
+// scrolled past its heading is never ambiguous. `null` for a period the
+// server could not date, which the template guards with `v-if`.
 function tile(row) {
   return dateTileParts(row.end_date)
+}
+
+/** "August 2026" -- the period a row's download button names. */
+function periodName(row) {
+  return isCalendarDate(row.end_date) ? formatMonth(monthOf(row.end_date)) : ''
 }
 
 /** One run of rows per year, newest first -- the server already orders by
@@ -176,41 +189,14 @@ const sheetOpen = computed(() => !!props.name && !isDesktop.value)
 
     <!-- Year filter. Only drawn when there is more than one year to choose
          between; a single-year list needs no control. -->
-    <div
+    <SegmentedChips
       v-if="years.length > 1"
-      class="mb-4 flex flex-wrap items-center gap-2"
-      role="group"
-      aria-label="Filter payslips by year"
-    >
-      <button
-        type="button"
-        class="min-h-11 rounded-full border px-4 text-sm font-medium"
-        :class="
-          year === null
-            ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-            : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-        "
-        :aria-pressed="year === null"
-        @click="filterByYear(null)"
-      >
-        All years
-      </button>
-      <button
-        v-for="option in years"
-        :key="option"
-        type="button"
-        class="tabular min-h-11 rounded-full border px-4 text-sm font-medium"
-        :class="
-          year === option
-            ? 'border-outline-gray-3 bg-surface-gray-3 text-ink-gray-9'
-            : 'border-outline-gray-2 text-ink-gray-7 hover:bg-surface-gray-2'
-        "
-        :aria-pressed="year === option"
-        @click="filterByYear(option)"
-      >
-        {{ option }}
-      </button>
-    </div>
+      class="mb-4"
+      label="Filter payslips by year"
+      :options="yearOptions"
+      :model-value="year"
+      @update:model-value="filterByYear"
+    />
 
     <div class="lg:flex lg:items-start lg:gap-6">
       <!-- The list. At lg: it keeps its place while the panel beside it
@@ -244,8 +230,8 @@ const sheetOpen = computed(() => !!props.name && !isDesktop.value)
                   class="date-tile mt-0.5 self-start"
                   aria-hidden="true"
                 >
-                  <span class="date-tile-month">{{ tile(row).year }}</span>
-                  <span class="date-tile-day">{{ tile(row).month }}</span>
+                  <span class="date-tile-month">{{ tile(row).month }}</span>
+                  <span class="date-tile-day">{{ tile(row).year }}</span>
                 </span>
 
                 <div class="min-w-0 flex-1">
@@ -285,6 +271,21 @@ const sheetOpen = computed(() => !!props.name && !isDesktop.value)
                   </p>
                 </div>
 
+                <!-- ED-06: the PDF straight from the row, without opening the
+                     sheet. Above the stretched link (`relative z-10`) so it is
+                     its own 44px target, and a real GET link like the field
+                     block's. A withheld slip has none: it is not a document
+                     to take away. -->
+                <a
+                  v-if="pdfHref(row)"
+                  :href="pdfHref(row)"
+                  download
+                  class="relative z-10 -my-1 inline-flex h-11 min-w-11 shrink-0 cursor-pointer items-center justify-center self-start rounded-full px-3 text-xs font-bold text-ink-gray-7 hover:bg-surface-gray-2 hover:text-ink-gray-9"
+                  :aria-label="`Download ${periodName(row) || formatDateRange(row.start_date, row.end_date)} payslip PDF`"
+                  data-testid="payslip-row-pdf"
+                >
+                  PDF
+                </a>
                 <Icon
                   name="chevronRight"
                   class="mt-1 shrink-0 self-start text-ink-gray-4"

@@ -10,10 +10,17 @@ import { NOT_RECORDED, formatProfileValue, spokenValue } from '@/lib/profileCorr
 // a long tab into headed runs; a field no group names renders in a trailing
 // untitled run so nothing the server sent is dropped. Editable fields are
 // skipped here -- the Contact tab edits them in its own form.
+//
+// Plan 2026-10-17-001 U10 (ED-18, EP-17): one "Request a correction" per run,
+// not one per row -- eleven identical links down the Personal tab were a
+// column of noise. The run hands the dialog its fields, and the dialog asks
+// which one (a single-field run skips the question).
 const props = defineProps({
   fields: { type: Array, default: () => [] },
   groups: { type: Array, default: () => [] },
-  /** False when the correction category is retired: no per-row button. */
+  /** The tab's name, for the run that has no heading of its own. */
+  sectionLabel: { type: String, default: '' },
+  /** False when the correction category is retired: no correction entry. */
   canCorrect: { type: Boolean, default: true },
 })
 const emit = defineEmits(['correct'])
@@ -31,7 +38,10 @@ const runs = computed(() => {
   }
   const rest = shown.value.filter((field) => !claimed.has(field.fieldname))
   if (rest.length) out.push({ label: '', fields: rest })
-  return out
+  return out.map((run) => {
+    const name = run.label || props.sectionLabel
+    return { ...run, name, slug: name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') }
+  })
 })
 
 function display(field) {
@@ -44,12 +54,25 @@ function isExpired(field) {
   return field.fieldname === 'valid_upto' && isCalendarDate(field.value) && field.value < today()
 }
 
-function correct(field) {
-  emit('correct', {
+function describe(field) {
+  return {
     label: field.label,
     display: display(field),
     masked: field.masked,
     fieldname: field.fieldname,
+  }
+}
+
+function correct(run) {
+  if (run.fields.length === 1) {
+    emit('correct', describe(run.fields[0]))
+    return
+  }
+  emit('correct', {
+    label: run.name,
+    section: true,
+    masked: run.fields.some((field) => field.masked),
+    choices: run.fields.map(describe),
   })
 }
 </script>
@@ -59,7 +82,7 @@ function correct(field) {
     <section
       v-for="run in runs"
       :key="run.label || 'rest'"
-      :aria-label="run.label || undefined"
+      :aria-label="run.name || undefined"
     >
       <h3
         v-if="run.label"
@@ -87,20 +110,26 @@ function correct(field) {
               v-if="isExpired(field)"
               class="rounded-full bg-surface-red-2 px-2 py-0.5 text-xs font-medium text-ink-red-4"
             >Expired</span>
-            <!-- Always visible, never hover-only: the correction path has to
-                 work on a phone and from the keyboard. -->
-            <button
-              v-if="canCorrect"
-              type="button"
-              class="-my-2 inline-flex min-h-11 shrink-0 cursor-pointer items-center text-sm font-medium text-blue-700 underline decoration-dotted underline-offset-4"
-              :aria-label="`Request a correction to ${field.label}`"
-              @click="correct(field)"
-            >
-              Request a correction
-            </button>
           </span>
         </div>
       </div>
+      <!-- Always visible, never hover-only: the correction path has to work
+           on a phone and from the keyboard. -->
+      <p
+        v-if="canCorrect"
+        class="mt-1 flex flex-wrap items-center gap-x-1 text-sm text-ink-gray-6"
+      >
+        Something wrong?
+        <button
+          type="button"
+          class="inline-flex min-h-11 cursor-pointer items-center font-medium text-blue-700 underline decoration-dotted underline-offset-4"
+          :aria-label="`Request a correction to ${run.name}`"
+          :data-testid="`profile-correct-${run.slug}`"
+          @click="correct(run)"
+        >
+          Request a correction
+        </button>
+      </p>
     </section>
   </div>
 </template>

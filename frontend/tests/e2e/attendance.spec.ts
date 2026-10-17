@@ -12,6 +12,19 @@ function firstDay(page: Page) {
   return page.locator('button[data-day]').first()
 }
 
+/** WCAG relative-luminance contrast of two computed `rgb()` colours. */
+function contrast(a: string, b: string): number {
+  const luminance = (colour: string) => {
+    const [r, g, bl] = (colour.match(/[\d.]+/g) || []).slice(0, 3).map((part) => {
+      const c = Number(part) / 255
+      return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4
+    })
+    return 0.2126 * r + 0.7152 * g + 0.0722 * bl
+  }
+  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x)
+  return (hi + 0.05) / (lo + 0.05)
+}
+
 test.describe('employee', () => {
   test.beforeEach(async ({}, testInfo) => {
     test.skip(testInfo.project.name !== 'employee', 'employee-only scenarios')
@@ -33,6 +46,67 @@ test.describe('employee', () => {
     for (const word of ['Present', 'Absent', 'Late', 'No record']) {
       await expect(page.getByRole('listitem').filter({ hasText: word }).first()).toBeVisible()
     }
+  })
+
+  // U16 (ED-16, EP-12). Today is marked -- visibly and for assistive tech --
+  // and every legend swatch measures at least 3:1 against the ground it sits
+  // on, the non-text contrast minimum (WCAG 1.4.11).
+  test('today is marked and the legend swatches are visible', async ({ page }) => {
+    const response = await page.request.get('/api/method/helixhr.api.get_portal_bootstrap')
+    const today = (await response.json()).message.today as string
+
+    await page.goto('/helixhr/attendance')
+    await page.waitForLoadState('networkidle')
+
+    const current = page.locator('[aria-current="date"]')
+    await expect(current).toHaveCount(1)
+    await expect(current).toHaveAttribute('data-day', today)
+    // The ring is drawn, not only announced.
+    expect(await current.evaluate((cell) => getComputedStyle(cell).boxShadow)).not.toBe('none')
+
+    const swatches = await page
+      .getByRole('list', { name: 'Legend' })
+      .locator('li > span[aria-hidden="true"]')
+      .evaluateAll((spans) =>
+        spans.map((span) => {
+          const style = getComputedStyle(span)
+          // A bordered swatch measures by its edge. The Late swatch is a
+          // ring, which the browser paints as the widest of its box-shadows
+          // (the zero-width one before it is the ring offset).
+          const ring = style.boxShadow
+            .split(/,(?![^(]*\))/)
+            .map((shadow) => ({
+              colour: (shadow.match(/rgba?\([^)]*\)/) || [''])[0],
+              spread: parseFloat((shadow.match(/(-?[\d.]+)px\s*$/) || ['', '0'])[1]),
+            }))
+            .sort((x, y) => y.spread - x.spread)[0]
+          const edge =
+            parseFloat(style.borderTopWidth) > 0 ? style.borderTopColor : ring?.colour || ''
+          let node: HTMLElement | null = span.parentElement
+          let ground = 'rgba(0, 0, 0, 0)'
+          while (node) {
+            const bg = getComputedStyle(node).backgroundColor
+            if (bg && !/rgba\(0, 0, 0, 0\)|transparent/.test(bg)) {
+              ground = bg
+              break
+            }
+            node = node.parentElement
+          }
+          return { label: span.parentElement!.textContent!.trim(), edge, ground }
+        }),
+      )
+    expect(swatches.map((swatch) => swatch.label)).toEqual(
+      expect.arrayContaining(['Present', 'Work from home', 'Absent', 'Late', 'No record']),
+    )
+    for (const { label, edge, ground } of swatches) {
+      expect(contrast(edge, ground), `${label}: ${edge} on ${ground}`).toBeGreaterThanOrEqual(3)
+    }
+
+    // Another month has no today in it.
+    await page.getByRole('button', { name: 'Previous month' }).click()
+    await page.waitForLoadState('networkidle')
+    await expect(page.locator('button[data-day]').first()).toBeVisible()
+    await expect(page.locator('[aria-current="date"]')).toHaveCount(0)
   })
 
   test('the day sheet closes by button, Escape and backdrop, and restores focus', async ({

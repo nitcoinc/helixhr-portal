@@ -105,6 +105,52 @@ test.describe('employee', () => {
     const box = await managerLink.boundingBox()
     expect(box!.height).toBeGreaterThanOrEqual(44)
   })
+
+  // U16 (ED-17, EP-20). A colleague HR has filed nothing for -- no role, no
+  // department, no manager, no work email -- is a name on a card: no empty
+  // footer band under it and no "Role not published" filler line. The filed
+  // colleague beside them is the control, so the footer is proved to exist
+  // when it has something to say.
+  test('a card with nothing filed has no footer band and no filler role', async ({ page }) => {
+    await page.route('**/api/method/helixhr.api.get_directory*', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          message: {
+            people: [
+              { name: 'HR-EMP-C', employee_name: 'Cy Bare', initials: 'CB' },
+              {
+                name: 'HR-EMP-D',
+                employee_name: 'Di Filed',
+                initials: 'DF',
+                designation: 'Analyst',
+                department: 'Finance',
+                email: 'di@helixhr.test',
+              },
+            ],
+            total: 2,
+            departments: [{ name: 'Finance', count: 1 }],
+          },
+        }),
+      }),
+    )
+
+    await page.goto('/helixhr/directory')
+    await page.waitForLoadState('networkidle')
+
+    const bare = page.locator('li.surface-card').filter({ hasText: 'Cy Bare' })
+    const filed = page.locator('li.surface-card').filter({ hasText: 'Di Filed' })
+    await expect(bare).toBeVisible()
+    await expect(filed).toBeVisible()
+
+    await expect(bare.locator('.border-t')).toHaveCount(0)
+    await expect(filed.locator('.border-t')).toHaveCount(1)
+    await expect(filed.getByText('Analyst')).toBeVisible()
+    // The bare card is the name and the avatar, nothing else.
+    await expect(bare).toHaveText(/^\s*CB\s*Cy Bare\s*$/)
+    await expect(page.getByText('Role not published')).toHaveCount(0)
+  })
 })
 
 test.describe('employee on a phone', () => {

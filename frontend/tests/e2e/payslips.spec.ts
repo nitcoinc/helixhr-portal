@@ -100,3 +100,67 @@ test.describe('employee on a phone', () => {
     await context.close()
   })
 })
+
+// Plan 2026-10-17-001 U10 (ED-06). An older slip downloads from its own row,
+// without opening the sheet, and a withheld slip offers no PDF. The fixture
+// seeds one real slip; a withheld slip for the month after it is stubbed in
+// front of it, which makes the real one the "older" row and keeps its PDF a
+// real download.
+test.describe('employee, per-row PDF', () => {
+  test.beforeEach(async ({}, testInfo) => {
+    test.skip(testInfo.project.name !== 'employee', 'employee-only scenarios')
+  })
+
+  test('an older row has a 44px named PDF link that downloads in place; Withheld has none', async ({
+    page,
+  }) => {
+    await page.route('**/api/method/helixhr.api.get_my_payslips*', async (route) => {
+      const response = await route.fetch()
+      const body = await response.json()
+      const real = body.message.payslips[0]
+      if (real?.end_date) {
+        const [y, m] = real.end_date.split('-').map(Number)
+        const next = new Date(Date.UTC(y, m, 1)) // first of the month after
+        const iso = (d: Date) => d.toISOString().slice(0, 10)
+        const end = new Date(Date.UTC(next.getUTCFullYear(), next.getUTCMonth() + 1, 0))
+        body.message.payslips = [
+          {
+            ...real,
+            name: 'Sal Slip/U10-WITHHELD/00001',
+            start_date: iso(next),
+            end_date: iso(end),
+            status: 'Withheld',
+            withheld: true,
+            can_download: false,
+            revised: false,
+          },
+          real,
+        ]
+        body.message.total = (body.message.total || 1) + 1
+      }
+      await route.fulfill({ response, body: JSON.stringify(body) })
+    })
+
+    await page.goto('/helixhr/payslips')
+    await page.waitForLoadState('networkidle')
+
+    const withheld = page.locator('li', { hasText: 'Withheld, ask HR' })
+    await expect(withheld).toHaveCount(1)
+    await expect(withheld.getByRole('link', { name: /Download .+ payslip/ })).toHaveCount(0)
+    // The field block's PDF follows the latest slip, which is the withheld one.
+    await expect(page.getByRole('link', { name: 'Download PDF' })).toHaveCount(0)
+
+    const pdf = page.getByRole('link', { name: /Download .+ payslip/ })
+    await expect(pdf).toHaveCount(1)
+    const box = (await pdf.boundingBox())!
+    expect(box.height, `the PDF link is ${box.height}px tall`).toBeGreaterThanOrEqual(44)
+    expect(box.width, `the PDF link is ${box.width}px wide`).toBeGreaterThanOrEqual(44)
+
+    const download = page.waitForEvent('download')
+    await pdf.click()
+    expect((await download).suggestedFilename()).toMatch(/\.pdf$/i)
+    // Downloaded where it stood: no sheet, no detail route.
+    await expect(page).toHaveURL(/\/helixhr\/payslips$/)
+    await expect(page.getByRole('dialog')).toHaveCount(0)
+  })
+})

@@ -58,10 +58,10 @@ class TestApprovalLanes(IntegrationTestCase):
 	def _stubbed(self, team, hr):
 		"""Patch both halves: the line-manager collectors return `team`, the
 		HR collectors return `hr` (requests through the HR Request kind)."""
-		patches = [patch.object(api, "_APPROVAL_SUMMARY_COLLECTORS", ((lambda employee, today: list(team), 99),))]
+		patches = [patch.object(api, "_APPROVAL_SUMMARY_COLLECTORS", ((lambda employee, today, count_only=False: list(team), 99),))]
 		for doctype, kind in api._APPROVAL_KINDS.items():
 			rows = [row for row in hr if row["doctype"] == doctype]
-			patches.append(patch.dict(kind, {"hr_queue": lambda employee, today, rows=rows: list(rows)}))
+			patches.append(patch.dict(kind, {"hr_queue": lambda employee, today, count_only=False, rows=rows: list(rows)}))
 		return patches
 
 	def _lanes(self, team, hr):

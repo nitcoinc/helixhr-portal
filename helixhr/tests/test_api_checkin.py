@@ -259,6 +259,38 @@ class TestPunchCoordinates(CheckinTestCase):
 		self.assertTrue(get_my_checkins(str(getdate()))[0]["has_location"])
 
 
+class TestBootstrapMobileCheckin(CheckinTestCase):
+	"""Plan 2026-10-17-001 U6 / EP-10: Home's check-in chip follows HR
+	Settings, and a session with no Employee never gets it."""
+
+	def _flag(self, value):
+		frappe.set_user("Administrator")
+		frappe.db.set_single_value("HR Settings", "allow_employee_checkin_from_mobile_app", value)
+
+	def test_mobile_checkin_mirrors_the_hr_settings_flag(self):
+		from helixhr.api import get_portal_bootstrap
+
+		self._flag(1)
+		frappe.set_user(EMPLOYEE_USER)
+		self.assertIs(get_portal_bootstrap()["mobile_checkin"], True)
+
+		self._flag(0)
+		frappe.set_user(EMPLOYEE_USER)
+		self.assertIs(get_portal_bootstrap()["mobile_checkin"], False)
+
+	def test_a_session_with_no_employee_never_offers_it(self):
+		from helixhr.api import get_portal_bootstrap
+		from helixhr.tests.utils import make_test_user_without_employee
+
+		self._flag(1)
+		user = make_test_user_without_employee()
+		frappe.set_user(user)
+		boot = get_portal_bootstrap()
+
+		self.assertIsNone(boot["employee"])
+		self.assertIs(boot["mobile_checkin"], False)
+
+
 class TestCheckinAvailability(CheckinTestCase):
 	"""P3-U4 scenario 4 / P3-AE6, P3-R5, P3-R8, P3-R9."""
 

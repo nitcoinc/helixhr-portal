@@ -22,3 +22,9 @@ export function roundHours(value) {
   if (!Number.isFinite(hours)) return 0
   return Math.round(hours * 100) / 100
 }
+
+/** One decimal place with a trailing ".0" dropped: 7 -> "7", 7.25 -> "7.3".
+ * For labels that summarise hours or days, not for the grid's own cells. */
+export function trimNumber(value) {
+  return Number(value).toFixed(1).replace(/\.0$/, '')
+}

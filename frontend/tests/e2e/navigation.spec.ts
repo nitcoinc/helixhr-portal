@@ -398,6 +398,7 @@ test.describe('a dead session and a refused action are different things', () => 
 // collapse, and the More sheet carries the same headings.
 test.describe('grouped navigation (U15)', () => {
   const rail = (page) => page.locator('aside nav[aria-label="Main"]')
+  const HR_COLLAPSED_KEY = 'helixhr.nav.collapsed:hr-manager-employee@helixhr.test'
 
   test('an employee sees no HR or Admin section', async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== 'employee', 'employee-only scenario')
@@ -415,7 +416,8 @@ test.describe('grouped navigation (U15)', () => {
     test.skip(testInfo.project.name !== 'hr', 'hr-only scenario')
     await page.setViewportSize({ width: 1440, height: 900 })
     await page.goto('/helixhr')
-    await page.evaluate(() => localStorage.setItem('helixhr.nav.collapsed', '[]'))
+    // KTD13: the remembered state is per user.
+    await page.evaluate((key) => localStorage.setItem(key, '[]'), HR_COLLAPSED_KEY)
     await page.reload()
 
     const toggle = rail(page).getByRole('button', { name: 'HR' })
@@ -444,22 +446,35 @@ test.describe('grouped navigation (U15)', () => {
       'aria-current',
       'page',
     )
-    expect(await page.evaluate(() => localStorage.getItem('helixhr.nav.collapsed'))).toBe('["hr"]')
-    await page.evaluate(() => localStorage.removeItem('helixhr.nav.collapsed'))
+    expect(await page.evaluate((key) => localStorage.getItem(key), HR_COLLAPSED_KEY)).toBe('["hr"]')
+    await page.evaluate((key) => localStorage.removeItem(key), HR_COLLAPSED_KEY)
   })
 
   test('the rail fits an HR user at 800px without scrolling', async ({ page }, testInfo) => {
     test.skip(testInfo.project.name !== 'hr', 'hr-only scenario')
     await page.setViewportSize({ width: 1280, height: 800 })
     await page.goto('/helixhr')
-    await page.evaluate(() => localStorage.removeItem('helixhr.nav.collapsed'))
+    await page.evaluate((key) => localStorage.removeItem(key), HR_COLLAPSED_KEY)
     await page.reload()
-    // First visit: the admin sections start collapsed, every heading shows.
+    // Plan 2026-10-17-001 U4 flips this (R8, HR-06): on a first visit HR's own
+    // work group opens, directly under the pinned items; Admin and Pay &
+    // policies start collapsed, and every heading still shows.
     await expect(rail(page).getByRole('button', { name: 'HR' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    )
+    await expect(rail(page).getByRole('link', { name: 'People' })).toBeVisible()
+    await expect(rail(page).getByRole('button', { name: 'Admin' })).toHaveAttribute(
       'aria-expanded',
       'false',
     )
-    await expect(rail(page).getByRole('button', { name: 'Admin' })).toBeVisible()
+    await expect(rail(page).getByRole('button', { name: 'Pay & policies' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    )
+    // HR-07: one People entry, no second Directory lookup.
+    await expect(rail(page).getByRole('link', { name: 'Directory' })).toHaveCount(0)
+    // The row budget in AppShell.vue: nothing scrolls at 800px.
     const overflow = await rail(page).evaluate((node) => node.scrollHeight - node.clientHeight)
     expect(overflow).toBeLessThanOrEqual(0)
   })
@@ -480,5 +495,315 @@ test.describe('grouped navigation (U15)', () => {
     }
     await expect(dialog.getByRole('button', { name: 'My work' })).toHaveCount(0)
     await expect(dialog.getByRole('link', { name: 'Attendance' })).toBeVisible()
+  })
+})
+
+// Plan 2026-10-17-001 U4 (R3, R8, R9, R10, KTD7, KTD8, KTD13).
+test.describe('the shell (U4)', () => {
+  const tabBar = (page) => page.locator('div > nav[aria-label="Main"]')
+  const rail = (page) => page.locator('aside nav[aria-label="Main"]')
+  const EMPLOYEE_BAR = ['Home', 'Leave', 'Timesheet', 'Requests', 'More']
+  const APPROVER_BAR = ['Home', 'Approvals', 'Timesheet', 'Requests', 'More']
+  // KTD7's table, per Playwright identity.
+  const EXPECTED_TABS = {
+    employee: EMPLOYEE_BAR,
+    'employee-mobile-webkit': EMPLOYEE_BAR,
+    manager: APPROVER_BAR,
+    hr: APPROVER_BAR,
+    'hr-user': EMPLOYEE_BAR,
+    it: EMPLOYEE_BAR,
+    'portal-admin': EMPLOYEE_BAR,
+  }
+
+  async function expectTabs(page, names: string[]) {
+    const tabs = tabBar(page).locator('a, button')
+    await expect(tabs).toHaveCount(names.length)
+    for (const [index, name] of names.entries()) {
+      // Accessible names: a count badge is aria-hidden and never part of one.
+      await expect(tabs.nth(index)).toHaveAccessibleName(name)
+    }
+  }
+
+  test("each identity's phone tab bar matches KTD7", async ({ page }, testInfo) => {
+    const expected = EXPECTED_TABS[testInfo.project.name]
+    test.skip(!expected, 'no tab-bar row for this project')
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/helixhr')
+    await expectTabs(page, expected)
+
+    if (expected === APPROVER_BAR) {
+      // Leave gave up its slot and leads "My work" in More.
+      await tabBar(page).getByRole('button', { name: 'More' }).click()
+      const work = page.getByRole('dialog').getByRole('region', { name: 'My work' })
+      await expect(work.getByRole('link').first()).toHaveAccessibleName('Leave')
+    }
+    if (testInfo.project.name === 'hr-user') {
+      // Oversight decides nothing, so nothing is counted anywhere.
+      await expect(page.getByTestId('tab-badge-more')).toHaveCount(0)
+      await expect(page.getByTestId('tab-badge-approvals')).toHaveCount(0)
+    }
+  })
+
+  test.describe('desk-only HR', () => {
+    test.use({ storageState: { cookies: [], origins: [] } })
+
+    test('keeps Home and More, and no Ask HR', async ({ page }, testInfo) => {
+      test.skip(testInfo.project.name !== 'employee', 'run once')
+      const api = await request.newContext({
+        baseURL: process.env.BASE_URL || 'http://localhost:8000',
+        extraHTTPHeaders: { Host: process.env.SITE_HOST || 'test_site' },
+      })
+      const login = await api.post('/api/method/login', {
+        form: {
+          usr: 'hr-manager@helixhr.test',
+          pwd: process.env.TEST_USER_PASSWORD || 'Helixhr-Test-Fixture-2026!',
+        },
+      })
+      expect(login.ok()).toBeTruthy()
+      const state = await api.storageState()
+      await api.dispose()
+      await page.context().addCookies(state.cookies)
+
+      await page.setViewportSize({ width: 390, height: 844 })
+      await page.goto('/helixhr')
+      await expect(page.locator('[data-portal-state="desk-only"]')).toBeVisible()
+      await expectTabs(page, ['Home', 'More'])
+      await tabBar(page).getByRole('button', { name: 'More' }).click()
+      await expect(page.getByRole('dialog').getByRole('link', { name: 'Ask HR' })).toHaveCount(0)
+    })
+  })
+
+  test('a click navigation moves focus to main and names the page', async ({ page }, testInfo) => {
+    test.skip(!testInfo.project.name.startsWith('employee'), 'employee-only scenario')
+    test.skip(testInfo.project.name === 'employee-mobile-webkit', 'the desktop rail is the surface here')
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/helixhr')
+    await expect(page.getByRole('region', { name: 'This week' })).toBeVisible()
+    await expect(page).toHaveTitle('Home · HelixHR')
+    // Not on the first load: nothing was left behind to move from.
+    expect(await page.evaluate(() => document.activeElement?.id)).not.toBe('main')
+
+    await rail(page).getByRole('link', { name: 'Leave' }).click()
+    await expect(page).toHaveURL(/\/helixhr\/leave$/)
+    await expect(page).toHaveTitle('Leave · HelixHR')
+    await expect.poll(() => page.evaluate(() => document.activeElement?.id)).toBe('main')
+  })
+
+  test('the first Tab reaches the skip link, and it lands in main', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'employee', 'Chromium keyboard scenario')
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/helixhr')
+    await expect(page.getByRole('region', { name: 'This week' })).toBeVisible()
+    await page.keyboard.press('Tab')
+    const skip = page.getByRole('link', { name: 'Skip to main content' })
+    await expect(skip).toBeFocused()
+    await expect(skip).toBeVisible()
+    // The coarse-pointer sweep skips it while it is visually hidden, so its
+    // focused size is the target that has to meet the 44px floor.
+    expect((await skip.boundingBox())!.height).toBeGreaterThanOrEqual(44)
+    await page.keyboard.press('Enter')
+    await expect.poll(() => page.evaluate(() => document.activeElement?.id)).toBe('main')
+  })
+
+  test('Ask HR opens the New request form from the rail', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'employee', 'run once')
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/helixhr')
+    await page.locator('aside').getByRole('link', { name: 'Ask HR' }).click()
+    await expect(page).toHaveURL(/\/helixhr\/requests\?category=Other$/)
+    await expect(page.getByRole('dialog', { name: 'New request' })).toBeVisible()
+  })
+
+  test("a handler's Requests entry opens the Team inbox (AI-02)", async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'it', 'routed-worker scenario')
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/helixhr')
+    await rail(page).getByRole('link', { name: 'Requests' }).click()
+    await expect(page).toHaveURL(/\/helixhr\/requests\?tab=work$/)
+  })
+
+  test('a remembered collapse survives a reload for an Admin-first rail', async ({ page }, testInfo) => {
+    test.skip(testInfo.project.name !== 'portal-admin', 'portal-admin scenario')
+    const key = 'helixhr.nav.collapsed:portal-admin@helixhr.test'
+    await page.setViewportSize({ width: 1440, height: 900 })
+    await page.goto('/helixhr')
+    await page.evaluate((k) => localStorage.removeItem(k), key)
+    await page.reload()
+    // AI-15: Admin is this role's whole job, so it starts open; its header
+    // carries no item count.
+    const admin = rail(page).getByRole('button', { name: 'Admin' })
+    await expect(admin).toHaveAttribute('aria-expanded', 'true')
+    await admin.click()
+    await expect(admin).toHaveAttribute('aria-expanded', 'false')
+    await expect(admin).toHaveAccessibleName('Admin')
+    await page.reload()
+    await expect(rail(page).getByRole('button', { name: 'Admin' })).toHaveAttribute('aria-expanded', 'false')
+    await page.evaluate((k) => localStorage.removeItem(k), key)
+  })
+
+  test('seven click navigations cost one bootstrap and no count call (R3, KTD8)', async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== 'manager', 'manager-only scenario')
+    await page.setViewportSize({ width: 1440, height: 900 })
+    const calls: string[] = []
+    page.on('request', (req) => {
+      const url = req.url()
+      if (url.includes('/api/method/')) calls.push(decodeURIComponent(url.split('/api/method/')[1].split('?')[0]))
+    })
+    await page.goto('/helixhr')
+    await expect(page.getByRole('region', { name: 'This week' })).toBeVisible()
+    for (const link of ['Leave', 'Timesheet', 'Requests', 'Attendance', 'Documents', 'Notifications', 'Team']) {
+      await rail(page).getByRole('link', { name: link, exact: false }).first().click()
+      await expect(rail(page).getByRole('link', { name: link, exact: false }).first()).toHaveAttribute(
+        'aria-current',
+        'page',
+      )
+    }
+    expect(calls.filter((c) => c === 'helixhr.api.get_portal_bootstrap')).toHaveLength(1)
+    expect(calls.filter((c) => c === 'helixhr.api.get_my_approvals')).toHaveLength(0)
+  })
+})
+
+// KTD8's lifecycle in the browser: the Approvals page sets the badge to its
+// own total, and a decision takes one off at once -- before the page's own
+// reload answers, and without asking anyone else for a count.
+test.describe('the Approvals badge (U4, KTD8)', () => {
+  const SITE_HOST = process.env.SITE_HOST || 'test_site'
+  const PASSWORD = process.env.TEST_USER_PASSWORD || 'Helixhr-Test-Fixture-2026!'
+  const EMPLOYEE = 'employee@helixhr.test'
+  const PROJECT_NAME = 'Navigation Spec Project'
+  // Clear of every week approvals.spec.ts (5, 9, 10, 11) and
+  // timesheet-entry.spec.ts (10, 11) work in: one Timesheet per week.
+  const WEEKS_BACK = 14
+
+  async function admin(baseURL: string) {
+    const api = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+    await api.post('/api/method/login', { form: { usr: 'Administrator', pwd: 'admin' } })
+    return api
+  }
+
+  async function value(api, doctype: string, filters: object, fieldname: string) {
+    const response = await api.get(
+      `/api/method/frappe.client.get_value?doctype=${encodeURIComponent(doctype)}&filters=` +
+        encodeURIComponent(JSON.stringify(filters)) +
+        `&fieldname=${fieldname}`,
+    )
+    return (await response.json())?.message?.[fieldname]
+  }
+
+  async function clearWeek(api, employee: string, monday: string) {
+    const sunday = new Date(`${monday}T00:00:00Z`)
+    sunday.setUTCDate(sunday.getUTCDate() + 6)
+    const existing = await api.get(
+      '/api/method/frappe.client.get_list?doctype=Timesheet&filters=' +
+        encodeURIComponent(
+          JSON.stringify({ employee, start_date: ['between', [monday, sunday.toISOString().slice(0, 10)]] }),
+        ) +
+        '&fields=' +
+        encodeURIComponent(JSON.stringify(['name', 'docstatus'])) +
+        '&limit_page_length=0',
+    )
+    for (const row of (await existing.json())?.message || []) {
+      if (row.docstatus === 1) {
+        await api.post('/api/method/frappe.client.cancel', { form: { doctype: 'Timesheet', name: row.name } })
+      }
+      await api.post('/api/method/frappe.client.delete', { form: { doctype: 'Timesheet', name: row.name } })
+    }
+  }
+
+  /** One pending week for the manager's report, through the portal's own
+   * submit, so the Pending-Approval share is the real one. */
+  async function seedPendingWeek(baseURL: string) {
+    const now = new Date()
+    const day = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()))
+    day.setUTCDate(day.getUTCDate() - ((day.getUTCDay() + 6) % 7) - WEEKS_BACK * 7)
+    const monday = day.toISOString().slice(0, 10)
+
+    const api = await admin(baseURL)
+    const employee = await value(api, 'Employee', { user_id: EMPLOYEE }, 'name')
+    const company = await value(api, 'Employee', { user_id: EMPLOYEE }, 'company')
+    let project = await value(api, 'Project', { project_name: PROJECT_NAME }, 'name')
+    if (!project) {
+      const created = await api.post('/api/method/frappe.client.insert', {
+        data: { doc: JSON.stringify({ doctype: 'Project', project_name: PROJECT_NAME, status: 'Open', company }) },
+      })
+      project = (await created.json()).message.name
+    }
+    if (!(await value(api, 'User Permission', { user: EMPLOYEE, allow: 'Project', for_value: project }, 'name'))) {
+      await api.post('/api/method/frappe.client.insert', {
+        data: {
+          doc: JSON.stringify({ doctype: 'User Permission', user: EMPLOYEE, allow: 'Project', for_value: project }),
+        },
+      })
+    }
+    await clearWeek(api, employee, monday)
+    await api.dispose()
+
+    const employeeApi = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+    await employeeApi.post('/api/method/login', { form: { usr: EMPLOYEE, pwd: PASSWORD } })
+    const submitted = await employeeApi.post('/api/method/helixhr.api.submit_my_week', {
+      form: { week_start: monday, rows: JSON.stringify([{ date: monday, project, task: '', hours: 8, note: '' }]) },
+    })
+    expect(submitted.ok(), await submitted.text()).toBeTruthy()
+    await employeeApi.dispose()
+
+    const check = await admin(baseURL)
+    const name = await value(check, 'Timesheet', { employee, start_date: monday }, 'name')
+    await check.dispose()
+    return { name, employee, monday }
+  }
+
+  test('Approvals sets the badge to its total, and a decision takes one off with no extra request', async ({
+    page,
+  }, testInfo) => {
+    test.skip(testInfo.project.name !== 'manager', 'manager-only scenario')
+    test.setTimeout(90000)
+    const baseURL = process.env.BASE_URL || 'http://localhost:8080'
+    const { name, employee, monday } = await seedPendingWeek(baseURL)
+    const badge = page.locator('aside').getByTestId('nav-badge-approvals')
+
+    try {
+      await page.setViewportSize({ width: 1440, height: 900 })
+      const loaded = page.waitForResponse((r) => r.url().includes('helixhr.api.get_my_approvals'))
+      await page.goto('/helixhr/approvals?view=timesheets')
+      const first = (await (await loaded).json()).message
+      expect(first.total).toBeGreaterThan(0)
+      await expect(badge).toHaveText(`${first.total}${first.total_is_capped ? '+' : ''}`)
+
+      await page.getByTestId('approvals-queue').locator(`[data-approval-name="${name}"]`).click()
+      const panel = page.getByTestId('approval-detail')
+      await expect(panel.getByRole('button', { name: /^Approve/ })).toBeVisible({ timeout: 10000 })
+
+      // Hold the page's own reload, so what the badge shows is the local
+      // decrement and nothing else.
+      let release = () => {}
+      const held = new Promise<void>((resolve) => (release = resolve))
+      await page.route('**/api/method/helixhr.api.get_my_approvals*', async (route) => {
+        await held
+        await route.continue()
+      })
+      const after: string[] = []
+      page.on('request', (req) => {
+        const url = req.url()
+        if (url.includes('/api/method/')) after.push(decodeURIComponent(url.split('/api/method/')[1].split('?')[0]))
+      })
+
+      await panel.getByRole('button', { name: /^Approve/ }).click()
+      const expected = first.total - 1
+      if (expected > 0) await expect(badge).toHaveText(`${expected}${first.total_is_capped ? '+' : ''}`)
+      else await expect(badge).toHaveCount(0)
+      expect(after.filter((c) => c !== 'helixhr.api.act_on_approval' && c !== 'helixhr.api.get_my_approvals')).toEqual(
+        [],
+      )
+      release()
+      // Let the held reload finish before the route goes, or Playwright
+      // reports the handler's continue() as already handled.
+      await page.unrouteAll({ behavior: 'wait' })
+    } finally {
+      const api = await admin(baseURL)
+      await clearWeek(api, employee, monday)
+      await api.dispose()
+    }
   })
 })

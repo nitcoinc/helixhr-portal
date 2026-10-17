@@ -103,28 +103,38 @@ export const icons = {
   folder: [
     'M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13c0 1.1.9 2 2 2z',
   ],
-}
-
-// Every kind `helixhr.api._get_needs_you` emits, and the glyph its row draws.
-// It lives here, next to the glyphs, because `<script setup>` cannot export
-// and this map has to be assertable: a kind with no entry falls back silently,
-// which is how a sent-back *leave* rendered with the Requests icon for a whole
-// unit. `icons.test.js` holds the kinds against the server's own list.
-export const NEEDS_YOU_ICON = {
-  timesheet_rejected: 'timesheet',
-  leave_rejected: 'leave',
-  request_answered: 'requests',
-  approval_leave: 'approvals',
-  approval_timesheet: 'approvals',
-  approval_request: 'requests',
-  approval_change: 'approvals',
-  leave_waiting: 'leave',
-  // P3-U1 step 2 / P3-R16, P3-R17: the attendance request kinds P3-U5 emits.
-  approval_attendance: 'approvals',
-  attendance_request_rejected: 'attendance',
-  attendance_request_waiting: 'attendance',
-  // P4-R4: the two terminal rejections. They sit in "Waiting on others" with
-  // the reason and no verb, because the decision is already made.
-  leave_final_rejected: 'leave',
-  attendance_request_final_rejected: 'attendance',
+  // Plan 2026-10-17-001 U2: Lucide's own `search`, for the palette's input
+  // and the shell's search triggers.
+  // `peopleSearch` above is the People nav glyph and stays its own name.
+  search: ['M11 19a8 8 0 1 0 0-16 8 8 0 0 0 0 16z', 'm21 21-4.3-4.3'],
+  // U14: the toast's dismiss control (Lucide `x`).
+  close: ['M18 6 6 18', 'm6 6 12 12'],
+  // Plan 2026-10-17-001 U4 (MH-21, AI-23, EP-25): one glyph per destination.
+  // Lucide's `briefcase` (My projects; Projects keeps the folder), `users-round`
+  // (Team; Directory keeps `users`), `calendar-clock` (Roster; Timesheet keeps
+  // the clock) and `mail` (Email templates; Notifications keeps the bell).
+  // Circles and rects are written as paths, because Icon.vue draws paths.
+  briefcase: [
+    'M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16',
+    'M4 6h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2z',
+  ],
+  usersRound: [
+    'M18 21a8 8 0 0 0-16 0',
+    'M10 3a5 5 0 1 0 0 10 5 5 0 0 0 0-10z',
+    'M22 20c0-3.37-2-6.5-4-8a5 5 0 0 0-.45-8.3',
+  ],
+  calendarClock: [
+    'M21 7.5V6a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h3.5',
+    'M16 2v4',
+    'M8 2v4',
+    'M3 10h5',
+    'M17.5 17.5 16 16.3V14',
+    'M16 10a6 6 0 1 0 0 12 6 6 0 0 0 0-12z',
+  ],
+  mail: [
+    'M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z',
+    'm22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7',
+  ],
+  // "Ask HR" (R10): Lucide `message-circle-question`.
+  askHr: ['M7.9 20A9 9 0 1 0 4 16.1L2 22z', 'M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3', 'M12 17h.01'],
 }

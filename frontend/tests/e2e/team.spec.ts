@@ -107,8 +107,56 @@ test.describe('manager', () => {
     await expect(outToday.getByRole('link', { name: /2 requests still waiting/ })).toBeVisible()
     // And the quiet week says so rather than rendering a grid with no
     // explanation.
-    await expect(page.getByText('Nobody on your team is booked off this week')).toBeVisible()
+    await expect(page.getByText('Nobody is off this week')).toBeVisible()
     await expect(page.locator('[data-testid="team-row"]').first()).toBeVisible()
+
+    // Plan 2026-10-17-001 U17 (MH-16): with nobody off, "Only people off"
+    // has nothing to narrow -- disabled, and pointing at that sentence.
+    await expect(page.getByTestId('team-only-off')).toBeDisabled()
+    await expect(page.getByRole('group', { name: 'Whose week to show' })).toHaveAttribute(
+      'aria-describedby',
+      'team-quiet-week',
+    )
+  })
+
+  // U17 (MH-16): whoever is off sorts first, and the toggle hides the rest.
+  test('people off this week sort first, and Only people off hides everyone else', async ({
+    page,
+    baseURL,
+  }) => {
+    const fixture = await seedTeamWeek(baseURL!)
+    await page.goto('/helixhr/team')
+    await page.waitForLoadState('networkidle')
+
+    const rows = page.locator('[data-testid="team-row"]')
+    await expect(rows.first()).toBeVisible()
+    // Every row with a bar comes before every row without one.
+    const hasBar = await rows.evaluateAll((list) =>
+      list.map((row) => !!row.querySelector('[data-testid="team-bar"]')),
+    )
+    expect(hasBar).toEqual([...hasBar].sort((a, b) => Number(b) - Number(a)))
+
+    const toggle = page.getByTestId('team-only-off')
+    await expect(toggle).toBeEnabled()
+    await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true')
+    await expect(rows).toHaveCount(hasBar.filter(Boolean).length)
+    await expect(page.locator(`[data-testid="team-row"][data-employee="${fixture.report_name}"]`)).toBeVisible()
+  })
+
+  // U17 (MH-18): on a phone, one row per leave with its range -- not the
+  // same person repeated on every day card the leave covers.
+  test('on a phone, a week-long leave is one row with its range', async ({ page, baseURL }) => {
+    const fixture = await seedTeamWeek(baseURL!)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/helixhr/team')
+    await page.waitForLoadState('networkidle')
+
+    const mine = page.locator(`[data-testid="team-leave-row"][data-employee="${fixture.report_name}"]`)
+    await expect(mine).toHaveCount(1)
+    await expect(mine).toContainText(fixture.leave_type)
+    await expect(mine).toContainText(/\w{3} \d+ – \w{3} \d+|\w{3} \d+/)
+    await expect(page.locator('[data-testid="team-row"]').first()).toBeHidden()
   })
 
   test('the payload carries no leave reason', async ({ page, baseURL }) => {
