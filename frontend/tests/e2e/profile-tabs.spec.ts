@@ -43,6 +43,8 @@ test.describe('employee', () => {
   test('a read-only section offers one correction entry that asks which detail', async ({ page }) => {
     await page.goto('/helixhr/profile')
     const personal = page.getByRole('region', { name: 'Personal' })
+    // Counted once the section has its data, not on the loading skeleton.
+    await expect(personal.getByTestId('profile-field-date_of_birth')).toBeVisible()
     expect(await personal.getByTestId(/^profile-field-/).count()).toBeGreaterThan(1)
     await expect(personal.getByRole('button', { name: /Request a correction/ })).toHaveCount(1)
     await expect(page.getByTestId('profile-field-date_of_birth').getByRole('button')).toHaveCount(0)
