@@ -47,15 +47,20 @@ export function createDebouncedSearch(lookup, { delay = SEARCH_DELAY_MS, initial
 
   /** Schedules `query`, replacing whatever was waiting. `wait` overrides
    * the delay for one call -- 0 for a lookup that should not wait, such as
-   * the list a picker shows on focus. */
-  function search(query, wait = delay) {
+   * the list a picker shows on focus. Only a number counts: wired as
+   * `watch(ref, search)`, Vue passes the old value second, and a string
+   * there must not cancel the debounce. */
+  function search(query, wait) {
     clearTimer()
     const mine = ++token
     loading.value = true
-    timer = setTimeout(() => {
-      timer = null
-      run(query, mine)
-    }, wait)
+    timer = setTimeout(
+      () => {
+        timer = null
+        run(query, mine)
+      },
+      typeof wait === 'number' ? wait : delay,
+    )
   }
 
   /** Drops the waiting query and any answer still in flight. */

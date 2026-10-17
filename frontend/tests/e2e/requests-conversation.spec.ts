@@ -174,7 +174,16 @@ test('handler Send and wait moves to waiting, employee sees Needs your reply ban
 // long-lived site's other rows never decide what is on screen.
 async function searchInbox(page: Page, text: string) {
   await page.goto('/helixhr/requests?tab=work')
+  // The search waits 250 ms after the last key (useDebouncedSearch), so wait
+  // for the filtered answer: a row acted on sooner belongs to the unfiltered
+  // list, which the filtered one then replaces under it.
+  const filtered = page.waitForResponse(
+    (response) =>
+      response.url().includes('helixhr.api.get_request_work') &&
+      `${decodeURIComponent(response.url())} ${response.request().postData() || ''}`.includes(text),
+  )
   await page.getByTestId('work-search').fill(text)
+  await filtered
 }
 
 function inboxRow(page: Page, subject: string) {

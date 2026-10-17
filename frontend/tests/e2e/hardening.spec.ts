@@ -368,4 +368,52 @@ test.describe('command palette loading', () => {
     await page.waitForLoadState('networkidle')
     expect(requested.filter(isPaletteChunk).length, 'fetched once').toBe(1)
   })
+
+  // Review fix: a failed chunk (a flaky network, or a deploy that rotated
+  // the hashed names) is retried once, and a second failure leaves Ctrl-K
+  // working rather than swallowed by a palette that never mounted. The
+  // retry carries a query string (Chromium caches a failed import), which
+  // the route pattern matches too.
+  test('a palette chunk that fails once is retried, and Ctrl-K opens it', async ({ page }) => {
+    let aborted = 0
+    await page.route(/\/CommandPalette-[\w-]{8}\.js(\?.*)?$/, (route) => {
+      if (aborted < 1) {
+        aborted += 1
+        return route.abort()
+      }
+      return route.continue()
+    })
+    await page.goto('/helixhr/')
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+    await page.waitForLoadState('networkidle')
+
+    await page.keyboard.press('Control+k')
+    await expect(page.getByRole('dialog', { name: 'Search' })).toBeVisible()
+    expect(aborted).toBe(1)
+  })
+
+  test('after the palette chunk fails twice, a later Ctrl-K loads it again', async ({ page }) => {
+    let aborted = 0
+    let failing = true
+    await page.route(/\/CommandPalette-[\w-]{8}\.js(\?.*)?$/, (route) => {
+      if (failing) {
+        aborted += 1
+        return route.abort()
+      }
+      return route.continue()
+    })
+    await page.goto('/helixhr/')
+    await expect(page.getByRole('heading', { level: 1 })).toBeVisible()
+    await page.waitForLoadState('networkidle')
+
+    const palette = page.getByRole('dialog', { name: 'Search' })
+    await page.keyboard.press('Control+k')
+    await expect.poll(() => aborted).toBe(2)
+    await page.waitForLoadState('networkidle')
+    await expect(palette).toHaveCount(0)
+
+    failing = false
+    await page.keyboard.press('Control+k')
+    await expect(palette).toBeVisible()
+  })
 })

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { effectScope } from 'vue'
+import { effectScope, nextTick, ref, watch } from 'vue'
 import { SEARCH_DELAY_MS, createDebouncedSearch, useDebouncedSearch } from './useDebouncedSearch'
 
 // Plan 2026-10-17-001 U3: the debounce and latest-wins contract every search
@@ -123,6 +123,26 @@ describe('createDebouncedSearch', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(lookup).toHaveBeenCalledWith('')
     expect(results.value).toEqual([''])
+  })
+
+  // Review fix: Roster, Directory, People and the request lists wire
+  // `watch(query, debounced.search)`, so Vue hands the old value in as the
+  // second argument. It must not stand in for the delay.
+  it('still waits when wired straight to a watch (old value as 2nd argument)', async () => {
+    const lookup = vi.fn((query) => [query])
+    const { search } = createDebouncedSearch(lookup)
+    const query = ref('')
+    const stop = watch(query, search)
+    query.value = 'p'
+    await nextTick()
+    query.value = 'pa'
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(SEARCH_DELAY_MS - 1)
+    expect(lookup).not.toHaveBeenCalled()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(lookup).toHaveBeenCalledTimes(1)
+    expect(lookup).toHaveBeenCalledWith('pa')
+    stop()
   })
 
   it('keeps the newest error and clears it on the next good answer', async () => {

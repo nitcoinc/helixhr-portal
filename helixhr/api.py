@@ -5236,14 +5236,23 @@ def get_my_week(week_start=None, include_non_working=0):
 		doc = frappe.get_doc("Timesheet", current.name)
 		# U9 / KTD9: "Copy last week" names what it could not copy, so a row
 		# carries its project's and task's words, not only their ids. One
-		# query for the week's tasks; a task the caller can no longer read
-		# falls back to its id.
+		# query for the week's tasks; a task the caller can no longer read --
+		# one outside the projects they belong to (`_my_project_names`, the
+		# rule HelixHR reads Task by; Frappe's Task permission answers no for
+		# a plain employee) -- falls back to its id, so a hand-written task id
+		# on a draft row cannot read another project's task subject.
 		task_ids = {row.task for row in doc.time_logs if row.task}
+		member_of = _my_project_names(frappe.session.user) if task_ids else set()
 		subjects = (
 			dict(
-				frappe.get_all("Task", filters={"name": ["in", list(task_ids)]}, fields=["name", "subject"], as_list=True)
+				frappe.get_all(
+					"Task",
+					filters={"name": ["in", list(task_ids)], "project": ["in", list(member_of)]},
+					fields=["name", "subject"],
+					as_list=True,
+				)
 			)
-			if task_ids
+			if member_of
 			else {}
 		)
 		timesheet = {

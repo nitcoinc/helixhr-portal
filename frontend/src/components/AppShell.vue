@@ -18,16 +18,46 @@ import { toasts } from '@/lib/notify'
 // before the first message in the usual case. A message sent sooner waits in
 // `lib/notify.js` and pulls the chunk in itself. A dedicated file means Vite
 // names the chunk `Toaster-<hash>.js`, which hardening.spec.ts looks for.
-const Toaster = defineAsyncComponent(() => import('@/components/Toaster.vue'))
+//
+// A lazy chunk can fail to load (a flaky connection, or a deploy that rotated
+// the hashed names). Chromium remembers a failed dynamic import for the life
+// of the page, so asking for the same URL again fails without a request: the
+// next attempt asks for the URL the error names with a fresh query string,
+// which is a new module. The first failure retries at once; after that the
+// shell forgets it asked, so the next message (or Ctrl-K) tries again instead
+// of leaving a dead wrapper mounted. An error that names no URL (WebKit's)
+// retries the plain import.
+function lazy(load, onGiveUp) {
+  let attempt = 0
+  let fresh = null
+  return defineAsyncComponent({
+    loader: () => (fresh ? import(/* @vite-ignore */ fresh) : load()),
+    onError(error, retry, fail, attempts) {
+      const url = /https?:\/\/[^\s'"?]+\.js/.exec(String(error?.message))?.[0]
+      if (url?.startsWith(`${location.origin}/`)) fresh = `${url}?retry=${++attempt}`
+      if (attempts <= 1) return retry()
+      fail()
+      onGiveUp()
+    },
+  })
+}
+const Toaster = lazy(
+  () => import('@/components/Toaster.vue'),
+  () => {
+    toasterWanted.value = false
+  },
+)
 const toasterWanted = ref(false)
 let idleHandle = null
 let idleTimer = null
 function wantToaster() {
   toasterWanted.value = true
 }
+// Keyed on the newest message, not on "any waiting": after a failed load the
+// queue is still non-empty, and the next message must try again.
 watch(
-  () => toasts.length > 0,
-  (pending) => pending && wantToaster(),
+  () => toasts[toasts.length - 1]?.id,
+  (newest) => newest && wantToaster(),
   { immediate: true },
 )
 
@@ -40,7 +70,15 @@ const showMore = ref(false)
 // Plan 2026-10-17-001 U5 (R7, KTD2, KTD4). The command palette is fetched on
 // its first open (`CommandPalette-<hash>.js`, hardening.spec.ts), so the
 // shell keeps only the shortcut, the triggers and where focus goes back to.
-const CommandPalette = defineAsyncComponent(() => import('@/components/CommandPalette.vue'))
+// On a failed load (after the retry) the palette is closed and unmounted, so
+// `openPalette` is not stuck behind `paletteOpen` and the next Ctrl-K retries.
+const CommandPalette = lazy(
+  () => import('@/components/CommandPalette.vue'),
+  () => {
+    paletteOpen.value = false
+    paletteWanted.value = false
+  },
+)
 const paletteWanted = ref(false)
 const paletteOpen = ref(false)
 const moreTab = ref(null)

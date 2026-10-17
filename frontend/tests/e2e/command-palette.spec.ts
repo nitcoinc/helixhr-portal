@@ -210,6 +210,38 @@ test.describe('employee, desktop', () => {
     await expect(palette(page)).not.toContainText('No results')
   })
 
+  // Review fix: while the next query's lookup is pending (or after it
+  // failed), the previous query's people must not stand in for its answer.
+  test("a pending lookup never shows the previous query's people", async ({ page }) => {
+    let release: () => void = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    await page.route(SEARCH_METHOD, async (route) => {
+      const q = (route.request().postDataJSON() || {}).q as string
+      const person = (name: string) => ({
+        message: { people: [{ name: `EMP-${name}`, employee_name: name }], requests: [], inbox: [], failed: [] },
+      })
+      if (q === 'zzalpha') return route.fulfill({ json: person('Alpha Fixture Person') })
+      await held
+      return route.fulfill({ json: person('Bravo Fixture Person') })
+    })
+    await page.goto('/helixhr/')
+    await openWithShortcut(page)
+    const people = group(page, 'people')
+    await paletteInput(page).fill('zzalpha')
+    await expect(people.getByRole('option', { name: /Alpha Fixture Person/ })).toBeVisible()
+
+    await paletteInput(page).fill('zzbravo')
+    await expect(page.getByTestId('palette-status')).toHaveText('Searching people and requests…')
+    await expect(people).toHaveCount(0)
+    await expect(palette(page)).not.toContainText('Alpha Fixture Person')
+
+    release()
+    await expect(people.getByRole('option', { name: /Bravo Fixture Person/ })).toBeVisible()
+    await expect(palette(page)).not.toContainText('Alpha Fixture Person')
+  })
+
   test('Escape closes it and gives focus back to the trigger', async ({ page }) => {
     await page.goto('/helixhr/')
     const trigger = page.getByTestId('palette-trigger')

@@ -94,7 +94,11 @@ const groups = computed(() => {
     { id: 'pages', heading: 'Pages', items: matchItems(pages.value, typed.value) },
     { id: 'actions', heading: 'Actions', items: matchItems(actions.value, typed.value) },
     { id: 'reports', heading: 'Reports', items: matchItems(paletteReports(catalog.value), typed.value).slice(0, 5) },
-    ...(asksServer.value ? serverGroups(server.results.value, session) : []),
+    // Only the settled answer to this query: while the next lookup waits,
+    // or after it failed, `results` still holds the previous query's rows.
+    ...(asksServer.value && !server.loading.value && !server.error.value
+      ? serverGroups(server.results.value, session)
+      : []),
   ].filter((group) => group.items.length)
 })
 

@@ -100,9 +100,12 @@ export const BULK_MAX_ITEMS = 60
 
 /** The rows `approve_clean_items` takes: timesheets and leave the server
  * still calls clean (R17). Attendance requests and change requests are
- * decided one at a time, and the server refuses them in a batch anyway. */
+ * decided one at a time, and the server refuses them in a batch anyway.
+ * Clean means the server said so (`needs_look: false`): an HR-lane timesheet
+ * or stalled leave carries no flags (`null`) and no stale-write token, and
+ * the batch endpoint would re-flag it and refuse. */
 export function isBatchable(row) {
-  return !!row && (row.kind === 'timesheet' || row.kind === 'leave') && !row.needs_look
+  return !!row && (row.kind === 'timesheet' || row.kind === 'leave') && row.needs_look === false
 }
 
 /** MH-04: the "Approve all" batch for one lane's rows. Built from the rows

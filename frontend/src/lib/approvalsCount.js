@@ -13,8 +13,10 @@ const state = reactive({ count: 0, capped: false })
 
 /** Set the count from the bootstrap's `approvals_count` /
  * `approvals_count_capped`, or from an answer the Approvals page just got
- * (`total`, `total_is_capped`). `capped` means the count is a floor: "N+". */
-export function setApprovalsCount(count, capped = false) {
+ * (`total`, `total_is_capped`). `capped` means the count is a floor: "N+".
+ * Leave `capped` out to keep the current flag -- a filtered Approvals load
+ * knows the whole queue's count but not whether the whole queue was capped. */
+export function setApprovalsCount(count, capped = state.capped) {
   state.count = Math.max(0, Number(count) || 0)
   state.capped = !!capped
 }

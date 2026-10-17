@@ -99,6 +99,15 @@ and a few new shortcuts appear. This note is by role; read your own row and ever
 
 - Run `bench migrate`. A patch (`v1_0/apply_notification_copy`) rewrites the HelixHR notification
   titles and messages on existing sites; live bell and email subjects change from then on.
+- Restart the web and worker processes after `bench migrate` (`bench restart`, or your supervisor
+  equivalent). The new notification templates call Jinja methods registered in `hooks.py`
+  (`helixhr_date`, `helixhr_state_words`), and a process started before the deploy cannot render
+  them.
+- The patch and the fixture sync overwrite the subject and message of the three HelixHR
+  notifications. Any Desk edit to those three is lost; copy it out before migrating if you need it.
+- **Leave** now reads leave balances as administrator, after its own check that the caller is the
+  employee. An IT Team member without the Employee role can open Leave; no permission grant was
+  added for it.
 - Run `bench --site <site> execute helixhr.preflight.run`. It now also checks the rate limit for
   the new search (`portal_search`).
 - Approvers' first page load does slightly more work, to show the pending count (a handful of

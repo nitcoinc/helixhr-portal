@@ -94,6 +94,27 @@ const work = createResource({
     category: category.value || undefined,
   }),
 })
+// Search, a category, Show more, the state filter and a pick-up all refetch,
+// and frappe-ui's resource cannot cancel a request, so two overlapping loads
+// would land last-wins. One load at a time instead: a trigger during a load
+// asks for one more, which runs when it settles -- `makeParams` reads the
+// state at that moment, so the rerun asks the newest question.
+let workInflight = null
+let workAgain = false
+function loadWork() {
+  if (workInflight) {
+    workAgain = true
+    return workInflight
+  }
+  const settle = () => {
+    workInflight = null
+    if (!workAgain) return null
+    workAgain = false
+    return loadWork()
+  }
+  workInflight = work.fetch().then(settle, (error) => settle() || Promise.reject(error))
+  return workInflight
+}
 // The server ignores a query under 2 characters (_REQUEST_SEARCH_MIN),
 // so a shorter one asks the same question as none, and an unchanged one is
 // not asked again.
@@ -102,7 +123,7 @@ const debounced = useDebouncedSearch((value) => {
   if (next === search.value) return
   search.value = next
   workLimit.value = 20
-  work.fetch()
+  loadWork()
 })
 watch(query, debounced.search)
 
@@ -114,13 +135,13 @@ const categoryOptions = computed(() => [
 function filterCategory(value) {
   category.value = value || ''
   workLimit.value = 20
-  work.fetch()
+  loadWork()
 }
 watch(
   workFilter,
   () => {
     workLimit.value = 20
-    work.fetch()
+    loadWork()
   },
   { immediate: true },
 )
@@ -174,7 +195,7 @@ const workGroups = computed(() => {
 
 function showMoreWork() {
   workLimit.value = Math.min(100, workLimit.value + 20)
-  work.fetch()
+  loadWork()
 }
 
 // The feed's detail is the same decision detail the Approvals queue loads
@@ -243,7 +264,7 @@ async function decide(action) {
     reasonFor.value = ''
     reasonMessage.value = ''
     workDetail.fetch()
-    work.fetch()
+    loadWork()
   } catch (error) {
     reasonError.value =
       error?.messages?.[0] || "That didn't go through. Reload and try again."
@@ -280,16 +301,19 @@ async function pickUp(row) {
       expected_modified: row.token_modified,
       expected_state: row.status,
     })
-    notify.success(`Assigned to you: ${row.subject}`)
-    if (props.name === row.name) workDetail.fetch()
-    await work.fetch()
-    focusAfter(group?.key, index)
   } catch (error) {
     notify.error(error?.messages?.[0] || "That didn't go through. Reload and try again.")
-    await work.fetch()
-  } finally {
+    await loadWork().catch(() => {})
     pickingUp.value = ''
+    return
   }
+  notify.success(`Assigned to you: ${row.subject}`)
+  if (props.name === row.name) workDetail.fetch()
+  // Best-effort: a failed reload shows in the list's own retry panel, and
+  // must not turn a pick-up that worked into an error.
+  await loadWork().catch(() => {})
+  pickingUp.value = ''
+  focusAfter(group?.key, index)
 }
 
 /** KTD16: the row left its group, so focus moves to the row that took its
@@ -680,7 +704,7 @@ const workTimeline = computed(() => {
             :assigns-on-wait="workSelected.status === 'Open'"
             :milestones="workTimeline"
             mode="handler"
-            @posted="workDetail.fetch(); work.fetch()"
+            @posted="workDetail.fetch(); loadWork()"
             @refetch="workDetail.fetch()"
           />
 

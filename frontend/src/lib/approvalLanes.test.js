@@ -71,7 +71,7 @@ describe('groupByPerson', () => {
 })
 
 // Plan 2026-10-17-001 U7: Approve all, select-all and the keyboard opt-in.
-const clean = (name, kind = 'timesheet', extra = {}) => ({ name, kind, ...extra })
+const clean = (name, kind = 'timesheet', extra = {}) => ({ name, kind, needs_look: false, ...extra })
 
 describe('isBatchable', () => {
   it('takes clean timesheets and leave only', () => {
@@ -82,6 +82,13 @@ describe('isBatchable', () => {
     expect(isBatchable(clean('c', 'change'))).toBe(false)
     expect(isBatchable(clean('f', 'timesheet', { needs_look: true }))).toBe(false)
     expect(isBatchable(null)).toBe(false)
+  })
+
+  it('takes only rows the server called clean, not rows it never flagged', () => {
+    // An HR-lane timesheet or stalled leave: no flags, no token.
+    expect(isBatchable(clean('h', 'timesheet', { needs_look: null }))).toBe(false)
+    expect(isBatchable({ name: 'u', kind: 'leave' })).toBe(false)
+    expect(isBatchable(clean('t', 'timesheet', { needs_look: false }))).toBe(true)
   })
 })
 

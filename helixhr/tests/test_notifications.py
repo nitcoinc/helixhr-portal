@@ -1106,6 +1106,17 @@ class TestNotificationCopy(IntegrationTestCase):
 		self.assertEqual(helixhr_state_words({**leave, "status": "Rejected", "docstatus": 0}), "Sent back")
 		self.assertEqual(helixhr_state_words({**leave, "status": "Rejected", "docstatus": 1}), "Rejected")
 
+	def test_an_open_leave_in_the_hr_stage_is_waiting_for_hr(self):
+		# A resend after HR's send-back keeps helixhr_stage at HR and fires
+		# "HelixHR Leave Status Changed"; the manager is not who it waits on.
+		leave = {"doctype": "Leave Application", "status": "Open"}
+		self.assertEqual(helixhr_state_words({**leave, "helixhr_stage": "HR"}), "waiting for HR")
+		self.assertEqual(helixhr_state_words({**leave, "helixhr_stage": "Manager"}), "waiting for your manager")
+		self.assertEqual(
+			helixhr_state_words({**leave, "status": "Rejected", "docstatus": 0, "helixhr_stage": "HR"}),
+			"Sent back",
+		)
+
 	def test_the_patch_run_twice_changes_nothing_the_second_time(self):
 		from helixhr.patches.v1_0.apply_notification_copy import execute
 

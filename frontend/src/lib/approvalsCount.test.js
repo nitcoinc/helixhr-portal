@@ -22,6 +22,15 @@ describe('approvals count (KTD8)', () => {
     expect(approvalsLabel()).toBe('149+')
   })
 
+  it('keeps the current floor flag when a count comes without one', () => {
+    setApprovalsCount(150, true)
+    setApprovalsCount(149)
+    expect(approvalsLabel()).toBe('149+')
+    setApprovalsCount(7, false)
+    setApprovalsCount(6)
+    expect(approvalsLabel()).toBe('6')
+  })
+
   it('takes decisions off locally and never goes below zero', () => {
     setApprovalsCount(2, false)
     decrementApprovals()

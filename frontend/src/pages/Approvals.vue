@@ -70,15 +70,18 @@ watch(kindFilter, () => queue.reload())
 
 // Plan 2026-10-17-001 KTD8: every load is the shell's badge, which is never
 // polled. `total` counts the chip's kind only, so a filtered view sums the
-// per-kind counts, which always cover the whole queue.
+// per-kind counts, which always cover the whole queue. Its
+// `total_is_capped` describes the filtered page, not the queue, so a
+// filtered load keeps the badge's current floor flag.
 watch(
   () => queue.data,
   (data) => {
     if (!data) return
-    const total = kindFilter.value
-      ? (data.counts?.kinds || []).reduce((sum, kind) => sum + (kind.count || 0), 0)
-      : data.total
-    setApprovalsCount(total, data.total_is_capped)
+    if (kindFilter.value) {
+      setApprovalsCount((data.counts?.kinds || []).reduce((sum, kind) => sum + (kind.count || 0), 0))
+    } else {
+      setApprovalsCount(data.total, data.total_is_capped)
+    }
   },
 )
 
@@ -805,7 +808,12 @@ async function runBulk() {
     }
   } catch (error) {
     confirmSource.value = null
-    notify.error(toPlainLeaveError(error) || 'Could not run the bulk approval. Try again.')
+    // The call may have failed after some rows were approved, so the queue
+    // (and through its watcher, the badge) is read again before saying so.
+    await reloadQueue()
+    notify.error(toPlainLeaveError(error) || 'Could not finish the bulk approval.', {
+      detail: 'Some items may already be approved; the list was refreshed.',
+    })
   } finally {
     bulkRunning.value = false
   }

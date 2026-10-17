@@ -592,6 +592,42 @@ class TestApiTimesheet(IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			save_my_week(str(self.monday), json.dumps([row]))
 
+	def test_a_week_names_only_tasks_on_the_callers_own_projects(self):
+		"""Review fix: `task_subject` is read only for tasks on a project the
+		employee belongs to; any other task id on a row comes back as itself,
+		so a hand-written task id cannot read another project's subject."""
+		other_project = make_test_project(f"{self.id().split('.')[-1]}-task-owner")
+		frappe.set_user("Administrator")
+		mine = frappe.get_doc({"doctype": "Task", "subject": "Bookable", "project": self.project}).insert(
+			ignore_permissions=True
+		)
+		theirs = frappe.get_doc({"doctype": "Task", "subject": "Not yours", "project": other_project}).insert(
+			ignore_permissions=True
+		)
+		start = get_datetime(f"{self.monday} 09:00:00")
+		frappe.get_doc(
+			{
+				"doctype": "Timesheet",
+				"employee": self.employee_name,
+				"company": frappe.db.get_value("Employee", self.employee_name, "company"),
+				"time_logs": [
+					{
+						"project": project,
+						"task": task.name,
+						"hours": 1,
+						"activity_type": "General",
+						"from_time": frappe.utils.add_to_date(start, hours=offset),
+						"to_time": frappe.utils.add_to_date(start, hours=offset + 1),
+					}
+					for offset, (project, task) in enumerate(((self.project, mine), (other_project, theirs)))
+				],
+			}
+		).insert(ignore_permissions=True)
+
+		frappe.set_user(EMPLOYEE_USER)
+		subjects = {row["task"]: row["task_subject"] for row in get_my_week(str(self.monday))["timesheet"]["rows"]}
+		self.assertEqual(subjects, {mine.name: "Bookable", theirs.name: theirs.name})
+
 	def test_projects_come_back_with_their_open_tasks(self):
 		frappe.set_user("Administrator")
 		task = frappe.get_doc(
