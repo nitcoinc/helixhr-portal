@@ -2929,3 +2929,114 @@ class TestRequestInboxTriage(IntegrationTestCase):
 		self.assertEqual(short["total"], everything["total"])
 		# The chips count every request, not the search's matches.
 		self.assertEqual(result["counts"], everything["counts"])
+
+	# --- closed order and all-state search (2026-10-17 fix) ------------------
+
+	def _close(self, name, status="Done", closed_days_ago=None):
+		"""Close `name` straight on the row: these tests are about what the
+		feed lists and in which order, not about the workflow that got it
+		there. `closed_days_ago=None` leaves `closed_on` empty, the shape of a
+		request closed before the date was stamped."""
+		closed_on = (
+			frappe.utils.add_days(frappe.utils.now_datetime(), -closed_days_ago)
+			if closed_days_ago is not None
+			else None
+		)
+		frappe.db.set_value(
+			"HR Request", name, {"status": status, "closed_on": closed_on}, update_modified=False
+		)
+
+	def test_the_closed_chip_lists_the_most_recently_closed_first(self):
+		sent_late_closed_early = self._file(f"Shut {self.stamp} a", days_ago=2)
+		sent_early_closed_late = self._file(f"Shut {self.stamp} b", days_ago=30)
+		# Sent first of all yet closed between the other two: oldest-created
+		# first would put it at the top.
+		middle = self._file(f"Shut {self.stamp} c", days_ago=40)
+		undated = self._file(f"Shut {self.stamp} d", days_ago=1)
+		self._close(sent_late_closed_early, "Done", closed_days_ago=20)
+		self._close(sent_early_closed_late, "Rejected", closed_days_ago=1)
+		self._close(middle, "Done", closed_days_ago=5)
+		self._close(undated, "Done")
+		expected = [sent_early_closed_late, middle, sent_late_closed_early, undated]
+
+		# The inbox always asks `sort=sla`; the plain order must agree.
+		for sort in ("", "sla"):
+			result = self._work(self.it_user, state="closed", sort=sort, limit=100)
+			self.assertFalse(result["searched"])
+			seen = [name for name in self._names(result) if name in expected]
+			self.assertEqual(seen, expected, sort)
+			rows = {row["name"]: row for row in result["work"]}
+			self.assertTrue(rows[middle]["closed_on"])
+			self.assertIsNone(rows[undated]["closed_on"])
+
+	def test_the_active_chips_keep_oldest_first(self):
+		older = self._file(f"Keep {self.stamp} older", days_ago=5)
+		newer = self._file(f"Keep {self.stamp} newer", days_ago=1)
+
+		for sort in ("", "sla"):
+			names = [n for n in self._names(self._work(self.it_user, sort=sort, limit=100)) if n in (older, newer)]
+			self.assertEqual(names, [older, newer], sort)
+
+	def test_a_search_covers_every_state_whatever_the_chip_active_rows_first(self):
+		q = f"Find {self.stamp}"
+		old_open = self._file(f"{q} old open", days_ago=6)
+		taken = self._file(f"{q} taken", days_ago=4)
+		self._act(self.it_user, taken, "Pick up")
+		new_open = self._file(f"{q} new open", days_ago=2)
+		done = self._file(f"{q} done", days_ago=40)
+		late = self._file(f"{q} late", days_ago=20)
+		rejected = self._file(f"{q} rejected", days_ago=3)
+		# Closed order matches neither sent order, oldest or newest first.
+		self._close(done, "Done", closed_days_ago=5)
+		self._close(late, "Done", closed_days_ago=1)
+		self._close(rejected, "Rejected", closed_days_ago=10)
+		expected = [old_open, taken, new_open, late, done, rejected]
+
+		for state in ("open", "mine", "waiting", "closed"):
+			for sort in ("", "sla"):
+				result = self._work(self.it_user, state=state, sort=sort, q=q)
+				self.assertTrue(result["searched"])
+				self.assertEqual(self._names(result), expected, (state, sort))
+				self.assertEqual(result["total"], 6)
+
+		# Load More walks the same order, every row once.
+		walked = []
+		for start in range(0, 6, 2):
+			walked += self._names(self._work(self.it_user, q=q, sort="sla", limit=2, start=start))
+		self.assertEqual(walked, expected)
+
+		rows = {row["name"]: row for row in self._work(self.it_user, q=q)["work"]}
+		self.assertEqual(rows[done]["status"], "Done")
+		self.assertTrue(rows[done]["closed_on"])
+		self.assertIsNone(rows[old_open]["closed_on"])
+
+		# No search (or one character): the chip's own view again.
+		for short in ("", "F"):
+			plain = self._work(self.it_user, q=short, limit=100)
+			self.assertFalse(plain["searched"])
+			self.assertNotIn(done, self._names(plain))
+			self.assertIn(old_open, self._names(plain))
+		closed = self._names(self._work(self.it_user, state="closed", limit=100))
+		self.assertIn(done, closed)
+		self.assertNotIn(old_open, closed)
+
+	def test_a_search_across_closed_requests_never_widens_scope(self):
+		q = f"Wide {self.stamp}"
+		letter = self._file(f"{q} letter", category="HR Letter")
+		laptop = self._file(f"{q} laptop")
+		own = self._file(f"{q} own laptop", as_user=self.it_user)
+		other_user = f"wc{self.stamp}@helixhr.test"
+		make_test_user(other_user, ensure_baseline_company())
+		elsewhere = self._file(f"{q} elsewhere", category="HR Letter", as_user=other_user)
+		for name in (letter, laptop, own, elsewhere):
+			self._close(name, "Done", closed_days_ago=1)
+
+		# HR: its own route and company only -- not the IT row, not another
+		# company's letter, closed or not.
+		self.assertEqual(self._names(self._work(self.hr_user, q=q)), [letter])
+		self.assertEqual(self._work(self.hr_user, q=f"wc{self.stamp}")["work"], [])
+		# IT: its route, never its own request.
+		self.assertEqual(self._names(self._work(self.it_user, q=q)), [laptop])
+		# A plain employee is still refused.
+		with self.assertRaises(frappe.PermissionError):
+			self._work(EMPLOYEE_USER, q=q)

@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, useId } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { createResource, Button, Dialog } from 'frappe-ui'
 import RequestForm from '@/components/RequestForm.vue'
@@ -41,6 +41,7 @@ const categoryFilter = computed(() => route.query.type || '')
 // so filtering the rows already here would search one page.
 const query = ref('')
 const search = ref('')
+const searchHintId = useId()
 const requests = createResource({
   url: 'helixhr.api.get_my_requests',
   makeParams: () => ({
@@ -298,7 +299,21 @@ defineExpose({ newRequest })
           placeholder="Part of a subject"
           maxlength="60"
           data-testid="request-search"
+          :aria-describedby="searchHintId"
         />
+        <!-- Always rendered: a live region inserted with its text already
+             in it is often not announced. Only the text comes and goes. -->
+        <p
+          :id="searchHintId"
+          class="text-sm text-ink-gray-6"
+          :class="search ? '-mt-2 mb-4' : ''"
+          role="status"
+        >
+          <span
+            v-if="search"
+            data-testid="request-search-hint"
+          >Searching all your requests{{ categoryFilter ? ` in ${categoryFilter}` : '' }}, including closed.</span>
+        </p>
         <AsyncState
           section="requests-list"
           :resource="requests"
@@ -306,7 +321,7 @@ defineExpose({ newRequest })
           :empty-title="search ? 'No requests match' : 'No requests yet'"
           :empty-body="
             search
-              ? 'Try another word from the subject, or clear the search.'
+              ? 'Nothing open or closed matches. Try another word from the subject, or clear the search.'
               : 'Ask HR for a letter, a payroll correction, or anything else you need.'
           "
           :skeleton-rows="3"

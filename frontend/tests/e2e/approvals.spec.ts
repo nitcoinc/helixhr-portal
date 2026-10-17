@@ -1038,3 +1038,77 @@ test('after a decision, focus moves to the next row (KTD16)', async ({ page }, t
     await removeRecord(baseURL, 'Leave Application', second)
   }
 })
+
+// Approvals search: an old decision -- older than the 14-day Decided
+// receipt -- is findable by its record name, the Decided list opens on its
+// own and says "all time", the pending lanes narrow to what matches, and the
+// shell's badge never takes a searched answer for the queue.
+test('Approvals search finds a decision older than the receipt and leaves the badge alone', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'manager', 'this is the manager capability shape')
+  test.setTimeout(90000)
+  const baseURL = process.env.BASE_URL || 'http://localhost:8080'
+  const start = futureWeekday()
+  const waiting = await seedLeave(baseURL, addDays(start, 63), 'search pending leave')
+  const old = await seedLeave(baseURL, addDays(start, 70), 'search old decision')
+
+  try {
+    const admin = await adminContext(baseURL)
+    const modified = await getValue(admin, 'Leave Application', { name: old }, 'modified')
+    const manager = await loginAs(baseURL, MANAGER)
+    const rejected = await manager.post('/api/method/helixhr.api.act_on_approval', {
+      form: {
+        doctype: 'Leave Application',
+        name: old,
+        action: 'Reject',
+        comment: 'search spec',
+        expected_modified: modified,
+        expected_state: 'Open',
+      },
+    })
+    expect(rejected.ok(), await rejected.text()).toBeTruthy()
+    await manager.dispose()
+    const backdated = await admin.post('/api/method/helixhr.tests.utils.backdate_decided_leave', {
+      form: { name: old, days: 40 },
+    })
+    expect(backdated.ok(), await backdated.text()).toBeTruthy()
+    await admin.dispose()
+
+    await page.setViewportSize(DESKTOP)
+    await page.goto('/helixhr/approvals?view=queue')
+    const queue = page.getByTestId('approvals-queue')
+    await expect(queue.locator(`[data-approval-name="${waiting}"]`)).toBeVisible({ timeout: 15000 })
+    // Outside the 14-day receipt, so not listed until searched for.
+    await expect(queue.locator(`[data-decided-name="${old}"]`)).toHaveCount(0)
+    const badge = page.getByTestId('nav-badge-approvals')
+    await expect(badge).toBeVisible()
+    const badgeText = await badge.textContent()
+
+    await page.getByTestId('approvals-search').fill(old)
+    await expect(page.getByTestId('approvals-search-hint')).toBeVisible({ timeout: 15000 })
+    const toggle = page.getByTestId('decided-toggle')
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    await expect(toggle).toContainText('all time')
+    const row = queue.locator(`[data-decided-name="${old}"]`)
+    await expect(row).toBeVisible()
+    await expect(row).toContainText('Decided')
+    // The pending lanes narrow to what matches: the waiting leave is not it.
+    await expect(queue.locator(`[data-approval-name="${waiting}"]`)).toHaveCount(0)
+    await expect(badge).toHaveText(badgeText || '')
+
+    // Clearing the search is the plain queue again.
+    await page.getByTestId('approvals-search').fill('')
+    await expect(queue.locator(`[data-approval-name="${waiting}"]`)).toBeVisible({ timeout: 15000 })
+    await expect(page.getByTestId('approvals-search-hint')).toHaveCount(0)
+    await expect(queue.locator(`[data-decided-name="${old}"]`)).toHaveCount(0)
+    await expect(badge).toHaveText(badgeText || '')
+
+    // Nothing matches: one plain empty state that names the term.
+    await page.getByTestId('approvals-search').fill('zz-no-such-approval')
+    await expect(page.getByText('No approvals match “zz-no-such-approval”')).toBeVisible({ timeout: 15000 })
+  } finally {
+    await removeRecord(baseURL, 'Leave Application', waiting)
+    await removeRecord(baseURL, 'Leave Application', old)
+  }
+})

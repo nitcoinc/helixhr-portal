@@ -1961,6 +1961,81 @@ class TestFourOutcomesAndTheHrQueue(IntegrationTestCase):
 		frappe.set_user(self.hr_user)
 		self.assertNotIn(request, [row["name"] for row in get_my_approvals()["decided"]])
 
+	def _backdate(self, doctype, name, days=40):
+		frappe.set_user("Administrator")
+		frappe.db.set_value(doctype, name, "modified", add_days(now_datetime(), -days), update_modified=False)
+
+	def test_search_reaches_a_decision_older_than_the_receipt(self):
+		"""Approvals search: `q` turns Decided into an all-time history of the
+		caller's own decisions, so a leave rejected 40 days ago is findable by
+		the person's name or the record name, newest first, and flagged as a
+		search."""
+		leave = self._open_leave()
+		frappe.set_user(MANAGER_USER)
+		act_on_approval("Leave Application", leave, "Reject", comment="no", **token("Leave Application", leave))
+		self._backdate("Leave Application", leave)
+		person = frappe.db.get_value("Employee", self.employee_name, "employee_name")
+
+		frappe.set_user(MANAGER_USER)
+		plain = get_my_approvals()
+		self.assertFalse(plain["searched"])
+		self.assertNotIn(leave, [row["name"] for row in plain["decided"]])
+
+		for q in (f"  {person}  ", person.upper(), leave):
+			found = get_my_approvals(q=q)
+			self.assertTrue(found["searched"], q)
+			self.assertEqual(found["decided_is_capped"], len(found["decided"]) >= 50, q)
+			receipt = [row for row in found["decided"] if row["name"] == leave]
+			self.assertEqual(len(receipt), 1, q)
+			self.assertEqual(receipt[0]["status"], "Rejected")
+			self.assertGreater(receipt[0]["age_days"], 14)
+			stamps = [row["decided_on"] for row in found["decided"]]
+			self.assertEqual(stamps, sorted(stamps, reverse=True))
+			self.assertTrue(all(person.lower() in row["employee_name"].lower() or row["name"] == q for row in found["pending"]))
+
+		self.assertNotIn(leave, [row["name"] for row in get_my_approvals(q="zz-no-such-person")["decided"]])
+		# The leave was never HR's decision, so HR's search does not list it.
+		frappe.set_user(self.hr_user)
+		self.assertNotIn(leave, [row["name"] for row in get_my_approvals(q=leave)["decided"]])
+
+	def test_search_keeps_hrs_history_their_own(self):
+		"""`_decided_by_me` holds for the all-time search: HR's native read
+		spans the company, but a manager's old decision is not HR's."""
+		request = self._pending_manager_request()
+		frappe.set_user(MANAGER_USER)
+		act_on_approval(DOCTYPE, request, "Approve", **token(DOCTYPE, request))
+		self._backdate(DOCTYPE, request)
+
+		frappe.set_user(MANAGER_USER)
+		self.assertIn(request, [row["name"] for row in get_my_approvals(q=request)["decided"]])
+		frappe.set_user(self.hr_user)
+		self.assertNotIn(request, [row["name"] for row in get_my_approvals(q=request)["decided"]])
+
+	def test_a_short_search_is_no_search(self):
+		"""Under two characters `q` asks nothing: the payload is exactly the
+		unsearched one, receipt window and all."""
+		self._open_leave()
+		frappe.set_user(MANAGER_USER)
+		plain = get_my_approvals()
+		for q in ("a", " b ", "", None):
+			self.assertEqual(get_my_approvals(q=q), plain, q)
+
+	def test_search_narrows_pending_but_counts_stay_the_whole_queue(self):
+		leave = self._open_leave()
+		person = frappe.db.get_value("Employee", self.employee_name, "employee_name")
+		frappe.set_user(MANAGER_USER)
+		plain = get_my_approvals()
+		self.assertIn(leave, [row["name"] for row in plain["pending"]])
+
+		found = get_my_approvals(q=person[:4])
+		self.assertIn(leave, [row["name"] for row in found["pending"]])
+		self.assertEqual(found["counts"], plain["counts"])
+
+		missed = get_my_approvals(q="zz-no-such-person")
+		self.assertEqual(missed["pending"], [])
+		self.assertEqual(missed["total"], 0)
+		self.assertEqual(missed["counts"], plain["counts"])
+
 	def test_a_hand_over_note_is_never_read_back_as_a_send_back_reason(self):
 		"""P4-R5's note is written for HR's eyes. It lives in the same
 		Comment stream as the reason the employee reads, so a later

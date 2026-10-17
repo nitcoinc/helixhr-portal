@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, nextTick } from 'vue'
+import { ref, computed, watch, nextTick, useId } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { createResource, Button, FormControl } from 'frappe-ui'
 import SegmentedChips from '@/components/SegmentedChips.vue'
@@ -82,6 +82,7 @@ function filterWork(state) {
 const query = ref('')
 const search = ref('')
 const category = ref('')
+const searchHintId = useId()
 const workLimit = ref(20)
 const work = createResource({
   url: 'helixhr.api.get_request_work',
@@ -169,8 +170,14 @@ const workMoreCount = computed(() => Math.max(0, workTotal.value - workRows.valu
 // AI-17: a kind tag that is the same on every row says nothing.
 const mixedKinds = computed(() => new Set(workRows.value.map((row) => row.routed_to_role)).size > 1)
 
+// A search covers every request the chips can list, closed included, and
+// ignores the state chip (the server says so with `searched`); clearing it
+// returns to the chip's own view.
+const searching = computed(() => Boolean(work.data?.searched))
+const CLOSED_STATUSES = ['Done', 'Rejected']
+
 const workGroups = computed(() => {
-  if (workFilter.value === 'closed') {
+  if (workFilter.value === 'closed' && !searching.value) {
     return [{ key: 'closed', title: 'Closed', rows: workRows.value }]
   }
   const newRows = workRows.value.filter((r) => r.status === 'Open')
@@ -186,6 +193,12 @@ const workGroups = computed(() => {
   }
   if (waitingRows.length) {
     list.push({ key: 'waiting', title: 'Waiting on employee', count: waitingRows.length, rows: waitingRows })
+  }
+  // Searching: closed matches below the active ones, most recently closed
+  // first (the server's order).
+  const closedRows = searching.value ? workRows.value.filter((r) => CLOSED_STATUSES.includes(r.status)) : []
+  if (closedRows.length) {
+    list.push({ key: 'closed', title: 'Closed', count: closedRows.length, rows: closedRows })
   }
   if (!list.length && workRows.value.length) {
     list.push({ key: 'all', title: 'Requests', count: workRows.value.length, rows: workRows.value })
@@ -390,7 +403,21 @@ const workTimeline = computed(() => {
         placeholder="Subject or requester"
         maxlength="60"
         data-testid="work-search"
+        :aria-describedby="searchHintId"
       />
+      <!-- Always rendered: a live region inserted with its text already in
+           it is often not announced. Only the text comes and goes. -->
+      <p
+        :id="searchHintId"
+        class="text-sm text-ink-gray-6"
+        :class="search ? '-mt-2 mb-4' : ''"
+        role="status"
+      >
+        <span
+          v-if="search"
+          data-testid="work-search-hint"
+        >Searching all requests{{ category ? ` in ${category}` : '' }}, including closed. Clear the search to filter by state.</span>
+      </p>
       <!-- R7: the feed's state chips, off the same server filter the
            tab read. "Closed" is a deliberate click away, not a default. -->
       <SegmentedChips
@@ -420,9 +447,11 @@ const workTimeline = computed(() => {
         :empty="workRows.length === 0"
         :empty-title="search || category ? 'No requests match' : 'Nothing to work on'"
         :empty-body="
-          search || category
-            ? 'Try another word, another category, or clear the search.'
-            : 'Requests routed to you appear here as they arrive.'
+          search
+            ? 'Nothing open or closed matches. Try another word, another category, or clear the search.'
+            : category
+              ? 'Try another category, or pick All.'
+              : 'Requests routed to you appear here as they arrive.'
         "
         :skeleton-rows="3"
       >
@@ -489,6 +518,9 @@ const workTimeline = computed(() => {
                       </template>
                       <template v-if="row.waiting_since">
                         · waiting {{ waitedFor(row.waiting_days) }}
+                      </template>
+                      <template v-if="row.closed_on">
+                        · closed {{ formatDate(row.closed_on) }}
                       </template>
                     </p>
                   </div>

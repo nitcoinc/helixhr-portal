@@ -493,8 +493,12 @@ test.describe('employee', () => {
     expect(parseFloat(style.duration)).toBeLessThan(0.05)
     expect(parseFloat(style.opacity)).toBe(1)
     // And the caption still says what is happening, which is the part a
-    // stopped animation cannot carry.
-    await expect(page.getByRole('status')).toHaveAttribute('aria-busy', 'true')
+    // stopped animation cannot carry. Scoped by name: the search hint is a
+    // second, always-rendered status region on this page.
+    await expect(page.getByRole('status', { name: 'Loading requests list' })).toHaveAttribute(
+      'aria-busy',
+      'true',
+    )
 
     // And the other skeleton shape, on a phase 3 anchored block: 'field'
     // draws its pulse on `bg-field/10` rather than `bg-surface-gray-2`, so

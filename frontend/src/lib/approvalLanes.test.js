@@ -6,6 +6,7 @@ import {
   approveAllLabel,
   batchItem,
   batchLabel,
+  decidedForTab,
   groupByPerson,
   isBatchable,
   laneSections,
@@ -47,6 +48,31 @@ describe('laneSections', () => {
     ])
     expect(lane.sections.map((section) => section.key)).toEqual(['change', 'flagged', 'normal'])
     expect(lane.sections[0].rows.map((r) => r.name)).toEqual(['c'])
+  })
+})
+
+describe('decidedForTab', () => {
+  const decided = [
+    { name: 'L-1', kind: 'leave' },
+    { name: 'TS-1', kind: 'timesheet' },
+    { name: 'AR-1', kind: 'attendance' },
+    { name: 'CH-1', kind: 'change' },
+  ]
+  const names = (rows) => rows.map((entry) => entry.name)
+
+  it('keeps the unsearched receipt on Leave & attendance only, whole', () => {
+    expect(names(decidedForTab(decided, 'queue', false))).toEqual(['L-1', 'TS-1', 'AR-1', 'CH-1'])
+    expect(decidedForTab(decided, 'timesheets', false)).toEqual([])
+  })
+
+  it('splits a search by tab: timesheets on Timesheets, the rest on Leave & attendance', () => {
+    expect(names(decidedForTab(decided, 'timesheets', true))).toEqual(['TS-1'])
+    expect(names(decidedForTab(decided, 'queue', true))).toEqual(['L-1', 'AR-1', 'CH-1'])
+  })
+
+  it('answers an empty list for no rows', () => {
+    expect(decidedForTab(undefined, 'queue', false)).toEqual([])
+    expect(decidedForTab(null, 'timesheets', true)).toEqual([])
   })
 })
 

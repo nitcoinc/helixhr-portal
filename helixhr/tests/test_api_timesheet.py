@@ -1220,6 +1220,24 @@ class TestTimesheetRecallAndCancel(IntegrationTestCase):
 		row = next(row for row in rows if row["name"] == name)
 		self.assertEqual(row["status"], "Cancelled")
 
+	def test_a_searched_timesheet_history_lists_only_the_callers_own_decisions(self):
+		"""Approvals search reaches timesheets for a line manager too, whose
+		nested-set read also covers weeks other approvers decided; "Decided by
+		me" there is the week's last writer. The unsearched shape is as before."""
+		from helixhr.api import _decided_timesheets
+
+		name = self._save_and_submit()
+		frappe.set_user(MANAGER_USER)
+		apply_workflow({"doctype": "Timesheet", "name": name}, "Approve")
+		pattern = f"%{name}%"
+		self.assertIn(name, [row["name"] for row in _decided_timesheets(self.manager_name, None, pattern)])
+
+		frappe.set_user("Administrator")
+		frappe.db.set_value("Timesheet", name, "modified_by", "Administrator", update_modified=False)
+		frappe.set_user(MANAGER_USER)
+		self.assertNotIn(name, [row["name"] for row in _decided_timesheets(self.manager_name, None, pattern)])
+		self.assertIn(name, [row["name"] for row in _decided_timesheets(self.manager_name, "2000-01-01")])
+
 	def test_an_hr_manager_cannot_cancel_their_own_week(self):
 		"""KTD2: the Cancel transition keeps the "not own" condition, like
 		every other HR transition."""
