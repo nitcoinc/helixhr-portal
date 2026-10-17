@@ -2078,6 +2078,70 @@ def seed_roster_fixtures():
 	return ensure_roster_fixtures()
 
 
+# Per-group paging on My requests: more closed requests than one page holds.
+MY_REQUESTS_PAGING_TAG = "GP-PAGING"
+MY_REQUESTS_PAGING_COUNT = 25
+
+
+@frappe.whitelist()
+def seed_my_requests_paging():
+	"""`requests-documents.spec.ts`: 25 closed `Payroll Question` requests for
+	the employee fixture, sent and closed over a year ago, so My requests'
+	Closed group always has a second page. Test sites and System Manager only.
+
+	Bulk-inserted under fixed names, so a rerun adds nothing (`_seed_bulk`'s
+	reasoning: a full insert would take the session's Employee). Payroll
+	Question because no other spec files one; closed, unrouted and with no
+	Notification Log, so Home's queue and every handler inbox are unchanged
+	and the rows sort below anything a spec files today."""
+	_require_allow_tests()
+	frappe.only_for("System Manager")
+	employee = frappe.db.get_value("Employee", {"user_id": EMPLOYEE_USER}, "name")
+	if not employee:
+		frappe.throw("Run setup_playwright_fixtures first.")
+	now = frappe.utils.now_datetime()
+	values = []
+	for index in range(MY_REQUESTS_PAGING_COUNT):
+		sent = frappe.utils.add_days(now, -(500 + index))
+		values.append(
+			(
+				f"{MY_REQUESTS_PAGING_TAG}-{index:04d}",
+				sent,
+				sent,
+				"Administrator",
+				"Administrator",
+				0,
+				"HR-REQ-.YYYY.-",
+				employee,
+				"Payroll Question",
+				f"Paging fixture {index:02d}",
+				("Done", "Rejected")[index % 2],
+				frappe.utils.add_days(now, -(400 + index)),
+			)
+		)
+	frappe.db.bulk_insert(
+		"HR Request",
+		[
+			"name",
+			"creation",
+			"modified",
+			"modified_by",
+			"owner",
+			"docstatus",
+			"naming_series",
+			"employee",
+			"category",
+			"subject",
+			"status",
+			"closed_on",
+		],
+		values,
+		ignore_duplicates=True,
+	)
+	frappe.db.commit()  # nosemgrep
+	return frappe.db.count("HR Request", {"name": ["like", f"{MY_REQUESTS_PAGING_TAG}-%"]})
+
+
 @frappe.whitelist()
 def backdate_decided_leave(name, days=40):
 	"""`approvals.spec.ts`: move a decided Leave Application's `modified`

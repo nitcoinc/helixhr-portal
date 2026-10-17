@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { byClosedNewest, fileSize, isOwed, myRequestGroups, slaOverLabel } from './requests'
+import { fileSize, isOwed, latestOnly, myRequestSections, slaOverLabel } from './requests'
 
 const row = (name, status, extra = {}) => ({ name, status, unread: false, unread_reply: false, ...extra })
 
@@ -16,73 +16,37 @@ describe('isOwed (KTD12)', () => {
   })
 })
 
-describe('myRequestGroups', () => {
-  it('keeps an unread Done with no message in Closed, not Needs you', () => {
-    const groups = myRequestGroups([
-      row('done', 'Done', { unread: true }),
-      row('reply', 'In Progress', { unread: true, unread_reply: true }),
-      row('wait', 'Waiting on Employee'),
-      row('open', 'Open', { unread: true }),
-      row('declined', 'Rejected'),
-    ])
-    expect(groups.map((group) => [group.key, group.rows.map((r) => r.name)])).toEqual([
-      ['needs-you', ['reply', 'wait']],
-      ['open', ['open']],
-      ['closed', ['done', 'declined']],
-    ])
+describe('myRequestSections', () => {
+  const group = (names, total = names.length, limit = 20) => ({
+    rows: names.map((name) => row(name, 'Open')),
+    total,
+    limit,
   })
-  it('lists Closed most recently closed first, whatever order the rows were sent in', () => {
-    const groups = myRequestGroups([
-      row('sent-new-closed-old', 'Done', { creation: '2026-10-10 09:00:00', closed_on: '2026-10-11 09:00:00' }),
-      row('open', 'Open', { creation: '2026-10-09 09:00:00' }),
-      row('sent-old-closed-new', 'Rejected', { creation: '2026-01-05 09:00:00', closed_on: '2026-10-16 17:30:00' }),
-      row('undated-new', 'Done', { creation: '2026-09-01 09:00:00' }),
-      row('sent-mid-closed-mid', 'Done', { creation: '2026-05-01 09:00:00', closed_on: '2026-10-12 08:00:00' }),
-      row('undated-old', 'Rejected', { creation: '2025-12-01 09:00:00' }),
-    ])
-    expect(groups.find((group) => group.key === 'closed').rows.map((r) => r.name)).toEqual([
-      'sent-old-closed-new',
-      'sent-mid-closed-mid',
-      'sent-new-closed-old',
-      'undated-new',
-      'undated-old',
-    ])
-    expect(groups.find((group) => group.key === 'open').rows.map((r) => r.name)).toEqual(['open'])
-  })
-  it('does not reorder Needs you or Open', () => {
-    const groups = myRequestGroups([
-      row('b', 'Open', { creation: '2026-10-01 09:00:00' }),
-      row('a', 'Open', { creation: '2026-10-05 09:00:00' }),
-      row('w2', 'Waiting on Employee', { creation: '2026-09-01 09:00:00' }),
-      row('w1', 'Waiting on Employee', { creation: '2026-10-02 09:00:00' }),
-    ])
-    expect(groups.map((group) => [group.key, group.rows.map((r) => r.name)])).toEqual([
-      ['needs-you', ['w2', 'w1']],
-      ['open', ['b', 'a']],
-    ])
-  })
-  it('drops empty groups', () => {
-    expect(myRequestGroups([row('open', 'Open')]).map((group) => group.key)).toEqual(['open'])
-    expect(myRequestGroups(null)).toEqual([])
-  })
-})
 
-describe('byClosedNewest', () => {
-  it('puts dated rows first, newest first, then undated by creation', () => {
-    const rows = [
-      { name: 'u', creation: '2026-10-15 00:00:00' },
-      { name: 'old', creation: '2026-01-01 00:00:00', closed_on: '2026-02-01 00:00:00' },
-      { name: 'new', creation: '2026-01-02 00:00:00', closed_on: '2026-10-01 00:00:00' },
-    ]
-    expect([...rows].sort(byClosedNewest).map((r) => r.name)).toEqual(['new', 'old', 'u'])
+  it('labels the server groups in order and keeps their row order', () => {
+    const sections = myRequestSections({
+      closed: group(['c2', 'c1']),
+      open: group(['o1']),
+      needs_you: group(['w2', 'w1'], 2, 100),
+    })
+    expect(sections.map((s) => [s.key, s.label, s.rows.map((r) => r.name)])).toEqual([
+      ['needs_you', 'Needs you', ['w2', 'w1']],
+      ['open', 'Open', ['o1']],
+      ['closed', 'Closed', ['c2', 'c1']],
+    ])
+    expect(sections[0].limit).toBe(100)
   })
-  it('breaks a closed_on tie by creation, newest first', () => {
-    const same = '2026-10-01 10:00:00'
-    const rows = [
-      { name: 'older', creation: '2026-01-01 00:00:00', closed_on: same },
-      { name: 'newer', creation: '2026-03-01 00:00:00', closed_on: same },
-    ]
-    expect([...rows].sort(byClosedNewest).map((r) => r.name)).toEqual(['newer', 'older'])
+  it('says how many more each group holds, never negative', () => {
+    const sections = myRequestSections({ open: group(['o1', 'o2'], 25), closed: group(['c1'], 0) })
+    expect(sections.map((s) => [s.key, s.more])).toEqual([
+      ['open', 23],
+      ['closed', 0],
+    ])
+  })
+  it('drops empty groups, and answers nothing without groups', () => {
+    expect(myRequestSections({ needs_you: group([]), open: group(['o']), closed: group([], 4) }).map((s) => s.key)).toEqual(['open'])
+    expect(myRequestSections(undefined)).toEqual([])
+    expect(myRequestSections({})).toEqual([])
   })
 })
 
@@ -100,5 +64,58 @@ describe('fileSize', () => {
     expect(fileSize(512)).toBe('512 B')
     expect(fileSize(2048)).toBe('2 KB')
     expect(fileSize(1.5 * 1024 * 1024)).toBe('1.5 MB')
+  })
+})
+
+describe('latestOnly', () => {
+  // A fetcher whose calls resolve or reject only when the test says so.
+  function deferredFetcher() {
+    const calls = []
+    const fetcher = (options) =>
+      new Promise((resolve, reject) => calls.push({ options, resolve, reject }))
+    return { calls, fetcher }
+  }
+
+  it('settles an overtaken call with the newest answer, whichever lands first', async () => {
+    const { calls, fetcher } = deferredFetcher()
+    const fetch = latestOnly(fetcher)
+    const first = fetch({ q: '' })
+    const second = fetch({ q: 'laptop' })
+    calls[1].resolve('newest')
+    calls[0].resolve('stale')
+    await expect(first).resolves.toBe('newest')
+    await expect(second).resolves.toBe('newest')
+  })
+
+  it('waits for the newest call when the overtaken one lands first', async () => {
+    const { calls, fetcher } = deferredFetcher()
+    const fetch = latestOnly(fetcher)
+    const first = fetch({})
+    const second = fetch({})
+    let settled = false
+    first.then(() => (settled = true))
+    calls[0].resolve('stale')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    calls[1].resolve('newest')
+    await expect(first).resolves.toBe('newest')
+    await expect(second).resolves.toBe('newest')
+  })
+
+  it("drops an overtaken call's failure and reports only the newest one's", async () => {
+    const { calls, fetcher } = deferredFetcher()
+    const fetch = latestOnly(fetcher)
+    const first = fetch({})
+    const second = fetch({})
+    calls[0].reject(new Error('stale'))
+    calls[1].reject(new Error('newest'))
+    await expect(first).rejects.toThrow('newest')
+    await expect(second).rejects.toThrow('newest')
+  })
+
+  it('passes a lone call straight through', async () => {
+    const fetch = latestOnly(async (options) => options.n * 2)
+    await expect(fetch({ n: 2 })).resolves.toBe(4)
   })
 })

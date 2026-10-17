@@ -210,8 +210,18 @@ test.describe('employee', () => {
       const rows = page.locator('[data-testid="request-row"]')
       await expect(rows.filter({ hasText: `U6 asset ${stamp}` })).toHaveCount(1)
       await expect(rows.filter({ hasText: `U6 letter ${stamp}` })).toHaveCount(0)
+      // Per-group paging: each group is its own page, and together the
+      // groups count every request the chip counts.
       const count = Number((await chip.innerText()).match(/(\d+)$/)![1])
-      await expect(rows).toHaveCount(Math.min(count, 20))
+      const listed = await employeeApi.get('/api/method/helixhr.api.get_my_requests', {
+        params: { category: 'IT / Asset' },
+      })
+      const groups = Object.values((await listed.json())?.message?.groups || {}) as {
+        rows: unknown[]
+        total: number
+      }[]
+      expect(groups.reduce((sum, group) => sum + group.total, 0)).toBe(count)
+      await expect(rows).toHaveCount(groups.reduce((sum, group) => sum + group.rows.length, 0))
 
       // ED-02 / EP-15: the list badge names the team, as the detail does.
       const asset = rows.filter({ hasText: `U6 asset ${stamp}` })
@@ -438,6 +448,61 @@ test.describe('employee', () => {
     } finally {
       await removeRequest(api, name)
       await itApi.dispose()
+      await employeeApi.dispose()
+      await api.dispose()
+    }
+  })
+
+  // ── Per-group paging: each group answers for itself ─────────────────
+  test('Closed pages on its own, Open stays put, and Needs you holds what is owed', async ({
+    page,
+    baseURL,
+  }) => {
+    const api = await admin(baseURL!)
+    const employeeApi = await asEmployee(baseURL!)
+    const stamp = Date.now()
+    const names: string[] = []
+
+    try {
+      // More closed requests than one page, sent and closed long ago
+      // (idempotent), plus one open request and one with an unread reply.
+      const seeded = await api.post('/api/method/helixhr.tests.utils.seed_my_requests_paging')
+      expect(seeded.ok(), await seeded.text()).toBeTruthy()
+      names.push(await seedRequest(employeeApi, `Paging open ${stamp}`))
+      const owed = await seedRequest(employeeApi, `Paging owed ${stamp}`)
+      names.push(owed)
+      await hrReplies(api, owed, 'Which month is it for?')
+
+      const listed = await employeeApi.get('/api/method/helixhr.api.get_my_requests')
+      const closedTotal = (await listed.json())?.message?.groups?.closed?.total as number
+      expect(closedTotal).toBeGreaterThan(20)
+
+      await page.goto('/helixhr/requests')
+      const needsYou = page.getByRole('region', { name: 'Needs you' })
+      await expect(needsYou.locator('[data-testid="request-row"]', { hasText: `Paging owed ${stamp}` })).toHaveCount(1)
+
+      const open = page.getByRole('region', { name: 'Open' })
+      const openRows = open.locator('[data-testid="request-row"]')
+      await expect(openRows.filter({ hasText: `Paging open ${stamp}` })).toHaveCount(1)
+      const openBefore = await openRows.allInnerTexts()
+
+      const closed = page.getByRole('region', { name: 'Closed' })
+      const closedRows = closed.locator('[data-testid="request-row"]')
+      await expect(closedRows).toHaveCount(20)
+      const more = closed.getByTestId('show-more-closed')
+      await expect(more).toHaveText(`Show ${Math.min(closedTotal - 20, 20)} more closed requests`)
+      // A 44px target, like every other control in the list.
+      expect((await more.boundingBox())!.height).toBeGreaterThanOrEqual(44)
+
+      await more.click()
+      await expect(closedRows).toHaveCount(Math.min(closedTotal, 40))
+      // Focus lands on the first row the click revealed, not on <body>.
+      await expect(closedRows.nth(20).getByRole('link')).toBeFocused()
+      // Only Closed grew.
+      expect(await openRows.allInnerTexts()).toEqual(openBefore)
+      await expect(needsYou.locator('[data-testid="request-row"]', { hasText: `Paging owed ${stamp}` })).toHaveCount(1)
+    } finally {
+      for (const name of names) await removeRequest(api, name)
       await employeeApi.dispose()
       await api.dispose()
     }

@@ -2930,6 +2930,174 @@ class TestRequestInboxTriage(IntegrationTestCase):
 		# The chips count every request, not the search's matches.
 		self.assertEqual(result["counts"], everything["counts"])
 
+	# --- My requests, per-group paging ---------------------------------------
+
+	def _mine(self, as_user=EMPLOYEE_USER, **kwargs):
+		from helixhr.api import get_my_requests
+
+		frappe.set_user(as_user)
+		try:
+			return get_my_requests(**kwargs)
+		finally:
+			frappe.set_user("Administrator")
+
+	@staticmethod
+	def _in(result, group):
+		return [row["name"] for row in result["groups"][group]["rows"]]
+
+	def _reply(self, name, note="Ready at the front desk."):
+		"""HR writes a reply: the employee's unread HR_REPLY_SUBJECT_PREFIX bell."""
+		frappe.set_user("Administrator")
+		desk = frappe.get_doc("HR Request", name)
+		desk.hr_note = note
+		desk.save()
+
+	def test_my_requests_groups_order_and_count_every_request_not_one_page(self):
+		q = f"Grp {self.stamp}"
+		# The three oldest: beyond a newest-sent-first page of 20.
+		oldest = self._file(f"{q} oldest", days_ago=90)
+		waiting = self._file(f"{q} waiting", category="HR Letter", days_ago=80)
+		replied = self._file(f"{q} replied", days_ago=70)
+		closed = [self._file(f"{q} closed {i:02d}", days_ago=40 - i) for i in range(19)]
+		opened = [self._file(f"{q} open {i}", days_ago=3 - i) for i in range(3)]
+		frappe.db.set_value("HR Request", opened[0], "category", "HR Letter", update_modified=False)
+
+		self._reply(replied)
+		self._close(replied, "Done", closed_days_ago=50)
+		frappe.db.set_value(
+			"HR Request", waiting, "status", "Waiting on Employee", update_modified=False
+		)
+		# Sent first of all, closed last of all.
+		self._close(oldest, "Rejected", closed_days_ago=0)
+		for index, name in enumerate(closed):
+			self._close(name, ("Done", "Rejected")[index % 2], closed_days_ago=index + 1)
+
+		result = self._mine(q=q)
+		# The existing keys are untouched: one page of 20 newest sent, which is
+		# exactly the page that used to be split -- and it misses all three.
+		self.assertEqual(result["total"], 25)
+		self.assertEqual(result["limit"], 20)
+		flat = [row["name"] for row in result["requests"]]
+		self.assertEqual(flat, [*reversed(opened), *reversed(closed)][:20])
+		for name in (oldest, waiting, replied):
+			self.assertNotIn(name, flat)
+
+		groups = result["groups"]
+		# Needs you: waiting on the employee, or an unread message -- closed
+		# or not -- newest sent first.
+		self.assertEqual(self._in(result, "needs_you"), [replied, waiting])
+		self.assertEqual(groups["needs_you"]["total"], 2)
+		self.assertEqual(self._in(result, "open"), list(reversed(opened)))
+		self.assertEqual((groups["open"]["total"], groups["open"]["limit"]), (3, 20))
+		# Closed: most recently closed first, so the oldest request leads.
+		self.assertEqual(self._in(result, "closed"), [oldest, *closed])
+		self.assertEqual((groups["closed"]["total"], groups["closed"]["limit"]), (20, 20))
+
+		rows = {row["name"]: row for group in groups.values() for row in group["rows"]}
+		self.assertTrue(rows[replied]["unread_reply"])
+		self.assertTrue(rows[replied]["unread"])
+		self.assertEqual(rows[replied]["status"], "Done")
+		self.assertTrue(rows[replied]["hr_note"])
+		self.assertTrue(rows[oldest]["closed_on"])
+		self.assertFalse(rows[oldest]["unread_reply"])
+		for row in rows.values():
+			self.assertIn("picked_up_by_name", row)
+			self.assertIn("handled_by_team", row)
+			self.assertIn("attachments", row)
+			self.assertNotIn("picked_up_by", row)
+
+		# Each Show more grows only its own group, bounded at 100.
+		small = self._mine(q=q, open_limit=1, closed_limit=5)
+		self.assertEqual(self._in(small, "open"), [opened[2]])
+		self.assertEqual(self._in(small, "closed"), [oldest, *closed[:4]])
+		self.assertEqual(small["groups"]["closed"]["total"], 20)
+		grown = self._mine(q=q, open_limit=1, closed_limit=10)
+		self.assertEqual(self._in(grown, "open"), self._in(small, "open"))
+		self.assertEqual(self._in(grown, "closed")[:5], self._in(small, "closed"))
+		self.assertEqual(len(self._in(grown, "closed")), 10)
+		self.assertEqual(self._in(grown, "needs_you"), [replied, waiting])
+		capped = self._mine(q=q, open_limit=10_000, closed_limit=10_000)
+		self.assertEqual((capped["groups"]["open"]["limit"], capped["groups"]["closed"]["limit"]), (100, 100))
+		self.assertEqual(capped["limit"], 20, "the flat page keeps its own limit")
+
+		# The chip and the search narrow every group and every total; the
+		# category chips still count everything.
+		letters = self._mine(q=q, category="HR Letter")
+		self.assertEqual(self._in(letters, "needs_you"), [waiting])
+		self.assertEqual(self._in(letters, "open"), [opened[0]])
+		self.assertEqual(self._in(letters, "closed"), [])
+		self.assertEqual(
+			[letters["groups"][key]["total"] for key in ("needs_you", "open", "closed")], [1, 1, 0]
+		)
+		self.assertEqual(letters["counts"], result["counts"])
+		searched = self._mine(q=f"{q} open")
+		self.assertEqual(self._in(searched, "open"), list(reversed(opened)))
+		self.assertEqual(
+			[searched["groups"][key]["total"] for key in ("needs_you", "open", "closed")], [0, 3, 0]
+		)
+
+		# Reading the reply stops it needing you; it takes its closed place.
+		from helixhr.api import mark_my_request_read
+
+		frappe.set_user(EMPLOYEE_USER)
+		mark_my_request_read(replied)
+		frappe.set_user("Administrator")
+		after = self._mine(q=q, closed_limit=40)
+		self.assertEqual(self._in(after, "needs_you"), [waiting])
+		self.assertEqual(self._in(after, "closed"), [oldest, *closed, replied])
+		self.assertEqual(after["groups"]["closed"]["total"], 21)
+
+	def test_my_requests_closed_group_puts_undated_after_dated(self):
+		# Closed before `closed_on` was stamped: after every dated row, newest
+		# sent first among themselves -- whatever order the database's NULLs
+		# would otherwise take.
+		q = f"Undated {self.stamp}"
+		undated_old = self._file(f"{q} a", days_ago=1)
+		undated_new = self._file(f"{q} b", days_ago=0)
+		dated_long_ago = self._file(f"{q} c", days_ago=60)
+		dated_recent = self._file(f"{q} d", days_ago=50)
+		self._close(undated_old, "Done")
+		self._close(undated_new, "Rejected")
+		self._close(dated_long_ago, "Done", closed_days_ago=40)
+		self._close(dated_recent, "Done", closed_days_ago=2)
+		self.assertEqual(
+			self._in(self._mine(q=q), "closed"), [dated_recent, dated_long_ago, undated_new, undated_old]
+		)
+
+	def test_my_requests_groups_never_list_another_employees_request(self):
+		from helixhr.events import HR_REPLY_SUBJECT_PREFIX
+
+		q = f"Theirs {self.stamp}"
+		mine = self._file(f"{q} mine", category="HR Letter")
+		self._reply(mine)
+		other_user = f"gp{self.stamp}@helixhr.test"
+		make_test_user(other_user, ensure_baseline_company())
+		theirs = self._file(f"{q} theirs", category="HR Letter", as_user=other_user)
+		waiting = self._file(f"{q} theirs waiting", category="HR Letter", as_user=other_user)
+		frappe.db.set_value("HR Request", waiting, "status", "Waiting on Employee", update_modified=False)
+		# An unread "HR replied" log addressed to the caller about somebody
+		# else's request must not pull that request into the caller's list.
+		log = frappe.get_doc(
+			{
+				"doctype": "Notification Log",
+				"for_user": EMPLOYEE_USER,
+				"type": "Alert",
+				"document_type": "HR Request",
+				"document_name": theirs,
+				"subject": f"{HR_REPLY_SUBJECT_PREFIX} {q} theirs",
+			}
+		).insert(ignore_permissions=True)
+		self.addCleanup(frappe.delete_doc, "Notification Log", log.name, force=True, ignore_permissions=True)
+
+		result = self._mine(q=q)
+		self.assertEqual(self._in(result, "needs_you"), [mine])
+		self.assertEqual(self._in(result, "open"), [])
+		self.assertEqual(self._in(result, "closed"), [])
+		self.assertEqual(
+			[result["groups"][key]["total"] for key in ("needs_you", "open", "closed")], [1, 0, 0]
+		)
+		self.assertEqual([row["name"] for row in result["requests"]], [mine])
+
 	# --- closed order and all-state search (2026-10-17 fix) ------------------
 
 	def _close(self, name, status="Done", closed_days_ago=None):

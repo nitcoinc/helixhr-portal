@@ -2894,10 +2894,7 @@ def _hr_request_summaries(
 		for c in comments:
 			if c.reference_name not in latest_questions:
 				latest_questions[c.reference_name] = c.creation
-	picker_names = {
-		user: _picker_display_name(user)
-		for user in {row.picked_up_by for row in rows if row.picked_up_by}
-	}
+	picker_names = _picker_display_names(row.picked_up_by for row in rows)
 	# One read per page, not per row (P2-R22): SLA days ride beside the
 	# routed role the categories already answer.
 	if sla_days is None:
@@ -8982,6 +8979,19 @@ def _picker_display_name(picked_up_by):
 	return row.full_name
 
 
+def _picker_display_names(users):
+	"""`{user: full name}` for many pickers in one read, by the rules of
+	`_picker_display_name`: no picker, the Administrator account, a disabled
+	or missing user are simply absent, so `.get()` answers None for them."""
+	wanted = list({user for user in users if user and user != "Administrator"})
+	if not wanted:
+		return {}
+	rows = frappe.get_all(
+		"User", filters={"name": ["in", wanted], "enabled": 1}, fields=["name", "full_name"]
+	)
+	return {row.name: row.full_name for row in rows}
+
+
 def _own_requests_filters(employee, category=None, pattern=None):
 	"""The one filter for "`employee`'s own requests": optionally one
 	category, and a subject matching the LIKE `pattern` (U8's bounded
@@ -8994,7 +9004,139 @@ def _own_requests_filters(employee, category=None, pattern=None):
 	return filters
 
 
-def _requests_summary(employee, limit=None, category=None, q=None):
+def _request_page_limit(value):
+	"""A page size the list may ask for: 1.._REQUEST_MAX_PAGE, `_REQUEST_PAGE`
+	when unset (P2-R22)."""
+	return min(max(cint(value) or _REQUEST_PAGE, 1), _REQUEST_MAX_PAGE)
+
+
+# Per-group paging: the most unread HR-reply logs one "Needs you" read looks
+# at. A reply notice goes to the requester only, one per reply, so this is far
+# past any real backlog; a request whose only reply logs fall beyond it lists
+# under Open or Closed, still carrying its `unread_reply` flag.
+_REPLY_LOG_CAP = 500
+
+
+def _unread_reply_request_names():
+	"""The HR Requests the session user holds an unread message about from
+	the handling team (`HR_REPLY_SUBJECT_PREFIX`), newest reply first -- one
+	bounded read. Not scoped to an employee: every caller intersects it with
+	`_own_requests_filters`, which is the boundary, so a log about somebody
+	else's request lists nothing."""
+	return list(
+		dict.fromkeys(
+			frappe.get_all(
+				"Notification Log",
+				filters={
+					"for_user": frappe.session.user,
+					"document_type": "HR Request",
+					"read": 0,
+					"subject": ["like", f"{HR_REPLY_SUBJECT_PREFIX}%"],
+				},
+				pluck="document_name",
+				order_by="creation desc",
+				limit=_REPLY_LOG_CAP,
+			)
+		)
+	)
+
+
+def _my_request_groups(filters, open_limit=None, closed_limit=None):
+	"""Needs you / Open / Closed over *every* request `filters` matches, each
+	its own bounded, ordered page with its own total (per-group paging; the
+	split used to happen in the browser over one page of 20, so group
+	membership and order depended on which rows happened to load).
+
+	The rules are KTD12's, as `isOwed` in lib/requests.js states them:
+	  * needs_you -- waits on the employee, or holds an unread message from
+	    the team. Newest sent first, every one up to `_REQUEST_MAX_PAGE`.
+	  * open -- not owed and not closed. Newest sent first, `open_limit`.
+	  * closed -- not owed, Done or Rejected. Most recently closed first;
+	    rows closed before `closed_on` was stamped follow, newest sent first
+	    (MariaDB sorts NULL last on DESC). `closed_limit`.
+
+	Rows are raw (with `picked_up_by`); `_request_list_rows` decorates them.
+	"""
+	fields = [*_REQUEST_FIELDS, "picked_up_by"]
+	replied = _unread_reply_request_names()
+	waiting = {**filters, "status": HR_REQUEST_WAITING_ON_EMPLOYEE}
+	not_owed = {**filters, "name": ["not in", replied]} if replied else filters
+
+	def page(group_filters, order_by, limit, or_filters=None, total=None):
+		limit = _request_page_limit(limit)
+		rows = frappe.get_all(
+			"HR Request",
+			filters=group_filters,
+			or_filters=or_filters,
+			fields=fields,
+			order_by=order_by,
+			limit=limit,
+		)
+		if total is None:
+			total = frappe.db.count("HR Request", group_filters)
+		return {"rows": rows, "total": total, "limit": limit}
+
+	if replied:
+		# `or_filters` has no count; the two halves are disjoint, so they add.
+		needs_you = page(
+			filters,
+			"creation desc",
+			_REQUEST_MAX_PAGE,
+			or_filters=[["status", "=", HR_REQUEST_WAITING_ON_EMPLOYEE], ["name", "in", replied]],
+			total=frappe.db.count("HR Request", waiting)
+			+ frappe.db.count(
+				"HR Request",
+				{**filters, "name": ["in", replied], "status": ["!=", HR_REQUEST_WAITING_ON_EMPLOYEE]},
+			),
+		)
+	else:
+		needs_you = page(waiting, "creation desc", _REQUEST_MAX_PAGE)
+	return {
+		"needs_you": needs_you,
+		"open": page(
+			{**not_owed, "status": ["in", (HR_REQUEST_OPEN, HR_REQUEST_IN_PROGRESS)]},
+			"creation desc",
+			open_limit,
+		),
+		"closed": page(
+			{**not_owed, "status": ["in", _REQUEST_CLOSED_STATES]},
+			"closed_on desc, creation desc",
+			closed_limit,
+		),
+	}
+
+
+def _request_list_rows(*pages):
+	"""Each page of raw HR Request rows as the list renders them: the picker
+	and team named, the unread flags, the file count. One read each for the
+	notifications, files, teams and pickers across the union of the pages,
+	never one per row or per page (P2-R22)."""
+	names = list(dict.fromkeys(row.name for rows in pages for row in rows))
+	replies = set()
+	unread = _unread_request_notifications(names, replies)
+	counts = _attachment_counts(names)
+	# Team labels come from the category, one query for the whole page.
+	teams = _category_teams()
+	pickers = _picker_display_names(row.picked_up_by for rows in pages for row in rows)
+
+	def shown(row):
+		return {
+			**{key: value for key, value in row.items() if key != "picked_up_by"},
+			"picked_up_by_name": pickers.get(row.picked_up_by),
+			"handled_by_team": teams.get(row.category) or "HR",
+			"unread": row.name in unread,
+			# Plan 2026-10-17-001 KTD12: an unread *message* from the
+			# handling team (the HR_REPLY_SUBJECT_PREFIX bell), as opposed
+			# to an unread status change. Only the message puts a row
+			# under "Needs you", the same rule Home applies.
+			"unread_reply": row.name in replies,
+			"attachments": counts.get(row.name, 0),
+		}
+
+	return [[shown(row) for row in rows] for rows in pages]
+
+
+def _requests_summary(employee, limit=None, category=None, q=None, group_limits=None):
 	"""A bounded page of `employee`'s requests, newest first, optionally of
 	one category (U6 / R13; `counts` is per category across all of them)
 	and matching a subject search (plan 2026-10-17-001 U8 / ED-19: the same
@@ -9005,8 +9147,14 @@ def _requests_summary(employee, limit=None, category=None, q=None):
 	dates, HR's reply, how many files are on it, and whether there is an
 	unread notification about it -- which is what puts a row under "Needs
 	you" rather than a status word (P2-R13).
+
+	`group_limits` (`{"open_limit": n, "closed_limit": n}`) adds `groups`,
+	the per-group pages of `_my_request_groups` under the same category and
+	search. Only `get_my_requests` asks for it, so the HR person view and the
+	dashboard pay nothing for it; `requests`, `total`, `counts` and `limit`
+	mean the same with or without it.
 	"""
-	limit = min(max(cint(limit) or _REQUEST_PAGE, 1), _REQUEST_MAX_PAGE)
+	limit = _request_page_limit(limit)
 	category = _valid_request_category(category)
 	filters = _own_requests_filters(employee, category, _request_search_pattern(q))
 
@@ -9017,30 +9165,11 @@ def _requests_summary(employee, limit=None, category=None, q=None):
 		order_by="creation desc",
 		limit=limit,
 	)
-	names = [row.name for row in rows]
-	replies = set()
-	unread = _unread_request_notifications(names, replies)
-	counts = _attachment_counts(names)
-	# Team labels come from the category, one query for the whole page.
-	teams = _category_teams()
-	for row in rows:
-		row["picked_up_by_name"] = _picker_display_name(row.pop("picked_up_by"))
-		row["handled_by_team"] = teams.get(row.category) or "HR"
-
-	return {
-		"requests": [
-			{
-				**row,
-				"unread": row.name in unread,
-				# Plan 2026-10-17-001 KTD12: an unread *message* from the
-				# handling team (the HR_REPLY_SUBJECT_PREFIX bell), as opposed
-				# to an unread status change. Only the message puts a row
-				# under "Needs you", the same rule Home applies.
-				"unread_reply": row.name in replies,
-				"attachments": counts.get(row.name, 0),
-			}
-			for row in rows
-		],
+	groups = None if group_limits is None else _my_request_groups(filters, **group_limits)
+	pages = [rows, *(group["rows"] for group in (groups or {}).values())]
+	rows, *group_rows = _request_list_rows(*pages)
+	summary = {
+		"requests": rows,
 		"total": frappe.db.count("HR Request", filters),
 		# One column over one employee's requests -- small, and the same
 		# flat-read reasoning as `_attachment_counts`.
@@ -9052,11 +9181,29 @@ def _requests_summary(employee, limit=None, category=None, q=None):
 		"limit": limit,
 		"today": user_today(),
 	}
+	if groups is not None:
+		for group, shown in zip(groups.values(), group_rows, strict=True):
+			group["rows"] = shown
+		summary["groups"] = groups
+	return summary
 
 
 @frappe.whitelist()
-def get_my_requests(limit=None, category=None, q=None):
-	return _requests_summary(get_current_employee(), limit, category, q)
+def get_my_requests(limit=None, category=None, q=None, open_limit=None, closed_limit=None):
+	"""The caller's own requests (`_requests_summary`), plus `groups`:
+	`{"needs_you" | "open" | "closed": {"rows", "total", "limit"}}`, each
+	ordered and counted over every matching request, not one page.
+
+	`open_limit` / `closed_limit` (1-100, default 20) grow only their own
+	group; Needs you lists up to 100. `limit` still sizes the flat
+	`requests` page, unchanged for callers that read it."""
+	return _requests_summary(
+		get_current_employee(),
+		limit,
+		category,
+		q,
+		group_limits={"open_limit": open_limit, "closed_limit": closed_limit},
+	)
 
 
 @frappe.whitelist()

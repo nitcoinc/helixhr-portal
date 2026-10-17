@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, useId } from 'vue'
+import { ref, computed, watch, nextTick, useId } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { createResource, Button, Dialog } from 'frappe-ui'
 import RequestForm from '@/components/RequestForm.vue'
@@ -10,12 +10,13 @@ import StatusBadge from '@/components/StatusBadge.vue'
 import RequestThread from '@/components/requests/RequestThread.vue'
 import AttachmentLink from '@/components/requests/AttachmentLink.vue'
 import Icon from '@/components/Icon.vue'
-import { attachToRequest } from '@/lib/api'
+import { apiRequest, attachToRequest } from '@/lib/api'
 import { formatDate, formatDateTime } from '@/lib/dates'
 import { markReadKeepalive } from '@/lib/unread'
 import { useIsDesktop } from '@/lib/useIsDesktop'
 import { CORRECTABLE_FIELDS, spokenValue } from '@/lib/profileCorrection'
-import { myRequestGroups } from '@/lib/requests'
+import { focusNear } from '@/lib/focus'
+import { isOwed, latestOnly, myRequestSections } from '@/lib/requests'
 import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
 
 // Plan 2026-10-17-001 U8 (R21, KTD14). The employee's workspace -- their own
@@ -31,8 +32,11 @@ const router = useRouter()
 
 // P2-R22. A bounded first page with an explicit Show more, and one
 // session-scoped read where the page used to send its own
-// `frappe.client.get_list` with `limit_page_length: 0`.
-const pageLimit = ref(20)
+// `frappe.client.get_list` with `limit_page_length: 0`. Open and Closed page
+// on their own (per-group paging): each Show more grows only its group.
+const PAGE = 20
+const MAX_PAGE = 100
+const groupLimits = ref({ open: PAGE, closed: PAGE })
 // U6 / R13. The category chip is in the URL query so a link reproduces the
 // view. `type`, not `category`: `?category=` already prefills the new-request
 // form (Profile's correction link), and one key cannot mean both.
@@ -44,8 +48,13 @@ const search = ref('')
 const searchHintId = useId()
 const requests = createResource({
   url: 'helixhr.api.get_my_requests',
+  // A search, a chip, a Show more and the mark-read reload can overlap; every
+  // one of them settles with the newest answer, so the list always matches
+  // the limits and search on screen.
+  resourceFetcher: latestOnly(apiRequest),
   makeParams: () => ({
-    limit: pageLimit.value,
+    open_limit: groupLimits.value.open,
+    closed_limit: groupLimits.value.closed,
     category: categoryFilter.value || undefined,
     q: search.value || undefined,
   }),
@@ -58,12 +67,12 @@ const debounced = useDebouncedSearch((value) => {
   const next = value.trim().length >= 2 ? value.trim() : ''
   if (next === search.value) return
   search.value = next
-  pageLimit.value = 20
+  groupLimits.value = { open: PAGE, closed: PAGE }
   requests.reload()
 })
 watch(query, debounced.search)
 watch(categoryFilter, () => {
-  pageLimit.value = 20
+  groupLimits.value = { open: PAGE, closed: PAGE }
   requests.reload()
 })
 const categoryChips = computed(() => requests.data?.counts?.categories || [])
@@ -76,15 +85,6 @@ function filterByCategory(category) {
   router.push({ name: route.name, params: route.params, query: { ...route.query, type: category || undefined } })
 }
 
-const rows = computed(() => requests.data?.requests || [])
-const total = computed(() => requests.data?.total || 0)
-const moreCount = computed(() => Math.max(0, total.value - rows.value.length))
-
-function showMore() {
-  pageLimit.value = Math.min(100, pageLimit.value + 20)
-  requests.reload()
-}
-
 // The search shows once there is something to search (every request the
 // employee has, whatever the chip or the search says).
 const allCount = computed(() => categoryChips.value.reduce((sum, chip) => sum + chip.count, 0))
@@ -95,7 +95,36 @@ const allCount = computed(() => categoryChips.value.reduce((sum, chip) => sum + 
 // change (Done, Declined) is an update: it keeps its unread dot in its own
 // Open or Closed group (ED-01, EP-04). The read state is still Frappe's own
 // Notification Log (P2-KTD6); a message you have read stops needing you.
-const groups = computed(() => myRequestGroups(rows.value))
+// The server groups, orders and counts over every matching request, so a
+// request sent long ago and closed yesterday tops Closed even when twenty
+// newer ones exist.
+const groups = computed(() => myRequestSections(requests.data?.groups))
+const listRegion = ref(null)
+const growing = ref('')
+
+/** Show more under one group: only that group grows, by a page, to 100.
+ * Focus moves to the first row it revealed (else stays by the button), so
+ * a keyboard user carries on where the new rows start -- unless they moved
+ * on while it loaded, or a search or chip reset the list meanwhile. */
+async function showMore(group) {
+  if (growing.value) return
+  const shown = group.rows.length
+  const trigger = document.activeElement
+  const limit = Math.min(MAX_PAGE, group.limit + PAGE)
+  growing.value = group.key
+  groupLimits.value = { ...groupLimits.value, [group.key]: limit }
+  // A failed read shows in the list's own retry panel.
+  await requests.reload().catch(() => {})
+  growing.value = ''
+  await nextTick()
+  if (groupLimits.value[group.key] !== limit) return
+  const active = document.activeElement
+  if (active && active !== document.body && active !== trigger) return
+  const root = listRegion.value?.$el
+  if (!root) return
+  const links = [...root.querySelectorAll(`[data-group="${group.key}"] [data-testid="request-row"] a`)]
+  focusNear(links.slice(shown), 0, root.querySelector(`[data-testid="show-more-${group.key}"]`))
+}
 
 /** The row's second line: when it was sent, and the most recent thing that
  * has happened to it since. Only steps the record actually knows are
@@ -161,12 +190,16 @@ async function clearReadObligation(data) {
   const pending = data?.unread_notifications || []
   if (!pending.length) return
   justMarkedRead.value = true
-  const row = rows.value.find((entry) => entry.name === data.name)
+  const row = groups.value.flatMap((group) => group.rows).find((entry) => entry.name === data.name)
+  const wasOwed = isOwed(row)
   if (row) {
     row.unread = false
     row.unread_reply = false
   }
   await markReadKeepalive('helixhr.api.mark_my_request_read', { name: data.name }, pending.length)
+  // The server owns the grouping, so a row that stopped needing you moves to
+  // its own group on the next read -- asked for once the write has landed.
+  if (wasOwed && !isOwed(row)) requests.reload().catch(() => {})
 }
 
 // --- the request that was sent, and the file that wasn't ----------------
@@ -314,10 +347,18 @@ defineExpose({ newRequest })
             data-testid="request-search-hint"
           >Searching all your requests{{ categoryFilter ? ` in ${categoryFilter}` : '' }}, including closed.</span>
         </p>
+        <!-- A refresh keeps the rows on screen: a search, a chip or a Show
+             more redraws the list in place (KTD16) rather than swapping it
+             for a skeleton and dropping focus. An empty list has no rows to
+             keep, so it shows the skeleton again rather than empty-state
+             copy written for the search that is being replaced. -->
         <AsyncState
+          ref="listRegion"
           section="requests-list"
           :resource="requests"
-          :empty="rows.length === 0"
+          :loading="requests.loading && (!requests.data || groups.length === 0)"
+          :aria-busy="requests.loading ? 'true' : 'false'"
+          :empty="groups.length === 0"
           :empty-title="search ? 'No requests match' : 'No requests yet'"
           :empty-body="
             search
@@ -345,6 +386,7 @@ defineExpose({ newRequest })
             :key="group.key"
             class="mb-6 last:mb-0"
             :aria-label="group.label"
+            :data-group="group.key"
           >
             <h2 class="label mb-2">
               {{ group.label }}
@@ -431,20 +473,34 @@ defineExpose({ newRequest })
                 </div>
               </li>
             </ul>
-          </section>
-
-          <div
-            v-if="moreCount"
-            class="mt-4 text-center"
-          >
-            <Button
-              variant="ghost"
-              :loading="requests.loading"
-              @click="showMore"
+            <!-- Open and Closed page on their own, to 100. Needs you already
+                 lists every owed request up to that cap, so it has none. -->
+            <div
+              v-if="group.more && group.limit < MAX_PAGE"
+              class="mt-3 text-center"
             >
-              Show {{ moreCount }} more
-            </Button>
-          </div>
+              <Button
+                class="min-h-11"
+                variant="ghost"
+                :data-testid="`show-more-${group.key}`"
+                :loading="growing === group.key"
+                :disabled="!!growing && growing !== group.key"
+                @click="showMore(group)"
+              >
+                Show {{ Math.min(group.more, PAGE) }} more
+                <span class="sr-only">{{ group.label.toLowerCase() }} requests</span>
+              </Button>
+            </div>
+            <!-- At the 100 cap the rest stay unlisted; say so, and how to
+                 reach them. -->
+            <p
+              v-else-if="group.more"
+              class="mt-3 text-center text-sm text-ink-gray-6"
+              :data-testid="`more-capped-${group.key}`"
+            >
+              Showing {{ group.rows.length }} of {{ group.rows.length + group.more }}. Search to find older ones.
+            </p>
+          </section>
         </AsyncState>
       </div>
 
