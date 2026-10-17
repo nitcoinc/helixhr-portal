@@ -6,8 +6,9 @@
 //
 // Signs in each Playwright identity over the API, asks the bootstrap what
 // that identity may open, and captures every allowed route full-page at a
-// desktop and a phone viewport. Output lands in test-results/audit-shots/<label>/
-// (gitignored) with a log.tsv per run: final URL, page height, horizontal
+// desktop and a phone viewport. Output lands in .audit-shots/<label>/ at the repo
+// root (gitignored; not test-results/, which every Playwright run wipes) with a
+// log.tsv per run: final URL, page height, horizontal
 // scroll and console errors per shot, so a before/after pair can be compared
 // side by side.
 //
@@ -26,7 +27,7 @@ const SITE_HOST = process.env.SITE_HOST
 const PASSWORD = process.env.TEST_USER_PASSWORD || 'Helixhr-Test-Fixture-2026!'
 const label = process.argv[2] || 'latest'
 const here = dirname(fileURLToPath(import.meta.url))
-const outDir = resolve(here, '../test-results/audit-shots', label)
+const outDir = resolve(here, '../../.audit-shots', label)
 
 const IDENTITIES = [
   'employee@helixhr.test',

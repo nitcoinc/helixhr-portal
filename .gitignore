@@ -77,3 +77,6 @@ logs/
 .impeccable/questions/
 .impeccable/mocks/
 .impeccable/build/
+
+# Plan 2026-10-17-001 U18: role x route x viewport review captures
+.audit-shots/
