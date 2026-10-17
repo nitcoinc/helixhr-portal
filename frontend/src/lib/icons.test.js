@@ -21,9 +21,11 @@ describe('NEEDS_YOU_ICON', () => {
     'approval_attendance',
     'attendance_request_rejected',
     'attendance_request_waiting',
-    // P4-R4: the two terminal rejections, which reach "Waiting on others".
+    // P4-R4: the two terminal rejections, which reach "Decided" (KTD11).
     'leave_final_rejected',
     'attendance_request_final_rejected',
+    // Plan 2026-10-17-001 KTD12: a status-only update on a closed request.
+    'request_decided',
   ]
 
   it('covers every kind the server emits, and nothing else', () => {

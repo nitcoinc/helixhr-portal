@@ -88,6 +88,10 @@ const state = reactive({
    * server sets it for HR and System Manager roles only -- an ordinary
    * employee is a System User too, and must not be shown a door to Desk. */
   deskUrl: null,
+  /** Plan 2026-10-17-001 U6 / EP-10: HR Settings allows check-in from the
+   * portal, and this session has an Employee to punch for. Draws Home's
+   * check-in chip; `punch_my_checkin` re-checks the flag itself. */
+  mobileCheckin: false,
   unread: 0,
   /** The authoritative calendar (P2-R5). Mirrored into lib/dates.js. */
   timeZone: null,
@@ -160,6 +164,7 @@ function apply(boot) {
   state.canManageDocuments = !!boot?.can_manage_documents
   state.canOpenDesk = !!boot?.can_open_desk
   state.deskUrl = boot?.desk_url || null
+  state.mobileCheckin = !!boot?.mobile_checkin
   state.unread = boot?.unread_notifications ?? 0
   state.timeZone = boot?.time_zone || null
   state.systemTimeZone = boot?.system_time_zone || null

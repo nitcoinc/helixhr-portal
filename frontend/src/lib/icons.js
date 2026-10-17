@@ -129,8 +129,10 @@ export const NEEDS_YOU_ICON = {
   approval_attendance: 'approvals',
   attendance_request_rejected: 'attendance',
   attendance_request_waiting: 'attendance',
-  // P4-R4: the two terminal rejections. They sit in "Waiting on others" with
-  // the reason and no verb, because the decision is already made.
+  // P4-R4: the two terminal rejections. They sit under "Decided" (plan
+  // 2026-10-17-001 KTD11) with the reason, because the decision is made.
   leave_final_rejected: 'leave',
   attendance_request_final_rejected: 'attendance',
+  // KTD12: an unread status-only update on a Done or Declined request.
+  request_decided: 'requests',
 }

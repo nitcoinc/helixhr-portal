@@ -71,6 +71,29 @@ function rejectedWeek(start: string, detail: string, ageDays: number) {
   }
 }
 
+/** One collapsed "HR replied" row, shaped the way `_get_needs_you` sends it
+ * after the KTD10 collapse: the id is the record, `count` the replies. */
+function repliedRow(record: string, subject: string, count: number, newest: string) {
+  return {
+    id: `request_answered:${record}`,
+    kind: 'request_answered',
+    reference_doctype: 'HR Request',
+    reference_name: record,
+    count,
+    notification: `NL-${record}`,
+    title: count > 1 ? `HR replied · ${count} · ${subject}` : `HR replied about ${subject}`,
+    detail: newest,
+    date: '2026-09-01 09:30:00',
+    day: null,
+    age_days: 1,
+    action: 'Read',
+    owner: 'you',
+    urgency: 'unread',
+    tone: 'info',
+    to: { name: 'RequestDetail', params: { name: record } },
+  }
+}
+
 async function stubDashboard(page: Page, body: object) {
   await page.route('**/api/method/helixhr.api.get_dashboard*', (route) =>
     route.fulfill({ contentType: 'application/json', body: JSON.stringify(body) }),
@@ -148,6 +171,156 @@ test.describe('the Home action queue (P2-AE5)', () => {
 
     await queue.getByRole('link', { name: /Casual Leave waiting for your manager/ }).click()
     await expect(page).toHaveURL(/\/helixhr\/leave\/HR-LAP-2026-TEST$/)
+  })
+
+  // Plan 2026-10-17-001 U6 (EP-03, ED-08, KTD10). The server collapses
+  // four replies on one request into one row; the row is the one link, and
+  // opening it clears every log about that record, not just the newest.
+  test('four replies are one row, and tapping it opens the request and clears it', async ({
+    page,
+  }) => {
+    const record = 'HR-REQ-2026-U6'
+    let cleared: Record<string, string> | null = null
+    await page.route('**/api/method/helixhr.api.get_dashboard*', (route) =>
+      route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify(
+          dashboard({
+            needsYou: {
+              items: cleared ? [] : [repliedRow(record, 'Address proof', 4, 'Collect it from reception.')],
+              more: 0,
+              waiting: [],
+            },
+          }),
+        ),
+      }),
+    )
+    await page.route('**/api/method/helixhr.api.mark_record_notifications_read*', (route) => {
+      cleared = route.request().postDataJSON()
+      return route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({ message: { cleared: 4, unread: 0 } }),
+      })
+    })
+    await page.route('**/api/method/helixhr.api.get_request_view*', (route) =>
+      route.fulfill({ contentType: 'application/json', body: JSON.stringify({ message: 'employee' }) }),
+    )
+
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/helixhr')
+    const queue = page.getByRole('region', { name: 'Needs you' })
+    const rows = queue.getByRole('listitem')
+    await expect(rows).toHaveCount(1)
+    const row = rows.first()
+    await expect(row.getByRole('link', { name: /HR replied · 4 · Address proof/ })).toBeVisible()
+    await expect(row.getByText('“Collect it from reception.”')).toBeVisible()
+    // EP-03: one line of title, the verb beside it -- a short row on a phone.
+    const box = await row.boundingBox()
+    expect(box!.height, `the row is ${box!.height}px tall`).toBeLessThanOrEqual(80)
+
+    // Anywhere on the row: the date corner is not the link's text.
+    await row.click({ position: { x: box!.width - 8, y: box!.height - 8 } })
+    await expect(page).toHaveURL(new RegExp(`/helixhr/requests/${record}$`))
+    await expect.poll(() => cleared).toEqual({ reference_doctype: 'HR Request', reference_name: record })
+
+    await page.goBack()
+    await expect(queue.getByText('Nothing needs you.')).toBeVisible()
+    await expect(queue.getByRole('link', { name: /HR replied/ })).toHaveCount(0)
+  })
+
+  test('two requests with different subjects read differently (HR-04)', async ({ page }) => {
+    await stubDashboard(
+      page,
+      dashboard({
+        needsYou: {
+          items: [
+            repliedRow('HR-REQ-2026-A', 'Address proof', 1, 'Ready at reception.'),
+            repliedRow('HR-REQ-2026-B', 'Salary certificate', 1, 'Sent by email.'),
+          ],
+          more: 0,
+          waiting: [],
+        },
+      }),
+    )
+
+    await page.goto('/helixhr')
+    const queue = page.getByRole('region', { name: 'Needs you' })
+    await expect(queue.getByRole('link', { name: /Address proof/ })).toHaveAttribute(
+      'href',
+      '/helixhr/requests/HR-REQ-2026-A',
+    )
+    await expect(queue.getByRole('link', { name: /Salary certificate/ })).toHaveAttribute(
+      'href',
+      '/helixhr/requests/HR-REQ-2026-B',
+    )
+  })
+
+  // KTD11 / P4-R4: a final rejection waits on nobody, so it is "Decided" --
+  // and it is still on Home, with its reason.
+  test('a final rejection sits under Decided, not Waiting on others', async ({ page }) => {
+    await stubDashboard(
+      page,
+      dashboard({
+        needsYou: {
+          items: [],
+          more: 0,
+          waiting: [],
+          waiting_more: 0,
+          decided: [
+            {
+              id: 'leave_final_rejected:HR-LAP-2026-U6',
+              kind: 'leave_final_rejected',
+              reference_doctype: 'Leave Application',
+              reference_name: 'HR-LAP-2026-U6',
+              count: 1,
+              notification: null,
+              title: 'Your Casual Leave was rejected',
+              detail: 'Quarter close, we need everyone that week.',
+              date: '2025-08-11',
+              day: null,
+              age_days: 430,
+              action: 'View',
+              owner: 'nobody',
+              urgency: 'waiting',
+              tone: 'muted',
+              to: { name: 'LeaveDetail', params: { name: 'HR-LAP-2026-U6' } },
+            },
+          ],
+          decided_more: 0,
+        },
+      }),
+    )
+
+    await page.goto('/helixhr')
+    const queue = page.getByRole('region', { name: 'Needs you' })
+    await expect(queue.getByRole('heading', { name: 'Decided' })).toBeVisible()
+    await expect(queue.getByRole('heading', { name: 'Waiting on others' })).toHaveCount(0)
+    const row = queue.locator('li[data-kind="leave_final_rejected"]')
+    await expect(row.getByText('“Quarter close, we need everyone that week.”')).toBeVisible()
+    await row.getByRole('link').click()
+    await expect(page).toHaveURL(/\/helixhr\/leave\/HR-LAP-2026-U6$/)
+  })
+
+  // EP-09: "View all (N)" counts records -- seven collapsed rows standing for
+  // twenty-one replies is seven -- and an employee's opens Notifications.
+  test('View all counts records, not notifications', async ({ page }) => {
+    await stubDashboard(
+      page,
+      dashboard({
+        needsYou: {
+          items: Array.from({ length: 7 }, (_, i) =>
+            repliedRow(`HR-REQ-2026-V${i}`, `Subject ${i}`, 3, `Reply ${i}`),
+          ),
+          more: 0,
+          waiting: [],
+        },
+      }),
+    )
+
+    await page.goto('/helixhr')
+    const queue = page.getByRole('region', { name: 'Needs you' })
+    await queue.getByRole('link', { name: 'View all (7)' }).click()
+    await expect(page).toHaveURL(/\/helixhr\/notifications$/)
   })
 
   test('a failed attendance section labels only itself and offers Retry', async ({ page }) => {

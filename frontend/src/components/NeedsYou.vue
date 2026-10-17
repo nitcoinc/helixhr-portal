@@ -1,13 +1,18 @@
 <script setup>
 import { computed, nextTick, ref, watch } from 'vue'
 import Icon from '@/components/Icon.vue'
+import { keepaliveRequest } from '@/lib/api'
 import { formatDate } from '@/lib/dates'
 import { NEEDS_YOU_ICON } from '@/lib/icons'
+import { queueDestination, sideListDestination } from '@/lib/needsYou'
 import { session } from '@/lib/session'
+import { currentUnread, setUnread, unreadCount } from '@/lib/unread'
 
 const props = defineProps({
+  // One row per record (plan 2026-10-17-001 KTD10): the server collapses
+  // sixty replies on one request into one row before it counts or slices.
   items: { type: Array, default: () => [] },
-  // Rows the queue holds but did not show, so a long backlog is disclosed
+  // Records the queue holds but did not show, so a long backlog is disclosed
   // rather than silently truncated.
   more: { type: Number, default: 0 },
   // Work that is this person's but is not this person's *move* -- leave
@@ -17,6 +22,11 @@ const props = defineProps({
   waiting: { type: Array, default: () => [] },
   // Waiting rows past the server's window, for the "View all (N)" count.
   waitingMore: { type: Number, default: 0 },
+  // KTD11 / KTD12: final outcomes -- a final rejection, an unread Done or
+  // Declined on a request. Nobody's move and never dropped by time, so a
+  // sibling of "Waiting on others" rather than a row in it (EP-08).
+  decided: { type: Array, default: () => [] },
+  decidedMore: { type: Number, default: 0 },
   loading: { type: Boolean, default: false },
   // Shown in the empty state so a clear queue still tells you where you
   // stand rather than just going blank -- the direction's named risk.
@@ -48,17 +58,18 @@ function ageLabel(item) {
 const VISIBLE_ROWS = 5
 const queueList = ref(null)
 const waitingList = ref(null)
+const decidedList = ref(null)
 const queueHeight = ref(null)
 const waitingHeight = ref(null)
+const decidedHeight = ref(null)
 const queueTotal = computed(() => props.items.length + props.more)
 const waitingTotal = computed(() => props.waiting.length + props.waitingMore)
-// EP-09: a plain employee has no Approvals page, so their own queue's
-// "View all" opens Notifications -- every item addressed to them.
-const viewAllDestination = computed(() => {
-  if (session.canApprove) return '/approvals'
-  if (session.canHandleRequests || session.canWorkRequests) return { path: '/requests', query: { tab: 'work' } }
-  return '/notifications'
-})
+const decidedTotal = computed(() => props.decided.length + props.decidedMore)
+// EP-09: each "View all (N)" opens the page that owns those records for
+// this person -- never Approvals for an employee who has none.
+const viewAllDestination = computed(() => queueDestination(session))
+const waitingDestination = computed(() => sideListDestination(props.waiting))
+const decidedDestination = computed(() => sideListDestination(props.decided))
 
 function capHeight(el) {
   const rows = el?.children
@@ -68,21 +79,39 @@ function capHeight(el) {
 }
 
 watch(
-  () => [props.items, props.waiting, props.loading],
+  () => [props.items, props.waiting, props.decided, props.loading],
   async () => {
     await nextTick()
     queueHeight.value = capHeight(queueList.value)
     waitingHeight.value = capHeight(waitingList.value)
+    decidedHeight.value = capHeight(decidedList.value)
   },
   { immediate: true, flush: 'post' },
 )
+
+/** KTD10: opening a notification-backed row clears every unread log the
+ * caller holds about that record ("HR replied · 4" clears all four), not
+ * just the newest. `keepalive`, because the tap is also the navigation. */
+async function opened(item) {
+  if (!item.notification || !item.reference_doctype || !item.reference_name) return
+  setUnread(currentUnread() - (item.count || 1))
+  try {
+    const result = await keepaliveRequest('helixhr.api.mark_record_notifications_read', {
+      reference_doctype: item.reference_doctype,
+      reference_name: item.reference_name,
+    })
+    setUnread(result.unread)
+  } catch {
+    unreadCount.reload()
+  }
+}
 </script>
 
 <template>
   <section aria-labelledby="needs-you-heading">
     <h2
       id="needs-you-heading"
-      class="mb-2 font-heading text-base font-semibold text-ink-gray-9"
+      class="type-section mb-2 font-heading text-ink-gray-9"
     >
       Needs you
     </h2>
@@ -142,11 +171,16 @@ watch(
     >
       <!-- The key is the server's own record identity, never the index: the
            queue re-orders as work is done, and an index key reuses the wrong
-           row's DOM state when it does (P2-U4 step 1). -->
+           row's DOM state when it does (P2-U4 step 1).
+
+           EP-03: the whole row is the one link, with the verb as a chip on
+           the title line. The title can wrap, so the link stays a plain
+           block with no `-my-2` (the stretched-link rule in
+           docs/design-system.md): the `after:` layer is the tap target. -->
       <li
         v-for="item in items"
         :key="item.id"
-        class="surface-card elev-1 flex flex-wrap items-start gap-x-3 gap-y-2 p-3 sm:flex-nowrap"
+        class="surface-card elev-1 relative flex items-start gap-3 p-3 transition-colors duration-200 hover:border-blue-600"
         :data-kind="item.kind"
       >
         <span
@@ -159,44 +193,47 @@ watch(
           />
         </span>
 
-        <div class="min-w-0 flex-1 basis-[calc(100%-2.75rem)]">
-          <p class="text-sm font-medium text-ink-gray-9">
-            {{ item.title }}
-          </p>
-          <!-- The manager's reason, or HR's reply, inline: the whole point is
-               not having to open the record to find out what it says. -->
-          <p
-            v-if="item.detail"
-            class="mt-0.5 text-sm text-ink-gray-6"
+        <div class="min-w-0 flex-1">
+          <router-link
+            :to="item.to"
+            class="flex flex-wrap items-start justify-between gap-x-2 gap-y-1 text-sm font-medium text-ink-gray-9 after:absolute after:inset-0 after:rounded after:content-['']"
+            @click="opened(item)"
           >
-            “{{ item.detail }}”
-          </p>
+            <!-- The chip rides the title line until the title would be
+                 squeezed under 8rem; then it wraps rather than overflow
+                 (200% text on a phone). -->
+            <span class="min-w-0 flex-[1_1_8rem] break-words">{{ item.title }}</span>
+            <span class="shrink-0 rounded-full bg-blue-50 px-2 py-0.5 text-xs font-medium text-blue-700">
+              {{ item.action }}
+            </span>
+          </router-link>
+          <!-- The manager's reason, or the newest HR reply, inline: the whole
+               point is not having to open the record to find out what it
+               says. One line beside the date keeps the row short (EP-03);
+               the full text is a tap away. -->
           <p
-            v-if="item.day || item.date"
-            class="mt-0.5 flex flex-wrap items-center gap-x-2 text-xs"
+            v-if="item.detail || item.date"
+            class="mt-0.5 flex min-w-0 items-center gap-2 text-xs"
           >
             <span
+              v-if="item.detail"
+              class="min-w-0 flex-1 truncate text-sm text-ink-gray-6"
+              :title="item.detail"
+            >“{{ item.detail }}”</span>
+            <span
               v-if="ageLabel(item)"
-              class="rounded-full bg-amber-50 px-2 py-0.5 font-medium text-amber-700"
+              class="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 font-medium text-amber-700"
             >
               {{ ageLabel(item) }}
             </span>
-            <span class="tabular text-ink-gray-5">
+            <span
+              v-if="item.date"
+              class="tabular ml-auto shrink-0 text-ink-gray-5"
+            >
               <span v-if="item.day">Week of </span>{{ formatDate(item.date) }}
             </span>
           </p>
         </div>
-
-        <router-link
-          :to="item.to"
-          class="ml-11 inline-flex min-h-11 shrink-0 cursor-pointer items-center gap-1 self-center rounded-lg px-3 text-sm font-medium text-blue-700 hover:bg-blue-50 sm:ml-0"
-        >
-          {{ item.action }}
-          <Icon
-            name="chevronRight"
-            size="h-4 w-4"
-          />
-        </router-link>
       </li>
     </ul>
 
@@ -248,10 +285,77 @@ watch(
             />
             <span class="min-w-0 flex-1">
               <span class="block truncate text-sm text-ink-gray-7">{{ item.title }}</span>
-              <!-- P4-R4. A terminal rejection reaches this list, and its
-                   reason is the whole reason the row exists: without it the
-                   employee reads "was rejected" and has to open the record to
-                   find out why. -->
+              <span class="tabular block text-xs text-ink-gray-5">
+                {{ formatDate(item.date) }}
+              </span>
+            </span>
+            <Icon
+              name="chevronRight"
+              size="h-4 w-4"
+              class="shrink-0 text-ink-gray-4"
+            />
+          </router-link>
+        </li>
+      </ul>
+      <router-link
+        v-if="waitingTotal > VISIBLE_ROWS"
+        :to="waitingDestination"
+        class="tabular mt-2 inline-flex min-h-11 cursor-pointer items-center text-sm font-medium text-blue-700 hover:underline"
+      >
+        View all ({{ waitingTotal }})
+      </router-link>
+    </div>
+
+    <!-- Decided (KTD11). A final rejection is not waiting on anyone, so it
+         left "Waiting on others" -- but it never drops off by time (P4-R4):
+         the reason is the whole content of the row, and an unread one must
+         not vanish. An unread Done or Declined on a request lands here too
+         (KTD12): an update, not an ask. -->
+    <div
+      v-if="decided.length"
+      class="mt-5"
+    >
+      <h3 class="label mb-2">
+        Decided
+      </h3>
+      <ul
+        ref="decidedList"
+        class="space-y-2"
+        :class="decided.length > VISIBLE_ROWS ? 'scroll-queue' : ''"
+        :style="decidedHeight ? { maxHeight: decidedHeight } : null"
+        :tabindex="decided.length > VISIBLE_ROWS ? 0 : undefined"
+        :aria-label="decided.length > VISIBLE_ROWS ? 'Decided, scrollable' : undefined"
+      >
+        <li
+          v-for="item in decided"
+          :key="item.id"
+          :data-kind="item.kind"
+        >
+          <router-link
+            :to="item.to"
+            class="surface-card elev-1 flex min-h-11 cursor-pointer items-center gap-3 p-3 transition-colors duration-200 hover:border-blue-600"
+            @click="opened(item)"
+          >
+            <Icon
+              :name="NEEDS_YOU_ICON[item.kind] || 'leave'"
+              size="h-4 w-4"
+              class="shrink-0 text-ink-gray-4"
+            />
+            <span class="min-w-0 flex-1">
+              <span class="flex items-center gap-2">
+                <span
+                  v-if="item.notification"
+                  class="h-2 w-2 shrink-0 rounded-full bg-blue-600"
+                  aria-hidden="true"
+                />
+                <span class="min-w-0 truncate text-sm text-ink-gray-7">{{ item.title }}</span>
+                <span
+                  v-if="item.notification"
+                  class="sr-only"
+                >(unread)</span>
+              </span>
+              <!-- P4-R4. Without the reason the employee reads "was
+                   rejected" and has to open the record to find out why. -->
               <span
                 v-if="item.detail"
                 class="block truncate text-xs text-ink-gray-6"
@@ -269,11 +373,11 @@ watch(
         </li>
       </ul>
       <router-link
-        v-if="waitingTotal > VISIBLE_ROWS"
-        to="/requests"
+        v-if="decidedTotal > VISIBLE_ROWS"
+        :to="decidedDestination"
         class="tabular mt-2 inline-flex min-h-11 cursor-pointer items-center text-sm font-medium text-blue-700 hover:underline"
       >
-        View all ({{ waitingTotal }})
+        View all ({{ decidedTotal }})
       </router-link>
     </div>
   </section>

@@ -61,7 +61,7 @@ function when(person) {
   >
     <h2
       id="celebrations-heading"
-      class="font-heading text-base font-semibold text-ink-gray-9"
+      class="type-section font-heading text-ink-gray-9"
     >
       Celebrating this month
     </h2>

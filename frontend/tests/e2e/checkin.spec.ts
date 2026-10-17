@@ -155,3 +155,68 @@ test.describe('employee', () => {
     await context.close()
   })
 })
+
+// Plan 2026-10-17-001 U6 / EP-10. Check in from Home in two taps: the chip,
+// then the sheet's own button. The bootstrap flag and the live check-in
+// state are stubbed -- whether this site's fixture employee is inside a
+// shift window right now is the clock's business, not this test's -- and
+// so is the punch, so the run books nothing.
+async function stubBootstrap(page: Page, mobileCheckin: boolean) {
+  await page.route('**/api/method/helixhr.api.get_portal_bootstrap*', async (route) => {
+    const response = await route.fetch()
+    const body = await response.json()
+    body.message.mobile_checkin = mobileCheckin
+    await route.fulfill({ response, json: body })
+  })
+}
+
+test.describe('check in from Home (EP-10)', () => {
+  test.beforeEach(async ({}, testInfo) => {
+    test.skip(testInfo.project.name !== 'employee', 'Chromium employee-only scenarios')
+  })
+
+  test('with mobile check-in on, the Home chip opens the sheet and punches in two taps', async ({
+    page,
+    baseURL,
+  }) => {
+    const context = page.context()
+    await context.grantPermissions(['geolocation'], { origin: baseURL! })
+    await context.setGeolocation(OFFICE)
+    await stubBootstrap(page, true)
+    await page.route('**/api/method/helixhr.api.get_my_attendance*', (route) =>
+      route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({
+          message: { checkin: { enabled: true, reason: null, last: null, next_log_type: 'IN' } },
+        }),
+      }),
+    )
+    const punches: unknown[] = []
+    await page.route('**/api/method/helixhr.api.punch_my_checkin*', (route) => {
+      punches.push(route.request().postDataJSON())
+      return route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({ message: { name: 'U6-punch', log_type: 'IN', existing: false } }),
+      })
+    })
+
+    await page.goto('/helixhr')
+    // Tap one.
+    await page.getByRole('button', { name: 'Check in / Check out' }).click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog).toBeVisible()
+    await expect(dialog.getByText('Location captured')).toBeVisible()
+    // Tap two.
+    await dialog.getByRole('button', { name: 'Check in' }).click()
+    await expect(dialog).toBeHidden()
+    expect(punches).toHaveLength(1)
+    expect(punches[0]).toMatchObject({ expected_log_type: 'IN' })
+  })
+
+  test('with mobile check-in off, Home draws no chip', async ({ page }) => {
+    await stubBootstrap(page, false)
+    await page.goto('/helixhr')
+    await expect(page.getByRole('region', { name: 'Needs you' })).toBeVisible()
+    await expect(page.getByRole('button', { name: 'Check in / Check out' })).toHaveCount(0)
+  })
+})

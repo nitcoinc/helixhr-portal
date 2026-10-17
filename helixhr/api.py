@@ -684,6 +684,9 @@ def get_portal_bootstrap():
 		# decision like every flag above; each admin method gates itself.
 		"desk_url": _portal_desk_url(frappe.session.user),
 		"unread_notifications": 0,
+		# Plan 2026-10-17-001 U6 / EP-10: whether Home offers the check-in chip.
+		# HR Settings' own flag, and false with no Employee (nobody to punch).
+		"mobile_checkin": False,
 	}
 
 	if not employee or not employee.get("name"):
@@ -716,6 +719,7 @@ def get_portal_bootstrap():
 		or bool(_safe(lambda: _approval_summaries(employee["name"], include_requests=False)[0], title=title))
 	)
 	boot["unread_notifications"] = _safe(_get_unread_notification_count, title=title) or 0
+	boot["mobile_checkin"] = bool(_safe(_mobile_checkin_allowed, title=title))
 	return boot
 
 
@@ -1087,6 +1091,9 @@ def _get_needs_you(employee, once):
 	current = _as_date(user_today())
 	items = []
 	waiting = []
+	# KTD11: final outcomes, a sibling of `waiting` -- nobody's move, never
+	# dropped by time.
+	decided = []
 
 	def day_for(date):
 		return str(date) if date and monday <= _as_date(date) <= sunday else None
@@ -1108,6 +1115,7 @@ def _get_needs_you(employee, once):
 			_queue_item(
 				kind="timesheet_rejected",
 				name=row.name,
+				doctype="Timesheet",
 				title="Your timesheet was sent back",
 				detail=reasons.get(row.name),
 				date=str(row.start_date),
@@ -1149,6 +1157,7 @@ def _get_needs_you(employee, once):
 			_queue_item(
 				kind="leave_rejected",
 				name=row.name,
+				doctype="Leave Application",
 				title=f"Your {row.leave_type} was sent back",
 				detail=leave_reasons.get(row.name),
 				date=str(row.from_date),
@@ -1179,6 +1188,7 @@ def _get_needs_you(employee, once):
 			_queue_item(
 				kind="attendance_request_rejected",
 				name=row.name,
+				doctype="Attendance Request",
 				title="Your attendance request was sent back",
 				detail=request_reasons.get(row.name),
 				date=str(row.from_date),
@@ -1193,10 +1203,11 @@ def _get_needs_you(employee, once):
 
 	# P4-R4. A terminal rejection is nobody's move. The employee has to *read*
 	# it -- the reason is the whole content of the row -- but there is nothing
-	# to edit, resend or chase, so it goes to the quieter "Waiting on others"
-	# list rather than into a queue of work. Once each: the two collectors
-	# above are scoped to the send-back states, so a rejected record reaches
-	# exactly one of these lists and never both.
+	# to edit, resend or chase, so it stays out of the queue of work. Plan
+	# 2026-10-17-001 KTD11 moves it from "Waiting on others" (it waits on
+	# nobody, EP-08) to the sibling "Decided" list, still with no expiry.
+	# Once each: the two collectors above are scoped to the send-back states,
+	# so a rejected record reaches exactly one of these lists and never both.
 	final_leave = frappe.get_all(
 		"Leave Application",
 		filters={"employee": employee, "status": "Rejected", "docstatus": 1},
@@ -1209,10 +1220,11 @@ def _get_needs_you(employee, once):
 		{row.name: row.owner for row in final_leave},
 	)
 	for row in final_leave:
-		waiting.append(
+		decided.append(
 			_queue_item(
 				kind="leave_final_rejected",
 				name=row.name,
+				doctype="Leave Application",
 				title=f"Your {row.leave_type} was rejected",
 				detail=final_leave_reasons.get(row.name),
 				date=str(row.from_date),
@@ -1236,10 +1248,11 @@ def _get_needs_you(employee, once):
 		"Attendance Request", [row.name for row in final_requests], employee
 	)
 	for row in final_requests:
-		waiting.append(
+		decided.append(
 			_queue_item(
 				kind="attendance_request_final_rejected",
 				name=row.name,
+				doctype="Attendance Request",
 				title=f"Your {row.reason} request was rejected",
 				detail=final_request_reasons.get(row.name),
 				date=str(row.from_date),
@@ -1257,32 +1270,46 @@ def _get_needs_you(employee, once):
 	# request's own status is what lets reading it clear the queue without a
 	# second seen-state model -- and what makes a *revised* reply a new
 	# obligation without reopening the one already read.
-	for log in frappe.get_all(
-		"Notification Log",
-		filters={
-			"for_user": frappe.session.user,
-			"read": 0,
-			"document_type": "HR Request",
-			"subject": ["like", f"{HR_REPLY_SUBJECT_PREFIX}%"],
-		},
-		fields=["name", "document_name", "subject", "description", "creation"],
-		order_by="creation asc",
-		limit=_QUEUE_FETCH,
+	#
+	# Plan 2026-10-17-001 KTD12, from the same single read (a join, not a
+	# second query): an unread *status-only* row on the employee's own Done or
+	# Declined request is an update, not an ask, so it goes to "Decided".
+	# Newest first, so `_collapse_by_record` keeps the newest text and the
+	# hard cap drops the oldest replies rather than the newest (KTD10).
+	log = frappe.qb.DocType("Notification Log")
+	request = frappe.qb.DocType("HR Request")
+	for row in (
+		frappe.qb.from_(log)
+		.left_join(request)
+		.on(request.name == log.document_name)
+		.select(log.name, log.document_name, log.subject, log.description, log.creation)
+		.where(log.for_user == frappe.session.user)
+		.where(log.read == 0)
+		.where(log.document_type == "HR Request")
+		.where(
+			log.subject.like(f"{HR_REPLY_SUBJECT_PREFIX}%")
+			| ((request.employee == employee) & request.status.isin([HR_REQUEST_DONE, HR_REQUEST_REJECTED]))
+		)
+		.orderby(log.creation, order=frappe.qb.desc)
+		.limit(_QUEUE_HARD_CAP)
+		.run(as_dict=True)
 	):
-		items.append(
+		replied = (row.subject or "").startswith(HR_REPLY_SUBJECT_PREFIX)
+		(items if replied else decided).append(
 			_queue_item(
-				kind="request_answered",
-				name=log.document_name,
-				title=log.subject,
-				detail=_notification_text(log.description),
-				date=str(log.creation),
+				kind="request_answered" if replied else "request_decided",
+				name=row.document_name,
+				doctype="HR Request",
+				title=row.subject if replied else _notification_text(row.subject),
+				detail=_notification_text(row.description),
+				date=str(row.creation),
 				day=None,
-				age_days=age_days(log.creation),
-				action="Read",
-				owner="you",
+				age_days=age_days(row.creation),
+				action="Read" if replied else "View",
+				owner="you" if replied else "nobody",
 				urgency="unread",
-				to={"name": "RequestDetail", "params": {"name": log.document_name}},
-				notification=log.name,
+				to={"name": "RequestDetail", "params": {"name": row.document_name}},
+				notification=row.name,
 			)
 		)
 
@@ -1306,6 +1333,7 @@ def _get_needs_you(employee, once):
 			_queue_item(
 				kind=decision["kind"],
 				name=decision["reference_name"],
+				doctype=decision["reference_doctype"],
 				title=decision["title"],
 				detail=None,
 				date=decision["date"],
@@ -1323,6 +1351,7 @@ def _get_needs_you(employee, once):
 			_queue_item(
 				kind="leave_waiting",
 				name=row.name,
+				doctype="Leave Application",
 				title=f"{row.leave_type} waiting for your manager",
 				detail=None,
 				date=str(row.from_date),
@@ -1353,6 +1382,7 @@ def _get_needs_you(employee, once):
 			_queue_item(
 				kind="attendance_request_waiting",
 				name=row.name,
+				doctype="Attendance Request",
 				title=f"{row.reason} request waiting for {'HR' if with_hr else 'your manager'}",
 				detail=None,
 				date=str(row.from_date),
@@ -1365,13 +1395,29 @@ def _get_needs_you(employee, once):
 			)
 		)
 
+	# KTD10: one row per record, per list, *before* the sort and the slice,
+	# so the sort sees each group's oldest age and `more` counts records.
+	items = _collapse_by_record(items)
+	for item in items:
+		if item["kind"] == "request_answered" and item["count"] > 1:
+			# "HR replied · 4 · Address proof": the count, then the subject
+			# the reply subject already carries -- no added read (HR-04).
+			subject = item["title"][len(HR_REPLY_SUBJECT_PREFIX) :].strip()
+			item["title"] = f"HR replied · {item['count']} · {subject}"
+	waiting = _collapse_by_record(waiting)
+	# KTD12: a request the employee still owes (an unread message) is one row
+	# in the queue, not a second one under "Decided".
+	owed = {_record_key(item) for item in items}
+	decided = [item for item in _collapse_by_record(decided) if _record_key(item) not in owed]
+
 	items.sort(key=lambda item: (_URGENCY_RANK[item["urgency"]], -(item["age_days"] or 0)))
-	# P4-R4, second order key: "nobody" rows are terminal receipts -- there is
-	# nothing to chase -- so they sort *below* everything still live, and only
-	# then by age. A recency window was the alternative and is worse: it would
-	# drop a rejection the employee never read, and the reason is the whole
-	# content of the row.
-	waiting.sort(key=lambda item: (item["owner"] == "nobody", -(item["age_days"] or 0)))
+	waiting.sort(key=lambda item: -(item["age_days"] or 0))
+	# P4-R4 / KTD11: decided rows are terminal receipts with no expiry. A
+	# recency window was the alternative and is worse: it would drop a
+	# rejection the employee never read, and the reason is the whole content
+	# of the row. Newest first, so the window shows the latest outcomes and
+	# `decided_more` counts the rest.
+	decided.sort(key=lambda item: item["age_days"] if item["age_days"] is not None else 1 << 30)
 	shown = items[:_QUEUE_LIMIT]
 	return {
 		"items": shown,
@@ -1379,17 +1425,69 @@ def _get_needs_you(employee, once):
 		"waiting": waiting[:_QUEUE_LIMIT],
 		# The "View all (N)" count for the waiting list, as `more` is for the queue.
 		"waiting_more": max(0, len(waiting) - _QUEUE_LIMIT),
+		"decided": decided[:_QUEUE_LIMIT],
+		"decided_more": max(0, len(decided) - _QUEUE_LIMIT),
 	}
 
 
+def _record_key(item):
+	return (item["reference_doctype"], item["reference_name"])
+
+
+def _collapse_by_record(rows):
+	"""Plan 2026-10-17-001 KTD10: one row per target record.
+
+	Same kind on one record (sixty unread replies on one request) folds into
+	the first row seen, with `count` rows behind it and the group's *oldest*
+	age and date. Every multi-row source is read newest-first, so the first
+	row seen carries the newest text. Different kinds on one record keep the
+	more urgent row by `_URGENCY_RANK`."""
+	kept = {}
+	for row in rows:
+		key = _record_key(row)
+		held = kept.get(key)
+		if held is None:
+			kept[key] = row
+		elif held["kind"] == row["kind"]:
+			held["count"] += 1
+			if (row["age_days"] or 0) > (held["age_days"] or 0):
+				held["age_days"] = row["age_days"]
+				held["date"] = row["date"]
+		elif _URGENCY_RANK[row["urgency"]] < _URGENCY_RANK[held["urgency"]]:
+			kept[key] = row
+	return list(kept.values())
+
+
 def _queue_item(
-	*, kind, name, title, detail, date, day, age_days, action, owner, urgency, to, notification=None
+	*,
+	kind,
+	name,
+	doctype,
+	title,
+	detail,
+	date,
+	day,
+	age_days,
+	action,
+	owner,
+	urgency,
+	to,
+	notification=None,
 ):
 	return {
 		# Stable record identity, and the Vue list key. Never an index: a
-		# re-ordered queue reused the wrong row's DOM state under one.
-		"id": f"{kind}:{notification or name}",
+		# re-ordered queue reused the wrong row's DOM state under one. The
+		# record, not the notification, so a collapsed row keeps its key when
+		# a new reply arrives (KTD10).
+		"id": f"{kind}:{name}",
 		"kind": kind,
+		# The record the row is about -- the dedupe key, and what opening a
+		# collapsed row marks read (`mark_record_notifications_read`).
+		"reference_doctype": doctype,
+		"reference_name": name,
+		# How many rows of this kind this one row stands for (KTD10).
+		"count": 1,
+		# The newest unread log behind the row, when one is.
 		"notification": notification,
 		"title": title,
 		"detail": detail,
@@ -1397,9 +1495,9 @@ def _queue_item(
 		"day": day,
 		"age_days": age_days,
 		"action": action,
-		# Whose move it is. "you" rows are the queue; "manager", "hr" and
-		# "nobody" rows are the waiting list -- "nobody" is a decision that
-		# has already been made and only needs reading (P4-R4).
+		# Whose move it is. "you" rows are the queue; "manager" and "hr" rows
+		# are the waiting list; "nobody" rows are "Decided" -- a decision that
+		# has already been made and only needs reading (P4-R4, KTD11).
 		"owner": owner,
 		"urgency": urgency,
 		"tone": _URGENCY_TONE[urgency],
@@ -3187,7 +3285,9 @@ _QUEUE_TITLE = {
 	"leave": lambda row: f"{row['employee_name']} asked for {row['leave_type']}",
 	"timesheet": lambda row: f"{row['employee_name']} sent a week for your approval",
 	"attendance": lambda row: f"{row['employee_name']} asked for {row['reason']}",
-	"request": lambda row: f"{row['employee_name']} filed a {row['category']} request",
+	# Plan 2026-10-17-001 HR-04 / AI-03: the subject tells five rows apart, and
+	# the possessive drops the "a IT" article. Fields already on the row.
+	"request": lambda row: f"{row['employee_name']}'s {row['category']} request: {row['subject']}",
 	"change": lambda row: f"{row['employee_name']} asked to change an approved week",
 }
 
@@ -8835,6 +8935,39 @@ def mark_my_request_read(name):
 		frappe.db.set_value("Notification Log", log, "read", 1, update_modified=False)
 
 	return {"cleared": len(cleared), "unread": _get_unread_notification_count()}
+
+
+@frappe.whitelist(methods=["POST"])
+def mark_record_notifications_read(reference_doctype, reference_name):
+	"""Mark read every unread Notification Log the *caller* holds about one
+	record (plan 2026-10-17-001 U6 / KTD10; U10 reuses it).
+
+	Opening a collapsed Home row ("HR replied · 4") clears all four logs, not
+	only the newest. Unlike `mark_my_request_read` this asks nothing about who
+	owns the record: a manager or handler can hold logs about a record that is
+	not theirs, and clearing their own logs must not fail on it. The scope is
+	`for_user` alone, in the filter of the one write -- another user's logs
+	about the same record are never read or touched. Unknown or foreign
+	records simply clear nothing.
+
+	Returns the new total so the badge moves in the same interaction.
+	"""
+	rate_limit_per_user("mark_notifications_read")
+	reference_doctype = reference_doctype.strip() if isinstance(reference_doctype, str) else ""
+	reference_name = reference_name.strip() if isinstance(reference_name, str) else ""
+	if not (0 < len(reference_doctype) <= 140 and 0 < len(reference_name) <= 140):
+		frappe.throw(_("That record couldn't be found."), frappe.ValidationError)
+
+	filters = {
+		"for_user": frappe.session.user,
+		"document_type": reference_doctype,
+		"document_name": reference_name,
+		"read": 0,
+	}
+	cleared = frappe.db.count("Notification Log", filters)
+	if cleared:
+		frappe.db.set_value("Notification Log", filters, "read", 1, update_modified=False)
+	return {"cleared": cleared, "unread": _get_unread_notification_count()}
 
 
 @frappe.whitelist(methods=["POST"])
