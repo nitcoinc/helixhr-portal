@@ -101,6 +101,11 @@ function closePerson() {
   openName.value = ''
 }
 
+/** Whether the desktop card has anything below the name line. */
+function hasCardFacts(person) {
+  return !!(person.department || person.manager_name || person.email)
+}
+
 /** Whether the manager is somebody the reader can be shown. The directory is
  * paged and company-scoped, so a manager in another company, or one who has
  * left, is a name and not a link. */
@@ -223,8 +228,14 @@ const emptyBody = computed(() =>
                 <span class="block truncate font-medium text-ink-gray-9">
                   {{ person.employee_name }}
                 </span>
-                <span class="block truncate text-sm text-ink-gray-6">
-                  {{ person.designation || 'Role not published' }}
+                <!-- ED-17 / EP-20: no "Role not published" filler. On a
+                     fixture site it was the second line of nearly every row
+                     and carried nothing; an empty role is simply no line. -->
+                <span
+                  v-if="person.designation"
+                  class="block truncate text-sm text-ink-gray-6"
+                >
+                  {{ person.designation }}
                 </span>
               </span>
 
@@ -236,9 +247,11 @@ const emptyBody = computed(() =>
             </component>
 
             <!-- The rest of the card, at desktop widths. On a phone the same
-                 three facts arrive in the sheet instead. -->
+                 three facts arrive in the sheet instead. ED-17: only when
+                 there is one of them to show -- an empty band with a top
+                 rule was 45px of nothing on most cards. -->
             <div
-              v-if="isDesktop"
+              v-if="isDesktop && hasCardFacts(person)"
               class="border-t border-outline-gray-1 px-3 py-2 text-sm text-ink-gray-6"
             >
               <p v-if="person.department">
@@ -314,8 +327,11 @@ const emptyBody = computed(() =>
               <p class="font-medium text-ink-gray-9">
                 {{ selected.employee_name }}
               </p>
-              <p class="text-sm text-ink-gray-6">
-                {{ selected.designation || 'Role not published' }}
+              <p
+                v-if="selected.designation"
+                class="text-sm text-ink-gray-6"
+              >
+                {{ selected.designation }}
               </p>
             </div>
           </div>

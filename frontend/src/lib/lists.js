@@ -67,3 +67,16 @@ export function offFirst(rows) {
   const list = rows || []
   return [...list.filter((row) => row?.leaves?.length), ...list.filter((row) => !row?.leaves?.length)]
 }
+
+/** My projects with something of mine in them this month -- hours booked or
+ * an open task -- and the rest, each half in the server's order (EP-23). */
+export function splitByActivity(projects) {
+  const active = []
+  const other = []
+  for (const project of projects || []) {
+    const busy = Number(project?.hours_this_month) > 0 || project?.tasks?.length > 0
+    if (busy) active.push(project)
+    else other.push(project)
+  }
+  return { active, other }
+}

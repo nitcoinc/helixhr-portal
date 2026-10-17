@@ -4,6 +4,7 @@ import { createResource } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import SegmentedChips from '@/components/SegmentedChips.vue'
+import Icon from '@/components/Icon.vue'
 import { dateTileParts, formatDate, today } from '@/lib/dates'
 import { HOLIDAY_LIST_UNKNOWN } from '@/lib/holidays'
 
@@ -36,19 +37,37 @@ const isCurrentYear = computed(() => year.value === Number(today().slice(0, 4)))
 // the only question anyone opens the page with is "which is next", and the
 // days already gone still have to be reachable for a leave plan. The
 // server's own today, never the host clock (P2-R5).
-const groups = computed(() =>
+const upcoming = computed(() => rows.value.filter((row) => row.date >= today()))
+const past = computed(() => rows.value.filter((row) => row.date < today()))
+
+// EP-22. The field block already names the next holiday, so Coming up starts
+// from the one after it rather than saying the same day twice. Matched on the
+// date, not the position: `next` is the server's, and a year other than this
+// one may not lead with it.
+const comingUp = computed(() =>
+  next.value && upcoming.value[0]?.date === next.value.date
+    ? upcoming.value.slice(1)
+    : upcoming.value,
+)
+const pastLabel = computed(() =>
+  isCurrentYear.value ? 'Earlier this year' : `Earlier in ${year.value}`,
+)
+
+// EP-22. The days already gone fold behind "Show past". Open by default only
+// when nothing is still to come -- a past year, or December after the last
+// one -- because then the past *is* the list. `null` means "not touched", so
+// a tap wins over the default until the year changes.
+const pastToggled = ref(null)
+const pastOpen = computed(() => pastToggled.value ?? upcoming.value.length === 0)
+watch(year, () => {
+  pastToggled.value = null
+})
+
+const sections = computed(() =>
   [
-    {
-      key: 'coming-up',
-      label: 'Coming up',
-      rows: rows.value.filter((row) => row.date >= today()),
-    },
-    {
-      key: 'earlier',
-      label: isCurrentYear.value ? 'Earlier this year' : `Earlier in ${year.value}`,
-      rows: rows.value.filter((row) => row.date < today()),
-    },
-  ].filter((group) => group.rows.length),
+    { key: 'coming-up', label: 'Coming up', rows: comingUp.value, fold: false },
+    { key: 'earlier', label: pastLabel.value, rows: past.value, fold: true },
+  ].filter((section) => section.rows.length),
 )
 
 // The date tile (index.css, `.date-tile`). `|| {}` so a value that is not a
@@ -103,13 +122,12 @@ const emptyBody = computed(() =>
     <SegmentedChips
       v-if="years.length > 1"
       v-model="year"
-      class="mb-4 max-w-xl"
+      class="mb-4"
       label="Year"
       :options="yearOptions"
     />
 
     <AsyncState
-      class="max-w-xl"
       section="holidays"
       :resource="holidays"
       :empty="rows.length === 0"
@@ -148,43 +166,71 @@ const emptyBody = computed(() =>
         </p>
       </section>
 
+      <!-- Compact rows (ED-21): the date tile carries the date, so the row is
+           the tile's height -- name and weekday beside it -- rather than an
+           80px card. Two columns at desktop widths, in the shell's own
+           max-w-5xl like every other list page (ED-20). -->
       <div
-        v-for="group in groups"
-        :key="group.key"
+        v-for="section in sections"
+        :key="section.key"
         class="mb-6 last:mb-0"
       >
-        <h2 class="label mb-2">
-          {{ group.label }}
-        </h2>
-        <ul class="space-y-2">
-          <li
-            v-for="row in group.rows"
-            :key="row.date"
-            class="surface-card elev-1 flex gap-3 p-3"
-          >
-            <span
-              class="date-tile mt-0.5"
-              aria-hidden="true"
+        <!-- EP-22. A real disclosure: the days already gone are reachable,
+             not in the way. Only rendered when there are some. -->
+        <button
+          v-if="section.fold"
+          type="button"
+          class="mb-1 inline-flex min-h-11 cursor-pointer items-center gap-1.5 text-sm font-medium text-blue-700 hover:underline"
+          :aria-expanded="pastOpen ? 'true' : 'false'"
+          :aria-controls="`holidays-${section.key}`"
+          @click="pastToggled = !pastOpen"
+        >
+          <Icon
+            name="chevronRight"
+            class="shrink-0 transition-transform duration-200"
+            :class="pastOpen ? 'rotate-90' : ''"
+          />
+          <span v-if="pastOpen">Hide past</span>
+          <span v-else>Show past (<span class="tabular">{{ section.rows.length }}</span>)</span>
+        </button>
+        <div
+          v-show="!section.fold || pastOpen"
+          :id="`holidays-${section.key}`"
+        >
+          <h2 class="label mb-2">
+            {{ section.label }}
+          </h2>
+          <ul class="space-y-2 lg:grid lg:grid-cols-2 lg:gap-2 lg:space-y-0">
+            <li
+              v-for="row in section.rows"
+              :key="row.date"
+              class="surface-card elev-1 flex items-center gap-3 p-1 pr-3"
             >
-              <span class="date-tile-month">{{ tile(row.date).month }}</span>
-              <span class="date-tile-day">{{ tile(row.date).day }}</span>
-            </span>
-            <div class="min-w-0 flex-1">
-              <p class="font-medium text-ink-gray-9">
-                {{ holidayName(row) }}
-                <!-- Half day is a property of the holiday, not a decoration:
-                     it changes whether anyone is expected at work. -->
-                <span
-                  v-if="row.is_half_day"
-                  class="ml-1 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-medium text-ink-gray-7"
-                >Half day</span>
-              </p>
-              <p class="mt-0.5 text-sm text-ink-gray-6">
-                {{ row.weekday }} · {{ formatDate(row.date) }}
-              </p>
-            </div>
-          </li>
-        </ul>
+              <span
+                class="date-tile"
+                aria-hidden="true"
+              >
+                <span class="date-tile-month">{{ tile(row.date).month }}</span>
+                <span class="date-tile-day">{{ tile(row.date).day }}</span>
+              </span>
+              <div class="min-w-0 flex-1">
+                <p class="font-medium text-ink-gray-9">
+                  {{ holidayName(row) }}
+                  <!-- Half day is a property of the holiday, not a decoration:
+                       it changes whether anyone is expected at work. -->
+                  <span
+                    v-if="row.is_half_day"
+                    class="ml-1 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-medium text-ink-gray-7"
+                  >Half day</span>
+                </p>
+                <!-- The tile is aria-hidden, so the full date is read here. -->
+                <p class="text-sm text-ink-gray-6">
+                  {{ row.weekday }}<span class="sr-only">, {{ formatDate(row.date) }}</span>
+                </p>
+              </div>
+            </li>
+          </ul>
+        </div>
       </div>
 
       <!-- Which list this is, and the one thing about it that surprises

@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { employeeNumberAddsNothing, fieldOptions, filterByField, offFirst, sortRows } from './lists'
+import {
+  employeeNumberAddsNothing,
+  fieldOptions,
+  filterByField,
+  offFirst,
+  sortRows,
+  splitByActivity,
+} from './lists'
 
 describe('sortRows', () => {
   const rows = [
@@ -77,5 +84,24 @@ describe('offFirst', () => {
       { name: 'd', leaves: [{ waiting: false }] },
     ]
     expect(offFirst(rows).map((row) => row.name)).toEqual(['b', 'd', 'a', 'c'])
+  })
+})
+
+describe('splitByActivity', () => {
+  it('puts projects with hours or open tasks first, keeping the server order in each half', () => {
+    const rows = [
+      { name: 'a', hours_this_month: 6, tasks: [] },
+      { name: 'b', hours_this_month: 0, tasks: [] },
+      { name: 'c', hours_this_month: 0, tasks: [{ name: 't' }] },
+      { name: 'd', hours_this_month: null },
+      { name: 'e', hours_this_month: '1.5', tasks: [] },
+    ]
+    const { active, other } = splitByActivity(rows)
+    expect(active.map((row) => row.name)).toEqual(['a', 'c', 'e'])
+    expect(other.map((row) => row.name)).toEqual(['b', 'd'])
+  })
+
+  it('is two empty halves for nothing at all', () => {
+    expect(splitByActivity(undefined)).toEqual({ active: [], other: [] })
   })
 })

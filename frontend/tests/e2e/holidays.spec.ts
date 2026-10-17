@@ -34,6 +34,32 @@ function daysBetween(from: string, to: string): number {
   return Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(fy, fm - 1, fd)) / 86400000)
 }
 
+/** A date-only string `days` away, by UTC string math. */
+function shiftDays(date: string, days: number): string {
+  const [year, month, day] = date.split('-').map(Number)
+  return new Date(Date.UTC(year, month - 1, day + days)).toISOString().slice(0, 10)
+}
+
+/** The weekday name of a date-only string, as the server spells it. */
+function weekdayOf(date: string): string {
+  const [year, month, day] = date.split('-').map(Number)
+  return new Date(Date.UTC(year, month - 1, day)).toLocaleDateString('en-US', {
+    weekday: 'long',
+    timeZone: 'UTC',
+  })
+}
+
+/** The Coming up / Earlier row for one holiday, found by its name *and* its
+ * date tile, so two holidays sharing a fixture name stay apart. */
+function holidayRow(page: Page, description: string, date: string) {
+  const [, month, day] = date.split('-')
+  return page
+    .getByRole('listitem')
+    .filter({ hasText: description })
+    .filter({ has: page.locator('.date-tile-month', { hasText: MONTHS[Number(month) - 1] }) })
+    .filter({ has: page.locator('.date-tile-day', { hasText: new RegExp(`^${Number(day)}$`) }) })
+}
+
 /** The page's own countdown wording, restated here so the assertion is
  * about what the employee reads. */
 function countdown(days: number): string {
@@ -52,19 +78,59 @@ test.describe('employee', () => {
     const holiday = seededHoliday(today)
     const [, month, day] = holiday.split('-')
 
+    // U16 (EP-22): the field block names the next holiday and Coming up
+    // starts from the one after it. On a fresh site the seeded holiday *is*
+    // the next one, so it would only be in the field block -- the real
+    // payload is re-served with one nearer holiday ahead of it, which keeps
+    // the seeded row a real row and makes the no-duplicate rule testable on
+    // every site. Today itself is free: if a real holiday were on it, the
+    // seeded one would not be next.
+    const response = await page.request.get('/api/method/helixhr.api.get_my_holidays')
+    const real = (await response.json()).message
+    const seededIsNext = real.next?.date === holiday
+    const nearer = {
+      date: today,
+      description: '_Spec Nearer Holiday',
+      weekday: weekdayOf(today),
+      is_half_day: 0,
+    }
+    const next = seededIsNext
+      ? { date: today, description: nearer.description, days_until: 0 }
+      : real.next
+    await page.route('**/api/method/helixhr.api.get_my_holidays*', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          message: {
+            ...real,
+            holidays: seededIsNext ? [nearer, ...real.holidays] : real.holidays,
+            next,
+          },
+        }),
+      }),
+    )
+
     await page.goto('/helixhr/holidays')
     await expect(page.getByRole('heading', { name: 'Holidays' })).toBeVisible()
     await page.waitForLoadState('networkidle')
 
-    // The fixture's own description, so this is that holiday and not
-    // whichever one the site happens to carry.
-    const row = page.getByRole('listitem').filter({ hasText: '_Test Holiday' }).first()
+    // The fixture's own description and its own day, so this is that
+    // holiday and not whichever one the site happens to carry.
+    const row = holidayRow(page, '_Test Holiday', holiday)
+    await expect(row).toHaveCount(1)
     await expect(row).toBeVisible()
     await expect(row.locator('.date-tile-month')).toHaveText(MONTHS[Number(month) - 1])
     await expect(row.locator('.date-tile-day')).toHaveText(String(Number(day)))
 
     // It is ahead of today, so it belongs to Coming up.
     await expect(page.getByRole('heading', { name: 'Coming up' })).toBeVisible()
+
+    // The next holiday is said once: in the field block, not again as the
+    // first Coming up row.
+    const strip = page.locator('section[aria-label="Next holiday"]')
+    await expect(strip).toContainText(next.description || 'Holiday')
+    await expect(holidayRow(page, next.description || 'Holiday', next.date)).toHaveCount(0)
   })
 
   test("the countdown agrees with the site's today", async ({ page }) => {
@@ -168,6 +234,67 @@ test.describe('employee', () => {
         "No holiday list is assigned to you or your company yet, so we can't tell which days are working days. Ask HR about your holiday list.",
       ),
     ).toBeVisible()
+  })
+
+  // U16 (EP-22). The days already gone fold behind "Show past", a real
+  // disclosure -- and with none of them there is no toggle at all.
+  test('past holidays fold behind Show past, which is absent when there are none', async ({
+    page,
+  }) => {
+    const today = await siteToday(page)
+    const year = Number(today.slice(0, 4))
+    const holiday = (date: string, description: string) => ({
+      date,
+      description,
+      weekday: weekdayOf(date),
+      is_half_day: 0,
+    })
+    const ahead = [
+      holiday(shiftDays(today, 5), '_Spec Soon'),
+      holiday(shiftDays(today, 9), '_Spec Later'),
+    ]
+    const gone = [holiday(shiftDays(today, -20), '_Spec Gone')]
+    let withPast = false
+    await page.route('**/api/method/helixhr.api.get_my_holidays*', (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          message: {
+            known: true,
+            holiday_list: '_Test Holiday List',
+            year,
+            years: [year],
+            holidays: withPast ? [...gone, ...ahead] : ahead,
+            next: { date: ahead[0].date, description: ahead[0].description, days_until: 5 },
+          },
+        }),
+      }),
+    )
+
+    // No past holidays: no toggle, no Earlier group.
+    await page.goto('/helixhr/holidays')
+    await page.waitForLoadState('networkidle')
+    await expect(page.getByText('_Spec Later')).toBeVisible()
+    await expect(page.getByRole('button', { name: /Show past/ })).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: /^Earlier/ })).toHaveCount(0)
+
+    // With one: folded, announced as collapsed, and it opens in place.
+    withPast = true
+    await page.reload()
+    await page.waitForLoadState('networkidle')
+    const toggle = page.getByRole('button', { name: 'Show past (1)' })
+    await expect(toggle).toBeVisible()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    const panel = page.locator(`#${await toggle.getAttribute('aria-controls')}`)
+    await expect(panel).toBeHidden()
+    await expect(page.getByText('_Spec Gone')).toBeHidden()
+
+    await toggle.click()
+    const open = page.getByRole('button', { name: 'Hide past' })
+    await expect(open).toHaveAttribute('aria-expanded', 'true')
+    await expect(panel).toBeVisible()
+    await expect(panel.getByText('_Spec Gone')).toBeVisible()
   })
 
   test('the footnote names the list and says weekly offs are not in it', async ({ page }) => {
