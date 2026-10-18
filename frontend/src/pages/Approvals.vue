@@ -1574,6 +1574,15 @@ function onQueueKey(event) {
                               >
                                 {{ hrLine(row) }}
                               </span>
+                              <!-- Plan 2026-10-18-001 R10: this approver's own row,
+                                   which their account cannot change yet. -->
+                              <span
+                                v-if="row.blocked_reason"
+                                class="block text-xs font-medium text-ink-amber-3"
+                                data-testid="row-blocked-reason"
+                              >
+                                View only: {{ row.blocked_reason }}
+                              </span>
                               <!-- R18: a batch refused this row and it is still
                                    pending; the reason stays with it. -->
                               <span

@@ -109,6 +109,7 @@ from helixhr.utils import (
 	_active_anchor_company,
 	access_summary,
 	active_company_grant,
+	active_employee_for_user,
 	admin_scope_employee_filters,
 	as_administrator,
 	can_admin_portal,
@@ -378,7 +379,7 @@ _PHOTO_UNAVAILABLE = "That photo isn't available."
 
 def _my_employee():
 	"""The caller's Active Employee id, or the portal's standard refusal."""
-	employee = (get_current_employee_info() or {}).get("name")
+	employee = active_employee_for_user(frappe.session.user).name
 	if not employee:
 		frappe.throw(_("Employee not found"), frappe.PermissionError)
 	return employee
@@ -6548,7 +6549,7 @@ def get_my_approvals(kind=None, category=None, q=None):
 	category = _valid_request_category(category)
 	if category:
 		kind = "request"
-	employee = get_current_employee()
+	employee = _my_employee()
 	# Plan 2026-10-16-001 KTD1: requests leave Approvals rows, lanes, counts,
 	# categories and Decided list.
 	pending, capped, _lane_counts = _approval_summaries(employee, include_requests=False)
@@ -6574,6 +6575,7 @@ def get_my_approvals(kind=None, category=None, q=None):
 	# the redesign groups per person (timesheet, leave, and the mixed view
 	# those live in); attendance keeps theirs. The hard cap stands behind all of it.
 	shown = pending[:_APPROVAL_PAGE] if kind == "attendance" else pending[:_QUEUE_HARD_CAP]
+	_mark_blocked_rows(shown)
 	decided = _recently_decided(employee, pattern)
 
 	# R14: the queue is grouped per person on the server, oldest waiting
@@ -7391,12 +7393,73 @@ def get_approval_detail(kind, name):
 
 	_assert_may_act_on(doc)
 	detail = _APPROVAL_KINDS[doctype]["detail"](doc)
+	# Plan 2026-10-18-001 R10: the approver's own record, which their account
+	# cannot change -- said in words, with no buttons the act would refuse.
+	problem = _approver_access_problem(doc, frappe.session.user)
+	if problem:
+		detail["actions"] = []
+		detail["read_only"] = True
+		detail["read_only_reason"] = problem
+		return detail
 	# P4-R1 / P4-KTD6: the outcomes that are legal for *this* record and
 	# *this* approver, from the one rule table `act_on_approval` validates
 	# against. The screen draws exactly this list, so it can never offer a
 	# button the server would refuse.
 	detail["actions"] = _allowed_actions(doc, frappe.session.user)
 	return detail
+
+
+# The two kinds a line manager decides through the record's own Workflow,
+# which runs Frappe's write/submit check on the record as the manager -- and
+# the one state each is the manager's to decide in.
+_LINE_MANAGER_WORKFLOW_KINDS = {"Timesheet": PENDING_STATE, "Attendance Request": REQUEST_PENDING_MANAGER}
+
+
+def _approver_access_problem(doc, user):
+	"""Why a line manager who owns this decision still cannot make it, in
+	words; None when nothing is missing (plan 2026-10-18-001 R10).
+
+	`apply_workflow` needs the Employee role (the manager transitions'
+	`allowed`) and Frappe write and submit on the record -- a DocShare, or
+	the manager's own User Permission reaching their report. Without one of
+	them the record was listed, opened and then refused with a raw
+	PermissionError on the click. HR inside its scope acts through its own
+	DocPerms, and Leave and the change request write with
+	`ignore_permissions`, so only the two workflow kinds are checked, and only
+	in the manager's own state: past it the share is gone by design and the
+	empty action list is the honest answer.
+	"""
+	manager_state = _LINE_MANAGER_WORKFLOW_KINDS.get(doc.doctype)
+	if not manager_state or doc.get("workflow_state") != manager_state or _decides_as_hr(doc, user):
+		return None
+	if "Employee" not in frappe.get_roles(user):
+		return _("You can see this, but your account isn't set up to decide it yet. Ask HR to check your access.")
+	if not all(frappe.has_permission(doc.doctype, ptype, doc=doc, user=user) for ptype in ("write", "submit")):
+		return _(
+			"You can see this, but your account can't change {0}'s records yet. Ask HR to check your access."
+		).format(doc.employee_name)
+	return None
+
+
+def _mark_blocked_rows(rows):
+	"""`can_act` and `blocked_reason` on each queue row (R10), so a row its
+	approver cannot decide says why before it is opened and never joins a
+	batch. Only the line manager's own workflow rows can be blocked -- the
+	team lane holds direct reports only, so it is the short half of the page --
+	and one `shared_admin_scope` keeps the HR-scope read to one per request."""
+	user = frappe.session.user
+	with shared_admin_scope():
+		for row in rows:
+			problem = None
+			if row.get("doctype") in _LINE_MANAGER_WORKFLOW_KINDS and row.get("lane") == "team":
+				try:
+					doc = frappe.get_doc(row["doctype"], row["name"])
+				except frappe.DoesNotExistError:
+					# Withdrawn since the queue read it; the act refuses it anyway.
+					doc = None
+				problem = doc and _approver_access_problem(doc, user)
+			row["can_act"] = not problem
+			row["blocked_reason"] = problem
 
 
 # The three kinds, and the doctype each one names -- the alias the whitelisted
@@ -7493,7 +7556,12 @@ def _allowed_actions(doc, user):
 	elif doc.doctype == "HelixHR Timesheet Change":
 		actions = _change_allowed_actions(doc, user)
 	else:
-		actions = _workflow_allowed_actions(doc, user)
+		# Plan 2026-10-18-001 KTD6 / R8: outside their HR scope an HR user is
+		# this record's line manager and nothing more, so the HR-role
+		# transitions -- every HR-stage decision among them -- are dropped.
+		actions = _workflow_allowed_actions(
+			doc, user, line_manager_only=_is_hr(user) and not _decides_as_hr(doc, user)
+		)
 
 	# P4-R5, and the dead end it would otherwise create: the only route out of
 	# Pending HR is an HR Manager who is not the requester, so on a site with
@@ -7541,7 +7609,14 @@ def _an_hr_manager_can_take_this(doc):
 	)
 
 
-def _workflow_allowed_actions(doc, user):
+def _decides_as_hr(doc, user):
+	"""Whether `user` decides `doc` as HR: they are HR, and the employee is in
+	their admin scope (plan 2026-10-18-001 KTD6). Outside it an HR user is
+	what any other employee is -- this record's line manager, or nobody."""
+	return _is_hr(user) and employee_in_admin_scope(doc.employee, resolve_admin_scope(user))
+
+
+def _workflow_allowed_actions(doc, user, line_manager_only=False):
 	"""The two workflow kinds' list, derived from the fixture's own
 	transitions.
 
@@ -7551,14 +7626,22 @@ def _workflow_allowed_actions(doc, user):
 	Employee-role outcomes (`allow_self_approval = 0`) and then refused with
 	"Self approval is not allowed" on the click. P4-KTD6's promise is that the
 	offered list and the enforced list cannot disagree.
+
+	`line_manager_only` keeps just the Employee-role transitions -- the line
+	manager's own step -- for an HR user deciding outside their HR scope.
 	"""
 	from frappe.model.workflow import get_transitions, has_approval_access
 
+	# `get_transitions` raises on a record the caller cannot read -- a manager's
+	# week once it has moved on to HR and its share is gone. No read, no move.
+	if not frappe.has_permission(doc.doctype, "read", doc=doc, user=user):
+		return []
 	reachable = {
 		transition.get("action")
 		for transition in get_transitions(doc)
 		if transition.get("action") in _APPROVAL_ACTIONS
 		and has_approval_access(user, doc, transition)
+		and (not line_manager_only or transition.get("allowed") == "Employee")
 	}
 	return [action for action in _APPROVAL_ACTIONS if action in reachable]
 
@@ -7566,8 +7649,9 @@ def _workflow_allowed_actions(doc, user):
 def _leave_allowed_actions(doc, user):
 	"""The HTD table, as code. A user who is both HR and this employee's
 	line manager gets the union -- minus Send to HR once the request is
-	already with HR, because there is nowhere left to send it."""
-	is_hr = _is_hr(user)
+	already with HR, because there is nowhere left to send it. HR counts only
+	inside the caller's HR scope (plan 2026-10-18-001 R8)."""
+	is_hr = _decides_as_hr(doc, user)
 	is_manager = user == doc.leave_approver
 
 	if (doc.get("helixhr_stage") or _LEAVE_STAGE_MANAGER) == LEAVE_STAGE_HR:
@@ -7852,6 +7936,9 @@ def _decide_one(doctype, name, action, reason, expected_modified, expected_state
 	# workflow kinds this is the fixture's own roles and conditions, so an
 	# action the workflow would technically allow from some other role is
 	# still refused here, and vice versa.
+	problem = _approver_access_problem(doc, frappe.session.user)
+	if problem:
+		frappe.throw(problem, frappe.PermissionError)
 	if action not in _allowed_actions(doc, frappe.session.user):
 		frappe.throw(_("That isn't something you can do to this request."))
 	_assert_expected_state(expected_modified, current_modified)
@@ -8066,20 +8153,21 @@ def _act_through_workflow(doc, action):
 def _may_act_on_leave(doc, user):
 	"""Who may decide one leave request (P4-R5, P4-R7).
 
-	Only reached for a non-HR session -- `_assert_may_act_on` returns early
-	for `_is_hr` -- so the stage check is the whole of "the manager loses the
-	request once it is with HR". The raw route (the `submit=1` DocShare HRMS
+	Only reached for a session that is not HR for this employee --
+	`_assert_may_act_on` returns early for HR inside its scope -- so the stage
+	check is the whole of "the manager loses the request once it is with HR". The raw route (the `submit=1` DocShare HRMS
 	grants the approver on every save) is closed by
 	`events.leave_application_before_submit`, not here.
 	"""
-	if doc.get("helixhr_stage") == LEAVE_STAGE_HR:
-		frappe.throw(
-			_("This leave request is with HR now, so only HR can decide it."),
-			frappe.PermissionError,
-		)
+	# Not-yours first: only the approver may learn where the request is.
 	if user != doc.leave_approver:
 		frappe.throw(
 			_(_APPROVAL_NOT_FOUND),
+			frappe.PermissionError,
+		)
+	if doc.get("helixhr_stage") == LEAVE_STAGE_HR:
+		frappe.throw(
+			_("This leave request is with HR now, so only HR can decide it."),
 			frappe.PermissionError,
 		)
 
@@ -8137,13 +8225,23 @@ def _assert_may_act_on(doc):
 		# check, and the list routes were scoped while the record routes were
 		# not. The refusal is the same words as for a missing record, so this
 		# endpoint cannot be used to learn whether a record exists.
-		if not employee_in_admin_scope(doc.employee, resolve_admin_scope(user)):
+		if employee_in_admin_scope(doc.employee, resolve_admin_scope(user)):
+			# Plan 2026-10-16-001 R4: HR Managers see HR requests only; IT
+			# requests belong to IT Team.
+			if (
+				doc.doctype == "HR Request"
+				and user != "Administrator"
+				and doc.routed_to_role not in frappe.get_roles(user)
+			):
+				frappe.throw(_APPROVAL_NOT_FOUND, frappe.PermissionError)
+			return
+		# Plan 2026-10-18-001 KTD6 / R7: outside their HR scope an HR user
+		# falls through to the line-manager rule below, so an HR Manager in
+		# one company still decides their own direct report's week in another.
+		# `_allowed_actions` keeps them to the line manager's actions there.
+		# A routed request has no line manager, so it stays refused.
+		if doc.doctype == "HR Request":
 			frappe.throw(_APPROVAL_NOT_FOUND, frappe.PermissionError)
-		# Plan 2026-10-16-001 R4: HR Managers see HR requests only; IT requests
-		# belong to IT Team.
-		if doc.doctype == "HR Request" and user != "Administrator" and doc.routed_to_role not in frappe.get_roles(user):
-			frappe.throw(_APPROVAL_NOT_FOUND, frappe.PermissionError)
-		return
 
 	_APPROVAL_KINDS[doc.doctype]["may_act"](doc, user)
 
@@ -8251,7 +8349,7 @@ def _act_on_attendance_request(doc, action):
 	a line manager can reach `apply_workflow` and `frappe.client.submit` from
 	Desk, neither of which comes through here.
 	"""
-	if action == "Approve" and not _is_hr():
+	if action == "Approve" and not _decides_as_hr(doc, frappe.session.user):
 		assert_no_attendance_overwrite(
 			doc.employee,
 			doc.from_date,
@@ -8305,7 +8403,7 @@ def assert_no_attendance_overwrite(
 def _may_act_on_hr_request(doc, user):
 	"""Only a holder of this request's **stored** `routed_to_role` may act on
 	it (P5-R5, P5-R9). Reached only for a non-HR session -- `_assert_may_act_on`
-	returns early for `_is_hr()` -- so a request stamped to HR Manager is only
+	returns early for HR in scope and refuses HR outside it -- so a request stamped to HR Manager is only
 	ever decided by HR here, never by an IT Team holder, whatever roles they
 	both happen to hold."""
 	if doc.routed_to_role not in frappe.get_roles(user):

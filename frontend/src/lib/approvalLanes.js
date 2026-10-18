@@ -112,9 +112,15 @@ export const BULK_MAX_ITEMS = 60
  * decided one at a time, and the server refuses them in a batch anyway.
  * Clean means the server said so (`needs_look: false`): an HR-lane timesheet
  * or stalled leave carries no flags (`null`) and no stale-write token, and
- * the batch endpoint would re-flag it and refuse. */
+ * the batch endpoint would re-flag it and refuse. A row whose approver's
+ * account cannot change it (`can_act: false`) never joins a batch either. */
 export function isBatchable(row) {
-  return !!row && (row.kind === 'timesheet' || row.kind === 'leave') && row.needs_look === false
+  return (
+    !!row &&
+    (row.kind === 'timesheet' || row.kind === 'leave') &&
+    row.needs_look === false &&
+    row.can_act !== false
+  )
 }
 
 /** MH-04: the "Approve all" batch for one lane's rows. Built from the rows

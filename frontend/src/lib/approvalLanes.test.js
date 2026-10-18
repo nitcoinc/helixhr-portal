@@ -116,6 +116,11 @@ describe('isBatchable', () => {
     expect(isBatchable({ name: 'u', kind: 'leave' })).toBe(false)
     expect(isBatchable(clean('t', 'timesheet', { needs_look: false }))).toBe(true)
   })
+
+  it('leaves out a row its approver cannot act on', () => {
+    expect(isBatchable(clean('b', 'timesheet', { can_act: false }))).toBe(false)
+    expect(isBatchable(clean('k', 'timesheet', { can_act: true }))).toBe(true)
+  })
 })
 
 describe('approveAllBatch', () => {
