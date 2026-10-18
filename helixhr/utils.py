@@ -1358,6 +1358,32 @@ def session_company(user):
 	return frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "company")
 
 
+def active_employee_for_user(user):
+	"""``user``'s Active Employee, as ``{state, name, company}`` (plan
+	2026-10-18-001 R9, KTD8).
+
+	``state`` keeps the three answers apart, because callers treat them
+	differently: ``"active"`` (``name`` and ``company`` set), ``"inactive"``
+	(the login has Employee rows, none Active) and ``"none"`` (no rows at
+	all). An unfiltered ``{"user_id": user}`` lookup returns whichever row
+	sorts first -- for a rehired or transferred login, often a newer Left
+	row -- which is the bug this replaces.
+
+	ERPNext refuses a second Active row for one login, so the order only
+	matters where that was bypassed; newest first keeps it deterministic.
+	"""
+	rows = frappe.get_all(
+		"Employee",
+		filters={"user_id": user},
+		fields=["name", "company", "status"],
+		order_by="creation desc, name desc",
+	)
+	for row in rows:
+		if row.status == "Active":
+			return frappe._dict(state="active", name=row.name, company=row.company)
+	return frappe._dict(state="inactive" if rows else "none", name=None, company=None)
+
+
 # P6-R6, P6-R7. Every persona this app knows how to grant an administrative
 # read to -- "HR Manager or System Manager" -- named once so U1's answer and
 # `hr_request.py`'s own `_UNSCOPED_ROLES` describe the same set without one
