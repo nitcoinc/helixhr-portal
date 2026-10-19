@@ -2,6 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { Button, createResource } from 'frappe-ui'
 import { call } from '@/lib/api'
+import { session } from '@/lib/session'
 import Icon from '@/components/Icon.vue'
 
 // Plan 2026-10-04-001 U6 (R20, R21, resolved decision 14): who may run and
@@ -25,6 +26,12 @@ const CELLS = [
 // sentence under 17 report names. Cells it covers render a dash, not a dead
 // checkbox, and are described by it.
 const NA_NOTE = "— means the report has no project scope, so a Delivery Manager can't be given it."
+
+// Plan 2026-10-19-001 R7: the matrix is one global policy, so changing it
+// needs All-orgs authority -- the same predicate as the Email templates page
+// (`can_edit_email_templates` is `has_all_orgs_authority`). A named-org
+// Portal Admin reads it; the server refuses their save either way.
+const readOnly = !session.canEditEmailTemplates
 
 const resource = createResource({ url: 'helixhr.api.get_report_access', auto: true })
 const draft = ref([])
@@ -128,6 +135,13 @@ async function save() {
         HR Manager and Report Manager can always run and export every report. Choose what HR User and
         Delivery Manager can do. Delivery Managers only ever see their own projects.
       </p>
+      <p
+        v-if="readOnly"
+        class="surface-inset mt-2 p-3 text-sm text-ink-gray-7"
+        data-testid="report-access-read-only"
+      >
+        You can view report access. Changing it needs access in all orgs, because it applies to every org.
+      </p>
     </div>
 
     <p
@@ -206,7 +220,8 @@ async function save() {
               <input
                 v-if="column(group, cell).rows.length"
                 type="checkbox"
-                class="size-5 cursor-pointer"
+                :disabled="readOnly"
+                class="size-5 cursor-pointer disabled:cursor-not-allowed"
                 :aria-label="columnName(group, cell)"
                 :checked="column(group, cell).all"
                 :indeterminate="column(group, cell).some"
@@ -242,7 +257,8 @@ async function save() {
               <input
                 v-if="applicable(row, cell.flag)"
                 type="checkbox"
-                class="size-5 cursor-pointer"
+                :disabled="readOnly"
+                class="size-5 cursor-pointer disabled:cursor-not-allowed"
                 :aria-label="cellName(row, cell)"
                 :checked="!!row[cell.flag]"
                 @change="setCell(row, cell.flag, $event.target.checked)"
@@ -308,6 +324,7 @@ async function save() {
               >
                 <input
                   type="checkbox"
+                  :disabled="readOnly"
                   class="size-5"
                   :aria-label="columnName(group, cell)"
                   :checked="column(group, cell).all"
@@ -339,6 +356,7 @@ async function save() {
                   >
                     <input
                       type="checkbox"
+                      :disabled="readOnly"
                       class="size-5"
                       :aria-label="cellName(row, cell)"
                       :checked="!!row[cell.flag]"

@@ -1,4 +1,4 @@
-import { test, expect, request, APIRequestContext } from '@playwright/test'
+import { test, expect, request, APIRequestContext, type Page } from '@playwright/test'
 
 // P5-U14. Settings is HR-only, and the plan's own test list asks for two
 // things the Python suite cannot prove on its own: that a direct navigation
@@ -15,6 +15,19 @@ async function loginAs(baseURL: string, user: string, pwd = PASSWORD): Promise<A
     throw new Error(`Login failed for ${user}: ${response.status()} ${await response.text()}`)
   }
   return api
+}
+
+// Plan 2026-10-19-001 R7: changing the report matrix needs All-orgs
+// authority; the `portal-admin` project's login holds named orgs and only
+// reads it. This one (`ensure_people_access_fixtures`) holds All orgs.
+const PORTAL_ADMIN_ALL = 'portal-admin-all@helixhr.test'
+
+async function signInPage(page: Page, baseURL: string, user: string) {
+  const api = await loginAs(baseURL, user)
+  const state = await api.storageState()
+  await api.dispose()
+  await page.context().clearCookies()
+  await page.context().addCookies(state.cookies)
 }
 
 async function getValue(api: APIRequestContext, doctype: string, filters: object, fieldname: string) {
@@ -254,6 +267,9 @@ test('U3: Report access and People & access are Portal Admin only', async ({ pag
     await expect(page.getByTestId('settings-tab-approvers')).toBeVisible()
     await expect(page.getByTestId('settings-tab-categories')).toHaveCount(0)
     await expect(page.getByTestId('settings-tab-leave-rules')).toHaveCount(0)
+    // R7: a named-org Portal Admin reads the global matrix, read-only.
+    await expect(page.getByTestId('report-access-read-only')).toBeVisible()
+    await expect(page.getByTestId('access-save-bar')).toHaveCount(0)
     await page.getByTestId('settings-tab-people-access').click()
     await expect(page.getByTestId('settings-tab-people-access')).toHaveAttribute('aria-current', 'page')
     // Plan 2026-10-15-001 U6: the replaced sections' old URLs land here.
@@ -323,8 +339,11 @@ test('U11: Report access fits a phone in folded families with a count each', asy
 
 test('U11: a not-applicable Delivery Manager cell is a dash, out of the Tab order, described by the column footnote', async ({
   page,
+  baseURL,
 }, testInfo) => {
   test.skip(testInfo.project.name !== 'portal-admin', 'Report access is Portal Admin only')
+  // Editable cells, so the Tab order is the one an editor meets.
+  await signInPage(page, baseURL!, PORTAL_ADMIN_ALL)
   await page.goto('/helixhr/settings/report-access')
   const dash = page.getByTestId('access-na-leave_ledger-dm_run')
   await expect(dash).toBeVisible()
@@ -345,7 +364,8 @@ test('U11: a not-applicable Delivery Manager cell is a dash, out of the Tab orde
 
 test('U11: a column select-all saves every row in its family', async ({ page, baseURL }, testInfo) => {
   test.skip(testInfo.project.name !== 'portal-admin', 'Report access is Portal Admin only')
-  const api = await loginAs(baseURL!, 'portal-admin@helixhr.test')
+  const api = await loginAs(baseURL!, PORTAL_ADMIN_ALL)
+  await signInPage(page, baseURL!, PORTAL_ADMIN_ALL)
   const before = (await callMethod(api, 'helixhr.api.get_report_access', {})) as Array<Record<string, unknown>>
   const family = before.filter((row) => row.family === 'attendance')
   expect(family.length, 'the fixture catalog has Attendance reports').toBeGreaterThan(1)

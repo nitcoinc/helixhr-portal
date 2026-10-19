@@ -323,8 +323,13 @@ class TestSearchPeopleAccess(_PeopleAccessRead):
 	def test_reach_and_the_org_filter(self):
 		self.assertNotIn(self.employees[B_ONLY], self._users(PA_A, query="par-b-only"))
 		self.assertIn(self.employees[B_ONLY], self._users(SM, query="par-b-only"))
-		rows = _as(PA_A, search_people_access, company=self.a, page_length=100)["rows"]
+		page = _as(PA_A, search_people_access, company=self.a, page_length=100)
+		rows = page["rows"]
 		self.assertTrue(rows)
+		# The org filter's options: the whole reach, not the one filtered on.
+		self.assertEqual(page["companies"], _as(PA_A, search_people_access)["companies"])
+		self.assertIn(self.a, page["companies"])
+		self.assertNotIn(self.b, page["companies"])
 		self.assertEqual({row["company"] for row in rows}, {self.a})
 		with self.assertRaises(frappe.PermissionError):
 			_as(PA_A, search_people_access, company=self.b)

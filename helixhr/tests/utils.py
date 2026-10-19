@@ -572,6 +572,101 @@ def ensure_company_access_fixtures():
 	make_test_company_grant(COMPANY_ACCESS_READONLY_USER, [third], level="Reports only")
 
 
+# Plan 2026-10-19-001 U7: people-access.spec.ts. Every one is in the test
+# company. The drift user holds a Frappe HR Manager role with no assignment
+# ("Role set outside HelixHR"); the access admin holds Manage access on All
+# orgs; the leader, the Delivery Manager target and the stale target start
+# with no elevated access; the no-login employee has no User at all; the
+# all-orgs Portal Admin may change the global report matrix (R7).
+ACCESS_DRIFT_USER = "access-drift@helixhr.test"
+ACCESS_ADMIN_USER = "access-admin@helixhr.test"
+ACCESS_LEADER_USER = "access-leader@helixhr.test"
+ACCESS_DM_TARGET_USER = "access-dm-target@helixhr.test"
+ACCESS_STALE_TARGET_USER = "access-stale-target@helixhr.test"
+ACCESS_NO_LOGIN_NUMBER = "ACCESS-NOLOGIN"
+PORTAL_ADMIN_ALL_USER = "portal-admin-all@helixhr.test"
+
+
+def _set_frappe_roles(user, add=(), remove=()):
+	doc = frappe.get_doc("User", user)
+	held = [row.role for row in doc.roles]
+	wanted = [role for role in held if role not in remove] + [role for role in add if role not in held]
+	if wanted != held:
+		doc.set("roles", [{"role": role} for role in wanted])
+		doc.save(ignore_permissions=True)
+		frappe.clear_cache(user=user)
+
+
+def _reset_access(user, roles):
+	"""``user`` back to no assignments and none of ``roles`` in Frappe."""
+	frappe.db.delete("HelixHR Access Assignment", {"user": user})
+	clear_role_scope_cache(user)
+	_set_frappe_roles(user, remove=roles)
+
+
+def ensure_people_access_fixtures():
+	"""The People & access e2e identities, reset to their starting state, so
+	a rerun of `people-access.spec.ts` starts where the first run did.
+	Idempotent."""
+	company = ensure_test_company()
+	make_test_user(ACCESS_DRIFT_USER, company)
+	frappe.db.delete("HelixHR Access Assignment", {"user": ACCESS_DRIFT_USER})
+	_set_frappe_roles(ACCESS_DRIFT_USER, add=["HR Manager"])
+	clear_role_scope_cache(ACCESS_DRIFT_USER)
+
+	make_test_user(ACCESS_ADMIN_USER, company)
+	make_assignment(ACCESS_ADMIN_USER, "HelixHR Access Admin", "all")
+
+	leader = make_test_user(ACCESS_LEADER_USER, company)
+	_reset_access(ACCESS_LEADER_USER, ASSIGNABLE_ROLES)
+	# Giving HR Manager drops the self Employee permission (R13); put it back.
+	if not frappe.db.exists(
+		"User Permission", {"user": ACCESS_LEADER_USER, "allow": "Employee", "for_value": leader}
+	):
+		frappe.get_doc(
+			{
+				"doctype": "User Permission",
+				"user": ACCESS_LEADER_USER,
+				"allow": "Employee",
+				"for_value": leader,
+				"apply_to_all_doctypes": 1,
+			}
+		).insert(ignore_permissions=True)
+
+	for user in (ACCESS_DM_TARGET_USER, ACCESS_STALE_TARGET_USER):
+		make_test_user(user, company)
+		_reset_access(user, ASSIGNABLE_ROLES)
+
+	if not frappe.db.exists("Employee", {"employee_number": ACCESS_NO_LOGIN_NUMBER}):
+		frappe.get_doc(
+			{
+				"doctype": "Employee",
+				"employee_number": ACCESS_NO_LOGIN_NUMBER,
+				"first_name": "Nologin",
+				"last_name": "Access",
+				"company": company,
+				"date_of_birth": "1990-01-01",
+				"date_of_joining": "2020-01-01",
+				"gender": ensure_test_gender(),
+				"status": "Active",
+			}
+		).insert(ignore_permissions=True)
+
+	make_test_user(PORTAL_ADMIN_ALL_USER, company)
+	make_assignment(PORTAL_ADMIN_ALL_USER, PORTAL_ADMIN_ROLE, "all")
+
+
+@frappe.whitelist()
+def seed_people_access_fixtures():
+	"""`ensure_people_access_fixtures` over HTTP, for `people-access.spec.ts`
+	to call before its run. Test sites and System Manager only: it rewrites
+	other people's roles and assignments."""
+	_require_allow_tests()
+	frappe.only_for("System Manager")
+	ensure_people_access_fixtures()
+	frappe.db.commit()  # nosemgrep
+
+
 CROSS_COMPANY_PROJECT = "_Test Cross Company Project"
 CROSS_COMPANY_IDLE_PROJECT = "_Test Cross Company Idle"
 CROSS_COMPANY_MONTH = "2016-04"
@@ -1065,6 +1160,8 @@ def setup_playwright_fixtures():
 	# Plan 2026-10-14-001: company access grants (company-access.spec.ts,
 	# reports-company.spec.ts).
 	ensure_company_access_fixtures()
+	# Plan 2026-10-19-001 U7: people-access.spec.ts.
+	ensure_people_access_fixtures()
 	# Plan 2026-10-15-001: an Inc project with Outsourcing hours
 	# (reports-company.spec.ts, "All my companies").
 	ensure_cross_company_project_fixture()

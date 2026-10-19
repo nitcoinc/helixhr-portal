@@ -373,6 +373,10 @@ const DELIVERY_MANAGER = 'delivery-manager@helixhr.test'
 const REPORT_MANAGER = 'report-manager@helixhr.test'
 const HR_MANAGER = 'hr-manager-employee@helixhr.test'
 const PORTAL_ADMIN = 'portal-admin@helixhr.test'
+// Plan 2026-10-19-001 R7: the matrix is global, so changing it needs a
+// Portal Admin on All orgs (`ensure_people_access_fixtures`); the named-org
+// Portal Admin above only reads it.
+const PORTAL_ADMIN_ALL = 'portal-admin-all@helixhr.test'
 
 async function apiAs(baseURL: string | undefined, user: string): Promise<APIRequestContext> {
   const api = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
@@ -446,11 +450,11 @@ test.describe('report tiers', () => {
     await expect(page.getByRole('button', { name: 'Open in Frappe' })).toHaveCount(0)
   })
 
-  test('Portal Admin grants HR User export in Settings; HR User sees it after reload', async ({
+  test('an All-orgs Portal Admin grants HR User export in Settings; HR User sees it after reload', async ({
     page,
     baseURL,
   }) => {
-    const admin = await apiAs(baseURL, PORTAL_ADMIN)
+    const admin = await apiAs(baseURL, PORTAL_ADMIN_ALL)
     const restore = async (flags: object) => {
       const response = await admin.post('/api/method/helixhr.api.save_report_access', {
         data: { rows: [{ key: 'leave_ledger', ...flags }] },
@@ -465,7 +469,7 @@ test.describe('report tiers', () => {
       await expect(exportButton).toBeDisabled()
       await expect(exportButton).toHaveAccessibleDescription(/not export it/)
 
-      await signInAs(page, baseURL, PORTAL_ADMIN)
+      await signInAs(page, baseURL, PORTAL_ADMIN_ALL)
       await page.goto('/helixhr/settings/report-access')
       const cell = page.getByRole('checkbox', { name: 'Leave ledger: HR User export' })
       await cell.check()
@@ -494,7 +498,7 @@ test.describe('report tiers', () => {
     // The grant is a Portal Admin action since plan 2026-10-06-001 U3;
     // `admin` stays HR Manager for the saved-view cleanup below, which is
     // not portal-admin work.
-    const portalAdmin = await apiAs(baseURL, PORTAL_ADMIN)
+    const portalAdmin = await apiAs(baseURL, PORTAL_ADMIN_ALL)
     const grant = await portalAdmin.post('/api/method/helixhr.api.save_report_access', {
       data: { rows: [{ key: 'leave_ledger', hr_user_run: 1, hr_user_export: 0 }] },
     })
@@ -583,64 +587,35 @@ test.describe('report tiers', () => {
 
   // HelixHR Portal Admin: Settings with only its admin sections,
   // Reports with only the export log, and no HR data.
-  test('a Portal Admin manages people\'s roles and reads the export log, nothing more', async ({ page, baseURL }) => {
-    const admin = await apiAs(baseURL, PORTAL_ADMIN)
-    const holders = await admin.post('/api/method/helixhr.api.get_portal_role_holders', {
-      data: { query: 'hr-user' },
-    })
-    const target = ((await holders.json()).message.rows || []).find((row) => row.user === HR_USER)
-    expect(target, 'HR User fixture is in the HR Manager company').toBeTruthy()
-    const restore = () =>
-      admin.post('/api/method/helixhr.api.set_portal_role', {
-        data: { employee: target.employee, role: 'IT Team', enabled: 0 },
-      })
-    await restore()
-    try {
-      await signInAs(page, baseURL, PORTAL_ADMIN)
-      await page.goto('/helixhr/settings')
-      await expect(page.getByTestId('settings-tab-report-access')).toBeVisible()
-      await expect(page.getByTestId('settings-tab-people-access')).toBeVisible()
-      await expect(page.getByTestId('settings-tab-categories')).toHaveCount(0)
-      await expect(page.getByRole('heading', { name: 'Report access' })).toBeVisible()
+  test('a Portal Admin reads report access, opens People & access and reads the export log, nothing more', async ({
+    page,
+    baseURL,
+  }) => {
+    await signInAs(page, baseURL, PORTAL_ADMIN)
+    await page.goto('/helixhr/settings')
+    await expect(page.getByTestId('settings-tab-report-access')).toBeVisible()
+    await expect(page.getByTestId('settings-tab-people-access')).toBeVisible()
+    await expect(page.getByTestId('settings-tab-categories')).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Report access' })).toBeVisible()
+    // Plan 2026-10-19-001 R7: a named-org Portal Admin reads the matrix and
+    // cannot change it.
+    await expect(page.getByTestId('report-access-read-only')).toBeVisible()
+    await expect(page.getByRole('checkbox', { name: 'Leave ledger: HR User run', exact: true }).first()).toBeDisabled()
 
-      // Plan 2026-10-15-001 U6: roles are managed in People & access.
-      await page.getByTestId('settings-tab-people-access').click()
-      await expect(page).toHaveURL(/\/settings\/people-access/)
-      await page.getByTestId('people-access-search').fill('hr-user')
-      await page.getByTestId(`people-access-row-${HR_USER}`).click()
-      const itTeam = page.getByTestId('people-access-panel').getByRole('checkbox', { name: 'IT Team' })
-      await expect(itTeam).not.toBeChecked()
-      await itTeam.check()
+    // Plan 2026-10-19-001 U7: access is managed in People & access
+    // (people-access.spec.ts covers the editor).
+    await page.getByTestId('settings-tab-people-access').click()
+    await expect(page).toHaveURL(/\/settings\/people-access/)
+    await expect(page.getByRole('heading', { name: 'Elevated access' })).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'All employees' })).toBeVisible()
 
-      // U6: on a phone the panel stacks with a Back control, and the sticky
-      // Save bar clears the fixed 56px tab bar instead of sitting under it.
-      const desktop = page.viewportSize()
-      await page.setViewportSize({ width: 375, height: 667 })
-      await expect(page.getByRole('button', { name: 'Back to everyone' })).toBeVisible()
-      await page.getByTestId('people-access-panel').getByRole('checkbox', { name: 'IT Team' }).scrollIntoViewIfNeeded()
-      const bar = await page.getByTestId('people-access-save-bar').boundingBox()
-      expect(bar, 'Save bar is rendered').toBeTruthy()
-      expect(bar.y + bar.height).toBeLessThanOrEqual(667 - 56 + 1)
-      if (desktop) await page.setViewportSize(desktop)
+    await page.goto('/helixhr/reports')
+    await expect(page.getByRole('heading', { name: 'Export log' })).toBeVisible()
+    await expect(page.getByRole('tablist', { name: 'Reports sections' })).toHaveCount(0)
+    await expect(page.getByRole('heading', { name: 'Leave', exact: true })).toHaveCount(0)
+    await expect(page.getByText("You don't have access to this")).toHaveCount(0)
 
-      await page.getByTestId('people-access-save').click()
-      await expect(page.getByRole('status')).toContainText('Saved')
-      await expect(page.getByTestId('people-access-summary')).toContainText('IT Team')
-      await itTeam.uncheck()
-      await page.getByTestId('people-access-save').click()
-      await expect(page.getByTestId('people-access-summary')).not.toContainText('IT Team')
-
-      await page.goto('/helixhr/reports')
-      await expect(page.getByRole('heading', { name: 'Export log' })).toBeVisible()
-      await expect(page.getByRole('tablist', { name: 'Reports sections' })).toHaveCount(0)
-      await expect(page.getByRole('heading', { name: 'Leave', exact: true })).toHaveCount(0)
-      await expect(page.getByText("You don't have access to this")).toHaveCount(0)
-
-      await page.goto('/helixhr/people')
-      await expect(page.getByRole('link', { name: 'People' })).toHaveCount(0)
-    } finally {
-      await restore()
-      await admin.dispose()
-    }
+    await page.goto('/helixhr/people')
+    await expect(page.getByRole('link', { name: 'People' })).toHaveCount(0)
   })
 })

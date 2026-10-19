@@ -13285,9 +13285,11 @@ def search_people_access(query=None, company=None, start=0, page_length=50):
 	"""All employees (R21): every Active Employee in the caller's reach, with
 	or without a login, filtered by name, ID or email (two characters or
 	more) and by ``company``, paged. A ``company`` outside the reach is
-	refused, not emptied."""
+	refused, not emptied. ``companies`` is the whole reach, for the screen's
+	org filter."""
 	rate_limit_per_user("search_people_access")
 	reach = _people_access_reach()
+	companies = list(reach)
 	if company:
 		if not isinstance(company, str) or company not in reach:
 			frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
@@ -13327,6 +13329,7 @@ def search_people_access(query=None, company=None, start=0, page_length=50):
 			for row in page
 		],
 		"has_more": len(employees) > page_length,
+		"companies": companies,
 	}
 
 

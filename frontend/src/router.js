@@ -217,6 +217,16 @@ const routes = [
     props: true,
   },
   {
+    // Plan 2026-10-19-001 U7: one person open in People & access. A route,
+    // so Back closes the editor; the same page and section stay mounted
+    // under it (one `meta.title`, so the shell does not move focus).
+    path: '/settings/people-access/:user',
+    name: 'SettingsPeopleAccessPerson',
+    meta: { title: 'Settings', deskOnly: true },
+    component: () => import('@/pages/Settings.vue'),
+    props: { section: 'people-access' },
+  },
+  {
     // Plan 2026-10-15-001 U6: People & access replaced these two sections.
     path: '/settings/:section(portal-roles|company-access)',
     name: 'SettingsPeopleAccessRedirect',

@@ -541,6 +541,44 @@ screen.
 
 Every empty state names the next action ("You have no leave requests yet. Ask for leave to get started.").
 
+## People & access words (plan 2026-10-19-001 U7)
+
+Roles are named by their HelixHR label, which the server sends with every row (`ROLE_LABELS` in
+`helixhr/utils.py`); a Frappe role name never reaches the screen.
+
+| Frappe role | Say |
+|---|---|
+| HR Manager | HR Manager |
+| HR User | HR User |
+| HelixHR Portal Admin | Portal Admin |
+| IT Team | IT Admin |
+| HelixHR Delivery Manager | Delivery Manager |
+| HelixHR Report Manager | Reports |
+| HelixHR Org Viewer | Org viewer |
+| HelixHR Notification Manager | Notification Manager |
+| HelixHR Access Admin | Manage access |
+| HR Manager on All orgs | Leadership (a preset, never a role) |
+
+A role reads "HR Manager · Org A, Org B"; on All orgs the orgs are one filled "All orgs" badge.
+Warnings are word chips: a **problem** (Employee record Left or Inactive, User disabled, No login,
+Role set outside HelixHR, Role missing in Frappe, Own org not covered by their roles) uses the
+sent-back pair; an **info** warning (Desk HR reach: all orgs, All orgs, Can manage access, Export
+on) uses the resting pair. High-risk lines in the review carry the words "High risk" on the
+sent-back pair.
+
+| Case | Text |
+|---|---|
+| Role with named orgs | "HR Manager in Org A and Org B." |
+| Role on All orgs | "HR Manager in all orgs, including new ones." |
+| Leadership | "Acts as HR Manager in all orgs, including new ones." |
+| Desk warning | "Desk access for HR roles is not yet limited to these orgs." |
+| Self | "You can't change your own access." |
+| R13 lock | "You can't change this person's access: they hold a role you can't assign." |
+| HR roles | "Only Manage access can give HR roles." |
+| R14 refusal | "This would leave nobody who can manage access." |
+| Role Profile | "This person's roles come from a role profile. Change it in Desk." |
+| Stale token | "Someone changed this person's access. Reload and re-apply." |
+
 ## Work kinds, action words, and request statuses (Plan 2026-10-16-001)
 
 ### Kind tags (R13)
