@@ -6,6 +6,7 @@ from frappe.tests import IntegrationTestCase
 
 from helixhr.tests.utils import (
 	GRANT_HOLDER_USER,
+	clear_test_company_grants,
 	ensure_baseline_company,
 	ensure_hr_manager_user,
 	ensure_test_company,
@@ -34,14 +35,12 @@ class _Grants(IntegrationTestCase):
 		self.other = ensure_baseline_company()
 		self.holder_employee = make_test_user(GRANT_HOLDER_USER, self.company, status="Active")
 		# The e2e fixtures commit grants; every test starts from none.
-		frappe.db.delete("HelixHR Company Access Company", {"parent": ["like", "%@helixhr.test"]})
-		frappe.db.delete("HelixHR Company Access", {"user": ["like", "%@helixhr.test"]})
+		clear_test_company_grants()
 		self.foreign = make_test_user("grant-foreign@helixhr.test", self.other)
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
-		frappe.db.delete("HelixHR Company Access Company", {"parent": ["like", "%@helixhr.test"]})
-		frappe.db.delete("HelixHR Company Access", {"user": ["like", "%@helixhr.test"]})
+		clear_test_company_grants()
 
 
 class TestReadScope(_Grants):
@@ -103,7 +102,10 @@ class TestReadScope(_Grants):
 
 
 class TestProjectReadScope(_Grants):
-	def test_delivery_manager_keeps_assigned_projects_and_gains_granted_companies(self):
+	def test_delivery_manager_reads_their_org_and_gains_granted_companies(self):
+		"""Plan 2026-10-19-001 U4: a Delivery Manager reaches every project
+		their org owns, member or not, and the grant's Org viewer rows add
+		the granted company's."""
 		_, dm = make_test_delivery_manager()
 		mine = make_test_project(self.company, "_T Grant DM own", members=(dm,))
 		theirs = make_test_project(self.other, "_T Grant DM theirs")
@@ -111,14 +113,12 @@ class TestProjectReadScope(_Grants):
 		make_test_company_grant(dm, [self.other])
 
 		scope = resolve_project_read_scope(dm)
-		self.assertEqual(scope["kind"], "companies")
-		self.assertTrue(project_in_scope(mine, scope))
-		self.assertTrue(project_in_scope(theirs, scope))
-		self.assertFalse(project_in_scope(home_other, scope))
-		names = set(project_scope_filters(scope)["name"][1])
-		self.assertTrue({mine, theirs} <= names)
-		self.assertNotIn(home_other, names)
-		self.assertEqual(resolve_project_scope(dm), {"kind": "assigned", "user": dm})
+		self.assertEqual(scope, {"kind": "companies", "companies": [self.company, self.other]})
+		for project in (mine, theirs, home_other):
+			self.assertTrue(project_in_scope(project, scope), project)
+		listed = frappe.get_all("Project", filters=project_scope_filters(scope), pluck="name")
+		self.assertTrue({mine, theirs, home_other} <= set(listed))
+		self.assertEqual(resolve_project_scope(dm), {"kind": "company", "company": self.company})
 
 	def test_non_delivery_manager_holder_reads_granted_company_projects(self):
 		theirs = make_test_project(self.other, "_T Grant reader theirs")

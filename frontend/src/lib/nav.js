@@ -72,8 +72,9 @@ export function allowedNav(session, items = NAV) {
         (!item.managerOnly || approves) &&
         (!item.reportsOnly || session.hasReports) &&
         (!item.directoryOnly || !session.canSeePeople) &&
-        // A Portal Admin gets Settings (two sections) and Reports (export log).
-        (!item.configureOnly || session.canConfigure || session.canAdminPortal) &&
+        // A Portal Admin gets Settings (two sections) and Reports (export log);
+        // a Manage access holder gets Settings (People & access).
+        (!item.configureOnly || session.canConfigure || session.canAdminPortal || session.canManageAccess) &&
         (!item.templatesOnly || session.canEditEmailTemplates) &&
         (!item.organisationOnly || session.canSeeOrganisation) &&
         (!item.peopleOnly || session.canSeePeople) &&

@@ -98,8 +98,8 @@ class TestActiveEmployeeLookups(IntegrationTestCase):
 
 	def test_rehired_delivery_manager_keeps_project_scope(self):
 		self._rehire(DM_USER)
-		_add_role(DM_USER, "HelixHR Delivery Manager")
-		self.assertEqual(resolve_project_scope(DM_USER), {"kind": "assigned", "user": DM_USER})
+		make_assignment(DM_USER, "HelixHR Delivery Manager", [self.company_a])
+		self.assertEqual(resolve_project_scope(DM_USER), {"kind": "company", "company": self.company_a})
 
 	def test_rehired_grant_holder_keeps_their_grant(self):
 		make_test_user(GRANT_USER, self.company_a, create_user_permission=0)

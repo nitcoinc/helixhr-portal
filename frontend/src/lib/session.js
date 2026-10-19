@@ -77,6 +77,9 @@ const state = reactive({
    * U3): the access matrix, export log and Portal roles. Mirrors
    * `can_admin_portal`, which those endpoints enforce. */
   canAdminPortal: false,
+  /** Plan 2026-10-19-001 U4: Manage access or System Manager -- People &
+   * access reaches every org for them. Mirrors `can_manage_access`. */
+  canManageAccess: false,
   /** Documents: the upload / edit / delete controls. Mirrors
    * `save_document_link`'s own gate, which is the real one. */
   canManageDocuments: false,
@@ -170,6 +173,7 @@ function apply(boot) {
   state.canSeeProjects = !!boot?.can_see_projects
   state.canRunReports = !!boot?.can_run_reports
   state.canAdminPortal = !!boot?.can_admin_portal
+  state.canManageAccess = !!boot?.can_manage_access
   state.canManageDocuments = !!boot?.can_manage_documents
   state.canOpenDesk = !!boot?.can_open_desk
   state.deskUrl = boot?.desk_url || null

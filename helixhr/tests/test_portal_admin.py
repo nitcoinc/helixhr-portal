@@ -28,6 +28,7 @@ from helixhr.tests.utils import (
 	ensure_hr_manager_user,
 	ensure_test_company,
 	ensure_test_gender,
+	make_assignment,
 	make_test_hr_manager_employee,
 	make_test_hr_user,
 	make_test_portal_admin,
@@ -88,10 +89,13 @@ class TestPortalAdminScope(IntegrationTestCase):
 			).insert(ignore_permissions=True)
 		self.assertEqual(resolve_portal_admin_scope("portal-admin-bare@helixhr.test")["kind"], "none")
 
-	def test_hr_manager_keeps_admin_scope_and_hr_user_has_none(self):
-		self.assertEqual(resolve_portal_admin_scope(ensure_hr_manager_user())["kind"], "unscoped")
+	def test_hr_roles_have_no_portal_admin_scope(self):
+		"""Plan 2026-10-19-001 U4: the scope is the Portal Admin rows; an HR
+		Manager's rows, even on All orgs, give none of it."""
+		self.assertEqual(resolve_portal_admin_scope(ensure_hr_manager_user())["kind"], "none")
 		_, hr_manager = make_test_hr_manager_employee()
-		self.assertEqual(resolve_portal_admin_scope(hr_manager)["kind"], "company")
+		self.assertEqual(resolve_portal_admin_scope(hr_manager)["kind"], "none")
+		self.assertEqual(resolve_portal_admin_scope("Administrator")["kind"], "unscoped")
 		_, hr_user = make_test_hr_user()
 		self.assertFalse(can_admin_portal(hr_user))
 		self.assertEqual(resolve_portal_admin_scope(hr_user)["kind"], "none")
@@ -128,6 +132,11 @@ class TestPortalAdminSeesNoHrData(IntegrationTestCase):
 	def test_edits_the_access_matrix(self):
 		rows = _as(self.user, get_report_access)
 		self.assertTrue(any(row["key"] == KEY for row in rows))
+		# Plan 2026-10-19-001 R7: the matrix is global; a named-org Portal
+		# Admin reads it and an All-orgs one changes it.
+		with self.assertRaises(frappe.PermissionError):
+			_as(self.user, save_report_access, [{"key": KEY, "hr_user_run": 1, "hr_user_export": 0}])
+		make_assignment(self.user, PORTAL_ADMIN_ROLE, "all")
 		_as(self.user, save_report_access, [{"key": KEY, "hr_user_run": 1, "hr_user_export": 0}])
 		self.assertEqual(frappe.db.get_value("HelixHR Report Access", KEY, "hr_user_export"), 0)
 		_, hr_user = make_test_hr_user()
@@ -136,31 +145,12 @@ class TestPortalAdminSeesNoHrData(IntegrationTestCase):
 
 	def test_export_log_is_company_scoped(self):
 		other = ensure_baseline_company()
-		# `setup_playwright_fixtures` gives this Portal Admin a Company User
-		# Permission on `other` (reach, plan 2026-10-14-001). On a site seeded
-		# for e2e that makes `other` legitimately visible; take it away for
-		# this test and put it back after.
-		reach = frappe.get_all(
-			"User Permission",
-			filters={"user": self.user, "allow": "Company", "for_value": other},
-			fields=["name", "applicable_for", "apply_to_all_doctypes", "is_default", "hide_descendants"],
-		)
-		for row in reach:
-			frappe.db.delete("User Permission", row.name)
-			self.addCleanup(
-				lambda row=row: frappe.get_doc(
-					{
-						"doctype": "User Permission",
-						"user": self.user,
-						"allow": "Company",
-						"for_value": other,
-						"applicable_for": row.applicable_for,
-						"apply_to_all_doctypes": row.apply_to_all_doctypes,
-						"is_default": row.is_default,
-						"hide_descendants": row.hide_descendants,
-					}
-				).insert(ignore_permissions=True)
-			)
+		# `setup_playwright_fixtures` gives this Portal Admin a row on `other`
+		# (the migrated Company User Permission). On a site seeded for e2e
+		# that makes `other` legitimately visible; take it away for this test
+		# (the class rolls it back).
+		frappe.db.delete("HelixHR Access Assignment", {"user": self.user, "role": PORTAL_ADMIN_ROLE})
+		make_assignment(self.user, PORTAL_ADMIN_ROLE, [ensure_test_company()])
 		mine = frappe.get_doc(
 			{
 				"doctype": "HelixHR Report Export",
@@ -179,7 +169,10 @@ class TestPortalAdminSeesNoHrData(IntegrationTestCase):
 		_, left = _make_role_user(
 			"portal-admin-left@helixhr.test", PORTAL_ADMIN_ROLE, status="Left", relieving_date="2026-01-31"
 		)
-		self.assertEqual(_as(left, get_export_log)["rows"], [])
+		# Plan 2026-10-19-001 R4: a Left Portal Admin is no admin at all.
+		self.assertFalse(can_admin_portal(left))
+		with self.assertRaises(frappe.PermissionError):
+			_as(left, get_export_log)
 		_, hr_user = make_test_hr_user()
 		with self.assertRaises(frappe.PermissionError):
 			_as(hr_user, get_export_log)

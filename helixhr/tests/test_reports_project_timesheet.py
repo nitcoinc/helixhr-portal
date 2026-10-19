@@ -183,14 +183,26 @@ class TestProjectTimesheet(IntegrationTestCase):
 		self.assertEqual(billable["grand_total"], 3)
 		self.assertEqual(billable["field"], "billing_hours")
 
-	def test_delivery_manager_member_project_only(self):
+	def test_delivery_manager_reads_every_org_project_but_not_another_orgs(self):
+		"""Plan 2026-10-19-001 U4: a non-member project their org owns, with
+		its hours; never another org's."""
 		_make_timesheet(
-			self.company, self.employee, "E", [{"date": "2019-10-01", "project": self.project, "hours": 1}]
+			self.company,
+			self.employee,
+			"E",
+			[
+				{"date": "2019-10-01", "project": self.project, "hours": 1},
+				{"date": "2019-10-02", "project": self.other_project, "hours": 2},
+			],
 		)
 		self.assertEqual(self._run("2019-10", user=self.dm_user)["totals"]["hours"], 1)
+		self.assertEqual(
+			self._run("2019-10", user=self.dm_user, project=self.other_project)["totals"]["hours"], 2
+		)
+		foreign = make_test_project(ensure_baseline_company(), "_Test U7 OtherCo")
 		frappe.set_user(self.dm_user)
 		try:
-			refused = run_report(KEY, filters={"project": self.other_project, "month": "2019-10"})
+			refused = run_report(KEY, filters={"project": foreign, "month": "2019-10"})
 		finally:
 			frappe.set_user("Administrator")
 		self.assertEqual(refused["filters_removed"], ["project"])

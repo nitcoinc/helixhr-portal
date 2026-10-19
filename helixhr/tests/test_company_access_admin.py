@@ -14,14 +14,16 @@ from helixhr.api import (
 )
 from helixhr.tests.utils import (
 	GRANT_HOLDER_USER,
+	clear_test_company_grants,
 	ensure_baseline_company,
 	ensure_test_company,
+	make_assignment,
 	make_test_company_grant,
 	make_test_hr_manager_employee,
 	make_test_portal_admin,
 	make_test_user,
 )
-from helixhr.utils import RATE_LIMIT_POLICY, grantable_companies
+from helixhr.utils import PORTAL_ADMIN_ROLE, RATE_LIMIT_POLICY, clear_role_scope_cache
 
 SYSTEM_MANAGER_USER = "grant-system-manager@helixhr.test"
 
@@ -54,18 +56,23 @@ class TestCompanyAccessAdmin(IntegrationTestCase):
 		self.other = ensure_baseline_company()
 		_, self.admin = make_test_portal_admin()
 		frappe.db.delete("User Permission", {"user": self.admin, "allow": "Company"})
+		# Plan 2026-10-19-001 U4: reach is the Portal Admin rows. Rows persist
+		# between methods (rollback is per class): start from home only.
+		frappe.db.delete("HelixHR Access Assignment", {"user": self.admin, "role": PORTAL_ADMIN_ROLE})
+		make_assignment(self.admin, PORTAL_ADMIN_ROLE, [self.company])
 		make_test_user(GRANT_HOLDER_USER, self.company)
 		# The e2e fixtures commit grants; every test starts from none.
-		frappe.db.delete("HelixHR Company Access Company", {"parent": ["like", "%@helixhr.test"]})
-		frappe.db.delete("HelixHR Company Access", {"user": ["like", "%@helixhr.test"]})
+		clear_test_company_grants()
 		self.foreign = "grant-admin-foreign@helixhr.test"
 		make_test_user(self.foreign, self.other)
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
-		frappe.db.delete("HelixHR Company Access Company", {"parent": ["like", "%@helixhr.test"]})
-		frappe.db.delete("HelixHR Company Access", {"user": ["like", "%@helixhr.test"]})
+		clear_test_company_grants()
 		frappe.db.delete("User Permission", {"user": self.admin, "allow": "Company"})
+
+	def _reach_other(self):
+		make_assignment(self.admin, PORTAL_ADMIN_ROLE, [self.other])
 
 	def _save(self, user=GRANT_HOLDER_USER, companies=None, caller=None, **kwargs):
 		return _as(
@@ -77,13 +84,14 @@ class TestCompanyAccessAdmin(IntegrationTestCase):
 			**kwargs,
 		)
 
-	def test_portal_admin_reach_is_home_plus_company_scoped_user_permissions(self):
-		"""Covers AE1. An apply-to-all Company row (ERPNext's side effect of
-		"Create User Permission") does not count."""
+	def test_portal_admin_reach_is_their_portal_admin_rows(self):
+		"""Covers AE1, since plan 2026-10-19-001 U4: a Company User
+		Permission of either kind widens nothing; a Portal Admin row does."""
 		_company_permission(self.admin, self.other, applicable_for=None)
-		self.assertEqual(grantable_companies(self.admin), [self.company])
 		_company_permission(self.admin, self.other)
-		self.assertEqual(grantable_companies(self.admin), [self.company, self.other])
+		with self.assertRaises(frappe.PermissionError):
+			self._save()
+		self._reach_other()
 
 		row = self._save()
 		self.assertEqual(row["companies"], [self.other])
@@ -131,7 +139,7 @@ class TestCompanyAccessAdmin(IntegrationTestCase):
 		self.assertEqual(_as(self.admin, get_company_access)["rows"], [])
 
 	def test_self_grant_is_refused_for_portal_admin_and_system_manager(self):
-		_company_permission(self.admin, self.other)
+		self._reach_other()
 		with self.assertRaises(frappe.PermissionError):
 			self._save(user=self.admin)
 		system_manager = _system_manager()
@@ -139,7 +147,7 @@ class TestCompanyAccessAdmin(IntegrationTestCase):
 			self._save(user=system_manager, caller=system_manager)
 
 	def test_targets_outside_the_rules_are_refused_alike(self):
-		_company_permission(self.admin, self.other)
+		self._reach_other()
 		inactive = "grant-admin-inactive@helixhr.test"
 		make_test_user(inactive, self.company, status="Inactive")
 		no_employee = "grant-admin-no-employee@helixhr.test"
@@ -151,7 +159,11 @@ class TestCompanyAccessAdmin(IntegrationTestCase):
 			with self.assertRaises(frappe.PermissionError, msg=user):
 				self._save(user=user)
 		# A target in a company the Portal Admin cannot reach.
-		frappe.db.delete("User Permission", {"user": self.admin, "allow": "Company"})
+		frappe.db.delete(
+			"HelixHR Access Assignment",
+			{"user": self.admin, "role": PORTAL_ADMIN_ROLE, "company": self.other},
+		)
+		clear_role_scope_cache(self.admin)
 		with self.assertRaises(frappe.PermissionError):
 			self._save(user=self.foreign, companies=[self.company])
 
@@ -168,7 +180,7 @@ class TestCompanyAccessAdmin(IntegrationTestCase):
 				_as(hr, call)
 
 	def test_stale_modified_is_refused_without_a_partial_write(self):
-		_company_permission(self.admin, self.other)
+		self._reach_other()
 		row = self._save()
 		with self.assertRaises(frappe.ValidationError):
 			self._save(companies=[self.company, self.other], level="Reports only")
@@ -181,7 +193,7 @@ class TestCompanyAccessAdmin(IntegrationTestCase):
 		self.assertEqual(edited["companies"], [self.company, self.other])
 
 	def test_revoke_then_save_re_enables_after_fresh_checks(self):
-		_company_permission(self.admin, self.other)
+		self._reach_other()
 		row = self._save()
 		revoked = _as(self.admin, revoke_company_access, GRANT_HOLDER_USER, row["modified"])
 		self.assertFalse(revoked["enabled"])

@@ -10,12 +10,14 @@ from frappe.tests import IntegrationTestCase
 from helixhr import api
 from helixhr.api import get_person_access, list_people_access, save_person_access
 from helixhr.tests.utils import (
+	clear_test_company_grants,
 	ensure_baseline_company,
 	ensure_test_company,
+	make_assignment,
 	make_test_portal_admin,
 	make_test_user,
 )
-from helixhr.utils import RATE_LIMIT_POLICY
+from helixhr.utils import PORTAL_ADMIN_ROLE, RATE_LIMIT_POLICY
 
 SYSTEM_MANAGER_USER = "people-system-manager@helixhr.test"
 HOME_TARGET = "people-home@helixhr.test"
@@ -62,26 +64,22 @@ class TestPeopleAccess(IntegrationTestCase):
 		self.other = ensure_baseline_company()
 		_, self.admin = make_test_portal_admin()
 		frappe.db.delete("User Permission", {"user": self.admin, "allow": "Company"})
-		frappe.get_doc(
-			{
-				"doctype": "User Permission",
-				"user": self.admin,
-				"allow": "Company",
-				"for_value": self.other,
-				"apply_to_all_doctypes": 0,
-				"applicable_for": "Company",
-			}
-		).insert(ignore_permissions=True)
+		# Plan 2026-10-19-001 U4: reach is the Portal Admin rows, not a Company
+		# User Permission. Rows persist between methods: reset them.
+		frappe.db.delete(
+			"HelixHR Access Assignment",
+			{"user": ["in", [self.admin, HOME_ONLY_ADMIN]], "role": PORTAL_ADMIN_ROLE},
+		)
+		make_assignment(self.admin, PORTAL_ADMIN_ROLE, [self.company, self.other])
 		make_test_user(SYSTEM_MANAGER_USER, self.company)
 		_set_roles(SYSTEM_MANAGER_USER, add=["System Manager"])
 		make_test_user(HOME_ONLY_ADMIN, self.company)
-		_set_roles(HOME_ONLY_ADMIN, add=["HelixHR Portal Admin"])
+		make_assignment(HOME_ONLY_ADMIN, PORTAL_ADMIN_ROLE, [self.company])
 		self.home = make_test_user(HOME_TARGET, self.company)
 		self.foreign = make_test_user(FOREIGN_TARGET, self.other)
 		for user in (HOME_TARGET, FOREIGN_TARGET):
 			_set_roles(user, remove=[IT, DM, "HR User", "HR Manager"])
-		frappe.db.delete("HelixHR Company Access Company", {"parent": ["like", "%@helixhr.test"]})
-		frappe.db.delete("HelixHR Company Access", {"user": ["like", "%@helixhr.test"]})
+		clear_test_company_grants()
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
@@ -114,17 +112,16 @@ class TestPeopleAccess(IntegrationTestCase):
 		self.assertIn("IT Team", person["summary"])
 		self.assertIn(self.other, person["summary"])
 
-	def test_admin_writes_only_the_grant_for_an_outsourcing_employee(self):
+	def test_admin_on_both_orgs_edits_roles_and_grant_for_an_outsourcing_employee(self):
+		"""Plan 2026-10-19-001 U4: a Portal Admin row on the employee's org
+		gives roles and grant alike; the old grant-only reach is gone."""
 		person = _as(self.admin, get_person_access, self.foreign)
-		self.assertFalse(person["can_edit_roles"])
+		self.assertTrue(person["can_edit_roles"])
 		self.assertTrue(person["can_edit_grant"])
 		self._save(self.admin, self.foreign, grant={"level": "Reports only", "companies": [self.other]})
 		self.assertEqual(frappe.db.get_value("HelixHR Company Access", FOREIGN_TARGET, "level"), "Reports only")
-		with self.assertRaises(frappe.PermissionError):
-			self._save(self.admin, self.foreign, managed_roles={IT: True})
-		self.assertNotIn(IT, _roles(FOREIGN_TARGET))
-		# An unchanged echo of the roles is not a change, so it is accepted.
-		self._save(self.admin, self.foreign, managed_roles={IT: False})
+		self._save(self.admin, self.foreign, managed_roles={IT: True})
+		self.assertIn(IT, _roles(FOREIGN_TARGET))
 
 	# --- R11: the HR boundary ------------------------------------------------
 
@@ -282,7 +279,7 @@ class TestPeopleAccess(IntegrationTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			_as(self.admin, save_person_access, admin_employee, managed_roles={IT: True}, user_modified="x")
 
-	def test_admin_without_company_permissions_reaches_home_only(self):
+	def test_admin_on_home_only_reaches_home_only(self):
 		with self.assertRaises(frappe.PermissionError):
 			_as(HOME_ONLY_ADMIN, get_person_access, self.foreign)
 		self.assertTrue(_as(HOME_ONLY_ADMIN, get_person_access, self.home)["can_edit_roles"])

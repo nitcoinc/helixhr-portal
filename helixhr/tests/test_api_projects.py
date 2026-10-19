@@ -57,21 +57,23 @@ class TestResolveProjectScope(IntegrationTestCase):
 		user = ensure_hr_manager_user()
 		self.assertEqual(resolve_project_scope(user), {"kind": "unscoped", "company": None})
 
-	def test_a_delivery_manager_resolves_to_exactly_their_member_projects(self):
+	def test_a_delivery_manager_resolves_to_every_project_their_org_owns(self):
+		"""Plan 2026-10-19-001 U4: membership no longer decides it."""
 		company = ensure_test_company()
+		other_company = ensure_baseline_company()
 		_, dm_user = make_test_delivery_manager()
 		member_project = make_test_project(company, "_Test DM Member Project", members=[dm_user])
 		other_project = make_test_project(company, "_Test DM Other Project")
+		foreign_project = make_test_project(other_company, "_Test DM Foreign Project", members=[dm_user])
 
 		scope = resolve_project_scope(dm_user)
-		self.assertEqual(scope, {"kind": "assigned", "user": dm_user})
+		self.assertEqual(scope, {"kind": "company", "company": company})
 
-		filters = project_scope_filters(scope)
-		names = {p.name for p in frappe.get_all("Project", filters=filters)}
-		self.assertIn(member_project, names)
-		self.assertNotIn(other_project, names)
+		names = set(frappe.get_all("Project", filters=project_scope_filters(scope), pluck="name"))
+		self.assertTrue({member_project, other_project} <= names)
+		self.assertNotIn(foreign_project, names)
 
-	def test_a_delivery_manager_with_zero_memberships_resolves_to_an_empty_set_without_an_empty_in(self):
+	def test_a_delivery_manager_with_zero_memberships_still_reaches_their_org(self):
 		company = ensure_test_company()
 		_, dm_user = make_test_delivery_manager()
 		# `IntegrationTestCase` rolls back once per class, not per method, so
@@ -80,13 +82,16 @@ class TestResolveProjectScope(IntegrationTestCase):
 		# "zero memberships" premise holds regardless of run order.
 		for row_name in frappe.get_all("Project User", filters={"user": dm_user}, pluck="name"):
 			frappe.delete_doc("Project User", row_name, ignore_permissions=True, force=True)
-		make_test_project(company, "_Test DM Zero Membership Project")
+		project = make_test_project(company, "_Test DM Zero Membership Project")
 
 		scope = resolve_project_scope(dm_user)
-		self.assertEqual(scope, {"kind": "assigned", "user": dm_user})
+		self.assertEqual(project_scope_filters(scope), {"company": company})
+		self.assertIn(project, frappe.get_all("Project", filters=project_scope_filters(scope), pluck="name"))
 
-		filters = project_scope_filters(scope)
-		self.assertIsNone(filters, "an empty membership list must skip the query, not filter with in ()")
+	def test_an_all_orgs_delivery_manager_is_unscoped(self):
+		_, dm_user = make_test_delivery_manager()
+		make_assignment(dm_user, "HelixHR Delivery Manager", "all")
+		self.assertEqual(resolve_project_scope(dm_user), {"kind": "unscoped", "company": None})
 
 	def test_a_plain_employee_resolves_to_none(self):
 		_, employee_user, _, _ = make_test_employee_and_manager()
@@ -217,6 +222,19 @@ class TestDeliveryManagerRestRouteScope(IntegrationTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			run("Timesheet Billing Summary")
 
+	def test_an_all_orgs_delivery_manager_is_refused_too(self):
+		"""Plan 2026-10-19-001 KTD10: the hooks never read Delivery Manager
+		rows, so All orgs opens nothing here either."""
+		from frappe.client import get, get_list
+
+		make_assignment(self.dm_user, "HelixHR Delivery Manager", "all")
+		frappe.set_user(self.dm_user)
+		for doctype, name in (("Project", self.other_project), ("Task", self.other_task)):
+			with self.assertRaises(frappe.PermissionError):
+				get(doctype, name)
+			with self.assertRaises(frappe.PermissionError):
+				get_list(doctype, filters={})
+
 	def test_a_delivery_manager_is_a_website_user_and_cannot_open_desk(self):
 		from helixhr.api import _can_open_desk
 
@@ -251,12 +269,14 @@ class TestSearchAndGetProject(IntegrationTestCase):
 	def tearDown(self):
 		frappe.set_user("Administrator")
 
-	def test_a_delivery_manager_lists_exactly_their_member_projects(self):
+	def test_a_delivery_manager_lists_every_project_in_their_org(self):
 		from helixhr.api import search_projects
 
 		frappe.set_user(self.dm_user)
-		names = {row["name"] for row in search_projects()["projects"]}
-		self.assertEqual(names, {self.member_project})
+		projects = {row["name"]: row for row in search_projects()["projects"]}
+		self.assertTrue({self.member_project, self.other_project, self.empty_project} <= set(projects))
+		self.assertNotIn(self.other_company_project, projects)
+		self.assertTrue(projects[self.other_project]["can_edit"])
 
 	def test_an_hr_manager_lists_projects_in_their_own_company_only(self):
 		from helixhr.api import search_projects
@@ -282,7 +302,7 @@ class TestSearchAndGetProject(IntegrationTestCase):
 
 		frappe.set_user(self.dm_user)
 		with self.assertRaises(frappe.PermissionError) as outside_scope:
-			get_project(self.other_project)
+			get_project(self.other_company_project)
 		with self.assertRaises(frappe.PermissionError) as missing:
 			get_project("_Test U3 Project That Does Not Exist")
 		self.assertEqual(str(outside_scope.exception), str(missing.exception))
@@ -292,9 +312,14 @@ class TestSearchAndGetProject(IntegrationTestCase):
 
 		frappe.set_user(self.dm_user)
 		with self.assertRaises(frappe.PermissionError) as caught:
-			get_project(self.other_project)
+			get_project(self.other_company_project)
 		message = str(caught.exception)
-		for leak in (self.other_project, "_Test U3 Other Project", self.company, self.dm_user):
+		for leak in (
+			self.other_company_project,
+			"_Test U3 Other Company Project",
+			self.other_company,
+			self.dm_user,
+		):
 			self.assertNotIn(leak, message)
 
 	def test_get_project_returns_members_as_employee_names_never_logins(self):
@@ -669,12 +694,13 @@ class TestSaveTaskAndSetProjectMembers(IntegrationTestCase):
 		save_my_week(str(monday), [{"date": str(monday), "project": project, "task": task, "hours": hours}])
 		return monday
 
-	def test_a_delivery_manager_cannot_add_a_task_to_a_project_they_are_not_a_member_of(self):
+	def test_a_delivery_manager_cannot_add_a_task_to_another_orgs_project(self):
+		"""Plan 2026-10-19-001 U4: their org, member or not; never another's."""
 		from helixhr.api import save_task
 
 		frappe.set_user(self.dm_user)
 		with self.assertRaises(frappe.PermissionError):
-			save_task(self.other_project, subject="_Test U4 Non-Member Task")
+			save_task(self.other_company_project, subject="_Test U4 Cross-Company Task")
 
 	def test_an_hr_manager_cannot_write_to_a_project_in_another_company(self):
 		from helixhr.api import save_task, set_project_members

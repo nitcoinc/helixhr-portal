@@ -1632,36 +1632,23 @@ DELIVERY_MANAGER_ROLE = "HelixHR Delivery Manager"
 def resolve_project_scope(user):
 	"""Which projects ``user`` may administer -- one answer, in the same
 	``{"kind": ..., ...}`` shape `resolve_admin_scope` returns, so every
-	caller after U2 (the REST-route hooks in `project_permissions.py`, and
-	every read and write in later units) branches on one vocabulary.
+	caller (`search_projects`, `get_project`, the project writes) branches on
+	one vocabulary. The REST-route hooks in `project_permissions.py` do NOT
+	use it: they read `resolve_admin_scope` only (plan 2026-10-19-001 KTD10).
 
-	Returns a dict with a ``kind`` of:
-
-	- ``"unscoped"`` -- every project. System Manager, and an HR-role holder
-	  with no Employee record at all (the same Desk-only persona
-	  `resolve_admin_scope` names) -- delegated to that helper outright
-	  rather than re-derived, per U2's dependency note.
-	- ``"company"`` -- every project in the named company. An HR Manager
-	  anchored to an Active Employee.
-	- ``"assigned"`` -- the projects named in ERPNext's own ``Project User``
-	  child table for this user (KTD5: membership keys on User, not
-	  Employee). A `HelixHR Delivery Manager` holder.
-	- ``"none"`` -- nobody. A plain employee, a holder of neither
-	  administrative role, or -- the offboarding lesson from the previous
-	  phase's security review, carried forward rather than re-learned -- an
-	  Employee record that exists but is not Active. That last case applies
-	  to a HelixHR Delivery Manager exactly as it does to an HR Manager: an
-	  Employee row going to Left, Inactive or Suspended must narrow this
-	  scope, never leave it at whatever the role alone would otherwise grant.
+	The HR scope when it is not "none" (Administrator, System Manager, HR
+	Manager rows); otherwise the caller's Delivery Manager rows (plan
+	2026-10-19-001 U4): every project whose ``Project.company`` is in their
+	orgs -- ``"company"``, ``"companies"``, or ``"unscoped"`` on All orgs.
+	Project membership no longer widens or narrows it. ``{"kind": "none"}``
+	for anyone else, and for a holder who fails R4 (disabled, or every
+	Employee row Left or Inactive) -- `role_scope` applies that gate.
 	"""
 	admin = resolve_admin_scope(user)
 	if admin["kind"] != "none":
 		return admin
-	if DELIVERY_MANAGER_ROLE not in frappe.get_roles(user):
-		return {"kind": "none"}
-	if active_employee_for_user(user).state == "inactive":
-		return {"kind": "none"}
-	return {"kind": "assigned", "user": user}
+	scope = portal_role_scope(user, DELIVERY_MANAGER_ROLE)
+	return scope if scope["kind"] != "none" else {"kind": "none"}
 
 
 def project_scope_filters(scope):
@@ -1761,39 +1748,23 @@ MANAGED_PORTAL_ROLES = (
 
 def resolve_portal_admin_scope(user):
 	"""Which employees ``user`` may administer *portal settings* for -- the
-	export log rows and the role holders -- in `resolve_admin_scope`'s shape.
-
-	A System Manager gets exactly `resolve_admin_scope`'s answer. A Portal
-	Admin gets its Active Employee anchor's company, or ``"none"`` without
-	one: unlike the Desk-only HR persona, it is never unscoped.
-
-	Since plan 2026-10-06-001 U3 the only callers are Portal Admin, System
-	Manager and Administrator -- `can_admin_portal` refuses HR Manager now --
-	but the HR Manager branch below stays, because the scope a role resolves
-	to is independent of who is allowed to ask."""
-	if user == "Administrator":
-		return {"kind": "unscoped", "company": None}
-	roles = set(frappe.get_roles(user))
-	if roles & _ADMIN_UNSCOPED_ROLES:
-		return resolve_admin_scope(user)
-	if PORTAL_ADMIN_ROLE in roles:
-		company = _active_anchor_company(user)
-		if company:
-			return {"kind": "company", "company": company}
-	return {"kind": "none", "company": None}
+	export log rows, the role holders, People & access edits -- in
+	`resolve_admin_scope`'s shape: the orgs their Portal Admin rows name
+	(plan 2026-10-19-001 U4), ``"unscoped"`` on All orgs. Administrator and a
+	System Manager who passes R4 are unscoped; an HR role alone gives
+	nothing."""
+	return portal_role_scope(user, PORTAL_ADMIN_ROLE)
 
 
 def can_admin_portal(user):
-	"""Portal Admin, System Manager or Administrator -- the callers of the
-	access matrix, export log and portal-role endpoints.
-
-	HR Manager and HR User are refused (plan 2026-10-06-001 U3, R5/R6):
+	"""Administrator, System Manager, or a Portal Admin row in force -- the
+	callers of the access matrix (read), export log and portal-role
+	endpoints. HR Manager and HR User are refused (plan 2026-10-06-001 U3):
 	administering the portal is a portal-configuration job, not an HR-data
-	one. `resolve_portal_admin_scope` still answers for a System Manager the
-	same way it always did."""
-	if user == "Administrator":
+	one. Changing a global setting needs more (`has_all_orgs_authority`)."""
+	if user == "Administrator" or "System Manager" in frappe.get_roles(user):
 		return True
-	return bool(set(frappe.get_roles(user)) & {PORTAL_ADMIN_ROLE, "System Manager"})
+	return resolve_portal_admin_scope(user)["kind"] != "none"
 
 
 # --- Access assignments (plan 2026-10-19-001) --------------------------------
@@ -1851,6 +1822,17 @@ def role_scope(user, role):
 	serves every role asked about for the rest of the request. Whoever writes
 	rows, or changes a User's ``enabled`` or an Employee's status, and reads
 	again in the same request calls `clear_role_scope_cache`."""
+	return _role_rows_scope(user, role, "rows")
+
+
+def role_export_scope(user, role):
+	"""The part of `role_scope(user, role)` whose rows have ``allow_export``
+	on (R2 "export per assignment"), in the same vocabulary: the orgs a
+	Reports or Org viewer holder may export for. Same gate, same cache."""
+	return _role_rows_scope(user, role, "export")
+
+
+def _role_rows_scope(user, role, rows_key):
 	if user == "Administrator":
 		return {"kind": "unscoped", "company": None}
 	entry = _role_scope_entry(user)
@@ -1858,7 +1840,7 @@ def role_scope(user, role):
 		return {"kind": "none", "company": None}
 	if entry["system_manager"]:
 		return {"kind": "unscoped", "company": None}
-	scopes = entry["rows"].get(role)
+	scopes = entry[rows_key].get(role)
 	if not scopes:
 		return {"kind": "none", "company": None}
 	if ALL_ORGS_SCOPE_KEY in scopes:
@@ -1866,6 +1848,56 @@ def role_scope(user, role):
 	if len(scopes) == 1:
 		return {"kind": "company", "company": next(iter(scopes))}
 	return {"kind": "companies", "companies": sorted(scopes)}
+
+
+# The portal-only roles (plan 2026-10-19-001 U4). HR Manager, HR User and IT
+# Team need the Frappe role AND a row (U3), because that role drives HRMS
+# DocPerms and workflow. These six carry no DocPerm that matters, and U8's
+# migration writes Reports rows for "Reports only" grant holders without
+# adding the Report Manager role (rollback safety): their reach is the rows
+# alone, whatever Has Role says. The Frappe role is still kept in step by the
+# save (R8) and drift still warns (R9); it just grants nothing here.
+PORTAL_ONLY_ROLES = frozenset(
+	{
+		PORTAL_ADMIN_ROLE,
+		REPORT_MANAGER_ROLE,
+		ORG_VIEWER_ROLE,
+		DELIVERY_MANAGER_ROLE,
+		NOTIFICATION_MANAGER_ROLE,
+		ACCESS_ADMIN_ROLE,
+	}
+)
+
+
+def portal_role_scope(user, role):
+	"""Which orgs ``user`` holds the portal-only ``role`` in: `role_scope`,
+	with no Has Role check (see `PORTAL_ONLY_ROLES`). Refuses an HR or IT
+	role, whose reach needs the Frappe role too."""
+	if role not in PORTAL_ONLY_ROLES:
+		raise ValueError(f"{role} is not a portal-only role")
+	return role_scope(user, role)
+
+
+def has_all_orgs_authority(user):
+	"""R7: who may change the portal's global settings -- the report matrix,
+	the email theme, the message and celebration templates. Administrator, a
+	System Manager, an All-orgs Portal Admin, or a Manage access holder
+	(which exists only on All orgs, KTD6)."""
+	if user == "Administrator" or "System Manager" in frappe.get_roles(user):
+		return True
+	return (
+		portal_role_scope(user, PORTAL_ADMIN_ROLE)["kind"] == "unscoped"
+		or can_manage_access(user)
+	)
+
+
+def can_manage_access(user):
+	"""Administrator, a System Manager, or a Manage access (HelixHR Access
+	Admin) holder who passes R4: People & access reaches every org for them
+	(R24)."""
+	if user == "Administrator" or "System Manager" in frappe.get_roles(user):
+		return True
+	return portal_role_scope(user, ACCESS_ADMIN_ROLE)["kind"] != "none"
 
 
 def clear_role_scope_cache(user=None):
@@ -1893,21 +1925,26 @@ def _role_scope_entry(user):
 
 
 def _read_role_scope_entry(user):
-	"""``{gate, system_manager, rows: {role: {scope_key}}}``, read fresh.
-	Rows are skipped when the gate is shut: nothing reads them then."""
+	"""``{gate, system_manager, rows: {role: {scope_key}}, export: {role:
+	{scope_key}}}``, read fresh -- ``export`` holds the rows with
+	``allow_export`` on. Rows are skipped when the gate is shut: nothing
+	reads them then."""
 	gate = bool(frappe.db.get_value("User", user, "enabled"))
 	if gate:
 		gate = active_employee_for_user(user).state != "inactive"
-	entry = {"gate": gate, "system_manager": False, "rows": {}}
+	entry = {"gate": gate, "system_manager": False, "rows": {}, "export": {}}
 	if not gate:
 		return entry
 	entry["system_manager"] = "System Manager" in frappe.get_roles(user)
 	for row in frappe.get_all(
 		"HelixHR Access Assignment",
 		filters={"user": user},
-		fields=["role", "all_orgs", "company"],
+		fields=["role", "all_orgs", "company", "allow_export"],
 	):
-		entry["rows"].setdefault(row.role, set()).add(ALL_ORGS_SCOPE_KEY if row.all_orgs else row.company)
+		key = ALL_ORGS_SCOPE_KEY if row.all_orgs else row.company
+		entry["rows"].setdefault(row.role, set()).add(key)
+		if row.allow_export:
+			entry["export"].setdefault(row.role, set()).add(key)
 	return entry
 
 
@@ -2011,45 +2048,36 @@ def grantable_companies(user):
 	return list(dict.fromkeys([home, *sorted(extra)]))
 
 
-def _widen_by_companies(scope, companies, user=None):
-	"""``scope`` plus read access to ``companies``. One company stays the
-	``"company"`` kind so single-company callers see no new shape; more
-	become ``{"kind": "companies", "companies": [...]}``. ``user`` keeps a
-	Delivery Manager's assigned projects in a project read scope."""
+def _widen_by_companies(scope, companies):
+	"""``scope`` plus read access to ``companies`` (None: every company). One
+	company stays the ``"company"`` kind so single-company callers see no new
+	shape; more become ``{"kind": "companies", "companies": [...]}``."""
+	if companies is None:
+		return {"kind": "unscoped", "company": None}
 	if scope["kind"] == "unscoped" or not companies:
 		return scope
 	names = list(dict.fromkeys(read_companies(scope) + companies))
-	if user is None and len(names) == 1:
+	if len(names) == 1:
 		return {"kind": "company", "company": names[0]}
-	widened = {"kind": "companies", "companies": names}
-	if user is not None:
-		widened["user"] = user
-	return widened
+	return {"kind": "companies", "companies": names}
 
 
 def resolve_read_scope(user):
-	"""Which employees ``user`` may READ: `resolve_admin_scope` widened by an
-	All-data grant. People, Organisation and photos use this; `can_edit` and
-	every write keep using `resolve_admin_scope` (KTD4)."""
-	admin = resolve_admin_scope(user)
-	if admin["kind"] == "unscoped":
-		return admin
-	grant = active_company_grant(user)
-	if not grant or grant["level"] != COMPANY_ACCESS_ALL:
-		return admin
-	return _widen_by_companies(admin, grant["companies"])
+	"""Which employees ``user`` may READ: `resolve_admin_scope` widened by
+	their Org viewer rows (plan 2026-10-19-001 U4, KTD7). People,
+	Organisation and photos use this; `can_edit` and every write keep using
+	`resolve_admin_scope` (KTD4)."""
+	return _widen_by_companies(
+		resolve_admin_scope(user), read_companies(portal_role_scope(user, ORG_VIEWER_ROLE))
+	)
 
 
 def resolve_project_read_scope(user):
-	"""Which projects ``user`` may READ: `resolve_project_scope` widened by an
-	All-data grant. A Delivery Manager keeps their assigned projects too."""
-	scope = resolve_project_scope(user)
-	if scope["kind"] == "unscoped":
-		return scope
-	grant = active_company_grant(user)
-	if not grant or grant["level"] != COMPANY_ACCESS_ALL:
-		return scope
-	return _widen_by_companies(scope, grant["companies"], user=user if scope["kind"] == "assigned" else None)
+	"""Which projects ``user`` may READ: `resolve_project_scope` widened by
+	their Org viewer rows -- every project their orgs own."""
+	return _widen_by_companies(
+		resolve_project_scope(user), read_companies(portal_role_scope(user, ORG_VIEWER_ROLE))
+	)
 
 
 # Every scope kind a resolver returns. `read_companies` raises on anything
@@ -2162,11 +2190,14 @@ def resolve_report_access(user, report_key, company=None):
 	Returns ``{"tier", "scope", "can_run", "can_export", "export_scope",
 	"company", "companies", "company_removed", "combined_option",
 	"combined_exportable", "blocking_companies"}``. Access is decided per
-	company: the existing tiers apply to the caller's home company (every
-	company for an unscoped caller), and a company access grant adds the
-	companies it names. ``company`` picks one of them; the other keys then
-	describe that company alone, and every scope is single-company, so the
-	engines never see more than one.
+	company, and every tier comes from the caller's assignments (plan
+	2026-10-19-001 U4): HR Manager (every report, export), Reports (every
+	report, export per row), HR User and Delivery Manager (through the
+	matrix; Delivery Manager on project-scoped entries only) and Org viewer
+	(company-scoped entries, export per row), each at every org its rows
+	name. ``company`` picks one of them; the other keys then describe that
+	company alone, and every scope is single-company, so the engines never
+	see more than one.
 
 	When ``company`` is ``"__all"`` (the sentinel) and a combined run is
 	available, the scope is widened across all run-capable companies. The
@@ -2180,8 +2211,9 @@ def resolve_report_access(user, report_key, company=None):
 	Export callers must use ``export_scope``, which can be narrower.
 
 	A ``company`` the caller may not use falls back to the default company
-	with ``company_removed`` set (R14): home when it is allowed, else the
-	site default for an unscoped caller, else the first allowed company.
+	with ``company_removed`` set (R14): the caller's own company when it is
+	allowed, else the site default for a caller reaching every org, else the
+	first allowed company.
 	``companies`` lists ``{company, can_export}`` per allowed company.
 
 	An unknown key and a denied key return the identical answer (R22).
@@ -2207,65 +2239,67 @@ def resolve_report_access(user, report_key, company=None):
 	if not entry:
 		return denied
 
-	roles = set(frappe.get_roles(user))
-	grants = []  # (tier, scope, can_export) for the home company
+	# Plan 2026-10-19-001 U4: every tier comes from the caller's rows, and
+	# each splits into one single-company tier per org it covers (one company
+	# per run, KTD11): ``{company: [(tier, scope, can_export), ...]}``.
+	by_company = {}
+	all_companies = []
+
+	def add(tier, run_scope, export):
+		"""``export``: a bool for the whole tier, or the scope it exports in."""
+		companies = read_companies(run_scope)
+		if companies is None:
+			if not all_companies:
+				all_companies.extend(frappe.get_all("Company", pluck="name", order_by="name asc"))
+			companies = all_companies
+		exportable = read_companies(export) if isinstance(export, dict) else None
+		for name in companies:
+			can = export if isinstance(export, bool) else exportable is None or name in exportable
+			by_company.setdefault(name, []).append((tier, {"kind": "company", "company": name}, can))
 
 	admin = resolve_admin_scope(user)
 	if admin["kind"] != "none":
-		grants.append(("admin", admin, True))
+		add("admin", admin, True)
 
-	home = _active_anchor_company(user)
-	if REPORT_MANAGER_ROLE in roles and home:
-		grants.append(("report_manager", {"kind": "company", "company": home}, True))
+	reports = portal_role_scope(user, REPORT_MANAGER_ROLE)
+	if reports["kind"] != "none":
+		add("report_manager", reports, role_export_scope(user, REPORT_MANAGER_ROLE))
 
+	# HR User is an HR role: its Frappe role is needed too (U3).
+	hr_user = (
+		role_scope(user, HR_USER_ROLE) if HR_USER_ROLE in frappe.get_roles(user) else {"kind": "none"}
+	)
+	delivery = (
+		portal_role_scope(user, DELIVERY_MANAGER_ROLE) if "project" in entry["scopes"] else {"kind": "none"}
+	)
 	matrix = None
-	if roles & {HR_USER_ROLE, DELIVERY_MANAGER_ROLE}:
+	if hr_user["kind"] != "none" or delivery["kind"] != "none":
 		matrix = frappe.db.get_value(
 			"HelixHR Report Access",
 			report_key,
 			["hr_user_run", "hr_user_export", "dm_run", "dm_export"],
 			as_dict=True,
 		)
+	if matrix and matrix.hr_user_run and hr_user["kind"] != "none":
+		add("hr_user", hr_user, bool(matrix.hr_user_export))
+	# Replaces the old "assigned" tier: a company tier at each Delivery
+	# Manager org, for project-scoped entries, through the matrix.
+	if matrix and matrix.dm_run and delivery["kind"] != "none":
+		add("delivery_manager", delivery, bool(matrix.dm_export))
 
-	if matrix and HR_USER_ROLE in roles and matrix.hr_user_run and home:
-		grants.append(("hr_user", {"kind": "company", "company": home}, bool(matrix.hr_user_export)))
-
-	if matrix and DELIVERY_MANAGER_ROLE in roles and matrix.dm_run and "project" in entry["scopes"]:
-		# Same offboarding rule as `resolve_project_scope`: an Employee that
-		# exists but is not Active narrows to nothing.
-		if active_employee_for_user(user).state != "inactive":
-			scope = {"kind": "assigned", "user": user}
-			if home:
-				scope["company"] = home
-			grants.append(("delivery_manager", scope, bool(matrix.dm_export)))
-
-	# One company's tier list each. An unscoped caller's tiers apply to every
-	# company, narrowed to that company (one company per run, KTD11).
-	by_company = {}
-	unscoped = any(grant[1]["kind"] == "unscoped" for grant in grants)
-	if unscoped:
-		for name in frappe.get_all("Company", pluck="name", order_by="name asc"):
-			by_company[name] = [("admin", {"kind": "company", "company": name}, True)]
-	else:
-		# A multi-company tier (plan 2026-10-18-001 U11) splits into one
-		# single-company tier per company; every other tier is home-anchored.
-		for tier, scope, export in grants:
-			if scope["kind"] == "companies":
-				for name in scope["companies"]:
-					by_company.setdefault(name, []).append((tier, {"kind": "company", "company": name}, export))
-			else:
-				by_company.setdefault(scope.get("company") or home, []).append((tier, scope, export))
-
-	# KTD8: a grant at either level runs every company-scoped catalog report
-	# for its companies; its own flag decides export.
-	grant = None if unscoped else active_company_grant(user)
-	if grant and "company" in entry["scopes"]:
-		for name in grant["companies"]:
-			by_company.setdefault(name, []).append(
-				("grant", {"kind": "company", "company": name}, grant["allow_export"])
-			)
+	# Org viewer replaces the "All data" grant (KTD7): every company-scoped
+	# catalog report in its orgs, export per row.
+	if "company" in entry["scopes"]:
+		viewer = portal_role_scope(user, ORG_VIEWER_ROLE)
+		if viewer["kind"] != "none":
+			add("org_viewer", viewer, role_export_scope(user, ORG_VIEWER_ROLE))
 	if not by_company:
 		return denied
+	# A tier over every org runs as the unscoped caller did: the combined
+	# scope is "unscoped", and the default may be the site's default company.
+	unscoped = bool(all_companies)
+	# Only the default pick reads the caller's own company, never the reach.
+	home = active_employee_for_user(user).company
 
 	# Plan 2026-10-15-001 (KTD1/KTD3): the "All my companies" option.
 	combined = _combined_access(entry, by_company, user, unscoped)

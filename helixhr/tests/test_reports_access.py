@@ -13,6 +13,7 @@ from helixhr.tests.utils import (
 	ensure_baseline_company,
 	ensure_hr_manager_user,
 	ensure_test_company,
+	make_assignment,
 	make_test_delivery_manager,
 	make_test_hr_manager_employee,
 	make_test_hr_user,
@@ -22,7 +23,7 @@ from helixhr.tests.utils import (
 	make_test_user_without_employee,
 	set_report_access,
 )
-from helixhr.utils import resolve_admin_scope, resolve_report_access
+from helixhr.utils import PORTAL_ADMIN_ROLE, resolve_admin_scope, resolve_report_access
 
 COMPANY_ONLY_KEY = "leave_ledger"
 PROJECT_KEY = "hours_by_project"
@@ -95,11 +96,14 @@ class TestResolveReportAccess(IntegrationTestCase):
 		access = resolve_report_access(user, COMPANY_ONLY_KEY)
 		self.assertFalse(access["can_run"] or access["can_export"])
 
-	def test_delivery_manager_granted_a_project_entry_gets_project_scope(self):
+	def test_delivery_manager_granted_a_project_entry_gets_their_org(self):
+		"""Plan 2026-10-19-001 U4: a company tier at each Delivery Manager org,
+		replacing the assigned-projects scope."""
 		_, user = make_test_delivery_manager()
 		set_report_access(PROJECT_KEY, dm_run=1, dm_export=1)
 		access = resolve_report_access(user, PROJECT_KEY)
-		self.assertEqual(access["scope"], {"kind": "assigned", "user": user, "company": self.company})
+		self.assertEqual(access["scope"], {"kind": "company", "company": self.company})
+		self.assertEqual(access["tier"], "delivery_manager")
 		self.assertTrue(access["can_export"])
 		self.assertFalse(resolve_report_access(user, COMPANY_ONLY_KEY)["can_run"])
 
@@ -118,24 +122,25 @@ class TestResolveReportAccess(IntegrationTestCase):
 			set_report_access("not_a_report", hr_user_run=1)
 
 	def test_hr_user_plus_delivery_manager_scope_is_per_report(self):
-		"""Resolved decision 2: scope comes only from tiers granting the
-		report. DM-only grant -> project scope; both -> company scope."""
+		"""Resolved decision 2: rights come only from tiers granting the
+		report. DM-only grant -> the Delivery Manager tier; both -> HR User
+		runs, and export comes from the Delivery Manager tier at the same
+		company width (plan 2026-10-19-001 U4: no project-only scope left)."""
 		_, user = _make_role_user("hr-user-dm@helixhr.test", "HR User")
-		doc = frappe.get_doc("User", user)
-		doc.append_roles("HelixHR Delivery Manager")
-		doc.save(ignore_permissions=True)
+		make_assignment(user, "HelixHR Delivery Manager", [self.company])
 
 		set_report_access(PROJECT_KEY, dm_run=1)
 		access = resolve_report_access(user, PROJECT_KEY)
-		self.assertEqual(access["scope"]["kind"], "assigned")
+		self.assertEqual(access["scope"], {"kind": "company", "company": self.company})
 		self.assertEqual(access["tier"], "delivery_manager")
+		self.assertFalse(access["can_export"])
 
 		set_report_access(PROJECT_KEY, hr_user_run=1, dm_run=1, dm_export=1)
 		access = resolve_report_access(user, PROJECT_KEY)
 		self.assertEqual(access["scope"], {"kind": "company", "company": self.company})
+		self.assertEqual(access["tier"], "hr_user")
 		self.assertTrue(access["can_export"])
-		# Export comes only from the Delivery Manager tier, so it is project-scoped.
-		self.assertEqual(access["export_scope"]["kind"], "assigned")
+		self.assertEqual(access["export_scope"], {"kind": "company", "company": self.company})
 
 	def test_unknown_and_denied_keys_are_identical(self):
 		_, user = make_test_hr_user()
@@ -206,31 +211,37 @@ class TestReportOptions(IntegrationTestCase):
 		self.assertEqual(self._search(user, COMPANY_ONLY_KEY, "employee", value=self.theirs), [])
 		self.assertEqual(self._search(user, COMPANY_ONLY_KEY, "employee", value=["in", [self.theirs]]), [])
 
-	def test_delivery_manager_sees_only_member_projects_tasks_and_members(self):
+	def test_delivery_manager_sees_their_org_projects_tasks_and_members(self):
+		"""Plan 2026-10-19-001 U4: every project their org owns, member or
+		not; never another org's."""
 		_, dm = make_test_delivery_manager()
 		set_report_access(PROJECT_KEY, dm_run=1)
 		member = make_test_project(
 			self.company, "_Test Opt Member Project", members=[dm, "opt-search-mine@helixhr.test"]
 		)
 		other = make_test_project(self.company, "_Test Opt Other Project")
-		for project in (member, other):
+		theirs = make_test_project(self.other_company, "_Test Opt Theirs Project")
+		for project in (member, other, theirs):
 			if not frappe.db.exists("Task", {"project": project, "subject": "_Test Opt Task"}):
 				frappe.get_doc(
 					{"doctype": "Task", "project": project, "subject": "_Test Opt Task", "status": "Open"}
 				).insert(ignore_permissions=True)
 
 		projects = {o["value"] for o in self._search(dm, PROJECT_KEY, "project", query="_Test Opt")}
-		self.assertEqual(projects, {member})
+		self.assertTrue({member, other} <= projects)
+		self.assertNotIn(theirs, projects)
 
-		tasks = self._search(dm, PROJECT_KEY, "task", query="_Test Opt Task")
-		self.assertEqual({o["description"] for o in tasks}, {member})
+		tasks = {o["description"] for o in self._search(dm, PROJECT_KEY, "task", query="_Test Opt Task")}
+		self.assertTrue({member, other} <= tasks)
+		self.assertNotIn(theirs, tasks)
 		# A dependent picker narrowed to an out-of-scope project gets nothing.
 		self.assertEqual(
-			self._search(dm, PROJECT_KEY, "task", query="_Test Opt Task", context={"project": other}), []
+			self._search(dm, PROJECT_KEY, "task", query="_Test Opt Task", context={"project": theirs}), []
 		)
 
 		employees = {o["value"] for o in self._search(dm, PROJECT_KEY, "employee", query="opt-search")}
-		self.assertEqual(employees, {self.mine})
+		self.assertIn(self.mine, employees)
+		self.assertNotIn(self.theirs, employees)
 
 	def test_undeclared_or_pickerless_filters_are_refused(self):
 		_, user = make_test_hr_manager_employee()
@@ -430,6 +441,8 @@ class TestReportAccessMatrix(IntegrationTestCase):
 		_, self.hr_manager = make_test_hr_manager_employee()
 		_, self.hr_user = make_test_hr_user()
 		_, self.portal_admin = make_test_portal_admin()
+		# Plan 2026-10-19-001 R7: changing the global matrix needs All orgs.
+		make_assignment(self.portal_admin, PORTAL_ADMIN_ROLE, "all")
 
 	def tearDown(self):
 		frappe.set_user("Administrator")

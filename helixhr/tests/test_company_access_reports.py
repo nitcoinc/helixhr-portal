@@ -19,16 +19,26 @@ from helixhr.api import (
 )
 from helixhr.tests.utils import (
 	GRANT_HOLDER_USER,
+	clear_test_company_grants,
 	ensure_baseline_company,
 	ensure_test_company,
+	make_assignment,
 	make_test_company_grant,
 	make_test_delivery_manager,
 	make_test_hr_manager_employee,
 	make_test_hr_user,
 	make_test_user,
+	remove_assignment,
 	set_report_access,
 )
-from helixhr.utils import SENTINEL_ALL, resolve_report_access
+from helixhr.utils import (
+	ORG_VIEWER_ROLE,
+	PORTAL_ADMIN_ROLE,
+	REPORT_MANAGER_ROLE,
+	SENTINEL_ALL,
+	clear_role_scope_cache,
+	resolve_report_access,
+)
 
 WRAPPED = "leave_ledger"
 DIRECTORY = "employee_directory"
@@ -51,8 +61,12 @@ def _forwarded_company(user, key, **filters):
 
 
 def _clear_grants():
-	frappe.db.delete("HelixHR Company Access Company", {"parent": ["like", "%@helixhr.test"]})
-	frappe.db.delete("HelixHR Company Access", {"user": ["like", "%@helixhr.test"]})
+	clear_test_company_grants()
+
+
+def _turn_export_off(user, role):
+	frappe.db.set_value("HelixHR Access Assignment", {"user": user, "role": role}, "allow_export", 0)
+	clear_role_scope_cache(user)
 
 
 class _GrantReports(IntegrationTestCase):
@@ -63,8 +77,7 @@ class _GrantReports(IntegrationTestCase):
 		self.own = make_test_user(GRANT_HOLDER_USER, self.company)
 		self.foreign = make_test_user("grant-report-foreign@helixhr.test", self.other)
 		# The e2e fixtures commit grants; every test starts from none.
-		frappe.db.delete("HelixHR Company Access Company", {"parent": ["like", "%@helixhr.test"]})
-		frappe.db.delete("HelixHR Company Access", {"user": ["like", "%@helixhr.test"]})
+		clear_test_company_grants()
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
@@ -72,20 +85,21 @@ class _GrantReports(IntegrationTestCase):
 
 
 class TestPerCompanyAccess(_GrantReports):
-	def test_reports_only_holder_runs_every_company_report_in_the_granted_company(self):
+	def test_reports_only_holder_runs_every_catalog_report_in_the_granted_company(self):
+		"""Plan 2026-10-19-001 U4: a "Reports only" grant migrates to Reports
+		rows, which run every catalog report in their orgs -- the Report
+		Manager's reach, not the grant's company-scoped subset."""
 		make_test_company_grant(GRANT_HOLDER_USER, [self.other], level="Reports only")
 		for entry in reports.CATALOG:
 			access = resolve_report_access(GRANT_HOLDER_USER, entry["key"])
-			self.assertEqual(access["can_run"], "company" in entry["scopes"], entry["key"])
-			if access["can_run"]:
-				# Home is not allowed, so the default is the granted company.
-				self.assertEqual(access["company"], self.other)
-				self.assertEqual(access["companies"], [{"company": self.other, "can_export": False}])
-				self.assertFalse(access["can_export"])
-				self.assertEqual(access["tier"], "grant")
+			self.assertTrue(access["can_run"], entry["key"])
+			# Home is not allowed, so the default is the granted company.
+			self.assertEqual(access["company"], self.other)
+			self.assertEqual(access["companies"], [{"company": self.other, "can_export": False}])
+			self.assertFalse(access["can_export"])
+			self.assertEqual(access["tier"], "report_manager")
 		catalog = _as(GRANT_HOLDER_USER, get_report_catalog)
-		self.assertTrue(catalog)
-		self.assertNotIn("Timesheet Billing Summary", {e["report"] for e in catalog})
+		self.assertEqual(len(catalog), len(reports.CATALOG))
 		self.assertTrue(all(e["company"] == self.other for e in catalog))
 
 	def test_export_flag_follows_the_grant(self):
@@ -94,13 +108,17 @@ class TestPerCompanyAccess(_GrantReports):
 		self.assertTrue(access["can_export"])
 		self.assertEqual(access["export_scope"], {"kind": "company", "company": self.other})
 
-	def test_delivery_manager_is_assigned_at_home_and_company_scoped_in_the_grant(self):
-		"""Covers AE5."""
+	def test_delivery_manager_is_company_scoped_in_their_org_and_in_the_grant(self):
+		"""Covers AE5. Plan 2026-10-19-001 U4: the Delivery Manager tier is a
+		company tier at their org, no longer their assigned projects."""
 		_, dm = make_test_delivery_manager()
 		set_report_access(PROJECT_KEY, dm_run=1, dm_export=1)
 		make_test_company_grant(dm, [self.other], level="Reports only")
 		home = resolve_report_access(dm, PROJECT_KEY)
-		self.assertEqual((home["company"], home["scope"]["kind"]), (self.company, "assigned"))
+		self.assertEqual(
+			(home["company"], home["tier"], home["scope"]),
+			(self.company, "delivery_manager", {"kind": "company", "company": self.company}),
+		)
 		granted = resolve_report_access(dm, PROJECT_KEY, self.other)
 		self.assertEqual(granted["scope"], {"kind": "company", "company": self.other})
 		self.assertFalse(granted["company_removed"])
@@ -261,9 +279,14 @@ class TestRevokedExports(IntegrationTestCase):
 		return out["export"], kwargs
 
 	def _revoke(self):
-		from helixhr.utils import disable_company_access
+		"""Remove the Reports rows and expire what they no longer reach -- what
+		the People & access save does (plan 2026-10-19-001 U5)."""
+		from helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export import (
+			expire_unreachable_exports,
+		)
 
-		disable_company_access(GRANT_HOLDER_USER, "test")
+		remove_assignment(GRANT_HOLDER_USER, REPORT_MANAGER_ROLE)
+		expire_unreachable_exports(GRANT_HOLDER_USER)
 		frappe.db.commit()  # nosemgrep
 
 	def test_revoked_before_the_job_runs_ends_failed_with_no_file(self):
@@ -289,7 +312,7 @@ class TestRevokedExports(IntegrationTestCase):
 		export, kwargs = self._queue()
 		reports.run_background_export(**kwargs)
 		# Narrowed without the endpoint's clean-up: the download still refuses.
-		frappe.db.set_value("HelixHR Company Access", GRANT_HOLDER_USER, "allow_export", 0)
+		_turn_export_off(GRANT_HOLDER_USER, REPORT_MANAGER_ROLE)
 		with self.assertRaises(frappe.PermissionError):
 			_as(GRANT_HOLDER_USER, download_report_export, export)
 
@@ -306,14 +329,8 @@ class TestExportLogReach(_GrantReports):
 		)["export"]
 
 	def _make_portal_admin(self, user, company):
-		from helixhr.tests.utils import make_test_user
-
 		make_test_user(user, company)
-		doc = frappe.get_doc("User", user)
-		if "HelixHR Portal Admin" not in [row.role for row in doc.roles]:
-			doc.append_roles("HelixHR Portal Admin")
-			doc.save(ignore_permissions=True)
-			frappe.clear_cache(user=user)
+		make_assignment(user, PORTAL_ADMIN_ROLE, [company])
 		return user
 
 	def test_row_records_data_company_and_exporter_company(self):
@@ -344,10 +361,7 @@ class TestExportLogReach(_GrantReports):
 
 	def test_log_hides_a_row_on_neither_side(self):
 		foreign_user = "grant-report-foreign@helixhr.test"
-		doc = frappe.get_doc("User", foreign_user)
-		doc.append_roles("HR User")
-		doc.save(ignore_permissions=True)
-		frappe.clear_cache(user=foreign_user)
+		make_assignment(foreign_user, "HR User", [self.other])
 		set_report_access(DIRECTORY, hr_user_run=1, hr_user_export=1)
 		other_only = _as(foreign_user, request_export, DIRECTORY, "csv")["export"]
 		admin_a = self._make_portal_admin("grant-admin-a@helixhr.test", self.company)
@@ -402,15 +416,16 @@ class TestCombinedCompanyScope(_GrantReports):
 		self.assertIn(self.other, access["blocking_companies"])
 
 	def test_dm_with_outsourcing_grant_combined_scope(self):
-		"""DM with Outsourcing-only grant: combined Outsourcing hours + assigned Inc."""
+		"""DM with Outsourcing-only grant: combined over both companies, each
+		company-wide (plan 2026-10-19-001 U4: no assigned-projects part)."""
 		_clear_grants()
 		_, dm = make_test_delivery_manager()
 		set_report_access(PROJECT_KEY, dm_run=1, dm_export=1)
 		make_test_company_grant(dm, [self.other], level="Reports only")
 		access = resolve_report_access(dm, PROJECT_KEY, SENTINEL_ALL)
 		self.assertEqual(access["company"], SENTINEL_ALL)
-		self.assertIn(self.other, access["scope"]["companies"])
-		self.assertIsNotNone(access["scope"].get("user"))
+		self.assertEqual(access["scope"]["companies"], sorted([self.company, self.other]))
+		self.assertIsNone(access["scope"].get("user"))
 
 	def test_single_company_sentinel_falls_back(self):
 		"""KTD3: single-company HR passing __all falls back with company_removed."""
@@ -428,31 +443,25 @@ class TestCombinedCompanyScope(_GrantReports):
 
 	def test_revoked_grant_resolves_to_home_when_user_has_other_tier(self):
 		"""Error: revoked grant resolves to home only for a user with another
-		tier. A grant-only holder loses all access on revocation."""
-		from helixhr.utils import disable_company_access
-
+		tier. A grant-only holder loses all access on revocation. Since plan
+		2026-10-19-001 U4 revoking is removing the Org viewer rows."""
 		# Create a DM who also has a grant.
 		_, dm = make_test_delivery_manager()
 		set_report_access(PROJECT_KEY, dm_run=1, dm_export=1)
 		make_test_company_grant(dm, [self.company, self.other], level="All data", allow_export=1)
 
-		# Revoke the grant; DM still has assigned access at home.
-		disable_company_access(dm, "test")
+		# Revoke the grant; DM still has their Delivery Manager org.
+		remove_assignment(dm, ORG_VIEWER_ROLE)
 		access = resolve_report_access(dm, PROJECT_KEY)
 		self.assertEqual(access["company"], self.company)
 		self.assertFalse(access["combined_option"])
-		self.assertEqual(access["scope"]["kind"], "assigned")
+		self.assertEqual(access["tier"], "delivery_manager")
 
 	def test_hr_user_run_without_export_blocks_combined_export_at_home(self):
-		"""KTD2: an HR User who may run but not export, and is also a Delivery
-		Manager who may export, runs Inc company-wide but exports only
-		assigned projects there: combined export is blocked, naming Inc."""
+		"""KTD2: an HR User who may run but not export Inc: combined export
+		is blocked, naming Inc."""
 		_clear_grants()
 		_, hr_user = make_test_hr_user()
-		doc = frappe.get_doc("User", hr_user)
-		doc.append_roles("HelixHR Delivery Manager")
-		doc.save(ignore_permissions=True)
-		frappe.clear_cache(user=hr_user)
 		set_report_access(PROJECT_KEY, hr_user_run=1, hr_user_export=0, dm_run=1, dm_export=1)
 		make_test_company_grant(hr_user, [self.other], level="Reports only", allow_export=1)
 		access = resolve_report_access(hr_user, PROJECT_KEY, SENTINEL_ALL)
@@ -472,16 +481,19 @@ class TestCombinedCompanyScope(_GrantReports):
 		self.assertEqual(access["scope"], {"kind": "unscoped", "combined": True})
 		self.assertEqual(access["combined_companies"], sorted(frappe.get_all("Company", pluck="name")))
 
-	def test_dm_combined_scope_keeps_assigned_projects_but_not_other_inc_projects(self):
+	def test_dm_combined_scope_covers_their_org_company_wide(self):
+		"""Plan 2026-10-19-001 U4: the Delivery Manager org joins the combined
+		set company-wide; no assigned-projects part is left."""
 		_clear_grants()
 		_, dm = make_test_delivery_manager()
 		set_report_access(PROJECT_KEY, dm_run=1, dm_export=1)
 		make_test_company_grant(dm, [self.other], level="Reports only", allow_export=1)
 		access = resolve_report_access(dm, PROJECT_KEY, SENTINEL_ALL)
 		self.assertEqual(
-			access["scope"], {"kind": "combined", "combined": True, "companies": [self.other], "user": dm}
+			access["scope"],
+			{"kind": "combined", "combined": True, "companies": sorted([self.company, self.other])},
 		)
-		self.assertEqual(access["assigned_companies"], [self.company])
+		self.assertEqual(access["assigned_companies"], [])
 		self.assertTrue(access["can_export"])
 
 
@@ -540,7 +552,7 @@ class TestCombinedExports(IntegrationTestCase):
 		self.assertEqual(row.status, "Ready", row.error)
 
 	def _narrow_export(self):
-		frappe.db.set_value("HelixHR Company Access", GRANT_HOLDER_USER, "allow_export", 0)
+		_turn_export_off(GRANT_HOLDER_USER, ORG_VIEWER_ROLE)
 		frappe.db.commit()  # nosemgrep
 
 	def test_inline_combined_export_stores_both_companies_and_the_home_company(self):
@@ -603,11 +615,7 @@ class TestCombinedExports(IntegrationTestCase):
 		out = _as(GRANT_HOLDER_USER, request_export, "project_timesheet", "csv", filters=self.filters)
 		admin = "xco-admin-b@helixhr.test"
 		make_test_user(admin, self.other)
-		doc = frappe.get_doc("User", admin)
-		if "HelixHR Portal Admin" not in [row.role for row in doc.roles]:
-			doc.append_roles("HelixHR Portal Admin")
-			doc.save(ignore_permissions=True)
-			frappe.clear_cache(user=admin)
+		make_assignment(admin, PORTAL_ADMIN_ROLE, [self.other])
 		names = [row.name for row in _as(admin, get_export_log, page_length=200)["rows"]]
 		self.assertIn(out["export"], names)
 		# A single-company export of the holder's home company stays hidden.

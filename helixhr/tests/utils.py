@@ -452,8 +452,13 @@ PORTAL_ADMIN_USER = "portal-admin@helixhr.test"
 
 
 def make_test_portal_admin(company=None, **employee_fields):
-	"""A HelixHR Portal Admin: portal-only, no Desk role, no HR data."""
-	return _make_role_user(PORTAL_ADMIN_USER, "HelixHR Portal Admin", company, **employee_fields)
+	"""A HelixHR Portal Admin: portal-only, no Desk role, no HR data. Its
+	Portal Admin rows are reset to exactly its Employee's company: suites
+	widen this shared login (other orgs, All orgs), and one that commits
+	would otherwise leak that reach into the next (plan 2026-10-19-001 U4)."""
+	frappe.db.delete("HelixHR Access Assignment", {"user": PORTAL_ADMIN_USER, "role": PORTAL_ADMIN_ROLE})
+	clear_role_scope_cache(PORTAL_ADMIN_USER)
+	return _make_role_user(PORTAL_ADMIN_USER, PORTAL_ADMIN_ROLE, company, **employee_fields)
 
 
 def make_test_hr_user(company=None, **employee_fields):
@@ -506,6 +511,23 @@ def make_test_company_grant(user, companies, level="All data", allow_export=0, e
 			user, role, companies, export=allow_export, origin="migrated", add_role=role == ORG_VIEWER_ROLE
 		)
 	return doc.name
+
+
+def clear_test_company_grants():
+	"""Delete every test login's grant and the Org viewer / Reports rows
+	`make_test_company_grant` wrote for it -- since plan 2026-10-19-001 U4
+	the rows, not the grant, are what the resolvers read."""
+	frappe.db.delete("HelixHR Company Access Company", {"parent": ["like", "%@helixhr.test"]})
+	frappe.db.delete("HelixHR Company Access", {"user": ["like", "%@helixhr.test"]})
+	frappe.db.delete(
+		"HelixHR Access Assignment",
+		{
+			"user": ["like", "%@helixhr.test"],
+			"origin": "migrated",
+			"role": ["in", [ORG_VIEWER_ROLE, REPORT_MANAGER_ROLE]],
+		},
+	)
+	clear_role_scope_cache()
 
 
 COMPANY_ACCESS_TARGET_USER = "grant-e2e-target@helixhr.test"

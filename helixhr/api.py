@@ -114,6 +114,7 @@ from helixhr.utils import (
 	admin_scope_employee_filters,
 	as_administrator,
 	can_admin_portal,
+	can_manage_access,
 	company_role_holders,
 	disable_company_access,
 	email_theme,
@@ -121,7 +122,7 @@ from helixhr.utils import (
 	event_variables,
 	get_manager_user,
 	get_week_bounds,
-	grantable_companies,
+	has_all_orgs_authority,
 	has_bank_number,
 	has_custom_wording,
 	is_photo_content,
@@ -661,8 +662,9 @@ def _portal_bootstrap():
 		# company access grant widens.
 		"can_see_organisation": read_scope_kind != "none",
 		# The Email templates page (theme, message templates, celebrations &
-		# holidays): Portal Admin and System Manager only -- the predicate
-		# every endpoint behind the page enforces. A boolean, never a role list.
+		# holidays): All-orgs authority (plan 2026-10-19-001 R7) -- the
+		# predicate every endpoint behind the page enforces. A boolean, never a
+		# role list.
 		"can_edit_email_templates": _can_edit_email_templates(frappe.session.user),
 		# P6-U4: same shape again -- `search_people` and `get_person` are
 		# gated by `resolve_read_scope` (`resolve_admin_scope` widened by an
@@ -685,6 +687,10 @@ def _portal_bootstrap():
 		# each of those endpoints enforces. HR Manager is refused since plan
 		# 2026-10-06-001 U3 (R5/R6).
 		"can_admin_portal": can_admin_portal(frappe.session.user),
+		# Plan 2026-10-19-001 U4: a Manage access holder or System Manager --
+		# People & access reaches every org for them (R24), with or without a
+		# Portal Admin row.
+		"can_manage_access": can_manage_access(frappe.session.user),
 		# Plan 2026-10-15-002 U4: HR User may see pending timesheets.
 		"can_oversee_timesheets": _can_oversee_timesheets(frappe.session.user),
 		# The All pending tab: `get_pending_by_approver`'s non-timesheet gate.
@@ -3421,14 +3427,13 @@ def _routed_roles_held(user=None):
 
 def _can_edit_email_templates(user=None):
 	"""Whether the caller owns every portal email -- the shared theme, the
-	message templates and the celebration / holiday mail: HelixHR Portal
-	Admin or System Manager. HR roles and the Notification Manager are
-	refused (the page is portal configuration, not HR data).
-
-	Plan 2026-10-06-001 U3 narrowed `can_admin_portal` to exactly this role
-	set, so the two predicates are now one -- delegated rather than
-	duplicated, so a future role-set change is made once."""
-	return can_admin_portal(user)
+	message templates and the celebration / holiday mail. These are global
+	settings, so plan 2026-10-19-001 R7 needs All-orgs authority
+	(`has_all_orgs_authority`): an All-orgs Portal Admin, Manage access, or
+	System Manager. A named-org Portal Admin, the HR roles and the
+	Notification Manager are refused. The one gate for the whole page, reads
+	included: it is one global editor, not a per-org view."""
+	return has_all_orgs_authority(user or frappe.session.user)
 
 
 def _initials(full_name):
@@ -9878,8 +9883,8 @@ def save_request_category(name, **fields):
 
 
 def _assert_can_edit_email_templates():
-	"""The one gate every Email templates method calls first: Portal Admin
-	or System Manager (`_can_edit_email_templates`). HR Manager is refused."""
+	"""The one gate every Email templates method calls first: All-orgs
+	authority (`_can_edit_email_templates`). HR Manager is refused."""
 	if not _can_edit_email_templates():
 		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
 
@@ -11941,16 +11946,16 @@ def _can_run_reports(user):
 	from helixhr.utils import (
 		DELIVERY_MANAGER_ROLE,
 		HR_USER_ROLE,
+		ORG_VIEWER_ROLE,
 		REPORT_MANAGER_ROLE,
-		active_company_grant,
 	)
 
 	# Most callers hold no report tier at all; answer them without resolving
-	# every catalog entry (two lookups each) on every bootstrap.
-	if (
-		resolve_admin_scope(user)["kind"] == "none"
-		and not set(frappe.get_roles(user)) & {REPORT_MANAGER_ROLE, HR_USER_ROLE, DELIVERY_MANAGER_ROLE}
-		and not active_company_grant(user)
+	# every catalog entry (two lookups each) on every bootstrap. `role_scope`
+	# reads the caller's rows once for all four roles.
+	if resolve_admin_scope(user)["kind"] == "none" and all(
+		role_scope(user, role)["kind"] == "none"
+		for role in (REPORT_MANAGER_ROLE, HR_USER_ROLE, DELIVERY_MANAGER_ROLE, ORG_VIEWER_ROLE)
 	):
 		return False
 	return any(True for _pair in _runnable_reports(user))
@@ -12146,11 +12151,8 @@ def get_export_log(start=0, page_length=50):
 	if scope["kind"] == "none":
 		return {"rows": [], "has_more": False}
 	filters, or_filters = {}, None
-	companies = read_companies(scope)
-	if companies is not None:
-		from helixhr.utils import grantable_companies
-
-		reach = list(dict.fromkeys(companies + (grantable_companies(frappe.session.user) or [])))
+	reach = read_companies(scope)
+	if reach is not None:
 		if not reach:
 			return {"rows": [], "has_more": False}
 		# Plan 2026-10-15-001 KTD5: a combined export is visible when its
@@ -12469,8 +12471,11 @@ def delete_report_view(name):
 _REPORT_ACCESS_FLAGS = ("hr_user_run", "hr_user_export", "dm_run", "dm_export")
 
 
-def _assert_report_access_admin():
-	if not can_admin_portal(frappe.session.user):
+def _assert_report_access_admin(edit=False):
+	"""Any Portal Admin may read the matrix; changing it -- one global policy
+	-- needs All-orgs authority (plan 2026-10-19-001 R7)."""
+	user = frappe.session.user
+	if not (has_all_orgs_authority(user) if edit else can_admin_portal(user)):
 		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
 
 
@@ -12512,7 +12517,7 @@ def save_report_access(rows):
 	from helixhr import reports
 
 	rate_limit_per_user("save_report_access")
-	_assert_report_access_admin()
+	_assert_report_access_admin(edit=True)
 	rows = frappe.parse_json(rows) if isinstance(rows, str) else rows
 	if not isinstance(rows, list) or not rows or len(rows) > len(reports.CATALOG):
 		frappe.throw(_("Nothing to save."))
@@ -12680,7 +12685,8 @@ def set_portal_role(employee, role, enabled):
 # --- Company access grants (plan 2026-10-14-001 U2, R2-R6) -------------------
 #
 # A Portal Admin or System Manager gives a portal user read access to other
-# companies. Who may grant which company is `grantable_companies` (KTD3).
+# companies. Which companies they reach is `_people_access_reach` (plan
+# 2026-10-19-001 R24; `grantable_companies` before it).
 # The doctype holds a System Manager DocPerm only; these endpoints are the
 # Portal Admin's gate, exactly as `save_report_access` is.
 
@@ -12689,11 +12695,7 @@ _COMPANY_ACCESS_REFUSED = "You are not authorised to change this person's compan
 
 
 def _company_access_reach():
-	user = frappe.session.user
-	reach = grantable_companies(user) if can_admin_portal(user) else None
-	if not reach:
-		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
-	return reach
+	return _people_access_reach()
 
 
 def _company_access_rows(reach, users=None):
@@ -12993,8 +12995,9 @@ def delete_company_access(user, modified=None):
 #
 # One person's managed portal roles, HR roles and grant, read and saved in
 # one place. Reach is split by what is edited (R11): the grant follows
-# `grantable_companies`, managed roles the caller's portal-admin scope (home
-# company for a Portal Admin), HR roles System Manager only (KTD9).
+# `_people_access_reach` (plan 2026-10-19-001 R24), managed roles the
+# caller's portal-admin scope (their Portal Admin orgs), HR roles System
+# Manager only (KTD9).
 
 _PEOPLE_ACCESS_PAGE_MAX = 100
 _PERSON_NOT_FOUND = "You are not authorised to see this person."
@@ -13003,7 +13006,17 @@ _ROLES_HOME_ONLY = "Portal roles can be changed only for people in your own comp
 
 
 def _people_access_reach():
-	reach = grantable_companies(frappe.session.user) if can_admin_portal(frappe.session.user) else None
+	"""The companies People & access reaches for the caller (plan
+	2026-10-19-001 R24): every company for Manage access and System Manager,
+	else the orgs their Portal Admin rows name. No Desk User Permission is
+	read. Refused when that is none."""
+	user = frappe.session.user
+	if can_manage_access(user):
+		reach = frappe.get_all("Company", pluck="name", order_by="name asc")
+	else:
+		reach = read_companies(resolve_portal_admin_scope(user))
+		if reach is None:
+			reach = frappe.get_all("Company", pluck="name", order_by="name asc")
 	if not reach:
 		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
 	return reach
@@ -13674,12 +13687,8 @@ def search_projects():
 		frappe.throw(_("You are not authorised to view projects here."), frappe.PermissionError)
 
 	write = resolve_project_scope(user)
-	if write["kind"] == "assigned":
-		assigned = set(frappe.get_all("Project User", filters={"user": user}, pluck="parent"))
 
 	def can_edit(row):
-		if write["kind"] == "assigned":
-			return row.name in assigned
 		return scope_covers(write, row.company)
 
 	filters = project_scope_filters(scope)
@@ -13878,8 +13887,9 @@ def create_project(project_name, is_billable=0, priority=None, project_type=None
 	"""Create a project the caller administers (P7-R1, P7-R6).
 
 	`company` is never read from the request -- it comes from the caller's
-	own Employee record, the same one `resolve_project_scope`'s "company"
-	and "assigned" branches key on, so a company named in the request body
+	own Employee record, and must be inside `resolve_project_scope` (plan
+	2026-10-19-001 U4: a Delivery Manager or HR Manager whose orgs no longer
+	include their own company is refused), so a company named in the request body
 	(accepted here only via `**kwargs`, then ignored, the same pattern
 	`get_dashboard` uses to swallow extra caller input) can never steer
 	which company the project lands in.
@@ -13890,10 +13900,8 @@ def create_project(project_name, is_billable=0, priority=None, project_type=None
 	Select options, `project_type` as a plain Link) rather than re-checked
 	here, so the two can never drift from what the doctype itself accepts.
 
-	The creator is added as a `Project User` in the same operation: without
-	it, a HelixHR Delivery Manager who just created the project would fall
-	straight back out of their own "assigned" scope and lose it the instant
-	they made it (the plan's own named risk for this unit).
+	The creator is added as a `Project User` in the same operation, so they
+	can book time on it.
 	"""
 	rate_limit_per_user("create_project")
 	scope = resolve_project_scope(frappe.session.user)
@@ -13924,6 +13932,8 @@ def create_project(project_name, is_billable=0, priority=None, project_type=None
 			frappe.ValidationError,
 		)
 	company = employee_info.get("company")
+	if not scope_covers(scope, company):
+		frappe.throw(_("You are not authorised to create projects here."), frappe.PermissionError)
 
 	doc = frappe.get_doc(
 		{

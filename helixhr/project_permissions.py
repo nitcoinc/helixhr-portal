@@ -24,10 +24,15 @@
 # rule for HelixHR's own methods (search_projects, get_project, ...), which
 # reach Project and Task via `ignore_permissions=True`/`frappe.db.get_value`
 # and never go through these hooks at all.
+#
+# Plan 2026-10-19-001 KTD10: since a Delivery Manager's project scope became
+# whole orgs (U4), these hooks build their scope from `resolve_admin_scope`
+# only -- never from Delivery Manager rows -- so a Delivery Manager stays
+# refused here on any project, on named orgs or All orgs alike.
 
 import frappe
 
-from helixhr.utils import read_companies, resolve_project_scope, scope_covers
+from helixhr.utils import read_companies, resolve_admin_scope, scope_covers
 
 
 def _allowed_project_names(scope):
@@ -36,13 +41,7 @@ def _allowed_project_names(scope):
 	kept separate from it because a SQL condition string and a
 	`frappe.get_all` filter dict guard the empty case differently (an empty
 	``in ()`` is a SQL error in a hand-built condition string; it is not an
-	error as a `frappe.get_all` filter -- see `project_scope_filters`).
-
-	"assigned" (HelixHR Delivery Manager) returns no names at all -- see the
-	module docstring for why this route is refused outright rather than
-	narrowed to memberships."""
-	if scope["kind"] == "assigned":
-		return []
+	error as a `frappe.get_all` filter -- see `project_scope_filters`)."""
 	companies = read_companies(scope)
 	if companies is None:
 		return None
@@ -68,7 +67,7 @@ def get_permission_query_conditions(user=None, doctype=None, **kwargs):
 	user = user or frappe.session.user
 	if user == "Administrator":
 		return ""
-	scope = resolve_project_scope(user)
+	scope = resolve_admin_scope(user)
 	field = "name" if doctype == "Project" else "project"
 	return _condition(scope, field)
 
@@ -78,18 +77,18 @@ def has_permission(doc, ptype=None, user=None, **kwargs):
 	twice in hooks.py against this same function, branching on `doc.doctype`
 	the way the list-route condition branches on `doctype`.
 
-	"assigned" (HelixHR Delivery Manager) always returns `False` -- see the
-	module docstring. A custom `has_permission` hook is independently
-	authoritative in Frappe regardless of whether the role holds any base
-	DocPerm, so a positive answer here would still grant the whole document
-	through the generic REST route even with no DocPerm at all."""
+	A Delivery Manager always gets `False` (KTD10) -- see the module
+	docstring. A custom `has_permission` hook is independently authoritative
+	in Frappe regardless of whether the role holds any base DocPerm, so a
+	positive answer here would still grant the whole document through the
+	generic REST route even with no DocPerm at all."""
 	user = user or frappe.session.user
 	if user == "Administrator":
 		return True
-	scope = resolve_project_scope(user)
+	scope = resolve_admin_scope(user)
 	if scope["kind"] == "unscoped":
 		return True
-	if scope["kind"] in ("none", "assigned"):
+	if scope["kind"] == "none":
 		return False
 	project_name = doc.name if doc.doctype == "Project" else doc.project
 	if not project_name:
