@@ -13,7 +13,16 @@ import stat
 import frappe
 from frappe.tests import IntegrationTestCase, UnitTestCase
 
-from helixhr.access_migration import SECURITY_FIXES, dry_run, plan_rows
+from helixhr.access_migration import SECURITY_FIXES, collect_state, dry_run, plan_rows
+from helixhr.tests.utils import (
+	create_test_company,
+	ensure_baseline_company,
+	ensure_test_company,
+	make_test_user,
+)
+
+SEEDED_ADMIN = "u5-portal-admin@helixhr.test"
+THIRD_COMPANY = "_Test Migration C"
 
 A, B, C = "Org A", "Org B", "Org C"
 COMPANIES = [A, B, C]
@@ -72,6 +81,8 @@ class TestPlanRows(UnitTestCase):
 			self.assertIsNone(plan[user]["employee"])
 		# HR User with no Employee had no portal reach: listed as widened.
 		self.assertTrue(plan["h"]["widened"])
+		# Portal Admin with no Employee: settings today, but an empty admin scope.
+		self.assertTrue(plan["p"]["widened"])
 		self.assertFalse(plan["m"]["widened"])
 
 	def test_a_rehired_login_anchors_on_the_active_row(self):
@@ -99,9 +110,20 @@ class TestPlanRows(UnitTestCase):
 		self.assertIn("portal_admin_scope", {note["fix"] for note in plan["u"]["narrowed"]})
 
 	def test_a_left_portal_admin_loses_admin_as_a_security_fix(self):
-		plan = _plan(u=_user({"HelixHR Portal Admin"}, [_left(A)]))
-		self.assertEqual(_rows(plan, "u"), {("HelixHR Portal Admin", A): (0, 0)})
+		plan = _plan(u=_user({"HelixHR Portal Admin"}, [_left(A)], company_permissions=[B]))
+		self.assertEqual(
+			_rows(plan, "u"), {("HelixHR Portal Admin", A): (0, 0), ("HelixHR Portal Admin", B): (0, 0)}
+		)
 		self.assertIn("left_portal_admin", {note["fix"] for note in plan["u"]["narrowed"]})
+		self.assertEqual(plan["u"]["widened"], [])
+
+	def test_an_inactive_delivery_manager_keeps_every_row_disabled(self):
+		plan = _plan(u=_user({"HelixHR Delivery Manager"}, [_left(A)], project_orgs={B: 1}))
+		self.assertEqual(
+			_rows(plan, "u"),
+			{("HelixHR Delivery Manager", A): (0, 0), ("HelixHR Delivery Manager", B): (0, 0)},
+		)
+		self.assertEqual(plan["u"]["widened"], [])
 
 	def test_report_manager_maps_to_reports_with_export(self):
 		plan = _plan(u=_user({"HelixHR Report Manager"}, [_active(A)]))
@@ -196,6 +218,56 @@ class TestPlanRows(UnitTestCase):
 		for answer in plan.values():
 			for note in answer["narrowed"]:
 				self.assertIn(note["fix"], SECURITY_FIXES)
+
+
+class TestCollectState(IntegrationTestCase):
+	"""The site read `plan_rows` runs on, end to end, for one seeded Portal
+	Admin: a Company-only User Permission is a second org; the apply-to-all
+	one ERPNext makes as a side effect is ignored."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company_a = ensure_test_company()
+		self.company_b = ensure_baseline_company()
+		self.company_c = create_test_company(THIRD_COMPANY, "TMC")
+		make_test_user(SEEDED_ADMIN, self.company_a, create_user_permission=0)
+		if "HelixHR Portal Admin" not in frappe.get_roles(SEEDED_ADMIN):
+			frappe.get_doc("User", SEEDED_ADMIN).add_roles("HelixHR Portal Admin")
+		for company, apply_to_all in ((self.company_b, 0), (self.company_c, 1)):
+			if not frappe.db.exists("User Permission", {"user": SEEDED_ADMIN, "for_value": company}):
+				frappe.get_doc(
+					{
+						"doctype": "User Permission",
+						"user": SEEDED_ADMIN,
+						"allow": "Company",
+						"for_value": company,
+						"apply_to_all_doctypes": apply_to_all,
+						"applicable_for": None if apply_to_all else "Company",
+					}
+				).insert(ignore_permissions=True)
+
+	def test_a_seeded_portal_admin_maps_to_home_plus_the_company_only_permission(self):
+		state = collect_state()
+		info = state["users"][SEEDED_ADMIN]
+		self.assertIn("HelixHR Portal Admin", info["roles"])
+		self.assertEqual(info["company_permissions"], [self.company_b])
+		rows = {
+			(row["role"], row["company"], row["enabled"]) for row in plan_rows(state)[SEEDED_ADMIN]["rows"]
+		}
+		self.assertEqual(
+			rows,
+			{("HelixHR Portal Admin", self.company_a, 1), ("HelixHR Portal Admin", self.company_b, 1)},
+		)
+
+	def test_the_dry_run_lists_the_seeded_person(self):
+		result = dry_run()
+		for path in (result["report"], result["snapshot"]):
+			self.addCleanup(os.remove, path)
+		with open(result["report"]) as handle:
+			people = {person["user"]: person for person in json.load(handle)["people"]}
+		self.assertIn("widened", people[SEEDED_ADMIN]["outcomes"])
+		with open(result["snapshot"]) as handle:
+			self.assertIn(SEEDED_ADMIN, json.load(handle)["users"])
 
 
 class TestDryRun(IntegrationTestCase):

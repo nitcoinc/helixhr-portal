@@ -104,6 +104,8 @@ class TestActiveEmployeeLookups(IntegrationTestCase):
 		self.added.append(_newer_left_row(GRANT_USER, self.company_b))
 		grant = active_company_grant(GRANT_USER)
 		self.assertIsNotNone(grant)
+		self.assertEqual(grant["home_company"], self.company_a)
+		self.assertIn(self.company_b, grant["companies"])
 
 	def test_rehired_role_holder_is_counted_in_their_active_company(self):
 		self._rehire(HR_USER)

@@ -145,6 +145,12 @@ def _plan_user(info, known, org_projects):
 					widened.append(
 						"HR User in all orgs: timesheet oversight and matrix reports become visible in the portal."
 					)
+				elif role == PORTAL_ADMIN:
+					# Today this login edits portal settings but its admin scope is
+					# empty: no export log, no role grants, no approver cleanup.
+					widened.append(
+						"Portal Admin in all orgs: export log, role grants and approver cleanup become available."
+					)
 			elif role == DELIVERY_MANAGER:
 				for company in sorted(info["project_orgs"]):
 					add(role, company)
@@ -152,16 +158,15 @@ def _plan_user(info, known, org_projects):
 		add(role, home, export=1 if role == REPORTS else 0)
 
 	if PORTAL_ADMIN in roles and state != "none":
-		if state == "inactive":
-			narrowed.append({"fix": "left_portal_admin", "text": SECURITY_FIXES["left_portal_admin"]})
-		else:
-			for company in dict.fromkeys(info["company_permissions"]):
-				if company in known and company != home:
-					add(PORTAL_ADMIN, company)
-					widened.append(f"Portal Admin in {company}: full admin (today read and grant only).")
-			narrowed.append({"fix": "portal_admin_scope", "text": SECURITY_FIXES["portal_admin_scope"]})
+		# Inactive: the same rows, disabled by `base_reason`.
+		for company in dict.fromkeys(info["company_permissions"]):
+			if company in known and company != home:
+				add(PORTAL_ADMIN, company)
+				widened.append(f"Portal Admin in {company}: full admin (today read and grant only).")
+		fix = "left_portal_admin" if state == "inactive" else "portal_admin_scope"
+		narrowed.append({"fix": fix, "text": SECURITY_FIXES[fix]})
 
-	if DELIVERY_MANAGER in roles and state == "active":
+	if DELIVERY_MANAGER in roles and state != "none":
 		for company in sorted(info["project_orgs"]):
 			add(DELIVERY_MANAGER, company)
 	if DELIVERY_MANAGER in roles and state != "inactive":
@@ -189,6 +194,9 @@ def _plan_user(info, known, org_projects):
 			if company in known:
 				add(_GRANT_ROLE[grant["level"]], company, export=grant["allow_export"], reason=reason)
 
+	if base_reason:
+		# Nothing is enabled, so nothing is gained.
+		widened = []
 	ordered = sorted(rows.values(), key=lambda row: (row["role"], not row["all_orgs"], row["company"] or ""))
 	return {
 		"employee": anchor["name"] if anchor and state == "active" else None,
@@ -381,8 +389,9 @@ def dry_run():
 def _write_private(name, payload):
 	folder = frappe.get_site_path("private", "access_migration")
 	os.makedirs(folder, mode=0o700, exist_ok=True)
+	os.chmod(folder, 0o700)
 	path = os.path.abspath(os.path.join(folder, name))
-	descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+	descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
 	with os.fdopen(descriptor, "w") as handle:
 		json.dump(payload, handle, indent=1, default=str)
 	os.chmod(path, 0o600)

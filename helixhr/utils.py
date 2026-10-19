@@ -1378,9 +1378,12 @@ def active_employee_for_user(user):
 def active_employees_for_users(users):
 	"""`active_employee_for_user` for many logins in one read: ``{user:
 	answer}`` with every login in ``users`` present. Each answer also carries
-	``employee_name`` for the screens that print it."""
+	``employee_name`` for the screens that print it, and ``latest`` -- the
+	newest row of any status -- for display-only lookups that still name a
+	Left person. ``latest`` is never an anchor."""
 	answers = {
-		user: frappe._dict(state="none", name=None, company=None, employee_name=None) for user in users
+		user: frappe._dict(state="none", name=None, company=None, employee_name=None, latest=None)
+		for user in users
 	}
 	if not answers:
 		return answers
@@ -1391,14 +1394,20 @@ def active_employees_for_users(users):
 		order_by="creation desc, name desc",
 	):
 		answer = answers[row.user_id]
+		latest = answer.latest or frappe._dict(name=row.name, employee_name=row.employee_name)
 		if answer.state == "active":
 			continue
 		if row.status == "Active":
 			answers[row.user_id] = frappe._dict(
-				state="active", name=row.name, company=row.company, employee_name=row.employee_name
+				state="active",
+				name=row.name,
+				company=row.company,
+				employee_name=row.employee_name,
+				latest=latest,
 			)
 		else:
 			answer.state = "inactive"
+			answer.latest = latest
 	return answers
 
 

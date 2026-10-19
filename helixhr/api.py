@@ -11677,7 +11677,9 @@ def _employee_for_user(user):
 	if not user:
 		return None, None
 	row = active_employees_for_users([user])[user]
-	return row.name, row.employee_name
+	# Display only: a Left approver is still named, as before (U17).
+	shown = row if row.state == "active" else row.latest
+	return (shown.name, shown.employee_name) if shown else (None, None)
 
 
 def _person_profile(employee):
@@ -12132,6 +12134,8 @@ def get_export_log(start=0, page_length=50):
 		from helixhr.utils import grantable_companies
 
 		reach = list(dict.fromkeys(companies + (grantable_companies(frappe.session.user) or [])))
+		if not reach:
+			return {"rows": [], "has_more": False}
 		# Plan 2026-10-15-001 KTD5: a combined export is visible when its
 		# stored company set touches the caller's reach. Upgrade path if the
 		# log grows large: a joined subquery instead of the name list.
@@ -12579,6 +12583,9 @@ def get_portal_role_holders(query=None):
 	scope = _assert_portal_admin()
 	filters = {"status": "Active", "user_id": ["is", "set"]}
 	companies = read_companies(scope)
+	if companies == []:
+		# Frappe reads `in []` as `IN ('')`, which matches rows with no company.
+		return {"roles": list(MANAGED_PORTAL_ROLES), "rows": []}
 	if companies is not None:
 		filters["company"] = ["in", companies]
 	query = (query or "").strip() if isinstance(query, str) else ""
@@ -13719,8 +13726,11 @@ def _project_members(project):
 	if not logins:
 		return []
 
+	# Display only: a Left member is still named, from their newest row.
 	employees = {
-		user: row for user, row in active_employees_for_users(logins).items() if row.state == "active"
+		user: row if row.state == "active" else row.latest
+		for user, row in active_employees_for_users(logins).items()
+		if row.state != "none"
 	}
 	full_names = {
 		row.name: row.full_name
