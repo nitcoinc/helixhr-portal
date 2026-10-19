@@ -110,6 +110,7 @@ from helixhr.utils import (
 	access_summary,
 	active_company_grant,
 	active_employee_for_user,
+	active_employees_for_users,
 	admin_scope_employee_filters,
 	as_administrator,
 	can_admin_portal,
@@ -8567,9 +8568,9 @@ def _handler_comment_refusal(doc, user):
 		if doc.routed_to_role not in frappe.get_roles(user):
 			return _(_APPROVAL_NOT_FOUND)
 		if not _is_hr(user):
-			anchor = frappe.db.get_value("Employee", {"user_id": user}, ["status", "company"], as_dict=True)
+			anchor = active_employee_for_user(user)
 			company = frappe.db.get_value("Employee", doc.employee, "company")
-			if not anchor or anchor.status != "Active" or anchor.company != company:
+			if anchor.state != "active" or anchor.company != company:
 				return _(_APPROVAL_NOT_FOUND)
 	if doc.status not in _REQUEST_OPEN_STATES:
 		return _("This request is {0}. Comments are only allowed while it is open.").format(doc.status)
@@ -11679,8 +11680,8 @@ def _employee_for_user(user):
 	read-only card renders."""
 	if not user:
 		return None, None
-	row = frappe.db.get_value("Employee", {"user_id": user}, ["name", "employee_name"], as_dict=True)
-	return (row.name, row.employee_name) if row else (None, None)
+	row = active_employees_for_users([user])[user]
+	return row.name, row.employee_name
 
 
 def _person_profile(employee):
@@ -12919,10 +12920,8 @@ def save_company_access(user, level, companies, allow_export=0, modified=None):
 	rate_limit_per_user("save_company_access")
 	reach = _company_access_reach()
 	_assert_not_own_grant(user)
-	target = frappe.db.get_value(
-		"Employee", {"user_id": user}, ["name", "status", "company"], as_dict=True
-	)
-	if not target or target.status != "Active" or target.company not in reach:
+	target = active_employee_for_user(user)
+	if target.state != "active" or target.company not in reach:
 		frappe.throw(_(_COMPANY_ACCESS_REFUSED), frappe.PermissionError)
 	level, companies, allow_export = _clean_grant(level, companies, allow_export, reach)
 	doc, _changed = _apply_grant(user, target, reach, modified, (level, companies, allow_export))
@@ -13727,13 +13726,7 @@ def _project_members(project):
 		return []
 
 	employees = {
-		row.user_id: row
-		for row in frappe.get_all(
-			"Employee",
-			filters={"user_id": ["in", logins]},
-			fields=["name", "user_id", "employee_name"],
-			ignore_permissions=True,
-		)
+		user: row for user, row in active_employees_for_users(logins).items() if row.state == "active"
 	}
 	full_names = {
 		row.name: row.full_name
