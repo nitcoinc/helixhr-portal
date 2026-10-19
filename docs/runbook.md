@@ -1557,10 +1557,11 @@ It reads only, and prints the two files it wrote under
   write and their outcomes. **widened** lists each gain with a key, the scope
   answers it moves and a sentence (a Portal Admin's second org, a Delivery
   Manager's "N projects today, M after", an HR User or Portal Admin with no
-  Employee, a System Manager with an Employee becoming unscoped).
+  Employee, a System Manager with an Employee becoming unscoped, a System
+  Manager with no Employee who holds IT Team gaining every org's IT queue).
   **narrowed_by_design** names a security fix from
   `access_migration.SECURITY_FIXES` (a disabled login or an all-Left person,
-  a Left Portal Admin included, reaching nothing; a named-org Portal Admin
+  a Left Portal Admin or System Manager included, reaching nothing; a named-org Portal Admin
   losing the global matrix, email theme and templates; an IT Admin with no
   Employee losing an empty request page), never anything else. **unchanged**
   is the rest. One person can be both widened and narrowed. Rows for a
@@ -1576,26 +1577,39 @@ tickets, and delete old ones once the switch is verified.
 
 ### Release B deploy checklist
 
+Steps 1 and 3 must run with Release A's code deployed: the snapshot records
+what Release A's resolvers answer, and that is the baseline the parity check
+compares against. A snapshot taken on Release B code over an unmigrated site
+is meaningless.
+
 1. With Release A deployed, run
    `bench --site <site> execute helixhr.access_migration.dry_run` on
    production. Review the per-person report with the owner.
 2. Freeze access edits. Turn on maintenance mode and run `bench backup`.
-3. Re-run the dry-run. Check its report matches the reviewed one, and note
-   its snapshot path.
-4. Run `bench --site <site> migrate`. The patch writes the assignments.
-5. Run
+3. Still on Release A code, re-run the dry-run. Check its report matches the
+   reviewed one, and note its snapshot path.
+4. Deploy Release B code without migrating: pull the code and build
+   (`git pull` in `apps/helixhr`, then `cd apps/helixhr/frontend && yarn build`).
+   Do not use `bench update` or a deploy flow that migrates for you: it runs
+   step 5 before you can check step 3's snapshot was taken on Release A.
+5. Run `bench --site <site> migrate`. The patch writes the assignments.
+6. Run
    `bench --site <site> execute helixhr.access_migration.parity_check --args '["<snapshot path>"]'`
    with the snapshot path from step 3. Zero undeclared differences are
    required, or restore the backup before reopening.
-6. Turn off maintenance mode. A System Manager gives the access owner Manage
+7. Turn off maintenance mode. A System Manager gives the access owner Manage
    access in People & access.
-7. Run `bench --site <site> execute helixhr.preflight.run` and confirm it is
+8. Run `bench --site <site> execute helixhr.preflight.run` and confirm it is
    clean.
 
 `parity_check` re-reads the legacy state (the patch never changes it), works
 out what each person's answers should now be, and labels each difference
 "declared widening", "security fix", "declared recipient change" or
-"undeclared". It also checks every migrated person's rows equal the plan. It
+"undeclared". A difference counts as a declared widening only when the new
+answer is wider than the old one, and as a security fix only when it is
+narrower; a narrowing under a widening note, or a mix of both, is undeclared.
+Flags are compared one by one (`flags.<name>`). It also checks every migrated
+person's rows equal the plan. It
 writes a 0600 `parity-<stamp>.json` and returns the counts; only undeclared
 blocks. If a person was changed through People & access since the switch, they
 are listed under `changed_through_save`, not compared.
@@ -1608,15 +1622,25 @@ holds it). A System Manager can still change access in the meantime.
 
 Before reopening, restore the backup from step 2. After reopening, roll back
 by code revert only; do not restore the backup, which would drop every change
-made since. Two things to expect:
+made since. What to expect:
 
 - HR assignments made after the switch revert to home-company reach, because
   the old code reads each HR Manager's own Employee company.
-- Legacy `HelixHR Company Access` grants for migrated Org viewer and Reports
-  rows that were removed since the switch were disabled when the row was
-  removed, so the old code does not bring that access back. Org viewer and
-  Reports rows added after the switch have no legacy grant, so that access
-  disappears on rollback.
+- Removing a migrated Org viewer or Reports row disabled the legacy
+  `HelixHR Company Access` grant it came from (an "All data" grant for Org
+  viewer, "Reports only" for Reports, naming that org), so the old code does
+  not bring that access back. A grant the removed row did not come from is
+  left on.
+- Turning export off on a migrated Org viewer or Reports row turned the
+  export of the grant it came from off too. The grant has one export flag
+  for all its orgs, so a rollback also loses export on that grant's other
+  orgs.
+- Export turned off on a Reports row that came from the Report Manager role
+  (the person's own org, export on) comes back under the old code: the role
+  still gives it. Remove the role in Desk after the rollback if that export
+  must stay off.
+- Org viewer and Reports rows added after the switch have no legacy grant, so
+  that access disappears on rollback.
 
 ### Before Release B only: giving an Org B Portal Admin Org A
 

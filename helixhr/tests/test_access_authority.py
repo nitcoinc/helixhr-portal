@@ -274,6 +274,37 @@ class TestWhoMayBeEdited(_Authority):
 		self._save(ADMIN_A, TARGET, [_row(IT_TEAM_ROLE, self.a)])
 		self.assertEqual(_rows(TARGET), [_row(IT_TEAM_ROLE, self.a)])
 
+	def test_a_case_variant_of_the_callers_own_id_is_still_self_edit(self):
+		"""The User table's collation matches any case, so the identity
+		checks run on the canonical name: an upper-cased copy of the caller's
+		own login is refused as self-edit (R11), never saved, and the
+		editor opens it locked."""
+		shout = HOLDER_X.upper()
+		self.assertNotEqual(shout, HOLDER_X)
+		self._refused(
+			frappe.PermissionError,
+			SELF_EDIT_REFUSAL,
+			HOLDER_X,
+			shout,
+			[_row(ACCESS_ADMIN_ROLE), _row("HR Manager")],
+			reason="Promote myself.",
+			token=access_token(HOLDER_X),
+		)
+		self.assertNotIn("HR Manager", _roles(HOLDER_X))
+		person = _as(HOLDER_X, api.get_person_access, shout)
+		self.assertEqual(person["user"], HOLDER_X)
+		self.assertEqual(person["lock"]["reason"], SELF_EDIT_REFUSAL)
+
+	def test_administrator_in_any_case_is_refused_like_a_missing_person(self):
+		for user in ("ADMINISTRATOR", "administrator", "GUEST"):
+			with self.subTest(user=user):
+				with self.assertRaises(frappe.PermissionError) as caught:
+					self._save(HOLDER_X, user, [_row(IT_TEAM_ROLE, self.a)], token="x")
+				self.assertIn("not authorised", str(caught.exception))
+				with self.assertRaises(frappe.PermissionError):
+					_as(HOLDER_X, api.get_person_access, user)
+		self.assertFalse(frappe.db.exists("HelixHR Access Assignment", {"user": "Administrator"}))
+
 	def test_a_system_manager_target_needs_full_authority(self):
 		self._refused(
 			frappe.PermissionError,
@@ -392,6 +423,28 @@ class TestStaleToken(_Authority):
 		frappe.get_doc("User", TARGET).add_roles(IT_TEAM_ROLE)
 		self.assertNotEqual(access_token(TARGET), token)
 
+	def test_a_save_that_commits_after_the_token_check_is_caught_under_the_lock(self):
+		"""Two saves load one token. The other's commit lands after this
+		save's unlocked check: the locked re-check inside the savepoint
+		refuses, and nothing of this save is written."""
+		token = access_token(TARGET)
+		real = api._desired_access_rows
+
+		def racing(rows):
+			# The other request's save, committed after our first check.
+			make_assignment(TARGET, DELIVERY_MANAGER_ROLE, [self.a], add_role=False)
+			return real(rows)
+
+		with (
+			patch.object(api, "_desired_access_rows", side_effect=racing),
+			self.assertRaises(frappe.TimestampMismatchError) as caught,
+		):
+			self._save(ADMIN_A, TARGET, [_row(IT_TEAM_ROLE, self.a)], token=token)
+		self.assertIn("Someone changed this person's access", str(caught.exception))
+		self.assertEqual(_rows(TARGET), [_row(DELIVERY_MANAGER_ROLE, self.a)])
+		self.assertNotIn(IT_TEAM_ROLE, _roles(TARGET))
+		self.assertEqual(_changes(TARGET), [])
+
 
 class TestRoleSync(_Authority):
 	"""R8-R10 and KTD4: the save writes Has Role for the roles it touched."""
@@ -436,6 +489,21 @@ class TestRoleSync(_Authority):
 		frappe.get_doc("User", TARGET).add_roles("HR User")
 		with self.assertRaises(frappe.PermissionError):
 			self._save(ADMIN_A, TARGET, rows, sync_roles=["HR User"])
+
+	def test_restoring_an_hr_role_is_high_risk(self):
+		"""KTD12: "Restore role" on an HR row gives HRMS Desk reach back, so
+		it needs a reason and notifies, like adding the row."""
+		make_assignment(TARGET, "HR Manager", [self.a], add_role=False)
+		rows = [_row("HR Manager", self.a)]
+		self._refused(
+			frappe.ValidationError, HIGH_RISK_REFUSAL, HOLDER_X, TARGET, rows, sync_roles=["HR Manager"]
+		)
+		self.assertNotIn("HR Manager", _roles(TARGET))
+		out = self._save(HOLDER_X, TARGET, rows, reason="Back from leave.", sync_roles=["HR Manager"])
+		self.assertIn("HR Manager", _roles(TARGET))
+		bells = _bells(out["change"])
+		self.assertTrue(bells)
+		self.assertTrue(all("HR Manager" in bell.subject for bell in bells))
 
 	def test_a_role_profile_target_is_refused_with_nothing_written(self):
 		if not frappe.db.exists("Role Profile", PROFILE):
@@ -525,6 +593,37 @@ class TestAuditAndRollback(_Authority):
 		make_assignment(TARGET, DELIVERY_MANAGER_ROLE, [self.a])
 		self._save(ADMIN_A, TARGET, [_row(ORG_VIEWER_ROLE, self.a)])
 		self.assertEqual(frappe.db.get_value("HelixHR Company Access", TARGET, "enabled"), 1)
+
+	def test_removing_a_migrated_row_the_grant_did_not_give_leaves_the_grant_on(self):
+		"""Only the grant a row came from is switched off: an "All data"
+		grant on A gives Org viewer on A -- not Reports on A (the Report
+		Manager role's), nor Org viewer on another org."""
+		self.addCleanup(clear_test_company_grants)
+		make_test_company_grant(TARGET, [self.a], level="All data", allow_export=1)
+		make_assignment(TARGET, REPORT_MANAGER_ROLE, [self.a], export=1, origin="migrated", add_role=False)
+		make_assignment(TARGET, ORG_VIEWER_ROLE, [self.b], origin="migrated")
+		self._save(HOLDER_X, TARGET, [_row(ORG_VIEWER_ROLE, self.a, export=1)])
+		self.assertEqual(frappe.db.get_value("HelixHR Company Access", TARGET, "enabled"), 1)
+		self.assertEqual(frappe.db.get_value("HelixHR Company Access", TARGET, "allow_export"), 1)
+
+	def test_turning_export_off_on_a_migrated_row_turns_the_grants_export_off(self):
+		"""Rollback safety: under the grant code the grant's export would
+		come back. The grant itself stays on: the row still reads."""
+		self.addCleanup(clear_test_company_grants)
+		make_test_company_grant(TARGET, [self.a], level="All data", allow_export=1)
+		self.assertEqual(_rows(TARGET), [_row(ORG_VIEWER_ROLE, self.a, export=1)])
+		self._save(ADMIN_A, TARGET, [_row(ORG_VIEWER_ROLE, self.a)])
+		grant = frappe.db.get_value("HelixHR Company Access", TARGET, ["enabled", "allow_export"], as_dict=True)
+		self.assertEqual((grant.enabled, grant.allow_export), (1, 0))
+		# Export turned off on a row the grant did not give leaves it alone.
+		frappe.db.set_value("HelixHR Company Access", TARGET, "allow_export", 1)
+		make_assignment(TARGET, REPORT_MANAGER_ROLE, [self.a], export=1, origin="migrated", add_role=False)
+		self._save(
+			HOLDER_X,
+			TARGET,
+			[_row(ORG_VIEWER_ROLE, self.a), _row(REPORT_MANAGER_ROLE, self.a)],
+		)
+		self.assertEqual(frappe.db.get_value("HelixHR Company Access", TARGET, "allow_export"), 1)
 
 
 class TestRestCall(_Authority):

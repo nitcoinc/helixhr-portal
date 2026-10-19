@@ -1636,19 +1636,21 @@ def resolve_project_scope(user):
 	one vocabulary. The REST-route hooks in `project_permissions.py` do NOT
 	use it: they read `resolve_admin_scope` only (plan 2026-10-19-001 KTD10).
 
-	The HR scope when it is not "none" (Administrator, System Manager, HR
-	Manager rows); otherwise the caller's Delivery Manager rows (plan
-	2026-10-19-001 U4): every project whose ``Project.company`` is in their
-	orgs -- ``"company"``, ``"companies"``, or ``"unscoped"`` on All orgs.
+	The union (R3) of the HR scope (Administrator, System Manager, HR
+	Manager rows) and the caller's Delivery Manager rows (plan 2026-10-19-001
+	U4): every project whose ``Project.company`` is in either's orgs --
+	``"company"``, ``"companies"``, or ``"unscoped"`` when either is.
 	Project membership no longer widens or narrows it. ``{"kind": "none"}``
 	for anyone else, and for a holder who fails R4 (disabled, or every
 	Employee row Left or Inactive) -- `role_scope` applies that gate.
 	"""
 	admin = resolve_admin_scope(user)
-	if admin["kind"] != "none":
-		return admin
-	scope = portal_role_scope(user, DELIVERY_MANAGER_ROLE)
-	return scope if scope["kind"] != "none" else {"kind": "none"}
+	delivery = portal_role_scope(user, DELIVERY_MANAGER_ROLE)
+	if delivery["kind"] == "none":
+		return admin if admin["kind"] != "none" else {"kind": "none"}
+	if admin["kind"] == "none":
+		return delivery
+	return _widen_by_companies(admin, read_companies(delivery))
 
 
 def project_scope_filters(scope):
@@ -2050,6 +2052,30 @@ def _widest_tier(tiers):
 	return max(tiers, key=lambda grant: _SCOPE_RANK[grant[1]["kind"]], default=None)
 
 
+def _project_companies(by_company, names, export=False):
+	"""Of ``names``, the orgs where a Delivery Manager tier runs (or, with
+	``export``, exports): a project report there counts every hour on the
+	org's own projects, whoever's staff logged it (plan 2026-10-19-001 R2),
+	not only its own staff's (`reports._timesheet_scope_conditions`)."""
+	return sorted(
+		name
+		for name in names
+		if any(tier == "delivery_manager" and (can or not export) for tier, _scope, can in by_company[name])
+	)
+
+
+def _with_owned(scope, owned):
+	"""``scope`` with ``project_companies`` when there are any: a scope with
+	no Delivery Manager org keeps the shape it always had."""
+	return {**scope, "project_companies": owned} if owned else scope
+
+
+def _with_project_companies(scope, by_company, name, export=False):
+	"""``scope`` for org ``name``, with ``project_companies`` when a
+	Delivery Manager tier there covers it (`_project_companies`)."""
+	return _with_owned(scope, _project_companies(by_company, [name], export))
+
+
 def _combined_access(entry, by_company, unscoped):
 	"""The combined ("All my companies") answer for one report, or None when
 	the entry may not offer it (KTD3: "project" in scopes and two or more
@@ -2073,9 +2099,11 @@ def _combined_access(entry, by_company, unscoped):
 		scope = {"kind": "unscoped", "combined": True}
 	else:
 		scope = {"kind": "combined", "combined": True, "companies": sorted(names)}
+	export_scope = _with_owned(dict(scope), _project_companies(by_company, names, export=True))
+	scope = _with_owned(scope, _project_companies(by_company, names))
 	return {
 		"scope": scope,
-		"export_scope": dict(scope) if not blocking else {"kind": "none"},
+		"export_scope": export_scope if not blocking else {"kind": "none"},
 		"companies": sorted(names),
 		"blocking": sorted(blocking),
 	}
@@ -2097,13 +2125,17 @@ def combined_export_scope(user, report_key, stored):
 	if not set(stored) <= set(access["combined_companies"]) or set(stored) & set(access["blocking_companies"]):
 		return None
 	scope = access["scope"]
+	owned = [name for name in access["export_scope"].get("project_companies") or [] if name in stored]
 	if scope["kind"] == "unscoped":
-		return {"kind": "combined", "combined": True, "companies": stored}
-	return {
-		"kind": "combined",
-		"combined": True,
-		"companies": [name for name in scope["companies"] if name in stored],
-	}
+		return _with_owned({"kind": "combined", "combined": True, "companies": stored}, owned)
+	return _with_owned(
+		{
+			"kind": "combined",
+			"combined": True,
+			"companies": [name for name in scope["companies"] if name in stored],
+		},
+		owned,
+	)
 
 
 def resolve_report_access(user, report_key, company=None):
@@ -2273,10 +2305,12 @@ def resolve_report_access(user, report_key, company=None):
 	run_grant, export_grant = answer(by_company[picked])
 	return {
 		"tier": run_grant[0],
-		"scope": run_grant[1],
+		"scope": _with_project_companies(run_grant[1], by_company, picked),
 		"can_run": True,
 		"can_export": export_grant is not None,
-		"export_scope": export_grant[1] if export_grant else {"kind": "none"},
+		"export_scope": _with_project_companies(export_grant[1], by_company, picked, export=True)
+		if export_grant
+		else {"kind": "none"},
 		"company": picked,
 		"companies": companies,
 		"company_removed": company_removed,

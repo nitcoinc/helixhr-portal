@@ -230,6 +230,8 @@ doc_events = {
 	# Plan 2026-10-08-001 U1: a company's own time zone must be a real one.
 	"Company": {
 		"validate": "helixhr.events.company_validate",
+		# Plan 2026-10-19-001 KTD1: assignment rows' scope_key follows a rename.
+		"after_rename": "helixhr.events.company_after_rename",
 	},
 	"Employee": {
 		"validate": "helixhr.events.employee_validate",

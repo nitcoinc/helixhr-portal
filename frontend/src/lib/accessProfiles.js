@@ -195,10 +195,13 @@ export function addOrgs(draft, role, companies) {
 }
 
 /** The All orgs switch. On, one badge stands for every org; the named chips
- * are kept underneath, so switching back restores them as they were. */
+ * are kept underneath, so switching back restores them as they were. An
+ * all-orgs-only role is always All orgs: the switch only turns one set
+ * outside HelixHR on ("Give All orgs"), never off. */
 export function setAllOrgs(draft, role, on) {
   return update(draft, role, (entry) => {
-    if (entry.allOrgs === on || ALL_ORGS_ONLY_ROLES.includes(role) || entry.locked.length) return
+    if (entry.allOrgs === on || entry.locked.length) return
+    if (ALL_ORGS_ONLY_ROLES.includes(role) && !(on && entry.outside)) return
     entry.keepNamed = false
     if (on && entry.export[ALL] === undefined) {
       entry.export[ALL] = entry.companies.length > 0 && entry.companies.every((company) => entry.export[company])

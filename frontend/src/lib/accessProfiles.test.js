@@ -173,6 +173,18 @@ describe('warning actions', () => {
     expect(reasonValid(diff, '')).toBe(true)
   })
 
+  it('Give All orgs on Manage access set outside HelixHR saves one All-orgs row', () => {
+    const drift = person([], ['HelixHR Access Admin'])
+    const next = setAllOrgs(draftFromPerson(drift), 'HelixHR Access Admin', true)
+    expect(draftRows(next)).toEqual([{ role: 'HelixHR Access Admin', all_orgs: 1, company: '', allow_export: 0 }])
+    const diff = diffDraft(drift, next, LABELS)
+    expect(diff.gains).toEqual([{ text: 'Manage access · All orgs', highRisk: true }])
+    // Never off, and never on for a saved all-orgs-only role.
+    expect(draftRows(setAllOrgs(next, 'HelixHR Access Admin', false))).toEqual(draftRows(next))
+    const saved = draftFromPerson(person([row('HelixHR Access Admin', null)]))
+    expect(setAllOrgs(saved, 'HelixHR Access Admin', false)).toEqual(saved)
+  })
+
   it('Restore role keeps the rows and gives the role back; an HR role is high-risk', () => {
     const missing = person([row('HR User', 'Org A', { missing_in_frappe: true })])
     const next = restoreRole(draftFromPerson(missing), 'HR User')

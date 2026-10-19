@@ -115,9 +115,14 @@ class TestPerCompanyAccess(_GrantReports):
 		set_report_access(PROJECT_KEY, dm_run=1, dm_export=1)
 		make_test_company_grant(dm, [self.other], level="Reports only")
 		home = resolve_report_access(dm, PROJECT_KEY)
+		# R2: their org's projects with every hour logged on them.
 		self.assertEqual(
 			(home["company"], home["tier"], home["scope"]),
-			(self.company, "delivery_manager", {"kind": "company", "company": self.company}),
+			(
+				self.company,
+				"delivery_manager",
+				{"kind": "company", "company": self.company, "project_companies": [self.company]},
+			),
 		)
 		granted = resolve_report_access(dm, PROJECT_KEY, self.other)
 		self.assertEqual(granted["scope"], {"kind": "company", "company": self.other})
@@ -308,6 +313,25 @@ class TestRevokedExports(IntegrationTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			_as(GRANT_HOLDER_USER, download_report_export, export)
 
+	def test_a_narrowing_save_expires_the_ready_file_once_it_commits(self):
+		"""Plan 2026-10-19-001 U5: the People & access save expires what the
+		person no longer reaches -- after commit, through the callback the
+		save registers, not by hand."""
+		from helixhr.api import access_token, save_person_access
+
+		export, kwargs = self._queue()
+		reports.run_background_export(**kwargs)
+		self.assertEqual(frappe.db.get_value("HelixHR Report Export", export, "status"), "Ready")
+
+		save_person_access(GRANT_HOLDER_USER, [], access_token(GRANT_HOLDER_USER))
+		# Saved, not yet committed: the file is still there.
+		self.assertEqual(frappe.db.get_value("HelixHR Report Export", export, "status"), "Ready")
+		frappe.db.commit()  # nosemgrep -- runs the save's after-commit callbacks
+		self.assertEqual(frappe.db.get_value("HelixHR Report Export", export, "status"), "Expired")
+		self.assertFalse(frappe.db.exists("File", {"attached_to_name": export}))
+		# The Reports row came from this grant: it is off too (rollback safety).
+		self.assertEqual(frappe.db.get_value("HelixHR Company Access", GRANT_HOLDER_USER, "enabled"), 0)
+
 	def test_download_re_checks_the_company(self):
 		export, kwargs = self._queue()
 		reports.run_background_export(**kwargs)
@@ -491,7 +515,14 @@ class TestCombinedCompanyScope(_GrantReports):
 		access = resolve_report_access(dm, PROJECT_KEY, SENTINEL_ALL)
 		self.assertEqual(
 			access["scope"],
-			{"kind": "combined", "combined": True, "companies": sorted([self.company, self.other])},
+			{
+				"kind": "combined",
+				"combined": True,
+				"companies": sorted([self.company, self.other]),
+				# Only the Delivery Manager org counts other orgs' hours on
+				# its projects; the grant's org is its own staff's.
+				"project_companies": [self.company],
+			},
 		)
 		self.assertNotIn("assigned_companies", access)
 		self.assertTrue(access["can_export"])

@@ -42,7 +42,7 @@ narrowings are the named `SECURITY_FIXES`.
 | Delivery Manager | the person's company + every org where they are a project member |
 | IT Team | the person's company |
 | Notification Manager | All orgs (message templates are global) |
-| System Manager | none; unscoped by role, declared when that widens today's reach |
+| System Manager | none; unscoped by role, declared when that widens today's reach, gated (R4) when disabled or Left |
 """
 
 import json
@@ -187,9 +187,14 @@ def _plan_user(info, known, org_projects):
 		row["allow_export"] = int(bool(row["allow_export"] or export))
 
 	if SYSTEM_MANAGER in roles:
-		# Unscoped by role, never assignable (R5). Today an anchored System
-		# Manager is limited to their company in the portal: that widens.
-		if state == "active" and info["enabled"]:
+		# Unscoped by role, never assignable (R5), but behind the person
+		# gate (R4), which today's code never applied to them: a disabled or
+		# all-Left System Manager loses their portal reach.
+		if gated:
+			return _answer(home, rows, [], [_narrowed("person_gate")])
+		# Today an anchored System Manager is limited to their company in
+		# the portal: that widens.
+		if state == "active":
 			widened.append(
 				_widened(
 					"system_manager_unscoped",
@@ -205,6 +210,15 @@ def _plan_user(info, known, org_projects):
 						"flags",
 					],
 					f"System Manager: portal HR reach widens from {home} to all orgs.",
+				)
+			)
+		elif IT_ADMIN in roles:
+			# Today the IT queue is the Active Employee's company: none here.
+			widened.append(
+				_widened(
+					"system_manager_it_all_orgs",
+					["it_scope"],
+					"System Manager with IT Team and no Employee: the IT queue widens from none to all orgs.",
 				)
 			)
 		return _answer(home, rows, widened, narrowed)
@@ -651,10 +665,15 @@ def parity_check(snapshot_path):
 	user and `SNAPSHOT_KEYS` key, a new answer that differs from the stored
 	one is:
 
-	- "declared widening" when one of the person's ``widened`` records names
-	  the key;
-	- "security fix" when one of their ``narrowed`` records does;
-	- "undeclared" otherwise.
+	- "declared widening" when the new answer is wider (`_direction`) and
+	  one of the person's ``widened`` records names the key;
+	- "security fix" when it is narrower and one of their ``narrowed``
+	  records does;
+	- "undeclared" otherwise -- a narrowing under a widening note, a widening
+	  under a fix, or a move that is neither (a mix, or a reshape).
+
+	Flags are compared one by one (``flags.<name>``), so a flag lost under a
+	note that widens another is still caught.
 
 	HR and IT recipients per (org, role) are compared the same way; a move is
 	"declared recipient change" when a `DECLARED_RECIPIENT_CHANGES` rule
@@ -677,17 +696,32 @@ def parity_check(snapshot_path):
 	people = {}
 	for user in users:
 		answer = plan.get(user) or {"widened": [], "narrowed": []}
+		assigned = (state["users"].get(user) or {}).get("project_orgs") or {}
 		old, new = _as_callers_see_it(baseline["users"][user]), _as_callers_see_it(current["users"][user])
 		for key in SNAPSHOT_KEYS:
-			before, after = old.get(key), new.get(key)
-			if before == after:
-				continue
-			widened = sorted({note["key"] for note in answer["widened"] if key in note["resolver_keys"]})
-			fixes = sorted({note["fix"] for note in answer["narrowed"] if key in note["resolver_keys"]})
-			label = "declared widening" if widened else "security fix" if fixes else "undeclared"
-			people.setdefault(user, []).append(
-				{"key": key, "label": label, "notes": widened or fixes, "before": before, "after": after}
-			)
+			for name, before, after in _moves(key, old.get(key), new.get(key)):
+				direction = _direction(key, before, after, assigned)
+				widened = sorted(
+					{note["key"] for note in answer["widened"] if key in note["resolver_keys"]}
+					if direction == "wider"
+					else ()
+				)
+				fixes = sorted(
+					{note["fix"] for note in answer["narrowed"] if key in note["resolver_keys"]}
+					if direction == "narrower"
+					else ()
+				)
+				label = "declared widening" if widened else "security fix" if fixes else "undeclared"
+				people.setdefault(user, []).append(
+					{
+						"key": name,
+						"label": label,
+						"direction": direction,
+						"notes": widened or fixes,
+						"before": before,
+						"after": after,
+					}
+				)
 
 	recipients = _recipient_differences(baseline.get("recipients") or {}, current["recipients"], state)
 	rows, changed_through_save = _row_differences(users, plan)
@@ -711,6 +745,112 @@ def parity_check(snapshot_path):
 		},
 	)
 	return {"undeclared": counts["undeclared"], "counts": counts, "report": path}
+
+
+def _moves(key, before, after):
+	"""``[(name, before, after)]``: the one answer that moved, or for
+	``flags`` each flag that did, as ``flags.<flag>``."""
+	if before == after:
+		return []
+	if key == "flags" and isinstance(before, dict) and isinstance(after, dict):
+		return [
+			(f"flags.{flag}", before.get(flag), after.get(flag))
+			for flag in sorted(set(before) | set(after))
+			if before.get(flag) != after.get(flag)
+		]
+	return [(key, before, after)]
+
+
+def _direction(key, before, after, assigned):
+	""""wider", "narrower" or None (both, neither, or a reshape) for one
+	moved answer, by the shape of ``key``'s answers. ``assigned`` is the
+	person's project orgs, what today's "assigned" project scope reaches."""
+	if key in ("admin", "read", "project", "project_read", "portal_admin"):
+		return _scope_direction(before or {}, after or {}, assigned)
+	if key == "reports":
+		return _combine(
+			_set_direction(_report_cells(before), _report_cells(after)),
+			_set_direction(_report_cells(before, export=True), _report_cells(after, export=True)),
+		)
+	if key in ("it_scope", "people_access_reach"):
+		return _set_direction(set(before or []), set(after or []))
+	if key == "oversight":
+		if not before or not after:
+			return "wider" if after else "narrower"
+		return _combine(
+			_set_direction(_companies(before["companies"]), _companies(after["companies"])),
+			_set_direction(_hr_manager(before), _hr_manager(after)),
+		)
+	# Booleans: can_admin_portal and each flag.
+	if isinstance(before, bool) and isinstance(after, bool):
+		return "wider" if after else "narrower"
+	return None
+
+
+def _hr_manager(oversight):
+	return {"hr_manager"} if oversight["hr_manager"] else set()
+
+
+def _companies(names):
+	"""A company list as a set, or None for every company."""
+	return None if names is None else set(names)
+
+
+def _scope_cover(scope, assigned):
+	"""The companies a snapshot scope reaches, or None for every one."""
+	kind = scope.get("kind")
+	if kind == "unscoped":
+		return None
+	if kind == "company":
+		return {scope["company"]} if scope.get("company") else set()
+	if kind in ("companies", "combined"):
+		return set(scope.get("companies") or [])
+	if kind == "assigned":
+		return set(assigned)
+	return set()
+
+
+def _scope_direction(before, after, assigned):
+	old, new = _scope_cover(before, assigned), _scope_cover(after, assigned)
+	# "assigned" (project membership) reaches only some of its orgs'
+	# projects, so an org scope over at least those orgs is wider.
+	if before.get("kind") == "assigned" and after.get("kind") != "assigned":
+		return "wider" if new is None or new >= old else None
+	if after.get("kind") == "assigned" and before.get("kind") != "assigned":
+		return "narrower" if old is None or old >= new else None
+	return _set_direction(old, new)
+
+
+def _report_cells(reports, export=False):
+	"""``{(report, company)}`` a snapshot's reports answer runs (or exports)."""
+	return {
+		(report, company)
+		for report, rows in (reports or {}).items()
+		for company, can_export in rows
+		if can_export or not export
+	}
+
+
+def _set_direction(old, new):
+	"""Two coverages, each a set or None for everything."""
+	if old == new:
+		return None
+	if new is None:
+		return "wider"
+	if old is None:
+		return "narrower"
+	if new > old:
+		return "wider"
+	if new < old:
+		return "narrower"
+	return None
+
+
+def _combine(*directions):
+	"""One direction for several parts of an answer, or None when they
+	disagree or none moved."""
+	moved = {direction for direction in directions if direction}
+	return moved.pop() if len(moved) == 1 else None
 
 
 def _as_callers_see_it(answers):

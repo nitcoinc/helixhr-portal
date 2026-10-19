@@ -1823,6 +1823,53 @@ class TestAccessLifecycle(IntegrationTestCase):
 		# No manual cache clear: the Employee hook drops the cached gate.
 		self.assertEqual(role_scope(user, "HR Manager")["kind"], "none")
 
+	def test_leaving_or_a_login_change_expires_exports_and_a_company_move_does_not(self):
+		"""R4: an Employee save that shuts the old login's gate expires the
+		Ready exports it could no longer request; a company move changes no
+		assignment, so it expires nothing."""
+		user = "u10-expiry@helixhr.test"
+		new_login = "u10-expiry-new@helixhr.test"
+		employee = make_test_user(user, self.company)
+		frappe.db.set_value("Employee", {"user_id": new_login}, "user_id", None)
+		if not frappe.db.exists("User", new_login):
+			frappe.get_doc(
+				{"doctype": "User", "email": new_login, "first_name": "New", "send_welcome_email": 0}
+			).insert(ignore_permissions=True)
+		target = "helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export.expire_unreachable_exports"
+
+		with patch(target) as expire:
+			doc = frappe.get_doc("Employee", employee)
+			doc.company = self.other
+			doc.save(ignore_permissions=True)
+		expire.assert_not_called()
+
+		with patch(target) as expire:
+			doc = frappe.get_doc("Employee", employee)
+			doc.user_id = new_login
+			doc.save(ignore_permissions=True)
+		expire.assert_called_once_with(user)
+
+		with patch(target) as expire:
+			doc = frappe.get_doc("Employee", employee)
+			doc.status = "Left"
+			doc.relieving_date = today()
+			doc.save(ignore_permissions=True)
+		# Once from the Employee hook; again if leaving also disables the login.
+		self.assertTrue(expire.called)
+		self.assertEqual({call.args for call in expire.call_args_list}, {(new_login,)})
+
+	def test_re_enabling_a_login_expires_nothing(self):
+		user = "u10-reenabled@helixhr.test"
+		make_test_user(user, self.company)
+		frappe.db.set_value("User", user, "enabled", 0)
+		with patch(
+			"helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export.expire_unreachable_exports"
+		) as expire:
+			doc = frappe.get_doc("User", user)
+			doc.enabled = 1
+			doc.save(ignore_permissions=True)
+		expire.assert_not_called()
+
 	def test_disabling_a_login_expires_its_exports(self):
 		from helixhr.tests.utils import make_assignment
 

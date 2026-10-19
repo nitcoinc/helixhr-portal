@@ -134,7 +134,14 @@ function canToggleAllOrgs(entry) {
   return canAdd.value && !!data.value.assignable?.all_orgs && !ALL_ORGS_ONLY_ROLES.includes(entry.role) && !entry.locked.length
 }
 function canAddOrg(entry) {
-  return canAdd.value && !entry.allOrgs && orgsToAdd(entry).length > 0
+  return canAdd.value && !entry.allOrgs && !ALL_ORGS_ONLY_ROLES.includes(entry.role) && orgsToAdd(entry).length > 0
+}
+// An all-orgs-only role (Manage access, Notification Manager) set outside
+// HelixHR can only be given on All orgs, never on named orgs.
+function canGiveAllOrgs(entry) {
+  return (
+    canAdd.value && entry.outside && !entry.allOrgs && !!data.value.assignable?.all_orgs && ALL_ORGS_ONLY_ROLES.includes(entry.role)
+  )
 }
 function orgsToAdd(entry) {
   return assignableCompanies.value.filter((company) => !entry.companies.includes(company))
@@ -435,6 +442,15 @@ function warningTone(kind) {
                   @click="openAddOrgs(entry)"
                 >
                   {{ entry.outside && !entry.companies.length ? 'Give orgs' : 'Add org' }}
+                </Button>
+                <Button
+                  v-if="canGiveAllOrgs(entry)"
+                  variant="ghost"
+                  class="min-h-11"
+                  :data-testid="`access-give-all-orgs-${entry.role}`"
+                  @click="onAllOrgs(entry, true)"
+                >
+                  Give All orgs
                 </Button>
               </div>
               <p

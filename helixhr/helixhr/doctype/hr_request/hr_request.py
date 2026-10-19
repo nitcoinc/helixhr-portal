@@ -121,11 +121,25 @@ def _company_scope_condition(companies):
 	return f"employee in ({', '.join(frappe.db.escape(name, percent=False) for name in company_employees)})"
 
 
+def _hr_routes_condition(roles):
+	"""What HR scope reads, as SQL: every route for a System Manager, else
+	every route but the worker roles' (plan 2026-10-19-001 U3, R3). A
+	request routed to IT Team is read through IT Team's own clause -- the
+	Frappe role and IT Admin rows on the employee's org -- whether or not the
+	reader is also HR, so a list never shows a row its reader can't open
+	(`api._assert_may_act_on`)."""
+	if "System Manager" in roles:
+		return ""
+	workers = ", ".join(frappe.db.escape(role, percent=False) for role in sorted(_WORKER_ROLES))
+	return f"ifnull(routed_to_role, '') not in ({workers})"
+
+
 def get_permission_query_conditions(user=None, doctype=None, **kwargs):
 	"""Limit lists to a requester's records, plus what their assignments
 	reach (plan 2026-10-19-001 U3): an HR Manager / System Manager's HR
-	scope, and each routed worker role's own orgs for requests routed to it.
-	A Frappe role with no assignment adds nothing (R3)."""
+	scope (`_hr_routes_condition`: not the worker routes, for an HR
+	Manager), and each routed worker role's own orgs for requests routed to
+	it. A Frappe role with no assignment adds nothing (R3)."""
 	user = user or frappe.session.user
 	if user == "Administrator":
 		return ""
@@ -136,10 +150,14 @@ def get_permission_query_conditions(user=None, doctype=None, **kwargs):
 		# (`resolve_admin_scope`, P6-R6): an HR Manager whose own Employee is
 		# Left, Inactive or Suspended resolves to nobody, never to everybody.
 		companies = read_companies(resolve_admin_scope(user))
+		routes = _hr_routes_condition(roles)
 		if companies is None:
-			return ""
-		if companies:
-			clauses.append(_company_scope_condition(companies))
+			if not routes:
+				return ""
+			clauses.append(routes)
+		elif companies:
+			scope = _company_scope_condition(companies)
+			clauses.append(f"({scope} and {routes})" if routes else scope)
 	employee = frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "name")
 	if employee:
 		clauses.append(f"employee = {frappe.db.escape(employee, percent=False)}")
@@ -166,7 +184,11 @@ def has_permission(doc, ptype=None, user=None, **kwargs):
 	if doc.employee == frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "name"):
 		return True
 	company = frappe.db.get_value("Employee", doc.employee, "company")
-	if roles & _UNSCOPED_ROLES and scope_covers(resolve_admin_scope(user), company):
+	if (
+		roles & _UNSCOPED_ROLES
+		and ("System Manager" in roles or doc.routed_to_role not in _WORKER_ROLES)
+		and scope_covers(resolve_admin_scope(user), company)
+	):
 		return True
 	# A routed worker: the stored route is a role they hold, and their
 	# assignments for it cover the employee's company (U3).

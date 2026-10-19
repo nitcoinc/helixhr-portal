@@ -10,6 +10,7 @@ from frappe.tests import IntegrationTestCase
 from helixhr import preflight
 from helixhr.tests.utils import (
 	_make_role_user,
+	create_test_company,
 	ensure_baseline_company,
 	ensure_test_company,
 	make_test_user,
@@ -20,6 +21,8 @@ from helixhr.utils import (
 	NOTIFICATION_MANAGER_ROLE,
 	ORG_VIEWER_ROLE,
 	REPORT_MANAGER_ROLE,
+	clear_role_scope_cache,
+	portal_role_scope,
 )
 
 ASSIGNEE_USER = "access-assignee@helixhr.test"
@@ -151,6 +154,49 @@ class TestAssignmentRefusals(_Assignments):
 
 	def test_administrator_cannot_hold_an_assignment(self):
 		self._refused(_assignment("HR Manager", all_orgs=1, user="Administrator"), "cannot hold")
+
+
+class TestCompanyRename(_Assignments):
+	"""KTD1: ``scope_key`` copies the company so the unique index can refuse
+	a second row; a Company rename moves it with the company."""
+
+	def _renamed(self):
+		suffix = frappe.generate_hash(length=6)
+		old = create_test_company(f"_Test Rename {suffix}", f"TR{suffix}")
+		return old, f"_Test Renamed {suffix}"
+
+	def _row(self, role):
+		return frappe.db.get_value(
+			"HelixHR Access Assignment",
+			{"user": ASSIGNEE_USER, "role": role},
+			["company", "scope_key", "allow_export"],
+			as_dict=True,
+		)
+
+	def test_a_rename_moves_the_key_and_keeps_the_duplicate_guard(self):
+		old, new = self._renamed()
+		_assignment(ORG_VIEWER_ROLE, old).insert(ignore_permissions=True)
+		frappe.rename_doc("Company", old, new, force=True)
+
+		row = self._row(ORG_VIEWER_ROLE)
+		self.assertEqual((row.company, row.scope_key), (new, new))
+		with self.assertRaises(frappe.ValidationError):
+			_assignment(ORG_VIEWER_ROLE, new).insert(ignore_permissions=True)
+		clear_role_scope_cache(ASSIGNEE_USER)
+		self.assertEqual(portal_role_scope(ASSIGNEE_USER, ORG_VIEWER_ROLE), {"kind": "company", "company": new})
+
+	def test_a_merge_folds_the_old_row_into_the_one_already_there(self):
+		old, _new = self._renamed()
+		_assignment(REPORT_MANAGER_ROLE, old, allow_export=1).insert(ignore_permissions=True)
+		_assignment(REPORT_MANAGER_ROLE, self.other).insert(ignore_permissions=True)
+		frappe.rename_doc("Company", old, self.other, merge=True, force=True)
+
+		rows = frappe.get_all(
+			"HelixHR Access Assignment",
+			filters={"user": ASSIGNEE_USER, "role": REPORT_MANAGER_ROLE},
+			fields=["company", "scope_key", "allow_export"],
+		)
+		self.assertEqual([(row.company, row.scope_key, row.allow_export) for row in rows], [(self.other, self.other, 1)])
 
 
 class TestAccessChangeLog(_Assignments):

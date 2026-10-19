@@ -102,7 +102,9 @@ class TestResolveReportAccess(IntegrationTestCase):
 		_, user = make_test_delivery_manager()
 		set_report_access(PROJECT_KEY, dm_run=1, dm_export=1)
 		access = resolve_report_access(user, PROJECT_KEY)
-		self.assertEqual(access["scope"], {"kind": "company", "company": self.company})
+		# R2: the org's projects with every hour logged on them.
+		owned = {"kind": "company", "company": self.company, "project_companies": [self.company]}
+		self.assertEqual(access["scope"], owned)
 		self.assertEqual(access["tier"], "delivery_manager")
 		self.assertTrue(access["can_export"])
 		self.assertFalse(resolve_report_access(user, COMPANY_ONLY_KEY)["can_run"])
@@ -129,17 +131,25 @@ class TestResolveReportAccess(IntegrationTestCase):
 		_, user = _make_role_user("hr-user-dm@helixhr.test", "HR User")
 		make_assignment(user, "HelixHR Delivery Manager", [self.company])
 
+		# R2: a Delivery Manager tier at the org adds the org's projects' hours
+		# logged by anyone, whichever tier's scope runs (R3 union).
+		owned = {"kind": "company", "company": self.company, "project_companies": [self.company]}
 		set_report_access(PROJECT_KEY, dm_run=1)
 		access = resolve_report_access(user, PROJECT_KEY)
-		self.assertEqual(access["scope"], {"kind": "company", "company": self.company})
+		self.assertEqual(access["scope"], owned)
 		self.assertEqual(access["tier"], "delivery_manager")
 		self.assertFalse(access["can_export"])
 
 		set_report_access(PROJECT_KEY, hr_user_run=1, dm_run=1, dm_export=1)
 		access = resolve_report_access(user, PROJECT_KEY)
-		self.assertEqual(access["scope"], {"kind": "company", "company": self.company})
+		self.assertEqual(access["scope"], owned)
 		self.assertEqual(access["tier"], "hr_user")
 		self.assertTrue(access["can_export"])
+		self.assertEqual(access["export_scope"], owned)
+
+		# Export only from HR User: the export scope is its own staff's hours.
+		set_report_access(PROJECT_KEY, hr_user_run=1, hr_user_export=1, dm_run=1, dm_export=0)
+		access = resolve_report_access(user, PROJECT_KEY)
 		self.assertEqual(access["export_scope"], {"kind": "company", "company": self.company})
 
 	def test_unknown_and_denied_keys_are_identical(self):

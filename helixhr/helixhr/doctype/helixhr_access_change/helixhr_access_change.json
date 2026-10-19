@@ -2,7 +2,7 @@
  "actions": [],
  "autoname": "hash",
  "creation": "2026-10-19 00:00:00.000000",
- "description": "Append-only log of access changes: one row per People & access save or migration run, with the target's assignment rows before and after (plan 2026-10-19-001 KTD8).",
+ "description": "Append-only log of access changes: one row per People & access save, with the target's assignment rows before and after (plan 2026-10-19-001 KTD8). The migration writes none: its rows carry origin \"migrated\".",
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [

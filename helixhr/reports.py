@@ -201,15 +201,26 @@ def _scope_companies(scope):
 
 
 def _timesheet_scope_conditions(scope, values):
-	"""SQL conditions narrowing ``tabTimesheet ts`` to ``scope``, or None when
-	nothing is in scope. A combined scope is ``ts.company in set`` (KTD2)."""
+	"""SQL conditions narrowing ``tabTimesheet ts`` (joined to ``tabTimesheet
+	Detail td``) to ``scope``, or None when nothing is in scope. A combined
+	scope is ``ts.company in set`` (KTD2). In a Delivery Manager's orgs
+	(``project_companies``, `utils._project_companies`) every hour on a
+	project the org owns counts too, whoever's staff logged it (plan
+	2026-10-19-001 R2)."""
 	companies = _scope_companies(scope)
 	if companies is None:
 		return []
 	if not companies:
 		return None
 	values["scope_companies"] = tuple(companies)
-	return ["ts.company in %(scope_companies)s"]
+	owners = [name for name in scope.get("project_companies") or [] if name in companies]
+	if not owners:
+		return ["ts.company in %(scope_companies)s"]
+	values["project_companies"] = tuple(owners)
+	return [
+		"(ts.company in %(scope_companies)s or td.project in "
+		"(select prj_scope.name from `tabProject` prj_scope where prj_scope.company in %(project_companies)s))"
+	]
 
 
 # --- U7: monthly project timesheet (flagship) --------------------------------

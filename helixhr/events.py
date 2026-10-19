@@ -2204,6 +2204,37 @@ def company_validate(doc, method=None):
 		)
 
 
+def company_after_rename(doc, method=None, old=None, new=None, merge=False):
+	"""Plan 2026-10-19-001 KTD1: an assignment's hidden ``scope_key`` copies
+	its company so the unique (user, role, scope_key) index can refuse a
+	second row. The rename has already moved ``company`` (a Link); move the
+	key with it, or the duplicate check and the index stop matching. On a
+	merge, a row the person already holds on ``new`` absorbs the old one
+	(export kept if either had it)."""
+	rows = frappe.get_all(
+		"HelixHR Access Assignment",
+		filters={"scope_key": old, "all_orgs": 0},
+		fields=["name", "user", "role", "allow_export"],
+	)
+	for row in rows:
+		kept = frappe.db.get_value(
+			"HelixHR Access Assignment",
+			{"user": row.user, "role": row.role, "scope_key": new},
+			["name", "allow_export"],
+			as_dict=True,
+		)
+		if kept:
+			if row.allow_export and not kept.allow_export:
+				frappe.db.set_value("HelixHR Access Assignment", kept.name, "allow_export", 1)
+			frappe.db.delete("HelixHR Access Assignment", row.name)
+		else:
+			frappe.db.set_value(
+				"HelixHR Access Assignment", row.name, "scope_key", new, update_modified=False
+			)
+	if rows:
+		clear_role_scope_cache()
+
+
 def hr_settings_validate(doc, method=None):
 	"""Refuse the save that would leave a site sending two emails for the
 	same event.

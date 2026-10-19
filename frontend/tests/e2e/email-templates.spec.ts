@@ -19,10 +19,13 @@ test.beforeEach(({}, testInfo) => {
   test.skip(testInfo.project.name !== 'hr', 'runs once, in the hr project')
 })
 
-async function signInAsPortalAdmin(page: Page, baseURL: string | undefined) {
+// Plan 2026-10-19-001 R7: the theme and message templates are global, so
+// only All-orgs authority edits them -- the All-orgs Portal Admin here; the
+// named-org Portal Admin is refused (test below).
+async function signInAsPortalAdmin(page: Page, baseURL: string | undefined, user = 'portal-admin-all@helixhr.test') {
   const api = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
   const login = await api.post('/api/method/login', {
-    form: { usr: 'portal-admin@helixhr.test', pwd: PASSWORD },
+    form: { usr: user, pwd: PASSWORD },
   })
   expect(login.ok()).toBeTruthy()
   const state = await api.storageState()
@@ -40,6 +43,13 @@ test('an HR Manager has no Email templates nav item and is sent home from the pa
   await expect(page.getByRole('link', { name: 'Settings' }).first()).toBeVisible()
   await expect(page.getByRole('link', { name: 'Email templates' })).toHaveCount(0)
 
+  await page.goto('/helixhr/email-templates')
+  await expect(page).not.toHaveURL(/email-templates/)
+  await expect(page.getByTestId('email-template-groups')).toHaveCount(0)
+})
+
+test('a Portal Admin on named orgs has no Email templates page', async ({ page, baseURL }) => {
+  await signInAsPortalAdmin(page, baseURL, 'portal-admin@helixhr.test')
   await page.goto('/helixhr/email-templates')
   await expect(page).not.toHaveURL(/email-templates/)
   await expect(page.getByTestId('email-template-groups')).toHaveCount(0)

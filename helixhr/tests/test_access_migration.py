@@ -311,17 +311,31 @@ class TestPlanRows(UnitTestCase):
 				self.assertTrue(note["resolver_keys"])
 				self.assertLessEqual(set(note["resolver_keys"]), set(SNAPSHOT_KEYS))
 
-	def test_a_gated_system_manager_or_portal_admin_declares_nothing_gained(self):
+	def test_a_gated_system_manager_or_portal_admin_declares_the_gate(self):
+		"""Today's code never gated a System Manager; R4 does: declared, so
+		the parity check can tell it from a bug. Nothing is gained."""
 		plan = _plan(
 			left=_user({"System Manager"}, [_left(A)]),
-			off=_user({"System Manager"}, [_active(A)], enabled=False),
+			off=_user({"System Manager", "IT Team"}, [_active(A)], enabled=False),
+			off_none=_user({"System Manager"}, enabled=False),
 			pa=_user({"HelixHR Portal Admin"}, [_active(A)], company_permissions=[B], enabled=False),
 		)
-		self.assertNotIn("left", plan)
-		self.assertNotIn("off", plan)
-		# Rows kept for reactivation; nothing gained, the gate declared.
-		self.assertEqual(plan["pa"]["widened"], [])
-		self.assertEqual(_fixes(plan, "pa"), {"person_gate"})
+		for user in ("left", "off", "off_none", "pa"):
+			with self.subTest(user=user):
+				self.assertEqual(plan[user]["widened"], [])
+				self.assertEqual(_fixes(plan, user), {"person_gate"})
+		# R5: a System Manager is never assigned; the Portal Admin's rows are
+		# kept for reactivation.
+		self.assertEqual(plan["off"]["rows"], [])
+		self.assertTrue(plan["pa"]["rows"])
+
+	def test_a_system_manager_with_no_employee_who_holds_it_team_widens_the_it_queue(self):
+		"""Today their IT queue is the Active Employee's company: none."""
+		plan = _plan(u=_user({"System Manager", "IT Team"}))
+		self.assertEqual(plan["u"]["rows"], [])
+		self.assertEqual(_widened_keys(plan, "u"), {"system_manager_it_all_orgs"})
+		self.assertEqual(plan["u"]["widened"][0]["resolver_keys"], ["it_scope"])
+		self.assertEqual(plan["u"]["narrowed"], [])
 
 	def test_an_it_admin_with_no_employee_declares_the_empty_queue(self):
 		plan = _plan(u=_user({"IT Team"}))
@@ -482,8 +496,12 @@ U8_SM = "u8-sm@helixhr.test"
 U8_DM = "u8-dm@helixhr.test"
 U8_GRANT = "u8-grant@helixhr.test"
 U8_REPORTS = "u8-reports@helixhr.test"
+U8_SM_OFF = "u8-sm-off@helixhr.test"
+U8_SM_IT = "u8-sm-it@helixhr.test"
+U8_HR_OFF = "u8-hr-off@helixhr.test"
 U8_PROJECT = "_Test U8 Delivery Project"
-_U8_USERS = (U8_IT, U8_HR_ALL, U8_SM, U8_DM, U8_GRANT, U8_REPORTS)
+_U8_USERS = (U8_IT, U8_HR_ALL, U8_SM, U8_DM, U8_GRANT, U8_REPORTS, U8_SM_OFF, U8_SM_IT, U8_HR_OFF)
+_U8_SEEDED = (U8_IT, U8_HR_ALL, U8_SM, U8_DM, U8_SM_OFF, U8_SM_IT, U8_HR_OFF)
 _FLAGS = (
 	"can_configure",
 	"can_handle_requests",
@@ -519,12 +537,15 @@ def _ensure_login(user):
 
 
 def _seed_legacy(company_a, company_b):
-	"""Four people as the pre-switch site holds them:
+	"""Seven people as the pre-switch site holds them:
 
 	- an IT Admin with an Employee in A;
 	- an HR Manager with no Employee (the Desk-only persona);
 	- a System Manager with an Employee in A who also holds IT Team;
-	- a Delivery Manager with an Employee in A, member of one project in B.
+	- a Delivery Manager with an Employee in A, member of one project in B;
+	- a disabled System Manager with an Employee in A;
+	- a System Manager with no Employee who holds IT Team;
+	- a disabled HR Manager with an Employee in A.
 	"""
 	make_test_user(U8_IT, company_a)
 	_set_legacy_roles(U8_IT, ["IT Team"])
@@ -536,6 +557,18 @@ def _seed_legacy(company_a, company_b):
 	make_test_user(U8_DM, company_a)
 	_set_legacy_roles(U8_DM, ["HelixHR Delivery Manager"])
 	make_test_project(company_b, U8_PROJECT, members=[U8_DM])
+	make_test_user(U8_SM_OFF, company_a)
+	_set_legacy_roles(U8_SM_OFF, ["System Manager"])
+	_ensure_login(U8_SM_IT)
+	frappe.db.delete("Employee", {"user_id": U8_SM_IT})
+	_set_legacy_roles(U8_SM_IT, ["System Manager", "IT Team"])
+	make_test_user(U8_HR_OFF, company_a)
+	_set_legacy_roles(U8_HR_OFF, ["HR Manager"])
+	for user in (U8_SM_OFF, U8_HR_OFF):
+		# Not `User.save`: its hooks would expire exports, which is not the
+		# point here. The gate re-reads `enabled`.
+		frappe.db.set_value("User", user, "enabled", 0)
+		clear_role_scope_cache(user)
 
 
 def _none():
@@ -560,7 +593,59 @@ def _old_answers(company_a, companies):
 	reports, and the old "assigned" tier ran them for the home company."""
 	unscoped = {"kind": "unscoped", "company": None}
 	home = {"kind": "company", "company": company_a}
+	# Today's code never read User.enabled: a disabled login answered like
+	# an enabled one.
+	anchored_sm = {
+		"admin": home,
+		"read": home,
+		"project": home,
+		"project_read": home,
+		"portal_admin": home,
+		"can_admin_portal": True,
+		"reports": _reports([company_a]),
+		"it_scope": [],
+		"oversight": {"hr_manager": True, "companies": [company_a]},
+		"people_access_reach": companies,
+		"flags": _flags(**dict.fromkeys(_FLAGS, 1)),
+	}
+	hr_flags = _flags(
+		can_configure=1,
+		can_handle_requests=1,
+		can_run_reports=1,
+		can_oversee_timesheets=1,
+		can_see_all_pending=1,
+		can_manage_documents=1,
+	)
 	return {
+		U8_SM_OFF: anchored_sm,
+		# No Employee: unscoped, and an empty IT queue (no session company).
+		U8_SM_IT: {
+			"admin": unscoped,
+			"read": unscoped,
+			"project": unscoped,
+			"project_read": unscoped,
+			"portal_admin": unscoped,
+			"can_admin_portal": True,
+			"reports": _reports(companies),
+			"it_scope": [],
+			"oversight": {"hr_manager": True, "companies": None},
+			"people_access_reach": companies,
+			"flags": _flags(**dict.fromkeys(_FLAGS, 1)),
+		},
+		U8_HR_OFF: {
+			"admin": home,
+			"read": home,
+			"project": home,
+			"project_read": home,
+			# Answered for an HR Manager too; compared behind can_admin_portal.
+			"portal_admin": home,
+			"can_admin_portal": False,
+			"reports": _reports([company_a]),
+			"it_scope": [],
+			"oversight": {"hr_manager": True, "companies": [company_a]},
+			"people_access_reach": None,
+			"flags": hr_flags,
+		},
 		U8_IT: {
 			"admin": _none(),
 			"read": _none(),
@@ -586,14 +671,7 @@ def _old_answers(company_a, companies):
 			"it_scope": [],
 			"oversight": {"hr_manager": True, "companies": None},
 			"people_access_reach": None,
-			"flags": _flags(
-				can_configure=1,
-				can_handle_requests=1,
-				can_run_reports=1,
-				can_oversee_timesheets=1,
-				can_see_all_pending=1,
-				can_manage_documents=1,
-			),
+			"flags": hr_flags,
 		},
 		# Anchored System Manager: every HR answer limited to their company.
 		U8_SM: {
@@ -748,6 +826,22 @@ class TestMigrate(_MigrationCase):
 		# Only Org viewer is ever added as a Frappe role.
 		self.assertEqual({row.role for row in frappe.get_doc("User", U8_REPORTS).roles}, roles)
 
+	def test_the_patch_ensures_both_new_roles_then_migrates(self):
+		"""The patch runs before fixtures sync, so it creates the two roles
+		itself; then it writes the rows."""
+		from helixhr.patches.v1_0 import migrate_access_assignments as module
+
+		_seed_legacy(self.company_a, self.company_b)
+		with patch.object(module, "_ensure_role", wraps=module._ensure_role) as ensure:
+			module.execute()
+		self.assertEqual(
+			[call.args[0] for call in ensure.call_args_list], ["HelixHR Org Viewer", "HelixHR Access Admin"]
+		)
+		for role in ("HelixHR Org Viewer", "HelixHR Access Admin"):
+			self.assertTrue(frappe.db.exists("Role", role), role)
+		self.assertEqual(self._rows(U8_HR_ALL), {("HR Manager", ALL_ORGS_SCOPE_KEY, 0, "migrated")})
+		self.assertEqual(self._rows(U8_IT), {("IT Team", self.company_a, 0, "migrated")})
+
 	def test_migrate_expires_no_export(self):
 		_seed_legacy(self.company_a, self.company_b)
 		ready = frappe.db.count("HelixHR Report Export", {"status": "Ready"})
@@ -785,7 +879,7 @@ class TestParityCheck(_MigrationCase):
 		return {item["key"]: item["label"] for item in report["people"].get(user, [])}
 
 	def test_seeded_people_show_zero_undeclared_differences(self):
-		result, report = self._check([U8_IT, U8_HR_ALL, U8_SM, U8_DM])
+		result, report = self._check(list(_U8_SEEDED))
 		self.assertEqual(result["undeclared"], 0, report)
 		self.assertEqual(report["counts"]["undeclared"], 0)
 		# Nothing moved for the IT Admin or the Desk-only HR Manager.
@@ -800,6 +894,55 @@ class TestParityCheck(_MigrationCase):
 		self.assertEqual(labels["it_scope"], "declared widening")
 		self.assertEqual(set(labels.values()), {"declared widening"})
 		self.assertTrue(all(item["notes"] == ["system_manager_unscoped"] for item in report["people"][U8_SM]))
+
+	def test_a_gated_system_manager_or_hr_manager_narrows_as_a_security_fix(self):
+		"""Today's code ignored a disabled login; R4 zeroes it (person_gate).
+		Every move is a narrowing, so every one is the declared fix."""
+		_result, report = self._check([U8_SM_OFF, U8_HR_OFF])
+		for user in (U8_SM_OFF, U8_HR_OFF):
+			with self.subTest(user=user):
+				items = report["people"][user]
+				self.assertEqual({item["label"] for item in items}, {"security fix"}, items)
+				self.assertTrue(all(item["notes"] == ["person_gate"] for item in items))
+				self.assertEqual(self._labels(report, user)["admin"], "security fix")
+
+	def test_a_system_manager_with_no_employee_widens_only_the_it_queue(self):
+		_result, report = self._check([U8_SM_IT])
+		self.assertEqual(
+			report["people"][U8_SM_IT],
+			[
+				{
+					"key": "it_scope",
+					"label": "declared widening",
+					"direction": "wider",
+					"notes": ["system_manager_it_all_orgs"],
+					"before": [],
+					"after": self.companies,
+				}
+			],
+		)
+
+	def test_a_narrowing_under_a_widening_note_is_undeclared(self):
+		"""The Delivery Manager's note declares ``project`` wider. Had today's
+		answer been every project, the org scope after is narrower: that is
+		a regression, not the declared widening."""
+		self.old[U8_DM] = {**self.old[U8_DM], "project": {"kind": "unscoped", "company": None}}
+		result, report = self._check([U8_DM])
+		self.assertEqual(self._labels(report, U8_DM)["project"], "undeclared")
+		self.assertEqual(result["undeclared"], 1)
+		# The other keys still widen, and stay declared.
+		self.assertEqual(self._labels(report, U8_DM)["project_read"], "declared widening")
+
+	def test_a_flag_is_judged_on_its_own(self):
+		"""The System Manager's note names ``flags`` for widening: a flag it
+		gains is declared, one it loses beside it is not."""
+		self.old[U8_SM] = {**self.old[U8_SM], "flags": {**self.old[U8_SM]["flags"], "can_configure": False}}
+		with patch.object(api, "_can_manage_documents", return_value=False):
+			_result, report = self._check([U8_SM])
+		labels = self._labels(report, U8_SM)
+		self.assertEqual(labels["flags.can_configure"], "declared widening")
+		self.assertEqual(labels["flags.can_manage_documents"], "undeclared")
+		self.assertNotIn("flags", labels)
 
 	def test_a_delivery_managers_widening_is_declared(self):
 		_result, report = self._check([U8_DM])
