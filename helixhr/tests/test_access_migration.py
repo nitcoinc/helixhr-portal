@@ -18,8 +18,10 @@ from helixhr.tests.utils import (
 	create_test_company,
 	ensure_baseline_company,
 	ensure_test_company,
+	make_test_hr_manager_employee,
 	make_test_hr_user,
 	make_test_it_user,
+	make_test_portal_admin,
 	make_test_user,
 )
 
@@ -110,11 +112,13 @@ class TestPlanRows(UnitTestCase):
 		plan = _plan(u=_user({"HR Manager", "IT Team"}, [_left(A)]))
 		self.assertEqual(_rows(plan, "u"), {("HR Manager", A): 0, ("IT Team", A): 0})
 		self.assertEqual(plan["u"]["widened"], [])
+		self.assertEqual(_fixes(plan, "u"), {"person_gate"})
 
 	def test_a_disabled_user_keeps_rows_and_gains_nothing(self):
 		plan = _plan(u=_user({"HR User", "IT Team"}, [_active(A)], enabled=False))
 		self.assertEqual(_rows(plan, "u"), {("HR User", A): 0, ("IT Team", A): 0})
 		self.assertEqual(plan["u"]["widened"], [])
+		self.assertEqual(_fixes(plan, "u"), {"person_gate"})
 
 	# --- portal roles -----------------------------------------------------------
 
@@ -129,7 +133,7 @@ class TestPlanRows(UnitTestCase):
 	def test_a_left_portal_admin_loses_admin_as_a_security_fix(self):
 		plan = _plan(u=_user({"HelixHR Portal Admin"}, [_left(A)], company_permissions=[B]))
 		self.assertEqual(_rows(plan, "u"), {("HelixHR Portal Admin", A): 0, ("HelixHR Portal Admin", B): 0})
-		self.assertEqual(_fixes(plan, "u"), {"left_portal_admin"})
+		self.assertEqual(_fixes(plan, "u"), {"person_gate"})
 		self.assertEqual(plan["u"]["widened"], [])
 
 	def test_report_manager_maps_to_reports_with_export(self):
@@ -244,13 +248,33 @@ class TestPlanRows(UnitTestCase):
 			f=_user({"System Manager"}, [_active(C)]),
 			g=_user({"HelixHR Portal Admin"}, [_left(A)]),
 		)
-		self.assertEqual(set(SECURITY_FIXES), {"left_portal_admin", "global_settings"})
+		self.assertEqual(set(SECURITY_FIXES), {"person_gate", "global_settings"})
 		for answer in plan.values():
 			for note in answer["widened"]:
 				self.assertTrue(note["key"] and note["resolver_keys"] and note["text"])
+				# A typo here would hide a real change from the parity check.
+				self.assertLessEqual(set(note["resolver_keys"]), set(SNAPSHOT_KEYS))
 			for note in answer["narrowed"]:
 				self.assertIn(note["fix"], SECURITY_FIXES)
 				self.assertTrue(note["resolver_keys"])
+				self.assertLessEqual(set(note["resolver_keys"]), set(SNAPSHOT_KEYS))
+
+	def test_a_gated_system_manager_or_portal_admin_declares_nothing_gained(self):
+		plan = _plan(
+			left=_user({"System Manager"}, [_left(A)]),
+			off=_user({"System Manager"}, [_active(A)], enabled=False),
+			pa=_user({"HelixHR Portal Admin"}, [_active(A)], company_permissions=[B], enabled=False),
+		)
+		self.assertNotIn("left", plan)
+		self.assertNotIn("off", plan)
+		# Rows kept for reactivation; nothing gained, the gate declared.
+		self.assertEqual(plan["pa"]["widened"], [])
+		self.assertEqual(_fixes(plan, "pa"), {"person_gate"})
+
+	def test_a_grant_on_a_person_with_no_employee_writes_nothing(self):
+		"""Today a grant needs its saved Employee to apply."""
+		plan = _plan(u=_user({"Employee"}, grant=self._grant("All data", [B])))
+		self.assertNotIn("u", plan)
 
 
 class TestCollectState(IntegrationTestCase):
@@ -316,7 +340,22 @@ class TestSnapshotKeys(IntegrationTestCase):
 		self.assertEqual(users[it_user]["it_scope"], [company])
 		self.assertEqual(users[hr_user]["oversight"], {"hr_manager": False, "companies": [company]})
 		self.assertTrue(users[hr_user]["flags"]["can_oversee_timesheets"])
+		self.assertFalse(users[hr_user]["flags"]["can_see_all_pending"])
 		self.assertIsNone(users[hr_user]["people_access_reach"])
+		self.assertEqual(users[hr_user]["it_scope"], [])
+
+	def test_a_portal_admins_reach_and_an_hr_managers_flags_are_recorded(self):
+		from helixhr.access_migration import snapshot
+
+		frappe.set_user("Administrator")
+		company = ensure_test_company()
+		_, admin = make_test_portal_admin(company)
+		_, hr_manager = make_test_hr_manager_employee()
+		users = snapshot([admin, hr_manager])["users"]
+		self.assertEqual(users[admin]["people_access_reach"], sorted(users[admin]["people_access_reach"]))
+		self.assertIn(company, users[admin]["people_access_reach"])
+		self.assertTrue(users[hr_manager]["flags"]["can_configure"])
+		self.assertTrue(users[hr_manager]["flags"]["can_see_all_pending"])
 
 	def test_recipients_are_recorded_per_org(self):
 		from helixhr.access_migration import snapshot
@@ -324,8 +363,10 @@ class TestSnapshotKeys(IntegrationTestCase):
 		frappe.set_user("Administrator")
 		company = ensure_test_company()
 		_, it_user = make_test_it_user()
+		_, hr_manager = make_test_hr_manager_employee()
 		recipients = snapshot([])["recipients"]
 		self.assertIn(it_user, recipients[company]["IT Team"])
+		self.assertIn(hr_manager, recipients[company]["HR Manager"])
 
 
 class TestDryRun(IntegrationTestCase):
@@ -353,7 +394,23 @@ class TestDryRun(IntegrationTestCase):
 			snapshot = json.load(handle)
 		self.assertTrue(snapshot["users"])
 		some = next(iter(snapshot["users"].values()))
-		self.assertEqual(set(some), set(SNAPSHOT_KEYS))
+		self.assertEqual(
+			set(some),
+			{
+				"admin",
+				"read",
+				"project",
+				"project_read",
+				"portal_admin",
+				"can_admin_portal",
+				"reports",
+				"it_scope",
+				"oversight",
+				"people_access_reach",
+				"flags",
+			},
+		)
+		self.assertEqual(set(SNAPSHOT_KEYS), set(some))
 		# Recipients are per org, not per person (U12).
 		self.assertTrue(snapshot["recipients"])
 		some_org = next(iter(snapshot["recipients"].values()))

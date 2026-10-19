@@ -1556,9 +1556,9 @@ It reads only, and prints the two files it wrote under
   Manager's "N projects today, M after", an HR User or Portal Admin with no
   Employee, a System Manager with an Employee becoming unscoped).
   **narrowed_by_design** names a security fix from
-  `access_migration.SECURITY_FIXES` (a Left Portal Admin; a named-org Portal
-  Admin losing the global matrix, email theme and templates), never anything
-  else. **unchanged** is the rest. One person can be both widened and narrowed.
+  `access_migration.SECURITY_FIXES` (a disabled login or an all-Left person,
+  a Left Portal Admin included, reaching nothing; a named-org Portal Admin
+  losing the global matrix, email theme and templates), never anything else. **unchanged** is the rest. One person can be both widened and narrowed.
   Rows for a disabled user or a Left person are listed too: the switch keeps
   them so reactivation restores access, as it does today.
 - `snapshot-<stamp>.json`: every user's scope answers today (admin, read,

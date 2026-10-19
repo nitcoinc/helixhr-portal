@@ -79,14 +79,17 @@ SNAPSHOT_KEYS = (
 # The deliberate narrowings, by key, with the snapshot keys each moves.
 # Anything else that narrows is a bug.
 SECURITY_FIXES = {
-	"left_portal_admin": "A Left or Inactive Portal Admin no longer administers the portal.",
+	"person_gate": (
+		"A disabled login, or a person whose Employee records are all Left or Inactive, reaches "
+		"nothing in the portal -- a Left Portal Admin included. Reactivating them restores it."
+	),
 	"global_settings": (
 		"The report matrix, email theme and message templates need All-orgs authority; "
 		"a Portal Admin on named orgs keeps its orgs' admin."
 	),
 }
 _FIX_KEYS = {
-	"left_portal_admin": ["can_admin_portal", "portal_admin", "people_access_reach", "flags"],
+	"person_gate": list(SNAPSHOT_KEYS),
 	"global_settings": ["flags"],
 }
 
@@ -168,13 +171,14 @@ def _plan_user(info, known, org_projects):
 						"project_read",
 						"portal_admin",
 						"reports",
+						"it_scope",
 						"oversight",
 						"flags",
 					],
 					f"System Manager: portal HR reach widens from {home} to all orgs.",
 				)
 			)
-		return _answer(home if state == "active" else None, rows, widened, narrowed)
+		return _answer(home, rows, widened, narrowed)
 
 	for role in _HOME_ROLES:
 		if role not in roles:
@@ -220,7 +224,8 @@ def _plan_user(info, known, org_projects):
 						f"Portal Admin in {company}: full admin (today read and grant only).",
 					)
 				)
-		narrowed.append(_narrowed("left_portal_admin" if state == "inactive" else "global_settings"))
+		if state == "active":
+			narrowed.append(_narrowed("global_settings"))
 
 	if DELIVERY_MANAGER in roles and state != "none":
 		for company in sorted(info["project_orgs"]):
@@ -254,8 +259,11 @@ def _plan_user(info, known, org_projects):
 			if company in known:
 				add(_GRANT_ROLE[grant["level"]], company, export=grant["allow_export"])
 
-	if gated:
-		widened = []
+	if gated and rows:
+		# Today the resolvers mostly ignore a disabled login and an all-Left
+		# person; after the switch the person gate (R4) zeroes them. Declared,
+		# so the parity check can tell it from a bug.
+		widened, narrowed = [], [_narrowed("person_gate")]
 	return _answer(home, rows, widened, narrowed)
 
 
