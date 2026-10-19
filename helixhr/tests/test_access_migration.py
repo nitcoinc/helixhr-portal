@@ -1,29 +1,49 @@
-"""Plan 2026-10-18-001 U5 (R26, R27) and plan 2026-10-19-001 U12: the pure mapping from
-today's access to assignment rows, the read-only dry-run and the resolver
-snapshot.
+"""Plan 2026-10-18-001 U5 (R26, R27) and plan 2026-10-19-001 U12 and U8: the pure
+mapping from today's access to assignment rows, the read-only dry-run, the
+resolver snapshot, the migration that writes the rows and the parity check
+that proves the switch.
 
 `plan_rows` takes a plain state dict, so the mapping table is tested without
-a database. The dry-run and snapshot are tested on the site.
+a database. The dry-run, snapshot, migration and parity check are tested on
+the site.
 """
 
 import json
 import os
 import stat
+import tempfile
+from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase, UnitTestCase
 
-from helixhr.access_migration import SECURITY_FIXES, SNAPSHOT_KEYS, collect_state, dry_run, plan_rows
+from helixhr import api
+from helixhr import utils as helixhr_utils
+from helixhr.access_migration import (
+	DECLARED_RECIPIENT_CHANGES,
+	SECURITY_FIXES,
+	SNAPSHOT_KEYS,
+	collect_state,
+	dry_run,
+	migrate,
+	parity_check,
+	plan_rows,
+	snapshot,
+)
+from helixhr.reports import CATALOG
 from helixhr.tests.utils import (
 	create_test_company,
 	ensure_baseline_company,
 	ensure_test_company,
+	make_test_company_grant,
 	make_test_hr_manager_employee,
 	make_test_hr_user,
 	make_test_it_user,
 	make_test_portal_admin,
+	make_test_project,
 	make_test_user,
 )
+from helixhr.utils import ALL_ORGS_SCOPE_KEY, clear_role_scope_cache
 
 SEEDED_ADMIN = "u5-portal-admin@helixhr.test"
 THIRD_COMPANY = "_Test Migration C"
@@ -142,7 +162,16 @@ class TestPlanRows(UnitTestCase):
 
 	def test_roles_that_reach_nothing_without_an_employee_get_no_rows(self):
 		plan = _plan(u=_user({"HelixHR Report Manager", "IT Team"}))
-		self.assertNotIn("u", plan)
+		self.assertEqual(plan["u"]["rows"], [])
+		self.assertNotIn("r", _plan(r=_user({"HelixHR Report Manager"})))
+
+	def test_an_unscoped_hr_manager_leaving_it_mail_is_a_declared_recipient_change(self):
+		from helixhr.access_migration import _recipient_rule
+
+		info = _user({"HR Manager", "IT Team"})
+		self.assertEqual(_recipient_rule("removed", "u", A, info, "IT Team"), "unscoped_hr_not_it")
+		self.assertIsNone(_recipient_rule("removed", "u", A, info, "HR Manager"))
+		self.assertIsNone(_recipient_rule("added", "u", A, info, "IT Team"))
 
 	def test_notification_manager_is_always_all_orgs(self):
 		"""Message templates are global, so the role is All-orgs only (R2)."""
@@ -225,6 +254,29 @@ class TestPlanRows(UnitTestCase):
 			_rows(plan, "u"), {("HelixHR Report Manager", A): 1, ("HelixHR Report Manager", B): 0}
 		)
 
+	def test_a_reports_only_grant_declares_every_catalog_report(self):
+		"""U8: today's grant tier runs company-scoped entries only."""
+		plan = _plan(u=_user({"Employee"}, [_active(A)], grant=self._grant("Reports only", [B])))
+		self.assertEqual(_widened_keys(plan, "u"), {"reports_grant_all_catalog"})
+		self.assertEqual(plan["u"]["widened"][0]["resolver_keys"], ["reports"])
+		viewer = _plan(u=_user({"Employee"}, [_active(A)], grant=self._grant("All data", [B])))
+		self.assertEqual(viewer["u"]["widened"], [])
+
+	def test_a_delivery_manager_whose_count_is_unchanged_still_declares_the_shape(self):
+		"""Today's scope is membership ("assigned"), after it is the orgs."""
+		plan = plan_rows(
+			{
+				"companies": COMPANIES,
+				"org_projects": {A: 1},
+				"users": {"u": _user({"HelixHR Delivery Manager"}, [_active(A)], project_orgs={A: 1})},
+			}
+		)
+		self.assertEqual(_widened_keys(plan, "u"), {"delivery_manager_org_projects"})
+
+	def test_a_portal_admins_extra_org_declares_people_access_reach(self):
+		plan = _plan(u=_user({"HelixHR Portal Admin"}, [_active(A)], company_permissions=[B]))
+		self.assertIn("people_access_reach", plan["u"]["widened"][0]["resolver_keys"])
+
 	def test_a_disabled_or_moved_grant_writes_no_rows(self):
 		"""Neither reaches anything today, so neither becomes access."""
 		disabled = _plan(u=_user({"Employee"}, [_active(A)], grant=self._grant("All data", [B], enabled=0)))
@@ -248,7 +300,7 @@ class TestPlanRows(UnitTestCase):
 			f=_user({"System Manager"}, [_active(C)]),
 			g=_user({"HelixHR Portal Admin"}, [_left(A)]),
 		)
-		self.assertEqual(set(SECURITY_FIXES), {"person_gate", "global_settings"})
+		self.assertEqual(set(SECURITY_FIXES), {"person_gate", "global_settings", "empty_it_queue"})
 		for answer in plan.values():
 			for note in answer["widened"]:
 				self.assertTrue(note["key"] and note["resolver_keys"] and note["text"])
@@ -270,6 +322,11 @@ class TestPlanRows(UnitTestCase):
 		# Rows kept for reactivation; nothing gained, the gate declared.
 		self.assertEqual(plan["pa"]["widened"], [])
 		self.assertEqual(_fixes(plan, "pa"), {"person_gate"})
+
+	def test_an_it_admin_with_no_employee_declares_the_empty_queue(self):
+		plan = _plan(u=_user({"IT Team"}))
+		self.assertEqual(plan["u"]["rows"], [])
+		self.assertEqual(_fixes(plan, "u"), {"empty_it_queue"})
 
 	def test_a_grant_on_a_person_with_no_employee_writes_nothing(self):
 		"""Today a grant needs its saved Employee to apply."""
@@ -415,3 +472,385 @@ class TestDryRun(IntegrationTestCase):
 		self.assertTrue(snapshot["recipients"])
 		some_org = next(iter(snapshot["recipients"].values()))
 		self.assertEqual(set(some_org), {"HR Manager", "IT Team"})
+
+
+# --- U8: the migration and the parity check --------------------------------------
+
+U8_IT = "u8-it@helixhr.test"
+U8_HR_ALL = "u8-hr-all@helixhr.test"
+U8_SM = "u8-sm@helixhr.test"
+U8_DM = "u8-dm@helixhr.test"
+U8_GRANT = "u8-grant@helixhr.test"
+U8_REPORTS = "u8-reports@helixhr.test"
+U8_PROJECT = "_Test U8 Delivery Project"
+_U8_USERS = (U8_IT, U8_HR_ALL, U8_SM, U8_DM, U8_GRANT, U8_REPORTS)
+_FLAGS = (
+	"can_configure",
+	"can_handle_requests",
+	"can_edit_email_templates",
+	"can_run_reports",
+	"can_oversee_timesheets",
+	"can_see_all_pending",
+	"can_manage_documents",
+)
+
+
+def _set_legacy_roles(user, roles):
+	"""``user`` holding exactly ``roles`` beyond Employee, as Desk would set
+	them before Release B: Frappe roles, no assignment rows, no change log."""
+	doc = frappe.get_doc("User", user)
+	managed = {*roles, "IT Team", "HR Manager", "HR User", "System Manager"}
+	managed |= {"HelixHR Delivery Manager", "HelixHR Report Manager", "HelixHR Org Viewer"}
+	doc.set("roles", [row for row in doc.roles if row.role not in managed])
+	for role in roles:
+		doc.append("roles", {"role": role})
+	doc.save(ignore_permissions=True)
+	frappe.db.delete("HelixHR Access Assignment", {"user": user})
+	frappe.db.delete("HelixHR Access Change", {"target_user": user})
+	frappe.clear_cache(user=user)
+	clear_role_scope_cache(user)
+
+
+def _ensure_login(user):
+	if not frappe.db.exists("User", user):
+		frappe.get_doc(
+			{"doctype": "User", "email": user, "first_name": user.split("@")[0], "send_welcome_email": 0}
+		).insert(ignore_permissions=True)
+
+
+def _seed_legacy(company_a, company_b):
+	"""Four people as the pre-switch site holds them:
+
+	- an IT Admin with an Employee in A;
+	- an HR Manager with no Employee (the Desk-only persona);
+	- a System Manager with an Employee in A who also holds IT Team;
+	- a Delivery Manager with an Employee in A, member of one project in B.
+	"""
+	make_test_user(U8_IT, company_a)
+	_set_legacy_roles(U8_IT, ["IT Team"])
+	_ensure_login(U8_HR_ALL)
+	frappe.db.delete("Employee", {"user_id": U8_HR_ALL})
+	_set_legacy_roles(U8_HR_ALL, ["HR Manager"])
+	make_test_user(U8_SM, company_a)
+	_set_legacy_roles(U8_SM, ["System Manager", "IT Team"])
+	make_test_user(U8_DM, company_a)
+	_set_legacy_roles(U8_DM, ["HelixHR Delivery Manager"])
+	make_test_project(company_b, U8_PROJECT, members=[U8_DM])
+
+
+def _none():
+	return {"kind": "none", "company": None}
+
+
+def _flags(**on):
+	return {flag: flag in on for flag in _FLAGS}
+
+
+def _reports(companies):
+	return {entry["key"]: [[company, True] for company in companies] for entry in CATALOG}
+
+
+def _old_answers(company_a, companies):
+	"""What the Release A resolvers answered for `_seed_legacy`'s people,
+	written out by hand from the old rules rather than run: the parity check
+	must prove the new code against the old answers, not against itself.
+
+	The Delivery Manager's report answers are the seeded report matrix's
+	(`seed_report_access`): Delivery Manager runs and exports the two project
+	reports, and the old "assigned" tier ran them for the home company."""
+	unscoped = {"kind": "unscoped", "company": None}
+	home = {"kind": "company", "company": company_a}
+	return {
+		U8_IT: {
+			"admin": _none(),
+			"read": _none(),
+			"project": {"kind": "none"},
+			"project_read": {"kind": "none"},
+			"portal_admin": _none(),
+			"can_admin_portal": False,
+			"reports": {},
+			"it_scope": [company_a],
+			"oversight": None,
+			"people_access_reach": None,
+			"flags": _flags(can_handle_requests=1),
+		},
+		# Desk-only HR Manager: unscoped by the role alone.
+		U8_HR_ALL: {
+			"admin": unscoped,
+			"read": unscoped,
+			"project": unscoped,
+			"project_read": unscoped,
+			"portal_admin": unscoped,
+			"can_admin_portal": False,
+			"reports": _reports(companies),
+			"it_scope": [],
+			"oversight": {"hr_manager": True, "companies": None},
+			"people_access_reach": None,
+			"flags": _flags(
+				can_configure=1,
+				can_handle_requests=1,
+				can_run_reports=1,
+				can_oversee_timesheets=1,
+				can_see_all_pending=1,
+				can_manage_documents=1,
+			),
+		},
+		# Anchored System Manager: every HR answer limited to their company.
+		U8_SM: {
+			"admin": home,
+			"read": home,
+			"project": home,
+			"project_read": home,
+			"portal_admin": home,
+			"can_admin_portal": True,
+			"reports": _reports([company_a]),
+			"it_scope": [company_a],
+			"oversight": {"hr_manager": True, "companies": [company_a]},
+			"people_access_reach": companies,
+			"flags": _flags(**dict.fromkeys(_FLAGS, 1)),
+		},
+		U8_DM: {
+			"admin": _none(),
+			"read": _none(),
+			"project": {"kind": "assigned", "user": U8_DM},
+			"project_read": {"kind": "assigned", "user": U8_DM},
+			"portal_admin": _none(),
+			"can_admin_portal": False,
+			"reports": {key: [[company_a, True]] for key in ("hours_by_project", "project_timesheet")},
+			"it_scope": [],
+			"oversight": None,
+			"people_access_reach": None,
+			"flags": _flags(can_run_reports=1),
+		},
+	}
+
+
+class _MigrationCase(IntegrationTestCase):
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company_a = ensure_test_company()
+		self.company_b = ensure_baseline_company()
+		self.companies = frappe.get_all("Company", pluck="name", order_by="name asc")
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		clear_role_scope_cache()
+
+	def _rows(self, user):
+		return {
+			(row.role, ALL_ORGS_SCOPE_KEY if row.all_orgs else row.company, row.allow_export, row.origin)
+			for row in frappe.get_all(
+				"HelixHR Access Assignment",
+				filters={"user": user},
+				fields=["role", "all_orgs", "company", "allow_export", "origin"],
+			)
+		}
+
+	def _has_role(self, user, role):
+		return bool(frappe.db.exists("Has Role", {"parenttype": "User", "parent": user, "role": role}))
+
+
+class TestMigrate(_MigrationCase):
+	"""U8: the patch writes the planned rows once, adds only the Org viewer
+	Frappe role, and leaves alone anyone the save has touched."""
+
+	def test_a_no_employee_hr_manager_gets_an_all_orgs_row(self):
+		_seed_legacy(self.company_a, self.company_b)
+		result = migrate()
+		self.assertIn(U8_HR_ALL, result["migrated"])
+		self.assertEqual(self._rows(U8_HR_ALL), {("HR Manager", ALL_ORGS_SCOPE_KEY, 0, "migrated")})
+		self.assertFalse(frappe.db.get_value("HelixHR Access Assignment", {"user": U8_HR_ALL}, "company"))
+		self.assertEqual(self._rows(U8_IT), {("IT Team", self.company_a, 0, "migrated")})
+		self.assertEqual(
+			self._rows(U8_DM),
+			{
+				("HelixHR Delivery Manager", self.company_a, 0, "migrated"),
+				("HelixHR Delivery Manager", self.company_b, 0, "migrated"),
+			},
+		)
+		# R5: a System Manager is never assigned.
+		self.assertEqual(self._rows(U8_SM), set())
+
+	def test_a_rerun_changes_nothing(self):
+		_seed_legacy(self.company_a, self.company_b)
+		migrate()
+		rows = frappe.get_all("HelixHR Access Assignment", fields=["name", "modified"], order_by="name")
+		roles = frappe.db.count("Has Role", {"parenttype": "User"})
+		again = migrate()
+		self.assertEqual(again["migrated"], [])
+		self.assertIn(U8_IT, again["skipped"])
+		self.assertEqual(
+			frappe.get_all("HelixHR Access Assignment", fields=["name", "modified"], order_by="name"), rows
+		)
+		self.assertEqual(frappe.db.count("Has Role", {"parenttype": "User"}), roles)
+
+	def test_a_person_cleared_through_the_save_is_not_recreated(self):
+		_seed_legacy(self.company_a, self.company_b)
+		migrate()
+		api.save_person_access(U8_IT, [], api.access_token(U8_IT))
+		self.assertEqual(self._rows(U8_IT), set())
+		# Desk gives the Frappe role back afterwards: drift, not a migration.
+		frappe.get_doc("User", U8_IT).add_roles("IT Team")
+		frappe.clear_cache(user=U8_IT)
+		self.assertIn(U8_IT, plan_rows(collect_state()))
+		result = migrate()
+		self.assertNotIn(U8_IT, result["migrated"])
+		self.assertIn(U8_IT, result["skipped"])
+		self.assertEqual(self._rows(U8_IT), set())
+
+	def test_an_all_data_grant_becomes_org_viewer_rows_and_the_org_viewer_role(self):
+		make_test_user(U8_GRANT, self.company_a)
+		_set_legacy_roles(U8_GRANT, [])
+		grant = make_test_company_grant(
+			U8_GRANT, [self.company_a, self.company_b], level="All data", allow_export=1
+		)
+		# The fixture also writes the rows; take the site back to before the switch.
+		frappe.db.delete("HelixHR Access Assignment", {"user": U8_GRANT})
+		frappe.db.delete("Has Role", {"parent": U8_GRANT, "role": "HelixHR Org Viewer"})
+		frappe.clear_cache(user=U8_GRANT)
+		before = frappe.db.get_value("HelixHR Company Access", grant, ["enabled", "modified"])
+		permissions = frappe.get_all("User Permission", filters={"user": U8_GRANT}, pluck="name")
+
+		migrate()
+		self.assertEqual(
+			self._rows(U8_GRANT),
+			{
+				("HelixHR Org Viewer", self.company_a, 1, "migrated"),
+				("HelixHR Org Viewer", self.company_b, 1, "migrated"),
+			},
+		)
+		self.assertTrue(self._has_role(U8_GRANT, "HelixHR Org Viewer"))
+		# Never the legacy grant or a User Permission.
+		self.assertEqual(
+			frappe.db.get_value("HelixHR Company Access", grant, ["enabled", "modified"]), before
+		)
+		self.assertEqual(
+			frappe.get_all("User Permission", filters={"user": U8_GRANT}, pluck="name"), permissions
+		)
+
+	def test_a_reports_only_grant_merges_with_report_manager_by_or(self):
+		make_test_user(U8_REPORTS, self.company_a)
+		_set_legacy_roles(U8_REPORTS, ["HelixHR Report Manager"])
+		make_test_company_grant(
+			U8_REPORTS, [self.company_a, self.company_b], level="Reports only", allow_export=0
+		)
+		frappe.db.delete("HelixHR Access Assignment", {"user": U8_REPORTS})
+		roles = {row.role for row in frappe.get_doc("User", U8_REPORTS).roles}
+
+		migrate()
+		self.assertEqual(
+			self._rows(U8_REPORTS),
+			{
+				("HelixHR Report Manager", self.company_a, 1, "migrated"),
+				("HelixHR Report Manager", self.company_b, 0, "migrated"),
+			},
+		)
+		# Only Org viewer is ever added as a Frappe role.
+		self.assertEqual({row.role for row in frappe.get_doc("User", U8_REPORTS).roles}, roles)
+
+	def test_migrate_expires_no_export(self):
+		_seed_legacy(self.company_a, self.company_b)
+		ready = frappe.db.count("HelixHR Report Export", {"status": "Ready"})
+		module = "helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export"
+		with patch(f"{module}.expire_export") as expire:
+			migrate()
+		expire.assert_not_called()
+		self.assertEqual(frappe.db.count("HelixHR Report Export", {"status": "Ready"}), ready)
+
+
+class TestParityCheck(_MigrationCase):
+	"""U8 (R26, KTD9): after the switch, every answer that moved from the
+	stored snapshot is declared by a structured note, a named fix or a
+	recipient rule -- or reported as undeclared."""
+
+	def setUp(self):
+		super().setUp()
+		_seed_legacy(self.company_a, self.company_b)
+		migrate()
+		self.old = _old_answers(self.company_a, self.companies)
+
+	def _check(self, users, recipients=None):
+		handle, path = tempfile.mkstemp(suffix=".json")
+		with os.fdopen(handle, "w") as out:
+			json.dump(
+				{"users": {user: self.old[user] for user in users}, "recipients": recipients or {}}, out
+			)
+		self.addCleanup(os.remove, path)
+		result = parity_check(path)
+		self.addCleanup(os.remove, result["report"])
+		with open(result["report"]) as report:
+			return result, json.load(report)
+
+	def _labels(self, report, user):
+		return {item["key"]: item["label"] for item in report["people"].get(user, [])}
+
+	def test_seeded_people_show_zero_undeclared_differences(self):
+		result, report = self._check([U8_IT, U8_HR_ALL, U8_SM, U8_DM])
+		self.assertEqual(result["undeclared"], 0, report)
+		self.assertEqual(report["counts"]["undeclared"], 0)
+		# Nothing moved for the IT Admin or the Desk-only HR Manager.
+		self.assertNotIn(U8_IT, report["people"])
+		self.assertNotIn(U8_HR_ALL, report["people"])
+		self.assertEqual(stat.S_IMODE(os.stat(result["report"]).st_mode), 0o600)
+
+	def test_a_system_manager_with_an_employee_is_declared(self):
+		_result, report = self._check([U8_SM])
+		labels = self._labels(report, U8_SM)
+		self.assertEqual(labels["admin"], "declared widening")
+		self.assertEqual(labels["it_scope"], "declared widening")
+		self.assertEqual(set(labels.values()), {"declared widening"})
+		self.assertTrue(all(item["notes"] == ["system_manager_unscoped"] for item in report["people"][U8_SM]))
+
+	def test_a_delivery_managers_widening_is_declared(self):
+		_result, report = self._check([U8_DM])
+		labels = self._labels(report, U8_DM)
+		self.assertEqual(labels["project"], "declared widening")
+		self.assertEqual(labels["project_read"], "declared widening")
+		# The B project's reports now run for B too.
+		self.assertEqual(labels["reports"], "declared widening")
+		self.assertEqual(set(labels.values()), {"declared widening"})
+
+	def test_a_resolver_that_ignores_all_orgs_rows_is_undeclared(self):
+		read = helixhr_utils._read_role_scope_entry
+
+		def ignoring_all_orgs(user):
+			entry = read(user)
+			for key in ("rows", "export"):
+				entry[key] = {
+					role: scopes - {ALL_ORGS_SCOPE_KEY}
+					for role, scopes in entry[key].items()
+					if scopes - {ALL_ORGS_SCOPE_KEY}
+				}
+			return entry
+
+		clear_role_scope_cache()
+		with patch.object(helixhr_utils, "_read_role_scope_entry", ignoring_all_orgs):
+			result, report = self._check([U8_IT, U8_HR_ALL])
+		self.assertGreater(result["undeclared"], 0)
+		self.assertEqual(self._labels(report, U8_HR_ALL)["admin"], "undeclared")
+		self.assertNotIn(U8_IT, report["people"])
+
+	def test_a_row_that_does_not_match_the_plan_is_undeclared(self):
+		frappe.db.delete(
+			"HelixHR Access Assignment",
+			{"user": U8_DM, "role": "HelixHR Delivery Manager", "company": self.company_b},
+		)
+		clear_role_scope_cache(U8_DM)
+		result, report = self._check([U8_IT])
+		self.assertGreater(result["undeclared"], 0)
+		self.assertEqual(self._labels(report, U8_DM)["rows"], "undeclared")
+
+	def test_recipient_moves_are_declared_only_by_a_rule(self):
+		self.assertEqual(set(DECLARED_RECIPIENT_CHANGES), {"system_manager_elsewhere", "unscoped_hr_not_it"})
+		now = snapshot([])["recipients"][self.company_b]["IT Team"]
+		# A System Manager anchored in A is no longer mailed for B: declared.
+		_result, report = self._check([], {self.company_b: {"IT Team": sorted({*now, U8_SM})}})
+		self.assertEqual(
+			[(item["user"], item["change"], item["label"]) for item in report["recipients"]],
+			[(U8_SM, "removed", "declared recipient change")],
+		)
+		self.assertEqual(report["recipients"][0]["notes"], ["system_manager_elsewhere"])
+		# The same move for an IT Admin who is not a System Manager is not.
+		result, report = self._check([], {self.company_b: {"IT Team": sorted({*now, U8_IT})}})
+		self.assertEqual(result["undeclared"], 1)
+		self.assertEqual(report["recipients"][0]["label"], "undeclared")

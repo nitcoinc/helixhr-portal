@@ -11,6 +11,14 @@ The read-only half ships before the switch, so it can run on production:
   and what widens or narrows) and a snapshot of today's scope answers, the
   baseline the parity check compares against.
 
+The switch (plan 2026-10-19-001 U8):
+
+- `migrate()` -- the `migrate_access_assignments` patch: writes the planned
+  rows for everyone who has no row and no access change yet.
+- `parity_check(snapshot_path)` -- reads only: the new resolvers' answers
+  against the dry-run's snapshot, every difference labelled. Any undeclared
+  one blocks reopening the site.
+
 Assignments carry no employee anchor and no enabled flag: a row that exists
 is in force, and the person-level gate (an enabled User, and an Active
 Employee when they have any) applies at read time. So the mapping keeps rows
@@ -41,6 +49,8 @@ import json
 import os
 
 import frappe
+
+from helixhr.utils import ALL_ORGS_SCOPE_KEY, clear_role_scope_cache
 
 HR_MANAGER = "HR Manager"
 HR_USER = "HR User"
@@ -87,10 +97,29 @@ SECURITY_FIXES = {
 		"The report matrix, email theme and message templates need All-orgs authority; "
 		"a Portal Admin on named orgs keeps its orgs' admin."
 	),
+	"empty_it_queue": (
+		"IT Admin with no Employee record handled no org's requests; its empty request "
+		"page is no longer shown."
+	),
 }
 _FIX_KEYS = {
 	"person_gate": list(SNAPSHOT_KEYS),
 	"global_settings": ["flags"],
+	"empty_it_queue": ["flags"],
+}
+
+# HR and IT mail recipients the switch moves by design, by rule. The snapshot
+# records them per (org, role), not per person, so they are matched here
+# rather than through a person's notes; a move no rule explains is undeclared.
+DECLARED_RECIPIENT_CHANGES = {
+	"system_manager_elsewhere": (
+		"A System Manager is never assigned (R5): holding HR Manager or IT Team, they are mailed "
+		"for the org of their Active Employee only, never for another org."
+	),
+	"unscoped_hr_not_it": (
+		"An HR Manager or System Manager with no Employee record was mailed every org's IT "
+		"requests as an unscoped admin; IT mail now goes to IT Admin assignments only."
+	),
 }
 
 
@@ -195,6 +224,9 @@ def _plan_user(info, known, org_projects):
 	if NOTIFICATION_MANAGER in roles:
 		add(NOTIFICATION_MANAGER)
 
+	if state == "none" and IT_ADMIN in roles and info["enabled"]:
+		narrowed.append(_narrowed("empty_it_queue"))
+
 	if state == "none" and HR_USER in roles:
 		widened.append(
 			_widened(
@@ -220,7 +252,7 @@ def _plan_user(info, known, org_projects):
 				widened.append(
 					_widened(
 						"portal_admin_extra_org",
-						["portal_admin"],
+						["portal_admin", "people_access_reach"],
 						f"Portal Admin in {company}: full admin (today read and grant only).",
 					)
 				)
@@ -231,17 +263,19 @@ def _plan_user(info, known, org_projects):
 		for company in sorted(info["project_orgs"]):
 			add(DELIVERY_MANAGER, company)
 	if DELIVERY_MANAGER in roles:
+		# Today's answer is membership ("assigned"), after it is the orgs, so
+		# the scope's shape moves even where the count does not: declared
+		# per org either way.
 		orgs = ({home} if home else set()) | set(info["project_orgs"])
 		for company in sorted(orgs):
 			today, after = info["project_orgs"].get(company, 0), org_projects.get(company, 0)
-			if after > today:
-				widened.append(
-					_widened(
-						"delivery_manager_org_projects",
-						["project", "project_read", "reports"],
-						f"Delivery Manager in {company}: {_plural(today, 'project')} today, {after} after.",
-					)
+			widened.append(
+				_widened(
+					"delivery_manager_org_projects",
+					["project", "project_read", "reports"],
+					f"Delivery Manager in {company}: {_plural(today, 'project')} today, {after} after.",
 				)
+			)
 
 	grant = info["grant"]
 	# A disabled grant, or one saved against an Employee the person no longer
@@ -255,9 +289,19 @@ def _plan_user(info, known, org_projects):
 		and grant["employee"] == anchor["name"]
 		and grant["home_company"] == home
 	):
-		for company in grant["companies"]:
-			if company in known:
-				add(_GRANT_ROLE[grant["level"]], company, export=grant["allow_export"])
+		granted = [company for company in grant["companies"] if company in known]
+		for company in granted:
+			add(_GRANT_ROLE[grant["level"]], company, export=grant["allow_export"])
+		if granted and grant["level"] == "Reports only":
+			# Today's grant tier runs company-scoped catalog entries only; a
+			# Reports row runs every entry, as Report Manager always has.
+			widened.append(
+				_widened(
+					"reports_grant_all_catalog",
+					["reports"],
+					f"Reports in {', '.join(granted)}: every catalog report (today company reports only).",
+				)
+			)
 
 	if gated and rows:
 		# Today the resolvers mostly ignore a disabled login and an all-Left
@@ -375,26 +419,31 @@ def collect_state():
 
 
 def snapshot(users):
-	"""Today's scope answers: ``{"users": {user: {key: answer}}, "recipients":
-	{company: {role: [user]}}}`` with one entry per `SNAPSHOT_KEYS` key -- the
-	baseline the parity check compares the switched resolvers against. Report
+	"""The resolvers' answers: ``{"users": {user: {key: answer}}, "recipients":
+	{company: {role: [user]}}}`` with one entry per `SNAPSHOT_KEYS` key. Report
 	access is recorded per catalog report as the companies it runs for and
-	whether each exports; flags are the bootstrap predicates that take a user."""
+	whether each exports; flags are the bootstrap predicates that take a user.
+
+	Whatever code is deployed answers. The baseline the parity check compares
+	against is the dry-run's snapshot taken with Release A still deployed
+	(deploy checklist step 3); the parity check calls this again after the
+	switch for the new answers, in the same shape."""
 	from helixhr import api
 	from helixhr.reports import CATALOG
 	from helixhr.utils import (
 		_company_role_holders,
 		can_admin_portal,
-		grantable_companies,
+		read_companies,
 		resolve_admin_scope,
 		resolve_portal_admin_scope,
 		resolve_project_read_scope,
 		resolve_project_scope,
 		resolve_read_scope,
 		resolve_report_access,
-		session_company,
+		role_scope,
 	)
 
+	companies = frappe.get_all("Company", pluck="name", order_by="name asc")
 	answers = {}
 	for user in users:
 		reports = {}
@@ -405,8 +454,13 @@ def snapshot(users):
 					[row["company"], bool(row["can_export"])] for row in access.get("companies") or []
 				)
 		admin = bool(can_admin_portal(user))
-		it_company = session_company(user) if IT_ADMIN in frappe.get_roles(user) else None
-		reach = grantable_companies(user) if admin else None
+		# The IT queue: the orgs of the IT Team rows, behind the Frappe role
+		# (Release A recorded the Active Employee's company here).
+		it_scope = []
+		if IT_ADMIN in frappe.get_roles(user):
+			it_scope = read_companies(role_scope(user, IT_ADMIN))
+			it_scope = companies if it_scope is None else it_scope
+		reach = api.people_access_reach(user)
 		answers[user] = {
 			"admin": _plain(resolve_admin_scope(user)),
 			"read": _plain(resolve_read_scope(user)),
@@ -415,7 +469,7 @@ def snapshot(users):
 			"portal_admin": _plain(resolve_portal_admin_scope(user)),
 			"can_admin_portal": admin,
 			"reports": reports,
-			"it_scope": [it_company] if it_company else [],
+			"it_scope": sorted(it_scope),
 			"oversight": _plain(api._oversight_scope(user) or {}) or None,
 			"people_access_reach": sorted(reach) if reach else None,
 			"flags": {
@@ -430,7 +484,7 @@ def snapshot(users):
 		}
 	recipients = {
 		company: {role: sorted(_company_role_holders(role, company)) for role in (HR_MANAGER, IT_ADMIN)}
-		for company in frappe.get_all("Company", pluck="name", order_by="name asc")
+		for company in companies
 	}
 	return {"users": answers, "recipients": recipients}
 
@@ -485,3 +539,291 @@ def _write_private(name, payload):
 		json.dump(payload, handle, indent=1, default=str)
 	os.chmod(path, 0o600)
 	return path
+
+
+# --- The switch (plan 2026-10-19-001 U8) --------------------------------------
+#
+# `migrate` writes the planned rows once, from the patch; `parity_check` then
+# proves the switched resolvers against the dry-run's snapshot (R25, R26).
+
+_MIGRATION_SKIP = "has assignment rows or an access change"
+
+
+def apply_rows(plan):
+	"""Write ``plan``'s rows as `HelixHR Access Assignment` (origin
+	``migrated``) for every user who has neither a row nor a `HelixHR Access
+	Change` yet, so a re-run, or a person whose rows were all removed through
+	the save, is left alone. Returns ``{"migrated": [user], "skipped":
+	[user]}``.
+
+	Side effects off: legacy grants and User Permissions are never touched,
+	no export expires and no mail goes out. The only Frappe role written is
+	`HelixHR Org Viewer`, which the old code never reads -- every other role
+	is already held, or (a "Reports only" grant's Reports rows) deliberately
+	not given, so a rollback to the grant code changes nothing."""
+	users = sorted(user for user, answer in plan.items() if answer["rows"])
+	if not users:
+		return {"migrated": [], "skipped": []}
+	done = set(
+		frappe.get_all(
+			"HelixHR Access Assignment", filters={"user": ["in", users]}, pluck="user", distinct=True
+		)
+	) | set(
+		frappe.get_all(
+			"HelixHR Access Change",
+			filters={"target_user": ["in", users]},
+			pluck="target_user",
+			distinct=True,
+		)
+	)
+	viewers = set(
+		frappe.get_all(
+			"Has Role",
+			filters={"parenttype": "User", "parent": ["in", users], "role": ORG_VIEWER},
+			pluck="parent",
+		)
+	)
+	migrated = []
+	for user in users:
+		if user in done:
+			continue
+		for row in plan[user]["rows"]:
+			frappe.get_doc(
+				{
+					"doctype": "HelixHR Access Assignment",
+					"user": user,
+					"role": row["role"],
+					"all_orgs": row["all_orgs"],
+					# "" not None: a None Company picks up the session's default
+					# company on insert, which an All-orgs row refuses.
+					"company": row["company"] or "",
+					"allow_export": row["allow_export"],
+					"origin": "migrated",
+				}
+			).insert(ignore_permissions=True)
+		if user not in viewers and any(row["role"] == ORG_VIEWER for row in plan[user]["rows"]):
+			_add_has_role(user, ORG_VIEWER)
+		migrated.append(user)
+
+	clear_role_scope_cache()
+	for user in migrated:
+		frappe.clear_cache(user=user)
+	return {"migrated": migrated, "skipped": sorted(done)}
+
+
+def _add_has_role(user, role):
+	"""Append ``role`` to ``user`` as a bare `Has Role` row. Not `User.save`:
+	that runs the User's hooks (Role Profile re-derivation, contact sync)
+	for a role the old code never reads."""
+	idx = frappe.get_all(
+		"Has Role", filters={"parenttype": "User", "parent": user}, pluck="idx", order_by="idx desc", limit=1
+	)
+	frappe.get_doc(
+		{
+			"doctype": "Has Role",
+			"parenttype": "User",
+			"parentfield": "roles",
+			"parent": user,
+			"role": role,
+			"idx": (idx[0] if idx else 0) + 1,
+		}
+	).db_insert()
+
+
+def migrate():
+	"""Today's access as assignment rows: `apply_rows` on `plan_rows` of the
+	site. Run by the `migrate_access_assignments` patch; safe to re-run."""
+	return apply_rows(plan_rows(collect_state()))
+
+
+# Parity labels. Counted in every report, even at zero.
+_LABELS = ("declared widening", "security fix", "declared recipient change", "undeclared")
+
+
+def parity_check(snapshot_path):
+	"""Compare the switched resolvers with the dry-run's snapshot (R26, KTD9).
+	Reads only. ``bench --site <site> execute
+	helixhr.access_migration.parity_check --args '["<snapshot path>"]'``.
+
+	The legacy state -- Has Role, grants, Company User Permissions, project
+	membership -- is what the patch never changes, so `collect_state` and
+	`plan_rows` re-derive the plan the migration wrote. Then, per snapshot
+	user and `SNAPSHOT_KEYS` key, a new answer that differs from the stored
+	one is:
+
+	- "declared widening" when one of the person's ``widened`` records names
+	  the key;
+	- "security fix" when one of their ``narrowed`` records does;
+	- "undeclared" otherwise.
+
+	HR and IT recipients per (org, role) are compared the same way; a move is
+	"declared recipient change" when a `DECLARED_RECIPIENT_CHANGES` rule
+	explains it. Every migrated person's rows must equal their planned rows
+	(a person changed through the save since is listed, not compared). A
+	declared key only says the move was expected, so the rows check is what
+	ties the new answer to the plan: right rows, and resolvers that read them.
+
+	Writes a 0600 report under the site's private folder and returns
+	``{"undeclared": n, "counts": {label: n}, "report": path}``. Any
+	undeclared difference blocks reopening the site (deploy checklist)."""
+	with open(snapshot_path) as handle:
+		baseline = json.load(handle)
+	state = collect_state()
+	plan = plan_rows(state)
+	users = sorted(baseline["users"])
+	# Through JSON, so tuples and lists compare as the stored file does.
+	current = json.loads(json.dumps(snapshot(users), default=str))
+
+	people = {}
+	for user in users:
+		answer = plan.get(user) or {"widened": [], "narrowed": []}
+		old, new = _as_callers_see_it(baseline["users"][user]), _as_callers_see_it(current["users"][user])
+		for key in SNAPSHOT_KEYS:
+			before, after = old.get(key), new.get(key)
+			if before == after:
+				continue
+			widened = sorted({note["key"] for note in answer["widened"] if key in note["resolver_keys"]})
+			fixes = sorted({note["fix"] for note in answer["narrowed"] if key in note["resolver_keys"]})
+			label = "declared widening" if widened else "security fix" if fixes else "undeclared"
+			people.setdefault(user, []).append(
+				{"key": key, "label": label, "notes": widened or fixes, "before": before, "after": after}
+			)
+
+	recipients = _recipient_differences(baseline.get("recipients") or {}, current["recipients"], state)
+	rows, changed_through_save = _row_differences(users, plan)
+	for difference in rows:
+		people.setdefault(difference["user"], []).append(difference)
+
+	counts = dict.fromkeys(_LABELS, 0)
+	for difference in [*recipients, *(item for items in people.values() for item in items)]:
+		counts[difference["label"]] += 1
+	# Microseconds: two runs in one second must not share a report.
+	stamp = frappe.utils.now_datetime().strftime("%Y%m%dT%H%M%S.%f")
+	path = _write_private(
+		f"parity-{stamp}.json",
+		{
+			"generated": stamp,
+			"snapshot": snapshot_path,
+			"counts": counts,
+			"people": people,
+			"recipients": recipients,
+			"changed_through_save": changed_through_save,
+		},
+	)
+	return {"undeclared": counts["undeclared"], "counts": counts, "report": path}
+
+
+def _as_callers_see_it(answers):
+	"""``answers`` with ``portal_admin`` behind ``can_admin_portal``, the gate
+	every caller of `resolve_portal_admin_scope` passes first. Release A
+	answered it for an HR Manager too (their HR scope), though no caller
+	ever read that, so it compares as "none" whenever the gate is shut."""
+	if answers.get("can_admin_portal"):
+		return answers
+	return {**answers, "portal_admin": {"kind": "none", "company": None}}
+
+
+def _recipient_differences(before, after, state):
+	"""Per org in the snapshot and role, each recipient added or removed,
+	labelled by `DECLARED_RECIPIENT_CHANGES`. An org created since the
+	snapshot has no baseline and is not compared."""
+	differences = []
+	for company in sorted(before):
+		for role in sorted(before[company]):
+			old = set(before[company][role])
+			new = set((after.get(company) or {}).get(role) or [])
+			for change, users in (("added", new - old), ("removed", old - new)):
+				for user in sorted(users):
+					rule = _recipient_rule(change, user, company, state["users"].get(user), role)
+					differences.append(
+						{
+							"company": company,
+							"role": role,
+							"user": user,
+							"change": change,
+							"label": "declared recipient change" if rule else "undeclared",
+							"notes": [rule] if rule else [],
+						}
+					)
+	return differences
+
+
+def _recipient_rule(change, user, company, info, role=None):
+	"""The `DECLARED_RECIPIENT_CHANGES` key that explains ``user`` being
+	``change``d ("added" or "removed") as a recipient in ``company``, or
+	None. ``info`` is the user's `collect_state` entry."""
+	if not info:
+		return None
+	state, anchor = _anchor(info["employees"])
+	if (
+		change == "removed"
+		and SYSTEM_MANAGER in info["roles"]
+		and state == "active"
+		and anchor["company"] != company
+	):
+		return "system_manager_elsewhere"
+	if (
+		change == "removed"
+		and role == IT_ADMIN
+		and state == "none"
+		and info["roles"] & {HR_MANAGER, SYSTEM_MANAGER}
+	):
+		return "unscoped_hr_not_it"
+	return None
+
+
+def _row_differences(users, plan):
+	"""Every migrated person's rows against ``plan``: the snapshot users the
+	plan gives rows, and anyone holding a migrated row. A person with a
+	`HelixHR Access Change` was changed through the save since, so is listed
+	in the second return value instead of compared."""
+	holders = set(
+		frappe.get_all(
+			"HelixHR Access Assignment", filters={"origin": "migrated"}, pluck="user", distinct=True
+		)
+	)
+	check = sorted({user for user in users if plan.get(user, {}).get("rows")} | holders)
+	if not check:
+		return [], []
+	changed = set(
+		frappe.get_all(
+			"HelixHR Access Change",
+			filters={"target_user": ["in", check]},
+			pluck="target_user",
+			distinct=True,
+		)
+	)
+	actual = {}
+	for row in frappe.get_all(
+		"HelixHR Access Assignment",
+		filters={"user": ["in", check]},
+		fields=["user", "role", "all_orgs", "company", "allow_export", "origin"],
+	):
+		actual.setdefault(row.user, set()).add(_row_key(row))
+	differences = []
+	for user in check:
+		if user in changed:
+			continue
+		planned = {_row_key(row) for row in (plan.get(user) or {}).get("rows", [])}
+		found = actual.get(user, set())
+		if planned != found:
+			differences.append(
+				{
+					"user": user,
+					"key": "rows",
+					"label": "undeclared",
+					"notes": [],
+					"before": sorted(planned),
+					"after": sorted(found),
+				}
+			)
+	return differences, sorted(changed)
+
+
+def _row_key(row):
+	return (
+		row["role"],
+		ALL_ORGS_SCOPE_KEY if row["all_orgs"] else row["company"],
+		int(bool(row["allow_export"])),
+		row["origin"],
+	)

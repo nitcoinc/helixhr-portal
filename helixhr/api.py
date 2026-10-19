@@ -12619,18 +12619,22 @@ _PEOPLE_ACCESS_PAGE_MAX = 100
 _PERSON_NOT_FOUND = "You are not authorised to see this person."
 
 
-def _people_access_reach():
-	"""The companies People & access reaches for the caller (plan
-	2026-10-19-001 R24): every company for Manage access and System Manager,
-	else the orgs their Portal Admin rows name. No Desk User Permission is
-	read. Refused when that is none."""
-	user = frappe.session.user
+def people_access_reach(user):
+	"""The companies People & access reaches for ``user`` (plan 2026-10-19-001
+	R24): every company for Manage access and System Manager, else the orgs
+	their Portal Admin rows name, else none. No Desk User Permission is read.
+	The migration's parity check asks it per user."""
 	if can_manage_access(user):
-		reach = frappe.get_all("Company", pluck="name", order_by="name asc")
-	else:
-		reach = read_companies(resolve_portal_admin_scope(user))
-		if reach is None:
-			reach = frappe.get_all("Company", pluck="name", order_by="name asc")
+		return frappe.get_all("Company", pluck="name", order_by="name asc")
+	reach = read_companies(resolve_portal_admin_scope(user))
+	if reach is None:
+		return frappe.get_all("Company", pluck="name", order_by="name asc")
+	return reach
+
+
+def _people_access_reach():
+	"""`people_access_reach` for the caller, refused when it is none."""
+	reach = people_access_reach(frappe.session.user)
 	if not reach:
 		frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
 	return reach
