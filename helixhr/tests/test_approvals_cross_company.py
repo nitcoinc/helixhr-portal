@@ -471,6 +471,10 @@ class TestCrossCompanyBulkApproval(_CrossCompanyCase):
 	which would make every earlier test's fixture writes permanent."""
 
 	def test_plain_manager_bulk_approves_a_report_in_another_company(self):
+		# The batch commits, so the class rollback cannot undo this week.
+		# Registered first so it runs last (cleanups are LIFO): it keeps the
+		# delete `_pending_timesheet`'s cleanup makes.
+		self.addCleanup(frappe.db.commit)
 		week = self._pending_timesheet(REPORT_USER)
 
 		frappe.set_user(MANAGER_USER)

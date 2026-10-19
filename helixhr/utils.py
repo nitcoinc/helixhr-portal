@@ -1823,6 +1823,92 @@ EXPORT_ROLES = frozenset({REPORT_MANAGER_ROLE, ORG_VIEWER_ROLE})
 # `scope_key` of an All-orgs row; a named-org row's key is its company.
 ALL_ORGS_SCOPE_KEY = "__all"
 
+# `frappe.local` attribute holding `role_scope`'s per-user entries. It lives
+# and dies with the request (or job); a rollback clears it, since rows read
+# inside the transaction may be gone. Separate from `_ADMIN_SCOPE_MEMO`, which
+# is block-scoped and memoises a resolver's answer, not the rows under it.
+_ROLE_SCOPE_CACHE = "helixhr_role_scope"
+
+
+def role_scope(user, role):
+	"""Which orgs ``user`` holds ``role`` in, from their assignments (plan
+	2026-10-19-001 KTD3), in the resolvers' vocabulary:
+
+	- ``{"kind": "unscoped", "company": None}`` -- an All-orgs row, so orgs
+	  created later are inside it too.
+	- ``{"kind": "company", "company": X}`` -- exactly one named org.
+	- ``{"kind": "companies", "companies": [...]}`` -- several, sorted.
+	- ``{"kind": "none", "company": None}`` -- no row. A Frappe role with no
+	  row gives nothing (R3).
+
+	Administrator is unscoped. Everyone else passes R4 first: a disabled
+	User, or one whose Employee records are all Left or Inactive, gets
+	"none"; a login with no Employee keeps its rows. A System Manager who
+	passes is unscoped whatever its rows (R5).
+
+	One read of all of the user's rows, the gate and the System Manager check
+	serves every role asked about for the rest of the request. Whoever writes
+	rows, or changes a User's ``enabled`` or an Employee's status, and reads
+	again in the same request calls `clear_role_scope_cache`."""
+	if user == "Administrator":
+		return {"kind": "unscoped", "company": None}
+	entry = _role_scope_entry(user)
+	if not entry["gate"]:
+		return {"kind": "none", "company": None}
+	if entry["system_manager"]:
+		return {"kind": "unscoped", "company": None}
+	scopes = entry["rows"].get(role)
+	if not scopes:
+		return {"kind": "none", "company": None}
+	if ALL_ORGS_SCOPE_KEY in scopes:
+		return {"kind": "unscoped", "company": None}
+	if len(scopes) == 1:
+		return {"kind": "company", "company": next(iter(scopes))}
+	return {"kind": "companies", "companies": sorted(scopes)}
+
+
+def clear_role_scope_cache(user=None):
+	"""Drop `role_scope`'s cached rows and gate for ``user``, or for everyone."""
+	cache = getattr(frappe.local, _ROLE_SCOPE_CACHE, None)
+	if not cache:
+		return
+	if user is None:
+		cache.clear()
+	else:
+		cache.pop(user, None)
+
+
+def _role_scope_entry(user):
+	cache = getattr(frappe.local, _ROLE_SCOPE_CACHE, None)
+	if cache is None:
+		cache = {}
+		setattr(frappe.local, _ROLE_SCOPE_CACHE, cache)
+	if user not in cache:
+		cache[user] = _read_role_scope_entry(user)
+		# A commit resets the rollback callbacks, so register per read: an
+		# entry read after a commit still clears on the next rollback.
+		frappe.db.after_rollback.add(clear_role_scope_cache)
+	return cache[user]
+
+
+def _read_role_scope_entry(user):
+	"""``{gate, system_manager, rows: {role: {scope_key}}}``, read fresh.
+	Rows are skipped when the gate is shut: nothing reads them then."""
+	gate = bool(frappe.db.get_value("User", user, "enabled"))
+	if gate:
+		gate = active_employee_for_user(user).state != "inactive"
+	entry = {"gate": gate, "system_manager": False, "rows": {}}
+	if not gate:
+		return entry
+	entry["system_manager"] = "System Manager" in frappe.get_roles(user)
+	for row in frappe.get_all(
+		"HelixHR Access Assignment",
+		filters={"user": user},
+		fields=["role", "all_orgs", "company"],
+	):
+		entry["rows"].setdefault(row.role, set()).add(ALL_ORGS_SCOPE_KEY if row.all_orgs else row.company)
+	return entry
+
 
 # --- Cross-company read grants (plan 2026-10-14-001) ------------------------
 #
