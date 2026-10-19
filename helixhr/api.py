@@ -110,6 +110,7 @@ from helixhr.utils import (
 	access_summary,
 	active_company_grant,
 	active_employee_for_user,
+	active_employees_for_users,
 	admin_scope_employee_filters,
 	as_administrator,
 	can_admin_portal,
@@ -142,6 +143,7 @@ from helixhr.utils import (
 	resolve_project_scope,
 	resolve_read_scope,
 	sample_context,
+	scope_covers,
 	send_notification,
 	session_company,
 	shared_admin_scope,
@@ -7036,11 +7038,9 @@ def _oversight_scope(user=None):
 	managers (plan scope boundary)."""
 	user = user or frappe.session.user
 	if _is_hr(user):
-		scope = resolve_admin_scope(user)
-		if scope["kind"] == "unscoped":
-			return {"hr_manager": True, "companies": None}
-		if scope["kind"] == "company":
-			return {"hr_manager": True, "companies": [scope["company"]]}
+		companies = read_companies(resolve_admin_scope(user))
+		if companies is None or companies:
+			return {"hr_manager": True, "companies": companies}
 		return None
 	if HR_USER_ROLE in frappe.get_roles(user):
 		anchor = _active_anchor_company(user)
@@ -8567,9 +8567,9 @@ def _handler_comment_refusal(doc, user):
 		if doc.routed_to_role not in frappe.get_roles(user):
 			return _(_APPROVAL_NOT_FOUND)
 		if not _is_hr(user):
-			anchor = frappe.db.get_value("Employee", {"user_id": user}, ["status", "company"], as_dict=True)
+			anchor = active_employee_for_user(user)
 			company = frappe.db.get_value("Employee", doc.employee, "company")
-			if not anchor or anchor.status != "Active" or anchor.company != company:
+			if anchor.state != "active" or anchor.company != company:
 				return _(_APPROVAL_NOT_FOUND)
 	if doc.status not in _REQUEST_OPEN_STATES:
 		return _("This request is {0}. Comments are only allowed while it is open.").format(doc.status)
@@ -10651,10 +10651,7 @@ def _assert_company_in_admin_scope(company):
 	is refused before anything is read."""
 	from helixhr.utils import resolve_admin_scope
 
-	scope = resolve_admin_scope(frappe.session.user)
-	if scope["kind"] == "unscoped":
-		return
-	if scope["kind"] == "company" and company == scope["company"]:
+	if scope_covers(resolve_admin_scope(frappe.session.user), company):
 		return
 	frappe.throw(_("You don't have permission to do that."), frappe.PermissionError)
 
@@ -10664,10 +10661,10 @@ def _companies_in_admin_scope():
 	the one company for an anchored one."""
 	from helixhr.utils import resolve_admin_scope
 
-	scope = resolve_admin_scope(frappe.session.user)
-	if scope["kind"] == "company":
-		return [scope["company"]]
-	return frappe.get_all("Company", pluck="name", order_by="company_name asc")
+	companies = read_companies(resolve_admin_scope(frappe.session.user))
+	if companies is None:
+		return frappe.get_all("Company", pluck="name", order_by="company_name asc")
+	return companies
 
 
 def _celebration_sample_context(event, company, frequency=None):
@@ -11679,8 +11676,10 @@ def _employee_for_user(user):
 	read-only card renders."""
 	if not user:
 		return None, None
-	row = frappe.db.get_value("Employee", {"user_id": user}, ["name", "employee_name"], as_dict=True)
-	return (row.name, row.employee_name) if row else (None, None)
+	row = active_employees_for_users([user])[user]
+	# Display only: a Left approver is still named, as before (U17).
+	shown = row if row.state == "active" else row.latest
+	return (shown.name, shown.employee_name) if shown else (None, None)
 
 
 def _person_profile(employee):
@@ -12130,10 +12129,13 @@ def get_export_log(start=0, page_length=50):
 	if scope["kind"] == "none":
 		return {"rows": [], "has_more": False}
 	filters, or_filters = {}, None
-	if scope["kind"] == "company":
+	companies = read_companies(scope)
+	if companies is not None:
 		from helixhr.utils import grantable_companies
 
-		reach = grantable_companies(frappe.session.user) or [scope["company"]]
+		reach = list(dict.fromkeys(companies + (grantable_companies(frappe.session.user) or [])))
+		if not reach:
+			return {"rows": [], "has_more": False}
 		# Plan 2026-10-15-001 KTD5: a combined export is visible when its
 		# stored company set touches the caller's reach. Upgrade path if the
 		# log grows large: a joined subquery instead of the name list.
@@ -12348,8 +12350,7 @@ def _can_delete_view(view, user):
 		return True
 	if view.visibility != "Shared" or not _is_hr(user):
 		return False
-	scope = resolve_admin_scope(user)
-	return scope["kind"] == "unscoped" or (scope["kind"] == "company" and scope["company"] == view.company)
+	return scope_covers(resolve_admin_scope(user), view.company)
 
 
 @frappe.whitelist()
@@ -12581,8 +12582,12 @@ def get_portal_role_holders(query=None):
 	rate_limit_per_user("get_portal_role_holders")
 	scope = _assert_portal_admin()
 	filters = {"status": "Active", "user_id": ["is", "set"]}
-	if scope["kind"] == "company":
-		filters["company"] = scope["company"]
+	companies = read_companies(scope)
+	if companies == []:
+		# Frappe reads `in []` as `IN ('')`, which matches rows with no company.
+		return {"roles": list(MANAGED_PORTAL_ROLES), "rows": []}
+	if companies is not None:
+		filters["company"] = ["in", companies]
 	query = (query or "").strip() if isinstance(query, str) else ""
 	or_filters = None
 	if query:
@@ -12631,7 +12636,7 @@ def set_portal_role(employee, role, enabled):
 		not target
 		or target.status != "Active"
 		or not target.user_id
-		or (scope["kind"] == "company" and target.company != scope["company"])
+		or not scope_covers(scope, target.company)
 	):
 		frappe.throw(_("You are not authorised to change this person's roles."), frappe.PermissionError)
 	if target.user_id in (frappe.session.user, "Administrator", "Guest"):
@@ -12919,10 +12924,8 @@ def save_company_access(user, level, companies, allow_export=0, modified=None):
 	rate_limit_per_user("save_company_access")
 	reach = _company_access_reach()
 	_assert_not_own_grant(user)
-	target = frappe.db.get_value(
-		"Employee", {"user_id": user}, ["name", "status", "company"], as_dict=True
-	)
-	if not target or target.status != "Active" or target.company not in reach:
+	target = active_employee_for_user(user)
+	if target.state != "active" or target.company not in reach:
 		frappe.throw(_(_COMPANY_ACCESS_REFUSED), frappe.PermissionError)
 	level, companies, allow_export = _clean_grant(level, companies, allow_export, reach)
 	doc, _changed = _apply_grant(user, target, reach, modified, (level, companies, allow_export))
@@ -13013,8 +13016,7 @@ def _person_target(employee, reach):
 def _can_edit_roles(target_company):
 	"""Managed portal roles keep `set_portal_role`'s reach: the caller's
 	portal-admin scope, which for a Portal Admin is the home company only."""
-	scope = resolve_portal_admin_scope(frappe.session.user)
-	return scope["kind"] == "unscoped" or (scope["kind"] == "company" and scope["company"] == target_company)
+	return scope_covers(resolve_portal_admin_scope(frappe.session.user), target_company)
 
 
 def _can_edit_hr_roles():
@@ -13659,11 +13661,9 @@ def search_projects():
 		assigned = set(frappe.get_all("Project User", filters={"user": user}, pluck="parent"))
 
 	def can_edit(row):
-		if write["kind"] == "unscoped":
-			return True
-		if write["kind"] == "company":
-			return row.company == write["company"]
-		return write["kind"] == "assigned" and row.name in assigned
+		if write["kind"] == "assigned":
+			return row.name in assigned
+		return scope_covers(write, row.company)
 
 	filters = project_scope_filters(scope)
 	projects = []
@@ -13726,14 +13726,11 @@ def _project_members(project):
 	if not logins:
 		return []
 
+	# Display only: a Left member is still named, from their newest row.
 	employees = {
-		row.user_id: row
-		for row in frappe.get_all(
-			"Employee",
-			filters={"user_id": ["in", logins]},
-			fields=["name", "user_id", "employee_name"],
-			ignore_permissions=True,
-		)
+		user: row if row.state == "active" else row.latest
+		for user, row in active_employees_for_users(logins).items()
+		if row.state != "none"
 	}
 	full_names = {
 		row.name: row.full_name
@@ -15069,7 +15066,11 @@ def get_organisation_view(company=None):
 	if scope["kind"] == "none":
 		frappe.throw(_("Only HR may see the organisation view."), frappe.PermissionError)
 
-	companies = read_companies(scope) or frappe.get_all("Company", pluck="name", order_by="company_name asc")
+	companies = read_companies(scope)
+	if companies is None:
+		companies = frappe.get_all("Company", pluck="name", order_by="company_name asc")
+	if not companies:
+		frappe.throw(_("Only HR may see the organisation view."), frappe.PermissionError)
 	home = session_company(frappe.session.user)
 	if not home and scope["kind"] == "unscoped":
 		home = frappe.db.get_single_value("Global Defaults", "default_company")

@@ -48,6 +48,7 @@ from helixhr.utils import (
 	PROFILE_CORRECTION_CATEGORY,
 	PROFILE_EDITABLE_FIELDS,
 	RATE_LIMIT_POLICY,
+	active_employee_for_user,
 	portal_home_page,
 	rate_limit_bounds,
 )
@@ -1839,10 +1840,8 @@ def check_company_access_grants():
 			order_by="idx asc",
 		)
 		listed.append(f"{grant.user} ({grant.level}: {', '.join(named)})")
-		anchor = frappe.db.get_value(
-			"Employee", {"user_id": grant.user}, ["name", "status", "company"], as_dict=True
-		)
-		if not anchor or anchor.status != "Active":
+		anchor = active_employee_for_user(grant.user)
+		if anchor.state != "active":
 			problems.append(f"{grant.user}: holder is not Active, so the grant does not apply")
 		elif anchor.name != grant.employee or anchor.company != grant.home_company:
 			problems.append(f"{grant.user}: holder moved since the grant was saved, so it does not apply")

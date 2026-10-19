@@ -71,7 +71,7 @@ from hrms.controllers.employee_reminders import (
 )
 
 from helixhr.events import PENDING_SINCE_FIELD as PENDING_SINCE
-from helixhr.utils import company_today
+from helixhr.utils import active_employee_for_user, company_today
 
 # One row per (event, company) since plan 2026-10-04-004 U1 -- named
 # `{event}-{company}` by the doctype's own autoname: the words HR reads on
@@ -1304,8 +1304,7 @@ def _user_owner(user):
 	if not user:
 		return [], "No approver"
 	name = frappe.utils.get_fullname(user)
-	status = frappe.db.get_value("Employee", {"user_id": user}, "status")
-	if status and status != "Active":
+	if active_employee_for_user(user).state == "inactive":
 		return [], name
 	return _mailable([user]), name
 

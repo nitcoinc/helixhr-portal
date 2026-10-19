@@ -1372,16 +1372,43 @@ def active_employee_for_user(user):
 	ERPNext refuses a second Active row for one login, so the order only
 	matters where that was bypassed; newest first keeps it deterministic.
 	"""
-	rows = frappe.get_all(
+	return active_employees_for_users([user])[user]
+
+
+def active_employees_for_users(users):
+	"""`active_employee_for_user` for many logins in one read: ``{user:
+	answer}`` with every login in ``users`` present. Each answer also carries
+	``employee_name`` for the screens that print it, and ``latest`` -- the
+	newest row of any status -- for display-only lookups that still name a
+	Left person. ``latest`` is never an anchor."""
+	answers = {
+		user: frappe._dict(state="none", name=None, company=None, employee_name=None, latest=None)
+		for user in users
+	}
+	if not answers:
+		return answers
+	for row in frappe.get_all(
 		"Employee",
-		filters={"user_id": user},
-		fields=["name", "company", "status"],
+		filters={"user_id": ["in", list(answers)]},
+		fields=["name", "user_id", "company", "status", "employee_name"],
 		order_by="creation desc, name desc",
-	)
-	for row in rows:
+	):
+		answer = answers[row.user_id]
+		latest = answer.latest or frappe._dict(name=row.name, employee_name=row.employee_name)
+		if answer.state == "active":
+			continue
 		if row.status == "Active":
-			return frappe._dict(state="active", name=row.name, company=row.company)
-	return frappe._dict(state="inactive" if rows else "none", name=None, company=None)
+			answers[row.user_id] = frappe._dict(
+				state="active",
+				name=row.name,
+				company=row.company,
+				employee_name=row.employee_name,
+				latest=latest,
+			)
+		else:
+			answer.state = "inactive"
+			answer.latest = latest
+	return answers
 
 
 # P6-R6, P6-R7. Every persona this app knows how to grant an administrative
@@ -1465,12 +1492,10 @@ def _admin_scope(user):
 	if user == "Administrator":
 		return {"kind": "unscoped", "company": None}
 	if set(frappe.get_roles(user)) & _ADMIN_UNSCOPED_ROLES:
-		anchor = frappe.db.get_value(
-			"Employee", {"user_id": user}, ["status", "company"], as_dict=True
-		)
-		if not anchor:
+		anchor = active_employee_for_user(user)
+		if anchor.state == "none":
 			return {"kind": "unscoped", "company": None}
-		if anchor.status != "Active":
+		if anchor.state == "inactive":
 			return {"kind": "none", "company": None}
 		return {"kind": "company", "company": anchor.company}
 	return {"kind": "none", "company": None}
@@ -1533,19 +1558,12 @@ def _company_role_holders(role, company):
 	users = [user for user in users if user not in ("Administrator", "Guest")]
 	if not users:
 		return []
-	anchors = {
-		row.user_id: row
-		for row in frappe.get_all(
-			"Employee",
-			filters={"user_id": ["in", users]},
-			fields=["user_id", "status", "company"],
-		)
-	}
+	anchors = active_employees_for_users(users)
 	result = []
 	for user in users:
-		anchor = anchors.get(user)
-		if anchor:
-			if anchor.status == "Active" and anchor.company == company:
+		anchor = anchors[user]
+		if anchor.state != "none":
+			if anchor.state == "active" and anchor.company == company:
 				result.append(user)
 		elif resolve_admin_scope(user)["kind"] == "unscoped":
 			result.append(user)
@@ -1640,8 +1658,7 @@ def resolve_project_scope(user):
 		return admin
 	if DELIVERY_MANAGER_ROLE not in frappe.get_roles(user):
 		return {"kind": "none"}
-	status = frappe.db.get_value("Employee", {"user_id": user}, "status")
-	if status and status != "Active":
+	if active_employee_for_user(user).state == "inactive":
 		return {"kind": "none"}
 	return {"kind": "assigned", "user": user}
 
@@ -1724,10 +1741,7 @@ def _active_anchor_company(user):
 	"""KTD6: the company of ``user``'s Employee when it is Active, else None.
 	No anchor and an inactive anchor both resolve to None for the new tiers;
 	the anchorless-HR-Manager exception stays inside `resolve_admin_scope`."""
-	anchor = frappe.db.get_value("Employee", {"user_id": user}, ["status", "company"], as_dict=True)
-	if anchor and anchor.status == "Active":
-		return anchor.company
-	return None
+	return active_employee_for_user(user).company
 
 
 # Portal-only administrator of the portal itself: edits the report access
@@ -1812,10 +1826,9 @@ def active_company_grant(user):
 	)
 	if not grant:
 		return None
-	anchor = frappe.db.get_value("Employee", {"user_id": user}, ["name", "status", "company"], as_dict=True)
+	anchor = active_employee_for_user(user)
 	if (
-		not anchor
-		or anchor.status != "Active"
+		anchor.state != "active"
 		or anchor.name != grant.employee
 		or anchor.company != grant.home_company
 	):
@@ -1889,7 +1902,7 @@ def _widen_by_companies(scope, companies, user=None):
 	Delivery Manager's assigned projects in a project read scope."""
 	if scope["kind"] == "unscoped" or not companies:
 		return scope
-	names = list(dict.fromkeys(([scope["company"]] if scope["kind"] == "company" else []) + companies))
+	names = list(dict.fromkeys(read_companies(scope) + companies))
 	if user is None and len(names) == 1:
 		return {"kind": "company", "company": names[0]}
 	widened = {"kind": "companies", "companies": names}
@@ -1923,13 +1936,31 @@ def resolve_project_read_scope(user):
 	return _widen_by_companies(scope, grant["companies"], user=user if scope["kind"] == "assigned" else None)
 
 
+# Every scope kind a resolver returns. `read_companies` raises on anything
+# else, so a new kind can never be read as "every company" by a consumer
+# that only knew the old ones (plan 2026-10-18-001 U11, KTD5).
+_SCOPE_KINDS = frozenset({"unscoped", "company", "companies", "assigned", "combined", "none"})
+
+
 def read_companies(scope):
-	"""The company names a read scope covers, or None for every company."""
-	if scope["kind"] == "unscoped":
+	"""The company names a scope covers, or None for every company. ``none``
+	covers no company; ``assigned`` covers only the companies it names (a
+	Delivery Manager's projects are not a company)."""
+	kind = scope["kind"]
+	if kind not in _SCOPE_KINDS:
+		frappe.throw(_("Unsupported access scope."))
+	if kind == "unscoped":
 		return None
-	if scope["kind"] == "company":
-		return [scope["company"]]
+	if kind == "company":
+		return [scope["company"]] if scope.get("company") else []
 	return list(scope.get("companies") or [])
+
+
+def scope_covers(scope, company):
+	"""Whether ``scope`` reaches ``company`` -- the single-company question
+	every write gate asks, for every scope kind (plan 2026-10-18-001 U11)."""
+	companies = read_companies(scope)
+	return companies is None or company in companies
 
 
 # Plan 2026-10-15-001 (KTD1): the "All my companies" company filter value.
@@ -2086,8 +2117,7 @@ def resolve_report_access(user, report_key, company=None):
 	if matrix and DELIVERY_MANAGER_ROLE in roles and matrix.dm_run and "project" in entry["scopes"]:
 		# Same offboarding rule as `resolve_project_scope`: an Employee that
 		# exists but is not Active narrows to nothing.
-		status = frappe.db.get_value("Employee", {"user_id": user}, "status")
-		if not status or status == "Active":
+		if active_employee_for_user(user).state != "inactive":
 			scope = {"kind": "assigned", "user": user}
 			if home:
 				scope["company"] = home
@@ -2100,8 +2130,15 @@ def resolve_report_access(user, report_key, company=None):
 	if unscoped:
 		for name in frappe.get_all("Company", pluck="name", order_by="name asc"):
 			by_company[name] = [("admin", {"kind": "company", "company": name}, True)]
-	elif grants:
-		by_company[grants[0][1].get("company") or home] = grants
+	else:
+		# A multi-company tier (plan 2026-10-18-001 U11) splits into one
+		# single-company tier per company; every other tier is home-anchored.
+		for tier, scope, export in grants:
+			if scope["kind"] == "companies":
+				for name in scope["companies"]:
+					by_company.setdefault(name, []).append((tier, {"kind": "company", "company": name}, export))
+			else:
+				by_company.setdefault(scope.get("company") or home, []).append((tier, scope, export))
 
 	# KTD8: a grant at either level runs every company-scoped catalog report
 	# for its companies; its own flag decides export.

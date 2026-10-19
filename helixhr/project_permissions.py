@@ -27,7 +27,7 @@
 
 import frappe
 
-from helixhr.utils import resolve_project_scope
+from helixhr.utils import read_companies, resolve_project_scope, scope_covers
 
 
 def _allowed_project_names(scope):
@@ -41,13 +41,14 @@ def _allowed_project_names(scope):
 	"assigned" (HelixHR Delivery Manager) returns no names at all -- see the
 	module docstring for why this route is refused outright rather than
 	narrowed to memberships."""
-	if scope["kind"] == "unscoped":
+	if scope["kind"] == "assigned":
+		return []
+	companies = read_companies(scope)
+	if companies is None:
 		return None
-	if scope["kind"] == "company":
-		if not scope["company"]:
-			return []
-		return frappe.get_all("Project", filters={"company": scope["company"]}, pluck="name")
-	return []
+	if not companies:
+		return []
+	return frappe.get_all("Project", filters={"company": ["in", companies]}, pluck="name")
 
 
 def _condition(scope, field):
@@ -93,6 +94,4 @@ def has_permission(doc, ptype=None, user=None, **kwargs):
 	project_name = doc.name if doc.doctype == "Project" else doc.project
 	if not project_name:
 		return False
-	if scope["kind"] == "company":
-		return frappe.db.get_value("Project", project_name, "company") == scope["company"]
-	return False
+	return scope_covers(scope, frappe.db.get_value("Project", project_name, "company"))
