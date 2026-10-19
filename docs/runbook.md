@@ -1551,12 +1551,19 @@ It reads only, and prints the two files it wrote under
 `sites/<site>/private/access_migration/` (mode 0600, bench user only):
 
 - `dry_run-<stamp>.json`: per person, the assignment rows migration would
-  write and their outcomes. **widened** lists each gain in words (a Portal
-  Admin's second org, a Delivery Manager's "N projects today, M after", an HR
-  User with no Employee). **narrowed_by_design** names a security fix from
-  `access_migration.SECURITY_FIXES`, never anything else. **unchanged** is the
-  rest. One person can be both widened and narrowed.
-- `snapshot-<stamp>.json`: every user's resolver answers today. Release 3's
+  write and their outcomes. **widened** lists each gain with a key, the scope
+  answers it moves and a sentence (a Portal Admin's second org, a Delivery
+  Manager's "N projects today, M after", an HR User or Portal Admin with no
+  Employee, a System Manager with an Employee becoming unscoped).
+  **narrowed_by_design** names a security fix from
+  `access_migration.SECURITY_FIXES` (a disabled login or an all-Left person,
+  a Left Portal Admin included, reaching nothing; a named-org Portal Admin
+  losing the global matrix, email theme and templates), never anything else. **unchanged** is the rest. One person can be both widened and narrowed.
+  Rows for a disabled user or a Left person are listed too: the switch keeps
+  them so reactivation restores access, as it does today.
+- `snapshot-<stamp>.json`: every user's scope answers today (admin, read,
+  project, Portal Admin, reports, IT, oversight, People & access reach and the
+  bootstrap flags) plus the HR and IT mail recipients per org. Release 3's
   parity check compares against it, so keep the file from the run the owner
   signed off.
 

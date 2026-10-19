@@ -188,9 +188,13 @@ function rowAge(row) {
               v-for="row in group.items"
               :key="row.name"
             >
-              <router-link
-                :to="{ name: 'ApprovalDetail', params: { kind: 'timesheet', name: row.name }, query: { view: 'timesheets' } }"
-                class="flex min-h-11 items-center justify-between gap-3 py-2 text-sm hover:bg-surface-gray-2"
+              <!-- Plan 2026-10-19-001 U9: the caller's own week is said, not
+                   linked -- the panel could only refuse it. -->
+              <component
+                :is="row.is_own ? 'div' : 'router-link'"
+                :to="row.is_own ? undefined : { name: 'ApprovalDetail', params: { kind: 'timesheet', name: row.name }, query: { view: 'timesheets' } }"
+                class="flex min-h-11 items-center justify-between gap-3 py-2 text-sm"
+                :class="row.is_own ? '' : 'hover:bg-surface-gray-2'"
                 data-testid="oversight-row"
                 :data-name="row.name"
               >
@@ -200,6 +204,10 @@ function rowAge(row) {
                     v-if="row.date"
                     class="text-ink-gray-6"
                   > · week of {{ formatDate(row.date) }}</span>
+                  <span
+                    v-if="row.is_own"
+                    class="text-ink-gray-6"
+                  > · your own week, so you can't decide it</span>
                 </span>
                 <span class="tabular shrink-0 text-ink-gray-7">
                   {{ rowAge(row) }}
@@ -208,7 +216,7 @@ function rowAge(row) {
                     class="ml-1 rounded-full bg-surface-amber-1 px-2 text-xs font-medium text-ink-amber-3"
                   >Overdue</span>
                 </span>
-              </router-link>
+              </component>
             </li>
           </ul>
         </article>

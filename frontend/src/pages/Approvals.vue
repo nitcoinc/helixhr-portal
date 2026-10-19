@@ -443,6 +443,8 @@ async function decide(action, { confirmed = false } = {}) {
   acting.value = item.name
   // KTD16: read before the row goes, so the row after it takes focus.
   const plan = focusPlan([item.name])
+  const fromAllPending = view.value === 'all-pending'
+  const nextOversight = fromAllPending ? allPendingNeighbour(item.name) : null
   try {
     await act.submit({
       doctype: item.doctype,
@@ -453,11 +455,19 @@ async function decide(action, { confirmed = false } = {}) {
       expected_state: item.state,
     })
     clearDecisionSurfaces()
-    closeDetail()
     // KTD8: the badge moves now; the reload below then answers with the
-    // queue's own total.
-    decrementApprovals(1)
-    reloadQueue().then(() => restoreFocus(plan))
+    // queue's own total. An All pending item is often not in the caller's
+    // own queue, so only a queued one moves the badge.
+    if (!fromAllPending || openInQueue.value) decrementApprovals(1)
+    closeDetail()
+    if (fromAllPending) {
+      Promise.resolve(allPending.reload())
+        .catch(() => {})
+        .then(() => focusAllPendingRow(nextOversight))
+      reloadQueue()
+    } else {
+      reloadQueue().then(() => restoreFocus(plan))
+    }
   } catch (error) {
     // Stale, already decided, reassigned or refused. The queue is reloaded
     // so the item that is genuinely gone leaves -- but nothing else on the
@@ -473,6 +483,8 @@ async function decide(action, { confirmed = false } = {}) {
     actionError.value =
       toPlainLeaveError(error) || "We couldn't record that decision. Reload and try again."
     reloadQueue()
+    // The row may be gone or decided elsewhere; All pending re-reads too.
+    if (fromAllPending) Promise.resolve(allPending.reload()).catch(() => {})
     if (props.name) detail.fetch()
   } finally {
     acting.value = ''
@@ -872,6 +884,28 @@ function openRefused(result) {
  * the cleared one (or the badge's own read). */
 let queueInflight = null
 let queueAgain = false
+/** Plan 2026-10-19-001 U9: the All pending row after (else before) `name`,
+ * read before the decided row leaves the list. */
+function allPendingNeighbour(name) {
+  // Only rows that open a panel can take focus; the decided row is one.
+  const rows = [...document.querySelectorAll('[data-overdue-name]')]
+    .filter((row) => row.dataset.overdueName === name || row.querySelector('[data-decidable]'))
+    .map((row) => row.dataset.overdueName)
+  const index = rows.indexOf(name)
+  return index < 0 ? null : rows[index + 1] || rows[index - 1] || null
+}
+
+/** KTD16 for All pending: focus the neighbour's link, else the tab's first
+ * control, never `body`. */
+function focusAllPendingRow(name) {
+  nextTick(() => {
+    const target =
+      (name && document.querySelector(`[data-overdue-name="${CSS.escape(name)}"] a`)) ||
+      document.querySelector('[data-testid="overdue-tab"] a, [data-testid="overdue-tab"] button')
+    target?.focus()
+  })
+}
+
 function reloadQueue() {
   if (queueInflight) {
     queueAgain = true
@@ -999,101 +1033,6 @@ function onQueueKey(event) {
       @update:model-value="showView"
     />
 
-    <!-- R8: every pending non-timesheet item in HR's company, by approver.
-         Overdue only reproduces the old Overdue tab; `?view=overdue` lands
-         here with it on. -->
-    <section
-      v-if="view === 'all-pending'"
-      data-testid="overdue-tab"
-    >
-      <div class="mb-4 flex flex-wrap items-center gap-3">
-        <SegmentedChips
-          label="Filter pending items by age"
-          :options="OVERDUE_OPTIONS"
-          :model-value="overdueOnly"
-          @update:model-value="setOverdue"
-        />
-        <p
-          v-if="allPending.data?.timesheet_count"
-          class="text-sm text-ink-gray-5"
-        >
-          Timesheets are on their own tab:
-          <button
-            type="button"
-            class="min-h-11 cursor-pointer font-medium text-ink-gray-9 underline"
-            @click="showView('timesheets')"
-          >
-            <span class="tabular">{{ allPending.data.timesheet_count }}</span> pending
-          </button>
-        </p>
-      </div>
-      <AsyncState
-        section="approvals-all-pending"
-        :resource="allPending"
-        :empty="!allPending.data?.count"
-        :empty-title="overdueOnly ? 'Nothing overdue' : `Nothing pending in ${session.employee?.company || 'your company'}`"
-        empty-body="Leave, attendance, change requests and requests waiting on someone appear here, grouped by who owes the decision."
-        :skeleton-rows="3"
-      >
-        <p
-          v-if="allPending.data.total_is_capped"
-          class="mb-3 text-sm text-ink-amber-3"
-        >
-          Showing the oldest 500. Narrow by approver.
-        </p>
-        <div class="space-y-6">
-          <section
-            v-for="group in allPending.data.groups"
-            :key="group.key"
-            data-testid="overdue-group"
-          >
-            <h2 class="label mb-2">
-              {{ group.approver_name }}
-              <span
-                v-if="group.is_you"
-                class="text-ink-gray-5"
-              >(You)</span>
-              <span class="tabular text-ink-gray-5">{{ group.count }}</span>
-              <span
-                v-if="group.reason && group.reason !== 'none'"
-                class="ml-1 text-ink-amber-3"
-              >{{ APPROVER_REASON_TEXT[group.reason] }}</span>
-            </h2>
-            <ul
-              class="space-y-2"
-              :class="group.items.length > OVERDUE_VISIBLE_ROWS ? 'scroll-queue max-h-[19.5rem]' : ''"
-              :tabindex="group.items.length > OVERDUE_VISIBLE_ROWS ? 0 : undefined"
-              :aria-label="group.items.length > OVERDUE_VISIBLE_ROWS ? `${group.approver_name}, scrollable` : undefined"
-            >
-              <li
-                v-for="item in group.items"
-                :key="item.route_kind + item.name"
-                data-testid="overdue-row"
-                :data-overdue-name="item.name"
-              >
-                <router-link
-                  :to="`/approvals/${item.route_kind}/${item.name}`"
-                  class="surface-card elev-1 flex min-h-14 min-w-0 items-center gap-3 px-3 hover:bg-surface-gray-2"
-                >
-                  <span class="min-w-0 flex-1">
-                    <span class="block truncate text-sm font-medium text-ink-gray-9">{{ item.employee_name }} · {{ item.title }}</span>
-                    <span class="block truncate text-xs text-ink-gray-5">
-                      {{ item.kind }}
-                      <template v-if="item.overdue"> · Overdue</template>
-                    </span>
-                  </span>
-                  <span class="tabular shrink-0 text-right text-sm text-ink-gray-9">
-                    {{ item.since_unknown ? 'Since unknown' : `${item.age_days} days` }}
-                    <span class="block text-xs text-ink-gray-5">limit {{ item.threshold_days }}</span>
-                  </span>
-                </router-link>
-              </li>
-            </ul>
-          </section>
-        </div>
-      </AsyncState>
-    </section>
-
     <p
       v-if="view === 'queue'"
       class="mb-4 text-sm text-ink-gray-5"
@@ -1146,13 +1085,130 @@ function onQueueKey(event) {
     </template>
 
     <div
-      v-if="view === 'queue' || view === 'timesheets'"
+      v-if="view === 'queue' || view === 'timesheets' || view === 'all-pending'"
       class="lg:flex lg:items-start lg:gap-6"
     >
+      <!-- R8: every pending non-timesheet item in HR's company, by approver.
+           Overdue only reproduces the old Overdue tab; `?view=overdue` lands
+           here with it on. -->
+      <section
+        v-if="view === 'all-pending'"
+        v-show="!name || isDesktop"
+        class="min-w-0 lg:flex-1"
+        data-testid="overdue-tab"
+      >
+        <div class="mb-4 flex flex-wrap items-center gap-3">
+          <SegmentedChips
+            label="Filter pending items by age"
+            :options="OVERDUE_OPTIONS"
+            :model-value="overdueOnly"
+            @update:model-value="setOverdue"
+          />
+          <p
+            v-if="allPending.data?.timesheet_count"
+            class="text-sm text-ink-gray-5"
+          >
+            Timesheets are on their own tab:
+            <button
+              type="button"
+              class="min-h-11 cursor-pointer font-medium text-ink-gray-9 underline"
+              @click="showView('timesheets')"
+            >
+              <span class="tabular">{{ allPending.data.timesheet_count }}</span> pending
+            </button>
+          </p>
+        </div>
+        <AsyncState
+          section="approvals-all-pending"
+          :resource="allPending"
+          :empty="!allPending.data?.count"
+          :empty-title="overdueOnly ? 'Nothing overdue' : `Nothing pending in ${session.employee?.company || 'your company'}`"
+          empty-body="Leave, attendance, change requests and requests waiting on someone appear here, grouped by who owes the decision."
+          :skeleton-rows="3"
+        >
+          <p
+            v-if="allPending.data.total_is_capped"
+            class="mb-3 text-sm text-ink-amber-3"
+          >
+            Showing the oldest 500. Narrow by approver.
+          </p>
+          <div class="space-y-6">
+            <section
+              v-for="group in allPending.data.groups"
+              :key="group.key"
+              data-testid="overdue-group"
+            >
+              <h2 class="label mb-2">
+                {{ group.approver_name }}
+                <span
+                  v-if="group.is_you"
+                  class="text-ink-gray-5"
+                >(You)</span>
+                <span class="tabular text-ink-gray-5">{{ group.count }}</span>
+                <span
+                  v-if="group.reason && group.reason !== 'none'"
+                  class="ml-1 text-ink-amber-3"
+                >{{ APPROVER_REASON_TEXT[group.reason] }}</span>
+              </h2>
+              <ul
+                class="space-y-2"
+                :class="group.items.length > OVERDUE_VISIBLE_ROWS ? 'scroll-queue max-h-[19.5rem]' : ''"
+                :tabindex="group.items.length > OVERDUE_VISIBLE_ROWS ? 0 : undefined"
+                :aria-label="group.items.length > OVERDUE_VISIBLE_ROWS ? `${group.approver_name}, scrollable` : undefined"
+              >
+                <li
+                  v-for="item in group.items"
+                  :key="item.route_kind + item.name"
+                  data-testid="overdue-row"
+                  :data-overdue-name="item.name"
+                >
+                  <!-- Plan 2026-10-19-001 U9 (R27): the row opens the decision
+                       panel beside the list, where HR decides it like any
+                       other; the caller's own item is said, not linked. -->
+                  <component
+                    :is="item.can_decide ? 'router-link' : 'div'"
+                    :data-decidable="item.can_decide ? '' : undefined"
+                    :to="
+                      item.can_decide
+                        ? {
+                          name: 'ApprovalDetail',
+                          params: { kind: item.route_kind, name: item.name },
+                          query: { ...route.query, view: 'all-pending', overdue: overdueOnly ? '1' : undefined },
+                        }
+                        : undefined
+                    "
+                    class="surface-card elev-1 flex min-h-14 min-w-0 items-center gap-3 px-3"
+                    :class="[
+                      item.can_decide ? 'hover:bg-surface-gray-2' : '',
+                      item.name === name ? 'ring-2 ring-outline-gray-4' : '',
+                    ]"
+                    :aria-current="item.name === name ? 'true' : undefined"
+                  >
+                    <span class="min-w-0 flex-1">
+                      <span class="block truncate text-sm font-medium text-ink-gray-9">{{ item.employee_name }} · {{ item.title }}</span>
+                      <span class="block truncate text-xs text-ink-gray-5">
+                        {{ item.kind }}
+                        <template v-if="item.overdue"> · Overdue</template>
+                        <template v-if="item.is_own"> · your own request, so you can't decide it</template>
+                      </span>
+                    </span>
+                    <span class="tabular shrink-0 text-right text-sm text-ink-gray-9">
+                      {{ item.since_unknown ? 'Since unknown' : `${item.age_days} days` }}
+                      <span class="block text-xs text-ink-gray-5">limit {{ item.threshold_days }}</span>
+                    </span>
+                  </component>
+                </li>
+              </ul>
+            </section>
+          </div>
+        </AsyncState>
+      </section>
+
       <!-- The queue. Plan 2026-10-15-002 U5/U6: the Approvals tab in lanes
            (My team, Decided by me, HR, IT); the Timesheets tab as Waiting on
            you and Waiting on HR, with HR's oversight list below. -->
       <div
+        v-if="view !== 'all-pending'"
         v-show="!name || isDesktop || openInQueue"
         class="min-w-0 lg:flex-1"
         data-testid="approvals-queue"
@@ -1677,7 +1733,7 @@ function onQueueKey(event) {
            the decision is only available once the thing being decided is
            visible. -->
       <aside
-        v-if="name && (isDesktop || !openInQueue)"
+        v-if="name && (isDesktop || view === 'all-pending' || !openInQueue)"
         class="min-w-0 lg:w-[36rem] lg:shrink-0"
         data-testid="approval-detail"
       >

@@ -7077,6 +7077,10 @@ def _pending_groups(scope, kinds, overdue_only):
 		stats=stats,
 	)
 	reminders.resolve_approvers(items)
+	# Plan 2026-10-19-001 U9 (R27): an HR Manager decides any of these from the
+	# row, through the same panel and `_allowed_actions` as their own queue --
+	# except their own items. HR User oversight stays read-only.
+	own_employee = active_employee_for_user(frappe.session.user).name
 
 	groups = {}
 	for item in items:
@@ -7108,7 +7112,10 @@ def _pending_groups(scope, kinds, overdue_only):
 			{
 				"kind": item["kind"],
 				"route_kind": item["route_kind"],
+				"doctype": _APPROVAL_DOCTYPES[item["route_kind"]],
 				"name": item["name"],
+				"is_own": item["employee"] == own_employee,
+				"can_decide": bool(scope["hr_manager"]) and item["employee"] != own_employee,
 				"title": item["title"],
 				"employee": item["employee"],
 				"employee_name": item["employee_name"],
