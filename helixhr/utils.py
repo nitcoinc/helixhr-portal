@@ -1736,8 +1736,8 @@ def _active_anchor_company(user):
 # matrix, reads the export log, and grants the portal-only roles below. Holds
 # no DocPerm and never passes `resolve_admin_scope` -- it sees no HR data.
 PORTAL_ADMIN_ROLE = "HelixHR Portal Admin"
-# The only roles `set_portal_role` may grant or remove. Never HR Manager, HR
-# User, System Manager or Portal Admin itself: those stay a Desk decision.
+# The portal roles the plan 2026-10-15-001 People & access reads list (plan
+# 2026-10-19-001 U6 replaces them). Who may assign what is `assignable`.
 MANAGED_PORTAL_ROLES = (
 	REPORT_MANAGER_ROLE,
 	DELIVERY_MANAGER_ROLE,
@@ -1946,6 +1946,73 @@ def _read_role_scope_entry(user):
 		if row.allow_export:
 			entry["export"].setdefault(row.role, set()).add(key)
 	return entry
+
+
+# --- Who may change whose access (plan 2026-10-19-001 R11-R13) --------------
+
+# R2's labels, for refusals and notifications that name a role.
+ROLE_LABELS = {
+	"HR Manager": "HR Manager",
+	HR_USER_ROLE: "HR User",
+	PORTAL_ADMIN_ROLE: "Portal Admin",
+	IT_TEAM_ROLE: "IT Admin",
+	DELIVERY_MANAGER_ROLE: "Delivery Manager",
+	REPORT_MANAGER_ROLE: "Reports",
+	ORG_VIEWER_ROLE: "Org viewer",
+	NOTIFICATION_MANAGER_ROLE: "Notification Manager",
+	ACCESS_ADMIN_ROLE: "Manage access",
+}
+# R12: what a Portal Admin gives, in its own orgs only. HR roles stay with
+# Manage access and System Manager until Desk lock-down ships (KTD12).
+PORTAL_ADMIN_ASSIGNABLE_ROLES = frozenset(
+	{DELIVERY_MANAGER_ROLE, IT_TEAM_ROLE, REPORT_MANAGER_ROLE, ORG_VIEWER_ROLE}
+)
+SELF_EDIT_REFUSAL = "You can't change your own access."
+TARGET_LOCKED_REFUSAL = "You can't change this person's access: they hold a role you can't assign."
+
+
+def assignable(caller):
+	"""R12: what ``caller`` may assign, as ``{roles, companies, all_orgs}``.
+	``companies`` is None for every named org; ``all_orgs`` says whether an
+	All-orgs row is theirs to give or take. Administrator, System Manager and
+	Manage access: everything. A Portal Admin: the four portal roles on its
+	own named orgs, never All orgs -- not even an All-orgs Portal Admin (R7).
+	Anyone else: nothing."""
+	if can_manage_access(caller):
+		return {"roles": frozenset(ASSIGNABLE_ROLES), "companies": None, "all_orgs": True}
+	scope = portal_role_scope(caller, PORTAL_ADMIN_ROLE)
+	if scope["kind"] == "none":
+		return {"roles": frozenset(), "companies": [], "all_orgs": False}
+	return {"roles": PORTAL_ADMIN_ASSIGNABLE_ROLES, "companies": read_companies(scope), "all_orgs": False}
+
+
+def may_assign(authority, row):
+	"""Whether `assignable`'s ``authority`` covers one assignment ``row``
+	(``role``, ``all_orgs``, ``company``)."""
+	if row["role"] not in authority["roles"]:
+		return False
+	if row["all_orgs"]:
+		return authority["all_orgs"]
+	return authority["companies"] is None or row["company"] in authority["companies"]
+
+
+def may_edit_target(caller, target, rows, held_roles):
+	"""R11 and R13: None when ``caller`` may change ``target``'s access, else
+	the sentence saying why not. ``rows`` are the target's assignment rows,
+	``held_roles`` their Frappe roles. Every row, and every managed role held
+	in Frappe without a row, must be one the caller may assign; a System
+	Manager or Administrator target needs full authority (R5)."""
+	if caller == target:
+		return SELF_EDIT_REFUSAL
+	authority = assignable(caller)
+	held_roles = set(held_roles)
+	if (
+		(held_roles & set(ASSIGNABLE_ROLES)) - authority["roles"]
+		or (held_roles & {"System Manager", "Administrator"} and not authority["all_orgs"])
+		or not all(may_assign(authority, row) for row in rows)
+	):
+		return TARGET_LOCKED_REFUSAL
+	return None
 
 
 # --- Cross-company read grants (plan 2026-10-14-001) ------------------------
@@ -2530,20 +2597,9 @@ RATE_LIMIT_POLICY = {
 	# U6: the access matrix -- a read, and an occasional administrative write.
 	"get_report_access": (60, 60),
 	"save_report_access": (30, 3600),
-	# Portal Admin: role holders in scope (a search per keystroke pause), and
-	# an occasional administrative grant.
-	"get_portal_role_holders": (60, 60),
-	"set_portal_role": (30, 3600),
-	# Plan 2026-10-14-001 U2: company access grants -- the Settings list, a
-	# holder search per keystroke pause, and rare administrative writes.
-	"get_company_access": (60, 60),
-	"search_company_access_targets": (60, 60),
-	"save_company_access": (30, 3600),
-	"revoke_company_access": (30, 3600),
 	# Plan 2026-10-15-002: timesheet oversight and reminders.
 	"get_pending_by_approver": (60, 60),
 	"send_timesheet_reminder": (20, 3600),
-	"delete_company_access": (30, 3600),
 	# Plan 2026-10-15-001 U5: People & access -- a read per person open,
 	# occasional administrative writes, and a paged search.
 	"get_person_access": (60, 60),

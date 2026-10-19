@@ -33,8 +33,9 @@
    "reqd": 1
   },
   {
+   "description": "Plain text as typed. Code, not Small Text: Frappe neither sanitises it on save nor renders it as HTML in Desk.",
    "fieldname": "reason",
-   "fieldtype": "Small Text",
+   "fieldtype": "Code",
    "label": "Reason"
   },
   {

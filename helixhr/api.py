@@ -1,3 +1,4 @@
+import hashlib
 import json
 import math
 import os
@@ -84,15 +85,21 @@ from helixhr.helixhr.doctype.helixhr_timesheet_change.helixhr_timesheet_change i
 # `hr_request.get_permission_query_conditions` cannot drift apart.
 from helixhr.helixhr.doctype.hr_request.hr_request import _WORKER_ROLES as _ROUTED_WORKER_ROLES
 from helixhr.utils import (
+	ACCESS_ADMIN_ROLE,
+	ALL_ORGS_ONLY_ROLES,
+	ALL_ORGS_SCOPE_KEY,
+	ASSIGNABLE_ROLES,
 	COMPANY_ACCESS_ALL,
 	COMPANY_ACCESS_REPORTS,
 	EMAIL_THEME,
+	EXPORT_ROLES,
 	HOLIDAY_LIST_EDITABLE_FIELDS,
 	HR_ROLES,
 	HR_USER_ROLE,
 	LEAVE_TYPE_EDITABLE_FIELDS,
 	MANAGED_PORTAL_ROLES,
 	NOTIFICATION_EVENTS,
+	ORG_VIEWER_ROLE,
 	PERSON_EDITABLE_FIELDS,
 	PROFILE_CORRECTABLE_FIELDS,
 	PROFILE_CORRECTION_CATEGORY,
@@ -102,6 +109,9 @@ from helixhr.utils import (
 	PROFILE_SECTION_FIELDS,
 	PROFILE_SECTION_TABLES,
 	PROFILE_USER_LINK_FIELDS,
+	REPORT_MANAGER_ROLE,
+	ROLE_LABELS,
+	SELF_EDIT_REFUSAL,
 	SHIFT_TYPE_EDITABLE_FIELDS,
 	THEME_PLACEHOLDERS,
 	UPLOAD_MAX_BYTES,
@@ -113,10 +123,11 @@ from helixhr.utils import (
 	active_employees_for_users,
 	admin_scope_employee_filters,
 	as_administrator,
+	assignable,
 	can_admin_portal,
 	can_manage_access,
+	clear_role_scope_cache,
 	company_role_holders,
-	disable_company_access,
 	email_theme,
 	employee_in_admin_scope,
 	event_variables,
@@ -127,9 +138,12 @@ from helixhr.utils import (
 	has_custom_wording,
 	is_photo_content,
 	mask_identifier,
+	may_assign,
+	may_edit_target,
 	message_brand,
 	photo_file_filters,
 	portal_home_page,
+	portal_role_scope,
 	prepare_profile_photo,
 	project_in_scope,
 	project_scope_filters,
@@ -12560,9 +12574,7 @@ def save_report_access(rows):
 	return get_report_access()
 
 
-# --- Portal roles (HelixHR Portal Admin) -------------------------------------
-
-_PORTAL_ROLE_RESULTS = 20
+# --- Portal Admin gate ---------------------------------------------------------
 
 
 def _assert_portal_admin():
@@ -12575,191 +12587,9 @@ def _assert_portal_admin():
 	return scope
 
 
-def _role_holder_rows(employees):
-	users = [row.user_id for row in employees]
-	held = {}
-	for row in frappe.get_all(
-		"Has Role",
-		filters={"parenttype": "User", "parent": ["in", users], "role": ["in", MANAGED_PORTAL_ROLES]},
-		fields=["parent", "role"],
-	):
-		held.setdefault(row.parent, set()).add(row.role)
-	return [
-		{
-			"employee": row.name,
-			"employee_name": row.employee_name,
-			"user": row.user_id,
-			"roles": {role: role in held.get(row.user_id, ()) for role in MANAGED_PORTAL_ROLES},
-		}
-		for row in employees
-	]
-
-
-@frappe.whitelist()
-def get_portal_role_holders(query=None):
-	"""Active employees in the caller's scope with a User, and which of the
-	four portal-only roles each holds. With no ``query``: everyone holding at
-	least one of them. With a ``query`` (2+ characters): a name search.
-	Employee name, id and user only -- no HR data."""
-	rate_limit_per_user("get_portal_role_holders")
-	scope = _assert_portal_admin()
-	filters = {"status": "Active", "user_id": ["is", "set"]}
-	companies = read_companies(scope)
-	if companies == []:
-		# Frappe reads `in []` as `IN ('')`, which matches rows with no company.
-		return {"roles": list(MANAGED_PORTAL_ROLES), "rows": []}
-	if companies is not None:
-		filters["company"] = ["in", companies]
-	query = (query or "").strip() if isinstance(query, str) else ""
-	or_filters = None
-	if query:
-		if len(query) < 2:
-			return {"roles": list(MANAGED_PORTAL_ROLES), "rows": []}
-		like = f"%{query[:80]}%"
-		or_filters = {"employee_name": ["like", like], "name": ["like", like]}
-	else:
-		holders = frappe.get_all(
-			"Has Role",
-			filters={"parenttype": "User", "role": ["in", MANAGED_PORTAL_ROLES]},
-			pluck="parent",
-			distinct=True,
-		)
-		if not holders:
-			return {"roles": list(MANAGED_PORTAL_ROLES), "rows": []}
-		filters["user_id"] = ["in", holders]
-	employees = frappe.get_all(
-		"Employee",
-		filters=filters,
-		or_filters=or_filters,
-		fields=["name", "employee_name", "user_id"],
-		order_by="employee_name asc",
-		limit=_PORTAL_ROLE_RESULTS if query else 0,
-	)
-	return {"roles": list(MANAGED_PORTAL_ROLES), "rows": _role_holder_rows(employees)}
-
-
-@frappe.whitelist(methods=["POST"])
-def set_portal_role(employee, role, enabled):
-	"""Grant or remove one of the four portal-only roles on ``employee``'s
-	User. Refused: any other role, an employee outside the caller's scope
-	(same refusal whether or not it exists), and the caller's own User. The
-	User is saved through ``doc.save()`` so its own validation runs, and an
-	Info comment on it records who changed what."""
-	rate_limit_per_user("set_portal_role")
-	scope = _assert_portal_admin()
-	if not isinstance(role, str) or role not in MANAGED_PORTAL_ROLES:
-		frappe.throw(_("That role can't be managed here."), frappe.PermissionError)
-	target = None
-	if isinstance(employee, str) and employee:
-		target = frappe.db.get_value(
-			"Employee", employee, ["name", "employee_name", "user_id", "status", "company"], as_dict=True
-		)
-	if (
-		not target
-		or target.status != "Active"
-		or not target.user_id
-		or not scope_covers(scope, target.company)
-	):
-		frappe.throw(_("You are not authorised to change this person's roles."), frappe.PermissionError)
-	if target.user_id in (frappe.session.user, "Administrator", "Guest"):
-		frappe.throw(_("You can't change your own roles here."), frappe.PermissionError)
-
-	enabled = enabled in (1, True, "1", "true")
-	user = frappe.get_doc("User", target.user_id)
-	added, removed = _apply_role_diff(user, [role] if enabled else [], [] if enabled else [role])
-	if added or removed:
-		user.add_comment(
-			"Info",
-			_("{0} {1} {2} in the HelixHR portal").format(
-				frappe.utils.get_fullname(frappe.session.user),
-				_("granted") if enabled else _("removed"),
-				role,
-			),
-		)
-		frappe.clear_cache(user=target.user_id)
-	return _role_holder_rows(
-		[frappe._dict(name=target.name, employee_name=target.employee_name, user_id=target.user_id)]
-	)[0]
-
-
-# --- Company access grants (plan 2026-10-14-001 U2, R2-R6) -------------------
-#
-# A Portal Admin or System Manager gives a portal user read access to other
-# companies. Which companies they reach is `_people_access_reach` (plan
-# 2026-10-19-001 R24; `grantable_companies` before it).
-# The doctype holds a System Manager DocPerm only; these endpoints are the
-# Portal Admin's gate, exactly as `save_report_access` is.
-
+# The legacy grant levels, still a filter on `list_people_access` until plan
+# 2026-10-19-001 U6 replaces it. Grants are no longer written by the portal.
 _COMPANY_ACCESS_LEVELS = (COMPANY_ACCESS_ALL, COMPANY_ACCESS_REPORTS)
-_COMPANY_ACCESS_REFUSED = "You are not authorised to change this person's company access."
-
-
-def _company_access_reach():
-	return _people_access_reach()
-
-
-def _company_access_rows(reach, users=None):
-	"""Grants the caller may see -- any named or home company in ``reach`` --
-	each with ``can_edit``: every one of its companies in reach, and not the
-	caller's own."""
-	filters = {"user": ["in", users]} if users else {}
-	grants = frappe.get_all(
-		"HelixHR Company Access",
-		filters=filters,
-		fields=[
-			"name",
-			"user",
-			"employee",
-			"home_company",
-			"level",
-			"allow_export",
-			"enabled",
-			"disabled_reason",
-			"modified",
-		],
-		order_by="modified desc",
-	)
-	if not grants:
-		return []
-	companies = {}
-	for row in frappe.get_all(
-		"HelixHR Company Access Company",
-		filters={"parenttype": "HelixHR Company Access", "parent": ["in", [g.name for g in grants]]},
-		fields=["parent", "company"],
-		order_by="idx asc",
-	):
-		companies.setdefault(row.parent, []).append(row.company)
-	names = dict(
-		frappe.get_all(
-			"Employee",
-			filters={"name": ["in", [g.employee for g in grants if g.employee]]},
-			fields=["name", "employee_name"],
-			as_list=True,
-		)
-	)
-	reach = set(reach)
-	rows = []
-	for grant in grants:
-		named = companies.get(grant.name, [])
-		touched = _grant_reach_needed(named, grant)
-		if not touched & reach:
-			continue
-		rows.append(
-			{
-				"user": grant.user,
-				"employee": grant.employee,
-				"employee_name": names.get(grant.employee) or grant.user,
-				"home_company": grant.home_company,
-				"level": grant.level,
-				"companies": named,
-				"allow_export": bool(grant.allow_export),
-				"enabled": bool(grant.enabled),
-				"disabled_reason": grant.disabled_reason,
-				"modified": str(grant.modified),
-				"can_edit": grant.user != frappe.session.user and touched <= reach,
-			}
-		)
-	return rows
 
 
 def _grant_reach_needed(companies, grant):
@@ -12769,45 +12599,6 @@ def _grant_reach_needed(companies, grant):
 	home, so the new company's Portal Admin can take it over."""
 	return {*companies, *([grant.home_company] if grant.enabled and grant.home_company else [])}
 
-
-def _editable_grant(user, reach, modified):
-	"""The existing grant on ``user`` once the caller may change it (R4), or
-	None when there is none. ``modified`` must match what the caller saw --
-	for an edit of a grant somebody has since deleted, too."""
-	if not frappe.db.exists("HelixHR Company Access", user):
-		if modified:
-			frappe.throw(_("This person's company access changed since you opened it. Reload and try again."))
-		return None
-	doc = frappe.get_doc("HelixHR Company Access", user)
-	touched = _grant_reach_needed([row.company for row in doc.companies], doc)
-	if not touched <= set(reach):
-		frappe.throw(_(_COMPANY_ACCESS_REFUSED), frappe.PermissionError)
-	if not modified or str(doc.modified) != str(modified):
-		frappe.throw(_("This person's company access changed since you opened it. Reload and try again."))
-	return doc
-
-
-def _assert_not_own_grant(user):
-	if not isinstance(user, str) or not user or user in ("Administrator", "Guest"):
-		frappe.throw(_(_COMPANY_ACCESS_REFUSED), frappe.PermissionError)
-	if user == frappe.session.user:
-		frappe.throw(_("You can't change your own company access."), frappe.PermissionError)
-
-
-def _comment_company_access(user, message):
-	"""Record the change on the User. The grant's own `on_update` /
-	`after_delete` clear the holder's cache and expire their exports."""
-	frappe.get_doc("User", user).add_comment(
-		"Info", f"{frappe.utils.get_fullname(frappe.session.user)} {message}"
-	)
-
-
-# --- Plan 2026-10-15-001: shared role and grant writes (U5, KTD6) -----------
-#
-# `set_portal_role`, `save_company_access` and `save_person_access` all write
-# through these two helpers. Each endpoint decides WHICH roles and companies
-# the caller may touch; the helpers only apply the decision. Only the outer
-# endpoint rate-limits and writes the Info comment.
 
 _ROLE_PROFILE_REFUSAL = "This person's roles come from a role profile. Change it in Desk."
 
@@ -12835,162 +12626,6 @@ def _apply_role_diff(user_doc, add, remove):
 	return added, removed
 
 
-def _clean_grant(level, companies, allow_export, reach):
-	"""Validate a grant payload against the caller's ``reach``."""
-	if level not in _COMPANY_ACCESS_LEVELS:
-		frappe.throw(_("Choose a level."))
-	companies = frappe.parse_json(companies) if isinstance(companies, str) else companies
-	if (
-		not isinstance(companies, list)
-		or not companies
-		or not all(isinstance(company, str) for company in companies)
-	):
-		frappe.throw(_("Choose at least one company."))
-	for company in companies:
-		if company not in reach:
-			frappe.throw(_("You can't grant access to {0}.").format(company), frappe.PermissionError)
-	return level, companies, _flag(allow_export) is True
-
-
-def _apply_grant(user, target, reach, modified, grant, defer=False):
-	"""Upsert or revoke ``user``'s grant (KTD6). ``grant`` is
-	``(level, companies, allow_export)`` from `_clean_grant` to save and
-	enable it, or None to switch it off. The existing grant is stale-checked
-	against ``modified`` (`_editable_grant`). ``defer`` leaves the cache
-	clear and export expiry to the caller's after-commit (KTD7).
-
-	Returns ``(doc, changed)``."""
-	doc = _editable_grant(user, reach, modified)
-	if grant is None:
-		if doc is None or not doc.enabled:
-			return doc, False
-		doc.update(
-			{
-				"enabled": 0,
-				"disabled_reason": _("{0} switched it off").format(
-					frappe.utils.get_fullname(frappe.session.user)
-				),
-			}
-		)
-	else:
-		level, companies, allow_export = grant
-		if doc is None:
-			doc = frappe.new_doc("HelixHR Company Access")
-			doc.user = user
-		doc.update(
-			{
-				"employee": target.name,
-				"home_company": target.company,
-				"level": level,
-				"allow_export": 1 if allow_export else 0,
-				"enabled": 1,
-				"disabled_reason": None,
-			}
-		)
-		doc.set("companies", [{"company": company} for company in companies])
-	# The caller holds no DocPerm here (KTD2); the endpoint's checks are the gate.
-	doc.flags.ignore_permissions = True
-	doc.flags.defer_side_effects = defer
-	doc.save()
-	return doc, True
-
-
-@frappe.whitelist()
-def get_company_access():
-	"""The grants the caller may see, the companies they may grant, and the
-	two levels. Names and companies only -- no HR data."""
-	rate_limit_per_user("get_company_access")
-	reach = _company_access_reach()
-	return {
-		"grantable": reach,
-		"levels": list(_COMPANY_ACCESS_LEVELS),
-		"rows": _company_access_rows(reach),
-	}
-
-
-@frappe.whitelist()
-def search_company_access_targets(query=None):
-	"""Active employees with a User in a company the caller may grant, other
-	than the caller (2+ characters). Name, id, user and company only."""
-	rate_limit_per_user("search_company_access_targets")
-	reach = _company_access_reach()
-	query = query.strip() if isinstance(query, str) else ""
-	if len(query) < 2:
-		return []
-	like = f"%{query[:80]}%"
-	return frappe.get_all(
-		"Employee",
-		filters={
-			"status": "Active",
-			"user_id": ["not in", [frappe.session.user, "Administrator", "Guest"]],
-			"company": ["in", reach],
-		},
-		or_filters={"employee_name": ["like", like], "name": ["like", like]},
-		fields=["name as employee", "employee_name", "user_id as user", "company"],
-		order_by="employee_name asc",
-		limit=_PORTAL_ROLE_RESULTS,
-	)
-
-
-@frappe.whitelist(methods=["POST"])
-def save_company_access(user, level, companies, allow_export=0, modified=None):
-	"""Create or replace ``user``'s grant, and enable it (R3-R6).
-
-	Refused: the caller's own User, a target that is not an Active Employee
-	with this login in a company the caller may grant, any company outside
-	that reach, and an existing grant naming a company outside it. Editing
-	an existing grant needs the ``modified`` the caller last saw."""
-	rate_limit_per_user("save_company_access")
-	reach = _company_access_reach()
-	_assert_not_own_grant(user)
-	target = active_employee_for_user(user)
-	if target.state != "active" or target.company not in reach:
-		frappe.throw(_(_COMPANY_ACCESS_REFUSED), frappe.PermissionError)
-	level, companies, allow_export = _clean_grant(level, companies, allow_export, reach)
-	doc, _changed = _apply_grant(user, target, reach, modified, (level, companies, allow_export))
-	_comment_company_access(
-		user,
-		_("set HelixHR company access to {0} for {1}{2}").format(
-			_(level),
-			", ".join(companies),
-			_(", with export") if doc.allow_export else "",
-		),
-	)
-	return _company_access_rows(reach, [user])[0]
-
-
-@frappe.whitelist(methods=["POST"])
-def revoke_company_access(user, modified=None):
-	"""Switch ``user``'s grant off; the row stays for history and can be
-	saved again later, which re-runs every check."""
-	rate_limit_per_user("revoke_company_access")
-	reach = _company_access_reach()
-	_assert_not_own_grant(user)
-	doc = _editable_grant(user, reach, modified)
-	if doc is None:
-		frappe.throw(_(_COMPANY_ACCESS_REFUSED), frappe.PermissionError)
-	if doc.enabled:
-		disable_company_access(
-			user, _("{0} switched it off").format(frappe.utils.get_fullname(frappe.session.user))
-		)
-	return _company_access_rows(reach, [user])[0]
-
-
-@frappe.whitelist(methods=["POST"])
-def delete_company_access(user, modified=None):
-	"""Delete ``user``'s grant outright. Its version history stays on the
-	Deleted Document, and the User keeps an Info comment."""
-	rate_limit_per_user("delete_company_access")
-	reach = _company_access_reach()
-	_assert_not_own_grant(user)
-	doc = _editable_grant(user, reach, modified)
-	if doc is None:
-		frappe.throw(_(_COMPANY_ACCESS_REFUSED), frappe.PermissionError)
-	frappe.delete_doc("HelixHR Company Access", doc.name, ignore_permissions=True)
-	_comment_company_access(user, _("removed HelixHR company access"))
-	return {"user": user, "deleted": True}
-
-
 # --- People & access (plan 2026-10-15-001 U5) --------------------------------
 #
 # One person's managed portal roles, HR roles and grant, read and saved in
@@ -13001,8 +12636,6 @@ def delete_company_access(user, modified=None):
 
 _PEOPLE_ACCESS_PAGE_MAX = 100
 _PERSON_NOT_FOUND = "You are not authorised to see this person."
-_PERSON_STALE = "This person changed while you were editing. Your edits were discarded."
-_ROLES_HOME_ONLY = "Portal roles can be changed only for people in your own company."
 
 
 def _people_access_reach():
@@ -13044,8 +12677,7 @@ def _person_target(employee, reach):
 
 
 def _can_edit_roles(target_company):
-	"""Managed portal roles keep `set_portal_role`'s reach: the caller's
-	portal-admin scope, which for a Portal Admin is the home company only."""
+	"""Whether the caller's portal-admin scope covers ``target_company``."""
 	return scope_covers(resolve_portal_admin_scope(frappe.session.user), target_company)
 
 
@@ -13111,32 +12743,6 @@ def get_person_access(employee):
 	return _person_access(_person_target(employee, reach), reach)
 
 
-def _toggle_changes(toggles, allowed, held):
-	"""``(add, remove)`` from a ``{role: bool}`` payload against ``held``.
-	A role the payload omits is never touched; one outside ``allowed`` is
-	refused."""
-	toggles = frappe.parse_json(toggles) if isinstance(toggles, str) else (toggles or {})
-	if not isinstance(toggles, dict):
-		frappe.throw(_("Invalid roles."))
-	if set(toggles) - set(allowed):
-		frappe.throw(_("That role can't be managed here."), frappe.PermissionError)
-	add = {role for role, on in toggles.items() if _flag(on) is True and role not in held}
-	remove = {role for role, on in toggles.items() if _flag(on) is False and role in held}
-	return add, remove
-
-
-def _same_timestamp(stored, sent):
-	"""Whether the screen's ``sent`` timestamp is the stored one, compared as
-	datetimes (not strings, which differ on microsecond padding). Both empty
-	is a match; an unparseable value is not."""
-	if not stored or not sent:
-		return not stored and not sent
-	try:
-		return get_datetime(stored) == get_datetime(sent)
-	except (TypeError, ValueError):
-		return False
-
-
 def _flag(value):
 	"""True or False for a boolean-ish request value (1/0, "true"/"false",
 	bools), else None -- so a garbage value is neither on nor off."""
@@ -13169,97 +12775,387 @@ def _set_self_employee_permission(user, employee, scoped):
 			frappe.delete_doc("User Permission", name, ignore_permissions=True)
 
 
-@frappe.whitelist(methods=["POST"])
-def save_person_access(
-	employee, managed_roles=None, hr_roles=None, grant=None, user_modified=None, grant_modified=None
-):
-	"""Save one person's portal roles, HR roles and grant atomically (R11-R14).
+# --- Saving a person's access (plan 2026-10-19-001 U5, R8-R16) --------------
+#
+# The one write path for assignments. The payload is the target's whole
+# desired row set; the server re-checks every rule (R16) in the order of the
+# plan's "Who may act on whom", then applies the rows, the Frappe roles the
+# save touched, the HR Manager self-permission rule, one change-log row and,
+# for a high-risk save, the notifications -- in one savepoint.
 
-	``managed_roles`` / ``hr_roles`` are ``{role: bool}``; an omitted role is
-	never touched. Changing managed roles needs the target in the caller's
-	portal-admin scope, HR roles need System Manager. ``grant`` is None to
-	leave it, ``{"revoke": true}`` to switch it off, else ``{level,
-	companies, allow_export}``. ``user_modified`` / ``grant_modified`` must
-	match what the screen loaded. Side effects run after commit (KTD7)."""
-	rate_limit_per_user("save_person_access")
-	reach = _people_access_reach()
-	target = _person_target(employee, reach)
+_ACCESS_ROWS_MAX = 200
+_ACCESS_REASON_MAX = 500
+_ACCESS_STALE = "Someone changed this person's access. Reload and re-apply."
+_ACCESS_LAST_ADMIN = "This would leave nobody who can manage access."
+_ACCESS_ROW_FIELDS = ("name", "role", "all_orgs", "company", "allow_export", "origin", "modified")
+# Assignment rows whose removal also switches off the legacy grant they were
+# migrated from, so a rollback to the grant code cannot revive them.
+_GRANT_BACKED_ROLES = (ORG_VIEWER_ROLE, REPORT_MANAGER_ROLE)
 
-	user_doc = frappe.get_doc("User", target.user_id)
-	current_grant = frappe.db.get_value("HelixHR Company Access", target.user_id, "modified")
-	if (
-		not user_modified
-		or not _same_timestamp(user_doc.modified, user_modified)
-		or not _same_timestamp(current_grant, grant_modified)
+
+def _access_rows(user):
+	return frappe.get_all(
+		"HelixHR Access Assignment",
+		filters={"user": user},
+		fields=list(_ACCESS_ROW_FIELDS),
+		order_by="name asc",
+	)
+
+
+def _access_key(row):
+	return (row["role"], ALL_ORGS_SCOPE_KEY if row["all_orgs"] else row["company"])
+
+
+def _access_token(rows, user_modified):
+	parts = sorted([row.name, str(row.modified)] for row in rows)
+	return hashlib.sha256(frappe.as_json([parts, str(user_modified)]).encode()).hexdigest()
+
+
+def access_token(user):
+	"""``user``'s stale token for People & access: a hash of every assignment
+	row's name and modified plus the User's modified, so any insert, delete
+	or edit of any row -- not only the newest -- or a Has Role change moves
+	it."""
+	return _access_token(_access_rows(user), frappe.db.get_value("User", user, "modified"))
+
+
+def _access_snapshot(rows):
+	"""Rows as the change log and the response carry them."""
+	return sorted(
+		(
+			{
+				"role": row["role"],
+				"all_orgs": cint(row["all_orgs"]),
+				"company": None if row["all_orgs"] else row["company"],
+				"allow_export": cint(row["allow_export"]),
+			}
+			for row in rows
+		),
+		key=lambda row: (row["role"], row["company"] or ""),
+	)
+
+
+def _access_line(row):
+	"""One row in words: "HR Manager · All orgs", "Reports · Org A, with export"."""
+	where = _("All orgs") if row["all_orgs"] else row["company"]
+	line = f"{_(ROLE_LABELS[row['role']])} · {where}"
+	return _("{0}, with export").format(line) if row["allow_export"] else line
+
+
+def _parse_json_arg(value):
+	"""A request argument that may arrive as JSON text; unparseable text is
+	None, for the caller's own refusal."""
+	if not isinstance(value, str):
+		return value
+	try:
+		return json.loads(value)
+	except ValueError:
+		return None
+
+
+def _desired_access_rows(rows):
+	"""The payload as ``{(role, scope_key): row}``, refused whole on any bad
+	row. The doctype re-validates on insert; this refuses before anything is
+	written, with one message per mistake."""
+	rows = _parse_json_arg(rows)
+	if not isinstance(rows, list) or len(rows) > _ACCESS_ROWS_MAX:
+		frappe.throw(_("Invalid access rows."))
+	desired = {}
+	for row in rows:
+		if not isinstance(row, dict) or row.get("role") not in ASSIGNABLE_ROLES:
+			frappe.throw(_("Invalid access rows."))
+		role = row["role"]
+		all_orgs = _flag(row.get("all_orgs") or 0)
+		allow_export = _flag(row.get("allow_export") or 0)
+		company = row.get("company") or ""
+		if all_orgs is None or allow_export is None or not isinstance(company, str):
+			frappe.throw(_("Invalid access rows."))
+		if all_orgs == bool(company):
+			frappe.throw(_("Choose All orgs or one org for {0}.").format(_(ROLE_LABELS[role])))
+		if company and not frappe.db.exists("Company", company):
+			frappe.throw(_("{0} is not a company.").format(company))
+		if role in ALL_ORGS_ONLY_ROLES and not all_orgs:
+			frappe.throw(_("{0} can only be given on All orgs.").format(_(ROLE_LABELS[role])))
+		if allow_export and role not in EXPORT_ROLES:
+			frappe.throw(_("Export can only be allowed on Reports or Org viewer."))
+		clean = frappe._dict(
+			role=role, all_orgs=int(all_orgs), company=company, allow_export=int(allow_export)
+		)
+		if _access_key(clean) in desired:
+			frappe.throw(_("{0} is listed twice.").format(_access_line(clean)))
+		desired[_access_key(clean)] = clean
+	return desired
+
+
+def _access_target_in_reach(caller, user, rows, reach):
+	"""People & access reach for one person (R24): everyone for Manage access
+	and System Manager; else their Active Employee's company, or a named org
+	on one of their rows, inside the caller's reach. Someone with only
+	All-orgs rows and no Employee is reachable by full authority only."""
+	if can_manage_access(caller):
+		return True
+	anchor = active_employee_for_user(user)
+	if anchor.state == "active" and anchor.company in reach:
+		return True
+	return any(not row.all_orgs and row.company in reach for row in rows)
+
+
+def _assignable_refusal(row):
+	if row["role"] in HR_ROLES:
+		return _("Only Manage access can give HR roles.")
+	if row["all_orgs"]:
+		return _("You can't give {0} on All orgs.").format(_(ROLE_LABELS[row["role"]]))
+	return _("You can't give {0} in {1}.").format(_(ROLE_LABELS[row["role"]]), row["company"])
+
+
+def _manage_access_left(removing):
+	"""R14: how many All-orgs Manage access holders other than ``removing``
+	still pass R4. Locks every such row first (``FOR UPDATE``), so two
+	holders removing each other at once are counted one after the other and
+	the second sees the first's removal."""
+	table = frappe.qb.DocType("HelixHR Access Assignment")
+	holders = (
+		frappe.qb.from_(table)
+		.select(table.user)
+		.where((table.role == ACCESS_ADMIN_ROLE) & (table.all_orgs == 1))
+		.for_update()
+		.run(pluck=True)
+	)
+	left = 0
+	for holder in set(holders) - {removing}:
+		# Fresh: a cached gate from earlier in this request may predate a
+		# disable or a Left status.
+		clear_role_scope_cache(holder)
+		if portal_role_scope(holder, ACCESS_ADMIN_ROLE)["kind"] != "none":
+			left += 1
+	return left
+
+
+def _disable_legacy_grant(user):
+	"""Rollback safety: switch off ``user``'s legacy `HelixHR Company Access`
+	grant, which the pre-assignment code would otherwise still apply. A plain
+	write -- the grant's own hooks would expire exports before commit; the
+	save's after-commit does that instead."""
+	name = frappe.db.get_value("HelixHR Company Access", {"user": user, "enabled": 1})
+	if name:
+		frappe.db.set_value(
+			"HelixHR Company Access",
+			name,
+			{
+				"enabled": 0,
+				"disabled_reason": _("Removed in People & access by {0}").format(
+					frappe.utils.get_fullname(frappe.session.user)
+				),
+			},
+		)
+
+
+def _notify_high_risk_access(change, user, lines, reason):
+	"""R15: one bell entry for every System Manager and Manage access holder
+	but the caller. Names and the reason are typed text: escaped here, since
+	the bell renders the subject as HTML."""
+	caller = frappe.session.user
+	recipients = set(
+		frappe.get_all("Has Role", filters={"parenttype": "User", "role": "System Manager"}, pluck="parent")
+	)
+	recipients |= set(
+		frappe.get_all("HelixHR Access Assignment", filters={"role": ACCESS_ADMIN_ROLE}, pluck="user")
+	)
+	recipients -= {caller, "Guest"}
+	if not recipients:
+		return
+	escape = frappe.utils.escape_html
+	subject = _("{0} gave {1} high-risk access: {2}. Reason: {3}").format(
+		escape(frappe.utils.get_fullname(caller)),
+		escape(frappe.utils.get_fullname(user)),
+		escape("; ".join(lines)),
+		escape(reason),
+	)
+	for recipient in frappe.get_all(
+		"User", filters={"name": ["in", sorted(recipients)], "enabled": 1}, pluck="name"
 	):
-		frappe.throw(_(_PERSON_STALE), frappe.TimestampMismatchError)
+		frappe.get_doc(
+			{
+				"doctype": "Notification Log",
+				"for_user": recipient,
+				"from_user": caller,
+				"type": "Alert",
+				"document_type": "HelixHR Access Change",
+				"document_name": change.name,
+				"subject": subject,
+			}
+		).insert(ignore_permissions=True)
 
+
+def _after_access_save(user):
+	clear_role_scope_cache(user)
+	frappe.clear_cache(user=user)
+	expire_unreachable_exports(user)
+
+
+@frappe.whitelist(methods=["POST"])
+def save_person_access(user, rows, token, reason=None, sync_roles=None):
+	"""Save ``user``'s assignments (plan 2026-10-19-001 U5, R8-R16).
+
+	``rows`` is the whole desired set, each ``{role, all_orgs, company,
+	allow_export}``; ``token`` is `access_token` as the screen loaded it.
+	``sync_roles`` names managed roles whose Frappe role should follow the
+	rows even though no row of theirs changed: "Remove role" on a role set
+	outside HelixHR, "Restore role" on one missing in Frappe (R9).
+
+	Refused, in order, with nothing written: the caller's own access (R11),
+	a person outside the caller's reach (one refusal whether or not they
+	exist), a person holding a role the caller can't assign (R13), a Role
+	Profile target (R10), a stale token, any added or changed row outside
+	the caller's authority (R12, R7), new access for a disabled or Left
+	person, a high-risk save without a plain-text reason of at most 500
+	characters (R15), and a save that would leave no All-orgs Manage access
+	holder passing R4, unless the caller is a System Manager (R14). A row the
+	caller may not assign is kept even when the payload omits it.
+
+	One savepoint applies the rows, the Frappe roles of the touched roles
+	only (KTD4), the HR Manager self Employee permission, one `HelixHR
+	Access Change` row and the high-risk notifications. Cache clearing and
+	export expiry run after commit."""
+	rate_limit_per_user("save_person_access")
+	caller = frappe.session.user
+	reach = set(_people_access_reach())
+	if not isinstance(user, str) or user in ("Administrator", "Guest") or not frappe.db.exists("User", user):
+		frappe.throw(_(_PERSON_NOT_FOUND), frappe.PermissionError)
+	if user == caller:
+		frappe.throw(_(SELF_EDIT_REFUSAL), frappe.PermissionError)
+	user_doc = frappe.get_doc("User", user)
+	stored = _access_rows(user)
+	if not _access_target_in_reach(caller, user, stored, reach):
+		frappe.throw(_(_PERSON_NOT_FOUND), frappe.PermissionError)
 	held = {row.role for row in user_doc.roles}
-	add, remove = _toggle_changes(managed_roles, MANAGED_PORTAL_ROLES, held)
-	if (add or remove) and not _can_edit_roles(target.company):
-		frappe.throw(_(_ROLES_HOME_ONLY), frappe.PermissionError)
-	hr_add, hr_remove = _toggle_changes(hr_roles, HR_ROLES, held)
-	if (hr_add or hr_remove) and not _can_edit_hr_roles():
-		frappe.throw(_("Only a System Manager can change HR roles."), frappe.PermissionError)
+	locked = may_edit_target(caller, user, stored, held)
+	if locked:
+		frappe.throw(_(locked), frappe.PermissionError)
+	if user_doc.get("role_profiles") or user_doc.get("role_profile_name"):
+		frappe.throw(_(_ROLE_PROFILE_REFUSAL))
+	if not isinstance(token, str) or token != _access_token(stored, user_doc.modified):
+		frappe.throw(_(_ACCESS_STALE), frappe.TimestampMismatchError)
 
-	grant = frappe.parse_json(grant) if isinstance(grant, str) else grant
-	if grant is not None and not isinstance(grant, dict):
-		frappe.throw(_("Invalid company access."))
-	# "keep" (None and {} both leave the grant alone: revoking needs explicit
-	# intent), "revoke", or "set" with `_clean_grant`'s values.
-	grant_values = None
-	if not grant:
-		grant_mode = "keep"
-	elif _flag(grant.get("revoke")) is True:
-		grant_mode = "revoke"
-	else:
-		grant_mode = "set"
-		grant_values = _clean_grant(grant.get("level"), grant.get("companies"), grant.get("allow_export"), reach)
+	desired = _desired_access_rows(rows)
+	sync_roles = _parse_json_arg(sync_roles) or []
+	if not isinstance(sync_roles, list) or not all(role in ASSIGNABLE_ROLES for role in sync_roles):
+		frappe.throw(_("Invalid roles."))
+	authority = assignable(caller)
+	if set(sync_roles) - authority["roles"]:
+		frappe.throw(_("You can't change that role."), frappe.PermissionError)
+
+	current = {_access_key(row): row for row in stored}
+	added = [row for key, row in desired.items() if key not in current]
+	# A row the caller may not assign stays, whatever the payload says.
+	removed = [row for key, row in current.items() if key not in desired and may_assign(authority, row)]
+	changed = [
+		(current[key], row)
+		for key, row in desired.items()
+		if key in current and cint(current[key].allow_export) != row.allow_export
+	]
+	for row in [*added, *(new for _old, new in changed)]:
+		if not may_assign(authority, row):
+			frappe.throw(_assignable_refusal(row), frappe.PermissionError)
+	opens = added or any(new.allow_export for _old, new in changed)
+	if opens and (not user_doc.enabled or active_employee_for_user(user).state == "inactive"):
+		frappe.throw(
+			_(
+				"This person's login is disabled or their employee record is not Active: "
+				"access can only be removed."
+			)
+		)
+
+	removed_keys = {_access_key(row) for row in removed}
+	final = [desired.get(key, row) for key, row in current.items() if key not in removed_keys] + added
+	touched = {row.role for row in (*added, *removed)} | {new.role for _old, new in changed} | set(sync_roles)
+	wanted = {row.role for row in final} & touched
+	role_add = wanted - held
+	role_remove = (touched - wanted) & held
+	if not (added or removed or changed or role_add or role_remove):
+		return {
+			"user": user,
+			"rows": _access_snapshot(stored),
+			"token": _access_token(stored, user_doc.modified),
+			"change": None,
+		}
+
+	# R15: what this save gives that is high-risk, in words.
+	lines = [
+		_access_line(row)
+		for row in added
+		if row.all_orgs or row.allow_export or row.role in (ACCESS_ADMIN_ROLE, *HR_ROLES)
+	]
+	lines += [_access_line(new) for _old, new in changed if new.allow_export]
+	# "Restore role" on an HR row gives HRMS Desk access back (KTD12).
+	lines += [_(ROLE_LABELS[role]) for role in sorted(role_add & set(HR_ROLES) - {row.role for row in added})]
+	reason = reason.strip() if isinstance(reason, str) else ""
+	if len(reason) > _ACCESS_REASON_MAX:
+		frappe.throw(_("Keep the reason to {0} characters or fewer.").format(_ACCESS_REASON_MAX))
+	if lines and not reason:
+		frappe.throw(_("This change gives high-risk access: give a reason."))
+	if any(row.role == ACCESS_ADMIN_ROLE for row in removed) and _manage_access_left(user) == 0:
+		if caller != "Administrator" and "System Manager" not in frappe.get_roles(caller):
+			frappe.throw(_(_ACCESS_LAST_ADMIN))
 
 	frappe.db.savepoint("save_person_access")
 	try:
-		added, removed = _apply_role_diff(user_doc, add | hr_add, remove | hr_remove)
-		# R13 follows the actual role change only.
-		if "HR Manager" in added:
-			_set_self_employee_permission(target.user_id, target.name, scoped=False)
-		elif "HR Manager" in removed:
-			_set_self_employee_permission(target.user_id, target.name, scoped=True)
-		grant_changed = False
-		if grant_mode != "keep":
-			doc, grant_changed = _apply_grant(
-				target.user_id, target, reach, grant_modified, grant_values, defer=True
-			)
+		for row in removed:
+			frappe.delete_doc("HelixHR Access Assignment", row.name, ignore_permissions=True)
+			if row.origin == "migrated" and row.role in _GRANT_BACKED_ROLES:
+				_disable_legacy_grant(user)
+		for old, new in changed:
+			doc = frappe.get_doc("HelixHR Access Assignment", old.name)
+			doc.allow_export = new.allow_export
+			doc.save(ignore_permissions=True)
+		for row in added:
+			frappe.get_doc(
+				{
+					"doctype": "HelixHR Access Assignment",
+					"user": user,
+					"role": row.role,
+					"all_orgs": row.all_orgs,
+					# "" not None: a None Company picks up the caller's default
+					# company on insert, which an All-orgs row refuses.
+					"company": row.company,
+					"allow_export": row.allow_export,
+					"origin": "manual",
+				}
+			).insert(ignore_permissions=True)
+		role_add, role_remove = _apply_role_diff(user_doc, role_add, role_remove)
+		employee = active_employee_for_user(user)
+		if employee.state == "active" and "HR Manager" in role_add:
+			_set_self_employee_permission(user, employee.name, scoped=False)
+		elif employee.state == "active" and "HR Manager" in role_remove:
+			_set_self_employee_permission(user, employee.name, scoped=True)
+		change = frappe.get_doc(
+			{
+				"doctype": "HelixHR Access Change",
+				"target_user": user,
+				"changed_by": caller,
+				"reason": reason or None,
+				"before": frappe.as_json(_access_snapshot(stored)),
+				"after": frappe.as_json(_access_snapshot(final)),
+			}
+		).insert(ignore_permissions=True)
+		if lines:
+			_notify_high_risk_access(change, user, lines, reason)
 	except Exception:
 		frappe.db.rollback(save_point="save_person_access")
 		# Anything cached from inside the rolled-back savepoint is wrong now.
-		frappe.clear_cache(user=target.user_id)
+		frappe.clear_cache(user=user)
+		clear_role_scope_cache(user)
 		raise
 
-	changes = []
-	if added:
-		changes.append(_("granted {0}").format(", ".join(added)))
-	if removed:
-		changes.append(_("removed {0}").format(", ".join(removed)))
-	if grant_changed:
-		changes.append(
-			_("switched off HelixHR company access")
-			if grant_mode == "revoke"
-			else _("set HelixHR company access to {0} for {1}{2}").format(
-				_(doc.level), ", ".join(grant_values[1]), _(", with export") if doc.allow_export else ""
-			)
-		)
-	if changes:
-		user_doc.add_comment(
-			"Info",
-			_("{0} in the HelixHR portal: {1}").format(
-				frappe.utils.get_fullname(frappe.session.user), "; ".join(changes)
-			),
-		)
-		user = target.user_id
-		frappe.db.after_commit.add(lambda: frappe.clear_cache(user=user))
-		if grant_changed:
-			frappe.db.after_commit.add(lambda: expire_unreachable_exports(user))
-	return _person_access(target, reach)
+	clear_role_scope_cache(user)
+	frappe.db.after_commit.add(lambda: _after_access_save(user))
+	saved = _access_rows(user)
+	return {
+		"user": user,
+		"rows": _access_snapshot(saved),
+		"token": _access_token(saved, frappe.db.get_value("User", user, "modified")),
+		"change": change.name,
+	}
 
 
 @frappe.whitelist()
@@ -13377,7 +13273,7 @@ def apply_approver_cleanup(employees):
 	whether or not it exists -- and each one commits on its own, so a
 	failure never undoes the rest (`approve_clean_items`' R18 shape). The
 	writes skip DocPerm: Portal Admin holds none on Employee, and the gate
-	plus the scope check above are the permission, as in `set_portal_role`.
+	plus the scope check above are the permission, as in `save_person_access`.
 	Idempotent, so a stale preview can only ever re-apply the rule."""
 	rate_limit_per_user("apply_approver_cleanup")
 	scope = _assert_portal_admin()

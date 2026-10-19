@@ -1,6 +1,6 @@
 """HelixHR Portal Admin: a portal-only role that edits the report access
-matrix, reads the export log and manages the four portal-only roles -- and
-sees no HR data."""
+matrix, reads the export log and gives portal roles in People & access
+(`test_access_authority`) -- and sees no HR data."""
 
 from unittest.mock import patch
 
@@ -14,13 +14,11 @@ from helixhr.api import (
 	get_export_log,
 	get_person,
 	get_portal_bootstrap,
-	get_portal_role_holders,
 	get_report_access,
 	get_report_catalog,
 	run_report,
 	save_report_access,
 	search_people,
-	set_portal_role,
 )
 from helixhr.tests.utils import (
 	_make_role_user,
@@ -36,7 +34,6 @@ from helixhr.tests.utils import (
 	set_report_access,
 )
 from helixhr.utils import (
-	MANAGED_PORTAL_ROLES,
 	PORTAL_ADMIN_ROLE,
 	can_admin_portal,
 	resolve_admin_scope,
@@ -45,7 +42,6 @@ from helixhr.utils import (
 )
 
 KEY = "leave_ledger"
-TARGET_USER = "portal-role-target@helixhr.test"
 OTHER_COMPANY_TARGET = "portal-role-other@helixhr.test"
 
 
@@ -176,81 +172,6 @@ class TestPortalAdminSeesNoHrData(IntegrationTestCase):
 		_, hr_user = make_test_hr_user()
 		with self.assertRaises(frappe.PermissionError):
 			_as(hr_user, get_export_log)
-
-
-class TestPortalRoleManagement(IntegrationTestCase):
-	def setUp(self):
-		frappe.set_user("Administrator")
-		self.company = ensure_test_company()
-		_, self.admin = make_test_portal_admin()
-		self.target = make_test_user(TARGET_USER, self.company)
-		self.other_target = make_test_user(OTHER_COMPANY_TARGET, ensure_baseline_company())
-
-	def test_grant_and_remove_an_allowed_role_with_an_audit_comment(self):
-		role = "HelixHR Report Manager"
-		out = _as(self.admin, set_portal_role, self.target, role, 1)
-		self.assertTrue(out["roles"][role])
-		self.assertIn(role, _roles(TARGET_USER))
-		self.assertTrue(
-			frappe.db.exists(
-				"Comment",
-				{
-					"reference_doctype": "User",
-					"reference_name": TARGET_USER,
-					"comment_type": "Info",
-					"content": ["like", f"%granted {role}%"],
-				},
-			)
-		)
-		listed = _as(self.admin, get_portal_role_holders)["rows"]
-		self.assertIn(self.target, [row["employee"] for row in listed])
-
-		_as(self.admin, set_portal_role, self.target, role, 0)
-		self.assertNotIn(role, _roles(TARGET_USER))
-
-	def test_every_managed_role_is_grantable(self):
-		for role in MANAGED_PORTAL_ROLES:
-			_as(self.admin, set_portal_role, self.target, role, 1)
-			self.assertIn(role, _roles(TARGET_USER))
-			_as(self.admin, set_portal_role, self.target, role, 0)
-
-	def test_roles_outside_the_allow_list_are_refused(self):
-		for role in ("HR Manager", "HR User", "System Manager", PORTAL_ADMIN_ROLE, "Employee", ""):
-			with self.assertRaises(frappe.PermissionError):
-				_as(self.admin, set_portal_role, self.target, role, 1)
-		self.assertFalse(_roles(TARGET_USER) & {"HR Manager", "HR User", "System Manager", PORTAL_ADMIN_ROLE})
-
-	def test_out_of_company_or_missing_target_is_refused_alike(self):
-		for employee in (self.other_target, "HR-EMP-DOES-NOT-EXIST"):
-			with self.assertRaises(frappe.PermissionError) as caught:
-				_as(self.admin, set_portal_role, employee, "IT Team", 1)
-			self.assertIn("not authorised", str(caught.exception))
-		self.assertNotIn("IT Team", _roles(OTHER_COMPANY_TARGET))
-		names = [row["employee"] for row in _as(self.admin, get_portal_role_holders, "portal-role")["rows"]]
-		self.assertNotIn(self.other_target, names)
-
-	def test_own_account_is_refused(self):
-		own = frappe.db.get_value("Employee", {"user_id": self.admin}, "name")
-		with self.assertRaises(frappe.PermissionError):
-			_as(self.admin, set_portal_role, own, "HelixHR Report Manager", 1)
-
-	def test_hr_user_and_plain_employee_are_refused(self):
-		_, hr_user = make_test_hr_user()
-		for user in (hr_user, TARGET_USER):
-			with self.assertRaises(frappe.PermissionError):
-				_as(user, set_portal_role, self.target, "IT Team", 1)
-			with self.assertRaises(frappe.PermissionError):
-				_as(user, get_portal_role_holders)
-
-	def test_hr_manager_is_refused_too(self):
-		"""Plan 2026-10-06-001 U3 (R5/R6): administering portal settings moved
-		to Portal Admin and System Manager; HR Manager no longer holds it."""
-		hr_manager = ensure_hr_manager_user()
-		with self.assertRaises(frappe.PermissionError):
-			_as(hr_manager, set_portal_role, self.other_target, "IT Team", 1)
-		with self.assertRaises(frappe.PermissionError):
-			_as(hr_manager, get_portal_role_holders)
-		self.assertNotIn("IT Team", _roles(OTHER_COMPANY_TARGET))
 
 
 CLEANUP_MANAGER = "cleanup-manager@helixhr.test"

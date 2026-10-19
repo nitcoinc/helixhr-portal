@@ -1,6 +1,8 @@
-"""Plan 2026-10-15-001 U5: one person's roles and grant, read and saved in one
-place (R9-R16). Every refusal is asserted as the caller's own role, never as
-Administrator."""
+"""People & access: the save's mechanics (plan 2026-10-19-001 U5) -- rows
+written, changed and removed, the payload refused whole, the HR Manager
+self-permission rule, the change log -- and the read endpoints of plan
+2026-10-15-001 U5, which U6 rewrites. Authority is `test_access_authority`.
+Every refusal is asserted as the caller's own role, never as Administrator."""
 
 from unittest.mock import patch
 
@@ -8,23 +10,32 @@ import frappe
 from frappe.tests import IntegrationTestCase
 
 from helixhr import api
-from helixhr.api import get_person_access, list_people_access, save_person_access
+from helixhr.api import access_token, get_person_access, list_people_access, save_person_access
 from helixhr.tests.utils import (
 	clear_test_company_grants,
 	ensure_baseline_company,
 	ensure_test_company,
 	make_assignment,
+	make_test_company_grant,
 	make_test_portal_admin,
 	make_test_user,
 )
-from helixhr.utils import PORTAL_ADMIN_ROLE, RATE_LIMIT_POLICY
+from helixhr.utils import (
+	ALL_ORGS_SCOPE_KEY,
+	ORG_VIEWER_ROLE,
+	PORTAL_ADMIN_ROLE,
+	RATE_LIMIT_POLICY,
+	REPORT_MANAGER_ROLE,
+)
 
 SYSTEM_MANAGER_USER = "people-system-manager@helixhr.test"
 HOME_TARGET = "people-home@helixhr.test"
 FOREIGN_TARGET = "people-foreign@helixhr.test"
 HOME_ONLY_ADMIN = "people-admin-home@helixhr.test"
+NO_EMPLOYEE_TARGET = "people-no-employee@helixhr.test"
 IT = "IT Team"
 DM = "HelixHR Delivery Manager"
+_TARGETS = (HOME_TARGET, FOREIGN_TARGET, NO_EMPLOYEE_TARGET)
 
 
 def _as(user, fn, *args, **kwargs):
@@ -36,7 +47,7 @@ def _as(user, fn, *args, **kwargs):
 
 
 def _roles(user):
-	return set(frappe.get_roles(user))
+	return {row.role for row in frappe.get_doc("User", user).roles}
 
 
 def _set_roles(user, add=(), remove=()):
@@ -50,11 +61,22 @@ def _set_roles(user, add=(), remove=()):
 	frappe.clear_cache(user=user)
 
 
-def _comments(user):
-	return frappe.db.count(
-		"Comment",
-		{"reference_doctype": "User", "reference_name": user, "comment_type": "Info", "content": ["like", "%HelixHR portal%"]},
-	)
+def _row(role, company=None, export=0):
+	return {"role": role, "all_orgs": 0 if company else 1, "company": company, "allow_export": export}
+
+
+def _rows(user):
+	return api._access_snapshot(api._access_rows(user))
+
+
+def _change_count(user):
+	# Change rows persist between methods (rollback is per class): compare deltas.
+	return frappe.db.count("HelixHR Access Change", {"target_user": user})
+
+
+def _self_permission(user):
+	employee = frappe.db.get_value("Employee", {"user_id": user})
+	return frappe.db.exists("User Permission", {"user": user, "allow": "Employee", "for_value": employee})
 
 
 class TestPeopleAccess(IntegrationTestCase):
@@ -68,7 +90,7 @@ class TestPeopleAccess(IntegrationTestCase):
 		# User Permission. Rows persist between methods: reset them.
 		frappe.db.delete(
 			"HelixHR Access Assignment",
-			{"user": ["in", [self.admin, HOME_ONLY_ADMIN]], "role": PORTAL_ADMIN_ROLE},
+			{"user": ["in", [self.admin, HOME_ONLY_ADMIN, *_TARGETS]]},
 		)
 		make_assignment(self.admin, PORTAL_ADMIN_ROLE, [self.company, self.other])
 		make_test_user(SYSTEM_MANAGER_USER, self.company)
@@ -77,94 +99,129 @@ class TestPeopleAccess(IntegrationTestCase):
 		make_assignment(HOME_ONLY_ADMIN, PORTAL_ADMIN_ROLE, [self.company])
 		self.home = make_test_user(HOME_TARGET, self.company)
 		self.foreign = make_test_user(FOREIGN_TARGET, self.other)
-		for user in (HOME_TARGET, FOREIGN_TARGET):
-			_set_roles(user, remove=[IT, DM, "HR User", "HR Manager"])
+		if not frappe.db.exists("User", NO_EMPLOYEE_TARGET):
+			frappe.get_doc(
+				{
+					"doctype": "User",
+					"email": NO_EMPLOYEE_TARGET,
+					"first_name": "Nobody",
+					"send_welcome_email": 0,
+				}
+			).insert(ignore_permissions=True)
+		for user in _TARGETS:
+			_set_roles(user, remove=[IT, DM, "HR User", "HR Manager", ORG_VIEWER_ROLE, REPORT_MANAGER_ROLE])
+		# An earlier method's HR Manager save dropped the self permission.
+		api._set_self_employee_permission(HOME_TARGET, self.home, scoped=True)
 		clear_test_company_grants()
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
 
-	def _save(self, caller, employee, **changes):
-		person = _as(caller, get_person_access, employee)
-		return _as(
-			caller,
-			save_person_access,
-			employee,
-			user_modified=changes.pop("user_modified", person["user_modified"]),
-			grant_modified=changes.pop("grant_modified", person["grant_modified"]),
-			**changes,
-		)
+	def _save(self, caller, user, rows, reason=None, **kwargs):
+		return _as(caller, save_person_access, user, rows, access_token(user), reason=reason, **kwargs)
 
-	# --- happy paths ---------------------------------------------------------
+	# --- the save writes rows, roles and one change ------------------------
 
-	def test_admin_saves_roles_and_grant_for_a_home_employee_with_one_comment(self):
-		before = _comments(HOME_TARGET)
-		person = self._save(
+	def test_one_save_adds_changes_and_removes_rows_with_one_change_each(self):
+		changes = _change_count(HOME_TARGET)
+		self._save(
 			self.admin,
-			self.home,
-			managed_roles={IT: True, DM: True},
-			grant={"level": "All data", "companies": [self.company, self.other], "allow_export": 1},
+			HOME_TARGET,
+			[_row(IT, self.company), _row(REPORT_MANAGER_ROLE, self.other, 1)],
+			reason="Month-end.",
 		)
-		self.assertTrue({IT, DM} <= _roles(HOME_TARGET))
-		self.assertEqual(person["grant"]["companies"], [self.company, self.other])
-		self.assertTrue(person["grant"]["allow_export"])
-		self.assertEqual(_comments(HOME_TARGET), before + 1)
-		self.assertIn("IT Team", person["summary"])
-		self.assertIn(self.other, person["summary"])
-
-	def test_admin_on_both_orgs_edits_roles_and_grant_for_an_outsourcing_employee(self):
-		"""Plan 2026-10-19-001 U4: a Portal Admin row on the employee's org
-		gives roles and grant alike; the old grant-only reach is gone."""
-		person = _as(self.admin, get_person_access, self.foreign)
-		self.assertTrue(person["can_edit_roles"])
-		self.assertTrue(person["can_edit_grant"])
-		self._save(self.admin, self.foreign, grant={"level": "Reports only", "companies": [self.other]})
-		self.assertEqual(frappe.db.get_value("HelixHR Company Access", FOREIGN_TARGET, "level"), "Reports only")
-		self._save(self.admin, self.foreign, managed_roles={IT: True})
-		self.assertIn(IT, _roles(FOREIGN_TARGET))
-
-	# --- R11: the HR boundary ------------------------------------------------
-
-	def test_admin_may_not_touch_hr_roles_and_an_existing_one_survives(self):
-		with self.assertRaises(frappe.PermissionError):
-			self._save(self.admin, self.home, hr_roles={"HR Manager": True})
-		self.assertNotIn("HR Manager", _roles(HOME_TARGET))
-		_set_roles(HOME_TARGET, add=["HR Manager"])
-		self.assertFalse(_as(self.admin, get_person_access, self.home)["can_edit_hr_roles"])
-		self._save(self.admin, self.home, managed_roles={IT: True})
-		self.assertTrue({"HR Manager", IT} <= _roles(HOME_TARGET))
-
-	def test_a_role_outside_the_managed_set_is_refused(self):
-		with self.assertRaises(frappe.PermissionError):
-			self._save(self.admin, self.home, managed_roles={"System Manager": True})
-		with self.assertRaises(frappe.PermissionError):
-			self._save(SYSTEM_MANAGER_USER, self.home, hr_roles={"HelixHR Portal Admin": True})
-
-	def test_system_manager_adds_hr_user(self):
-		self.assertTrue(_as(SYSTEM_MANAGER_USER, get_person_access, self.home)["can_edit_hr_roles"])
-		self._save(SYSTEM_MANAGER_USER, self.home, hr_roles={"HR User": True})
-		self.assertIn("HR User", _roles(HOME_TARGET))
-
-	def test_hr_manager_toggle_keeps_the_self_user_permission_in_step(self):
-		"""R13."""
-
-		def scoped():
-			return frappe.db.exists("User Permission", {"user": HOME_TARGET, "allow": "Employee"})
-
-		self.assertTrue(scoped())
-		self._save(SYSTEM_MANAGER_USER, self.home, hr_roles={"HR Manager": True})
-		self.assertIn("HR Manager", _roles(HOME_TARGET))
-		self.assertFalse(scoped())
-		self._save(SYSTEM_MANAGER_USER, self.home, hr_roles={"HR Manager": False})
-		self.assertNotIn("HR Manager", _roles(HOME_TARGET))
+		self.assertTrue({IT, REPORT_MANAGER_ROLE} <= _roles(HOME_TARGET))
+		out = self._save(
+			self.admin,
+			HOME_TARGET,
+			[_row(REPORT_MANAGER_ROLE, self.other), _row(DM, self.company)],
+		)
+		self.assertEqual(out["rows"], [_row(DM, self.company), _row(REPORT_MANAGER_ROLE, self.other)])
+		roles = _roles(HOME_TARGET)
+		self.assertNotIn(IT, roles)
+		self.assertTrue({DM, REPORT_MANAGER_ROLE} <= roles)
+		self.assertEqual(_change_count(HOME_TARGET), changes + 2)
+		change = frappe.get_doc("HelixHR Access Change", out["change"])
 		self.assertEqual(
-			frappe.db.get_value("User Permission", {"user": HOME_TARGET, "allow": "Employee"}, "for_value"),
-			self.home,
+			frappe.parse_json(change.before),
+			[_row(REPORT_MANAGER_ROLE, self.other, 1), _row(IT, self.company)],
 		)
+		self.assertEqual(frappe.parse_json(change.after), out["rows"])
+
+	def test_an_all_orgs_row_stores_no_company(self):
+		self._save(SYSTEM_MANAGER_USER, HOME_TARGET, [_row(ORG_VIEWER_ROLE)], reason="Board member.")
+		row = frappe.db.get_value(
+			"HelixHR Access Assignment",
+			{"user": HOME_TARGET, "role": ORG_VIEWER_ROLE},
+			["all_orgs", "company", "scope_key", "origin"],
+			as_dict=True,
+		)
+		self.assertEqual(
+			(row.all_orgs, row.company or None, row.scope_key, row.origin),
+			(1, None, ALL_ORGS_SCOPE_KEY, "manual"),
+		)
+
+	def test_an_unchanged_save_writes_nothing(self):
+		self._save(self.admin, HOME_TARGET, [_row(IT, self.company)])
+		changes = _change_count(HOME_TARGET)
+		token = access_token(HOME_TARGET)
+		out = self._save(self.admin, HOME_TARGET, [_row(IT, self.company)])
+		self.assertIsNone(out["change"])
+		self.assertEqual(out["token"], token)
+		self.assertEqual(_change_count(HOME_TARGET), changes)
+
+	def test_a_bad_payload_is_refused_whole_before_any_write(self):
+		good = _row(IT, self.company)
+		changes = _change_count(HOME_TARGET)
+		for rows in (
+			"not json",
+			{"role": IT},
+			[good, "row"],
+			[good, _row("System Manager", self.company)],
+			[good, {**_row(DM, self.company), "all_orgs": 1}],
+			[good, {"role": DM, "all_orgs": 0, "company": None}],
+			[good, _row(IT, self.company, export=1)],
+			[good, _row(DM, "No Such Company")],
+			[good, _row("HelixHR Notification Manager", self.company)],
+			[good, good],
+			[good, {**_row(DM, self.company), "allow_export": "maybe"}],
+			[good] * 201,
+		):
+			with self.subTest(rows=str(rows)[:80]), self.assertRaises(frappe.ValidationError):
+				self._save(self.admin, HOME_TARGET, rows)
+		self.assertEqual(_rows(HOME_TARGET), [])
+		self.assertNotIn(IT, _roles(HOME_TARGET))
+		self.assertEqual(_change_count(HOME_TARGET), changes)
+
+	def test_flags_parse_strictly(self):
+		self.assertIs(api._flag("true"), True)
+		self.assertIs(api._flag("0"), False)
+		self.assertIs(api._flag(1), True)
+		self.assertIsNone(api._flag("yes please"))
+		self.assertIsNone(api._flag(None))
+
+	def test_rows_as_a_json_string_and_the_reach_of_a_two_org_admin(self):
+		"""Plan 2026-10-19-001 U4: a Portal Admin row on the employee's org
+		reaches them, whatever company the admin is in."""
+		self._save(self.admin, FOREIGN_TARGET, frappe.as_json([_row(IT, self.other)]))
+		self.assertEqual(_rows(FOREIGN_TARGET), [_row(IT, self.other)])
+		with self.assertRaises(frappe.PermissionError):
+			self._save(HOME_ONLY_ADMIN, FOREIGN_TARGET, [])
+
+	# --- the HR Manager self-permission rule ------------------------------
+
+	def test_hr_manager_keeps_the_self_user_permission_in_step(self):
+		self.assertTrue(_self_permission(HOME_TARGET))
+		self._save(
+			SYSTEM_MANAGER_USER, HOME_TARGET, [_row("HR Manager", self.company)], reason="New HR lead."
+		)
+		self.assertIn("HR Manager", _roles(HOME_TARGET))
+		self.assertFalse(_self_permission(HOME_TARGET))
+		self._save(SYSTEM_MANAGER_USER, HOME_TARGET, [])
+		self.assertNotIn("HR Manager", _roles(HOME_TARGET))
+		self.assertTrue(_self_permission(HOME_TARGET))
 
 	def test_granting_hr_manager_drops_only_the_self_employee_permission(self):
-		"""R13 touches the user's own Employee row only; another Employee
-		User Permission (here: on a colleague) survives."""
 		colleague = make_test_user("people-colleague@helixhr.test", self.company)
 		other = frappe.get_doc(
 			{
@@ -176,108 +233,38 @@ class TestPeopleAccess(IntegrationTestCase):
 			}
 		).insert(ignore_permissions=True)
 		self.addCleanup(frappe.db.delete, "User Permission", {"name": other.name})
-		self._save(SYSTEM_MANAGER_USER, self.home, hr_roles={"HR Manager": True})
-		self.assertFalse(
-			frappe.db.exists("User Permission", {"user": HOME_TARGET, "allow": "Employee", "for_value": self.home})
+		self._save(
+			SYSTEM_MANAGER_USER, HOME_TARGET, [_row("HR Manager", self.company)], reason="New HR lead."
 		)
+		self.assertFalse(_self_permission(HOME_TARGET))
 		self.assertTrue(frappe.db.exists("User Permission", other.name))
-		self._save(SYSTEM_MANAGER_USER, self.home, hr_roles={"HR Manager": False})
-		self.assertTrue(
-			frappe.db.exists("User Permission", {"user": HOME_TARGET, "allow": "Employee", "for_value": self.home})
+
+	def test_an_hr_manager_with_no_employee_gets_no_user_permission(self):
+		self._save(SYSTEM_MANAGER_USER, NO_EMPLOYEE_TARGET, [_row("HR Manager")], reason="Leadership.")
+		self.assertIn("HR Manager", _roles(NO_EMPLOYEE_TARGET))
+		self.assertFalse(
+			frappe.db.exists("User Permission", {"user": NO_EMPLOYEE_TARGET, "allow": "Employee"})
 		)
 
-	def test_flags_parse_strictly_and_timestamps_compare_as_datetimes(self):
-		self.assertIs(api._flag("true"), True)
-		self.assertIs(api._flag("0"), False)
-		self.assertIs(api._flag(1), True)
-		self.assertIsNone(api._flag("yes please"))
-		self.assertIsNone(api._flag(None))
-		self.assertTrue(api._same_timestamp("2026-10-15 10:00:00", "2026-10-15 10:00:00.000000"))
-		self.assertTrue(api._same_timestamp(None, ""))
-		self.assertFalse(api._same_timestamp("2026-10-15 10:00:00", None))
-		self.assertFalse(api._same_timestamp("2026-10-15 10:00:00", "not a time"))
-		# A garbage toggle value is neither on nor off: nothing changes.
-		self._save(self.admin, self.home, managed_roles={IT: "maybe"})
-		self.assertNotIn(IT, _roles(HOME_TARGET))
-
-	def test_an_unchanged_hr_manager_toggle_leaves_the_user_permission_alone(self):
-		self._save(SYSTEM_MANAGER_USER, self.home, hr_roles={"HR Manager": False}, managed_roles={IT: True})
-		self.assertTrue(frappe.db.exists("User Permission", {"user": HOME_TARGET, "allow": "Employee"}))
-
-	# --- R12: atomic, side effects after commit, stale refusals ------------
-
-	def test_a_failure_after_the_grant_rolls_everything_back_without_side_effects(self):
-		real_apply_grant = api._apply_grant
-
-		def failing(*args, **kwargs):
-			real_apply_grant(*args, **kwargs)
-			frappe.throw("boom")
-
-		access_module = "helixhr.helixhr.doctype.helixhr_company_access.helixhr_company_access"
-		with (
-			patch.object(api, "_apply_grant", side_effect=failing),
-			patch(f"{access_module}._after_change") as after_change,
-			self.assertRaises(frappe.ValidationError),
-		):
+	def test_a_second_hr_manager_row_leaves_the_user_permission_alone(self):
+		self._save(
+			SYSTEM_MANAGER_USER, HOME_TARGET, [_row("HR Manager", self.company)], reason="New HR lead."
+		)
+		with patch.object(api, "_set_self_employee_permission") as rescope:
 			self._save(
-				self.admin,
-				self.home,
-				managed_roles={IT: True},
-				grant={"level": "All data", "companies": [self.other]},
+				SYSTEM_MANAGER_USER,
+				HOME_TARGET,
+				[_row("HR Manager", self.company), _row("HR Manager", self.other)],
+				reason="Both orgs.",
 			)
-		after_change.assert_not_called()
-		self.assertNotIn(IT, _roles(HOME_TARGET))
-		self.assertFalse(frappe.db.exists("HelixHR Company Access", HOME_TARGET))
+		rescope.assert_not_called()
 
-	def test_grant_side_effects_wait_for_commit(self):
-		access_module = "helixhr.helixhr.doctype.helixhr_company_access.helixhr_company_access"
-		with patch(f"{access_module}._after_change") as after_change:
-			self._save(self.admin, self.home, grant={"level": "All data", "companies": [self.other]})
-		after_change.assert_not_called()
+	# --- the read endpoints (plan 2026-10-15-001; U6 rewrites them) --------
 
-	def test_stale_tokens_are_refused_with_nothing_written(self):
-		with self.assertRaises(frappe.TimestampMismatchError):
-			self._save(self.admin, self.home, managed_roles={IT: True}, user_modified="2000-01-01 00:00:00")
-		self.assertNotIn(IT, _roles(HOME_TARGET))
-		self._save(self.admin, self.home, grant={"level": "All data", "companies": [self.other]})
-		with self.assertRaises(frappe.TimestampMismatchError):
-			self._save(
-				self.admin,
-				self.home,
-				managed_roles={IT: True},
-				grant={"level": "Reports only", "companies": [self.other]},
-				grant_modified=None,
-			)
-		self.assertNotIn(IT, _roles(HOME_TARGET))
-		self.assertEqual(frappe.db.get_value("HelixHR Company Access", HOME_TARGET, "level"), "All data")
-
-	def test_a_grant_company_outside_reach_refuses_the_whole_save(self):
-		from helixhr.tests.utils import COMPANY_ACCESS_THIRD_COMPANY, create_test_company
-
-		third = create_test_company(COMPANY_ACCESS_THIRD_COMPANY, "TCAC")
-		with self.assertRaises(frappe.PermissionError):
-			self._save(
-				self.admin, self.home, managed_roles={IT: True}, grant={"level": "All data", "companies": [third]}
-			)
-		self.assertNotIn(IT, _roles(HOME_TARGET))
-		self.assertFalse(frappe.db.exists("HelixHR Company Access", HOME_TARGET))
-
-	def test_an_empty_grant_never_revokes_and_revoke_needs_explicit_intent(self):
-		self._save(self.admin, self.home, grant={"level": "All data", "companies": [self.other]})
-		self._save(self.admin, self.home, grant={})
-		self.assertEqual(frappe.db.get_value("HelixHR Company Access", HOME_TARGET, "enabled"), 1)
-		person = self._save(self.admin, self.home, grant={"revoke": True})
-		self.assertEqual(frappe.db.get_value("HelixHR Company Access", HOME_TARGET, "enabled"), 0)
-		self.assertFalse(person["grant"]["enabled"])
-
-	# --- R14 and reach -------------------------------------------------------
-
-	def test_self_edit_is_refused(self):
+	def test_self_read_is_refused(self):
 		admin_employee = frappe.db.get_value("Employee", {"user_id": self.admin})
 		with self.assertRaises(frappe.PermissionError):
 			_as(self.admin, get_person_access, admin_employee)
-		with self.assertRaises(frappe.PermissionError):
-			_as(self.admin, save_person_access, admin_employee, managed_roles={IT: True}, user_modified="x")
 
 	def test_admin_on_home_only_reaches_home_only(self):
 		with self.assertRaises(frappe.PermissionError):
@@ -288,20 +275,23 @@ class TestPeopleAccess(IntegrationTestCase):
 		from helixhr.tests.utils import make_test_hr_manager_employee
 
 		_, hr = make_test_hr_manager_employee()
-		for fn, args in ((get_person_access, (self.home,)), (list_people_access, ())):
+		for fn, args in (
+			(get_person_access, (self.home,)),
+			(list_people_access, ()),
+			(save_person_access, (HOME_TARGET, [], "x")),
+		):
 			with self.assertRaises(frappe.PermissionError):
 				_as(hr, fn, *args)
 
-	# --- R15: who has what -------------------------------------------------
-
 	def test_list_roles_are_the_panels_held_roles(self):
-		"""R15: the list chip and the panel match profiles over the same
-		role set -- every managed and HR role held, nothing else."""
 		_set_roles(HOME_TARGET, add=[IT, "HR User", "Accounts User"])
 		self.addCleanup(_set_roles, HOME_TARGET, remove=[IT, "HR User", "Accounts User"])
 		person = _as(SYSTEM_MANAGER_USER, get_person_access, self.home)
 		panel = sorted(
-			role for toggles in (person["managed_roles"], person["hr_roles"]) for role, on in toggles.items() if on
+			role
+			for toggles in (person["managed_roles"], person["hr_roles"])
+			for role, on in toggles.items()
+			if on
 		)
 		rows = _as(SYSTEM_MANAGER_USER, list_people_access, query=self.home)["rows"]
 		row = next(row for row in rows if row["employee"] == self.home)
@@ -324,7 +314,7 @@ class TestPeopleAccess(IntegrationTestCase):
 		self.assertTrue(all(IT in row["roles"] for row in rows))
 
 	def test_grant_level_filter_and_strict_permissions(self):
-		self._save(self.admin, self.foreign, grant={"level": "Reports only", "companies": [self.other]})
+		make_test_company_grant(FOREIGN_TARGET, [self.other], level="Reports only")
 		frappe.db.set_single_value("System Settings", "apply_strict_user_permissions", 1)
 		try:
 			rows = _as(self.admin, list_people_access, grant_level="Reports only")["rows"]
@@ -337,13 +327,6 @@ class TestPeopleAccess(IntegrationTestCase):
 	def test_every_endpoint_has_a_rate_limit(self):
 		for action in ("get_person_access", "save_person_access", "list_people_access"):
 			self.assertIn(action, RATE_LIMIT_POLICY)
-
-	# --- KTD6: the old endpoints still behave -------------------------------
-
-	def test_set_portal_role_still_refuses_hr_roles_and_writes_managed_ones(self):
-		from helixhr.api import set_portal_role
-
-		with self.assertRaises(frappe.PermissionError):
-			_as(self.admin, set_portal_role, self.home, "HR Manager", 1)
-		_as(self.admin, set_portal_role, self.home, IT, 1)
-		self.assertIn(IT, _roles(HOME_TARGET))
+		for removed in ("save_company_access", "set_portal_role", "get_portal_role_holders"):
+			self.assertNotIn(removed, RATE_LIMIT_POLICY)
+			self.assertFalse(hasattr(api, removed))
