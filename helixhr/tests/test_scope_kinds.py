@@ -128,10 +128,7 @@ class TestCompaniesScopeKind(IntegrationTestCase):
 			)
 			doc.insert(ignore_permissions=True)
 			rows.append(doc.name)
-		with (
-			patch("helixhr.api.resolve_portal_admin_scope", return_value=self.scope),
-			patch("helixhr.utils.grantable_companies", return_value=[]),
-		):
+		with patch("helixhr.api.resolve_portal_admin_scope", return_value=self.scope):
 			names = {row["name"] for row in api.get_export_log(page_length=200)["rows"]}
 		self.assertIn(rows[0], names)
 		self.assertNotIn(rows[1], names)

@@ -237,6 +237,11 @@ doc_events = {
 		"on_update": "helixhr.events.employee_on_update",
 		"after_insert": "helixhr.events.employee_after_insert",
 	},
+	# Plan 2026-10-19-001 R4: a disabled login reaches nothing, so disabling
+	# one expires the exports it could no longer request.
+	"User": {
+		"on_update": "helixhr.events.user_on_update",
+	},
 	# P2-U4 / P2-KTD6. The employee-facing "HR replied" event. A fixture
 	# Notification watches one field on a Value Change and the existing one
 	# watches `status`, so a reply written without a status change produced

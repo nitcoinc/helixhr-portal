@@ -1,5 +1,8 @@
-"""Plan 2026-10-14-001 U1: the HelixHR Company Access grant, the read
-resolvers built on it, and the offboarding hook that switches it off."""
+"""Plan 2026-10-14-001 U1: the HelixHR Company Access grant and the read
+resolvers built on it -- since plan 2026-10-19-001 U4, on the Org viewer and
+Reports rows its migration writes. The offboarding hook that switched a grant
+off is gone (U10, KTD2); `test_preflight.TestAccessLifecycle` covers what
+replaced it."""
 
 import frappe
 from frappe.tests import IntegrationTestCase
@@ -17,7 +20,6 @@ from helixhr.tests.utils import (
 	make_test_user,
 )
 from helixhr.utils import (
-	active_company_grant,
 	employee_in_admin_scope,
 	project_in_scope,
 	project_scope_filters,
@@ -61,7 +63,6 @@ class TestReadScope(_Grants):
 	def test_reports_only_grant_reads_no_people(self):
 		make_test_company_grant(GRANT_HOLDER_USER, [self.other], level="Reports only")
 		self.assertEqual(resolve_read_scope(GRANT_HOLDER_USER)["kind"], "none")
-		self.assertEqual(active_company_grant(GRANT_HOLDER_USER)["companies"], [self.other])
 
 	def test_anchored_hr_manager_with_a_grant_reads_both(self):
 		_, hr = make_test_hr_manager_employee()
@@ -78,21 +79,7 @@ class TestReadScope(_Grants):
 
 	def test_disabled_grant_is_ignored(self):
 		make_test_company_grant(GRANT_HOLDER_USER, [self.other], enabled=0)
-		self.assertIsNone(active_company_grant(GRANT_HOLDER_USER))
 		self.assertEqual(resolve_read_scope(GRANT_HOLDER_USER)["kind"], "none")
-
-	def test_grant_on_an_inactive_or_moved_holder_is_ignored(self):
-		make_test_company_grant(GRANT_HOLDER_USER, [self.other])
-		frappe.db.set_value("Employee", self.holder_employee, "status", "Suspended")
-		self.assertIsNone(active_company_grant(GRANT_HOLDER_USER))
-		frappe.db.set_value("Employee", self.holder_employee, "status", "Active")
-		self.assertIsNotNone(active_company_grant(GRANT_HOLDER_USER))
-		# `db_set` skips the hook; the stored home company still guards it.
-		frappe.db.set_value("Employee", self.holder_employee, "company", self.other)
-		try:
-			self.assertIsNone(active_company_grant(GRANT_HOLDER_USER))
-		finally:
-			frappe.db.set_value("Employee", self.holder_employee, "company", self.company)
 
 	def test_grant_never_changes_the_write_resolvers(self):
 		_, hr = make_test_hr_manager_employee()
@@ -140,69 +127,3 @@ class TestGrantDoctype(_Grants):
 	def test_only_system_manager_holds_a_docperm(self):
 		roles = {row.role for row in frappe.get_meta("HelixHR Company Access").permissions}
 		self.assertEqual(roles, {"System Manager"})
-
-
-class TestOffboardingHook(_Grants):
-	def _holder(self, suffix):
-		user = f"grant-hook-{suffix}@helixhr.test"
-		employee = make_test_user(user, self.company)
-		make_test_company_grant(user, [self.other])
-		return employee, user
-
-	def _grant(self, user):
-		return frappe.db.get_value(
-			"HelixHR Company Access", user, ["enabled", "disabled_reason"], as_dict=True
-		)
-
-	def test_leaving_active_disables_and_reactivating_does_not_re_enable(self):
-		employee, user = self._holder("inactive")
-		doc = frappe.get_doc("Employee", employee)
-		doc.status = "Inactive"
-		doc.save(ignore_permissions=True)
-		grant = self._grant(user)
-		self.assertEqual(grant.enabled, 0)
-		self.assertIn("Inactive", grant.disabled_reason)
-		self.assertTrue(
-			frappe.db.exists(
-				"Comment",
-				{
-					"reference_doctype": "User",
-					"reference_name": user,
-					"content": ["like", "%company access%"],
-				},
-			)
-		)
-		doc.reload()
-		doc.status = "Active"
-		doc.save(ignore_permissions=True)
-		self.assertEqual(self._grant(user).enabled, 0)
-
-	def test_login_change_disables(self):
-		employee, user = self._holder("login")
-		make_test_user("grant-hook-login-new@helixhr.test", self.company)
-		# Free the new login from the Employee the factory gave it.
-		frappe.db.set_value("Employee", {"user_id": "grant-hook-login-new@helixhr.test"}, "user_id", None)
-		doc = frappe.get_doc("Employee", employee)
-		doc.user_id = "grant-hook-login-new@helixhr.test"
-		doc.save(ignore_permissions=True)
-		self.assertEqual(self._grant(user).enabled, 0)
-
-	def test_company_move_disables(self):
-		employee, user = self._holder("move")
-		doc = frappe.get_doc("Employee", employee)
-		doc.company = self.other
-		doc.save(ignore_permissions=True)
-		self.assertEqual(self._grant(user).enabled, 0)
-		self.assertIn(self.other, self._grant(user).disabled_reason)
-
-	def test_transfer_to_a_new_employee_disables(self):
-		employee, user = self._holder("transfer")
-		old = frappe.get_doc("Employee", employee)
-		# An HRMS Employee Transfer moves the login to a new record
-		# without saving the old one first (plan 2026-10-14-001 R16).
-		frappe.db.set_value("Employee", employee, "user_id", None)
-		new = frappe.copy_doc(old)
-		new.user_id = user
-		new.insert(ignore_permissions=True)
-		self.assertEqual(self._grant(user).enabled, 0)
-		self.assertIn(new.name, self._grant(user).disabled_reason)

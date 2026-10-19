@@ -9,8 +9,10 @@ from helixhr import preflight
 from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	ensure_email_admin_user,
+	ensure_test_company,
 	leave_rules,
 	make_test_employee_and_manager,
+	make_test_user,
 	suspend_chart_of_account_fixtures,
 )
 
@@ -1533,51 +1535,11 @@ class TestReportAccessHrLockout(IntegrationTestCase):
 		self.assertIn("apply_permission_deltas", result["detail"])
 
 
-class TestCompanyAccessGrantsCheck(IntegrationTestCase):
-	"""Plan 2026-10-14-001 U11 / R18."""
+class TestCombinedExportTable(IntegrationTestCase):
+	"""Plan 2026-10-15-001 U7, kept when the grant check it lived in retired."""
 
-	def setUp(self):
-		from helixhr.tests.utils import (
-			GRANT_HOLDER_USER,
-			ensure_baseline_company,
-			ensure_test_company,
-			make_test_user,
-		)
-
-		frappe.set_user("Administrator")
-		self.user = GRANT_HOLDER_USER
-		self.company = ensure_test_company()
-		self.other = ensure_baseline_company()
-		# Rolled back per class, not per test: restore what a test changed.
-		self.employee = make_test_user(self.user, self.company, status="Active")
-		self._clear()
-		self.addCleanup(self._clear)
-
-	def _clear(self):
-		frappe.db.delete("HelixHR Company Access Company", {"parent": ["like", "%@helixhr.test"]})
-		frappe.db.delete("HelixHR Company Access", {"user": ["like", "%@helixhr.test"]})
-
-	def _grant(self, allow_export=1):
-		from helixhr.tests.utils import make_test_company_grant
-
-		make_test_company_grant(self.user, [self.other], allow_export=allow_export)
-
-	def test_no_grants_passes(self):
-		result = preflight.check_company_access_grants()
-		self.assertEqual((result["status"], result["detail"]), (preflight.PASS, "no enabled grants"))
-
-	def test_a_live_grant_is_listed(self):
-		self._grant()
-		result = preflight.check_company_access_grants()
-		self.assertEqual(result["status"], preflight.PASS)
-		self.assertIn(f"{self.user} (All data: {self.other})", result["detail"])
-
-	def test_a_run_only_grant_warns(self):
-		"""Plan 2026-10-15-001 U7: run rights without export in a company."""
-		self._grant(allow_export=0)
-		result = preflight.check_company_access_grants()
-		self.assertEqual(result["status"], preflight.WARN)
-		self.assertIn(f"{self.user}: may run but not export reports in {self.other}", result["detail"])
+	def test_present_passes(self):
+		self.assertEqual(preflight.check_combined_export_table()["status"], preflight.PASS)
 
 	def test_a_missing_export_company_table_fails(self):
 		real_exists = preflight.frappe.db.exists
@@ -1588,35 +1550,289 @@ class TestCompanyAccessGrantsCheck(IntegrationTestCase):
 			return real_exists(doctype, name, *args, **kwargs)
 
 		with patch.object(preflight.frappe.db, "exists", side_effect=missing):
-			result = preflight.check_company_access_grants()
+			result = preflight.check_combined_export_table()
 		self.assertEqual(result["status"], preflight.FAIL)
 		self.assertIn("HelixHR Report Export Company", result["detail"])
 
-	def test_a_grant_on_an_inactive_holder_warns(self):
-		self._grant()
-		frappe.db.set_value("Employee", self.employee, "status", "Inactive")
-		result = preflight.check_company_access_grants()
+
+U10_HOLDER = "u10-holder@helixhr.test"
+U10_OTHER = "u10-other@helixhr.test"
+
+
+def _bare_user(email):
+	"""An enabled login with no Employee record: R4 lets its rows apply."""
+	if not frappe.db.exists("User", email):
+		frappe.get_doc(
+			{"doctype": "User", "email": email, "first_name": email.split("@")[0], "send_welcome_email": 0}
+		).insert(ignore_permissions=True)
+	frappe.db.set_value("User", email, "enabled", 1)
+	return email
+
+
+class TestAccessPreflight(IntegrationTestCase):
+	"""Plan 2026-10-19-001 U10: each access check fires on seeded data and is
+	quiet without it. Every test starts from a site with no assignment rows
+	and no managed Frappe role, inside a savepoint it rolls back, so the
+	site's own (and other suites') rows never decide an answer."""
+
+	def setUp(self):
+		from helixhr.utils import ASSIGNABLE_ROLES, clear_role_scope_cache
+
+		frappe.set_user("Administrator")
+		frappe.db.savepoint("u10_preflight")
+		# Cleanups run last-in first-out: roll back, then drop every cache
+		# that saw the emptied tables (role lists live in Redis).
+		self.addCleanup(frappe.clear_cache)
+		self.addCleanup(clear_role_scope_cache)
+		self.addCleanup(frappe.db.rollback, save_point="u10_preflight")
+		frappe.db.delete("HelixHR Access Assignment")
+		frappe.db.delete("Has Role", {"parenttype": "User", "role": ["in", list(ASSIGNABLE_ROLES)]})
+		clear_role_scope_cache()
+		frappe.clear_cache()
+		self.holder = _bare_user(U10_HOLDER)
+		self.other = _bare_user(U10_OTHER)
+
+	def _assign(self, user, role, orgs, **kwargs):
+		from helixhr.tests.utils import make_assignment
+
+		make_assignment(user, role, orgs, **kwargs)
+		frappe.clear_cache(user=user)
+
+	# --- Manage access holders ------------------------------------------------
+
+	def test_a_fresh_site_with_no_assignments_warns(self):
+		result = preflight.check_manage_access_holders()
 		self.assertEqual(result["status"], preflight.WARN)
-		self.assertIn(f"{self.user}: holder is not Active", result["detail"])
+		self.assertIn("Nobody can manage access yet", result["detail"])
 
-	def test_a_grant_naming_an_unknown_company_warns(self):
-		self._grant()
-		frappe.db.set_value(
-			"HelixHR Company Access Company", {"parent": self.user}, "company", "_Gone Company"
-		)
-		result = preflight.check_company_access_grants()
+	def test_assignments_without_a_manage_access_holder_fail(self):
+		self._assign(self.other, "HelixHR Org Viewer", [ensure_test_company()])
+		self.assertEqual(preflight.check_manage_access_holders()["status"], preflight.FAIL)
+
+	def test_an_enabled_holder_passes(self):
+		self._assign(self.holder, "HelixHR Access Admin", "all")
+		result = preflight.check_manage_access_holders()
+		self.assertEqual(result["status"], preflight.PASS)
+		self.assertIn(self.holder, result["detail"])
+
+	def test_a_holder_who_fails_the_person_gate_does_not_count(self):
+		from helixhr.utils import clear_role_scope_cache
+
+		self._assign(self.holder, "HelixHR Access Admin", "all")
+		frappe.db.set_value("User", self.holder, "enabled", 0)
+		clear_role_scope_cache()
+		self.assertEqual(preflight.check_manage_access_holders()["status"], preflight.FAIL)
+
+		frappe.db.set_value("User", self.holder, "enabled", 1)
+		employee = make_test_user(self.holder, ensure_test_company())
+		frappe.db.set_value("Employee", employee, {"status": "Left", "relieving_date": today()})
+		clear_role_scope_cache()
+		self.assertEqual(preflight.check_manage_access_holders()["status"], preflight.FAIL)
+
+	# --- Access assignment permissions ----------------------------------------
+
+	def test_the_shipped_doctypes_are_read_only(self):
+		result = preflight.check_access_doctype_permissions()
+		self.assertEqual(result["status"], preflight.PASS, result["detail"])
+
+	def test_a_write_docperm_fails(self):
+		frappe.get_doc(
+			{
+				"doctype": "Custom DocPerm",
+				"parent": "HelixHR Access Change",
+				"role": "System Manager",
+				"permlevel": 0,
+				"read": 1,
+				"write": 1,
+			}
+		).insert(ignore_permissions=True)
+		result = preflight.check_access_doctype_permissions()
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("System Manager holds write on HelixHR Access Change (Custom DocPerm)", result["detail"])
+
+	# --- Access drift -----------------------------------------------------------
+
+	def test_rows_and_roles_in_step_pass(self):
+		self._assign(self.holder, "HR Manager", [ensure_test_company()])
+		# A portal-only row reaches without its Frappe role (migrated grants).
+		self._assign(self.other, "HelixHR Org Viewer", [ensure_test_company()], add_role=False)
+		result = preflight.check_access_drift()
+		self.assertEqual(result["status"], preflight.PASS, result["detail"])
+
+	def test_a_role_set_outside_helixhr_warns(self):
+		frappe.get_doc("User", self.holder).add_roles("HR User")
+		result = preflight.check_access_drift()
 		self.assertEqual(result["status"], preflight.WARN)
-		self.assertIn("unknown companies _Gone Company", result["detail"])
+		self.assertIn(f"set outside HelixHR: {self.holder} (HR User)", result["detail"])
 
-	def test_an_extra_docperm_fails(self):
-		real_get_all = preflight.frappe.get_all
+	def test_a_role_missing_in_frappe_warns(self):
+		self._assign(self.holder, "IT Team", "all", add_role=False)
+		result = preflight.check_access_drift()
+		self.assertEqual(result["status"], preflight.WARN)
+		self.assertIn(f"missing in Frappe: {self.holder} (IT Team)", result["detail"])
 
-		def leaking_get_all(doctype, *args, **kwargs):
-			if doctype == "Custom DocPerm" and kwargs.get("pluck") == "role":
-				return ["HelixHR Portal Admin"]
+	def test_system_managers_never_drift(self):
+		user = frappe.get_doc("User", self.holder)
+		user.add_roles("System Manager", "HR Manager")
+		self.assertEqual(preflight.check_access_drift()["status"], preflight.PASS)
+
+	# --- Access on inactive people ----------------------------------------------
+
+	def test_rows_on_active_people_pass(self):
+		self._assign(self.holder, "HR Manager", "all")
+		self.assertEqual(preflight.check_access_inactive_holders()["status"], preflight.PASS)
+
+	def test_rows_on_a_disabled_login_or_a_left_person_warn(self):
+		company = ensure_test_company()
+		self._assign(self.holder, "HR Manager", "all")
+		self._assign(self.other, "HelixHR Org Viewer", [company])
+		frappe.db.set_value("User", self.holder, "enabled", 0)
+		employee = make_test_user(self.other, company)
+		frappe.db.set_value("Employee", employee, {"status": "Left", "relieving_date": today()})
+		result = preflight.check_access_inactive_holders()
+		self.assertEqual(result["status"], preflight.WARN)
+		self.assertIn(f"{self.holder} (login disabled)", result["detail"])
+		self.assertIn(f"{self.other} (employee record not Active)", result["detail"])
+
+	# --- Org access coverage ----------------------------------------------------
+
+	def _coverage(self, company):
+		real_get_all = frappe.get_all
+
+		def one_company(doctype, *args, **kwargs):
+			if doctype == "Company":
+				return [company]
 			return real_get_all(doctype, *args, **kwargs)
 
-		with patch.object(preflight.frappe, "get_all", side_effect=leaking_get_all):
-			result = preflight.check_company_access_grants()
-		self.assertEqual(result["status"], preflight.FAIL)
-		self.assertIn("HelixHR Portal Admin", result["detail"])
+		with patch.object(preflight.frappe, "get_all", side_effect=one_company):
+			return preflight.check_org_access_coverage()
+
+	def test_an_org_with_nobody_warns_and_all_orgs_rows_cover_it(self):
+		company = ensure_test_company()
+		result = self._coverage(company)
+		self.assertEqual(result["status"], preflight.WARN)
+		self.assertIn(f"{company} (no HR Manager or IT Admin)", result["detail"])
+
+		self._assign(self.holder, "HR Manager", [company])
+		self.assertIn(f"{company} (no IT Admin)", self._coverage(company)["detail"])
+
+		self._assign(self.other, "IT Team", "all")
+		self.assertEqual(self._coverage(company)["status"], preflight.PASS)
+
+	def test_a_row_without_its_frappe_role_does_not_cover(self):
+		company = ensure_test_company()
+		self._assign(self.holder, "HR Manager", "all", add_role=False)
+		self._assign(self.other, "IT Team", "all")
+		self.assertIn(f"{company} (no HR Manager)", self._coverage(company)["detail"])
+
+
+class TestAccessLifecycle(IntegrationTestCase):
+	"""Plan 2026-10-19-001 U10 / KTD2: assignments name their orgs, so an
+	Employee's company move or transfer changes no row and switches nothing
+	off -- the move shows as "Own org not covered" instead."""
+
+	def setUp(self):
+		from helixhr.tests.utils import ensure_baseline_company
+
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		self.other = ensure_baseline_company()
+
+	def _rows(self, user):
+		return frappe.get_all(
+			"HelixHR Access Assignment",
+			filters={"user": user},
+			fields=["name", "role", "all_orgs", "company", "allow_export", "modified"],
+			order_by="name asc",
+		)
+
+	def test_a_company_move_leaves_rows_and_shows_own_org_not_covered(self):
+		from helixhr.api import get_elevated_access
+		from helixhr.tests.utils import make_assignment
+
+		user = "u10-mover@helixhr.test"
+		employee = make_test_user(user, self.company)
+		make_assignment(user, "HelixHR Delivery Manager", [self.company])
+		before = self._rows(user)
+
+		doc = frappe.get_doc("Employee", employee)
+		doc.company = self.other
+		doc.save(ignore_permissions=True)
+
+		self.assertEqual(self._rows(user), before)
+		person = next(row for row in get_elevated_access()["people"] if row["user"] == user)
+		self.assertEqual(person["own_company"], self.other)
+		self.assertIn("own_org_not_covered", {warning["key"] for warning in person["warnings"]})
+
+	def test_an_employee_transfer_for_a_former_grant_holder_raises_nothing(self):
+		from helixhr.tests.utils import make_test_company_grant
+		from helixhr.utils import clear_role_scope_cache, read_companies, resolve_read_scope
+
+		user = "u10-transfer@helixhr.test"
+		employee = make_test_user(user, self.company)
+		make_test_company_grant(user, [self.other])
+		before = self._rows(user)
+		designation = frappe.db.get_value("Designation", {}, "name") or (
+			frappe.get_doc({"doctype": "Designation", "designation_name": "_Test U10 Designation"})
+			.insert(ignore_permissions=True)
+			.name
+		)
+
+		transfer = frappe.get_doc(
+			{
+				"doctype": "Employee Transfer",
+				"employee": employee,
+				"transfer_date": today(),
+				"company": self.company,
+				"new_company": self.other,
+				"create_new_employee_id": 1,
+				"transfer_details": [
+					{
+						"property": "Designation",
+						"fieldname": "designation",
+						"current": frappe.db.get_value("Employee", employee, "designation"),
+						"new": designation,
+					}
+				],
+			}
+		).insert(ignore_permissions=True)
+		transfer.flags.ignore_permissions = True
+		transfer.submit()
+
+		moved_to = transfer.new_employee_id
+		self.assertEqual(frappe.db.get_value("Employee", moved_to, ["user_id", "company"]), (user, self.other))
+		self.assertEqual(self._rows(user), before)
+		# The legacy grant is history now: nothing switches it off.
+		self.assertEqual(frappe.db.get_value("HelixHR Company Access", user, "enabled"), 1)
+		clear_role_scope_cache()
+		self.assertIn(self.other, read_companies(resolve_read_scope(user)))
+
+	def test_a_status_change_refreshes_the_gate_in_the_same_request(self):
+		from helixhr.tests.utils import make_assignment
+		from helixhr.utils import role_scope
+
+		user = "u10-leaver@helixhr.test"
+		employee = make_test_user(user, self.company)
+		make_assignment(user, "HR Manager", [self.company])
+		self.assertEqual(role_scope(user, "HR Manager")["kind"], "company")
+
+		doc = frappe.get_doc("Employee", employee)
+		doc.status = "Left"
+		doc.relieving_date = today()
+		doc.save(ignore_permissions=True)
+		# No manual cache clear: the Employee hook drops the cached gate.
+		self.assertEqual(role_scope(user, "HR Manager")["kind"], "none")
+
+	def test_disabling_a_login_expires_its_exports(self):
+		from helixhr.tests.utils import make_assignment
+
+		user = "u10-disabled@helixhr.test"
+		make_test_user(user, self.company)
+		make_assignment(user, "HR Manager", [self.company])
+		with patch(
+			"helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export.expire_unreachable_exports"
+		) as expire:
+			doc = frappe.get_doc("User", user)
+			doc.enabled = 0
+			doc.save(ignore_permissions=True)
+		expire.assert_called_once_with(user)

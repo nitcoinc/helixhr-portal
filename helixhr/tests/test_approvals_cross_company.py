@@ -56,6 +56,7 @@ MANAGER_USER = "xco-manager@helixhr.test"
 REPORT_USER = "xco-report@helixhr.test"
 STRANGER_USER = "xco-stranger@helixhr.test"
 STRANGER_MANAGER_USER = "xco-b-manager@helixhr.test"
+B_HR_USER = "xco-b-hr@helixhr.test"
 
 _OLD_CONDITION = (
 	'frappe.db.get_value("Employee", doc.employee, "reports_to") == '
@@ -139,6 +140,11 @@ class _CrossCompanyCase(IntegrationTestCase):
 		frappe.set_user("Administrator")
 		self.company_a = ensure_test_company()
 		self.company_b = ensure_baseline_company()
+		# "Send to HR" is offered only while an HR Manager covers the
+		# employee's company (U3): B's HR, named here rather than left to
+		# whichever suite happened to run first.
+		make_test_user(B_HR_USER, self.company_b, create_user_permission=0)
+		make_assignment(B_HR_USER, "HR Manager", [self.company_b])
 		for company in (self.company_a, self.company_b):
 			ensure_holiday_list_assignment(company)
 

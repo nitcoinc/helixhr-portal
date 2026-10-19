@@ -493,7 +493,7 @@ class TestCombinedCompanyScope(_GrantReports):
 			access["scope"],
 			{"kind": "combined", "combined": True, "companies": sorted([self.company, self.other])},
 		)
-		self.assertEqual(access["assigned_companies"], [])
+		self.assertNotIn("assigned_companies", access)
 		self.assertTrue(access["can_export"])
 
 

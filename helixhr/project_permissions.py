@@ -12,7 +12,7 @@
 # *scoped* to member projects. Code review found that pairing insufficient --
 # a DocPerm has no field-level notion of scope, so "scoped" still meant "the
 # whole document, for projects they administer." The DocPerm was removed;
-# these hooks now refuse the "assigned" scope kind outright (Frappe's custom
+# these hooks now refuse a Delivery Manager outright (Frappe's custom
 # `has_permission` hook is independently authoritative, so removing the
 # DocPerm alone does not close this off -- a hook returning `True` grants
 # access even with no base permission at all, confirmed on the bench). HR

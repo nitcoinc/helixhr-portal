@@ -16,11 +16,12 @@ from helixhr.tests.utils import (
 )
 from helixhr.utils import (
 	_company_role_holders,
-	active_company_grant,
 	active_employees_for_users,
 	clear_role_scope_cache,
+	read_companies,
 	resolve_admin_scope,
 	resolve_project_scope,
+	resolve_read_scope,
 )
 
 HR_USER = "u17-hr@helixhr.test"
@@ -101,14 +102,13 @@ class TestActiveEmployeeLookups(IntegrationTestCase):
 		make_assignment(DM_USER, "HelixHR Delivery Manager", [self.company_a])
 		self.assertEqual(resolve_project_scope(DM_USER), {"kind": "company", "company": self.company_a})
 
-	def test_rehired_grant_holder_keeps_their_grant(self):
+	def test_rehired_grant_holder_keeps_their_reach(self):
+		"""The grant's migrated Org viewer row still reads its org."""
 		make_test_user(GRANT_USER, self.company_a, create_user_permission=0)
 		make_test_company_grant(GRANT_USER, [self.company_b])
 		self.added.append(_newer_left_row(GRANT_USER, self.company_b))
-		grant = active_company_grant(GRANT_USER)
-		self.assertIsNotNone(grant)
-		self.assertEqual(grant["home_company"], self.company_a)
-		self.assertIn(self.company_b, grant["companies"])
+		clear_role_scope_cache()
+		self.assertIn(self.company_b, read_companies(resolve_read_scope(GRANT_USER)))
 
 	def test_rehired_role_holder_is_counted_in_their_active_company(self):
 		self._rehire(HR_USER)

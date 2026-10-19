@@ -27,8 +27,8 @@ class HelixHRCompanyAccess(Document):
 		if self.enabled:
 			self.disabled_reason = None
 		if not self.employee or not self.home_company:
-			# A grant created in Desk: anchor it the way the portal does, or
-			# `active_company_grant` would never apply it.
+			# A grant created in Desk: anchor it the way the portal did, or
+			# the migration (and a rollback's old code) would never apply it.
 			anchor = frappe.db.get_value(
 				"Employee", {"user_id": self.user, "status": "Active"}, ["name", "company"], as_dict=True
 			)

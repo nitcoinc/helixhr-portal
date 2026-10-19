@@ -18,6 +18,7 @@ from helixhr.utils import (
 	PROFILE_CORRECTION_CATEGORY,
 	UPLOAD_POLICY,
 	_company_role_holders,
+	clear_role_scope_cache,
 	employee_in_admin_scope,
 	get_manager_user,
 	mask_identifier,
@@ -556,43 +557,47 @@ def employee_on_update(doc, method=None):
 		):
 			frappe.db.set_value("HelixHR Timesheet Change", name, "status", "Withdrawn")
 
-	# Plan 2026-10-14-001 KTD9 / R16. A cross-company grant belongs to this
-	# login, in this company, while Active. Any of the three changing
-	# switches it off; `active_company_grant` already ignores it meanwhile.
-	if doc.user_id and doc.user_id != before.user_id:
-		_disable_grant_saved_elsewhere(doc)
-	if before.user_id:
-		reason = None
-		if before.user_id != doc.user_id:
-			reason = _("the employee's login changed")
-		elif before.status == "Active" and doc.status != "Active":
-			reason = _("the employee is now {0}").format(_(doc.status))
-		elif before.company != doc.company:
-			reason = _("the employee moved to {0}").format(doc.company)
-		if reason:
-			from helixhr.utils import disable_company_access
-
-			disable_company_access(before.user_id, reason)
+	# Plan 2026-10-19-001 KTD2: assignments name their orgs, so nothing here
+	# moves or switches off access -- a company move leaves the rows as they
+	# are and People & access shows "Own org not covered". What a status or
+	# login change does move is R4's gate: `role_scope` re-reads it, and a
+	# Ready export the login can no longer request is expired.
+	if before.user_id != doc.user_id or before.status != doc.status or before.company != doc.company:
+		left = before.status == "Active" and doc.status != "Active"
+		if before.user_id:
+			_refresh_access(before.user_id, expire=left or before.user_id != doc.user_id)
+		if doc.user_id and doc.user_id != before.user_id:
+			_refresh_access(doc.user_id)
 
 
 def employee_after_insert(doc, method=None):
-	"""Plan 2026-10-14-001 R16: an HRMS Employee Transfer that creates a new
-	employee ID moves the login to a new record without saving the old one
-	through `employee_on_update` first."""
+	"""An HRMS Employee Transfer that creates a new employee ID moves the
+	login to a new record without saving the old one through
+	`employee_on_update` first: R4's gate may have changed."""
 	if doc.user_id:
-		_disable_grant_saved_elsewhere(doc)
+		_refresh_access(doc.user_id)
 
 
-def _disable_grant_saved_elsewhere(doc):
-	"""Switch off the login's grant when it was saved against another
-	Employee: the login now belongs to ``doc``."""
-	saved_for = frappe.db.get_value(
-		"HelixHR Company Access", {"user": doc.user_id, "enabled": 1}, "employee"
-	)
-	if saved_for and saved_for != doc.name:
-		from helixhr.utils import disable_company_access
+def user_on_update(doc, method=None):
+	"""Plan 2026-10-19-001 R4: a disabled User reaches nothing. `role_scope`
+	re-reads the gate, and disabling expires every Ready export the login
+	could no longer request."""
+	before = doc.get_doc_before_save()
+	if before and before.enabled != doc.enabled:
+		_refresh_access(doc.name, expire=not doc.enabled)
 
-		disable_company_access(doc.user_id, _("the login moved to employee {0}").format(doc.name))
+
+def _refresh_access(user, expire=False):
+	"""``user``'s R4 gate may have changed: drop `role_scope`'s cached answer
+	for the rest of this request and, with ``expire``, expire the Ready
+	exports they could no longer request (plan 2026-10-14-001 R15)."""
+	clear_role_scope_cache(user)
+	if expire:
+		from helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export import (
+			expire_unreachable_exports,
+		)
+
+		expire_unreachable_exports(user)
 
 
 def employee_validate(doc, method=None):
