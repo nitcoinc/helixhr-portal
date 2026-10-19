@@ -358,10 +358,11 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"delete_report_view": (60, 3600),
 			"get_report_access": (60, 60),
 			"save_report_access": (30, 3600),
-			# Plan 2026-10-15-001 U5: People & access.
+			# Plan 2026-10-15-001 U5, 2026-10-19-001 U6: People & access.
 			"get_person_access": (60, 60),
 			"save_person_access": (30, 3600),
-			"list_people_access": (60, 60),
+			"get_elevated_access": (60, 60),
+			"search_people_access": (60, 60),
 			"get_approver_cleanup": (60, 60),
 			"apply_approver_cleanup": (10, 3600),
 			"get_dashboard": (60, 60),

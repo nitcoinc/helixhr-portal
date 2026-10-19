@@ -26,13 +26,13 @@ from helixhr.api import (
 	get_person,
 	get_portal_bootstrap,
 	get_project,
-	list_people_access,
 	request_export,
 	save_email_theme,
 	save_message_template,
 	save_person,
 	save_report_access,
 	search_people,
+	search_people_access,
 	search_projects,
 )
 from helixhr.events import _enabled_users_with_role, _hr_managers, _is_hr
@@ -359,26 +359,26 @@ class TestPeopleAccessReach(_PortalScope):
 		"""A Portal Admin whose own Employee is in B, with rows on A and B,
 		reaches A in People & access -- with no Company User Permission."""
 		self.assertFalse(frappe.db.exists("User Permission", {"user": PA_AB, "allow": "Company"}))
-		found = {row["employee"] for row in _as(PA_AB, list_people_access, query="res-emp")["rows"]}
+		found = {row["employee"] for row in _as(PA_AB, search_people_access, query="res-emp")["rows"]}
 		self.assertIn(self.emp_a, found)
 		self.assertIn(self.emp_b, found)
 		self.assertNotIn(self.emp_c, found)
 
 	def test_a_named_org_portal_admin_reaches_only_its_orgs(self):
-		found = {row["employee"] for row in _as(PA_A, list_people_access, query="res-emp")["rows"]}
+		found = {row["employee"] for row in _as(PA_A, search_people_access, query="res-emp")["rows"]}
 		self.assertEqual(found & {self.emp_a, self.emp_b, self.emp_c}, {self.emp_a})
 
 	def test_manage_access_reaches_every_org_without_portal_admin(self):
 		self.assertFalse(can_admin_portal(ACCESS_ADMIN))
 		self.assertTrue(can_manage_access(ACCESS_ADMIN))
 		self.assertTrue(_as(ACCESS_ADMIN, get_portal_bootstrap)["can_manage_access"])
-		found = {row["employee"] for row in _as(ACCESS_ADMIN, list_people_access, query="res-emp")["rows"]}
+		found = {row["employee"] for row in _as(ACCESS_ADMIN, search_people_access, query="res-emp")["rows"]}
 		self.assertTrue({self.emp_a, self.emp_b, self.emp_c} <= found)
 
 	def test_a_plain_employee_has_no_reach(self):
 		self.assertFalse(_as(PLAIN, get_portal_bootstrap)["can_manage_access"])
 		with self.assertRaises(frappe.PermissionError):
-			_as(PLAIN, list_people_access)
+			_as(PLAIN, search_people_access)
 
 
 class TestPortalAdminScope(_PortalScope):

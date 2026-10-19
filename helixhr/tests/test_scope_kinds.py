@@ -23,8 +23,11 @@ from helixhr.tests.utils import (
 	make_test_user,
 )
 from helixhr.utils import (
+	DELIVERY_MANAGER_ROLE,
 	admin_scope_employee_filters,
+	assignable,
 	employee_in_admin_scope,
+	may_assign,
 	read_companies,
 	scope_covers,
 )
@@ -97,9 +100,16 @@ class TestCompaniesScopeKind(IntegrationTestCase):
 			)
 
 	def test_portal_role_edits_stop_at_the_scope(self):
-		with patch("helixhr.api.resolve_portal_admin_scope", return_value=self.scope):
-			self.assertTrue(api._can_edit_roles(self.company_b))
-			self.assertFalse(api._can_edit_roles(self.company_c))
+		# Plan 2026-10-19-001 U5/U6: a Portal Admin's grant authority is
+		# `assignable`, which reads its Portal Admin scope.
+		with (
+			patch("helixhr.utils.can_manage_access", return_value=False),
+			patch("helixhr.utils.portal_role_scope", return_value=self.scope),
+		):
+			authority = assignable(HR_USER)
+		row = {"role": DELIVERY_MANAGER_ROLE, "all_orgs": 0}
+		self.assertTrue(may_assign(authority, {**row, "company": self.company_b}))
+		self.assertFalse(may_assign(authority, {**row, "company": self.company_c}))
 
 	def test_export_log_shows_only_the_scope_companies(self):
 		rows = []

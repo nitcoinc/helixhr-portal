@@ -1736,14 +1736,6 @@ def _active_anchor_company(user):
 # matrix, reads the export log, and grants the portal-only roles below. Holds
 # no DocPerm and never passes `resolve_admin_scope` -- it sees no HR data.
 PORTAL_ADMIN_ROLE = "HelixHR Portal Admin"
-# The portal roles the plan 2026-10-15-001 People & access reads list (plan
-# 2026-10-19-001 U6 replaces them). Who may assign what is `assignable`.
-MANAGED_PORTAL_ROLES = (
-	REPORT_MANAGER_ROLE,
-	DELIVERY_MANAGER_ROLE,
-	"HelixHR Notification Manager",
-	"IT Team",
-)
 
 
 def resolve_portal_admin_scope(user):
@@ -2442,32 +2434,74 @@ def can_export_report(user, report_key, company=None, access=None):
 	return access["can_export"] and not access["company_removed"]
 
 
-def access_summary(roles, grant, direct_reports):
+def _join_orgs(companies):
+	"""Org names in words: "Org A", "Org A and Org B", "Org A, Org B and Org C"."""
+	if len(companies) < 2:
+		return "".join(companies)
+	return _("{0} and {1}").format(", ".join(companies[:-1]), companies[-1])
+
+
+def access_summary(rows, held_roles, direct_reports=0, own_company=None, enabled=True, employee_state="none"):
 	"""Plain-language sentences about one person's SAVED access (plan
-	2026-10-15-001 R16): ``roles`` they hold, their active ``grant`` (as
-	`active_company_grant` returns it) and how many people report to them."""
-	parts = []
-	held = [role for role in (*MANAGED_PORTAL_ROLES, *HR_ROLES) if role in roles]
-	if held:
-		parts.append(_("Holds {0}.").format(", ".join(held)))
-	if grant:
-		reach = (
-			_("people, organisation, projects and reports")
-			if grant["level"] == COMPANY_ACCESS_ALL
-			else _("reports")
-		)
-		parts.append(
-			_("Can read {0} for {1}, {2}.").format(
-				reach,
-				", ".join(grant["companies"]),
-				_("with export") if grant["allow_export"] else _("without export"),
+	2026-10-19-001 U7 copy table): their assignment ``rows`` (``role``,
+	``all_orgs``, ``company``, ``allow_export``), the Frappe roles they hold,
+	how many people report to them, their Active Employee's company, and the
+	R4 gate (``enabled``, ``employee_state`` as `active_employee_for_user`
+	answers). Roles are named by R2's labels, never by Frappe role names."""
+	sentences = []
+	if not enabled:
+		sentences.append(_("Their login is disabled, so none of this access applies."))
+	elif employee_state == "inactive":
+		sentences.append(_("Their employee record is not Active, so none of this access applies."))
+	if "System Manager" in held_roles:
+		sentences.append(_("System Manager: reaches every org. Set in Desk."))
+	by_role = {}
+	for row in rows:
+		by_role.setdefault(row["role"], []).append(row)
+	for role in ASSIGNABLE_ROLES:
+		label = _(ROLE_LABELS[role])
+		role_rows = by_role.get(role)
+		if not role_rows:
+			if role in held_roles:
+				sentences.append(_("{0} is set outside HelixHR and gives no portal access.").format(label))
+			continue
+		all_orgs = any(row["all_orgs"] for row in role_rows)
+		named = sorted(row["company"] for row in role_rows if not row["all_orgs"])
+		if role == "HR Manager" and all_orgs:
+			# R6: the Leadership preset.
+			sentence = _("Acts as HR Manager in all orgs, including new ones")
+		elif all_orgs:
+			sentence = _("{0} in all orgs, including new ones").format(label)
+		else:
+			sentence = _("{0} in {1}").format(label, _join_orgs(named))
+		exporting = [row for row in role_rows if row["allow_export"]]
+		if exporting and len(exporting) == len(role_rows):
+			sentence = _("{0}, with export").format(sentence)
+		elif exporting:
+			where = [_("all orgs") if row["all_orgs"] else row["company"] for row in exporting]
+			sentence = _("{0}, with export in {1}").format(sentence, _join_orgs(sorted(where)))
+		sentences.append(sentence + ".")
+		if role not in PORTAL_ONLY_ROLES and role not in held_roles:
+			# U3: HR and IT reach needs the Frappe role as well as the row.
+			sentences.append(
+				_("{0} is missing in Frappe, so it gives no access until restored.").format(label)
 			)
-		)
-	if not parts:
-		parts.append(_("Employee access only: their own records."))
-	if direct_reports:
-		parts.append(_("{0} people report to them.").format(direct_reports))
-	return " ".join(parts)
+	if any(row["role"] in HR_ROLES and not row["all_orgs"] for row in rows):
+		sentences.append(_("Desk access for HR roles is not yet limited to these orgs."))
+	if (
+		own_company
+		and rows
+		and "System Manager" not in held_roles
+		and not any(row["all_orgs"] or row["company"] == own_company for row in rows)
+	):
+		sentences.append(_("Their own org, {0}, is not covered by these roles.").format(own_company))
+	if not rows and not (set(held_roles) & {*ASSIGNABLE_ROLES, "System Manager"}):
+		sentences.append(_("Employee access only."))
+	if direct_reports == 1:
+		sentences.append(_("Manages 1 person."))
+	elif direct_reports:
+		sentences.append(_("Manages {0} people.").format(direct_reports))
+	return sentences
 
 
 def stored_export_companies(export):
@@ -2600,11 +2634,13 @@ RATE_LIMIT_POLICY = {
 	# Plan 2026-10-15-002: timesheet oversight and reminders.
 	"get_pending_by_approver": (60, 60),
 	"send_timesheet_reminder": (20, 3600),
-	# Plan 2026-10-15-001 U5: People & access -- a read per person open,
-	# occasional administrative writes, and a paged search.
+	# Plan 2026-10-15-001 U5, 2026-10-19-001 U6: People & access -- a read
+	# per person open, occasional administrative writes, the Elevated table
+	# and a paged search.
 	"get_person_access": (60, 60),
 	"save_person_access": (30, 3600),
-	"list_people_access": (60, 60),
+	"get_elevated_access": (60, 60),
+	"search_people_access": (60, 60),
 	# Plan 2026-10-07-001 U4: the Approvers cleanup -- a preview read and a
 	# rare batch apply.
 	"get_approver_cleanup": (60, 60),

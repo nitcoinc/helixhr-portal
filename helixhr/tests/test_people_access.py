@@ -1,8 +1,9 @@
 """People & access: the save's mechanics (plan 2026-10-19-001 U5) -- rows
 written, changed and removed, the payload refused whole, the HR Manager
-self-permission rule, the change log -- and the read endpoints of plan
-2026-10-15-001 U5, which U6 rewrites. Authority is `test_access_authority`.
-Every refusal is asserted as the caller's own role, never as Administrator."""
+self-permission rule, the change log -- and the read endpoints' basics (U6;
+their warnings and reach are `test_people_access_read`). Authority is
+`test_access_authority`. Every refusal is asserted as the caller's own role,
+never as Administrator."""
 
 from unittest.mock import patch
 
@@ -10,13 +11,18 @@ import frappe
 from frappe.tests import IntegrationTestCase
 
 from helixhr import api
-from helixhr.api import access_token, get_person_access, list_people_access, save_person_access
+from helixhr.api import (
+	access_token,
+	get_elevated_access,
+	get_person_access,
+	save_person_access,
+	search_people_access,
+)
 from helixhr.tests.utils import (
 	clear_test_company_grants,
 	ensure_baseline_company,
 	ensure_test_company,
 	make_assignment,
-	make_test_company_grant,
 	make_test_portal_admin,
 	make_test_user,
 )
@@ -26,6 +32,7 @@ from helixhr.utils import (
 	PORTAL_ADMIN_ROLE,
 	RATE_LIMIT_POLICY,
 	REPORT_MANAGER_ROLE,
+	SELF_EDIT_REFUSAL,
 )
 
 SYSTEM_MANAGER_USER = "people-system-manager@helixhr.test"
@@ -259,74 +266,78 @@ class TestPeopleAccess(IntegrationTestCase):
 			)
 		rescope.assert_not_called()
 
-	# --- the read endpoints (plan 2026-10-15-001; U6 rewrites them) --------
+	# --- the read endpoints (plan 2026-10-19-001 U6) -----------------------
 
-	def test_self_read_is_refused(self):
-		admin_employee = frappe.db.get_value("Employee", {"user_id": self.admin})
-		with self.assertRaises(frappe.PermissionError):
-			_as(self.admin, get_person_access, admin_employee)
+	def test_self_read_is_locked_with_the_self_sentence(self):
+		person = _as(self.admin, get_person_access, self.admin)
+		self.assertEqual(person["lock"], {"reason": SELF_EDIT_REFUSAL, "removal_only": False})
 
 	def test_admin_on_home_only_reaches_home_only(self):
 		with self.assertRaises(frappe.PermissionError):
-			_as(HOME_ONLY_ADMIN, get_person_access, self.foreign)
-		self.assertTrue(_as(HOME_ONLY_ADMIN, get_person_access, self.home)["can_edit_roles"])
+			_as(HOME_ONLY_ADMIN, get_person_access, FOREIGN_TARGET)
+		self.assertIsNone(_as(HOME_ONLY_ADMIN, get_person_access, HOME_TARGET)["lock"])
 
 	def test_hr_manager_without_portal_admin_is_refused(self):
 		from helixhr.tests.utils import make_test_hr_manager_employee
 
 		_, hr = make_test_hr_manager_employee()
 		for fn, args in (
-			(get_person_access, (self.home,)),
-			(list_people_access, ()),
+			(get_person_access, (HOME_TARGET,)),
+			(get_elevated_access, ()),
+			(search_people_access, ()),
 			(save_person_access, (HOME_TARGET, [], "x")),
 		):
 			with self.assertRaises(frappe.PermissionError):
 				_as(hr, fn, *args)
 
-	def test_list_roles_are_the_panels_held_roles(self):
-		_set_roles(HOME_TARGET, add=[IT, "HR User", "Accounts User"])
-		self.addCleanup(_set_roles, HOME_TARGET, remove=[IT, "HR User", "Accounts User"])
-		person = _as(SYSTEM_MANAGER_USER, get_person_access, self.home)
+	def test_elevated_roles_are_the_person_views_roles(self):
+		self._save(self.admin, HOME_TARGET, [_row(IT, self.company)])
+		_set_roles(HOME_TARGET, add=["HR User", "Accounts User"])
+		self.addCleanup(_set_roles, HOME_TARGET, remove=["HR User", "Accounts User"])
+		person = _as(SYSTEM_MANAGER_USER, get_person_access, HOME_TARGET)
 		panel = sorted(
-			role
-			for toggles in (person["managed_roles"], person["hr_roles"])
-			for role, on in toggles.items()
-			if on
+			[row["label"] for row in person["rows"]]
+			+ [role["label"] for role in person["held_roles_without_rows"]]
 		)
-		rows = _as(SYSTEM_MANAGER_USER, list_people_access, query=self.home)["rows"]
-		row = next(row for row in rows if row["employee"] == self.home)
-		self.assertEqual(row["roles"], panel)
-		self.assertEqual(panel, sorted([IT, "HR User"]))
+		people = _as(SYSTEM_MANAGER_USER, get_elevated_access)["people"]
+		row = next(row for row in people if row["user"] == HOME_TARGET)
+		self.assertEqual(sorted(role["label"] for role in row["roles"]), panel)
+		self.assertEqual(panel, ["HR User", "IT Admin"])
 
-	def test_role_filter_runs_before_paging(self):
-		_set_roles(HOME_TARGET, add=[IT])
-		_set_roles(FOREIGN_TARGET, add=[IT])
+	def test_search_pages_through_every_match(self):
 		rows = []
 		start = 0
 		while True:
-			page = _as(self.admin, list_people_access, roles=[IT], start=start, page_length=1)
+			page = _as(self.admin, search_people_access, query="people-", start=start, page_length=1)
 			rows += page["rows"]
 			if not page["has_more"]:
 				break
 			start += 1
 		users = {row["user"] for row in rows}
 		self.assertTrue({HOME_TARGET, FOREIGN_TARGET} <= users)
-		self.assertTrue(all(IT in row["roles"] for row in rows))
+		self.assertEqual(len(rows), len({row["employee"] for row in rows}))
 
-	def test_grant_level_filter_and_strict_permissions(self):
-		make_test_company_grant(FOREIGN_TARGET, [self.other], level="Reports only")
+	def test_search_under_strict_permissions(self):
 		frappe.db.set_single_value("System Settings", "apply_strict_user_permissions", 1)
 		try:
-			rows = _as(self.admin, list_people_access, grant_level="Reports only")["rows"]
-			everyone = _as(self.admin, list_people_access, page_length=100)["rows"]
+			everyone = _as(self.admin, search_people_access, query="people-", page_length=100)["rows"]
 		finally:
 			frappe.db.set_single_value("System Settings", "apply_strict_user_permissions", 0)
-		self.assertEqual([row["user"] for row in rows], [FOREIGN_TARGET])
 		self.assertTrue({HOME_TARGET, FOREIGN_TARGET} <= {row["user"] for row in everyone})
 
 	def test_every_endpoint_has_a_rate_limit(self):
-		for action in ("get_person_access", "save_person_access", "list_people_access"):
+		for action in (
+			"get_person_access",
+			"save_person_access",
+			"get_elevated_access",
+			"search_people_access",
+		):
 			self.assertIn(action, RATE_LIMIT_POLICY)
-		for removed in ("save_company_access", "set_portal_role", "get_portal_role_holders"):
+		for removed in (
+			"save_company_access",
+			"set_portal_role",
+			"get_portal_role_holders",
+			"list_people_access",
+		):
 			self.assertNotIn(removed, RATE_LIMIT_POLICY)
 			self.assertFalse(hasattr(api, removed))
