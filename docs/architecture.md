@@ -703,8 +703,24 @@ button the server would refuse is not drawn, rather than drawn and disabled.
 | Attendance | Pending HR | — | Approve · Send back · Reject |
 
 "Line manager" is the reports-to user with an **Active** Employee record
-(`events._approver_user`). A manager who is also HR gets the union, minus Send
-to HR once a request is already with HR — there is nowhere left to send it.
+(`events._approver_user`), in any company — the reporting line, not the
+company, decides it (plan 2026-10-18-001 R7). The Timesheet manager transitions
+look up the caller's *Active* Employee too (KTD7); an unfiltered lookup matched
+a newer Left row for a rehired or transferred login and hid the buttons.
+`utils.active_employee_for_user` is the one helper for "this login's Employee".
+
+"HR Manager" in the table means HR *for this employee*: HR, with the employee in
+`resolve_admin_scope`. Outside that scope an HR user falls through to the
+line-manager rule (`_assert_may_act_on`, `_decides_as_hr`) and gets only the
+line manager's column — the HR-role transitions, and so every HR-stage action,
+are dropped (R8). A routed request has no line manager, so out-of-scope HR stays
+refused there. A manager who is also HR gets the union, minus Send to HR once a
+request is already with HR — there is nowhere left to send it.
+
+A line manager whose account cannot change the record — no Employee role, or no
+write/submit through a share or their User Permission — gets the row and the
+detail as view only, with the reason in words (`_approver_access_problem`,
+R10), rather than buttons that fail with a raw PermissionError.
 Own requests: nothing, at any step, on any route (P4-R8); the list is empty for
 the requester and the three `before_submit` hooks refuse the raw routes.
 Administrator is exempt everywhere, being the migration account.

@@ -17,10 +17,12 @@ from helixhr.utils import (
 	PROFILE_CORRECTABLE_FIELDS,
 	PROFILE_CORRECTION_CATEGORY,
 	UPLOAD_POLICY,
+	employee_in_admin_scope,
 	get_manager_user,
 	mask_identifier,
 	photo_file_filters,
 	render_message,
+	resolve_admin_scope,
 	send_notification,
 	upload_extension,
 	validate_portal_upload,
@@ -2126,7 +2128,9 @@ def attendance_request_before_submit(doc, method=None):
 			frappe.PermissionError,
 		)
 
-	if not _is_hr():
+	# Plan 2026-10-18-001 R8: HR outside its scope approves here only as the
+	# line manager, so it gets the line manager's overwrite gate too.
+	if not (_is_hr() and employee_in_admin_scope(doc.employee, resolve_admin_scope(user))):
 		# P4-KTD5, and the reason the gate lives here rather than only in the
 		# portal: HRMS's `on_submit` writes and *overwrites* Attendance in
 		# place, and the `submit=1` DocShare above means a line manager can

@@ -133,3 +133,6 @@ helixhr.patches.v1_0.ensure_close_from_waiting
 # Plan 2026-10-17-001 U12: notification titles say "Mar 8" and "waiting for
 # your manager" -- subject and message copied from the fixture, idempotent.
 helixhr.patches.v1_0.apply_notification_copy
+# Plan 2026-10-18-001 U2 / KTD7: the Timesheet manager transitions look up the
+# caller's Active Employee -- condition copied from the fixture, idempotent.
+helixhr.patches.v1_0.active_manager_workflow_conditions

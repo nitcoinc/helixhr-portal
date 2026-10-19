@@ -635,7 +635,7 @@ const reasonPlaceholder = computed(() =>
       class="surface-inset mt-3 p-3 text-sm text-ink-gray-7"
       data-testid="view-only-note"
     >
-      View only: you can't approve timesheets.
+      View only: {{ selected.read_only_reason || "you can't approve timesheets." }}
     </p>
     <!-- P4-R1. Exactly the outcomes the server allows, in one order on every
          kind: the decision, the recoverable no, the final no, the hand-over.

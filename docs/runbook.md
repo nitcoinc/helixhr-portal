@@ -1506,6 +1506,38 @@ this change keep their old values until something saves them. After deploying:
 The one-department-per-manager workaround is no longer needed for routing.
 Departments are untouched. Restructuring them is separate work.
 
+## "A manager sees a timesheet but can't approve it" (plan 2026-10-18-001 R1)
+
+Three causes were confirmed in code; Release 1 fixes all three. To find which
+one hit a person, run these in `bench --site <site> mariadb` with the manager's
+login in `@u` and the report's Employee id in `@e`:
+
+```sql
+-- 1. More than one Employee row for the manager's login. Before the fix the
+--    workflow condition picked the newest, often a Left row.
+SELECT name, company, status, creation FROM tabEmployee WHERE user_id = @u ORDER BY creation DESC;
+
+-- 2. Manager and report in different companies, and the manager holds HR
+--    Manager: the portal refused them as HR outside their company and never
+--    tried the line-manager rule.
+SELECT e.company AS report_company, m.company AS manager_company,
+  (SELECT COUNT(*) FROM `tabHas Role` WHERE parent = @u AND role = 'HR Manager') AS is_hr
+FROM tabEmployee e JOIN tabEmployee m ON m.name = e.reports_to WHERE e.name = @e;
+
+-- 3. A missing permission layer: the Employee role, the approver share, or the
+--    manager's own User Permission (hide_descendants = 1 stops it at them).
+SELECT role FROM `tabHas Role` WHERE parent = @u AND role = 'Employee';
+SELECT share_name, `read`, `write`, submit FROM tabDocShare
+  WHERE user = @u AND share_doctype = 'Timesheet'
+  AND share_name IN (SELECT name FROM tabTimesheet WHERE employee = @e AND docstatus = 0);
+SELECT for_value, hide_descendants FROM `tabUser Permission` WHERE user = @u AND allow = 'Employee';
+```
+
+After Release 1, cause 3 shows on the row itself: "View only:" and the missing
+piece in words. Causes 1 and 2 need no data fix. If the report's `reports_to`
+still names the manager's *old* (Left) Employee id after a transfer, point it at
+the Active one; that is data, not this bug.
+
 ## Company access: letting someone read another company (plan 2026-10-14-001)
 
 The portal scopes HR reads to the reader's own company. Desk Role Permissions
