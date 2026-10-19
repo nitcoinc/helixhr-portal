@@ -383,19 +383,17 @@ notifications" FAILs and names them -- run `bench --site <site> migrate`, or del
 Desk. Bell fixtures are not retired.
 
 **Who edits email.** The Email templates page (theme, message templates, celebrations &
-holidays) is `HelixHR Portal Admin` or System Manager only: Desk → User → Roles. The user sees
-Admin → Email templates (`/email-templates`); one with no Employee record lands there.
-Preflight "Portal Admin role" WARNs when no enabled user holds it. HR Manager, HR User and
-`HelixHR Notification Manager` are refused (the last still exists but grants nothing here).
+holidays) needs All-orgs authority: an All-orgs `HelixHR Portal Admin`, a Manage access
+holder, or a System Manager. Give it in People & access (Settings), not Desk. The user sees
+Admin → Email templates (`/email-templates`); one with no Employee record lands there. A
+Portal Admin on named orgs is refused, because the theme and templates are global. Preflight
+"Portal Admin role" WARNs when no enabled user holds the role. HR Manager, HR User and
+`HelixHR Notification Manager` are refused (Notification Manager still exists as an All-orgs
+role for message templates; see "Who can change what" below).
 
-**Granting portal roles without Desk.** Give someone `HelixHR Portal Admin` in Desk (User →
-Roles); they need an Active Employee, whose company bounds what they manage. They then grant
-Report Manager, Delivery Manager, Notification Manager and IT Team at `/settings/portal-roles`.
-"You are not authorised to change this person's roles" means the target is not an Active
-Employee with a User in their company (or does not exist -- deliberately the same message);
-their own account is refused too. "This person's roles come from a role profile" means the
-User has a Role Profile that rewrites roles on save: change it in Desk. Each grant/removal is
-an Info comment on the User. HR Manager, HR User and System Manager are never managed here.
+**Granting portal roles without Desk.** Settings → People & access. Roles are assignments
+(a person, a role, the orgs it covers) and HelixHR keeps the Frappe role in step; do not set
+them in Desk. See "Giving access: People & access" and "Who can change what".
 
 **A template email came out in default wording.** The saved template failed to render at
 send time (e.g. a variable removed from the event). The send fell back to the default and
@@ -1538,10 +1536,15 @@ piece in words. Causes 1 and 2 need no data fix. If the report's `reports_to`
 still names the manager's *old* (Left) Employee id after a transfer, point it at
 the Active one; that is data, not this bug.
 
-## Org-scoped access: the migration dry-run (plan 2026-10-18-001 Release 2)
+## Access assignments: dry-run, deploy and rollback (plan 2026-10-19-001)
 
-Before Release 3 switches access to per-org assignments, run the dry-run on
-production and review it with the owner (deploy checklist step 1):
+Every elevated permission is an assignment: a person, a role, and the orgs it
+covers ("All orgs" or named orgs). It never follows the person's own employee
+company, and no Desk User Permission is needed. Release B switches every scope
+to assignments in one deploy. Release A (HR decides from All pending) changes
+nobody's access.
+
+### The dry-run
 
 ```
 bench --site <site> execute helixhr.access_migration.dry_run
@@ -1558,44 +1561,141 @@ It reads only, and prints the two files it wrote under
   **narrowed_by_design** names a security fix from
   `access_migration.SECURITY_FIXES` (a disabled login or an all-Left person,
   a Left Portal Admin included, reaching nothing; a named-org Portal Admin
-  losing the global matrix, email theme and templates), never anything else. **unchanged** is the rest. One person can be both widened and narrowed.
-  Rows for a disabled user or a Left person are listed too: the switch keeps
-  them so reactivation restores access, as it does today.
+  losing the global matrix, email theme and templates; an IT Admin with no
+  Employee losing an empty request page), never anything else. **unchanged**
+  is the rest. One person can be both widened and narrowed. Rows for a
+  disabled user or a Left person are listed too: the switch keeps them so
+  reactivation restores access, as it does today.
 - `snapshot-<stamp>.json`: every user's scope answers today (admin, read,
   project, Portal Admin, reports, IT, oversight, People & access reach and the
-  bootstrap flags) plus the HR and IT mail recipients per org. Release 3's
-  parity check compares against it, so keep the file from the run the owner
-  signed off.
+  bootstrap flags) plus the HR and IT mail recipients per org. The parity
+  check compares against it, so keep the file from the run you pass to it.
 
 The files name people and their access: do not paste them into chat or
-tickets, and delete old ones once Release 3 is verified.
+tickets, and delete old ones once the switch is verified.
 
-## Company access: letting someone read another company (plan 2026-10-14-001)
+### Release B deploy checklist
 
-The portal scopes HR reads to the reader's own company. Desk Role Permissions
-and User Permissions do not widen it. To let a C-level user, a Delivery Manager
-or a reports user read another company, give them a **company access grant**.
-Grants are read-only: approvals, edits and the roster stay with each company's
-own HR.
+1. With Release A deployed, run
+   `bench --site <site> execute helixhr.access_migration.dry_run` on
+   production. Review the per-person report with the owner.
+2. Freeze access edits. Turn on maintenance mode and run `bench backup`.
+3. Re-run the dry-run. Check its report matches the reviewed one, and note
+   its snapshot path.
+4. Run `bench --site <site> migrate`. The patch writes the assignments.
+5. Run
+   `bench --site <site> execute helixhr.access_migration.parity_check --args '["<snapshot path>"]'`
+   with the snapshot path from step 3. Zero undeclared differences are
+   required, or restore the backup before reopening.
+6. Turn off maintenance mode. A System Manager gives the access owner Manage
+   access in People & access.
+7. Run `bench --site <site> execute helixhr.preflight.run` and confirm it is
+   clean.
 
-1. **Give the granting Portal Admin reach.** A Portal Admin can grant only its
-   own company, plus each company named in its own User Permissions on Company.
-   In Desk, add a User Permission for that Portal Admin with Allow `Company`, the
-   company as the value, **Apply To All Document Types off** and **Applicable For
-   `Company`**. An apply-to-all row does not count, and it would also narrow that
-   person's own reads of every company-linked doctype. A System Manager needs
-   none of this.
-2. **Grant.** In the portal, open **Settings > Company access**. Pick the
-   person, a level (*All data* or *Reports only*), the companies and whether
-   they may export reports. Nobody can grant themselves.
-3. **Run preflight.** `Company access grants` lists every enabled grant. It
-   WARNs on a grant that no longer applies or is held by a Portal Admin.
+`parity_check` re-reads the legacy state (the patch never changes it), works
+out what each person's answers should now be, and labels each difference
+"declared widening", "security fix", "declared recipient change" or
+"undeclared". It also checks every migrated person's rows equal the plan. It
+writes a 0600 `parity-<stamp>.json` and returns the counts; only undeclared
+blocks. If a person was changed through People & access since the switch, they
+are listed under `changed_through_save`, not compared.
 
-The holder reloads the portal once to see the new menu entries. A grant
-switches itself off when the holder stops being Active, gets a different
-login or moves company. The row shows why; save it again to re-enable it.
-Disabling or narrowing a grant deletes any finished export file the holder
-can no longer request.
+Before the first Manage access holder exists, the "Manage access holders"
+preflight check WARNs (FAILs once assignments exist and nobody who can sign in
+holds it). A System Manager can still change access in the meantime.
+
+### Rollback
+
+Before reopening, restore the backup from step 2. After reopening, roll back
+by code revert only; do not restore the backup, which would drop every change
+made since. Two things to expect:
+
+- HR assignments made after the switch revert to home-company reach, because
+  the old code reads each HR Manager's own Employee company.
+- Legacy `HelixHR Company Access` grants for migrated Org viewer and Reports
+  rows that were removed since the switch were disabled when the row was
+  removed, so the old code does not bring that access back. Org viewer and
+  Reports rows added after the switch have no legacy grant, so that access
+  disappears on rollback.
+
+### Before Release B only: giving an Org B Portal Admin Org A
+
+*Before Release B only -- remove after the switch.* Until assignments ship, a
+Portal Admin reaches another company only through a Desk User Permission. In
+Desk add one for that person: Allow `Company`, For Value = Org A,
+**Applicable For = Company** (Apply To All Document Types off: an apply-to-all
+row does not count, and it would also narrow that person's own reads of every
+company-linked doctype). Remove it after the switch: assignments never read it,
+and the migration has already turned each such Company-only permission into a
+Portal Admin row for that org.
+
+### Giving access: People & access
+
+Settings → **People & access**. Elevated access is first (everyone in your reach
+who holds an assignment or a managed Frappe role, problems first), then All
+employees with search by name or ID and an org filter. An employee with no login
+is listed and marked "No login", and has no add-role control: create the login
+first. Open a person to see a plain summary, edit role rows with org chips, and
+review gains and losses before saving.
+
+**Give someone access in two orgs.** Open the person, **Add role**, pick the role
+(for example HR Manager), then add both orgs as chips (a new role starts on their
+own org). The role appears as "HR Manager · Org A, Org B". Nothing is needed in
+Desk: HelixHR adds the Frappe role for you. To widen later, add an org chip and
+save; to narrow, use the chip's remove button. Their own employee company does
+not matter: reach follows the chips. If the same person must hold different
+roles in different orgs, add each role with its own orgs (Portal Admin in Org A,
+Org viewer in Org B).
+
+**Leadership.** "Apply Leadership" is a preset, not a role: it sets HR Manager on
+All orgs and leaves every other row alone, and so covers orgs created later. It
+is high-risk (a reason is required, and every System Manager and Manage access
+holder gets a notification). Only System Manager and Manage access can give it.
+
+**Manage access.** The role that lets someone change other people's access. It
+exists only on All orgs. Only a System Manager or another Manage access holder
+gives it. Nobody but a System Manager can remove the last holder who can sign
+in ("This would leave nobody who can manage access."). After the switch, a
+System Manager must give it to the access owner (deploy checklist step 6).
+
+**The review step and the reason.** A save that adds All orgs, Manage access,
+export, or an HR Manager or HR User row is high-risk: the review dialog marks it
+"High risk" and needs a plain-text reason of 500 characters or fewer. The reason
+is stored with the change, shown in the person's history, and sent in the
+notification.
+
+**What each warning means, and how to fix it.** Elevated access shows these. The
+banner counts people with a problem; "Needs attention" filters to them.
+
+| Warning | Means | Fix |
+|---|---|---|
+| Employee record Left or Inactive | Their Active Employee is gone; they reach nothing in the portal | Remove their rows, or rehire/reactivate them (reach comes back) |
+| User disabled | Login disabled; they reach nothing | Remove the rows, or enable the User |
+| No login | An employee in All employees has no User | Create the login in Desk first |
+| Role set outside HelixHR | A managed Frappe role is held with no assignment (someone edited Roles in Desk). It gives no portal reach | **Give orgs** (add the role's orgs and save) or **Remove role** |
+| Role missing in Frappe | An assignment whose Frappe role was removed. For HR Manager, HR User and IT Admin the row then reaches nothing | **Restore role** (saves the row again) or **Remove role** |
+| Own org not covered by their roles | Their employee company is in none of their rows (often a transfer). Informational in effect: reach stays as assigned | Add their org if they should still act there, or leave it |
+| Desk HR reach: all orgs | A named-org HR role. In Desk, HRMS reads every org through the Frappe role | See the caveat below |
+| All orgs | Holds an All-orgs row | Check it is intended |
+| Can manage access | Holds Manage access | Check it is intended |
+| Export on | A Reports or Org viewer row allows export | Check it is intended |
+
+For a Left, disabled or no-login person the editor only allows removing rows.
+A person whose roles come from a Role Profile is read-only here ("Change it in
+Desk"): the profile would rewrite the roles on save.
+
+**HR roles reach every org in Desk until Desk lock-down.** HR Manager and HR User
+are Frappe roles, and HRMS's Desk permissions read every org's records for them
+no matter which orgs the assignment names. The portal limits HR to the assigned
+orgs; Desk does not. That is why only System Manager and Manage access can give
+HR roles, why doing so is high-risk, and why a named-org HR row carries the
+"Desk HR reach: all orgs" warning. Treat an HR assignment as all-orgs in Desk
+until the Desk and REST lock-down plan ships.
+
+**Preflight** reports the same drift site-wide. `Access drift` WARNs for either
+direction, `Access on inactive people` WARNs for rows nobody can use, and `Org
+access coverage` WARNs when an org has no HR Manager or no IT Admin. Each is put
+right in People & access.
 
 ## Go-live checklist
 
@@ -1950,13 +2050,15 @@ Approvals appears for an HR User only when the bootstrap's
 `can_oversee_timesheets` is true (`api._oversight_scope`):
 
 1. The User holds **HR User** (HR Manager takes the HR Manager path instead).
-2. Their Employee record is **Active** and has a company. Inactive, Left or
-   no Employee means no flag and no nav item.
+2. They hold an **HR User** assignment covering at least one org (People &
+   access), and pass the person gate: an enabled login, and an Active
+   Employee if they have any Employee record. A Frappe HR User role with no
+   assignment, or a Left Employee, means no flag and no nav item.
 3. The bootstrap is read once per page load: reload the portal after
    changing the role or the Employee.
 
 An HR User with only oversight sees one tab (Timesheets), so the tab bar is
-hidden. They can open a pending timesheet in their own company read-only
+hidden. They can open a pending timesheet in their orgs read-only
 ("View only"); any other kind or company is refused as not found.
 
 ### Employee can't comment on a request
@@ -1998,7 +2100,7 @@ Open -> Waiting on Employee transitions. Verify:
 
 ### Project report missing hours from the other company
 
-A combined run covers every company the caller's grant allows, but an
+A combined run covers every company the caller's assignments allow, but an
 incorrect filter scope or a missing SQL condition can silently drop rows.
 
 1. Check the result's ``columns`` for a ``company`` field. Without it,
@@ -2007,8 +2109,9 @@ incorrect filter scope or a missing SQL condition can silently drop rows.
    a named company, the resolver was given a specific company, not the
    combined option.
 3. A single-company caller sees only their own company's hours on another
-   company's project -- by design (R4). Hours from the other company need a
-   grant over it, then "All my companies".
+   company's project -- by design (R4). Hours from the other company need an
+   assignment over it (Delivery Manager, Reports, Org viewer, or an HR role in
+   that org), then "All my companies".
 4. "All my companies" missing from the picker: the caller has fewer than
    two run-capable companies for this report, or it is not a project report.
 5. An unknown scope kind reaching `_timesheet_scope_conditions` raises
@@ -2016,16 +2119,30 @@ incorrect filter scope or a missing SQL condition can silently drop rows.
 
 ### Who can change what (People & access)
 
-The People & access Settings section replaces the Portal roles and Company
-access sections. The reach split can confuse:
+Reach is the orgs the caller's Portal Admin rows name; Manage access holders and
+System Managers reach everything. What the caller may change within it:
 
-| Action | Who | Why blocked |
+| Caller | May assign | In orgs |
 |---|---|---|
-| Edit managed roles | Portal Admin, home company only | The target is outside the admin's home company "home company only" |
-| Edit grant | Portal Admin, any grantable company | Grant company outside `grantable_companies` "You can't grant access to..." |
-| Edit HR roles | System Manager only | Portal Admin toggles are locked |
-| Self-edit | Nobody | "You can't change your own access here." |
-| Role Profile user | Nobody | "This person's roles come from a role profile." |
+| System Manager | Everything | Any |
+| Manage access (All orgs) | Everything | Any |
+| Portal Admin | Delivery Manager, IT Admin, Reports, Org viewer | Only its orgs |
+
+A person is editable only when every role they hold is one the caller may assign
+in every org it covers. Otherwise the whole person is read-only with the reason.
+
+| What you see | Why | Fix |
+|---|---|---|
+| "You can't change your own access." | Nobody edits themselves | Ask another Manage access holder or a System Manager |
+| "You can't change this person's access: they hold a role you can't assign." | The person holds a role, or an org, beyond the caller's authority (for a Portal Admin: HR, Portal Admin, Manage access, or a role in another org) | A System Manager or Manage access holder makes the change |
+| "Only Manage access can give HR roles." | HR roles are Manage access and System Manager only, until Desk lock-down | Ask one of them |
+| "You can't give X on All orgs." / "...in Org B." | The row is outside the caller's orgs. Even an All-orgs Portal Admin cannot give All orgs | Ask Manage access |
+| "This person's roles come from a role profile. Change it in Desk." | A Role Profile rewrites roles on save | Change the profile in Desk, not here |
+| "Someone changed this person's access. Reload and re-apply." | Another save landed first (any row, not only the newest) | Reload; your draft is kept |
+| "This would leave nobody who can manage access." | Removing the last All-orgs Manage access holder who can sign in | A System Manager gives it to someone first |
+| "This change gives high-risk access: give a reason." | High-risk save with no reason | Enter a reason (500 characters or fewer) |
+| Person not found / "not authorised to see this person" | Outside the caller's reach. Same message whether or not they exist | A caller with the right orgs, or Manage access |
+| Matrix, email theme or message templates refused | Global settings need All-orgs authority (an All-orgs Portal Admin, Manage access, or System Manager) | Ask one of them |
 
 ### Request not in Approvals (Plan 2026-10-16-001 U3 / KTD1)
 

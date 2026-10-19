@@ -169,7 +169,7 @@ neither), with a `category` (Important / General) and a `published_on` date (def
 the `backfill_document_link_dates` patch gave older rows General and their creation date).
 
 - **Who publishes.** `save_document_link` / `delete_document_link` gate on
-  `_assert_can_manage_document`: HR only; an anchored HR Manager for their own company, never a
+  `_assert_can_manage_document`: HR only; an HR Manager for the orgs their HR Manager assignments name, never a
   global (blank-company) row; a System Manager for any. An edit checks the row's current company
   too, so a row can't be pulled across companies. The bootstrap's `can_manage_documents` only
   decides whether the controls render.
@@ -814,7 +814,7 @@ Key architecture for routed requests:
 - **The resolver (Plan 2026-10-16-001 KTD8).** `helixhr.api.get_request_view(name)`
   returns `employee`, `handler` or `none` for a request name: ownership first, then
   the two rules that already exist -- `hr_request.has_permission` (read scope:
-  company for a routed holder, `resolve_admin_scope` with grants for HR) and
+  company for a routed holder, `resolve_admin_scope` for HR) and
   `_assert_may_act_on` (stored route, not own request). `Notifications.vue`
   calls this resolver when opening a notification so handlers land on the Team
   inbox detail and employees land on My requests, preventing "That request isn't yours"
@@ -1223,7 +1223,7 @@ an hour is refused, so the bypass is never the thing under test.
 | HR Manager | decide Manager-stage leave **in the approver's place** when the approver is on approved leave today or the request is overdue (admin scope only). Row tagged "Approver on leave" / "Overdue with approver". | `get_my_approvals` adds the rows with `hr_reason`; `_leave_allowed_actions` |
 | HR Manager | see the **Overdue** tab (`get_overdue_approvals`), grouped by owner | same collector as the digest, `resolve_admin_scope` |
 | HR Manager | review, Reveal (logged, comment written) and apply a bank-detail correction on Done | `reveal_correction_value`, `events` correction block |
-| `HelixHR Portal Admin` (or System Manager) | everything on the Email templates page: the shared theme, message templates (edit, preview, test-send, switch off, reset) and celebration / holiday mail | `_assert_can_edit_email_templates`; bootstrap flag `can_edit_email_templates` |
+| An All-orgs `HelixHR Portal Admin`, Manage access, or System Manager (R7) | everything on the Email templates page: the shared theme, message templates (edit, preview, test-send, switch off, reset) and celebration / holiday mail | `_assert_can_edit_email_templates`; bootstrap flag `can_edit_email_templates` |
 
 The Portal Admin holds **no DocPerm** (preflight FAILs on one), so every
 endpoint behind the page checks the role and then writes with
@@ -1475,9 +1475,9 @@ KTD4 — not because of a line count.
   (reports, HR, or a decision waiting -- request rows no longer count, plan
   2026-10-16-001 KTD1) or `can_oversee_timesheets`;
   Settings appears on `can_configure` (HR sections) or `can_admin_portal`
-  (Report access + Portal roles); Organisation only on
-  `can_see_organisation` (HR Manager / System Manager, company-scoped,
-  read-only). Every nav gate is a bootstrap boolean, never a role list --
+  (Report access + People & access); Organisation only on
+  `can_see_organisation` (HR Manager, Org viewer or System Manager, scoped to
+  their assignment orgs, read-only). Every nav gate is a bootstrap boolean, never a role list --
   the frontend carries no role names of its own, and the server enforces the
   read or write independently of what the nav happens to show.
 - `lib/session.js` owns the portal bootstrap (`ensureBootstrap`, at most once
@@ -1646,16 +1646,16 @@ exports them itself (CSV, Excel, PDF), inside one bound and one access model:
   may run it for, each with its own export right) and `company_removed`;
   every report endpoint consumes it, through `api._report_access`, and
   exports use `export_scope`. Access is decided per company (plan
-  2026-10-14-001): the tiers below apply to the home company, an unscoped
-  caller gets every company one at a time, and a company access grant adds
-  its companies. A company the caller may not use falls back to the default
+  2026-10-14-001): each tier applies at every org the caller's assignments
+  name, an All-orgs row gives every company one at a time (plan
+  2026-10-19-001). A company the caller may not use falls back to the default
   with `company` in `filters_removed`; exports refuse it. The company rides
   in the result's filters, so export fingerprints, the background job, the
   download and saved views all re-check it. Scope is
   resolved per report from only the tiers that grant run/export on that key,
   reusing `resolve_admin_scope` and `resolve_project_scope`. Report Manager
-  and HR User need an Active Employee anchor whose company is their scope;
-  Delivery Manager gets project scope. Entity filters must be plain in-scope
+  (Reports), HR User, Org viewer and Delivery Manager rows each give a tier at
+  their orgs (Delivery Manager on project-scoped entries only). Entity filters must be plain in-scope
   strings: operator-shaped values are refused, an out-of-scope value empties
   the result with a `filters_removed` notice, never widens it. Saved views
   always run as the viewer.
@@ -1677,68 +1677,50 @@ exports them itself (CSV, Excel, PDF), inside one bound and one access model:
 - **Portal Admin.** `HelixHR Portal Admin` is a portal-only role (fixture,
   desk_access 0, no DocPerm at all -- preflight "Portal Admin role" FAILs on
   desk access or any report/export/write/create grant, and the Timesheet
-  report guard covers it as a fixture role). It edits the access matrix
-  (`get/save_report_access`, saving with `ignore_permissions` after
-  `can_admin_portal`), reads the export log, and grants or removes only the
-  four portal-only roles (`MANAGED_PORTAL_ROLES`: Report Manager, Delivery
-  Manager, Notification Manager, IT Team) through
-  `get_portal_role_holders` / `set_portal_role`. System Manager may call all
-  of these too; HR Manager and HR User are refused (plan 2026-10-06-001 U3).
-  Scope is `resolve_portal_admin_scope`: a System Manager keeps
-  `resolve_admin_scope`'s answer; a Portal Admin gets its Active Employee's
-  company, or none. A target must be
-  an Active Employee with a User in that scope, never the caller; the User is
-  saved through `doc.save()` (a Role Profile that re-derives roles is
-  refused) and an Info comment on the User records the change. A Portal
-  Admin never passes `resolve_admin_scope` or `resolve_report_access`: no
-  People, no reports, unless it also holds a report role. Bootstrap flag
-  `can_admin_portal` drives the Settings (Report access + Portal roles only)
-  and Reports (Export log only) nav entries.
+  report guard covers it as a fixture role). Its reach is its assignment
+  rows (`resolve_portal_admin_scope`, plan 2026-10-19-001): the orgs they
+  name, or every org on All orgs. It reads the export log and the access
+  matrix, cleans up approvers, and gives the everyday roles in its orgs
+  through People & access (see "Access assignments" below). Editing the
+  matrix, the email theme and the message templates is global policy and needs
+  All-orgs authority (`has_all_orgs_authority`: an All-orgs Portal Admin,
+  Manage access, or System Manager); a named-org Portal Admin is refused.
+  `can_admin_portal` is true for a Portal Admin row in force or a System
+  Manager. A Portal Admin never passes `resolve_admin_scope` or
+  `resolve_report_access` on that role alone: no People, no reports, unless
+  it also holds a read role. Bootstrap flag `can_admin_portal` drives the
+  Settings and Reports (Export log only) nav entries.
 
-### Cross-company read grants (plan 2026-10-14-001)
+### Cross-company read (plan 2026-10-14-001, reshaped by 2026-10-19-001)
 
 Every administrative read was scoped to one company: the caller's Active
-Employee's. A **company access grant** (`HelixHR Company Access`, one per
-User, System Manager DocPerm only, track_changes on) lets a portal user read
-other companies' data. **Grants are read-only.**
+Employee's. Plan 2026-10-14-001 added a per-user company access grant
+(`HelixHR Company Access`) so a portal user could read other companies. Plan
+2026-10-19-001 replaced the grant with **Org viewer** and **Reports**
+assignments; the grant doctype is no longer read by any resolver and
+survives only as migration input and as the switch the save turns off for a
+removed migrated row (see "Access assignments"). What stayed from the grant
+design:
 
-- **Two levels.** *All data* opens People, Organisation, Projects and
-  Reports for the named companies. *Reports only* opens every non-deny-listed
-  company-scoped catalog report for them. At both levels the grant's
-  `allow_export` decides export, not the HelixHR Report Access matrix.
 - **A second resolver, never a wider first one.** `resolve_read_scope` and
   `resolve_project_read_scope` widen `resolve_admin_scope` /
-  `resolve_project_scope` for read sites only, returning a `companies` kind
-  when more than one company applies. The original two resolvers still
-  answer every REST permission hook and every write, approve and roster
-  gate, so a grant reaches no `/api/resource` document and no write. Reads
-  return `can_edit` (person, project) and `can_create` (projects) from the
-  write resolvers. Roster's "Everyone" mode has its own bootstrap flag,
-  `can_roster_everyone`.
-- **Grant reads run server-side.** Holders keep their self User Permission
-  under strict mode. That is still the boundary for every permission-aware
-  read, so reads behind the read resolver use `frappe.get_all` (which ignores
+  `resolve_project_scope` for read sites only, now by the caller's Org viewer
+  rows, returning a `companies` kind when more than one company applies. The
+  original two resolvers still answer every REST permission hook and every
+  write, approve and roster gate, so an Org viewer reaches no `/api/resource`
+  document and no write. Reads return `can_edit` (person, project) and
+  `can_create` (projects) from the write resolvers. Roster's "Everyone" mode
+  has its own bootstrap flag, `can_roster_everyone`.
+- **Reads run server-side.** Holders keep their self User Permission under
+  strict mode. That is still the boundary for every permission-aware read, so
+  reads behind the read resolver use `frappe.get_all` (which ignores
   permissions). The person view's leave balances run inside
   `as_administrator()`, because HRMS's `get_leave_details` checks the session
   user.
-- **Grant authority (reverses plan 2026-10-06-001 U3's "Portal Admin is
-  config, not HR data" for this one capability).** `grantable_companies`:
-  System Manager and Administrator may grant any company. A Portal Admin may
-  grant only its Active home company plus the companies in its own User
-  Permissions on Company whose Applicable For is Company. Apply-to-all rows
-  are ignored: ERPNext creates them as a side effect of "Create User
-  Permission" and never removes them on a transfer. No one may grant,
-  edit or revoke their own grant, and a Portal Admin edits only grants whose
-  every company is in its reach. Every change comments on the holder's User
-  and clears their cache. The Portal Admin itself still sees no HR data
-  through its role.
-- **Lifecycle.** A grant applies only to the Employee and company it was
-  saved against, while that Employee is Active (`active_company_grant`).
-  `employee_on_update` disables it on a status, login or company change,
-  and re-enabling it is a fresh save. Disabling or narrowing a grant
-  expires the holder's Ready export files they can no longer request.
-  Preflight "Company access grants" lists every enabled grant and WARNs on
-  ones that no longer apply or are held by a Portal Admin.
+- **Export follows the row.** A Reports or Org viewer row's `allow_export`
+  decides export for its orgs, not the HelixHR Report Access matrix.
+  Removing the row, or a login or Employee change that ends reach, expires
+  the holder's Ready export files they can no longer request.
 
 Desk access to HRMS reports is unchanged and still governed by Frappe's own
 Report roles and DocPerms, not by this matrix: granting a report here gives
@@ -1813,15 +1795,16 @@ first. `?view=overdue` is an alias for All pending with Overdue only on.
   so HR sees whose queue it is), `no_login`, `unmailable`, else `none`.
   Groups key on user, then Employee, then role, then one no-approver bucket.
 - **Oversight scope** (`api._oversight_scope`, also the bootstrap's
-  `can_oversee_timesheets`). HR Manager: `resolve_admin_scope` -- one company,
-  or every company for the unscoped Desk persona; an HR Manager whose Employee
-  is not Active is refused, never widened. HR User with an Active Employee:
-  the anchor company, timesheets only. Company access grants never widen it.
+  `can_oversee_timesheets`). HR Manager: `resolve_admin_scope` -- the orgs
+  their HR Manager assignments name, or every org on All orgs; an HR Manager
+  who fails the person gate (R4) is refused, never widened. HR User: the orgs
+  their HR User assignments name, timesheets only. Org viewer and Reports rows
+  never widen it.
   Reads are `frappe.get_all` with explicit fields, so strict User Permissions
   do not empty them.
 - **HR User detail.** `get_approval_detail` checks, from the row's columns
   before loading the document, that the timesheet is pending and in the HR
-  User's company; it then returns the evidence with `actions: []` and
+  User's orgs; it then returns the evidence with `actions: []` and
   `read_only: true` unless the HR User is that timesheet's own approver.
   Every other kind or company falls through to `_assert_may_act_on`'s
   not-found refusal; `act_on_approval` is untouched.
@@ -1923,31 +1906,297 @@ companies, reversing the "one company per run" decision (KTD11 of plan
 - **Export gate.** A combined export is refused when any company in the
   set lacks export rights. The reason names the blocking company.
 
-### People & access (plan 2026-10-15-001)
+### Access assignments (plan 2026-10-19-001)
 
-One Settings section for one person: their managed portal roles, HR roles
-and cross-company grant, in one screen with one Save.
+Every elevated permission is one **assignment**: a person, a role, and the
+orgs it covers (one or more named orgs, or "All orgs"). The orgs are explicit
+and never follow the person's own employee company. HelixHR is the only place
+assignments are set; no Desk User Permission is needed. People & access shows
+**Elevated access** first, with plain warnings, then **All employees** with
+search. This replaces the anchor model and the cross-company grant (see
+"Reversals" below).
 
-- **Reach split.** A Portal Admin may edit managed roles only for targets
-  in their home company, and the grant only for companies in their
-  ``grantable_companies`` reach. HR roles (HR User, HR Manager) are System
-  Manager only (KTD9). Self-edit is refused (R14).
-- **HR Manager self-UP (R13).** Adding HR Manager removes the target's
-  Employee User Permissions (an HR Manager scoped to themselves has no HR
-  queue); removing it creates the self one. Only an actual role change
-  triggers it.
-- **Writes.** ``set_portal_role``, ``save_company_access`` and
-  ``save_person_access`` share ``_apply_role_diff`` (one User save, Role
-  Profile refusal) and ``_apply_grant`` (upsert or switch off, stale-checked).
-  ``save_person_access`` needs ``user_modified`` and ``grant_modified`` as
-  loaded, leaves the grant alone unless sent, and revokes only on an explicit
-  ``{"revoke": true}``.
-- **Side effects deferred.** The grant's cache clear and export expiry run
-  after commit (KTD7), via a ``defer_side_effects`` flag on
-  ``HelixHRCompanyAccess``. A rollback then never leaves deleted export
-  files behind.
-- **Profiles.** Frontend-only templates over role and grant toggles. The
-  server validates the resulting toggle set, never a profile name (KTD8).
+#### The model
+
+- **One row per (user, role, org-or-All).** Doctype `HelixHR Access
+  Assignment`: `user`, `role`, `all_orgs`, `company`, `allow_export`, `origin`
+  (`manual` or `migrated`) and a hidden `scope_key` (the company, or
+  `__all`) under a unique index on (user, role, `scope_key`), because MariaDB
+  treats NULLs as distinct. System Manager has read-only DocPerm on it and on
+  `HelixHR Access Change`; writes go through `save_person_access` and the
+  migration only, with `ignore_permissions`. Preflight FAILs on any create,
+  write or delete DocPerm for either.
+- **No anchor, no enabled flag.** A row that exists is in force; removing it
+  deletes it. Reach follows the row's orgs. The one person-level gate is
+  **R4**: an enabled User, and an Active Employee when the person has any
+  Employee record (a person with none is fine). A transfer cannot silently
+  move access; the Elevated table shows "Own org not covered".
+- **One resolver input.** `utils.role_scope(user, role)` returns a scope dict
+  in the existing vocabulary (`unscoped`, `company`, `companies`, `none`).
+  It reads all of a user's rows in one query, applies R4, and caches them on
+  `frappe.local` for the request (`clear_role_scope_cache` after a write).
+  Administrator and a System Manager who passes R4 are unscoped, never
+  assigned (R5). `role_export_scope` is the part whose rows have
+  `allow_export`. Every resolver keeps its name and output shape, and the
+  bootstrap flags keep theirs, plus a new `can_manage_access`.
+- **`Has Role` stays Frappe's switch.** HR Manager, HR User and IT Team need
+  the Frappe role **and** a row, because that role drives HRMS DocPerms and
+  workflow. The six **portal-only** roles (`PORTAL_ONLY_ROLES`: Portal Admin,
+  Reports, Org viewer, Delivery Manager, Notification Manager, Manage access)
+  need only the row, read through `portal_role_scope`, which raises on an HR
+  or IT role. A Frappe role with no row gives no portal reach (R3). A save
+  adds or removes the Frappe role for the roles it touches, in the same
+  transaction (R8); a role it did not touch is left alone, and drift shows as
+  a warning that grants nothing extra (R9). System Managers and Administrator
+  never get drift warnings.
+- **Leadership is a preset, not a role.** HR Manager on All orgs (R6). HR
+  Manager already runs every catalog report with export, so it needs nothing
+  else. It covers orgs created later.
+- **Delivery Manager's broader reach stays inside the portal (KTD10).**
+  `project_permissions.py` builds its REST scope from `resolve_admin_scope`
+  only, so a Delivery Manager reaches no `/api/resource` Project or Task.
+  Line-manager rights still follow `reports_to`, not assignments.
+
+#### Roles
+
+| Role | UI label | Gives | Orgs |
+|---|---|---|---|
+| HR Manager | HR Manager | HR reads, approvals, person edits, roster in each covered org; global HR configuration | named or All |
+| HR User | HR User | Timesheet oversight and matrix reports in each covered org, read-only | named or All |
+| HelixHR Portal Admin | Portal Admin | Export log, approver cleanup, People & access, everyday-role grants in each covered org | named or All |
+| IT Team | IT Admin | IT requests in each covered org | named or All |
+| HelixHR Delivery Manager | Delivery Manager | Every project each covered org owns, with its logged hours | named or All |
+| HelixHR Report Manager | Reports | Catalog reports in each covered org, export per assignment | named or All |
+| HelixHR Org Viewer | Org viewer | Read people, org chart, projects and reports in each covered org, export per assignment | named or All |
+| HelixHR Notification Manager | Notification Manager | Message templates, which are global | All only |
+| HelixHR Access Admin | Manage access | Change other people's access | All only |
+
+`HelixHR Org Viewer` and `HelixHR Access Admin` are new fixture roles
+(`desk_access 0`, no DocPerm). Manage access exists only on All orgs (KTD6): a
+named-org version would differ from Portal Admin by one role. Export is
+allowed only on Reports and Org viewer rows. System Manager and Administrator
+are unscoped and not assignable.
+
+Global portal settings -- the report matrix, the email theme and the message
+and celebration templates -- need All-orgs authority (R7): an All-orgs Portal
+Admin, Manage access, or a System Manager (`has_all_orgs_authority`).
+
+Where each role is read: HR Manager and HR User in `_admin_scope`,
+`_oversight_scope` and the HR/IT mail recipients (`_company_role_holders`,
+one query per role and org); IT Team in the IT worker scope of `hr_request`
+and in routing; Portal Admin in `resolve_portal_admin_scope` and
+`can_admin_portal`; Org viewer in `resolve_read_scope` /
+`resolve_project_read_scope`; Reports, HR User, Org viewer and Delivery
+Manager each as a per-org tier in `resolve_report_access`; Delivery Manager in
+`resolve_project_scope` (every project whose `Project.company` is in its
+orgs; membership no longer widens or narrows it).
+
+#### Who may change access
+
+Nobody changes their own access (R11).
+
+| Caller | May assign | In orgs |
+|---|---|---|
+| System Manager | Everything | Any |
+| Manage access (All orgs) | Everything | Any |
+| Portal Admin | Delivery Manager, IT Admin, Reports, Org viewer | Only its orgs |
+
+`utils.assignable(caller)` returns this as `{roles, companies, all_orgs}`;
+`may_assign` tests one row against it. An All-orgs Portal Admin still cannot
+give All orgs (R7). HR roles are assignable only by System Manager and Manage
+access, until Desk lock-down ships (KTD12).
+
+**Who may edit whom (R13).** `utils.may_edit_target(caller, target, rows,
+held_roles)` returns None or the reason. A target is editable only when every
+row they hold, and every managed role they hold in Frappe without a row, is
+one the caller may assign in every org it covers. A System Manager or
+Administrator target needs full authority. Otherwise the whole person is
+read-only to that caller, with "You can't change this person's access: they
+hold a role you can't assign."
+
+**Reach (R24).** `people_access_reach(user)`: every company for Manage access
+and System Manager, else the orgs their Portal Admin rows name. No Company
+User Permission is read. An elevated person is reachable when any of their
+rows names an org in the caller's reach, or their Active Employee's company
+is in it; a person with only All-orgs rows and no Employee is reachable by
+System Manager and Manage access holders only.
+
+#### Warnings
+
+`get_elevated_access` and `get_person_access` return these (R19), each a
+`problem` or `info`. The banner counts people with any problem and sets the
+"Needs attention" filter.
+
+| Warning | Kind | Means |
+|---|---|---|
+| Employee record Left or Inactive | problem | No Active Employee; R4 gives them no reach |
+| User disabled | problem | R4 gives them no reach |
+| No login | problem | Shown per employee in All employees (`has_login`), not in Elevated access, where everyone is a User |
+| Role set outside HelixHR | problem | A managed Frappe role held with no assignment: no portal reach |
+| Role missing in Frappe | problem | A row whose Frappe role was removed; HR, HR User and IT rows then reach nothing |
+| Own org not covered by their roles | problem | Their Active Employee's org is in none of their rows |
+| Desk HR reach: all orgs (until Desk lock-down) | info | A named-org HR role; HRMS Desk reads every org through the Frappe role |
+| All orgs | info | Holds an All-orgs row |
+| Can manage access | info | Holds Manage access |
+| Export on | info | A row has `allow_export` |
+
+A migrated Org viewer or Reports row before its person's first save carries no
+"Role missing in Frappe" warning: the migration deliberately writes those
+without the Frappe role (rollback safety). After a first save, a gap is drift.
+System Managers show as "System Manager · unscoped" with no drift warning.
+
+#### The save path
+
+`save_person_access(user, rows, token, reason=None, sync_roles=None)` is the
+one write path, keyed by User. The payload is the target's full desired row
+set. The server re-checks every rule (R16), in this order, writing nothing
+until all pass:
+
+1. Self-edit refused (R11).
+2. The target is reachable, else the same "not authorised" refusal as a
+   missing person.
+3. The target is editable (R13).
+4. Role Profile target refused with a plain reason (R10); Role Profiles stay
+   outside the portal.
+5. Stale token: a hash of the target's sorted row set (name and `modified`
+   per row) plus `User.modified`, so any insert, delete or edit moves it.
+6. Every added or changed row against R12 and R7. Rows the caller cannot
+   assign are kept even if the payload omits them. New access for a disabled
+   or Left person is refused; they can only lose rows.
+7. High-risk (R15): the save adds All orgs, Manage access, export, or an HR
+   Manager or HR User row (until Desk lock-down). It needs a plain-text
+   reason of at most 500 characters.
+8. Last holder (R14): all All-orgs Manage access rows are locked (`FOR
+   UPDATE`), then holders who remain and pass R4 are counted. Nobody but a
+   System Manager can leave zero.
+
+One savepoint then applies the row changes; the `Has Role` sync for touched
+roles only (KTD4); the HR Manager self Employee User Permission rule (only
+for a target with an Active Employee: adding HR Manager removes their
+self-scoping, removing it restores it); one `HelixHR Access Change` row; and,
+for a high-risk save, one in-app notification to every System Manager and
+Manage access holder but the caller, with names and reason escaped. After
+commit it clears the user's cache and expires Ready exports they can no
+longer reach.
+
+**Rollback safety.** Removing a migrated Org viewer or Reports row also
+disables that user's legacy `HelixHR Company Access` grant, so a code
+rollback cannot revive revoked access.
+
+#### Audit
+
+`HelixHR Access Change` is append-only, one row per save: target, caller,
+reason, and the before and after row sets as JSON. It drives the person
+view's history (last 20; reasons render as text), the "last change" column,
+the stale-token's companions and the migration's re-run guard (a person with a
+change row is never re-migrated).
+
+#### Read endpoints
+
+- `get_elevated_access()`: everyone in the caller's reach holding an
+  assignment or a managed Frappe role, plus enabled System Managers. Problem
+  rows first, then All-orgs and Manage access, then by name; `counts` drives
+  the banner. Five set queries whatever the head count: assignments, Has
+  Role, Employee, User, change log.
+- `search_people_access(query, company, start, page_length)`: every Active
+  employee in reach, with or without a login, by name, ID or email and org; a
+  company outside reach is refused.
+- `get_person_access(user)`: summary sentences, every row (a row outside the
+  caller's authority is `editable` false, never dropped), roles held with no
+  row, warnings, the lock and its reason, what the caller may assign, the
+  Leadership preset, the stale token and history.
+
+Removed with the anchor model: `save_company_access`, `set_portal_role`,
+`get_portal_role_holders`, `list_people_access` and the per-person grant read.
+Dotted paths are public API, so any external caller of them breaks.
+
+#### Migration and parity
+
+Release B ships as one branch and one deploy, behind
+`access_migration.migrate()` (patch `migrate_access_assignments`,
+`[post_model_sync]`). `plan_rows(state)` is the pure mapping, shared by
+`dry_run`, the patch and the parity check:
+
+| Today | Rows (all `origin=migrated`) |
+|---|---|
+| HR Manager / HR User with an Employee | that role at the person's company |
+| HR Manager / HR User / Portal Admin, no Employee | that role, All orgs |
+| Portal Admin with an Employee | its company plus its Company-only User Permission companies |
+| Report Manager | Reports at the person's company, export on |
+| Reports-only grant | Reports at the grant's companies, the grant's export flag |
+| All-data grant | Org viewer at the grant's companies, the grant's export flag |
+| Disabled grant, or a grant saved against another Employee | none |
+| Delivery Manager | the person's company plus every org where they are a project member |
+| IT Team | the person's company |
+| Notification Manager | All orgs |
+| System Manager | none; unscoped by role |
+
+- **Keeps everyone's reach (R25).** Every widening is a structured record
+  `{key, resolver_keys, text}` in the dry-run (for example a System Manager
+  with an Employee becoming unscoped, an extra Portal Admin org from a Company
+  User Permission, a Delivery Manager's org projects, an HR User or Portal
+  Admin with no Employee). The only narrowings are `SECURITY_FIXES`:
+  `person_gate` (a disabled login or an all-Left person reaches nothing),
+  `global_settings` (a named-org Portal Admin loses the global matrix, theme
+  and templates) and `empty_it_queue`. HR and IT mail moves are matched by
+  `DECLARED_RECIPIENT_CHANGES` (`system_manager_elsewhere`,
+  `unscoped_hr_not_it`).
+- **Rows for inactive people are kept.** Reactivation restores reach, as it
+  does today. A disabled grant produces no rows.
+- **The patch** skips any user who already has rows or an Access Change row,
+  writes with side effects off, expires no export, and adds `Has Role` only
+  for `HelixHR Org Viewer`, which the old code ignores. Every other role is
+  untouched. A re-run changes nothing.
+- **Parity (R26, KTD9).** `parity_check(snapshot_path)` re-reads the legacy
+  state, which the patch never changes, re-runs `plan_rows`, and compares the
+  new resolvers' answers with the maintenance-mode snapshot for each key in
+  `SNAPSHOT_KEYS` (admin, read, project, project_read, portal_admin,
+  can_admin_portal, reports, it_scope, oversight, people_access_reach, flags),
+  plus HR and IT recipients per org. A difference is "declared widening" or
+  "security fix" only when the new answer follows from the plan and a note
+  names that key; otherwise "undeclared". It also checks that every migrated
+  person's rows equal their planned rows. Any undeclared difference blocks
+  reopening the site. The report is a 0600 file under the site's private
+  folder.
+
+#### Preflight
+
+New checks: **Manage access holders** FAILs when assignments exist but no
+All-orgs Manage access holder passes R4 (WARN on a fresh site with none yet);
+**Access assignment permissions** FAILs on any create/write/delete DocPerm on
+the two doctypes; **Access drift** WARNs on either drift direction, ignoring
+System Managers and Administrator; **Access on inactive people** WARNs on rows
+for a disabled or all-Left person; **Org access coverage** WARNs on an org
+with no HR Manager or IT Admin. The two new roles have no-grant role checks.
+`check_company_access_grants` is retired.
+
+#### Reversals
+
+- **2026-10-14-001: grants are read-only; Portal Admin reach comes from
+  Company User Permissions.** Reversed. A cross-org read is an Org viewer or
+  Reports assignment, which Portal Admin may give within its orgs. Portal
+  Admin reach is its own Portal Admin rows. A Company User Permission is
+  never read, and no Desk setting is needed. `grantable_companies`,
+  `active_company_grant` and `disable_company_access` are removed.
+- **2026-10-15-001 KTD9: HR roles are System Manager only, and a Portal Admin
+  edits targets in its home company.** Reversed in part. Manage access holders
+  now give HR roles and Portal Admin too (a new role with its own authority, not
+  a System Manager). A Portal Admin still never gives HR roles or Portal Admin,
+  but its reach is its Portal Admin orgs, not its home company, and it edits a
+  person only when it may assign every role they hold in every org it covers
+  (R13). HR roles stay with System Manager and Manage access until Desk
+  lock-down (KTD12).
+- **2026-10-18-001 Releases 3, 3b and 4, and its anchor rules.** Replaced by
+  this plan. Releases 1 and 2 stay (the line-manager rule and the dry-run). The
+  anchor rules are gone: R6 (an assignment counts only while the Employee it
+  was recorded against is still the person's Active one) and KTD14 (the
+  fail-closed lifecycle: an enabled flag, disable hooks on Employee and User
+  changes, a re-confirm notice). Reach follows the row's orgs, and R4 is the
+  only person gate.
+- **Deferred.** Desk and REST lock-down (wildcard deny hooks, script-report
+  company gate, Employee edit guards) stays a follow-up. Until it ships, a
+  named-org HR role still reads every org in Desk, which is why HR roles are
+  Manage-access-only, high-risk and carry the Desk warning.
 
 ## Ease of use: search, the Home queue, the inbox and notifications (plan 2026-10-17-001)
 
