@@ -1538,6 +1538,31 @@ piece in words. Causes 1 and 2 need no data fix. If the report's `reports_to`
 still names the manager's *old* (Left) Employee id after a transfer, point it at
 the Active one; that is data, not this bug.
 
+## Org-scoped access: the migration dry-run (plan 2026-10-18-001 Release 2)
+
+Before Release 3 switches access to per-org assignments, run the dry-run on
+production and review it with the owner (deploy checklist step 1):
+
+```
+bench --site <site> execute helixhr.access_migration.dry_run
+```
+
+It reads only, and prints the two files it wrote under
+`sites/<site>/private/access_migration/` (mode 0600, bench user only):
+
+- `dry_run-<stamp>.json`: per person, the assignment rows migration would
+  write and their outcomes. **widened** lists each gain in words (a Portal
+  Admin's second org, a Delivery Manager's "N projects today, M after", an HR
+  User with no Employee). **narrowed_by_design** names a security fix from
+  `access_migration.SECURITY_FIXES`, never anything else. **unchanged** is the
+  rest. One person can be both widened and narrowed.
+- `snapshot-<stamp>.json`: every user's resolver answers today. Release 3's
+  parity check compares against it, so keep the file from the run the owner
+  signed off.
+
+The files name people and their access: do not paste them into chat or
+tickets, and delete old ones once Release 3 is verified.
+
 ## Company access: letting someone read another company (plan 2026-10-14-001)
 
 The portal scopes HR reads to the reader's own company. Desk Role Permissions
