@@ -1,34 +1,40 @@
-"""Plan 2026-10-18-001 U5: today's access as org-scoped assignment rows.
+"""Today's access as org-scoped assignment rows (plan 2026-10-18-001 U5,
+reshaped by plan 2026-10-19-001 U12 for the assignment model).
 
-Release 2 ships the read-only half, so it can run on production before the
-switch:
+The read-only half ships before the switch, so it can run on production:
 
 - `plan_rows(state)` -- the pure mapping, one table (below), shared by the
-  dry-run, the Release 3 patch and the U18 parity check.
+  dry-run, the Release B patch and the parity check.
 - `dry_run()` -- `bench --site <site> execute helixhr.access_migration.dry_run`.
   Reads only. Writes two files under the site's private folder, readable by
-  the bench user alone: a per-person report (widened / narrowed by design /
-  unchanged, with the rows each person would get) and a snapshot of every
-  user's resolver outputs today, the baseline U4 and U18 compare against.
+  the bench user alone: a per-person report (the rows each person would get,
+  and what widens or narrows) and a snapshot of today's scope answers, the
+  baseline the parity check compares against.
 
-The mapping keeps everyone's reach (R26). Where the new model can only keep
-it by giving more, the row is still enabled and the widening is listed. The
-only narrowing is a named security fix (`SECURITY_FIXES`).
+Assignments carry no employee anchor and no enabled flag: a row that exists
+is in force, and the person-level gate (an enabled User, and an Active
+Employee when they have any) applies at read time. So the mapping keeps rows
+for inactive people and disabled users -- reactivating them restores reach,
+as it does today -- and writes no rows for access that reaches nothing today.
+
+Every widening and narrowing is a structured record naming the snapshot keys
+it moves, so the parity check can tell a declared change from a bug. The only
+narrowings are the named `SECURITY_FIXES`.
 
 | Today | Rows (all `origin=migrated`) |
 |---|---|
-| HR Manager / HR User with an Active Employee | that role at the home company |
-| HR Manager / HR User / Portal Admin, no Employee | that role, All orgs, empty anchor |
-| Report Manager, IT Team, Notification Manager, no Employee | none (no reach today) |
-| Portal Admin with an Employee | home + its Company-only User Permission companies |
-| Report Manager | Reports at home, export on |
+| HR Manager / HR User with an Employee | that role at the person's company |
+| HR Manager / HR User / Portal Admin, no Employee | that role, All orgs |
+| Report Manager, IT Team, no Employee | none (no reach today) |
+| Portal Admin with an Employee | its company + its Company-only User Permission companies |
+| Report Manager | Reports at the person's company, export on |
 | Reports-only grant | Reports at the grant's companies, the grant's export flag |
 | All-data grant | Org viewer at the grant's companies, the grant's export flag |
-| Delivery Manager | home + every org where they are a project member |
-| IT Team, Notification Manager | home |
-| Inactive anchor, disabled user, or a grant that does not apply | the same rows, disabled, with the reason |
-
-System Managers get no rows: they are unscoped and not assignable (R5).
+| Disabled grant, or a grant saved against another Employee | none (no reach today) |
+| Delivery Manager | the person's company + every org where they are a project member |
+| IT Team | the person's company |
+| Notification Manager | All orgs (message templates are global) |
+| System Manager | none; unscoped by role, declared when that widens today's reach |
 """
 
 import json
@@ -46,28 +52,43 @@ IT_ADMIN = "IT Team"
 NOTIFICATION_MANAGER = "HelixHR Notification Manager"
 SYSTEM_MANAGER = "System Manager"
 
-# Roles whose holders today reach something through their Employee anchor.
-_HOME_ROLES = (HR_MANAGER, HR_USER, PORTAL_ADMIN, REPORTS, DELIVERY_MANAGER, IT_ADMIN, NOTIFICATION_MANAGER)
+# Roles whose holders today reach something through their Employee's company.
+_HOME_ROLES = (HR_MANAGER, HR_USER, PORTAL_ADMIN, REPORTS, DELIVERY_MANAGER, IT_ADMIN)
 # Of those, the ones that reach every company today when there is no Employee.
 _ANCHORLESS_ALL_ORGS = (HR_MANAGER, HR_USER, PORTAL_ADMIN)
-_TRACKED_ROLES = (*_HOME_ROLES, SYSTEM_MANAGER)
+_TRACKED_ROLES = (*_HOME_ROLES, NOTIFICATION_MANAGER, SYSTEM_MANAGER)
 
 _GRANT_ROLE = {"All data": ORG_VIEWER, "Reports only": REPORTS}
 
-# The deliberate narrowings, by key. Anything else that narrows is a bug.
+# The per-person answers `snapshot` records. A widening or narrowing record
+# names the ones it moves; the parity check treats any other move as a bug.
+SNAPSHOT_KEYS = (
+	"admin",
+	"read",
+	"project",
+	"project_read",
+	"portal_admin",
+	"can_admin_portal",
+	"reports",
+	"it_scope",
+	"oversight",
+	"people_access_reach",
+	"flags",
+)
+
+# The deliberate narrowings, by key, with the snapshot keys each moves.
+# Anything else that narrows is a bug.
 SECURITY_FIXES = {
 	"left_portal_admin": "A Left or Inactive Portal Admin no longer administers the portal.",
-	"portal_admin_scope": (
-		"Editing the global report matrix needs All-orgs authority, and email templates are "
-		"limited to its own orgs."
+	"global_settings": (
+		"The report matrix, email theme and message templates need All-orgs authority; "
+		"a Portal Admin on named orgs keeps its orgs' admin."
 	),
-	"hr_desk_reach": "From Release 4, Desk HR reach is limited to the assigned orgs.",
-	"company_move": "A company move switches assignments off until they are re-confirmed.",
 }
-
-_NOT_ACTIVE = "Employee is not Active"
-_USER_DISABLED = "User is disabled"
-_GRANT_MOVED = "Holder moved since the grant was saved"
+_FIX_KEYS = {
+	"left_portal_admin": ["can_admin_portal", "portal_admin", "people_access_reach", "flags"],
+	"global_settings": ["flags"],
+}
 
 
 def _anchor(employees):
@@ -83,21 +104,27 @@ def _plural(count, word):
 	return f"{count} {word}" if count == 1 else f"{count} {word}s"
 
 
+def _widened(key, resolver_keys, text):
+	return {"key": key, "resolver_keys": list(resolver_keys), "text": text}
+
+
+def _narrowed(fix):
+	return {"fix": fix, "resolver_keys": list(_FIX_KEYS[fix]), "text": SECURITY_FIXES[fix]}
+
+
 def plan_rows(state):
-	"""``{user: {employee, home_company, rows, widened, narrowed}}`` for every
-	user who gets a row or a note. Pure: reads nothing but ``state``.
+	"""``{user: {own_company, rows, widened, narrowed}}`` for every user who
+	gets a row or a note. Pure: reads nothing but ``state``.
 
 	``state`` is ``{"companies": [...], "org_projects": {company: count},
 	"users": {user: {enabled, roles, employees, company_permissions, grant,
 	project_orgs}}}`` -- the shape `collect_state` reads from the site.
-	``widened`` is a list of sentences; ``narrowed`` a list of ``{fix, text}``
-	whose ``fix`` is always a `SECURITY_FIXES` key.
+	``widened`` is a list of ``{key, resolver_keys, text}``; ``narrowed`` a list
+	of ``{fix, resolver_keys, text}`` whose ``fix`` is a `SECURITY_FIXES` key.
 	"""
 	known = set(state["companies"])
 	plan = {}
 	for user, info in state["users"].items():
-		if SYSTEM_MANAGER in info["roles"]:
-			continue
 		answer = _plan_user(info, known, state["org_projects"])
 		if answer["rows"] or answer["widened"] or answer["narrowed"]:
 			plan[user] = answer
@@ -107,104 +134,134 @@ def plan_rows(state):
 def _plan_user(info, known, org_projects):
 	state, anchor = _anchor(info["employees"])
 	home = anchor["company"] if anchor else None
-	base_reason = None
-	if not info["enabled"]:
-		base_reason = _USER_DISABLED
-	elif state == "inactive":
-		base_reason = _NOT_ACTIVE
+	# Nothing reaches anything while the person is gated off, so nothing is
+	# gained either; their rows are still written for reactivation.
+	gated = not info["enabled"] or state == "inactive"
+	roles = info["roles"]
 	rows = {}
 	widened, narrowed = [], []
 
-	def add(role, company=None, export=0, reason=base_reason):
-		key = (role, company or "ALL")
+	def add(role, company=None, export=0):
 		row = rows.setdefault(
-			key,
+			(role, company or "ALL"),
 			{
 				"role": role,
 				"all_orgs": 0 if company else 1,
 				"company": company,
 				"allow_export": 0,
-				"enabled": 0,
-				"disabled_reason": reason,
 				"origin": "migrated",
 			},
 		)
 		row["allow_export"] = int(bool(row["allow_export"] or export))
-		if not reason:
-			row["enabled"] = 1
-			row["disabled_reason"] = None
 
-	roles = info["roles"]
+	if SYSTEM_MANAGER in roles:
+		# Unscoped by role, never assignable (R5). Today an anchored System
+		# Manager is limited to their company in the portal: that widens.
+		if state == "active" and info["enabled"]:
+			widened.append(
+				_widened(
+					"system_manager_unscoped",
+					[
+						"admin",
+						"read",
+						"project",
+						"project_read",
+						"portal_admin",
+						"reports",
+						"oversight",
+						"flags",
+					],
+					f"System Manager: portal HR reach widens from {home} to all orgs.",
+				)
+			)
+		return _answer(home if state == "active" else None, rows, widened, narrowed)
+
 	for role in _HOME_ROLES:
 		if role not in roles:
 			continue
 		if state == "none":
 			if role in _ANCHORLESS_ALL_ORGS:
 				add(role)
-				if role == HR_USER:
-					widened.append(
-						"HR User in all orgs: timesheet oversight and matrix reports become visible in the portal."
-					)
-				elif role == PORTAL_ADMIN:
-					# Today this login edits portal settings but its admin scope is
-					# empty: no export log, no role grants, no approver cleanup.
-					widened.append(
-						"Portal Admin in all orgs: export log, role grants and approver cleanup become available."
-					)
 			elif role == DELIVERY_MANAGER:
 				for company in sorted(info["project_orgs"]):
 					add(role, company)
 			continue
 		add(role, home, export=1 if role == REPORTS else 0)
 
+	if NOTIFICATION_MANAGER in roles:
+		add(NOTIFICATION_MANAGER)
+
+	if state == "none" and HR_USER in roles:
+		widened.append(
+			_widened(
+				"hr_user_all_orgs",
+				["oversight", "reports", "flags"],
+				"HR User in all orgs: timesheet oversight and matrix reports become visible in the portal.",
+			)
+		)
+	if state == "none" and PORTAL_ADMIN in roles:
+		# Today this login edits portal settings but its admin scope is empty.
+		widened.append(
+			_widened(
+				"portal_admin_all_orgs",
+				["portal_admin", "people_access_reach", "flags"],
+				"Portal Admin in all orgs: export log, role grants and approver cleanup become available.",
+			)
+		)
+
 	if PORTAL_ADMIN in roles and state != "none":
-		# Inactive: the same rows, disabled by `base_reason`.
 		for company in dict.fromkeys(info["company_permissions"]):
 			if company in known and company != home:
 				add(PORTAL_ADMIN, company)
-				widened.append(f"Portal Admin in {company}: full admin (today read and grant only).")
-		fix = "left_portal_admin" if state == "inactive" else "portal_admin_scope"
-		narrowed.append({"fix": fix, "text": SECURITY_FIXES[fix]})
+				widened.append(
+					_widened(
+						"portal_admin_extra_org",
+						["portal_admin"],
+						f"Portal Admin in {company}: full admin (today read and grant only).",
+					)
+				)
+		narrowed.append(_narrowed("left_portal_admin" if state == "inactive" else "global_settings"))
 
 	if DELIVERY_MANAGER in roles and state != "none":
 		for company in sorted(info["project_orgs"]):
 			add(DELIVERY_MANAGER, company)
-	if DELIVERY_MANAGER in roles and state != "inactive":
+	if DELIVERY_MANAGER in roles:
 		orgs = ({home} if home else set()) | set(info["project_orgs"])
 		for company in sorted(orgs):
 			today, after = info["project_orgs"].get(company, 0), org_projects.get(company, 0)
 			if after > today:
 				widened.append(
-					f"Delivery Manager in {company}: {_plural(today, 'project')} today, {after} after."
+					_widened(
+						"delivery_manager_org_projects",
+						["project", "project_read", "reports"],
+						f"Delivery Manager in {company}: {_plural(today, 'project')} today, {after} after.",
+					)
 				)
 
-	if state == "active" and roles & {HR_MANAGER, HR_USER}:
-		narrowed.append({"fix": "hr_desk_reach", "text": SECURITY_FIXES["hr_desk_reach"]})
-
 	grant = info["grant"]
-	if grant and grant["level"] in _GRANT_ROLE:
-		reason = base_reason
-		if not reason and not grant["enabled"]:
-			reason = grant.get("disabled_reason") or "Grant is turned off"
-		if not reason and (
-			state != "active" or grant["employee"] != anchor["name"] or grant["home_company"] != home
-		):
-			reason = _NOT_ACTIVE if state != "active" else _GRANT_MOVED
+	# A disabled grant, or one saved against an Employee the person no longer
+	# is, reaches nothing today. A grant on an inactive person is kept: today
+	# it comes back when they are reactivated.
+	if (
+		grant
+		and grant["level"] in _GRANT_ROLE
+		and grant["enabled"]
+		and state != "none"
+		and grant["employee"] == anchor["name"]
+		and grant["home_company"] == home
+	):
 		for company in grant["companies"]:
 			if company in known:
-				add(_GRANT_ROLE[grant["level"]], company, export=grant["allow_export"], reason=reason)
+				add(_GRANT_ROLE[grant["level"]], company, export=grant["allow_export"])
 
-	if base_reason:
-		# Nothing is enabled, so nothing is gained.
+	if gated:
 		widened = []
+	return _answer(home, rows, widened, narrowed)
+
+
+def _answer(own_company, rows, widened, narrowed):
 	ordered = sorted(rows.values(), key=lambda row: (row["role"], not row["all_orgs"], row["company"] or ""))
-	return {
-		"employee": anchor["name"] if anchor and state == "active" else None,
-		"home_company": home if state == "active" else None,
-		"rows": ordered,
-		"widened": widened,
-		"narrowed": narrowed,
-	}
+	return {"own_company": own_company, "rows": ordered, "widened": widened, "narrowed": narrowed}
 
 
 def collect_state():
@@ -310,22 +367,27 @@ def collect_state():
 
 
 def snapshot(users):
-	"""Every resolver's answer for each of ``users`` today -- the baseline the
-	Release 3 resolvers are compared against (U4 characterization, U18
-	parity). Report access is recorded per catalog report as the companies it
-	runs for and whether each exports."""
+	"""Today's scope answers: ``{"users": {user: {key: answer}}, "recipients":
+	{company: {role: [user]}}}`` with one entry per `SNAPSHOT_KEYS` key -- the
+	baseline the parity check compares the switched resolvers against. Report
+	access is recorded per catalog report as the companies it runs for and
+	whether each exports; flags are the bootstrap predicates that take a user."""
+	from helixhr import api
 	from helixhr.reports import CATALOG
 	from helixhr.utils import (
+		_company_role_holders,
 		can_admin_portal,
+		grantable_companies,
 		resolve_admin_scope,
 		resolve_portal_admin_scope,
 		resolve_project_read_scope,
 		resolve_project_scope,
 		resolve_read_scope,
 		resolve_report_access,
+		session_company,
 	)
 
-	result = {}
+	answers = {}
 	for user in users:
 		reports = {}
 		for entry in CATALOG:
@@ -334,16 +396,35 @@ def snapshot(users):
 				reports[entry["key"]] = sorted(
 					[row["company"], bool(row["can_export"])] for row in access.get("companies") or []
 				)
-		result[user] = {
+		admin = bool(can_admin_portal(user))
+		it_company = session_company(user) if IT_ADMIN in frappe.get_roles(user) else None
+		reach = grantable_companies(user) if admin else None
+		answers[user] = {
 			"admin": _plain(resolve_admin_scope(user)),
 			"read": _plain(resolve_read_scope(user)),
 			"project": _plain(resolve_project_scope(user)),
 			"project_read": _plain(resolve_project_read_scope(user)),
 			"portal_admin": _plain(resolve_portal_admin_scope(user)),
-			"can_admin_portal": bool(can_admin_portal(user)),
+			"can_admin_portal": admin,
 			"reports": reports,
+			"it_scope": [it_company] if it_company else [],
+			"oversight": _plain(api._oversight_scope(user) or {}) or None,
+			"people_access_reach": sorted(reach) if reach else None,
+			"flags": {
+				"can_configure": bool(api._is_hr(user)),
+				"can_handle_requests": bool(api._is_hr(user) or api._holds_routed_role(user)),
+				"can_edit_email_templates": bool(api._can_edit_email_templates(user)),
+				"can_run_reports": bool(api._can_run_reports(user)),
+				"can_oversee_timesheets": bool(api._can_oversee_timesheets(user)),
+				"can_see_all_pending": bool(api._can_see_all_pending(user)),
+				"can_manage_documents": bool(api._can_manage_documents(user)),
+			},
 		}
-	return result
+	recipients = {
+		company: {role: sorted(_company_role_holders(role, company)) for role in (HR_MANAGER, IT_ADMIN)}
+		for company in frappe.get_all("Company", pluck="name", order_by="name asc")
+	}
+	return {"users": answers, "recipients": recipients}
 
 
 def _plain(scope):
@@ -381,7 +462,7 @@ def dry_run():
 		f"dry_run-{stamp}.json", {"generated": stamp, "summary": summary, "people": people}
 	)
 	snapshot_path = _write_private(
-		f"snapshot-{stamp}.json", {"generated": stamp, "users": snapshot(sorted(state["users"]))}
+		f"snapshot-{stamp}.json", {"generated": stamp, **snapshot(sorted(state["users"]))}
 	)
 	return {"report": report_path, "snapshot": snapshot_path, "summary": summary}
 
