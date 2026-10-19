@@ -8,7 +8,7 @@ from frappe.model.document import Document
 from frappe.utils import now_datetime
 from hrms.api import get_current_employee
 
-from helixhr.utils import resolve_admin_scope, session_company
+from helixhr.utils import read_companies, resolve_admin_scope, scope_covers, session_company
 
 # The first worker claim and terminal outcomes. Both are read off the
 # DocType's own Select options; a status added in Desk that is in neither set
@@ -99,21 +99,23 @@ _WORKER_ROLES = frozenset({"IT Team"})
 _UNSCOPED_ROLES = frozenset({"HR Manager", "System Manager"})
 
 
-def _company_scope_condition(company):
+def _company_scope_condition(companies):
 	"""The list-route half of an HR Manager / System Manager's company scope
-	(P5-R5): every request whose employee is in that company.
+	(P5-R5): every request whose employee is in one of ``companies``.
 
 	`ensure_hr_manager_user()` deliberately holds no Employee record -- the
 	same Desk-only, no-company HR Manager P3-KTD7/P4-KTD7 already reach every
-	Attendance Request and Timesheet through the role alone. `company` is
-	`None` for that holder, and the wide-open behaviour for *that* persona is
-	preserved on purpose. A portal HR Manager who does have an active
-	Employee (`make_test_hr_manager_employee`) is the one this scope narrows,
-	since they are the multi-company risk P5-R5 exists to close.
+	Attendance Request and Timesheet through the role alone. That holder is
+	unscoped and never reaches here (the caller returns no condition), so the
+	wide-open behaviour for *that* persona is preserved on purpose. A portal
+	HR Manager who does have an active Employee
+	(`make_test_hr_manager_employee`) is the one this scope narrows, since
+	they are the multi-company risk P5-R5 exists to close. An empty list is
+	nobody.
 	"""
-	if not company:
-		return ""
-	company_employees = frappe.get_all("Employee", filters={"company": company}, pluck="name")
+	if not companies:
+		return "1=0"
+	company_employees = frappe.get_all("Employee", filters={"company": ["in", companies]}, pluck="name")
 	if not company_employees:
 		return "1=0"
 	return f"employee in ({', '.join(frappe.db.escape(name, percent=False) for name in company_employees)})"
@@ -129,10 +131,10 @@ def get_permission_query_conditions(user=None, doctype=None, **kwargs):
 		# One answer for "which employees may this user administer"
 		# (`resolve_admin_scope`, P6-R6): an HR Manager whose own Employee is
 		# Left, Inactive or Suspended resolves to nobody, never to everybody.
-		scope = resolve_admin_scope(user)
-		if scope["kind"] == "none":
-			return "1=0"
-		return _company_scope_condition(scope["company"])
+		companies = read_companies(resolve_admin_scope(user))
+		if companies is None:
+			return ""
+		return _company_scope_condition(companies)
 	employee = frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "name")
 	if not employee:
 		return "1=0"
@@ -164,12 +166,9 @@ def has_permission(doc, ptype=None, user=None, **kwargs):
 	if doc.employee == frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "name"):
 		return True
 	if roles & _UNSCOPED_ROLES:
-		scope = resolve_admin_scope(user)
-		if scope["kind"] == "none":
-			return False
-		if scope["kind"] == "unscoped":
-			return True
-		return frappe.db.get_value("Employee", doc.employee, "company") == scope["company"]
+		return scope_covers(
+			resolve_admin_scope(user), frappe.db.get_value("Employee", doc.employee, "company")
+		)
 	return (
 		doc.routed_to_role in roles
 		and frappe.db.get_value("Employee", doc.employee, "company") == session_company(user)

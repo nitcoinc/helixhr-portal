@@ -1973,6 +1973,11 @@ def _scope_company(scope, raw):
 	letter head and export meta, while rows carry a Company column."""
 	if scope["kind"] == "company":
 		return scope["company"]
+	if scope["kind"] != "unscoped" and not scope.get("combined"):
+		# Only an unscoped caller may name a company (plan 2026-10-18-001
+		# U11): any other kind falling through would run for whatever the
+		# caller asked.
+		frappe.throw(_("Unsupported report scope."))
 	if scope.get("combined"):
 		return session_company(frappe.session.user) or frappe.defaults.get_global_default("company")
 	requested = raw.get("company") if isinstance(raw, dict) else None

@@ -1893,7 +1893,7 @@ def _widen_by_companies(scope, companies, user=None):
 	Delivery Manager's assigned projects in a project read scope."""
 	if scope["kind"] == "unscoped" or not companies:
 		return scope
-	names = list(dict.fromkeys(([scope["company"]] if scope["kind"] == "company" else []) + companies))
+	names = list(dict.fromkeys(read_companies(scope) + companies))
 	if user is None and len(names) == 1:
 		return {"kind": "company", "company": names[0]}
 	widened = {"kind": "companies", "companies": names}
@@ -1927,13 +1927,31 @@ def resolve_project_read_scope(user):
 	return _widen_by_companies(scope, grant["companies"], user=user if scope["kind"] == "assigned" else None)
 
 
+# Every scope kind a resolver returns. `read_companies` raises on anything
+# else, so a new kind can never be read as "every company" by a consumer
+# that only knew the old ones (plan 2026-10-18-001 U11, KTD5).
+_SCOPE_KINDS = frozenset({"unscoped", "company", "companies", "assigned", "combined", "none"})
+
+
 def read_companies(scope):
-	"""The company names a read scope covers, or None for every company."""
-	if scope["kind"] == "unscoped":
+	"""The company names a scope covers, or None for every company. ``none``
+	covers no company; ``assigned`` covers only the companies it names (a
+	Delivery Manager's projects are not a company)."""
+	kind = scope["kind"]
+	if kind not in _SCOPE_KINDS:
+		frappe.throw(_("Unsupported access scope."))
+	if kind == "unscoped":
 		return None
-	if scope["kind"] == "company":
-		return [scope["company"]]
+	if kind == "company":
+		return [scope["company"]] if scope.get("company") else []
 	return list(scope.get("companies") or [])
+
+
+def scope_covers(scope, company):
+	"""Whether ``scope`` reaches ``company`` -- the single-company question
+	every write gate asks, for every scope kind (plan 2026-10-18-001 U11)."""
+	companies = read_companies(scope)
+	return companies is None or company in companies
 
 
 # Plan 2026-10-15-001 (KTD1): the "All my companies" company filter value.
@@ -2103,8 +2121,15 @@ def resolve_report_access(user, report_key, company=None):
 	if unscoped:
 		for name in frappe.get_all("Company", pluck="name", order_by="name asc"):
 			by_company[name] = [("admin", {"kind": "company", "company": name}, True)]
-	elif grants:
-		by_company[grants[0][1].get("company") or home] = grants
+	else:
+		# A multi-company tier (plan 2026-10-18-001 U11) splits into one
+		# single-company tier per company; every other tier is home-anchored.
+		for tier, scope, export in grants:
+			if scope["kind"] == "companies":
+				for name in scope["companies"]:
+					by_company.setdefault(name, []).append((tier, {"kind": "company", "company": name}, export))
+			else:
+				by_company.setdefault(scope.get("company") or home, []).append((tier, scope, export))
 
 	# KTD8: a grant at either level runs every company-scoped catalog report
 	# for its companies; its own flag decides export.
