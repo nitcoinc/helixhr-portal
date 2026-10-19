@@ -1795,6 +1795,35 @@ def can_admin_portal(user):
 	return bool(set(frappe.get_roles(user)) & {PORTAL_ADMIN_ROLE, "System Manager"})
 
 
+# --- Access assignments (plan 2026-10-19-001) --------------------------------
+#
+# One `HelixHR Access Assignment` row per (user, role, org-or-All). R2's nine
+# roles are the only assignable ones; System Manager and Administrator stay
+# unscoped and are never assigned (R5).
+ORG_VIEWER_ROLE = "HelixHR Org Viewer"
+ACCESS_ADMIN_ROLE = "HelixHR Access Admin"
+NOTIFICATION_MANAGER_ROLE = "HelixHR Notification Manager"
+IT_TEAM_ROLE = "IT Team"
+ASSIGNABLE_ROLES = (
+	"HR Manager",
+	HR_USER_ROLE,
+	PORTAL_ADMIN_ROLE,
+	IT_TEAM_ROLE,
+	DELIVERY_MANAGER_ROLE,
+	REPORT_MANAGER_ROLE,
+	ORG_VIEWER_ROLE,
+	NOTIFICATION_MANAGER_ROLE,
+	ACCESS_ADMIN_ROLE,
+)
+# Message templates are global, and a named-org Manage access would overlap
+# Portal Admin (KTD6): both exist only on All orgs.
+ALL_ORGS_ONLY_ROLES = frozenset({NOTIFICATION_MANAGER_ROLE, ACCESS_ADMIN_ROLE})
+# The roles whose rows may carry `allow_export` (R2 "export per assignment").
+EXPORT_ROLES = frozenset({REPORT_MANAGER_ROLE, ORG_VIEWER_ROLE})
+# `scope_key` of an All-orgs row; a named-org row's key is its company.
+ALL_ORGS_SCOPE_KEY = "__all"
+
+
 # --- Cross-company read grants (plan 2026-10-14-001) ------------------------
 #
 # A grant widens what its holder may READ, never what they may change. The

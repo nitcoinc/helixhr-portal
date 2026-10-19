@@ -1698,6 +1698,23 @@ def check_report_manager_role():
 	return _no_grant_portal_role(REPORT_MANAGER, "Report Manager role")
 
 
+ORG_VIEWER = "HelixHR Org Viewer"
+ACCESS_ADMIN = "HelixHR Access Admin"
+
+
+def check_org_viewer_role():
+	"""Plan 2026-10-19-001 U1: Org viewer reads through HelixHR's own read
+	resolvers only, so it holds no DocPerm reaching Desk."""
+	return _no_grant_portal_role(ORG_VIEWER, "Org viewer role")
+
+
+def check_access_admin_role():
+	"""Plan 2026-10-19-001 U1: Manage access changes access through the
+	People & access endpoint only, which saves with ``ignore_permissions``;
+	a DocPerm would open a second, unaudited door."""
+	return _no_grant_portal_role(ACCESS_ADMIN, "Manage access role")
+
+
 PORTAL_ADMIN = "HelixHR Portal Admin"
 
 
@@ -1875,6 +1892,8 @@ CHECKS = [
 	check_delivery_manager_role,
 	check_notification_manager_role,
 	check_report_manager_role,
+	check_org_viewer_role,
+	check_access_admin_role,
 	check_portal_admin_role,
 	check_report_access_hr_lockout,
 	check_company_access_grants,

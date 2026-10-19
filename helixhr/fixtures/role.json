@@ -33,5 +33,19 @@
   "is_custom": 0,
   "name": "HelixHR Portal Admin",
   "role_name": "HelixHR Portal Admin"
+ },
+ {
+  "desk_access": 0,
+  "doctype": "Role",
+  "is_custom": 0,
+  "name": "HelixHR Org Viewer",
+  "role_name": "HelixHR Org Viewer"
+ },
+ {
+  "desk_access": 0,
+  "doctype": "Role",
+  "is_custom": 0,
+  "name": "HelixHR Access Admin",
+  "role_name": "HelixHR Access Admin"
  }
 ]

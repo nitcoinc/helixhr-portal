@@ -100,6 +100,9 @@ fixtures = [
 					"HelixHR Notification Manager",
 					"HelixHR Report Manager",
 					"HelixHR Portal Admin",
+					# Plan 2026-10-19-001 U1: assignable roles new in that plan.
+					"HelixHR Org Viewer",
+					"HelixHR Access Admin",
 				],
 			]
 		],
