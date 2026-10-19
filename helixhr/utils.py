@@ -1424,25 +1424,18 @@ def resolve_admin_scope(user):
 	so a list read (U2) and a single-record check (U3) consume the same
 	result without re-deriving it.
 
-	Returns a dict with a ``kind`` of:
+	Since plan 2026-10-19-001 U3 the answer is the caller's HR Manager
+	assignments (`role_scope`), behind the Frappe role, which stays Frappe's
+	switch (KTD4):
 
-	- ``"unscoped"`` -- every employee, on every company. Administrator, and
-	  the Desk-only HR Manager / System Manager who holds no Employee record
-	  (P3-KTD7, P4-KTD7: `ensure_hr_manager_user()` is built to be exactly
-	  this, on purpose, and must keep working).
-	- ``"company"`` -- the named company only. An HR Manager / System
-	  Manager anchored to an active Employee (the 2026-09-16 fix this
-	  mirrors) is scoped to that company, never another.
-	- ``"none"`` -- nobody. A plain employee, an `IT Team` holder, or any
-	  other caller with no administrative role.
-
-	The one deliberate distinction: "no Employee record" and "an Employee
-	record that is not Active" are NOT the same case. The first is the
-	Desk-only persona above. The second is somebody who has been offboarded,
-	suspended, or marked Inactive while their User still holds the role --
-	an offboarding lag, not a persona -- and it resolves to ``"none"``, never
-	to unscoped. Before this rule, marking an HR Manager's Employee as Left
-	silently widened their reach from one company to every company.
+	- ``"unscoped"`` -- every employee, on every company. Administrator, a
+	  System Manager, and an HR Manager with an All-orgs row (the Leadership
+	  preset, R6), which covers orgs created later too.
+	- ``"company"`` / ``"companies"`` -- the orgs the HR Manager rows name,
+	  whatever company the person's own Employee is in (KTD2).
+	- ``"none"`` -- nobody. A plain employee, an `IT Team` holder, an HR
+	  Manager role with no assignment (R3), or a holder who fails R4: a
+	  disabled User, or one whose Employee records are all Left or Inactive.
 	"""
 	return dict(request_memo_get(_ADMIN_SCOPE_MEMO, user, lambda: _admin_scope(user)))
 
@@ -1488,16 +1481,13 @@ def shared_admin_scope():
 
 
 def _admin_scope(user):
-	"""`resolve_admin_scope`'s answer, read fresh."""
+	"""`resolve_admin_scope`'s answer, read fresh -- `role_scope` keeps its
+	rows for the request, so this stays cheap for `events._is_hr`."""
 	if user == "Administrator":
 		return {"kind": "unscoped", "company": None}
 	if set(frappe.get_roles(user)) & _ADMIN_UNSCOPED_ROLES:
-		anchor = active_employee_for_user(user)
-		if anchor.state == "none":
-			return {"kind": "unscoped", "company": None}
-		if anchor.state == "inactive":
-			return {"kind": "none", "company": None}
-		return {"kind": "company", "company": anchor.company}
+		# A System Manager who passes R4 is unscoped here (R5).
+		return role_scope(user, "HR Manager")
 	return {"kind": "none", "company": None}
 
 
@@ -1530,13 +1520,10 @@ def employee_in_admin_scope(employee, scope):
 
 def company_role_holders(role, employee):
 	"""Enabled holders of ``role`` who may hear about ``employee``'s request
-	(plan 2026-10-15-003 KTD5, R9): an unscoped admin (`resolve_admin_scope`
-	says ``unscoped`` -- an HR Manager or System Manager with no Employee),
-	or a holder whose Active Employee is in ``employee``'s company.
-	Administrator is never a recipient. When nobody qualifies, HR Manager
-	through the same rule is the fallback, so a company with no in-company
-	IT holder still reaches someone. Arrival mail keeps
-	`events._enabled_users_with_role` until its own follow-up."""
+	(plan 2026-10-15-003 KTD5, R9), resolved by `_company_role_holders` for
+	the employee's company. Administrator is never a recipient. When nobody
+	qualifies, HR Manager through the same rule is the fallback, so a company
+	with no IT holder still reaches someone."""
 	company = frappe.db.get_value("Employee", employee, "company") if employee else None
 	holders = _company_role_holders(role, company)
 	if not holders and role != "HR Manager":
@@ -1545,27 +1532,41 @@ def company_role_holders(role, employee):
 
 
 def _company_role_holders(role, company):
+	"""Who holds ``role`` in ``company``, for mail (plan 2026-10-19-001 U3):
+	an enabled User holding the Frappe role, passing R4, with an assignment
+	row on All orgs or on ``company``. A System Manager is never assigned
+	(R5), so one who holds the Frappe role keeps today's rule: no Employee,
+	or an Active one in ``company``. Administrator and Guest never are.
+	A fixed handful of set reads, whatever the number of holders."""
 	if not role or not company:
 		return []
-	holders = frappe.get_all(
-		"Has Role", filters={"role": role, "parenttype": "User"}, pluck="parent", distinct=True
+	assigned = set(
+		frappe.get_all(
+			"HelixHR Access Assignment",
+			filters={"role": role},
+			or_filters={"all_orgs": 1, "company": company},
+			pluck="user",
+			distinct=True,
+		)
 	)
-	users = frappe.get_all(
-		"User",
-		filters={"name": ["in", holders or [""]], "enabled": 1},
-		pluck="name",
+	held = frappe.get_all(
+		"Has Role",
+		filters={"role": ["in", [role, "System Manager"]], "parenttype": "User"},
+		fields=["parent", "role"],
 	)
-	users = [user for user in users if user not in ("Administrator", "Guest")]
-	if not users:
+	system_managers = {row.parent for row in held if row.role == "System Manager"}
+	candidates = {row.parent for row in held if row.role == role} & (assigned | system_managers)
+	candidates -= {"Administrator", "Guest"}
+	if not candidates:
 		return []
+	users = frappe.get_all("User", filters={"name": ["in", list(candidates)], "enabled": 1}, pluck="name")
 	anchors = active_employees_for_users(users)
 	result = []
 	for user in users:
 		anchor = anchors[user]
-		if anchor.state != "none":
-			if anchor.state == "active" and anchor.company == company:
-				result.append(user)
-		elif resolve_admin_scope(user)["kind"] == "unscoped":
+		if anchor.state == "inactive":
+			continue
+		if user in assigned or anchor.state == "none" or anchor.company == company:
 			result.append(user)
 	return result
 

@@ -16,6 +16,7 @@ from helixhr.tests.utils import (
 	ensure_hr_manager_user,
 	ensure_test_company,
 	ensure_test_email_account,
+	make_assignment,
 	make_test_employee_and_manager,
 	make_test_hr_manager_employee,
 	make_test_it_user,
@@ -693,13 +694,7 @@ class TestRequestApprovalQueue(IntegrationTestCase):
 		company = ensure_test_company()
 		user = "second-it-team@helixhr.test"
 		employee = make_test_user(user, company)
-		user_doc = frappe.get_doc("User", user)
-		roles = [row.role for row in user_doc.roles if row.role != "Employee"]
-		if "IT Team" not in roles:
-			roles.append("IT Team")
-			user_doc.set("roles", [{"role": role} for role in roles])
-			user_doc.save(ignore_permissions=True)
-			frappe.clear_cache(user=user)
+		make_assignment(user, "IT Team", [company])
 		return employee, user
 
 	def _watch_mail(self):
@@ -2072,9 +2067,13 @@ class TestRequestConversation(IntegrationTestCase):
 		return added
 
 	def _user_with_role(self, user, role, company=None):
+		"""A holder of ``role`` for ``company`` (plan 2026-10-19-001 U3: an
+		assignment there), or of the Frappe role alone with no Employee."""
 		if company:
 			make_test_user(user, company)
-		elif not frappe.db.exists("User", user):
+			make_assignment(user, role, [company])
+			return user
+		if not frappe.db.exists("User", user):
 			frappe.get_doc(
 				{"doctype": "User", "email": user, "first_name": user.split("@")[0], "send_welcome_email": 0}
 			).insert(ignore_permissions=True)

@@ -254,13 +254,23 @@ def make_assignment(user, role, orgs, export=0, origin="manual", add_role=True):
 				"user": user,
 				"role": role,
 				"all_orgs": 0 if company else 1,
-				"company": company,
+				# "" not None: a None Company picks up the session user's
+				# default company on insert, which an All-orgs row refuses.
+				"company": company or "",
 				"allow_export": export,
 				"origin": origin,
 			}
 		).insert(ignore_permissions=True)
 	if add_role:
 		_ensure_frappe_role(user, role)
+	clear_role_scope_cache(user)
+
+
+def remove_assignment(user, role):
+	"""Delete every ``role`` row ``user`` holds, the undo of `make_assignment`
+	for a test that grants and then revokes. The Frappe role is the caller's
+	to remove."""
+	frappe.db.delete("HelixHR Access Assignment", {"user": user, "role": role})
 	clear_role_scope_cache(user)
 
 

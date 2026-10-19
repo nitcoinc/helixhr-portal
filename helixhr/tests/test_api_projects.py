@@ -15,6 +15,7 @@ from helixhr.tests.utils import (
 	ensure_hr_manager_user,
 	ensure_test_company,
 	ensure_test_email_account,
+	make_assignment,
 	make_test_delivery_manager,
 	make_test_employee_and_manager,
 	make_test_hr_manager_employee,
@@ -49,11 +50,7 @@ class TestResolveProjectScope(IntegrationTestCase):
 		company = ensure_test_company()
 		user = "left-hr-manager-projects@helixhr.test"
 		make_test_user(user, company, create_user_permission=0, status="Left", relieving_date="2026-01-31")
-		doc = frappe.get_doc("User", user)
-		if "HR Manager" not in [row.role for row in doc.roles]:
-			doc.append_roles("HR Manager")
-			doc.save(ignore_permissions=True)
-			frappe.clear_cache(user=user)
+		make_assignment(user, "HR Manager", [company])
 		self.assertEqual(resolve_project_scope(user), {"kind": "none"})
 
 	def test_an_hr_role_holder_with_no_employee_record_resolves_unscoped(self):

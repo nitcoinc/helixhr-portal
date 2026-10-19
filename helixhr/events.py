@@ -17,6 +17,7 @@ from helixhr.utils import (
 	PROFILE_CORRECTABLE_FIELDS,
 	PROFILE_CORRECTION_CATEGORY,
 	UPLOAD_POLICY,
+	_company_role_holders,
 	employee_in_admin_scope,
 	get_manager_user,
 	mask_identifier,
@@ -212,8 +213,10 @@ def _decider_name():
 	return frappe.utils.get_fullname(frappe.session.user)
 
 
-def _hr_managers():
-	return _enabled_users_with_role("HR Manager")
+def _hr_managers(employee):
+	"""HR-stage mail: the HR Managers whose assignments cover ``employee``'s
+	company (plan 2026-10-19-001 U3)."""
+	return _enabled_users_with_role("HR Manager", employee)
 
 
 def _leave_balance_after(doc, subtract_days):
@@ -268,7 +271,7 @@ def _mail_leave_for_hr(doc):
 			action_url=_portal_url(f"approvals/leave/{doc.name}"),
 		)
 
-	_mail(doc, "leave_for_hr", _hr_managers(), context)
+	_mail(doc, "leave_for_hr", _hr_managers(doc.employee), context)
 
 
 def leave_application_on_change(doc, method=None):
@@ -356,7 +359,7 @@ def _mail_timesheet_change(doc, before):
 		_mail(
 			doc,
 			"timesheet_for_hr",
-			_hr_managers(),
+			_hr_managers(doc.employee),
 			lambda: context(action_url=_portal_url(f"approvals/timesheet/{doc.name}")),
 		)
 	elif state == "Draft" and before.get("workflow_state") == PENDING_STATE:
@@ -429,7 +432,7 @@ def timesheet_change_after_insert(doc, method=None):
 
 
 def _hr_mail_change(doc):
-	recipients = [user for user in _hr_managers() if user != frappe.session.user]
+	recipients = [user for user in _hr_managers(doc.employee) if user != frappe.session.user]
 	if not recipients:
 		return
 	_mail(
@@ -1431,7 +1434,8 @@ def _attach_correction_proof(doc):
 
 
 def hr_request_after_insert(doc, method=None):
-	"""Queue arrival mail for enabled holders of the request's stored route.
+	"""Queue arrival mail for the holders of the request's stored route in
+	the employee's company (plan 2026-10-19-001 U3).
 
 	The request is already durable before this hook runs. Email Queue failures
 	therefore cannot roll back a portal filing; they are logged for the operator
@@ -1445,13 +1449,13 @@ def hr_request_after_insert(doc, method=None):
 			{"requested_on": frappe.utils.format_datetime(doc.creation or frappe.utils.now_datetime())},
 		)
 	role = doc.routed_to_role
-	users = _enabled_users_with_role(role)
+	users = _enabled_users_with_role(role, doc.employee)
 	if not users and role != "HR Manager":
 		frappe.log_error(
-			f"HR Request {doc.name} is routed to {role}, which has no enabled holders; falling back to HR Manager.",
+			f"HR Request {doc.name} is routed to {role}, which has no enabled holders in the employee's company; falling back to HR Manager.",
 		"HelixHR request routing",
 		)
-		users = _enabled_users_with_role("HR Manager")
+		users = _enabled_users_with_role("HR Manager", doc.employee)
 	if not users:
 		frappe.log_error(
 			f"HR Request {doc.name} has no enabled recipient for route {role}.",
@@ -1486,13 +1490,12 @@ def hr_request_after_insert(doc, method=None):
 		frappe.log_error(frappe.get_traceback(), "HelixHR request arrival mail failed")
 
 
-def _enabled_users_with_role(role):
-	if not role:
-		return []
-	holders = frappe.get_all("Has Role", filters={"role": role, "parenttype": "User"}, pluck="parent")
-	if not holders:
-		return []
-	return frappe.get_all("User", filters={"name": ["in", holders], "enabled": 1}, pluck="name")
+def _enabled_users_with_role(role, employee):
+	"""Holders of ``role`` whose assignments cover ``employee``'s company --
+	the one recipient rule request and HR-stage mail share with request
+	comments (`utils._company_role_holders`)."""
+	company = frappe.db.get_value("Employee", employee, "company") if employee else None
+	return _company_role_holders(role, company)
 
 
 def hr_request_on_update(doc, method=None):
@@ -1802,12 +1805,13 @@ ATTENDANCE_REQUEST_SENT_BACK_FALLBACK = (
 	"No reason was given, ask your manager or HR for details"
 )
 
-_HR_ROLES = {"HR Manager", "System Manager"}
-
-
 def _is_hr(user=None):
+	"""Whether ``user`` acts as HR anywhere: their HR scope
+	(`resolve_admin_scope`) is not "none" (plan 2026-10-19-001 U3). An HR
+	Manager role with no assignment is not HR (R3). Cheap enough for its
+	many callers: `role_scope` reads a user's rows once per request."""
 	user = user or frappe.session.user
-	return user == "Administrator" or bool(set(frappe.get_roles(user)) & _HR_ROLES)
+	return user == "Administrator" or resolve_admin_scope(user)["kind"] != "none"
 
 
 def helixhr_date(value):
@@ -1997,7 +2001,7 @@ def _mail_attendance_change(doc):
 		_mail(
 			doc,
 			"attendance_for_hr",
-			_hr_managers(),
+			_hr_managers(doc.employee),
 			lambda: {
 				"employee_name": doc.employee_name or doc.employee,
 				"date_range": date_range,

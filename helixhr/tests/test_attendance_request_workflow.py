@@ -43,13 +43,16 @@ from helixhr.tests.utils import (
 	MANAGER_USER,
 	NIGHT_SHIFT_TYPE,
 	OTHER_MANAGER_USER,
+	TEST_COMPANY,
 	ensure_holiday_list_assignment,
 	ensure_holiday_list_assignment_from,
 	ensure_hr_manager_user,
 	ensure_test_holiday,
 	ensure_test_shift_type,
+	make_assignment,
 	make_test_employee_and_manager,
 	make_test_user,
+	remove_assignment,
 )
 
 DOCTYPE = "Attendance Request"
@@ -556,6 +559,7 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 		employee_login = frappe.get_doc("User", EMPLOYEE_USER)
 		employee_login.add_roles("HR Manager")
 		frappe.clear_cache(user=EMPLOYEE_USER)
+		make_assignment(EMPLOYEE_USER, "HR Manager", [TEST_COMPANY], add_role=False)
 		try:
 			frappe.set_user(EMPLOYEE_USER)
 			with self.assertRaises(frappe.PermissionError):
@@ -566,6 +570,7 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 			employee_login.reload()
 			employee_login.remove_roles("HR Manager")
 			frappe.clear_cache(user=EMPLOYEE_USER)
+			remove_assignment(EMPLOYEE_USER, "HR Manager")
 
 		# Another HR Manager still confirms it.
 		frappe.set_user(self.hr_user)
@@ -854,6 +859,7 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 		employee_login = frappe.get_doc("User", EMPLOYEE_USER)
 		employee_login.add_roles("HR Manager")
 		frappe.clear_cache(user=EMPLOYEE_USER)
+		make_assignment(EMPLOYEE_USER, "HR Manager", [TEST_COMPANY], add_role=False)
 		try:
 			frappe.set_user(EMPLOYEE_USER)
 			with self.assertRaises(
@@ -866,6 +872,7 @@ class TestAttendanceRequestWorkflow(IntegrationTestCase):
 			employee_login.reload()
 			employee_login.remove_roles("HR Manager")
 			frappe.clear_cache(user=EMPLOYEE_USER)
+			remove_assignment(EMPLOYEE_USER, "HR Manager")
 
 	def test_the_decision_reason_is_not_the_employees_to_write(self):
 		"""P4-KTD7a. The field is at permlevel 1, so a generic save by the

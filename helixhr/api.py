@@ -106,7 +106,7 @@ from helixhr.utils import (
 	THEME_PLACEHOLDERS,
 	UPLOAD_MAX_BYTES,
 	TemplateRejected,
-	_active_anchor_company,
+	_company_role_holders,
 	access_summary,
 	active_company_grant,
 	active_employee_for_user,
@@ -142,6 +142,7 @@ from helixhr.utils import (
 	resolve_project_read_scope,
 	resolve_project_scope,
 	resolve_read_scope,
+	role_scope,
 	sample_context,
 	scope_covers,
 	send_notification,
@@ -2994,13 +2995,24 @@ def _request_requester_scope(user):
 	"""The Employee filter for "requesters this caller may see", or None for
 	nobody -- the same branches as `hr_request.get_permission_query_conditions`:
 	an HR/System Manager reads through `resolve_admin_scope`, a routed worker
-	through their own company."""
+	through their assignments for the roles they work (plan 2026-10-19-001
+	U3), anyone else through their own company (their own requests)."""
 	if user == "Administrator":
 		return {}
-	if set(frappe.get_roles(user)) & {"HR Manager", "System Manager"}:
-		return admin_scope_employee_filters(resolve_admin_scope(user))
-	company = session_company(user)
-	return {"company": company} if company else None
+	roles = set(frappe.get_roles(user))
+	scopes = [role_scope(user, role) for role in _routed_roles_held(user) if role != "HR Manager"]
+	if roles & {"HR Manager", "System Manager"}:
+		scopes.append(resolve_admin_scope(user))
+	companies = set()
+	for scope in scopes:
+		covered = read_companies(scope)
+		if covered is None:
+			return {}
+		companies.update(covered)
+	own = session_company(user)
+	if own:
+		companies.add(own)
+	return {"company": ["in", sorted(companies)]} if companies else None
 
 
 def _request_search_or_filters(q, user):
@@ -3160,8 +3172,7 @@ def get_request_work(state=None, limit=None, start=0, q=None, sort=None, categor
 		frappe.throw(_("There is no sort called {0}.").format(sort))
 	category = _valid_request_category(category)
 
-	roles = set(frappe.get_roles())
-	routed_roles = [role for role in ("HR Manager", *_ROUTED_WORKER_ROLES) if role in roles]
+	routed_roles = _routed_roles_held()
 	if not routed_roles:
 		# An HR-adjacent session (System Manager) without either role that
 		# routes requests: nothing here is theirs to work.
@@ -3387,11 +3398,25 @@ def _collect_approval_summaries(employee, include_requests, count_only, today):
 
 
 def _holds_routed_role(user=None):
-	"""Whether the caller holds a role a category may route work to, other
+	"""Whether the caller works a role a category may route work to, other
 	than HR Manager -- `_is_hr` already covers HR Manager, and this is the
 	other half of P5-R11's "is HR or holds a routed role" gate."""
+	return any(role != "HR Manager" for role in _routed_roles_held(user))
+
+
+def _routed_roles_held(user=None):
+	"""The routed roles ``user`` works: HR Manager and each routed worker
+	role (IT Team) they hold in Frappe *and* reach some org with by
+	assignment (plan 2026-10-19-001 U3, R3). A Frappe role with no
+	assignment works nothing; a System Manager works only the routed roles
+	it holds, as before."""
 	user = user or frappe.session.user
-	return bool(set(frappe.get_roles(user)) & _ROUTED_WORKER_ROLES)
+	roles = set(frappe.get_roles(user))
+	return [
+		role
+		for role in ("HR Manager", *sorted(_ROUTED_WORKER_ROLES))
+		if role in roles and role_scope(user, role)["kind"] != "none"
+	]
 
 
 def _can_edit_email_templates(user=None):
@@ -7032,7 +7057,8 @@ def _oversight_scope(user=None):
 	  companies (every company) for the unscoped Desk persona. An HR Manager
 	  whose own Employee is not Active resolves to nobody (`resolve_admin_scope`
 	  "none") and is refused, never widened.
-	- HR User with an Active Employee: their anchor company, timesheets only.
+	- HR User: the orgs their HR User assignments name (`role_scope`, plan
+	  2026-10-19-001 U3), timesheets only; ``None`` companies on All orgs.
 
 	Company access grants never widen this: each company's HR chases its own
 	managers (plan scope boundary)."""
@@ -7043,9 +7069,9 @@ def _oversight_scope(user=None):
 			return {"hr_manager": True, "companies": companies}
 		return None
 	if HR_USER_ROLE in frappe.get_roles(user):
-		anchor = _active_anchor_company(user)
-		if anchor:
-			return {"hr_manager": False, "companies": [anchor]}
+		companies = read_companies(role_scope(user, HR_USER_ROLE))
+		if companies is None or companies:
+			return {"hr_manager": False, "companies": companies}
 	return None
 
 
@@ -7375,9 +7401,9 @@ def get_approval_detail(kind, name):
 		frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
 
 	# Plan 2026-10-15-002 KTD4: an HR User reads a pending timesheet in their
-	# anchor company, read-only. Decided from the row's columns before the
-	# document is loaded; any other kind or company falls through to the
-	# approver rule below and its not-found refusal.
+	# assigned orgs (every org on All orgs), read-only. Decided from the row's
+	# columns before the document is loaded; any other kind or company falls
+	# through to the approver rule below and its not-found refusal.
 	scope = _oversight_scope() if kind == "timesheet" and not _is_hr() else None
 	oversees = bool(scope) and bool(
 		frappe.db.exists(
@@ -7385,7 +7411,7 @@ def get_approval_detail(kind, name):
 			{
 				"name": name,
 				"docstatus": 0,
-				"company": ["in", scope["companies"]],
+				**({"company": ["in", scope["companies"]]} if scope["companies"] is not None else {}),
 				"workflow_state": ["in", ("Pending Approval", TIMESHEET_PENDING_HR)],
 			},
 		)
@@ -7566,9 +7592,12 @@ def _allowed_actions(doc, user):
 		# Plan 2026-10-18-001 KTD6 / R8: outside their HR scope an HR user is
 		# this record's line manager and nothing more, so the HR-role
 		# transitions -- every HR-stage decision among them -- are dropped.
-		actions = _workflow_allowed_actions(
-			doc, user, line_manager_only=_is_hr(user) and not _decides_as_hr(doc, user)
-		)
+		# Plan 2026-10-19-001 U3: so is a holder of the Frappe HR role with no
+		# assignment behind it (R3) -- the role alone opens no HR transition.
+		# A routed request has no line manager: its worker is gated by
+		# `_may_act_on_hr_request` (stored route and assignment) instead.
+		line_manager_only = doc.doctype != "HR Request" and not _decides_as_hr(doc, user)
+		actions = _workflow_allowed_actions(doc, user, line_manager_only=line_manager_only)
 
 	# P4-R5, and the dead end it would otherwise create: the only route out of
 	# Pending HR is an HR Manager who is not the requester, so on a site with
@@ -7582,38 +7611,19 @@ def _allowed_actions(doc, user):
 
 def _an_hr_manager_can_take_this(doc):
 	"""Is there anybody who could actually decide this record once it is with
-	HR: an enabled login holding HR Manager who is not this record's
-	requester.
+	HR: an HR Manager whose assignments cover the employee's company (plan
+	2026-10-19-001 U3, the same holders HR-stage mail goes to) and who is not
+	this record's requester. Administrator and Guest never count --
+	Administrator is the migration and backfill account, not a person HR
+	work can be handed to.
 
-	The same notion of "enabled holder of HR Manager" `preflight._hr_manager_users`
-	checks (P4-R11). The two-query shape is repeated here rather than imported
-	because preflight is an operator command and this is a request path; both
-	exclude Administrator and Guest -- Administrator is the migration and
-	backfill account, not a person HR work can be handed to.
-
-	`ignore_permissions` for the reason the holiday and directory reads give:
-	an ordinary employee has no read on Has Role, this method owns the whole
-	scope, and what leaves the function is a boolean.
+	`_company_role_holders` reads with `frappe.get_all`, which skips
+	permissions: an ordinary employee has no read on Has Role, this method
+	owns the whole scope, and what leaves the function is a boolean.
 	"""
-	holders = set(
-		frappe.get_all(
-			"Has Role",
-			filters={"role": "HR Manager", "parenttype": "User"},
-			pluck="parent",
-			ignore_permissions=True,
-		)
-	) - {"Administrator", "Guest", _requester_user(doc)}
-	if not holders:
-		return False
-	return bool(
-		frappe.get_all(
-			"User",
-			filters={"enabled": 1, "name": ["in", list(holders)]},
-			pluck="name",
-			limit=1,
-			ignore_permissions=True,
-		)
-	)
+	company = frappe.db.get_value("Employee", doc.employee, "company")
+	requester = _requester_user(doc)
+	return any(user != requester for user in _company_role_holders("HR Manager", company))
 
 
 def _decides_as_hr(doc, user):
@@ -8412,8 +8422,11 @@ def _may_act_on_hr_request(doc, user):
 	it (P5-R5, P5-R9). Reached only for a non-HR session -- `_assert_may_act_on`
 	returns early for HR in scope and refuses HR outside it -- so a request stamped to HR Manager is only
 	ever decided by HR here, never by an IT Team holder, whatever roles they
-	both happen to hold."""
-	if doc.routed_to_role not in frappe.get_roles(user):
+	both happen to hold. The holder's assignments for that role must also
+	cover the employee's company (plan 2026-10-19-001 U3)."""
+	if doc.routed_to_role not in frappe.get_roles(user) or not scope_covers(
+		role_scope(user, doc.routed_to_role), frappe.db.get_value("Employee", doc.employee, "company")
+	):
 		frappe.throw(
 			_(_APPROVAL_NOT_FOUND),
 			frappe.PermissionError,
@@ -8566,17 +8579,16 @@ def _handler_comment_refusal(doc, user):
 
 	Runs after `_assert_may_act_on`, which already holds HR to its admin
 	scope. On top of that: the caller must hold the stored routed role
-	(Administrator exempt), a non-HR handler must have an Active Employee in
-	the employee's company (an IT holder with no Employee is refused, never
-	treated as unscoped), and the request must be open. Returns the refusal
+	(Administrator exempt), a non-HR handler's assignments for that role must
+	cover the employee's company (plan 2026-10-19-001 U3: an IT holder with
+	no row is refused), and the request must be open. Returns the refusal
 	text so `can_comment` and the endpoint share one rule."""
 	if user != "Administrator":
 		if doc.routed_to_role not in frappe.get_roles(user):
 			return _(_APPROVAL_NOT_FOUND)
 		if not _is_hr(user):
-			anchor = active_employee_for_user(user)
 			company = frappe.db.get_value("Employee", doc.employee, "company")
-			if anchor.state != "active" or anchor.company != company:
+			if not scope_covers(role_scope(user, doc.routed_to_role), company):
 				return _(_APPROVAL_NOT_FOUND)
 	if doc.status not in _REQUEST_OPEN_STATES:
 		return _("This request is {0}. Comments are only allowed while it is open.").format(doc.status)
@@ -8642,8 +8654,7 @@ def _hr_request_queue(employee, today, count_only=False):
 	`count_only` is accepted so every `hr_queue` reader shares one signature,
 	and ignored: the one count read (the bootstrap's) never collects requests
 	(`include_requests=False`), so there is no request count to make cheap."""
-	roles = set(frappe.get_roles())
-	routed_roles = [r for r in ("HR Manager", *_ROUTED_WORKER_ROLES) if r in roles]
+	routed_roles = _routed_roles_held()
 	if not routed_roles:
 		return []
 	return _hr_request_summaries(employee, today, routed_roles=routed_roles)
@@ -11592,8 +11603,7 @@ def _portal_search_inbox(employee, pattern):
 	permission-aware so `hr_request`'s query conditions still scope the
 	company. A session holding no routing role (System Manager alone) has
 	nothing here."""
-	roles = set(frappe.get_roles())
-	routed_roles = [role for role in ("HR Manager", *_ROUTED_WORKER_ROLES) if role in roles]
+	routed_roles = _routed_roles_held()
 	if not routed_roles:
 		return []
 	filters = _request_summaries_filters(employee, _PORTAL_SEARCH_REQUEST_STATES, routed_roles=routed_roles)

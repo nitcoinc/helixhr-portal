@@ -71,7 +71,7 @@ from hrms.controllers.employee_reminders import (
 )
 
 from helixhr.events import PENDING_SINCE_FIELD as PENDING_SINCE
-from helixhr.utils import active_employee_for_user, company_today
+from helixhr.utils import _company_role_holders, active_employee_for_user, company_today
 
 # One row per (event, company) since plan 2026-10-04-004 U1 -- named
 # `{event}-{company}` by the doctype's own autoname: the words HR reads on
@@ -1089,7 +1089,9 @@ def collect_overdue(today=None, cutoff=None, companies=None, kinds=None, resolve
 		else {}
 	)
 	items = []
-	hr_users = None
+	# Plan 2026-10-19-001 U3: who owes an HR- or IT-routed item is that
+	# role's holders in the item's company -- one read per (role, company).
+	holders = {}
 	if stats is not None:
 		stats["capped"] = False
 
@@ -1099,11 +1101,13 @@ def collect_overdue(today=None, cutoff=None, companies=None, kinds=None, resolve
 			stats["capped"] = True
 		return rows
 
-	def hr_owned():
-		nonlocal hr_users
-		if hr_users is None:
-			hr_users = _active_hr_managers()
-		return list(hr_users), _HR_ROLE
+	def role_owners(role, company):
+		if (role, company) not in holders:
+			holders[role, company] = _mailable(_company_role_holders(role, company))
+		return list(holders[role, company])
+
+	def hr_owned(company):
+		return role_owners(_HR_ROLE, company), _HR_ROLE
 
 	def owned(resolve, *args):
 		return resolve(*args) if resolve_owners else ([], None)
@@ -1153,7 +1157,7 @@ def collect_overdue(today=None, cutoff=None, companies=None, kinds=None, resolve
 			if late_only and not is_overdue(row.get(PENDING_SINCE), today, threshold):
 				continue
 			if row.helixhr_stage == "HR":
-				owners, owner_name = owned(hr_owned)
+				owners, owner_name = owned(hr_owned, row.company)
 				approver = {"role": _HR_ROLE}
 			else:
 				owners, owner_name = owned(_user_owner, row.leave_approver)
@@ -1182,7 +1186,7 @@ def collect_overdue(today=None, cutoff=None, companies=None, kinds=None, resolve
 			if late_only and not is_overdue(row.get(PENDING_SINCE), today, threshold):
 				continue
 			if row.workflow_state == hr_state:
-				owners, owner_name = owned(hr_owned)
+				owners, owner_name = owned(hr_owned, row.company)
 				approver = {"role": _HR_ROLE}
 			else:
 				owners, owner_name = owned(_manager_owner, row.employee)
@@ -1218,15 +1222,17 @@ def collect_overdue(today=None, cutoff=None, companies=None, kinds=None, resolve
 		sla = slas.get(row.category, 0)
 		if late_only and (sla <= 0 or not is_overdue(row.creation, today, sla)):
 			continue
-		row.employee_name = frappe.db.get_value("Employee", row.employee, "employee_name")
+		row.employee_name, company = frappe.db.get_value(
+			"Employee", row.employee, ["employee_name", "company"]
+		) or (None, None)
 		if row.picked_up_by:
 			owners, owner_name = owned(_user_owner, row.picked_up_by)
 			approver = {"user": row.picked_up_by}
 		elif row.routed_to_role == _HR_ROLE:
-			owners, owner_name = owned(hr_owned)
+			owners, owner_name = owned(hr_owned, company)
 			approver = {"role": _HR_ROLE}
 		else:
-			owners = _mailable(_role_holders(row.routed_to_role)) if resolve_owners else []
+			owners = role_owners(row.routed_to_role, company) if resolve_owners else []
 			owner_name = row.routed_to_role or "No owner"
 			approver = {"role": row.routed_to_role} if row.routed_to_role else {}
 		add("request", "HR Request", row, row.subject, row.creation, owners, owner_name, sla, "request", approver)
@@ -1249,7 +1255,7 @@ def collect_overdue(today=None, cutoff=None, companies=None, kinds=None, resolve
 				owners, owner_name = owned(_user_owner, row.approver_user)
 				approver = {"user": row.approver_user}
 			else:
-				owners, owner_name = owned(hr_owned)
+				owners, owner_name = owned(hr_owned, row.company)
 				approver = {"role": _HR_ROLE}
 			title = f"Change request, {format_date(row.week_start, _date_format())}"
 			add("change", "HelixHR Timesheet Change", row, title, row.get(PENDING_SINCE), owners, owner_name,
@@ -1340,15 +1346,19 @@ def _mailable(users):
 	)
 
 
-def _role_holders(role):
-	if not role:
-		return []
-	return frappe.get_all("Has Role", filters={"role": role, "parenttype": "User"}, pluck="parent")
-
-
 def _active_hr_managers():
-	"""Who receives `hr_overdue_summary` (R24)."""
-	return [user for user in _mailable(_role_holders(_HR_ROLE)) if user != "Administrator"]
+	"""Who receives `hr_overdue_summary` (R24): mailable HR Managers whose
+	HR scope reaches some org (plan 2026-10-19-001 U3). `_summary_owners`
+	narrows each one's summary to that scope, so Leadership reads every
+	org's items and an HR Manager on [A] only A's."""
+	from helixhr.utils import resolve_admin_scope
+
+	holders = frappe.get_all("Has Role", filters={"role": _HR_ROLE, "parenttype": "User"}, pluck="parent")
+	return [
+		user
+		for user in _mailable(holders)
+		if user != "Administrator" and resolve_admin_scope(user)["kind"] != "none"
+	]
 
 
 

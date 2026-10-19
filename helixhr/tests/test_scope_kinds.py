@@ -19,6 +19,7 @@ from helixhr.tests.utils import (
 	create_test_company,
 	ensure_baseline_company,
 	ensure_test_company,
+	make_assignment,
 	make_test_user,
 )
 from helixhr.utils import (
@@ -44,8 +45,9 @@ class TestCompaniesScopeKind(IntegrationTestCase):
 		self.employee_a = make_test_user(USER_A, self.company_a)
 		self.employee_c = make_test_user(USER_C, self.company_c)
 		make_test_user(HR_USER, self.company_a, create_user_permission=0)
-		if "HR Manager" not in frappe.get_roles(HR_USER):
-			frappe.get_doc("User", HR_USER).add_roles("HR Manager")
+		# Plan 2026-10-19-001 U3: an HR Manager on [A, B] is now a real
+		# `companies` scope, so the HR gates the patch does not reach agree.
+		make_assignment(HR_USER, "HR Manager", [self.company_a, self.company_b])
 
 	def _as_admin_scope(self):
 		return patch("helixhr.api.resolve_admin_scope", return_value=self.scope)

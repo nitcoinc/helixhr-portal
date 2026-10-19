@@ -44,6 +44,7 @@ from helixhr.tests.utils import (
 	ensure_leave_approver_role,
 	ensure_test_company,
 	ensure_test_email_account,
+	make_assignment,
 	make_test_project,
 	make_test_user,
 )
@@ -145,8 +146,7 @@ class _CrossCompanyCase(IntegrationTestCase):
 		# HR login has no reports, and the bulk class below commits.
 		self.hr_employee = make_test_user(HR_USER, self.company_a, create_user_permission=0)
 		self.hr_user = HR_USER
-		if "HR Manager" not in frappe.get_roles(HR_USER):
-			frappe.get_doc("User", HR_USER).add_roles("HR Manager")
+		make_assignment(HR_USER, "HR Manager", [self.company_a])
 		self.hr_report = make_test_user(HR_REPORT_USER, self.company_b, reports_to=self.hr_employee)
 		self.manager = make_test_user(MANAGER_USER, self.company_a)
 		self.report = make_test_user(REPORT_USER, self.company_b, reports_to=self.manager)

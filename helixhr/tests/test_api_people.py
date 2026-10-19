@@ -10,6 +10,7 @@ from helixhr.tests.utils import (
 	TEST_COMPANY,
 	ensure_hr_manager_user,
 	ensure_test_company,
+	make_assignment,
 	make_test_employee_and_manager,
 	make_test_hr_manager_employee,
 	make_test_it_user,
@@ -95,16 +96,11 @@ class TestResolveAdminScope(IntegrationTestCase):
 					}
 				).insert(ignore_permissions=True)
 		# The HR admin is the only active employee this company has -- the
-		# nearest a company-anchored persona can get to "nobody to
-		# administer" without resolve_admin_scope itself falling back to
-		# unscoped (which is what a *missing* active Employee would do).
+		# nearest an HR Manager assigned to one company can get to "nobody to
+		# administer".
 		empty_hr_user = "empty-scope-hr@helixhr.test"
 		make_test_user(empty_hr_user, empty_company, create_user_permission=0)
-		user = frappe.get_doc("User", empty_hr_user)
-		if "HR Manager" not in [row.role for row in user.roles]:
-			user.append_roles("HR Manager")
-			user.save(ignore_permissions=True)
-			frappe.clear_cache(user=empty_hr_user)
+		make_assignment(empty_hr_user, "HR Manager", [empty_company])
 
 		scope = resolve_admin_scope(empty_hr_user)
 		self.assertEqual(scope, {"kind": "company", "company": empty_company})

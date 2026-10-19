@@ -553,7 +553,7 @@ class TestHrQueueEmails(IntegrationTestCase):
 	def _hr_recipients(self):
 		from helixhr.events import _enabled_users_with_role
 
-		return set(_enabled_users_with_role("HR Manager")) - {frappe.session.user}
+		return set(_enabled_users_with_role("HR Manager", self.employee_name)) - {frappe.session.user}
 
 	def _leave(self, leave_type="Casual Leave"):
 		ensure_leave_allocation(self.employee_name, leave_type, 30)
