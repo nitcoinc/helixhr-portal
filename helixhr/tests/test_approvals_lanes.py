@@ -329,3 +329,83 @@ class TestHrUserOversightDetail(IntegrationTestCase):
 		outsider = make_test_user("lanes-outsider@helixhr.test", other_company, reports_to=self.manager)
 		name = make_timesheet(self, outsider, 3, company=other_company)
 		self.assertRaises(frappe.PermissionError, _as, self.hr_user, get_approval_detail, "timesheet", name)
+
+
+class TestHrManagerDecidesFromAllPending(IntegrationTestCase):
+	"""Plan 2026-10-19-001 U9 (R27): an HR Manager decides any pending item in
+	their company from All pending, not only the ones handed to HR, and each
+	row says whether the caller can decide it."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		self.hr_employee, self.hr_manager = make_test_hr_manager_employee()
+		self.manager = make_test_user(MANAGER, self.company, status="Active")
+		self.report = make_test_user(REPORT, self.company, reports_to=self.manager)
+		self.hr_employee_user, self.hr_user = _make_role_user(
+			HR_USER, "HR User", self.company, status="Active"
+		)
+
+	def _items(self, user, kind="timesheet"):
+		result = _as(user, api.get_pending_by_approver, kind)  # kind=None: the All pending tab
+		return {item["name"]: item for group in result["groups"] for item in group["items"]}
+
+	def test_a_manager_stage_timesheet_is_decidable_by_hr(self):
+		name = make_timesheet(self, self.report, 3)
+		item = self._items(self.hr_manager)[name]
+		self.assertTrue(item["can_decide"])
+		self.assertEqual((item["route_kind"], item["doctype"]), ("timesheet", "Timesheet"))
+
+		# The same rule table `act_on_approval` enforces (P4-KTD6), so the
+		# panel the row opens offers exactly what the act accepts.
+		detail = _as(self.hr_manager, get_approval_detail, "timesheet", name)
+		self.assertEqual(detail["actions"], ["Approve", "Send Back"])
+
+	def test_hr_users_own_item_and_hr_user_rows_are_not_decidable(self):
+		name = make_timesheet(self, self.report, 3)
+		self.assertFalse(self._items(self.hr_user)[name]["can_decide"])
+		own = make_timesheet(self, self.hr_employee, 3, week_offset=2)
+		self.assertFalse(self._items(self.hr_manager)[own]["can_decide"])
+		# The flag is a hint; the server refuses the own item on its own.
+		self.assertRaises(frappe.PermissionError, _as, self.hr_manager, get_approval_detail, "timesheet", own)
+		self.assertRaises(
+			frappe.PermissionError,
+			_as,
+			self.hr_manager,
+			act_on_approval,
+			"Timesheet",
+			own,
+			"Approve",
+			**token("Timesheet", own),
+		)
+
+	def _raw_leave(self, employee, approver):
+		"""A pending leave written straight to the table: what All pending
+		lists is under test, not HRMS's own validation."""
+		doc = frappe.get_doc(
+			{
+				"doctype": "Leave Application",
+				"employee": employee,
+				"employee_name": frappe.db.get_value("Employee", employee, "employee_name"),
+				"company": frappe.db.get_value("Employee", employee, "company"),
+				"leave_type": frappe.db.get_value("Leave Type", {}, "name"),
+				"from_date": "2031-03-03",
+				"to_date": "2031-03-03",
+				"status": "Open",
+				"leave_approver": approver,
+			}
+		)
+		doc.set_new_name()
+		doc.db_insert()
+		self.addCleanup(frappe.db.delete, "Leave Application", {"name": doc.name})
+		return doc.name
+
+	def test_a_manager_stage_leave_row_is_decidable_and_typed(self):
+		leave = self._raw_leave(self.report, MANAGER)
+		item = self._items(self.hr_manager, kind=None)[leave]
+		self.assertEqual((item["doctype"], item["can_decide"]), ("Leave Application", True))
+
+	def test_another_companys_item_is_not_listed(self):
+		other = make_test_user("lanes-other-co@helixhr.test", ensure_baseline_company())
+		leave = self._raw_leave(other, MANAGER)
+		self.assertNotIn(leave, self._items(self.hr_manager, kind=None))

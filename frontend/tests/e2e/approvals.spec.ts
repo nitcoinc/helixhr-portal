@@ -419,6 +419,71 @@ test('HR sees an overdue item under All pending, grouped under its approver', as
   }
 })
 
+/**
+ * Plan 2026-10-19-001 U9 (R27): HR decides an item still with its manager
+ * straight from All pending -- not only what was handed to HR -- and stays
+ * on All pending while doing it.
+ */
+test('HR decides a manager-stage leave from All pending without leaving the tab', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'this is the HR capability shape')
+  test.setTimeout(90000)
+
+  const baseURL = process.env.BASE_URL || 'http://localhost:8080'
+  const admin = await adminContext(baseURL)
+  const employee = await getValue(admin, 'Employee', { user_id: EMPLOYEE }, 'name')
+  const date = futureWeekday()
+  // Two leaves on consecutive days: deciding one must leave focus on the other.
+  const names: string[] = []
+  for (const day of [date, addDays(date, 7)]) {
+    const inserted = await admin.post('/api/method/frappe.client.insert', {
+      data: {
+        doc: JSON.stringify({
+          doctype: 'Leave Application',
+          employee,
+          leave_type: 'Casual Leave',
+          from_date: day,
+          to_date: day,
+          description: 'u9 all pending',
+          leave_approver: 'manager@helixhr.test',
+        }),
+      },
+    })
+    expect(inserted.ok(), await inserted.text()).toBeTruthy()
+    names.push((await inserted.json()).message.name)
+  }
+  const [name, other] = names
+
+  try {
+    await page.goto('/helixhr/approvals?view=all-pending')
+    const row = page.getByTestId('overdue-tab').locator(`[data-overdue-name="${name}"]`)
+    await expect(row).toBeVisible({ timeout: 15000 })
+    await row.getByRole('link').click()
+
+    await expect(page).toHaveURL(/view=all-pending/)
+    const panel = page.getByTestId('approval-detail')
+    await panel.getByRole('button', { name: /^Approve/ }).click()
+    await expect
+      .poll(async () => getValue(admin, 'Leave Application', { name }, 'docstatus'), { timeout: 15000 })
+      .toBe(1)
+    await expect(page).toHaveURL(/view=all-pending/)
+    await expect(row).toHaveCount(0, { timeout: 15000 })
+    // KTD16: focus lands on a remaining row, never on the page body.
+    await expect
+      .poll(() => page.evaluate(() => document.activeElement?.closest('[data-overdue-name]')?.dataset.overdueName))
+      .toBe(other)
+  } finally {
+    for (const leave of names) {
+      if ((await getValue(admin, 'Leave Application', { name: leave }, 'docstatus')) === 1) {
+        await admin.post('/api/method/frappe.client.cancel', { form: { doctype: 'Leave Application', name: leave } })
+      }
+      await admin.post('/api/method/frappe.client.delete', { form: { doctype: 'Leave Application', name: leave } })
+    }
+    await admin.dispose()
+  }
+})
+
 test('an employee has no All pending tab, even by URL', async ({ page }, testInfo) => {
   test.skip(testInfo.project.name !== 'employee', 'this is the non-HR capability shape')
 
