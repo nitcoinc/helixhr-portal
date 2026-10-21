@@ -24,8 +24,6 @@ export const WARNING_LABELS = {
   role_outside_helixhr: 'Role set outside HelixHR',
   role_missing_in_frappe: 'Role missing in Frappe',
   own_org_not_covered: 'Own org not covered by their roles',
-  desk_hr_reach_all_orgs: 'Desk HR reach: all orgs',
-  all_orgs: 'All orgs',
   can_manage_access: 'Can manage access',
   export_on: 'Export on',
 }

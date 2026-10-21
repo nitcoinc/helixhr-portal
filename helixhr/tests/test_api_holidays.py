@@ -204,15 +204,16 @@ class TestHelixHRHolidays(IntegrationTestCase):
 		"""P3-R11. The same contract `get_my_attendance` uses for
 		`working_days_known`: false means "cannot tell", and the page says so
 		rather than claiming a year with no holidays in it."""
-		# A year before any assignment on this bench begins. HRMS resolves a
-		# list by `from_date <= as_on`, so nothing covers it.
+		# A year before any assignment begins is no longer "nothing": HRMS's
+		# resolver now falls back to the earliest assignment for dates before
+		# the first one (`resolve_holiday_list_assignment`), and this page
+		# mirrors HRMS, so the year resolves to that list -- the one leave and
+		# attendance use for those dates too.
 		payload = get_my_holidays(PAST_YEAR)
-		self.assertFalse(payload["known"])
-		self.assertIsNone(payload["holiday_list"])
-		self.assertEqual(payload["holidays"], [])
-		self.assertIsNone(payload["next"])
+		self.assertTrue(payload["known"])
+		self.assertTrue(payload["holiday_list"])
 
-		# And the current year with every assignment withdrawn -- an employee
+		# The current year with every assignment withdrawn -- an employee
 		# whose company HR has not set up yet. `docstatus` is written
 		# directly, not cancelled through the document, because this suite
 		# must leave the shared company assignment exactly as it found it;

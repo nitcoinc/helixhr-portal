@@ -2004,7 +2004,7 @@ Nobody changes their own access (R11).
 `utils.assignable(caller)` returns this as `{roles, companies, all_orgs}`;
 `may_assign` tests one row against it. An All-orgs Portal Admin still cannot
 give All orgs (R7). HR roles are assignable only by System Manager and Manage
-access, until Desk lock-down ships (KTD12).
+access (KTD12; kept after the Desk lock-down was skipped).
 
 **Who may edit whom (R13).** `utils.may_edit_target(caller, target, rows,
 held_roles)` returns None or the reason. A target is editable only when every
@@ -2035,8 +2035,6 @@ System Manager and Manage access holders only.
 | Role set outside HelixHR | problem | A managed Frappe role held with no assignment: no portal reach |
 | Role missing in Frappe | problem | A row whose Frappe role was removed; HR, HR User and IT rows then reach nothing |
 | Own org not covered by their roles | problem | Their Active Employee's org is in none of their rows |
-| Desk HR reach: all orgs (until Desk lock-down) | info | A named-org HR role; HRMS Desk reads every org through the Frappe role |
-| All orgs | info | Holds an All-orgs row |
 | Can manage access | info | Holds Manage access |
 | Export on | info | A row has `allow_export` |
 
@@ -2064,7 +2062,7 @@ until all pass:
    assign are kept even if the payload omits them. New access for a disabled
    or Left person is refused; they can only lose rows.
 7. High-risk (R15): the save adds All orgs, Manage access, export, or an HR
-   Manager or HR User row (until Desk lock-down). It needs a plain-text
+   Manager or HR User row. It needs a plain-text
    reason of at most 500 characters.
 8. Last holder (R14): all All-orgs Manage access rows are locked (`FOR
    UPDATE`), then holders who remain and pass R4 are counted. Nobody but a
@@ -2184,8 +2182,7 @@ with no HR Manager or IT Admin. The two new roles have no-grant role checks.
   a System Manager). A Portal Admin still never gives HR roles or Portal Admin,
   but its reach is its Portal Admin orgs, not its home company, and it edits a
   person only when it may assign every role they hold in every org it covers
-  (R13). HR roles stay with System Manager and Manage access until Desk
-  lock-down (KTD12).
+  (R13). HR roles stay with System Manager and Manage access (KTD12).
 - **2026-10-18-001 Releases 3, 3b and 4, and its anchor rules.** Replaced by
   this plan. Releases 1 and 2 stay (the line-manager rule and the dry-run). The
   anchor rules are gone: R6 (an assignment counts only while the Employee it
@@ -2193,10 +2190,11 @@ with no HR Manager or IT Admin. The two new roles have no-grant role checks.
   fail-closed lifecycle: an enabled flag, disable hooks on Employee and User
   changes, a re-confirm notice). Reach follows the row's orgs, and R4 is the
   only person gate.
-- **Deferred.** Desk and REST lock-down (wildcard deny hooks, script-report
-  company gate, Employee edit guards) stays a follow-up. Until it ships, a
-  named-org HR role still reads every org in Desk, which is why HR roles are
-  Manage-access-only, high-risk and carry the Desk warning.
+- **Skipped (2026-10-21).** Desk and REST lock-down (wildcard deny hooks,
+  script-report company gate, Employee edit guards). Every HR person is trusted
+  with both orgs, so a named-org HR role reading every org in Desk is accepted;
+  org control lives in the portal. HR roles stay Manage-access-only and
+  high-risk; the Desk warning was removed.
 
 ## Ease of use: search, the Home queue, the inbox and notifications (plan 2026-10-17-001)
 
