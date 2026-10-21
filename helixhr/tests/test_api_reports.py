@@ -145,16 +145,19 @@ class TestHoursByProject(IntegrationTestCase):
 		with self.assertRaises(frappe.PermissionError):
 			run_report("hours_by_project")
 
-	def test_delivery_manager_gets_only_member_project_rows_even_naming_another_project(self):
+	def test_delivery_manager_gets_their_org_rows_and_nothing_naming_another_orgs_project(self):
+		"""Plan 2026-10-19-001 U4: every project their org owns, member or
+		not; another org's project is removed, never widened to."""
 		self._sheet(self.company, self.dm_employee, self.member_project, 2)
 		self._sheet(self.company, self.employee_name, self.other_project, 5)
+		self._sheet(self.other_company, self.hr_employee, self.other_company_project, 4)
 		frappe.set_user(self.dm_user)
-		result = run_report("hours_by_project", filters={"project": self.other_project, **self.window})
-		self.assertEqual(_rows(result), [])
+		result = run_report("hours_by_project", filters={"project": self.other_company_project, **self.window})
 		self.assertEqual(result["filters_removed"], ["project"])
+		self.assertNotIn(self.other_company_project, {row["project"] for row in _rows(result)})
 		projects = {row["project"] for row in _hours(**self.window)}
-		self.assertIn(self.member_project, projects)
-		self.assertNotIn(self.other_project, projects)
+		self.assertTrue({self.member_project, self.other_project} <= projects)
+		self.assertNotIn(self.other_company_project, projects)
 
 	def test_hr_manager_naming_another_companys_project_gets_nothing(self):
 		self._sheet(self.company, self.employee_name, self.member_project, 2)

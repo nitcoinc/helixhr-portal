@@ -136,3 +136,7 @@ helixhr.patches.v1_0.apply_notification_copy
 # Plan 2026-10-18-001 U2 / KTD7: the Timesheet manager transitions look up the
 # caller's Active Employee -- condition copied from the fixture, idempotent.
 helixhr.patches.v1_0.active_manager_workflow_conditions
+# Plan 2026-10-19-001 U8 (R25): today's access as assignment rows, origin
+# "migrated"; skips anyone with rows or an access change, so it is idempotent.
+# Run `access_migration.parity_check` on the dry-run's snapshot before reopening.
+helixhr.patches.v1_0.migrate_access_assignments

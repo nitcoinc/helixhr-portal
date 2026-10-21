@@ -183,14 +183,26 @@ class TestProjectTimesheet(IntegrationTestCase):
 		self.assertEqual(billable["grand_total"], 3)
 		self.assertEqual(billable["field"], "billing_hours")
 
-	def test_delivery_manager_member_project_only(self):
+	def test_delivery_manager_reads_every_org_project_but_not_another_orgs(self):
+		"""Plan 2026-10-19-001 U4: a non-member project their org owns, with
+		its hours; never another org's."""
 		_make_timesheet(
-			self.company, self.employee, "E", [{"date": "2019-10-01", "project": self.project, "hours": 1}]
+			self.company,
+			self.employee,
+			"E",
+			[
+				{"date": "2019-10-01", "project": self.project, "hours": 1},
+				{"date": "2019-10-02", "project": self.other_project, "hours": 2},
+			],
 		)
 		self.assertEqual(self._run("2019-10", user=self.dm_user)["totals"]["hours"], 1)
+		self.assertEqual(
+			self._run("2019-10", user=self.dm_user, project=self.other_project)["totals"]["hours"], 2
+		)
+		foreign = make_test_project(ensure_baseline_company(), "_Test U7 OtherCo")
 		frappe.set_user(self.dm_user)
 		try:
-			refused = run_report(KEY, filters={"project": self.other_project, "month": "2019-10"})
+			refused = run_report(KEY, filters={"project": foreign, "month": "2019-10"})
 		finally:
 			frappe.set_user("Administrator")
 		self.assertEqual(refused["filters_removed"], ["project"])
@@ -362,6 +374,55 @@ class TestCrossCompanyProjectReports(IntegrationTestCase):
 		self.assertEqual(sum(row["hours"] for row in _data(result)), 5)
 		self.assertNotIn("company", [column["fieldname"] for column in result["columns"]])
 		self.assertIsNone(result["company_counts"])
+
+	def test_an_inc_delivery_manager_sees_every_hour_on_incs_project(self):
+		"""Plan 2026-10-19-001 R2: a Delivery Manager's org tier covers each
+		project the org owns with all its logged hours -- Outsourcing staff's
+		included, though no row of theirs names Outsourcing. HR keeps its own
+		staff's hours (above)."""
+		from helixhr.tests.utils import make_assignment, make_test_user
+		from helixhr.utils import DELIVERY_MANAGER_ROLE
+
+		dm = "xco-inc-dm@helixhr.test"
+		make_test_user(dm, self.fx.company)
+		make_assignment(dm, DELIVERY_MANAGER_ROLE, [self.fx.company])
+		set_report_access(KEY, dm_run=1, dm_export=1)
+		set_report_access("hours_by_project", dm_run=1)
+
+		result = self._run(dm)
+		self.assertEqual(result["filters_removed"], [])
+		# Every approved hour on the project that month, whoever logged it
+		# (other methods of this class may add more; rollback is per class).
+		logged = frappe.db.sql(
+			"""select sum(td.hours) from `tabTimesheet Detail` td
+			inner join `tabTimesheet` ts on ts.name = td.parent
+			where ts.docstatus = 1 and td.project = %s and td.from_time between '2016-04-01' and '2016-05-01'""",
+			self.fx.project,
+		)[0][0]
+		self.assertGreaterEqual(logged, 8)
+		self.assertEqual(sum(row["hours"] for row in _data(result)), logged)
+		# Inc HR sees Inc staff's hours only; the difference is Outsourcing's.
+		self.assertGreater(logged, sum(row["hours"] for row in _data(self._run(self.inc_hr))))
+		# Pending hours obey the same scope (a month no other method uses).
+		_make_timesheet(
+			self.fx.other,
+			self.fx.out,
+			"XCO Out",
+			[{"date": "2016-07-21", "project": self.fx.project, "task": self.fx.out_task, "hours": 4}],
+			state="Pending Approval",
+		)
+		self.assertEqual(self._run(dm, month="2016-07")["extra"]["pending_hours"], 4)
+		self.assertEqual(self._run(self.inc_hr, month="2016-07")["extra"]["pending_hours"], 0)
+		by_project = self._as(
+			dm,
+			run_report,
+			"hours_by_project",
+			filters={"project": self.fx.project, "from_date": "2016-04-01", "to_date": "2016-04-30"},
+		)
+		self.assertLessEqual({self.fx.inc, self.fx.out}, {row["employee"] for row in _data(by_project)})
+		# Never a project Inc does not own.
+		foreign = make_test_project(self.fx.other, "_Test XCO Outsourcing Project")
+		self.assertEqual(self._run(dm, project=foreign)["filters_removed"], ["project"])
 
 	def test_outsourcing_hr_picks_the_inc_project_and_sees_outsourcing_hours_and_holidays(self):
 		"""Covers AE3."""

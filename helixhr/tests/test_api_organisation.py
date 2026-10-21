@@ -7,6 +7,7 @@ from helixhr.tests.utils import (
 	EMPLOYEE_USER,
 	ensure_test_email_account,
 	ensure_test_gender,
+	make_assignment,
 	make_test_it_user,
 	suspend_chart_of_account_fixtures,
 )
@@ -108,6 +109,7 @@ class TestOrganisationView(IntegrationTestCase):
 		self.hr_manager = _ensure_org_employee(
 			"_test-org-hr", self.company, user=ORG_HR_USER, extra_roles=("HR Manager",)
 		)
+		make_assignment(ORG_HR_USER, "HR Manager", [self.company])
 		self.employee_a = _ensure_org_employee("_test-org-a", self.company)
 		self.employee_b = _ensure_org_employee("_test-org-b", self.company)
 		self.left_employee = _ensure_org_employee("_test-org-left", self.company)

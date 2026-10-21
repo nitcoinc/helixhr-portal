@@ -38,9 +38,11 @@ from helixhr.tests.utils import (
 	ensure_leave_allocation,
 	ensure_leave_approver_role,
 	ensure_test_email_account,
+	make_assignment,
 	make_test_employee_and_manager,
 	make_test_hr_manager_employee,
 	make_test_user,
+	remove_assignment,
 )
 from helixhr.utils import get_week_bounds
 
@@ -1043,6 +1045,9 @@ class TestLeaveApprovalIsNative(IntegrationTestCase):
 					"roles": [{"doctype": "Has Role", "role": "HR Manager"}],
 				}
 			).insert(ignore_permissions=True)
+		# Plan 2026-10-19-001 U3: the role alone gives no reach; no Employee,
+		# so All orgs, as the migration writes it.
+		make_assignment(hr_user, "HR Manager", "all")
 
 		frappe.set_user(hr_user)
 		result = act_on_approval(
@@ -1889,12 +1894,16 @@ class TestFourOutcomesAndTheHrQueue(IntegrationTestCase):
 		login = frappe.get_doc("User", user)
 		login.add_roles("HR Manager")
 		frappe.clear_cache(user=user)
+		# HR for their own company (plan 2026-10-19-001 U3).
+		company = frappe.db.get_value("Employee", {"user_id": user, "status": "Active"}, "company")
+		make_assignment(user, "HR Manager", [company], add_role=False)
 
 		def revoke():
 			frappe.set_user("Administrator")
 			login.reload()
 			login.remove_roles("HR Manager")
 			frappe.clear_cache(user=user)
+			remove_assignment(user, "HR Manager")
 
 		self.addCleanup(revoke)
 

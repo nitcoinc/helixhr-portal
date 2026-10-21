@@ -24,6 +24,7 @@ from helixhr.tests.utils import (
 	TEST_COMPANY,
 	ensure_baseline_company,
 	ensure_test_company,
+	make_assignment,
 	make_test_employee_and_manager,
 	make_test_hr_manager_employee,
 	make_test_it_user,
@@ -36,12 +37,9 @@ OUTSIDER_USER = "hardening-outsider@helixhr.test"
 DESK_LESS_SYSTEM_USER = "desk-less-system-user@helixhr.test"
 
 
-def _grant_hr_manager(user):
-	doc = frappe.get_doc("User", user)
-	if "HR Manager" not in [row.role for row in doc.roles]:
-		doc.append_roles("HR Manager")
-		doc.save(ignore_permissions=True)
-		frappe.clear_cache(user=user)
+def _grant_hr_manager(user, company):
+	# HR for their company (plan 2026-10-19-001 U3): rows that R4 then gates.
+	make_assignment(user, "HR Manager", [company])
 
 
 def _seed_request(tag, employee, status, routed_to_role="HR Manager"):
@@ -83,7 +81,7 @@ class TestOffboardedHrManagerLosesScope(IntegrationTestCase):
 			status="Left",
 			relieving_date="2026-01-31",
 		)
-		_grant_hr_manager(LEFT_HR_USER)
+		_grant_hr_manager(LEFT_HR_USER, self.company)
 
 	def tearDown(self):
 		frappe.set_user("Administrator")

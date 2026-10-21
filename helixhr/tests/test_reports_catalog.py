@@ -131,7 +131,8 @@ class TestHoursByProjectTaskEmployee(IntegrationTestCase):
 		self.other = make_test_project(self.company, "_Test U8b Other")
 		self.window = {"from_date": "2017-03-01", "to_date": "2017-03-31"}
 
-	def test_delivery_manager_sees_member_projects_and_pending_toggle_marks_rows(self):
+	def test_delivery_manager_sees_their_org_projects_and_pending_toggle_marks_rows(self):
+		"""Plan 2026-10-19-001 U4: member or not, every project their org owns."""
 		_make_timesheet(
 			self.company, self.employee, "E", [{"date": "2017-03-06", "project": self.member, "hours": 1}]
 		)
@@ -153,12 +154,15 @@ class TestHoursByProjectTaskEmployee(IntegrationTestCase):
 			state="Draft",
 		)
 		off = _data(_as(self.dm_user, run_report, "hours_by_project", filters=self.window))
-		self.assertEqual([(row["project"], row["hours"]) for row in off], [(self.member, 1)])
+		self.assertEqual(
+			sorted((row["project"], row["hours"]) for row in off), sorted([(self.member, 1), (self.other, 7)])
+		)
 		on = _data(
 			_as(self.dm_user, run_report, "hours_by_project", filters={**self.window, "include_pending": 1})
 		)
 		self.assertEqual(
-			sorted((row["hours"], row["approval"]) for row in on), [(1, "Approved"), (2, "Pending")]
+			sorted((row["hours"], row["approval"]) for row in on),
+			[(1, "Approved"), (2, "Pending"), (7, "Approved")],
 		)
 		self.assertTrue(_data(_as(self.hr_user, run_report, "hours_by_project", filters=self.window)))
 

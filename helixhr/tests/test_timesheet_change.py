@@ -29,11 +29,13 @@ from helixhr.api import (
 from helixhr.tests.test_api_timesheet import make_test_project
 from helixhr.tests.utils import (
 	ensure_baseline_company,
+	make_assignment,
 	make_test_employee_and_manager,
 	make_test_hr_manager_employee,
 	make_test_user,
+	remove_assignment,
 )
-from helixhr.utils import get_week_bounds
+from helixhr.utils import ASSIGNABLE_ROLES, get_week_bounds
 
 CHANGE_DOCTYPE = "HelixHR Timesheet Change"
 COMMENT = "Tuesday should be six hours, not two"
@@ -449,10 +451,7 @@ class TestTimesheetChange(IntegrationTestCase):
 		other_company = ensure_baseline_company()
 		make_test_user("other-company-hr@helixhr.test", other_company)
 		frappe.set_user("Administrator")
-		user = frappe.get_doc("User", "other-company-hr@helixhr.test")
-		if not any(row.role == "HR Manager" for row in user.roles):
-			user.append("roles", {"doctype": "Has Role", "role": "HR Manager"})
-			user.save(ignore_permissions=True)
+		make_assignment("other-company-hr@helixhr.test", "HR Manager", [other_company])
 		other_hr_employee = frappe.db.get_value("Employee", {"user_id": "other-company-hr@helixhr.test"})
 		if not frappe.db.exists(
 			"User Permission",
@@ -536,12 +535,17 @@ class TestTimesheetChange(IntegrationTestCase):
 		had_role = any(row.role == role for row in manager.roles)
 		if not had_role:
 			manager.add_roles(role)
+			if role in ASSIGNABLE_ROLES:
+				# HR for their own company (plan 2026-10-19-001 U3).
+				company = frappe.db.get_value("Employee", {"user_id": self.manager_user}, "company")
+				make_assignment(self.manager_user, role, [company], add_role=False)
 		try:
 			self.assertEqual(self._queue_count(self.manager_user, change["name"]), 1)
 		finally:
 			if not had_role:
 				frappe.set_user("Administrator")
 				frappe.get_doc("User", self.manager_user).remove_roles(role)
+				remove_assignment(self.manager_user, role)
 
 	def test_an_hr_manager_approver_sees_their_reports_request_once(self):
 		self._assert_approver_with_role_sees_it_once("HR Manager")

@@ -9,10 +9,11 @@ from frappe.model.document import Document
 class HelixHRCompanyAccess(Document):
 	"""One cross-company read grant per User (plan 2026-10-14-001 KTD2).
 
-	Who may save one is decided by `api.save_company_access`, not here: this
-	keeps the row itself coherent and owns its side effects, so a System
-	Manager editing or deleting it in Desk gets the same checks and the same
-	clean-up as the portal."""
+	The portal no longer writes grants (plan 2026-10-19-001 U5: access is
+	assignments); the migration reads them and People & access switches one
+	off when it removes the row migrated from it. This keeps the row itself
+	coherent and owns its side effects, so a Desk edit or delete gets the
+	same checks and clean-up."""
 
 	def validate(self):
 		companies = [row.company for row in self.companies]
@@ -26,8 +27,8 @@ class HelixHRCompanyAccess(Document):
 		if self.enabled:
 			self.disabled_reason = None
 		if not self.employee or not self.home_company:
-			# A grant created in Desk: anchor it the way the portal does, or
-			# `active_company_grant` would never apply it.
+			# A grant created in Desk: anchor it the way the portal did, or
+			# the migration (and a rollback's old code) would never apply it.
 			anchor = frappe.db.get_value(
 				"Employee", {"user_id": self.user, "status": "Active"}, ["name", "company"], as_dict=True
 			)

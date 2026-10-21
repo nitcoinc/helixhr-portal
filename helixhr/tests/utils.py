@@ -4,6 +4,16 @@ from unittest.mock import patch
 
 import frappe
 
+from helixhr.utils import (
+	ALL_ORGS_SCOPE_KEY,
+	ASSIGNABLE_ROLES,
+	NOTIFICATION_MANAGER_ROLE,
+	ORG_VIEWER_ROLE,
+	PORTAL_ADMIN_ROLE,
+	REPORT_MANAGER_ROLE,
+	clear_role_scope_cache,
+)
+
 TEST_COMPANY = "_Test Company"
 MANAGER_USER = "manager@helixhr.test"
 EMPLOYEE_USER = "employee@helixhr.test"
@@ -220,6 +230,65 @@ def make_test_employee_and_manager():
 	return employee_name, EMPLOYEE_USER, manager_name, MANAGER_USER
 
 
+def make_assignment(user, role, orgs, export=0, origin="manual", add_role=True):
+	"""Ensure ``user`` holds ``role`` on ``orgs`` -- ``"all"`` or a list of
+	companies -- as HelixHR Access Assignment rows (plan 2026-10-19-001 U2),
+	plus the Frappe role unless ``add_role`` is false. Idempotent: an existing
+	row is kept, and ``export`` only ever turns its export on (the migration's
+	merge by OR). Clears `role_scope`'s cache for ``user``."""
+	for company in [None] if orgs == "all" else orgs:
+		scope_key = company or ALL_ORGS_SCOPE_KEY
+		existing = frappe.db.get_value(
+			"HelixHR Access Assignment",
+			{"user": user, "role": role, "scope_key": scope_key},
+			["name", "allow_export"],
+			as_dict=True,
+		)
+		if existing:
+			if export and not existing.allow_export:
+				frappe.db.set_value("HelixHR Access Assignment", existing.name, "allow_export", 1)
+			continue
+		frappe.get_doc(
+			{
+				"doctype": "HelixHR Access Assignment",
+				"user": user,
+				"role": role,
+				"all_orgs": 0 if company else 1,
+				# "" not None: a None Company picks up the session user's
+				# default company on insert, which an All-orgs row refuses.
+				"company": company or "",
+				"allow_export": export,
+				"origin": origin,
+			}
+		).insert(ignore_permissions=True)
+	if add_role:
+		_ensure_frappe_role(user, role)
+	clear_role_scope_cache(user)
+
+
+def remove_assignment(user, role):
+	"""Delete every ``role`` row ``user`` holds, the undo of `make_assignment`
+	for a test that grants and then revokes. The Frappe role is the caller's
+	to remove."""
+	frappe.db.delete("HelixHR Access Assignment", {"user": user, "role": role})
+	clear_role_scope_cache(user)
+
+
+def _ensure_frappe_role(user, role):
+	# The doc, not `frappe.get_roles`: a test that deleted a Has Role row
+	# directly leaves the cached roles stale.
+	doc = frappe.get_doc("User", user)
+	if role not in [row.role for row in doc.roles]:
+		doc.append_roles(role)
+		# Some callers run signed in as the employee under test.
+		doc.save(ignore_permissions=True)
+		frappe.clear_cache(user=user)
+
+
+def _employee_company(employee_name):
+	return [frappe.db.get_value("Employee", employee_name, "company")]
+
+
 def ensure_hr_manager_user():
 	"""A login holding HR Manager and nothing else -- no Employee record, so
 	it reaches every Attendance Request through the role alone, the way HR
@@ -236,6 +305,7 @@ def ensure_hr_manager_user():
 				"roles": [{"doctype": "Has Role", "role": "HR Manager"}],
 			}
 		).insert(ignore_permissions=True)
+	make_assignment(HR_MANAGER_USER, "HR Manager", "all")
 	return HR_MANAGER_USER
 
 
@@ -262,6 +332,7 @@ def ensure_email_admin_user():
 				"roles": [{"doctype": "Has Role", "role": "HelixHR Portal Admin"}],
 			}
 		).insert(ignore_permissions=True)
+	make_assignment(EMAIL_ADMIN_USER, PORTAL_ADMIN_ROLE, "all")
 	return EMAIL_ADMIN_USER
 
 
@@ -282,6 +353,7 @@ def ensure_notification_manager_user():
 				"roles": [{"doctype": "Has Role", "role": "HelixHR Notification Manager"}],
 			}
 		).insert(ignore_permissions=True)
+	make_assignment(NOTIFICATION_MANAGER_USER, NOTIFICATION_MANAGER_ROLE, "all")
 	return NOTIFICATION_MANAGER_USER
 
 
@@ -308,12 +380,7 @@ def make_test_hr_manager_employee():
 		HR_MANAGER_EMPLOYEE_USER, company, create_user_permission=0
 	)
 
-	user = frappe.get_doc("User", HR_MANAGER_EMPLOYEE_USER)
-	if "HR Manager" not in [row.role for row in user.roles]:
-		user.append_roles("HR Manager")
-		user.save(ignore_permissions=True)
-		frappe.clear_cache(user=HR_MANAGER_EMPLOYEE_USER)
-
+	make_assignment(HR_MANAGER_EMPLOYEE_USER, "HR Manager", _employee_company(employee_name))
 	return employee_name, HR_MANAGER_EMPLOYEE_USER
 
 
@@ -329,6 +396,7 @@ def make_test_it_user():
 		user.set("roles", [{"role": role} for role in roles])
 		user.save(ignore_permissions=True)
 		frappe.clear_cache(user=IT_TEAM_USER)
+	make_assignment(IT_TEAM_USER, "IT Team", _employee_company(employee_name))
 	return employee_name, IT_TEAM_USER
 
 
@@ -350,6 +418,7 @@ def make_test_delivery_manager(**employee_fields):
 		user.set("roles", [{"role": role} for role in roles])
 		user.save(ignore_permissions=True)
 		frappe.clear_cache(user=DELIVERY_MANAGER_USER)
+	make_assignment(DELIVERY_MANAGER_USER, "HelixHR Delivery Manager", _employee_company(employee_name))
 	return employee_name, DELIVERY_MANAGER_USER
 
 
@@ -361,13 +430,16 @@ def _make_role_user(user, role, company=None, **employee_fields):
 	"""A user with an Employee record in ``company`` (the test company by
 	default) plus ``role`` -- the shared shape of the report-tier fixtures
 	(plan 2026-10-04-001 U1). ``employee_fields`` (e.g. ``status="Left"``)
-	reach the existing Employee too. Returns (employee_name, user)."""
+	reach the existing Employee too. Returns (employee_name, user).
+
+	An assignable role also gets its row on the Employee's company; a Report
+	Manager's has export on, as the migration writes it (today they export
+	their own company). System Manager is never assigned (R5): role only."""
 	employee_name = make_test_user(user, company or ensure_test_company(), **employee_fields)
-	doc = frappe.get_doc("User", user)
-	if role not in [row.role for row in doc.roles]:
-		doc.append_roles(role)
-		doc.save(ignore_permissions=True)
-		frappe.clear_cache(user=user)
+	if role in ASSIGNABLE_ROLES:
+		make_assignment(user, role, _employee_company(employee_name), export=int(role == REPORT_MANAGER_ROLE))
+	else:
+		_ensure_frappe_role(user, role)
 	return employee_name, user
 
 
@@ -380,8 +452,13 @@ PORTAL_ADMIN_USER = "portal-admin@helixhr.test"
 
 
 def make_test_portal_admin(company=None, **employee_fields):
-	"""A HelixHR Portal Admin: portal-only, no Desk role, no HR data."""
-	return _make_role_user(PORTAL_ADMIN_USER, "HelixHR Portal Admin", company, **employee_fields)
+	"""A HelixHR Portal Admin: portal-only, no Desk role, no HR data. Its
+	Portal Admin rows are reset to exactly its Employee's company: suites
+	widen this shared login (other orgs, All orgs), and one that commits
+	would otherwise leak that reach into the next (plan 2026-10-19-001 U4)."""
+	frappe.db.delete("HelixHR Access Assignment", {"user": PORTAL_ADMIN_USER, "role": PORTAL_ADMIN_ROLE})
+	clear_role_scope_cache(PORTAL_ADMIN_USER)
+	return _make_role_user(PORTAL_ADMIN_USER, PORTAL_ADMIN_ROLE, company, **employee_fields)
 
 
 def make_test_hr_user(company=None, **employee_fields):
@@ -395,7 +472,14 @@ GRANT_HOLDER_USER = "grant-holder@helixhr.test"
 def make_test_company_grant(user, companies, level="All data", allow_export=0, enabled=1):
 	"""Upsert ``user``'s HelixHR Company Access (plan 2026-10-14-001), saved
 	against their current Employee and company the way the admin endpoint
-	saves it. Returns the grant name."""
+	saves it. Returns the grant name.
+
+	Also writes the rows plan 2026-10-19-001 U8's migration makes of it --
+	Org viewer for "All data", Reports for "Reports only", with the grant's
+	export, origin "migrated" -- replacing the ones an earlier call wrote, so
+	the suites keep their reach once resolvers read assignments. Like the
+	migration, only Org viewer gets its Frappe role; a disabled grant, or one
+	on a login with no Employee, writes none."""
 	anchor = frappe.db.get_value("Employee", {"user_id": user}, ["name", "company"], as_dict=True)
 	values = {
 		"employee": anchor.name if anchor else None,
@@ -414,7 +498,36 @@ def make_test_company_grant(user, companies, level="All data", allow_export=0, e
 	for company in companies:
 		doc.append("companies", {"company": company})
 	doc.save(ignore_permissions=True)
+
+	grant_roles = {"All data": ORG_VIEWER_ROLE, "Reports only": REPORT_MANAGER_ROLE}
+	frappe.db.delete(
+		"HelixHR Access Assignment",
+		{"user": user, "origin": "migrated", "role": ["in", list(grant_roles.values())]},
+	)
+	clear_role_scope_cache(user)
+	if enabled and anchor and level in grant_roles:
+		role = grant_roles[level]
+		make_assignment(
+			user, role, companies, export=allow_export, origin="migrated", add_role=role == ORG_VIEWER_ROLE
+		)
 	return doc.name
+
+
+def clear_test_company_grants():
+	"""Delete every test login's grant and the Org viewer / Reports rows
+	`make_test_company_grant` wrote for it -- since plan 2026-10-19-001 U4
+	the rows, not the grant, are what the resolvers read."""
+	frappe.db.delete("HelixHR Company Access Company", {"parent": ["like", "%@helixhr.test"]})
+	frappe.db.delete("HelixHR Company Access", {"user": ["like", "%@helixhr.test"]})
+	frappe.db.delete(
+		"HelixHR Access Assignment",
+		{
+			"user": ["like", "%@helixhr.test"],
+			"origin": "migrated",
+			"role": ["in", [ORG_VIEWER_ROLE, REPORT_MANAGER_ROLE]],
+		},
+	)
+	clear_role_scope_cache()
 
 
 COMPANY_ACCESS_TARGET_USER = "grant-e2e-target@helixhr.test"
@@ -447,6 +560,8 @@ def ensure_company_access_fixtures():
 				"applicable_for": "Company",
 			}
 		).insert(ignore_permissions=True)
+	# The migration turns that User Permission into a Portal Admin row.
+	make_assignment(admin, PORTAL_ADMIN_ROLE, [other])
 	make_test_user(GRANT_HOLDER_USER, company, status="Active")
 	make_test_company_grant(GRANT_HOLDER_USER, [company, other], allow_export=1)
 	make_test_user(COMPANY_ACCESS_FOREIGN_USER, other, employee_number="GRANT-E2E-B1")
@@ -455,6 +570,101 @@ def ensure_company_access_fixtures():
 	frappe.db.delete("HelixHR Company Access", {"name": COMPANY_ACCESS_TARGET_USER})
 	make_test_user(COMPANY_ACCESS_READONLY_USER, company)
 	make_test_company_grant(COMPANY_ACCESS_READONLY_USER, [third], level="Reports only")
+
+
+# Plan 2026-10-19-001 U7: people-access.spec.ts. Every one is in the test
+# company. The drift user holds a Frappe HR Manager role with no assignment
+# ("Role set outside HelixHR"); the access admin holds Manage access on All
+# orgs; the leader, the Delivery Manager target and the stale target start
+# with no elevated access; the no-login employee has no User at all; the
+# all-orgs Portal Admin may change the global report matrix (R7).
+ACCESS_DRIFT_USER = "access-drift@helixhr.test"
+ACCESS_ADMIN_USER = "access-admin@helixhr.test"
+ACCESS_LEADER_USER = "access-leader@helixhr.test"
+ACCESS_DM_TARGET_USER = "access-dm-target@helixhr.test"
+ACCESS_STALE_TARGET_USER = "access-stale-target@helixhr.test"
+ACCESS_NO_LOGIN_NUMBER = "ACCESS-NOLOGIN"
+PORTAL_ADMIN_ALL_USER = "portal-admin-all@helixhr.test"
+
+
+def _set_frappe_roles(user, add=(), remove=()):
+	doc = frappe.get_doc("User", user)
+	held = [row.role for row in doc.roles]
+	wanted = [role for role in held if role not in remove] + [role for role in add if role not in held]
+	if wanted != held:
+		doc.set("roles", [{"role": role} for role in wanted])
+		doc.save(ignore_permissions=True)
+		frappe.clear_cache(user=user)
+
+
+def _reset_access(user, roles):
+	"""``user`` back to no assignments and none of ``roles`` in Frappe."""
+	frappe.db.delete("HelixHR Access Assignment", {"user": user})
+	clear_role_scope_cache(user)
+	_set_frappe_roles(user, remove=roles)
+
+
+def ensure_people_access_fixtures():
+	"""The People & access e2e identities, reset to their starting state, so
+	a rerun of `people-access.spec.ts` starts where the first run did.
+	Idempotent."""
+	company = ensure_test_company()
+	make_test_user(ACCESS_DRIFT_USER, company)
+	frappe.db.delete("HelixHR Access Assignment", {"user": ACCESS_DRIFT_USER})
+	_set_frappe_roles(ACCESS_DRIFT_USER, add=["HR Manager"])
+	clear_role_scope_cache(ACCESS_DRIFT_USER)
+
+	make_test_user(ACCESS_ADMIN_USER, company)
+	make_assignment(ACCESS_ADMIN_USER, "HelixHR Access Admin", "all")
+
+	leader = make_test_user(ACCESS_LEADER_USER, company)
+	_reset_access(ACCESS_LEADER_USER, ASSIGNABLE_ROLES)
+	# Giving HR Manager drops the self Employee permission (R13); put it back.
+	if not frappe.db.exists(
+		"User Permission", {"user": ACCESS_LEADER_USER, "allow": "Employee", "for_value": leader}
+	):
+		frappe.get_doc(
+			{
+				"doctype": "User Permission",
+				"user": ACCESS_LEADER_USER,
+				"allow": "Employee",
+				"for_value": leader,
+				"apply_to_all_doctypes": 1,
+			}
+		).insert(ignore_permissions=True)
+
+	for user in (ACCESS_DM_TARGET_USER, ACCESS_STALE_TARGET_USER):
+		make_test_user(user, company)
+		_reset_access(user, ASSIGNABLE_ROLES)
+
+	if not frappe.db.exists("Employee", {"employee_number": ACCESS_NO_LOGIN_NUMBER}):
+		frappe.get_doc(
+			{
+				"doctype": "Employee",
+				"employee_number": ACCESS_NO_LOGIN_NUMBER,
+				"first_name": "Nologin",
+				"last_name": "Access",
+				"company": company,
+				"date_of_birth": "1990-01-01",
+				"date_of_joining": "2020-01-01",
+				"gender": ensure_test_gender(),
+				"status": "Active",
+			}
+		).insert(ignore_permissions=True)
+
+	make_test_user(PORTAL_ADMIN_ALL_USER, company)
+	make_assignment(PORTAL_ADMIN_ALL_USER, PORTAL_ADMIN_ROLE, "all")
+
+
+@frappe.whitelist()
+def seed_people_access_fixtures():
+	"""`ensure_people_access_fixtures` over HTTP, for `people-access.spec.ts`
+	to call before its run. Test sites and System Manager only: it rewrites
+	other people's roles and assignments."""
+	_require_allow_tests()
+	frappe.only_for("System Manager")
+	ensure_people_access_fixtures()
+	frappe.db.commit()  # nosemgrep
 
 
 CROSS_COMPANY_PROJECT = "_Test Cross Company Project"
@@ -950,6 +1160,8 @@ def setup_playwright_fixtures():
 	# Plan 2026-10-14-001: company access grants (company-access.spec.ts,
 	# reports-company.spec.ts).
 	ensure_company_access_fixtures()
+	# Plan 2026-10-19-001 U7: people-access.spec.ts.
+	ensure_people_access_fixtures()
 	# Plan 2026-10-15-001: an Inc project with Outsourcing hours
 	# (reports-company.spec.ts, "All my companies").
 	ensure_cross_company_project_fixture()
@@ -2406,12 +2618,10 @@ def ensure_showcase_fixtures():
 
 	# Same shape as `make_test_hr_manager_employee`: no self-scoping User
 	# Permission, or HR Manager sees nobody but themselves (P4-R11).
-	make_test_user(SHOWCASE_HR_USER, company, first_name="Ananya", last_name="Rao", create_user_permission=0)
-	hr_user = frappe.get_doc("User", SHOWCASE_HR_USER)
-	if "HR Manager" not in [row.role for row in hr_user.roles]:
-		hr_user.append_roles("HR Manager")
-		hr_user.save(ignore_permissions=True)
-		frappe.clear_cache(user=SHOWCASE_HR_USER)
+	showcase_hr = make_test_user(
+		SHOWCASE_HR_USER, company, first_name="Ananya", last_name="Rao", create_user_permission=0
+	)
+	make_assignment(SHOWCASE_HR_USER, "HR Manager", _employee_company(showcase_hr))
 
 	ensure_leave_allocation(employee, "Casual Leave", 12)
 	ensure_leave_allocation(employee, "Privilege Leave", 18)

@@ -25,7 +25,8 @@ const props = defineProps({
 // A Portal Admin who is not HR gets only the two sections whose endpoints
 // accept it, and never calls `get_portal_config` (HR-only). Anyone else still
 // goes through that call, so a direct hit keeps the server's refusal.
-const portalOnly = !session.canConfigure && session.canAdminPortal
+// A Manage access holder without Portal Admin gets People & access alone.
+const portalOnly = !session.canConfigure && (session.canAdminPortal || session.canManageAccess)
 
 const config = createResource({
   url: 'helixhr.api.get_portal_config',
@@ -57,12 +58,13 @@ const ALL_SECTIONS = [
 const HR_SECTIONS = ['categories', 'leave-types', 'holiday-lists', 'shift-types', 'leave-rules']
 const PORTAL_SECTIONS = ['report-access', 'people-access', 'approvers']
 const SECTIONS =
-  !session.canConfigure && !session.canAdminPortal
+  !session.canConfigure && !session.canAdminPortal && !session.canManageAccess
     ? ALL_SECTIONS
     : ALL_SECTIONS.filter(
         (tab) =>
           (session.canConfigure && HR_SECTIONS.includes(tab.key)) ||
-          (session.canAdminPortal && PORTAL_SECTIONS.includes(tab.key)),
+          (session.canAdminPortal && PORTAL_SECTIONS.includes(tab.key)) ||
+          (session.canManageAccess && tab.key === 'people-access'),
       )
 const DEFAULT_SECTION = SECTIONS[0].key
 

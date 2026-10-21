@@ -77,6 +77,14 @@ const state = reactive({
    * U3): the access matrix, export log and Portal roles. Mirrors
    * `can_admin_portal`, which those endpoints enforce. */
   canAdminPortal: false,
+  /** Plan 2026-10-19-001 U4: Manage access or System Manager -- People &
+   * access reaches every org for them. Mirrors `can_manage_access`. */
+  canManageAccess: false,
+  /** Plan 2026-10-19-001 R7: All-orgs authority (`has_all_orgs_authority`)
+   * -- an All-orgs Portal Admin, Manage access or System Manager. Gates the
+   * Email templates page and decides whether Report access is editable or
+   * read-only. Mirrors `can_edit_email_templates`. */
+  canEditEmailTemplates: false,
   /** Documents: the upload / edit / delete controls. Mirrors
    * `save_document_link`'s own gate, which is the real one. */
   canManageDocuments: false,
@@ -161,8 +169,8 @@ function apply(boot) {
   state.canConfigure = !!boot?.can_configure
   state.canOverseeTimesheets = !!boot?.can_oversee_timesheets
   state.canSeeAllPending = !!boot?.can_see_all_pending
-  // The Email templates page: Portal Admin or System Manager only, the same
-  // predicate every endpoint behind the page enforces.
+  // All-orgs authority (R7): the Email templates page and an editable
+  // Report access matrix, the predicate their endpoints enforce.
   state.canEditEmailTemplates = !!boot?.can_edit_email_templates
   state.canSeeOrganisation = !!boot?.can_see_organisation
   state.canSeePeople = !!boot?.can_see_people
@@ -170,6 +178,7 @@ function apply(boot) {
   state.canSeeProjects = !!boot?.can_see_projects
   state.canRunReports = !!boot?.can_run_reports
   state.canAdminPortal = !!boot?.can_admin_portal
+  state.canManageAccess = !!boot?.can_manage_access
   state.canManageDocuments = !!boot?.can_manage_documents
   state.canOpenDesk = !!boot?.can_open_desk
   state.deskUrl = boot?.desk_url || null

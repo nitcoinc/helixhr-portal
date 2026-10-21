@@ -1,0 +1,89 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-10-19 00:00:00.000000",
+ "description": "One elevated permission: a person, a role, and the org it covers or All orgs (plan 2026-10-19-001 KTD1). Set only from People & access in the portal, which keeps the matching Frappe role and the access-change log in step.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "user",
+  "role",
+  "all_orgs",
+  "company",
+  "allow_export",
+  "origin",
+  "scope_key"
+ ],
+ "fields": [
+  {
+   "fieldname": "user",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "User",
+   "options": "User",
+   "reqd": 1
+  },
+  {
+   "fieldname": "role",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Role",
+   "options": "Role",
+   "reqd": 1
+  },
+  {
+   "default": "0",
+   "fieldname": "all_orgs",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "All orgs"
+  },
+  {
+   "depends_on": "eval:!doc.all_orgs",
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Org",
+   "options": "Company"
+  },
+  {
+   "default": "0",
+   "fieldname": "allow_export",
+   "fieldtype": "Check",
+   "label": "May export reports"
+  },
+  {
+   "default": "manual",
+   "fieldname": "origin",
+   "fieldtype": "Select",
+   "label": "Origin",
+   "options": "manual\nmigrated",
+   "read_only": 1
+  },
+  {
+   "description": "The company, or __all for an All-orgs row. Set on save; part of the unique (user, role, scope_key) index.",
+   "fieldname": "scope_key",
+   "fieldtype": "Data",
+   "hidden": 1,
+   "label": "Scope key",
+   "read_only": 1
+  }
+ ],
+ "in_create": 1,
+ "module": "HelixHR",
+ "name": "HelixHR Access Assignment",
+ "naming_rule": "Random",
+ "permissions": [
+  {
+   "read": 1,
+   "report": 1,
+   "role": "System Manager"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

@@ -44,6 +44,7 @@ from helixhr.tests.utils import (
 	ensure_leave_approver_role,
 	ensure_test_company,
 	ensure_test_email_account,
+	make_assignment,
 	make_test_project,
 	make_test_user,
 )
@@ -55,6 +56,7 @@ MANAGER_USER = "xco-manager@helixhr.test"
 REPORT_USER = "xco-report@helixhr.test"
 STRANGER_USER = "xco-stranger@helixhr.test"
 STRANGER_MANAGER_USER = "xco-b-manager@helixhr.test"
+B_HR_USER = "xco-b-hr@helixhr.test"
 
 _OLD_CONDITION = (
 	'frappe.db.get_value("Employee", doc.employee, "reports_to") == '
@@ -138,6 +140,11 @@ class _CrossCompanyCase(IntegrationTestCase):
 		frappe.set_user("Administrator")
 		self.company_a = ensure_test_company()
 		self.company_b = ensure_baseline_company()
+		# "Send to HR" is offered only while an HR Manager covers the
+		# employee's company (U3): B's HR, named here rather than left to
+		# whichever suite happened to run first.
+		make_test_user(B_HR_USER, self.company_b, create_user_permission=0)
+		make_assignment(B_HR_USER, "HR Manager", [self.company_b])
 		for company in (self.company_a, self.company_b):
 			ensure_holiday_list_assignment(company)
 
@@ -145,8 +152,7 @@ class _CrossCompanyCase(IntegrationTestCase):
 		# HR login has no reports, and the bulk class below commits.
 		self.hr_employee = make_test_user(HR_USER, self.company_a, create_user_permission=0)
 		self.hr_user = HR_USER
-		if "HR Manager" not in frappe.get_roles(HR_USER):
-			frappe.get_doc("User", HR_USER).add_roles("HR Manager")
+		make_assignment(HR_USER, "HR Manager", [self.company_a])
 		self.hr_report = make_test_user(HR_REPORT_USER, self.company_b, reports_to=self.hr_employee)
 		self.manager = make_test_user(MANAGER_USER, self.company_a)
 		self.report = make_test_user(REPORT_USER, self.company_b, reports_to=self.manager)
@@ -471,6 +477,10 @@ class TestCrossCompanyBulkApproval(_CrossCompanyCase):
 	which would make every earlier test's fixture writes permanent."""
 
 	def test_plain_manager_bulk_approves_a_report_in_another_company(self):
+		# The batch commits, so the class rollback cannot undo this week.
+		# Registered first so it runs last (cleanups are LIFO): it keeps the
+		# delete `_pending_timesheet`'s cleanup makes.
+		self.addCleanup(frappe.db.commit)
 		week = self._pending_timesheet(REPORT_USER)
 
 		frappe.set_user(MANAGER_USER)

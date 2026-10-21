@@ -100,6 +100,9 @@ fixtures = [
 					"HelixHR Notification Manager",
 					"HelixHR Report Manager",
 					"HelixHR Portal Admin",
+					# Plan 2026-10-19-001 U1: assignable roles new in that plan.
+					"HelixHR Org Viewer",
+					"HelixHR Access Admin",
 				],
 			]
 		],
@@ -227,12 +230,19 @@ doc_events = {
 	# Plan 2026-10-08-001 U1: a company's own time zone must be a real one.
 	"Company": {
 		"validate": "helixhr.events.company_validate",
+		# Plan 2026-10-19-001 KTD1: assignment rows' scope_key follows a rename.
+		"after_rename": "helixhr.events.company_after_rename",
 	},
 	"Employee": {
 		"validate": "helixhr.events.employee_validate",
 		"before_save": "helixhr.events.employee_before_save",
 		"on_update": "helixhr.events.employee_on_update",
 		"after_insert": "helixhr.events.employee_after_insert",
+	},
+	# Plan 2026-10-19-001 R4: a disabled login reaches nothing, so disabling
+	# one expires the exports it could no longer request.
+	"User": {
+		"on_update": "helixhr.events.user_on_update",
 	},
 	# P2-U4 / P2-KTD6. The employee-facing "HR replied" event. A fixture
 	# Notification watches one field on a Value Change and the existing one

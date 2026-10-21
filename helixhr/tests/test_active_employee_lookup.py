@@ -10,15 +10,18 @@ from frappe.utils import add_days, today
 from helixhr.tests.utils import (
 	ensure_baseline_company,
 	ensure_test_company,
+	make_assignment,
 	make_test_company_grant,
 	make_test_user,
 )
 from helixhr.utils import (
 	_company_role_holders,
-	active_company_grant,
 	active_employees_for_users,
+	clear_role_scope_cache,
+	read_companies,
 	resolve_admin_scope,
 	resolve_project_scope,
+	resolve_read_scope,
 )
 
 HR_USER = "u17-hr@helixhr.test"
@@ -76,13 +79,14 @@ class TestActiveEmployeeLookups(IntegrationTestCase):
 
 	def test_rehired_hr_manager_keeps_their_company_scope(self):
 		self._rehire(HR_USER)
-		_add_role(HR_USER, "HR Manager")
+		make_assignment(HR_USER, "HR Manager", [self.company_a])
 		self.assertEqual(resolve_admin_scope(HR_USER), {"kind": "company", "company": self.company_a})
 
 	def test_hr_manager_with_only_a_left_row_has_no_scope(self):
 		employee = make_test_user(LEFT_USER, self.company_a, create_user_permission=0)
-		_add_role(LEFT_USER, "HR Manager")
+		make_assignment(LEFT_USER, "HR Manager", [self.company_a])
 		frappe.db.set_value("Employee", employee, {"status": "Left", "relieving_date": today()})
+		clear_role_scope_cache()
 		self.assertEqual(resolve_admin_scope(LEFT_USER)["kind"], "none")
 
 	def test_hr_manager_with_no_employee_stays_unscoped(self):
@@ -90,26 +94,25 @@ class TestActiveEmployeeLookups(IntegrationTestCase):
 			frappe.get_doc(
 				{"doctype": "User", "email": NO_EMPLOYEE_HR, "first_name": "Nobody", "send_welcome_email": 0}
 			).insert(ignore_permissions=True)
-		_add_role(NO_EMPLOYEE_HR, "HR Manager")
+		make_assignment(NO_EMPLOYEE_HR, "HR Manager", "all")
 		self.assertEqual(resolve_admin_scope(NO_EMPLOYEE_HR)["kind"], "unscoped")
 
 	def test_rehired_delivery_manager_keeps_project_scope(self):
 		self._rehire(DM_USER)
-		_add_role(DM_USER, "HelixHR Delivery Manager")
-		self.assertEqual(resolve_project_scope(DM_USER), {"kind": "assigned", "user": DM_USER})
+		make_assignment(DM_USER, "HelixHR Delivery Manager", [self.company_a])
+		self.assertEqual(resolve_project_scope(DM_USER), {"kind": "company", "company": self.company_a})
 
-	def test_rehired_grant_holder_keeps_their_grant(self):
+	def test_rehired_grant_holder_keeps_their_reach(self):
+		"""The grant's migrated Org viewer row still reads its org."""
 		make_test_user(GRANT_USER, self.company_a, create_user_permission=0)
 		make_test_company_grant(GRANT_USER, [self.company_b])
 		self.added.append(_newer_left_row(GRANT_USER, self.company_b))
-		grant = active_company_grant(GRANT_USER)
-		self.assertIsNotNone(grant)
-		self.assertEqual(grant["home_company"], self.company_a)
-		self.assertIn(self.company_b, grant["companies"])
+		clear_role_scope_cache()
+		self.assertIn(self.company_b, read_companies(resolve_read_scope(GRANT_USER)))
 
 	def test_rehired_role_holder_is_counted_in_their_active_company(self):
 		self._rehire(HR_USER)
-		_add_role(HR_USER, "HR Manager")
+		make_assignment(HR_USER, "HR Manager", [self.company_a])
 		self.assertIn(HR_USER, _company_role_holders("HR Manager", self.company_a))
 		self.assertNotIn(HR_USER, _company_role_holders("HR Manager", self.company_b))
 

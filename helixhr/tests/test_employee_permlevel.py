@@ -2,7 +2,7 @@ import frappe
 from frappe.client import get_value as client_get_value
 from frappe.tests import IntegrationTestCase
 
-from helixhr.tests.utils import EMPLOYEE_USER, make_test_employee_and_manager
+from helixhr.tests.utils import EMPLOYEE_USER, make_assignment, make_test_employee_and_manager
 
 
 class TestEmployeePermlevel(IntegrationTestCase):
@@ -104,6 +104,9 @@ class TestEmployeePermlevel(IntegrationTestCase):
 					"roles": [{"doctype": "Has Role", "role": "HR Manager"}],
 				}
 			).insert(ignore_permissions=True)
+		# Plan 2026-10-19-001 U3: the role alone gives no reach; no Employee,
+		# so All orgs, as the migration writes it.
+		make_assignment(hr_manager_user, "HR Manager", "all")
 
 		frappe.set_user(hr_manager_user)
 		doc = frappe.get_doc("Employee", self.employee_name)

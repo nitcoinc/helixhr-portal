@@ -74,6 +74,10 @@ describe('allowedNav', () => {
     ])
   })
 
+  it('gives a Manage access holder without Portal Admin the Settings item', () => {
+    expect(labels(allowedNav({ status: 'ready', canManageAccess: true }))).toContain('Settings')
+  })
+
   it('separates Approvals (a decision) from Team (reports)', () => {
     expect(labels(allowedNav(IDENTITIES.manager))).toEqual(expect.arrayContaining(['Approvals', 'Team']))
     const approver = labels(allowedNav(IDENTITIES.leaveApprover))

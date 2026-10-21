@@ -19,11 +19,15 @@ from helixhr.tests.utils import (
 	create_test_company,
 	ensure_baseline_company,
 	ensure_test_company,
+	make_assignment,
 	make_test_user,
 )
 from helixhr.utils import (
+	DELIVERY_MANAGER_ROLE,
 	admin_scope_employee_filters,
+	assignable,
 	employee_in_admin_scope,
+	may_assign,
 	read_companies,
 	scope_covers,
 )
@@ -44,8 +48,9 @@ class TestCompaniesScopeKind(IntegrationTestCase):
 		self.employee_a = make_test_user(USER_A, self.company_a)
 		self.employee_c = make_test_user(USER_C, self.company_c)
 		make_test_user(HR_USER, self.company_a, create_user_permission=0)
-		if "HR Manager" not in frappe.get_roles(HR_USER):
-			frappe.get_doc("User", HR_USER).add_roles("HR Manager")
+		# Plan 2026-10-19-001 U3: an HR Manager on [A, B] is now a real
+		# `companies` scope, so the HR gates the patch does not reach agree.
+		make_assignment(HR_USER, "HR Manager", [self.company_a, self.company_b])
 
 	def _as_admin_scope(self):
 		return patch("helixhr.api.resolve_admin_scope", return_value=self.scope)
@@ -95,9 +100,16 @@ class TestCompaniesScopeKind(IntegrationTestCase):
 			)
 
 	def test_portal_role_edits_stop_at_the_scope(self):
-		with patch("helixhr.api.resolve_portal_admin_scope", return_value=self.scope):
-			self.assertTrue(api._can_edit_roles(self.company_b))
-			self.assertFalse(api._can_edit_roles(self.company_c))
+		# Plan 2026-10-19-001 U5/U6: a Portal Admin's grant authority is
+		# `assignable`, which reads its Portal Admin scope.
+		with (
+			patch("helixhr.utils.can_manage_access", return_value=False),
+			patch("helixhr.utils.portal_role_scope", return_value=self.scope),
+		):
+			authority = assignable(HR_USER)
+		row = {"role": DELIVERY_MANAGER_ROLE, "all_orgs": 0}
+		self.assertTrue(may_assign(authority, {**row, "company": self.company_b}))
+		self.assertFalse(may_assign(authority, {**row, "company": self.company_c}))
 
 	def test_export_log_shows_only_the_scope_companies(self):
 		rows = []
@@ -116,10 +128,7 @@ class TestCompaniesScopeKind(IntegrationTestCase):
 			)
 			doc.insert(ignore_permissions=True)
 			rows.append(doc.name)
-		with (
-			patch("helixhr.api.resolve_portal_admin_scope", return_value=self.scope),
-			patch("helixhr.utils.grantable_companies", return_value=[]),
-		):
+		with patch("helixhr.api.resolve_portal_admin_scope", return_value=self.scope):
 			names = {row["name"] for row in api.get_export_log(page_length=200)["rows"]}
 		self.assertIn(rows[0], names)
 		self.assertNotIn(rows[1], names)

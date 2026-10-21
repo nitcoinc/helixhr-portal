@@ -20,6 +20,7 @@ from helixhr.api import (
 )
 from helixhr.tests.utils import (
 	GRANT_HOLDER_USER,
+	clear_test_company_grants,
 	ensure_baseline_company,
 	ensure_test_company,
 	make_test_company_grant,
@@ -48,13 +49,11 @@ class _Surfaces(IntegrationTestCase):
 		self.own = make_test_user(GRANT_HOLDER_USER, self.company)
 		self.foreign = make_test_user(FOREIGN_USER, self.other, employee_number="GRANT-SURFACE-B1")
 		# The e2e fixtures commit grants; every test starts from none.
-		frappe.db.delete("HelixHR Company Access Company", {"parent": ["like", "%@helixhr.test"]})
-		frappe.db.delete("HelixHR Company Access", {"user": ["like", "%@helixhr.test"]})
+		clear_test_company_grants()
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
-		frappe.db.delete("HelixHR Company Access Company", {"parent": ["like", "%@helixhr.test"]})
-		frappe.db.delete("HelixHR Company Access", {"user": ["like", "%@helixhr.test"]})
+		clear_test_company_grants()
 
 
 class TestSessionFlags(_Surfaces):

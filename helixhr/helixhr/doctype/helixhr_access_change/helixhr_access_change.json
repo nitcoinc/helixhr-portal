@@ -1,0 +1,66 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-10-19 00:00:00.000000",
+ "description": "Append-only log of access changes: one row per People & access save, with the target's assignment rows before and after (plan 2026-10-19-001 KTD8). The migration writes none: its rows carry origin \"migrated\".",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "target_user",
+  "changed_by",
+  "reason",
+  "before",
+  "after"
+ ],
+ "fields": [
+  {
+   "fieldname": "target_user",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Person",
+   "options": "User",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "changed_by",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Changed by",
+   "options": "User",
+   "reqd": 1
+  },
+  {
+   "description": "Plain text as typed. Code, not Small Text: Frappe neither sanitises it on save nor renders it as HTML in Desk.",
+   "fieldname": "reason",
+   "fieldtype": "Code",
+   "label": "Reason"
+  },
+  {
+   "fieldname": "before",
+   "fieldtype": "JSON",
+   "label": "Before"
+  },
+  {
+   "fieldname": "after",
+   "fieldtype": "JSON",
+   "label": "After"
+  }
+ ],
+ "in_create": 1,
+ "module": "HelixHR",
+ "name": "HelixHR Access Change",
+ "naming_rule": "Random",
+ "permissions": [
+  {
+   "read": 1,
+   "report": 1,
+   "role": "System Manager"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

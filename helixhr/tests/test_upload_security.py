@@ -358,18 +358,11 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"delete_report_view": (60, 3600),
 			"get_report_access": (60, 60),
 			"save_report_access": (30, 3600),
-			"get_portal_role_holders": (60, 60),
-			"set_portal_role": (30, 3600),
-			# Plan 2026-10-14-001 U2: company access grants.
-			"get_company_access": (60, 60),
-			"search_company_access_targets": (60, 60),
-			"save_company_access": (30, 3600),
-			"revoke_company_access": (30, 3600),
-			"delete_company_access": (30, 3600),
-			# Plan 2026-10-15-001 U5: People & access.
+			# Plan 2026-10-15-001 U5, 2026-10-19-001 U6: People & access.
 			"get_person_access": (60, 60),
 			"save_person_access": (30, 3600),
-			"list_people_access": (60, 60),
+			"get_elevated_access": (60, 60),
+			"search_people_access": (60, 60),
 			"get_approver_cleanup": (60, 60),
 			"apply_approver_cleanup": (10, 3600),
 			"get_dashboard": (60, 60),

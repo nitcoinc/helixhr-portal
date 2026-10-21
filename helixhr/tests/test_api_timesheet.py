@@ -18,7 +18,14 @@ from helixhr.api import (
 	save_my_week,
 	submit_my_week,
 )
-from helixhr.tests.utils import EMPLOYEE_USER, MANAGER_USER, make_test_employee_and_manager
+from helixhr.tests.utils import (
+	EMPLOYEE_USER,
+	MANAGER_USER,
+	TEST_COMPANY,
+	make_assignment,
+	make_test_employee_and_manager,
+	remove_assignment,
+)
 from helixhr.utils import get_week_bounds
 
 
@@ -357,6 +364,9 @@ class TestApiTimesheet(IntegrationTestCase):
 					"roles": [{"doctype": "Has Role", "role": "HR Manager"}],
 				}
 			).insert(ignore_permissions=True)
+		# Plan 2026-10-19-001 U3: the role alone gives no reach; no Employee,
+		# so All orgs, as the migration writes it.
+		make_assignment(hr_manager_user, "HR Manager", "all")
 
 		frappe.set_user(hr_manager_user)
 		apply_workflow({"doctype": "Timesheet", "name": name}, "Approve")
@@ -416,6 +426,7 @@ class TestApiTimesheet(IntegrationTestCase):
 		employee_login = frappe.get_doc("User", EMPLOYEE_USER)
 		employee_login.add_roles("HR Manager")
 		frappe.clear_cache(user=EMPLOYEE_USER)
+		make_assignment(EMPLOYEE_USER, "HR Manager", [TEST_COMPANY], add_role=False)
 		try:
 			frappe.set_user(EMPLOYEE_USER)
 			with self.assertRaises(Exception):
@@ -431,6 +442,7 @@ class TestApiTimesheet(IntegrationTestCase):
 			employee_login.reload()
 			employee_login.remove_roles("HR Manager")
 			frappe.clear_cache(user=EMPLOYEE_USER)
+			remove_assignment(EMPLOYEE_USER, "HR Manager")
 
 	def _hr_manager_user(self, email):
 		frappe.set_user("Administrator")
@@ -445,6 +457,9 @@ class TestApiTimesheet(IntegrationTestCase):
 					"roles": [{"doctype": "Has Role", "role": "HR Manager"}],
 				}
 			).insert(ignore_permissions=True)
+		# Plan 2026-10-19-001 U3: the role alone gives no reach; no Employee,
+		# so All orgs, as the migration writes it.
+		make_assignment(email, "HR Manager", "all")
 		return email
 
 	def test_hr_cancel_then_get_my_week_offers_a_fresh_week(self):
@@ -1107,6 +1122,9 @@ class TestTimesheetRecallAndCancel(IntegrationTestCase):
 					"roles": [{"doctype": "Has Role", "role": "HR Manager"}],
 				}
 			).insert(ignore_permissions=True)
+		# Plan 2026-10-19-001 U3: the role alone gives no reach; no Employee,
+		# so All orgs, as the migration writes it.
+		make_assignment(email, "HR Manager", "all")
 		return email
 
 	def test_employee_recalls_own_pending_week_back_to_draft(self):

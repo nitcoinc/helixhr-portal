@@ -43,13 +43,16 @@ from frappe.utils import cint, flt
 
 from helixhr.patches.v1_0.apply_permission_deltas import DELTAS
 from helixhr.utils import (
+	ASSIGNABLE_ROLES,
 	DOCUMENT_MAX_BYTES,
 	DOCUMENT_POLICY,
 	PROFILE_CORRECTION_CATEGORY,
 	PROFILE_EDITABLE_FIELDS,
 	RATE_LIMIT_POLICY,
-	active_employee_for_user,
+	_company_role_holders,
+	active_employees_for_users,
 	portal_home_page,
+	portal_role_scope,
 	rate_limit_bounds,
 )
 
@@ -1698,6 +1701,23 @@ def check_report_manager_role():
 	return _no_grant_portal_role(REPORT_MANAGER, "Report Manager role")
 
 
+ORG_VIEWER = "HelixHR Org Viewer"
+ACCESS_ADMIN = "HelixHR Access Admin"
+
+
+def check_org_viewer_role():
+	"""Plan 2026-10-19-001 U1: Org viewer reads through HelixHR's own read
+	resolvers only, so it holds no DocPerm reaching Desk."""
+	return _no_grant_portal_role(ORG_VIEWER, "Org viewer role")
+
+
+def check_access_admin_role():
+	"""Plan 2026-10-19-001 U1: Manage access changes access through the
+	People & access endpoint only, which saves with ``ignore_permissions``;
+	a DocPerm would open a second, unaudited door."""
+	return _no_grant_portal_role(ACCESS_ADMIN, "Manage access role")
+
+
 PORTAL_ADMIN = "HelixHR Portal Admin"
 
 
@@ -1798,64 +1818,184 @@ def check_no_timesheet_report_permission():
 	)
 
 
-def check_company_access_grants():
-	"""Plan 2026-10-14-001 R18: every enabled cross-company read grant, by
-	holder. WARN on a grant that no longer applies (the holder is not Active,
-	or moved Employee or company since it was saved), one naming a company
-	that no longer exists, and one held by a Portal Admin -- two Portal Admins
-	with reach into the same companies can grant each other. FAIL when the
-	doctype gains a DocPerm beyond System Manager: Portal Admin writes
-	through its own gated endpoints, and a role DocPerm would let anybody
-	holding it edit grants over REST.
-
-	Plan 2026-10-15-001 U7: FAIL when the combined-export company table is
-	missing (every combined export re-check reads it), and WARN for a
-	holder who may run reports but not export them in a granted company --
-	their "All my companies" export stays blocked there."""
-	label = "Company access grants"
+def check_combined_export_table():
+	"""Plan 2026-10-15-001 U7: every combined export re-check reads the
+	combined-export company table, so it must exist."""
+	label = "Combined export table"
 	if not frappe.db.exists("DocType", "HelixHR Report Export Company"):
 		return _result(label, FAIL, "HelixHR Report Export Company doctype is missing -- run bench migrate")
-	extra = set()
-	for doctype in ("DocPerm", "Custom DocPerm"):
-		extra |= set(frappe.get_all(doctype, filters={"parent": "HelixHR Company Access"}, pluck="role"))
-	extra -= {"System Manager"}
-	if extra:
-		return _result(label, FAIL, f"DocPerm beyond System Manager: {', '.join(sorted(extra))}")
+	return _result(label, PASS, "present")
 
-	grants = frappe.get_all(
-		"HelixHR Company Access",
-		filters={"enabled": 1},
-		fields=["name", "user", "employee", "home_company", "level", "allow_export"],
-		order_by="user asc",
-	)
-	if not grants:
-		return _result(label, PASS, "no enabled grants")
-	known = set(frappe.get_all("Company", pluck="name"))
-	listed, problems = [], []
-	for grant in grants:
-		named = frappe.get_all(
-			"HelixHR Company Access Company",
-			filters={"parenttype": "HelixHR Company Access", "parent": grant.name},
-			pluck="company",
-			order_by="idx asc",
+
+# --- Access assignments (plan 2026-10-19-001 U10) -----------------------------
+#
+# Reach comes from `HelixHR Access Assignment` rows only, so these replace the
+# old grant check: nobody left to change access, a second door onto the rows,
+# drift between the rows and Frappe roles, rows that apply to nobody, and orgs
+# nobody handles.
+
+ACCESS_DOCTYPES = ("HelixHR Access Assignment", "HelixHR Access Change")
+# HR and IT reach needs the Frappe role as well as the row (U3), so a row
+# whose role was removed reaches nothing. The portal-only roles' rows reach
+# without it, and the migration writes some of them without it on purpose.
+_ROLE_NEEDED_FOR_REACH = ("HR Manager", "HR User", IT_TEAM)
+
+
+def _listed(items, limit=5):
+	return ", ".join(items[:limit]) + (f" and {len(items) - limit} more" if len(items) > limit else "")
+
+
+def check_manage_access_holders():
+	"""R14: somebody must be able to change access. FAIL when no All-orgs
+	Manage access holder passes R4 (an enabled login, Active if they have
+	Employee records) on a site that has assignments.
+
+	A fresh install has no assignments at all until a System Manager gives
+	the first Manage access (deploy checklist step 6), so there it is a WARN:
+	a System Manager can still change access meanwhile."""
+	label = "Manage access holders"
+	holders = sorted(
+		set(
+			frappe.get_all(
+				"HelixHR Access Assignment",
+				filters={"role": ACCESS_ADMIN, "all_orgs": 1},
+				pluck="user",
+			)
 		)
-		listed.append(f"{grant.user} ({grant.level}: {', '.join(named)})")
-		anchor = active_employee_for_user(grant.user)
-		if anchor.state != "active":
-			problems.append(f"{grant.user}: holder is not Active, so the grant does not apply")
-		elif anchor.name != grant.employee or anchor.company != grant.home_company:
-			problems.append(f"{grant.user}: holder moved since the grant was saved, so it does not apply")
-		unknown = [company for company in named if company not in known]
-		if unknown:
-			problems.append(f"{grant.user}: names unknown companies {', '.join(unknown)}")
-		if PORTAL_ADMIN in frappe.get_roles(grant.user):
-			problems.append(f"{grant.user}: holds Portal Admin -- check who granted it")
-		if not grant.allow_export:
-			problems.append(f"{grant.user}: may run but not export reports in {', '.join(named)}")
-	detail = f"{len(grants)} enabled: {'; '.join(listed)}"
+	)
+	effective = [user for user in holders if portal_role_scope(user, ACCESS_ADMIN)["kind"] != "none"]
+	if effective:
+		return _result(label, PASS, f"{len(effective)} can manage access: {_listed(effective)}")
+	if frappe.db.count("HelixHR Access Assignment"):
+		return _result(
+			label,
+			FAIL,
+			"nobody who can sign in has Manage access -- a System Manager must give it to someone "
+			"in People & access",
+		)
+	return _result(label, WARN, "Nobody can manage access yet -- a System Manager must assign Manage access")
+
+
+def check_access_doctype_permissions():
+	"""KTD1, KTD8: assignments change only through the People & access save,
+	which keeps Frappe roles in step and writes the audit row, and through
+	the migration. A create, write or delete DocPerm on either doctype, for
+	any role (System Manager included), is a second door that skips both.
+	Both permission tables are read: either may be the one Frappe honours."""
+	label = "Access assignment permissions"
+	problems = []
+	for source in ("DocPerm", "Custom DocPerm"):
+		for row in frappe.get_all(
+			source,
+			filters={"parent": ["in", ACCESS_DOCTYPES]},
+			fields=["parent", "role", "create", "write", "delete"],
+		):
+			rights = [right for right in ("create", "write", "delete") if cint(row.get(right))]
+			if rights:
+				problems.append(f"{row.role} holds {'/'.join(rights)} on {row.parent} ({source})")
 	if problems:
-		return _result(label, WARN, f"{'; '.join(problems)}. {detail}")
-	return _result(label, PASS, detail)
+		return _result(
+			label,
+			FAIL,
+			"; ".join(sorted(problems)) + " -- remove it: access changes only through People & access",
+		)
+	return _result(label, PASS, "read-only outside People & access")
+
+
+def check_access_drift():
+	"""R9 across the site. "Role set outside HelixHR": a managed Frappe role
+	with no assignment for it -- no portal reach, but HRMS's Desk permissions
+	still honour it. "Role missing in Frappe": an HR Manager, HR User or IT
+	Admin row whose Frappe role was removed, so it reaches nothing.
+
+	System Managers and Administrator are unscoped and never drift (KTD4).
+	Disabled logins are left to `check_access_inactive_holders`. WARN:
+	People & access shows each person, and is where they are put right."""
+	label = "Access drift"
+	skip = {"Administrator", "Guest"} | set(
+		frappe.get_all("Has Role", filters={"parenttype": "User", "role": "System Manager"}, pluck="parent")
+	)
+	held = {
+		(row.parent, row.role)
+		for row in frappe.get_all(
+			"Has Role",
+			filters={"parenttype": "User", "role": ["in", list(ASSIGNABLE_ROLES)]},
+			fields=["parent", "role"],
+		)
+		if row.parent not in skip
+	}
+	assigned = {
+		(row.user, row.role)
+		for row in frappe.get_all("HelixHR Access Assignment", fields=["user", "role"])
+		if row.user not in skip
+	}
+	users = sorted({user for user, _role in held | assigned})
+	enabled = (
+		set(frappe.get_all("User", filters={"name": ["in", users], "enabled": 1}, pluck="name"))
+		if users
+		else set()
+	)
+	outside = sorted(f"{user} ({role})" for user, role in held - assigned if user in enabled)
+	missing = sorted(
+		f"{user} ({role})"
+		for user, role in assigned - held
+		if user in enabled and role in _ROLE_NEEDED_FOR_REACH
+	)
+	problems = []
+	if outside:
+		problems.append(f"{len(outside)} role(s) set outside HelixHR: {_listed(outside)}")
+	if missing:
+		problems.append(f"{len(missing)} role(s) missing in Frappe: {_listed(missing)}")
+	if problems:
+		return _result(label, WARN, "; ".join(problems) + " -- review them in People & access")
+	return _result(label, PASS, "Frappe roles match the assignments")
+
+
+def check_access_inactive_holders():
+	"""R4: rows on a disabled login, or on a person whose Employee records
+	are all Left or Inactive, give nothing today -- and come back the moment
+	the login is enabled or the person is rehired. WARN so somebody decides:
+	remove them in People & access, or keep them on purpose."""
+	label = "Access on inactive people"
+	users = sorted(set(frappe.get_all("HelixHR Access Assignment", pluck="user")))
+	if not users:
+		return _result(label, PASS, "no assignments")
+	enabled = set(frappe.get_all("User", filters={"name": ["in", users], "enabled": 1}, pluck="name"))
+	employees = active_employees_for_users(users)
+	problems = []
+	for user in users:
+		if user not in enabled:
+			problems.append(f"{user} (login disabled)")
+		elif employees[user].state == "inactive":
+			problems.append(f"{user} (employee record not Active)")
+	if problems:
+		return _result(
+			label, WARN, f"{len(problems)} person(s) hold access that does not apply: {_listed(problems)}"
+		)
+	return _result(label, PASS, f"all {len(users)} people with access can use it")
+
+
+def check_org_access_coverage():
+	"""Every org needs someone to decide its HR items and someone to work its
+	IT requests: an HR Manager and an IT Admin assignment on it or on All
+	orgs, held by someone who passes R4 and holds the Frappe role -- the same
+	rule that picks who is mailed (`_company_role_holders`). IT mail falls
+	back to HR, so an org with no IT Admin is still answered, by the wrong
+	team. WARN until the by-role coverage grid ships (deferred)."""
+	label = "Org access coverage"
+	gaps = []
+	companies = frappe.get_all("Company", pluck="name", order_by="name asc")
+	for company in companies:
+		missing = [
+			role_label
+			for role, role_label in (("HR Manager", "HR Manager"), (IT_TEAM, "IT Admin"))
+			if not _company_role_holders(role, company)
+		]
+		if missing:
+			gaps.append(f"{company} (no {' or '.join(missing)})")
+	if gaps:
+		return _result(label, WARN, f"{len(gaps)} org(s) not covered: {_listed(gaps)}")
+	return _result(label, PASS, f"all {len(companies)} org(s) have an HR Manager and an IT Admin")
 
 
 CHECKS = [
@@ -1875,9 +2015,16 @@ CHECKS = [
 	check_delivery_manager_role,
 	check_notification_manager_role,
 	check_report_manager_role,
+	check_org_viewer_role,
+	check_access_admin_role,
 	check_portal_admin_role,
 	check_report_access_hr_lockout,
-	check_company_access_grants,
+	check_combined_export_table,
+	check_manage_access_holders,
+	check_access_doctype_permissions,
+	check_access_drift,
+	check_access_inactive_holders,
+	check_org_access_coverage,
 	check_signup_disabled,
 	check_password_login,
 	check_entra,

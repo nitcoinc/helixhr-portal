@@ -15,6 +15,7 @@ from helixhr.tests.utils import (
 	HR_MANAGER_EMPLOYEE_USER,
 	IT_TEAM_USER,
 	_make_role_user,
+	clear_test_company_grants,
 	ensure_baseline_company,
 	ensure_email_admin_user,
 	ensure_hr_manager_user,
@@ -25,8 +26,9 @@ from helixhr.tests.utils import (
 	make_test_hr_manager_employee,
 	make_test_it_user,
 	make_test_user,
+	remove_assignment,
 )
-from helixhr.utils import RATE_LIMIT_POLICY, _rate_limit_key, reset_rate_limit
+from helixhr.utils import ORG_VIEWER_ROLE, RATE_LIMIT_POLICY, _rate_limit_key, reset_rate_limit
 
 TAG = "Palettecheck"
 FOREIGN_USER = "palette-foreign@helixhr.test"
@@ -136,8 +138,7 @@ class _PortalSearch(IntegrationTestCase):
 	def _reset(self):
 		# The e2e fixtures commit grants; every test starts from none. Seeded
 		# requests go too: a fixture helper can commit mid-test.
-		frappe.db.delete("HelixHR Company Access Company", {"parent": ["like", "%@helixhr.test"]})
-		frappe.db.delete("HelixHR Company Access", {"user": ["like", "%@helixhr.test"]})
+		clear_test_company_grants()
 		frappe.db.delete("HR Request", {"name": ["like", "_TEST-U5-PAL-%"]})
 
 
@@ -173,12 +174,12 @@ class TestPortalSearchPeople(_PortalSearch):
 		self.assertNotIn(foreign_request, _names(found["requests"]) | _names(found["inbox"]))
 		self.assertEqual(found["inbox"], [])
 
-	def test_a_lapsed_grant_gives_home_scope_only(self):
+	def test_removed_org_viewer_rows_give_home_scope_only(self):
 		make_test_user(GRANT_HOLDER_USER, self.company)
-		grant = make_test_company_grant(GRANT_HOLDER_USER, [self.company, self.other])
-		# The grant was saved against another home company: it no longer
-		# applies (`active_company_grant`), so the holder is a plain employee.
-		frappe.db.set_value("HelixHR Company Access", grant, "home_company", self.other)
+		make_test_company_grant(GRANT_HOLDER_USER, [self.company, self.other])
+		# Plan 2026-10-19-001 U4: reach is the rows, not the grant (which
+		# stays enabled here): without them the holder is a plain employee.
+		remove_assignment(GRANT_HOLDER_USER, ORG_VIEWER_ROLE)
 		found = _as(GRANT_HOLDER_USER, portal_search, TAG)
 		self.assertEqual(_names(found["people"]), {self.people["mailed"], self.people["plain"]})
 		for row in found["people"]:

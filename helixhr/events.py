@@ -17,6 +17,8 @@ from helixhr.utils import (
 	PROFILE_CORRECTABLE_FIELDS,
 	PROFILE_CORRECTION_CATEGORY,
 	UPLOAD_POLICY,
+	_company_role_holders,
+	clear_role_scope_cache,
 	employee_in_admin_scope,
 	get_manager_user,
 	mask_identifier,
@@ -212,8 +214,10 @@ def _decider_name():
 	return frappe.utils.get_fullname(frappe.session.user)
 
 
-def _hr_managers():
-	return _enabled_users_with_role("HR Manager")
+def _hr_managers(employee):
+	"""HR-stage mail: the HR Managers whose assignments cover ``employee``'s
+	company (plan 2026-10-19-001 U3)."""
+	return _enabled_users_with_role("HR Manager", employee)
 
 
 def _leave_balance_after(doc, subtract_days):
@@ -268,7 +272,7 @@ def _mail_leave_for_hr(doc):
 			action_url=_portal_url(f"approvals/leave/{doc.name}"),
 		)
 
-	_mail(doc, "leave_for_hr", _hr_managers(), context)
+	_mail(doc, "leave_for_hr", _hr_managers(doc.employee), context)
 
 
 def leave_application_on_change(doc, method=None):
@@ -356,7 +360,7 @@ def _mail_timesheet_change(doc, before):
 		_mail(
 			doc,
 			"timesheet_for_hr",
-			_hr_managers(),
+			_hr_managers(doc.employee),
 			lambda: context(action_url=_portal_url(f"approvals/timesheet/{doc.name}")),
 		)
 	elif state == "Draft" and before.get("workflow_state") == PENDING_STATE:
@@ -429,7 +433,7 @@ def timesheet_change_after_insert(doc, method=None):
 
 
 def _hr_mail_change(doc):
-	recipients = [user for user in _hr_managers() if user != frappe.session.user]
+	recipients = [user for user in _hr_managers(doc.employee) if user != frappe.session.user]
 	if not recipients:
 		return
 	_mail(
@@ -553,43 +557,47 @@ def employee_on_update(doc, method=None):
 		):
 			frappe.db.set_value("HelixHR Timesheet Change", name, "status", "Withdrawn")
 
-	# Plan 2026-10-14-001 KTD9 / R16. A cross-company grant belongs to this
-	# login, in this company, while Active. Any of the three changing
-	# switches it off; `active_company_grant` already ignores it meanwhile.
-	if doc.user_id and doc.user_id != before.user_id:
-		_disable_grant_saved_elsewhere(doc)
-	if before.user_id:
-		reason = None
-		if before.user_id != doc.user_id:
-			reason = _("the employee's login changed")
-		elif before.status == "Active" and doc.status != "Active":
-			reason = _("the employee is now {0}").format(_(doc.status))
-		elif before.company != doc.company:
-			reason = _("the employee moved to {0}").format(doc.company)
-		if reason:
-			from helixhr.utils import disable_company_access
-
-			disable_company_access(before.user_id, reason)
+	# Plan 2026-10-19-001 KTD2: assignments name their orgs, so nothing here
+	# moves or switches off access -- a company move leaves the rows as they
+	# are and People & access shows "Own org not covered". What a status or
+	# login change does move is R4's gate: `role_scope` re-reads it, and a
+	# Ready export the login can no longer request is expired.
+	if before.user_id != doc.user_id or before.status != doc.status or before.company != doc.company:
+		left = before.status == "Active" and doc.status != "Active"
+		if before.user_id:
+			_refresh_access(before.user_id, expire=left or before.user_id != doc.user_id)
+		if doc.user_id and doc.user_id != before.user_id:
+			_refresh_access(doc.user_id)
 
 
 def employee_after_insert(doc, method=None):
-	"""Plan 2026-10-14-001 R16: an HRMS Employee Transfer that creates a new
-	employee ID moves the login to a new record without saving the old one
-	through `employee_on_update` first."""
+	"""An HRMS Employee Transfer that creates a new employee ID moves the
+	login to a new record without saving the old one through
+	`employee_on_update` first: R4's gate may have changed."""
 	if doc.user_id:
-		_disable_grant_saved_elsewhere(doc)
+		_refresh_access(doc.user_id)
 
 
-def _disable_grant_saved_elsewhere(doc):
-	"""Switch off the login's grant when it was saved against another
-	Employee: the login now belongs to ``doc``."""
-	saved_for = frappe.db.get_value(
-		"HelixHR Company Access", {"user": doc.user_id, "enabled": 1}, "employee"
-	)
-	if saved_for and saved_for != doc.name:
-		from helixhr.utils import disable_company_access
+def user_on_update(doc, method=None):
+	"""Plan 2026-10-19-001 R4: a disabled User reaches nothing. `role_scope`
+	re-reads the gate, and disabling expires every Ready export the login
+	could no longer request."""
+	before = doc.get_doc_before_save()
+	if before and before.enabled != doc.enabled:
+		_refresh_access(doc.name, expire=not doc.enabled)
 
-		disable_company_access(doc.user_id, _("the login moved to employee {0}").format(doc.name))
+
+def _refresh_access(user, expire=False):
+	"""``user``'s R4 gate may have changed: drop `role_scope`'s cached answer
+	for the rest of this request and, with ``expire``, expire the Ready
+	exports they could no longer request (plan 2026-10-14-001 R15)."""
+	clear_role_scope_cache(user)
+	if expire:
+		from helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export import (
+			expire_unreachable_exports,
+		)
+
+		expire_unreachable_exports(user)
 
 
 def employee_validate(doc, method=None):
@@ -1431,7 +1439,8 @@ def _attach_correction_proof(doc):
 
 
 def hr_request_after_insert(doc, method=None):
-	"""Queue arrival mail for enabled holders of the request's stored route.
+	"""Queue arrival mail for the holders of the request's stored route in
+	the employee's company (plan 2026-10-19-001 U3).
 
 	The request is already durable before this hook runs. Email Queue failures
 	therefore cannot roll back a portal filing; they are logged for the operator
@@ -1445,13 +1454,13 @@ def hr_request_after_insert(doc, method=None):
 			{"requested_on": frappe.utils.format_datetime(doc.creation or frappe.utils.now_datetime())},
 		)
 	role = doc.routed_to_role
-	users = _enabled_users_with_role(role)
+	users = _enabled_users_with_role(role, doc.employee)
 	if not users and role != "HR Manager":
 		frappe.log_error(
-			f"HR Request {doc.name} is routed to {role}, which has no enabled holders; falling back to HR Manager.",
+			f"HR Request {doc.name} is routed to {role}, which has no enabled holders in the employee's company; falling back to HR Manager.",
 		"HelixHR request routing",
 		)
-		users = _enabled_users_with_role("HR Manager")
+		users = _enabled_users_with_role("HR Manager", doc.employee)
 	if not users:
 		frappe.log_error(
 			f"HR Request {doc.name} has no enabled recipient for route {role}.",
@@ -1486,13 +1495,12 @@ def hr_request_after_insert(doc, method=None):
 		frappe.log_error(frappe.get_traceback(), "HelixHR request arrival mail failed")
 
 
-def _enabled_users_with_role(role):
-	if not role:
-		return []
-	holders = frappe.get_all("Has Role", filters={"role": role, "parenttype": "User"}, pluck="parent")
-	if not holders:
-		return []
-	return frappe.get_all("User", filters={"name": ["in", holders], "enabled": 1}, pluck="name")
+def _enabled_users_with_role(role, employee):
+	"""Holders of ``role`` whose assignments cover ``employee``'s company --
+	the one recipient rule request and HR-stage mail share with request
+	comments (`utils._company_role_holders`)."""
+	company = frappe.db.get_value("Employee", employee, "company") if employee else None
+	return _company_role_holders(role, company)
 
 
 def hr_request_on_update(doc, method=None):
@@ -1802,12 +1810,13 @@ ATTENDANCE_REQUEST_SENT_BACK_FALLBACK = (
 	"No reason was given, ask your manager or HR for details"
 )
 
-_HR_ROLES = {"HR Manager", "System Manager"}
-
-
 def _is_hr(user=None):
+	"""Whether ``user`` acts as HR anywhere: their HR scope
+	(`resolve_admin_scope`) is not "none" (plan 2026-10-19-001 U3). An HR
+	Manager role with no assignment is not HR (R3). Cheap enough for its
+	many callers: `role_scope` reads a user's rows once per request."""
 	user = user or frappe.session.user
-	return user == "Administrator" or bool(set(frappe.get_roles(user)) & _HR_ROLES)
+	return user == "Administrator" or resolve_admin_scope(user)["kind"] != "none"
 
 
 def helixhr_date(value):
@@ -1997,7 +2006,7 @@ def _mail_attendance_change(doc):
 		_mail(
 			doc,
 			"attendance_for_hr",
-			_hr_managers(),
+			_hr_managers(doc.employee),
 			lambda: {
 				"employee_name": doc.employee_name or doc.employee,
 				"date_range": date_range,
@@ -2193,6 +2202,37 @@ def company_validate(doc, method=None):
 				frappe.bold(doc.helixhr_time_zone)
 			)
 		)
+
+
+def company_after_rename(doc, method=None, old=None, new=None, merge=False):
+	"""Plan 2026-10-19-001 KTD1: an assignment's hidden ``scope_key`` copies
+	its company so the unique (user, role, scope_key) index can refuse a
+	second row. The rename has already moved ``company`` (a Link); move the
+	key with it, or the duplicate check and the index stop matching. On a
+	merge, a row the person already holds on ``new`` absorbs the old one
+	(export kept if either had it)."""
+	rows = frappe.get_all(
+		"HelixHR Access Assignment",
+		filters={"scope_key": old, "all_orgs": 0},
+		fields=["name", "user", "role", "allow_export"],
+	)
+	for row in rows:
+		kept = frappe.db.get_value(
+			"HelixHR Access Assignment",
+			{"user": row.user, "role": row.role, "scope_key": new},
+			["name", "allow_export"],
+			as_dict=True,
+		)
+		if kept:
+			if row.allow_export and not kept.allow_export:
+				frappe.db.set_value("HelixHR Access Assignment", kept.name, "allow_export", 1)
+			frappe.db.delete("HelixHR Access Assignment", row.name)
+		else:
+			frappe.db.set_value(
+				"HelixHR Access Assignment", row.name, "scope_key", new, update_modified=False
+			)
+	if rows:
+		clear_role_scope_cache()
 
 
 def hr_settings_validate(doc, method=None):

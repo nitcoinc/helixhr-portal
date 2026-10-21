@@ -184,47 +184,43 @@ def _hours_by_project(filters, scope):
 	return columns, rows
 
 
-def _scope_parts(scope):
-	"""``(companies, assigned user)`` a project-report scope covers, or None
-	for every company (unscoped). An unknown kind raises rather than
-	silently returning nothing (plan 2026-10-15-001 U2)."""
+def _scope_companies(scope):
+	"""The companies a project-report scope covers, or None for every company
+	(unscoped). An unknown kind raises rather than silently returning nothing
+	(plan 2026-10-15-001 U2)."""
 	kind = scope["kind"]
 	if kind == "unscoped":
 		return None
 	if kind == "company":
-		return [scope["company"]], None
-	if kind == "assigned":
-		return [], scope["user"]
+		return [scope["company"]]
 	if kind == "combined":
-		return list(scope.get("companies") or []), scope.get("user")
+		return list(scope.get("companies") or [])
 	if kind == "none":
-		return [], None
+		return []
 	frappe.throw(_("Unsupported report scope."))
 
 
-def _assigned_projects(user):
-	return frappe.get_all("Project User", filters={"user": user}, pluck="parent") if user else []
-
-
 def _timesheet_scope_conditions(scope, values):
-	"""SQL conditions narrowing ``tabTimesheet ts`` / ``tabTimesheet Detail
-	td`` to ``scope``, or None when nothing is in scope. A combined scope is
-	``ts.company in set``, or-ed with the assigned projects (KTD2)."""
-	parts = _scope_parts(scope)
-	if parts is None:
+	"""SQL conditions narrowing ``tabTimesheet ts`` (joined to ``tabTimesheet
+	Detail td``) to ``scope``, or None when nothing is in scope. A combined
+	scope is ``ts.company in set`` (KTD2). In a Delivery Manager's orgs
+	(``project_companies``, `utils._project_companies`) every hour on a
+	project the org owns counts too, whoever's staff logged it (plan
+	2026-10-19-001 R2)."""
+	companies = _scope_companies(scope)
+	if companies is None:
 		return []
-	companies, user = parts
-	alternatives = []
-	if companies:
-		values["scope_companies"] = tuple(companies)
-		alternatives.append("ts.company in %(scope_companies)s")
-	assigned = _assigned_projects(user)
-	if assigned:
-		values["scope_projects"] = tuple(assigned)
-		alternatives.append("td.project in %(scope_projects)s")
-	if not alternatives:
+	if not companies:
 		return None
-	return [alternatives[0] if len(alternatives) == 1 else f"({' or '.join(alternatives)})"]
+	values["scope_companies"] = tuple(companies)
+	owners = [name for name in scope.get("project_companies") or [] if name in companies]
+	if not owners:
+		return ["ts.company in %(scope_companies)s"]
+	values["project_companies"] = tuple(owners)
+	return [
+		"(ts.company in %(scope_companies)s or td.project in "
+		"(select prj_scope.name from `tabProject` prj_scope where prj_scope.company in %(project_companies)s))"
+	]
 
 
 # --- U7: monthly project timesheet (flagship) --------------------------------
@@ -388,7 +384,7 @@ def _project_timesheet_extra(clean, scope, rows):
 	start, end = _month_bounds(clean["month"])
 	# Plan 2026-10-15-001 U2: a single-company run shades the run company's
 	# holidays (Outsourcing HR on an Inc project sees Outsourcing's); a
-	# combined or assigned run shades the project company's, labelled.
+	# combined run shades the project company's, labelled.
 	holiday_company = scope["company"] if scope["kind"] == "company" else (project.company if project else None)
 	holidays = _company_holidays(holiday_company, start, end) if holiday_company else {}
 	if holiday_company and scope["kind"] != "company":
@@ -1587,10 +1583,6 @@ def wrapped_report_names():
 
 def _entity_in_scope(kind, value, scope):
 	if kind == "employee":
-		if scope["kind"] == "assigned" or (scope["kind"] == "combined" and scope.get("user")):
-			# The hours query intersects with the scope itself; an employee
-			# filter can only narrow that further.
-			return bool(frappe.db.exists("Employee", value))
 		if scope["kind"] == "combined":
 			return bool(frappe.db.exists("Employee", {"name": value, "company": ["in", scope["companies"]]}))
 		return employee_in_admin_scope(value, scope)
@@ -1735,13 +1727,11 @@ def _logged(column, companies, project=None):
 
 def report_projects(scope):
 	"""Project names a report may cover for ``scope``, or None for every
-	project (unscoped): owned by a scope company, logged on by its staff, or
-	assigned to the scope's Delivery Manager."""
-	parts = _scope_parts(scope)
-	if parts is None:
+	project (unscoped): owned by a scope company, or logged on by its staff."""
+	companies = _scope_companies(scope)
+	if companies is None:
 		return None
-	companies, user = parts
-	names = set(_assigned_projects(user))
+	names = set()
 	if companies:
 		names.update(frappe.get_all("Project", filters={"company": ["in", companies]}, pluck="name"))
 		names.update(_logged("td.project", companies))
@@ -1749,13 +1739,10 @@ def report_projects(scope):
 
 
 def _project_owned(project, scope):
-	"""Whether every hour on ``project`` is in scope by ownership or
-	assignment (as opposed to only the scope companies' logged hours)."""
-	parts = _scope_parts(scope)
-	if parts is None:
-		return True
-	companies, user = parts
-	if user and frappe.db.exists("Project User", {"parent": project, "user": user}):
+	"""Whether every hour on ``project`` is in scope by ownership (as opposed
+	to only the scope companies' logged hours)."""
+	companies = _scope_companies(scope)
+	if companies is None:
 		return True
 	return bool(companies) and bool(frappe.db.exists("Project", {"name": project, "company": ["in", companies]}))
 
@@ -1766,18 +1753,16 @@ def report_project_in_scope(project, scope):
 		return False
 	if _project_owned(project, scope):
 		return True
-	companies, _user = _scope_parts(scope)
-	return bool(_logged("td.project", companies, project))
+	return bool(_logged("td.project", _scope_companies(scope), project))
 
 
 def _report_task_filters(scope, project=None):
 	"""Task filters for ``scope`` (and one ``project``), or None for none.
 	On a project the scope reaches only through logged hours, only tasks
 	with hours from the scope companies are listed."""
-	parts = _scope_parts(scope)
-	if parts is None:
+	companies = _scope_companies(scope)
+	if companies is None:
 		return {"project": project} if project else {}
-	companies, user = parts
 	if project:
 		if not report_project_in_scope(project, scope):
 			return None
@@ -1785,7 +1770,7 @@ def _report_task_filters(scope, project=None):
 		full = projects if _project_owned(project, scope) else []
 	else:
 		projects = report_projects(scope)
-		owned = set(_assigned_projects(user))
+		owned = set()
 		if companies:
 			owned.update(frappe.get_all("Project", filters={"company": ["in", companies]}, pluck="name"))
 		full = [name for name in projects if name in owned]
@@ -1804,23 +1789,13 @@ def _report_employee_filters(scope, project=None):
 	"""Employee filters for ``scope``, or None for nobody. On a project the
 	scope reaches only through logged hours, only the scope companies'
 	employees who logged on it are listed."""
-	parts = _scope_parts(scope)
-	if parts is None:
+	companies = _scope_companies(scope)
+	if companies is None:
 		return {}
-	companies, user = parts
 	if project and report_project_in_scope(project, scope) and not _project_owned(project, scope):
 		names = _logged("ts.employee", companies, project)
 		return {"name": ["in", names]} if names else None
-	assigned = _assigned_projects(user)
-	members = frappe.get_all("Project User", filters={"parent": ["in", assigned]}, pluck="user") if assigned else []
-	if not members:
-		return {"company": ["in", companies]} if companies else None
-	if not companies:
-		return {"user_id": ["in", members]}
-	names = frappe.get_all(
-		"Employee", or_filters={"company": ["in", companies], "user_id": ["in", members]}, pluck="name"
-	)
-	return {"name": ["in", names]} if names else None
+	return {"company": ["in", companies]} if companies else None
 
 
 def _option_source(spec, scope, context):
@@ -1830,7 +1805,7 @@ def _option_source(spec, scope, context):
 	wanted = context.get("project") if isinstance(context, dict) else None
 	wanted = wanted if isinstance(wanted, str) and wanted else None
 	if kind == "employee":
-		if scope["kind"] in ("assigned", "combined"):
+		if scope["kind"] == "combined":
 			filters = _report_employee_filters(scope, wanted)
 		else:
 			filters = admin_scope_employee_filters(scope)
@@ -2306,7 +2281,7 @@ def export_meta(entry, result, scope, raw=None):
 	who generated it and when (with the site's time zone)."""
 	from frappe.utils import get_system_timezone
 
-	company = _scope_company(scope, raw or {}) if scope["kind"] != "assigned" else None
+	company = _scope_company(scope, raw or {})
 	return {
 		"title": _(entry["label"]),
 		"company": company,
