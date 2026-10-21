@@ -204,12 +204,15 @@ class TestElevatedWarnings(_PeopleAccessRead):
 		self.assertIn("own_org_not_covered", _keys(people[MOVED]))
 		self.assertNotIn("own_org_not_covered", _keys(people[HR_NAMED]))
 		self.assertIn("export_on", _keys(people[EXPORTER]))
-		self.assertEqual(_keys(people[MANAGE]), {"all_orgs", "can_manage_access"})
-		self.assertEqual(_keys(people[LEADER]), {"all_orgs"})
+		self.assertEqual(_keys(people[MANAGE]), {"can_manage_access"})
+		# "All orgs" is the role chip's badge, not a warning.
+		self.assertEqual(_keys(people[LEADER]), set())
+		self.assertTrue(people[LEADER]["roles"][0]["all_orgs"])
 
-	def test_a_named_org_hr_manager_carries_the_desk_info_warning(self):
+	def test_a_named_org_hr_manager_carries_no_warning(self):
+		"""Desk HR reach stays global by decision (2026-10-21), so it is not flagged."""
 		person = self._elevated(SM)[HR_NAMED]
-		self.assertEqual(person["warnings"], [{"key": "desk_hr_reach_all_orgs", "kind": "info"}])
+		self.assertEqual(person["warnings"], [])
 		self.assertEqual(person["roles"][0]["companies"], [self.a])
 		self.assertEqual(person["own_company"], self.a)
 
@@ -227,7 +230,7 @@ class TestElevatedWarnings(_PeopleAccessRead):
 		}
 		for key in ("employee_left", "user_disabled", "role_outside_helixhr", "own_org_not_covered"):
 			self.assertEqual(kinds[key], "problem")
-		for key in ("desk_hr_reach_all_orgs", "all_orgs", "can_manage_access", "export_on"):
+		for key in ("can_manage_access", "export_on"):
 			self.assertEqual(kinds[key], "info")
 
 	def test_system_managers_are_unscoped_with_no_drift_warning(self):
@@ -251,7 +254,9 @@ class TestElevatedWarnings(_PeopleAccessRead):
 		def tier(person):
 			if any(w["kind"] == "problem" for w in person["warnings"]):
 				return 0
-			return 1 if _keys(person) & {"all_orgs", "can_manage_access"} else 2
+			if "can_manage_access" in _keys(person) or any(role["all_orgs"] for role in person["roles"]):
+				return 1
+			return 2
 
 		people = _as(SM, get_elevated_access)["people"]
 		keys = [(tier(p), p["full_name"].lower()) for p in people]
@@ -458,7 +463,6 @@ class TestAccessSummary(IntegrationTestCase):
 				"HR Manager in Org A and Org B.",
 				"Reports in all orgs, including new ones, with export.",
 				"Org viewer in Org A and Org B, with export in Org A.",
-				"Desk access for HR roles is not yet limited to these orgs.",
 				"Manages 3 people.",
 			],
 		)

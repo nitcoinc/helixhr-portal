@@ -2627,6 +2627,13 @@ class TestBulkApproval(IntegrationTestCase):
 		# submit path validates through -- resolves only submitted
 		# `Holiday List Assignment` rows (the field no longer feeds it after
 		# 16.20's resolution refactor). The fixture feeds both.
+		# The field is reset in the committed teardown: the batch commits, so
+		# a rollback cannot undo it, and the shared fixture employee would
+		# carry the 2019-2049 bulk list into the holiday suite.
+		self._original_holiday_lists = {
+			employee: frappe.db.get_value("Employee", employee, "holiday_list")
+			for employee in (self.employee_name, self.second_name, self.leave_name)
+		}
 		for employee in (self.employee_name, self.second_name, self.leave_name):
 			frappe.db.set_value("Employee", employee, "holiday_list", self.holiday_list)
 			# Earlier runs' assignments persist (an aborted run can strand a
@@ -2751,6 +2758,11 @@ class TestBulkApproval(IntegrationTestCase):
 		# follow. They go last: cancelling the submitted leave above resolves
 		# its holiday list through them.
 		frappe.db.delete("Holiday List Assignment", {"holiday_list": self.holiday_list})
+		for employee, original in self._original_holiday_lists.items():
+			# Never back to this suite's own list, whatever an aborted run left.
+			if original == self.holiday_list:
+				original = None
+			frappe.db.set_value("Employee", employee, "holiday_list", original)
 		frappe.db.set_single_value("HR Settings", "standard_working_hours", self.standard)
 		frappe.db.commit()
 

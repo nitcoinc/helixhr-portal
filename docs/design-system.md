@@ -562,8 +562,8 @@ Roles are named by their HelixHR label, which the server sends with every row (`
 A role reads "HR Manager · Org A, Org B"; on All orgs the orgs are one filled "All orgs" badge.
 Warnings are word chips: a **problem** (Employee record Left or Inactive, User disabled, No login,
 Role set outside HelixHR, Role missing in Frappe, Own org not covered by their roles) uses the
-sent-back pair; an **info** warning (Desk HR reach: all orgs, All orgs, Can manage access, Export
-on) uses the resting pair. High-risk lines in the review carry the words "High risk" on the
+sent-back pair; an **info** warning (Can manage access, Export on) uses the resting pair.
+All orgs is shown once, as the role's badge, not again as a warning. High-risk lines in the review carry the words "High risk" on the
 sent-back pair.
 
 | Case | Text |
@@ -571,7 +571,6 @@ sent-back pair.
 | Role with named orgs | "HR Manager in Org A and Org B." |
 | Role on All orgs | "HR Manager in all orgs, including new ones." |
 | Leadership | "Acts as HR Manager in all orgs, including new ones." |
-| Desk warning | "Desk access for HR roles is not yet limited to these orgs." |
 | Self | "You can't change your own access." |
 | R13 lock | "You can't change this person's access: they hold a role you can't assign." |
 | HR roles | "Only Manage access can give HR roles." |

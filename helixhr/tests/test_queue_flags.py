@@ -80,9 +80,12 @@ class TestQueueFlags(IntegrationTestCase):
 		# assignment this suite submitted for the shared fixture employee
 		# would leak into the holiday suites that follow.
 		frappe.db.delete("Holiday List Assignment", {"assigned_to": self.employee_name})
-		frappe.db.commit()
+		# Restored before the commit: written after it, the class rollback
+		# undid the restore and left this suite's list on the shared employee,
+		# which the holiday suite then read as a list covering its past year.
 		frappe.db.set_single_value("HR Settings", "standard_working_hours", self._original_standard)
 		frappe.db.set_value("Employee", self.employee_name, "holiday_list", self._original_holiday_list)
+		frappe.db.commit()
 
 	def _drop_assignment(self, employee, list_name):
 		frappe.set_user("Administrator")

@@ -2382,8 +2382,6 @@ def access_summary(rows, held_roles, direct_reports=0, own_company=None, enabled
 			sentences.append(
 				_("{0} is missing in Frappe, so it gives no access until restored.").format(label)
 			)
-	if any(row["role"] in HR_ROLES and not row["all_orgs"] for row in rows):
-		sentences.append(_("Desk access for HR roles is not yet limited to these orgs."))
 	if (
 		own_company
 		and rows

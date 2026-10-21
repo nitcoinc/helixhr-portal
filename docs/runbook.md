@@ -1699,8 +1699,6 @@ banner counts people with a problem; "Needs attention" filters to them.
 | Role set outside HelixHR | A managed Frappe role is held with no assignment (someone edited Roles in Desk). It gives no portal reach | **Give orgs** (add the role's orgs and save) or **Remove role** |
 | Role missing in Frappe | An assignment whose Frappe role was removed. For HR Manager, HR User and IT Admin the row then reaches nothing | **Restore role** (saves the row again) or **Remove role** |
 | Own org not covered by their roles | Their employee company is in none of their rows (often a transfer). Informational in effect: reach stays as assigned | Add their org if they should still act there, or leave it |
-| Desk HR reach: all orgs | A named-org HR role. In Desk, HRMS reads every org through the Frappe role | See the caveat below |
-| All orgs | Holds an All-orgs row | Check it is intended |
 | Can manage access | Holds Manage access | Check it is intended |
 | Export on | A Reports or Org viewer row allows export | Check it is intended |
 
@@ -1708,13 +1706,12 @@ For a Left, disabled or no-login person the editor only allows removing rows.
 A person whose roles come from a Role Profile is read-only here ("Change it in
 Desk"): the profile would rewrite the roles on save.
 
-**HR roles reach every org in Desk until Desk lock-down.** HR Manager and HR User
-are Frappe roles, and HRMS's Desk permissions read every org's records for them
-no matter which orgs the assignment names. The portal limits HR to the assigned
-orgs; Desk does not. That is why only System Manager and Manage access can give
-HR roles, why doing so is high-risk, and why a named-org HR row carries the
-"Desk HR reach: all orgs" warning. Treat an HR assignment as all-orgs in Desk
-until the Desk and REST lock-down plan ships.
+**HR roles reach every org in Desk, by decision.** HR Manager and HR User are
+Frappe roles, and HRMS's Desk permissions read every org's records for them no
+matter which orgs the assignment names. The portal limits HR to the assigned
+orgs; Desk does not. Every HR person is trusted with both orgs (decided
+2026-10-21), so there is no Desk lock-down and no warning for it. Giving an HR
+role stays with System Manager and Manage access, and still needs a reason.
 
 **Preflight** reports the same drift site-wide. `Access drift` WARNs for either
 direction, `Access on inactive people` WARNs for rows nobody can use, and `Org
@@ -2159,7 +2156,7 @@ in every org it covers. Otherwise the whole person is read-only with the reason.
 |---|---|---|
 | "You can't change your own access." | Nobody edits themselves | Ask another Manage access holder or a System Manager |
 | "You can't change this person's access: they hold a role you can't assign." | The person holds a role, or an org, beyond the caller's authority (for a Portal Admin: HR, Portal Admin, Manage access, or a role in another org) | A System Manager or Manage access holder makes the change |
-| "Only Manage access can give HR roles." | HR roles are Manage access and System Manager only, until Desk lock-down | Ask one of them |
+| "Only Manage access can give HR roles." | HR roles are Manage access and System Manager only | Ask one of them |
 | "You can't give X on All orgs." / "...in Org B." | The row is outside the caller's orgs. Even an All-orgs Portal Admin cannot give All orgs | Ask Manage access |
 | "This person's roles come from a role profile. Change it in Desk." | A Role Profile rewrites roles on save | Change the profile in Desk, not here |
 | "Someone changed this person's access. Reload and re-apply." | Another save landed first (any row, not only the newest) | Reload; your draft is kept |

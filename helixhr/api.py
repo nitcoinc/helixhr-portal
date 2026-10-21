@@ -13163,8 +13163,6 @@ _ACCESS_WARNINGS = {
 	"role_outside_helixhr": "problem",
 	"role_missing_in_frappe": "problem",
 	"own_org_not_covered": "problem",
-	"desk_hr_reach_all_orgs": "info",
-	"all_orgs": "info",
 	"can_manage_access": "info",
 	"export_on": "info",
 }
@@ -13205,11 +13203,8 @@ def _access_warnings(rows, held, enabled, employee, changed):
 			and not any(row.all_orgs or row.company == employee.company for row in rows)
 		):
 			keys.add("own_org_not_covered")
-	# KTD12: until Desk lock-down, HRMS Desk reads every org for an HR role.
-	if any(row.role in HR_ROLES and not row.all_orgs for row in rows):
-		keys.add("desk_hr_reach_all_orgs")
-	if any(row.all_orgs for row in rows):
-		keys.add("all_orgs")
+	# "All orgs" is the role chip's own badge, not a warning (2026-10-21);
+	# Desk HR reach stays global by decision, so it is not flagged either.
 	if any(row.role == ACCESS_ADMIN_ROLE for row in rows):
 		keys.add("can_manage_access")
 	if any(row.allow_export for row in rows):
@@ -13358,7 +13353,7 @@ def get_elevated_access():
 	out.sort(
 		key=lambda person: (
 			not problem(person),
-			not any(warning["key"] in ("all_orgs", "can_manage_access") for warning in person["warnings"]),
+			not any(role["all_orgs"] or role["role"] == ACCESS_ADMIN_ROLE for role in person["roles"]),
 			person["full_name"].lower(),
 			person["user"],
 		)
