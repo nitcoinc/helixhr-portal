@@ -245,6 +245,182 @@ test.describe('hr', () => {
     await expect(row.getByTestId('people-status')).toHaveText('Left')
   })
 
+  // Plan 2026-10-22-001 U5. A Left status disables the linked login outside
+  // any rollback, so every test that relieves or schedules works on throwaway
+  // people made here with per-run names -- never a Playwright fixture user.
+  async function api(page, method: string, params: Record<string, unknown>) {
+    return page.evaluate(
+      async ([method, params]) => {
+        const response = await fetch(`/api/method/${method}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Frappe-CSRF-Token': window.csrf_token },
+          body: JSON.stringify(params),
+        })
+        const body = await response.json()
+        if (!response.ok) throw new Error(`${method}: ${JSON.stringify(body)}`)
+        return body.message
+      },
+      [method, params] as const,
+    )
+  }
+
+  /** A throwaway Active employee in HR's first company, no login. */
+  async function throwaway(page, firstName: string, extra: Record<string, unknown> = {}) {
+    if (!page.url().includes('/helixhr')) await page.goto('/helixhr/people')
+    const options = await api(page, 'helixhr.api.get_new_person_options', {})
+    const created = await api(page, 'helixhr.api.create_employee', {
+      first_name: firstName,
+      last_name: 'Throwaway',
+      gender: options.genders[0],
+      date_of_birth: '1990-01-01',
+      company: options.companies[0],
+      date_of_joining: '2025-01-06',
+      create_login: 0,
+      ...extra,
+    })
+    return { id: created.employee as string, name: created.employee_name as string }
+  }
+
+  function isoDay(offset: number) {
+    const day = new Date()
+    day.setDate(day.getDate() + offset)
+    return day.toISOString().slice(0, 10)
+  }
+
+  test('U5: the joining card no longer offers Left', async ({ page }) => {
+    await page.goto('/helixhr/people')
+    await page.getByLabel('Search').fill(COLLEAGUE_NAME)
+    await page.getByRole('button', { name: new RegExp(COLLEAGUE_NAME) }).first().click()
+    await page.getByTestId('person-edit-joining').click()
+    const status = page.getByRole('dialog').getByLabel('Status')
+    await expect(status.locator('option')).toHaveText(['Active', 'Inactive', 'Suspended'])
+  })
+
+  test('U5: Create login on a person without one shows who they sign in as', async ({ page }) => {
+    const stamp = Date.now()
+    const email = `loginless-${stamp}@helixhr.test`
+    const person = await throwaway(page, `Loginless ${stamp}`, { company_email: email })
+    await page.goto(`/helixhr/people/${person.id}`)
+
+    const login = page.getByTestId('person-login')
+    await expect(login).toContainText('No login')
+    await login.getByRole('button', { name: 'Create login' }).click()
+    await expect(login).toContainText(`Signs in as ${email}`)
+    await expect(login).toContainText('Welcome email held until Microsoft sign-in is on.')
+    await expect(page.getByText(`Login created for ${person.name}.`).first()).toBeVisible()
+  })
+
+  test('U5: Create login waits for a work email', async ({ page }) => {
+    const person = await throwaway(page, `Noemail ${Date.now()}`)
+    await page.goto(`/helixhr/people/${person.id}`)
+    const login = page.getByTestId('person-login')
+    await expect(login.getByRole('button', { name: 'Create login' })).toBeDisabled()
+    await expect(login).toContainText('Add a work email first')
+  })
+
+  test('U5: schedule a leaving, change its date, then cancel it', async ({ page }) => {
+    const person = await throwaway(page, `Scheduled ${Date.now()}`)
+    await page.goto(`/helixhr/people/${person.id}`)
+    await page.getByTestId('person-relieve').click()
+
+    const sheet = page.getByTestId('relieve-sheet')
+    // Continue with nothing filled marks the fields, and saves nothing.
+    await sheet.getByRole('button', { name: 'Continue' }).click()
+    await expect(sheet.getByText('Choose the leaving date.')).toBeVisible()
+    await expect(sheet.getByLabel('Leaving date')).toBeFocused()
+
+    const first = isoDay(30)
+    await sheet.getByLabel('Leaving date').fill(first)
+    await sheet.getByLabel('Reason').fill('Moving abroad')
+    await sheet.getByRole('button', { name: 'Continue' }).click()
+    await expect(sheet.getByTestId('relieve-confirm')).toContainText('Until then nothing changes')
+    await sheet.getByRole('button', { name: 'Schedule leaving' }).click()
+
+    const banner = page.getByTestId('person-leaving')
+    await expect(banner).toContainText('Leaving on')
+    await expect(banner).toContainText('Moving abroad')
+    await expect(page.getByTestId('person-relieve')).toHaveCount(0)
+    const firstHeading = await banner.getByRole('heading').textContent()
+
+    await banner.getByRole('button', { name: 'Change' }).click()
+    await expect(sheet.getByLabel('Leaving date')).toHaveValue(first)
+    await sheet.getByLabel('Leaving date').fill(isoDay(40))
+    await sheet.getByRole('button', { name: 'Continue' }).click()
+    await sheet.getByRole('button', { name: 'Save new leaving' }).click()
+    await expect(banner.getByRole('heading')).not.toHaveText(firstHeading!)
+    await expect(page.getByText(new RegExp(`${person.name}'s leaving is now`)).first()).toBeVisible()
+
+    await banner.getByRole('button', { name: 'Cancel leaving' }).click()
+    await expect(banner).toHaveCount(0)
+    await expect(page.getByTestId('person-relieve')).toBeVisible()
+    await expect(page.getByText(`${person.name}'s leaving is cancelled.`, { exact: false }).first()).toBeVisible()
+  })
+
+  test('U5: relieve today moves the team to the new manager and the person shows Left', async ({ page }) => {
+    const stamp = Date.now()
+    const leaver = await throwaway(page, `Leaver ${stamp}`)
+    const successor = await throwaway(page, `Successor ${stamp}`)
+    const report = await throwaway(page, `Report ${stamp}`, { reports_to: leaver.id })
+
+    await page.goto(`/helixhr/people/${leaver.id}`)
+    await page.getByTestId('person-relieve').click()
+    const sheet = page.getByTestId('relieve-sheet')
+    // A couple of days back, so it is on or before every company's today.
+    await sheet.getByLabel('Leaving date').fill(isoDay(-2))
+    await sheet.getByLabel('Reason').fill('Resigned')
+    await expect(sheet.getByText(`1 person reports to ${leaver.name}; choose who they report to next.`)).toBeVisible()
+    await sheet.getByRole('button', { name: 'Continue' }).click()
+    await expect(sheet.getByText('Choose who their team reports to next.')).toBeVisible()
+
+    await sheet.getByLabel('Find a person').fill(`Successor ${stamp}`)
+    const manager = sheet.getByLabel('New manager')
+    await expect(manager.locator('option')).toHaveCount(2)
+    await manager.selectOption({ label: successor.name })
+    await sheet.getByRole('button', { name: 'Continue' }).click()
+    const confirm = sheet.getByTestId('relieve-confirm')
+    await expect(confirm).toContainText(`will report to ${successor.name}`)
+    await expect(confirm).toContainText("This can't be undone here.")
+    await sheet.getByRole('button', { name: `Relieve ${leaver.name} now` }).click()
+
+    await expect(page.getByTestId('person-left')).toContainText('Left on')
+    await expect(page.getByTestId('person-left')).toContainText('Resigned')
+    await expect(page.getByTestId('person-relieve')).toHaveCount(0)
+    await expect(page.getByText(`Their team now reports to ${successor.name}.`).first()).toBeVisible()
+
+    await page.goto(`/helixhr/people/${report.id}`)
+    await expect(page.getByRole('region', { name: 'Approvers and shift' })).toContainText(successor.name)
+  })
+
+  // The employee-mobile-webkit project signs in as an employee, who has no
+  // People screen; this is the phone width in Chromium with HR's session.
+  test('U5: the relieve sheet works at phone width', async ({ browser }) => {
+    const context = await browser.newContext({
+      storageState: 'tests/.auth/hr.json',
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
+    })
+    const page = await context.newPage()
+    const person = await throwaway(page, `Phone ${Date.now()}`)
+    await page.goto(`/helixhr/people/${person.id}`)
+    await page.getByTestId('person-relieve').click()
+    const sheet = page.getByTestId('relieve-sheet')
+    await sheet.getByLabel('Leaving date').fill(isoDay(30))
+    await sheet.getByLabel('Reason').fill('Contract ends')
+    await sheet.getByRole('button', { name: 'Continue' }).click()
+    const schedule = sheet.getByRole('button', { name: 'Schedule leaving' })
+    await expect(schedule).toBeInViewport()
+    const box = await schedule.boundingBox()
+    const width = await page.evaluate(() => document.documentElement.scrollWidth)
+    // Back out: nothing is saved without the confirm.
+    await sheet.getByRole('button', { name: 'Back' }).click()
+    await sheet.getByRole('button', { name: 'Close' }).click()
+    await expect(page.getByTestId('person-leaving')).toHaveCount(0)
+    await context.close()
+    expect(box?.height).toBeGreaterThanOrEqual(44)
+    expect(width).toBeLessThanOrEqual(390)
+  })
+
   // HR-10 / U15: the shared SearchField, 44px under a coarse pointer.
   test('the search field is a 44px target on a phone', async ({ browser }) => {
     const context = await browser.newContext({
