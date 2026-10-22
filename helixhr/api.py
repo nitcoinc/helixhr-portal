@@ -696,6 +696,9 @@ def _portal_bootstrap():
 		# Roster's "Everyone" mode stays on `resolve_admin_scope`: a grant is
 		# read-only and never opens the roster (KTD11).
 		"can_roster_everyone": resolve_admin_scope(frappe.session.user)["kind"] != "none",
+		# Plan 2026-10-22-001 U2: People's "Add employee" -- the predicate
+		# `create_employee` and `get_new_person_options` enforce.
+		"can_add_people": _can_add_people(frappe.session.user),
 		# P7-U5: same shape as `can_see_people` just above -- `search_projects`
 		# and `get_project` are gated by `resolve_project_read_scope`, so the
 		# nav item and the server's gate agree by construction.
@@ -11518,7 +11521,11 @@ _PEOPLE_SEARCH_FIELDS = (
 	"company",
 	"company_email",
 	"date_of_joining",
+	"status",
 )
+# Plan 2026-10-22-001 R16: People can include people who have left; "all"
+# is every status. Active stays the default.
+_PEOPLE_SEARCH_STATUSES = ("Active", "Left", "all")
 
 
 def _people_search_projection(row):
@@ -11533,20 +11540,23 @@ def _people_search_projection(row):
 		# Plan 2026-10-17-001 U17: the People table sorts by it. The person
 		# view already shows it to the same caller.
 		"date_of_joining": str(row.date_of_joining) if row.date_of_joining else None,
+		"status": row.status,
 	}
 
 
-def _people_search_scope(scope, pattern):
+def _people_search_scope(scope, pattern, status="Active"):
 	"""People's one Employee scope, as `frappe.get_all` keyword arguments:
 	Active employees inside a granted `resolve_read_scope` answer, matched by
 	the LIKE `pattern` on name, employee number or work email (everyone in
-	scope when None). The caller has already refused scope "none".
+	scope when None), of ``status`` (one of `_PEOPLE_SEARCH_STATUSES`). The
+	caller has already refused scope "none".
 	`search_people` and `portal_search` both read through it (plan
 	2026-10-17-001 KTD5)."""
 	# Left and Inactive employees are excluded by default -- looking somebody
-	# up means a current colleague unless HR says otherwise (P6 Open
-	# Questions: findability of Left employees is deferred until asked).
-	filters = {**(admin_scope_employee_filters(scope) or {}), "status": "Active"}
+	# up means a current colleague unless HR says otherwise (R16).
+	filters = {**(admin_scope_employee_filters(scope) or {})}
+	if status != "all":
+		filters["status"] = status
 	or_filters = None
 	if pattern:
 		or_filters = [
@@ -11556,10 +11566,12 @@ def _people_search_scope(scope, pattern):
 
 
 @frappe.whitelist()
-def search_people(query=None, start=0, limit=None):
+def search_people(query=None, start=0, limit=None, status=None):
 	"""A bounded page of active employees this caller may read, matched by
 	name, employee number or work email (P6-R1, P6-R8), across every company
-	their read scope covers; each row names its company.
+	their read scope covers; each row names its company and status.
+	``status`` "Left" or "all" widens the page to people who have left (plan
+	2026-10-22-001 R16); empty means Active.
 
 	Refused server-side, before any row is read, for anyone
 	`resolve_read_scope` does not grant a scope to (P6-R6, P6-R13) --
@@ -11570,12 +11582,15 @@ def search_people(query=None, start=0, limit=None):
 	if scope["kind"] == "none":
 		frappe.throw(_("You are not authorised to look up other people."), frappe.PermissionError)
 
+	status = status or "Active"
+	if status not in _PEOPLE_SEARCH_STATUSES:
+		frappe.throw(_("Choose Active, Left or all people."))
 	limit = min(max(cint(limit) or _PEOPLE_SEARCH_PAGE, 1), _PEOPLE_SEARCH_MAX_PAGE)
 	start = max(cint(start), 0)
 
 	needle = (query or "").strip()[:_PEOPLE_SEARCH_QUERY_MAX]
 	scope_query = _people_search_scope(
-		scope, f"%{needle}%" if len(needle) >= _PEOPLE_SEARCH_QUERY_MIN else None
+		scope, f"%{needle}%" if len(needle) >= _PEOPLE_SEARCH_QUERY_MIN else None, status
 	)
 	rows = frappe.get_all(
 		"Employee",
@@ -13773,30 +13788,36 @@ def get_person_form_options(employee):
 		frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
 
 	company = frappe.db.get_value("Employee", employee, "company")
-	people_filters = {"status": "Active"}
-	if company:
-		people_filters["company"] = company
+	return {
+		"designations": frappe.get_all("Designation", pluck="name", order_by="name asc"),
+		"branches": frappe.get_all("Branch", pluck="name", order_by="name asc"),
+		"employment_types": frappe.get_all("Employment Type", pluck="name", order_by="name asc"),
+		"grades": frappe.get_all("Employee Grade", pluck="name", order_by="name asc"),
+		"shift_types": frappe.get_all("Shift Type", pluck="name", order_by="name asc"),
+		"holiday_lists": frappe.get_all("Holiday List", pluck="name", order_by="name asc"),
+		**_company_person_options(company),
+	}
+
+
+def _company_person_options(company):
+	"""The company-bound pickers: `departments` of ``company`` and the Active
+	`people` there to report to (every company's when ``company`` is empty).
+	Shared by `get_person_form_options` and `get_new_person_options`; the
+	caller has already passed its scope gate."""
 	people = frappe.get_all(
 		"Employee",
-		filters=people_filters,
+		filters={"status": "Active", **({"company": company} if company else {})},
 		fields=["name", "employee_name"],
 		order_by="employee_name asc",
 		ignore_permissions=True,
 	)
-
 	return {
-		"designations": frappe.get_all("Designation", pluck="name", order_by="name asc"),
 		"departments": frappe.get_all(
 			"Department",
 			filters={"company": company} if company else {},
 			pluck="name",
 			order_by="name asc",
 		),
-		"branches": frappe.get_all("Branch", pluck="name", order_by="name asc"),
-		"employment_types": frappe.get_all("Employment Type", pluck="name", order_by="name asc"),
-		"grades": frappe.get_all("Employee Grade", pluck="name", order_by="name asc"),
-		"shift_types": frappe.get_all("Shift Type", pluck="name", order_by="name asc"),
-		"holiday_lists": frappe.get_all("Holiday List", pluck="name", order_by="name asc"),
 		"people": [{"name": row.name, "employee_name": row.employee_name} for row in people],
 	}
 
@@ -14039,6 +14060,182 @@ def send_employee_welcome(employee):
 		frappe.throw(_("Add a company email for {0} first.").format(row.employee_name))
 	welcome = _send_employee_welcome(employee)
 	return {"login": _person_login(employee), "welcome": welcome}
+
+
+# ---------------------------------------------------------------------------
+# Plan 2026-10-22-001 U2: adding an employee from People (R1-R4). The
+# Employee is inserted with the caller's own permissions (R2), so ERPNext's
+# and HelixHR's validation (approver derivation, date rules) runs unchanged;
+# the company and the manager are checked against the admin scope first.
+# ---------------------------------------------------------------------------
+
+# The add form's write surface; anything else in the payload is ignored, so
+# `status`, `user_id` and every permlevel field stay out of reach (R1).
+_NEW_PERSON_FIELDS = (
+	"first_name",
+	"last_name",
+	"gender",
+	"date_of_birth",
+	"date_of_joining",
+	"company",
+	"designation",
+	"department",
+	"reports_to",
+	"company_email",
+)
+# ERPNext's required fields, refused in plain words before the insert would.
+_NEW_PERSON_REQUIRED = {
+	"first_name": "Enter their first name.",
+	"gender": "Choose their gender.",
+	"date_of_birth": "Enter their date of birth.",
+	"date_of_joining": "Enter their joining date.",
+	"company": "Choose the company they join.",
+}
+
+
+def _can_add_people(user):
+	"""`create_employee`'s gate, asked by the bootstrap too: an admin scope
+	(HR Manager or System Manager) and Frappe's own create on Employee, which
+	the insert runs under (R2). ERPNext grants System Manager no Employee
+	DocPerm, so a site without a custom one is not offered a form that would
+	refuse it."""
+	return resolve_admin_scope(user)["kind"] != "none" and bool(
+		frappe.has_permission("Employee", "create", user=user)
+	)
+
+
+def _new_person_date(values, field, label):
+	try:
+		return getdate(values[field])
+	except Exception:
+		frappe.throw(_("Enter the {0} as a date.").format(_(label)))
+
+
+@frappe.whitelist()
+def get_new_person_options():
+	"""The add form's option lists, in one call: the `companies` inside the
+	caller's admin scope, `genders`, `designations`, and `by_company` --
+	each company's `departments` and Active `people` to report to.
+
+	Refused (`PermissionError`) for a caller who may not add people."""
+	rate_limit_per_user("get_new_person_options")
+	if not _can_add_people(frappe.session.user):
+		frappe.throw(_("You are not authorised to add people."), frappe.PermissionError)
+	companies = _companies_in_admin_scope()
+	return {
+		"companies": companies,
+		"genders": frappe.get_all("Gender", pluck="name", order_by="name asc"),
+		"designations": frappe.get_all("Designation", pluck="name", order_by="name asc"),
+		"by_company": {company: _company_person_options(company) for company in companies},
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+def create_employee(create_login=0, **fields):
+	"""Add an Active Employee (R1-R3) from `_NEW_PERSON_FIELDS`, then, with
+	``create_login``, their login through `create_employee_login` (R4).
+
+	Refused in plain words, with nothing written: a caller who may not add
+	people, a company or manager outside their scope (`PermissionError`), a
+	missing required field, a date of birth in the future or after the
+	joining date, ``create_login`` without a company email, and a likely
+	duplicate -- same first and last name, date of birth and company, still
+	Active -- named in the refusal.
+
+	The login runs in its own savepoint: a refused or failed login never
+	takes the new employee with it. Returns `{"employee", "employee_name",
+	"login": <get_person's login block>, "login_created": bool,
+	"login_error": str or None, "welcome": "sent", "held", "not_sent" or
+	None}`."""
+	rate_limit_per_user("create_employee")
+	if not _can_add_people(frappe.session.user):
+		frappe.throw(_("You are not authorised to add people."), frappe.PermissionError)
+	scope = resolve_admin_scope(frappe.session.user)
+
+	values = {
+		field: (fields[field].strip() if isinstance(fields[field], str) else fields[field]) or None
+		for field in _NEW_PERSON_FIELDS
+		if field in fields
+	}
+	for field, message in _NEW_PERSON_REQUIRED.items():
+		if not values.get(field):
+			frappe.throw(_(message))
+	company = values["company"]
+	if not frappe.db.exists("Company", company) or not scope_covers(scope, company):
+		frappe.throw(_("You are not authorised to add people to {0}.").format(company), frappe.PermissionError)
+	values["reports_to"] = _validate_reports_to(values.get("reports_to"), scope)
+	if values.get("company_email"):
+		values["company_email"] = values["company_email"].lower()
+	elif cint(create_login):
+		frappe.throw(_("Add a company email to create a login, or turn off Create login now."))
+
+	# ERPNext's `validate_date`, said the way HR would.
+	born = _new_person_date(values, "date_of_birth", "date of birth")
+	joined = _new_person_date(values, "date_of_joining", "joining date")
+	if born > getdate():
+		frappe.throw(_("The date of birth can't be in the future."))
+	if joined < born:
+		frappe.throw(_("The joining date can't be before the date of birth."))
+
+	duplicate = frappe.get_all(
+		"Employee",
+		filters={
+			"first_name": values["first_name"],
+			"last_name": values.get("last_name") or ["is", "not set"],
+			"date_of_birth": born,
+			"company": company,
+			"status": "Active",
+		},
+		fields=["name", "employee_name"],
+		limit=1,
+		ignore_permissions=True,
+	)
+	if duplicate:
+		frappe.throw(
+			_(
+				"{0} ({1}) already works at {2} with this name and date of birth. Open their page instead of adding them again."
+			).format(duplicate[0].employee_name, duplicate[0].name, company)
+		)
+
+	doc = frappe.new_doc("Employee")
+	_apply_allowed_fields(doc, values, _NEW_PERSON_FIELDS)
+	doc.status = "Active"
+	doc.insert()
+	_employee_note(
+		doc.name,
+		"helixhr:employee_added",
+		_("{0} added {1} to {2}.").format(
+			frappe.utils.get_fullname(frappe.session.user), doc.employee_name, company
+		),
+	)
+
+	login_created, login_error, welcome = False, None, None
+	if cint(create_login):
+		frappe.db.savepoint("helixhr_new_employee_login")
+		try:
+			result = create_employee_login(doc.name)
+			login_created, welcome = result["created"], result["welcome"]
+		except Exception as exc:
+			frappe.db.rollback(save_point="helixhr_new_employee_login")
+			frappe.clear_last_message()
+			# Our own refusals are worded for the screen; anything else is
+			# logged, not echoed (`apply_approver_cleanup`'s rule).
+			if isinstance(exc, frappe.ValidationError | frappe.PermissionError):
+				login_error = " ".join(frappe.utils.strip_html(str(exc)).split())
+			else:
+				frappe.log_error(
+					title="HelixHR new employee login failed", reference_doctype="Employee", reference_name=doc.name
+				)
+			login_error = login_error or _("The login could not be created. Try again from their page.")
+
+	return {
+		"employee": doc.name,
+		"employee_name": doc.employee_name,
+		"login": _person_login(doc.name),
+		"login_created": login_created,
+		"login_error": login_error,
+		"welcome": welcome,
+	}
 
 
 # ---------------------------------------------------------------------------

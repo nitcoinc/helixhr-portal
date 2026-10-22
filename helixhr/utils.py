@@ -2635,6 +2635,11 @@ RATE_LIMIT_POLICY = {
 	# an address HR typed -- so they are bounded like the reminder sends.
 	"create_employee_login": (20, 3600),
 	"send_employee_welcome": (10, 3600),
+	# Plan 2026-10-22-001 U2: the add form's read, and the insert -- an
+	# administrative write like `save_person`. Its login step spends
+	# `create_employee_login`'s own bucket.
+	"get_new_person_options": (60, 60),
+	"create_employee": (30, 3600),
 	# U3: relieving moves a team and turns off a login -- an occasional
 	# administrative write, bounded like `save_person`.
 	"relieve_employee": (20, 3600),

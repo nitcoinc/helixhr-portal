@@ -225,6 +225,23 @@ class TestSearchPeople(IntegrationTestCase):
 		result = search_people(query="Zara Departed")
 		self.assertNotIn(self.left_employee, [row["name"] for row in result["people"]])
 
+	def test_hr_can_include_people_who_have_left(self):
+		"""Plan 2026-10-22-001 R16."""
+		frappe.set_user(self.hr_user)
+		left = {row["name"]: row for row in search_people(query="Zara", status="Left")["people"]}
+		self.assertIn(self.left_employee, left)
+		self.assertNotIn(self.colleague, left)
+		self.assertEqual(left[self.left_employee]["status"], "Left")
+
+		everyone = [row["name"] for row in search_people(query="Zara", status="all")["people"]]
+		self.assertIn(self.left_employee, everyone)
+		self.assertIn(self.colleague, everyone)
+
+	def test_an_unknown_status_filter_is_refused(self):
+		frappe.set_user(self.hr_user)
+		with self.assertRaises(frappe.ValidationError):
+			search_people(query="Zara", status="Deleted")
+
 	def test_the_read_is_rate_limited(self):
 		from helixhr.utils import RATE_LIMIT_POLICY
 
@@ -756,3 +773,248 @@ class TestGetPersonFormOptions(IntegrationTestCase):
 		from helixhr.utils import RATE_LIMIT_POLICY
 
 		self.assertIn("get_person_form_options", RATE_LIMIT_POLICY)
+
+
+# --- Plan 2026-10-22-001 U2: adding an employee from People -----------------
+
+U2_ORG_VIEWER_USER = "u2-org-viewer@helixhr.test"
+U2_SYSTEM_MANAGER_USER = "u2-system-manager@helixhr.test"
+
+
+def _ensure_login_user(user, roles):
+	"""A User with exactly ``roles`` and no Employee."""
+	from helixhr.utils import clear_role_scope_cache
+
+	if not frappe.db.exists("User", user):
+		frappe.get_doc(
+			{"doctype": "User", "email": user, "first_name": user.split("@")[0], "send_welcome_email": 0}
+		).insert(ignore_permissions=True)
+	doc = frappe.get_doc("User", user)
+	doc.set("roles", [{"role": role} for role in roles])
+	doc.save(ignore_permissions=True)
+	frappe.clear_cache(user=user)
+	clear_role_scope_cache(user)
+	return user
+
+
+class TestCreateEmployee(IntegrationTestCase):
+	"""Plan 2026-10-22-001 U2 / R1-R4, R17."""
+
+	def setUp(self):
+		from helixhr.tests.utils import ensure_test_gender
+		from helixhr.utils import reset_rate_limit
+
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		self.gender = ensure_test_gender()
+		self.hr_employee, self.hr_user = make_test_hr_manager_employee()
+		self.colleague, self.colleague_user, self.manager, self.manager_user = (
+			make_test_employee_and_manager()
+		)
+		self.other_company = _ensure_other_company()
+		self.other_company_employee = make_test_user(OTHER_COMPANY_USER, self.other_company)
+		self.tag = frappe.generate_hash(length=8)
+		for action in ("create_employee", "create_employee_login", "get_new_person_options"):
+			reset_rate_limit(action, self.hr_user)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _payload(self, **overrides):
+		return {
+			"first_name": "Nova",
+			"last_name": f"Joiner {self.tag}",
+			"gender": self.gender,
+			"date_of_birth": "1995-04-01",
+			"date_of_joining": "2026-10-01",
+			"company": self.company,
+			**overrides,
+		}
+
+	def _create(self, sign_in=False, **payload):
+		from unittest.mock import patch
+
+		from helixhr.api import create_employee
+
+		frappe.set_user(self.hr_user)
+		with patch("helixhr.api.microsoft_sign_in_enabled", return_value=sign_in):
+			return create_employee(**payload)
+
+	def _count(self, **filters):
+		return frappe.db.count("Employee", {"last_name": f"Joiner {self.tag}", **filters})
+
+	def test_required_fields_add_an_active_employee_whose_approvers_follow_the_manager(self):
+		result = self._create(**self._payload(reports_to=self.manager))
+
+		frappe.set_user("Administrator")
+		row = frappe.db.get_value(
+			"Employee",
+			result["employee"],
+			["status", "company", "reports_to", "leave_approver", "user_id"],
+			as_dict=True,
+		)
+		self.assertEqual(row.status, "Active")
+		self.assertEqual(row.company, self.company)
+		self.assertEqual(row.reports_to, self.manager)
+		self.assertEqual(row.leave_approver, self.manager_user)
+		self.assertIsNone(row.user_id)
+		self.assertEqual(result["employee_name"], f"Nova Joiner {self.tag}")
+		self.assertEqual(result["login"]["state"], "none")
+		self.assertFalse(result["login_created"])
+		self.assertIsNone(result["login_error"])
+		self.assertIsNone(result["welcome"])
+		notes = frappe.get_all(
+			"Comment",
+			filters={"reference_doctype": "Employee", "reference_name": result["employee"], "comment_type": "Info"},
+			pluck="content",
+		)
+		self.assertTrue(any("added" in note for note in notes), notes)
+
+	def test_with_create_login_the_employee_and_login_both_exist(self):
+		email = f"u2-{self.tag}@helixhr.test"
+		result = self._create(**self._payload(company_email=email.upper(), create_login=1))
+
+		self.assertTrue(result["login_created"])
+		self.assertIsNone(result["login_error"])
+		self.assertEqual(result["welcome"], "held")
+		self.assertEqual(result["login"], {"state": "active", "user": email, "welcome_held": True})
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("Employee", result["employee"], "user_id"), email)
+		self.assertTrue(frappe.db.get_value("User", email, "enabled"))
+
+	def test_a_refused_login_keeps_the_employee_and_says_why(self):
+		# EMPLOYEE_USER is already a login, so the email is taken (R6).
+		result = self._create(**self._payload(company_email=EMPLOYEE_USER, create_login=1))
+
+		self.assertFalse(result["login_created"])
+		self.assertIn(EMPLOYEE_USER, result["login_error"])
+		self.assertIn("already belongs to", result["login_error"])
+		self.assertEqual(result["login"]["state"], "none")
+		self.assertIsNone(result["welcome"])
+		frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("Employee", result["employee"], "status"), "Active")
+		self.assertIsNone(frappe.db.get_value("Employee", result["employee"], "user_id"))
+
+	def test_a_failed_login_step_is_logged_and_still_keeps_the_employee(self):
+		from unittest.mock import patch
+
+		with patch("helixhr.api.create_employee_login", side_effect=RuntimeError("boom")):
+			result = self._create(**self._payload(company_email=f"u2-{self.tag}@helixhr.test", create_login=1))
+
+		self.assertFalse(result["login_created"])
+		self.assertNotIn("boom", result["login_error"])
+		frappe.set_user("Administrator")
+		self.assertTrue(frappe.db.exists("Employee", result["employee"]))
+
+	def test_create_login_without_a_company_email_is_refused_before_anything_is_written(self):
+		with self.assertRaisesRegex(frappe.ValidationError, "company email"):
+			self._create(**self._payload(create_login=1))
+		self.assertEqual(self._count(), 0)
+
+	def test_a_company_outside_scope_is_refused(self):
+		with self.assertRaises(frappe.PermissionError):
+			self._create(**self._payload(company=self.other_company))
+		self.assertEqual(self._count(), 0)
+
+	def test_a_manager_outside_scope_is_refused(self):
+		with self.assertRaises(frappe.PermissionError):
+			self._create(**self._payload(reports_to=self.other_company_employee))
+		self.assertEqual(self._count(), 0)
+
+	def test_a_missing_required_field_is_refused_in_plain_words(self):
+		with self.assertRaisesRegex(frappe.ValidationError, "^Enter their date of birth.$"):
+			self._create(**self._payload(date_of_birth=""))
+
+	def test_joining_before_birth_gives_a_plain_sentence(self):
+		with self.assertRaisesRegex(
+			frappe.ValidationError, "^The joining date can't be before the date of birth.$"
+		):
+			self._create(**self._payload(date_of_birth="2000-01-01", date_of_joining="1999-12-31"))
+		self.assertEqual(self._count(), 0)
+
+	def test_a_future_date_of_birth_gives_a_plain_sentence(self):
+		from frappe.utils import add_days, today
+
+		with self.assertRaisesRegex(frappe.ValidationError, "^The date of birth can't be in the future.$"):
+			self._create(**self._payload(date_of_birth=add_days(today(), 30)))
+
+	def test_an_unreadable_date_gives_a_plain_sentence(self):
+		with self.assertRaisesRegex(frappe.ValidationError, "^Enter the joining date as a date.$"):
+			self._create(**self._payload(date_of_joining="next tuesday-ish"))
+
+	def test_a_likely_duplicate_is_refused_naming_the_existing_person(self):
+		first = self._create(**self._payload())
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self._create(**self._payload(date_of_joining="2026-10-05"))
+		self.assertIn(first["employee"], str(caught.exception))
+		self.assertIn(f"Nova Joiner {self.tag}", str(caught.exception))
+		self.assertEqual(self._count(), 1)
+
+	def test_the_same_name_with_another_birth_date_is_not_a_duplicate(self):
+		self._create(**self._payload())
+		self._create(**self._payload(date_of_birth="1996-04-01"))
+		self.assertEqual(self._count(), 2)
+
+	def test_unknown_and_permlevel_fields_are_ignored(self):
+		result = self._create(
+			**self._payload(status="Left", user_id=EMPLOYEE_USER, ctc=999999, leave_approver=self.hr_user)
+		)
+		frappe.set_user("Administrator")
+		row = frappe.db.get_value(
+			"Employee", result["employee"], ["status", "user_id", "ctc", "leave_approver"], as_dict=True
+		)
+		self.assertEqual(row.status, "Active")
+		self.assertIsNone(row.user_id)
+		self.assertFalse(row.ctc)
+		self.assertIsNone(row.leave_approver)
+
+	def test_a_plain_employee_is_refused(self):
+		from helixhr.api import create_employee, get_new_person_options
+
+		frappe.set_user(self.colleague_user)
+		with self.assertRaises(frappe.PermissionError):
+			create_employee(**self._payload())
+		with self.assertRaises(frappe.PermissionError):
+			get_new_person_options()
+
+	def test_the_options_cover_the_callers_companies_only(self):
+		from helixhr.api import get_new_person_options
+
+		frappe.set_user(self.hr_user)
+		options = get_new_person_options()
+		self.assertEqual(options["companies"], [self.company])
+		self.assertIn(self.gender, options["genders"])
+		self.assertIsInstance(options["designations"], list)
+		self.assertEqual(set(options["by_company"]), {self.company})
+		people = [row["name"] for row in options["by_company"][self.company]["people"]]
+		self.assertIn(self.manager, people)
+		self.assertNotIn(self.other_company_employee, people)
+		self.assertIsInstance(options["by_company"][self.company]["departments"], list)
+
+	def test_can_add_people_is_true_for_hr_and_system_managers_only(self):
+		from helixhr.api import get_portal_bootstrap
+		from helixhr.utils import ORG_VIEWER_ROLE
+
+		make_test_user(U2_ORG_VIEWER_USER, self.company)
+		make_assignment(U2_ORG_VIEWER_USER, ORG_VIEWER_ROLE, [self.company])
+		_ensure_login_user(U2_SYSTEM_MANAGER_USER, ["System Manager", "HR Manager"])
+		make_test_it_user()
+
+		def flag(user):
+			frappe.set_user(user)
+			try:
+				return get_portal_bootstrap()["can_add_people"]
+			finally:
+				frappe.set_user("Administrator")
+
+		self.assertTrue(flag(self.hr_user))
+		self.assertTrue(flag(U2_SYSTEM_MANAGER_USER))
+		self.assertFalse(flag(U2_ORG_VIEWER_USER))
+		self.assertFalse(flag(IT_TEAM_USER))
+		self.assertFalse(flag(self.colleague_user))
+
+	def test_the_endpoints_are_rate_limited(self):
+		from helixhr.utils import RATE_LIMIT_POLICY
+
+		self.assertIn("create_employee", RATE_LIMIT_POLICY)
+		self.assertIn("get_new_person_options", RATE_LIMIT_POLICY)
