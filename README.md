@@ -330,6 +330,7 @@ a fresh site and is the authoritative signal.
 ```bash
 # Python (from the bench root; needs allow_tests on the site)
 bench --site test_site set-config allow_tests true
+uv pip install "freezegun~=1.5.5" --python env/bin/python   # once: Frappe's test extra
 bench --site test_site run-tests --app helixhr
 ruff check helixhr
 

@@ -373,9 +373,14 @@ class TestMigrateCelebrationReminders(IntegrationTestCase):
 			name: frappe.get_doc("HelixHR Celebration Reminder", name).as_dict()
 			for name in frappe.get_all("HelixHR Celebration Reminder", pluck="name")
 		}
+		# Start rowless, as a pre-P8 site does: rows left by whichever test
+		# class ran earlier would make the patch step aside and every
+		# assertion here pass without running it.
+		frappe.db.delete("HelixHR Celebration Reminder")
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
+		frappe.db.delete("Email Template", {"name": "_Stale Template"})
 		for name in frappe.get_all("HelixHR Celebration Reminder", pluck="name"):
 			if name not in self.existing:
 				frappe.delete_doc(
@@ -385,13 +390,13 @@ class TestMigrateCelebrationReminders(IntegrationTestCase):
 			if not frappe.db.exists("HelixHR Celebration Reminder", name):
 				frappe.get_doc(snapshot).insert(ignore_permissions=True)
 
-	def test_no_rows_means_nothing_is_created_without_the_old_fields(self):
+	def test_blank_old_fields_carry_as_disabled_rows(self):
 		from helixhr.patches.v1_0.migrate_celebration_reminders import execute
 
 		# This site has the old Custom Fields (they ship as fixtures and are
-		# left in place after carrying), so a site with rows is guarded by
-		# `test_any_existing_row_stops_the_patch`; here both fields are
-		# blanked, so a rowless site creates nothing at all.
+		# left in place after carrying). Blank fields still carry, as one
+		# disabled row per (event, company) with no template: absent means
+		# disabled, so nothing sends.
 		original = {
 			field: frappe.db.get_single_value("HR Settings", field)
 			for field in ("helixhr_birthday_template", "helixhr_anniversary_template")
@@ -399,18 +404,31 @@ class TestMigrateCelebrationReminders(IntegrationTestCase):
 		for field in original:
 			frappe.db.set_single_value("HR Settings", field, None)
 
-		before = frappe.db.count("HelixHR Celebration Reminder")
-		execute()
-		self.assertEqual(frappe.db.count("HelixHR Celebration Reminder"), before)
-
-		for field, value in original.items():
-			frappe.db.set_single_value("HR Settings", field, value)
+		try:
+			execute()
+			rows = frappe.get_all("HelixHR Celebration Reminder", fields=["is_enabled", "email_template"])
+			self.assertEqual(len(rows), 2 * frappe.db.count("Company"))
+			for row in rows:
+				self.assertEqual(row.is_enabled, 0)
+				self.assertFalse(row.email_template)
+		finally:
+			for field, value in original.items():
+				frappe.db.set_single_value("HR Settings", field, value)
 
 	def test_any_existing_row_stops_the_patch(self):
 		"""Once rows exist, an HR edit or deletion is never resurrected from
 		the stale Custom Fields -- a second run copies nothing."""
 		from helixhr.patches.v1_0.migrate_celebration_reminders import execute
 
+		if not frappe.db.exists("Email Template", "_Stale Template"):
+			frappe.get_doc(
+				{
+					"doctype": "Email Template",
+					"name": "_Stale Template",
+					"subject": "Stale",
+					"response": "Stale",
+				}
+			).insert(ignore_permissions=True)
 		frappe.db.set_single_value("HR Settings", "helixhr_birthday_template", "_Stale Template")
 
 		try:

@@ -91,6 +91,9 @@ jobs:
           { cat sites/apps.txt; echo; echo helixhr; } | awk 'NF' > sites/apps.txt.tmp
           mv sites/apps.txt.tmp sites/apps.txt
           uv pip install -e apps/helixhr --python env/bin/python
+          # Frappe's own test extra, not installed by `bench init`: the
+          # suite's `self.freeze_time` pins the clock with it.
+          uv pip install "freezegun~=1.5.5" --python env/bin/python
         working-directory: frappe-bench
 
       - name: Build frontend

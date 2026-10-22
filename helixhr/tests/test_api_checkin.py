@@ -32,11 +32,14 @@ FAR = (13.0827, 80.2707)
 
 
 class CheckinTestCase(IntegrationTestCase):
-	"""Shared fixture: an employee with a shift whose window covers the whole
-	site day, so `now_datetime()` is always inside it whatever time the suite
-	runs at."""
+	"""Shared fixture: an employee with a shift whose window covers the site
+	day (00:00-23:59), with the clock pinned to midday so `now_datetime()`
+	is inside it whatever time the suite runs at -- a run at 23:59 sat in
+	the gap after the window, and one just after midnight aged a punch
+	into the previous day. `tick` keeps time moving so punches still order."""
 
 	def setUp(self):
+		self.enterContext(self.freeze_time(f"{getdate()} 12:00:00", tick=True))
 		self.employee_name, _, _, _ = make_test_employee_and_manager()
 		frappe.set_user("Administrator")
 		self._clear_punches()
