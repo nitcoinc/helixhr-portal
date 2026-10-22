@@ -283,6 +283,9 @@ class TestGetPerson(IntegrationTestCase):
 				"can_edit",
 				# Plan 2026-10-22-001 U1: login state, for an editor only.
 				"login",
+				# U3: the open (or applied) leaving and the team that moves.
+				"leaving",
+				"direct_reports",
 				"failed_sections",
 			},
 		)

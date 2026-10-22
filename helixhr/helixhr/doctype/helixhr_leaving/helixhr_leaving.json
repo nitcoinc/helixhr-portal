@@ -1,0 +1,148 @@
+{
+ "actions": [],
+ "autoname": "hash",
+ "creation": "2026-10-22 00:00:00.000000",
+ "description": "One leaving scheduled or applied from the portal's Relieve action (plan 2026-10-22-001 KTD2): when, why, who the employee's direct reports move to, and what happened. One open (Pending or Failed) row per employee. Written only through helixhr.api.relieve_employee, cancel_leaving, retry_leaving and the half-hourly helixhr.tasks.apply_due_leavings.",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "employee",
+  "employee_name",
+  "company",
+  "leaving_date",
+  "reason",
+  "column_break_1",
+  "new_manager",
+  "new_manager_name",
+  "status",
+  "scheduled_by",
+  "applied_on",
+  "section_failure",
+  "error",
+  "failed_on"
+ ],
+ "fields": [
+  {
+   "fieldname": "employee",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Employee",
+   "options": "Employee",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fetch_from": "employee.employee_name",
+   "fieldname": "employee_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Employee name",
+   "read_only": 1
+  },
+  {
+   "fieldname": "company",
+   "fieldtype": "Link",
+   "in_standard_filter": 1,
+   "label": "Company",
+   "options": "Company",
+   "reqd": 1
+  },
+  {
+   "description": "The first day without access. Applied on this date on the company's own clock.",
+   "fieldname": "leaving_date",
+   "fieldtype": "Date",
+   "in_list_view": 1,
+   "label": "Leaving date",
+   "reqd": 1
+  },
+  {
+   "fieldname": "reason",
+   "fieldtype": "Small Text",
+   "label": "Reason",
+   "reqd": 1
+  },
+  {
+   "fieldname": "column_break_1",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Every Active direct report found when the leaving applies moves here; this person, if one of them, moves to the leaver's own manager.",
+   "fieldname": "new_manager",
+   "fieldtype": "Link",
+   "label": "New manager",
+   "options": "Employee"
+  },
+  {
+   "fetch_from": "new_manager.employee_name",
+   "fieldname": "new_manager_name",
+   "fieldtype": "Data",
+   "label": "New manager name",
+   "read_only": 1
+  },
+  {
+   "default": "Pending",
+   "fieldname": "status",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "in_standard_filter": 1,
+   "label": "Status",
+   "options": "Pending\nApplied\nFailed\nCancelled",
+   "reqd": 1,
+   "search_index": 1
+  },
+  {
+   "fieldname": "scheduled_by",
+   "fieldtype": "Link",
+   "label": "Scheduled by",
+   "options": "User",
+   "reqd": 1
+  },
+  {
+   "fieldname": "applied_on",
+   "fieldtype": "Datetime",
+   "label": "Applied on",
+   "read_only": 1
+  },
+  {
+   "fieldname": "section_failure",
+   "fieldtype": "Section Break",
+   "label": "Failure"
+  },
+  {
+   "description": "Why the leaving could not be applied, in plain words. The employee stays Active until it is.",
+   "fieldname": "error",
+   "fieldtype": "Small Text",
+   "label": "Error",
+   "read_only": 1
+  },
+  {
+   "description": "The company-local day the failure was last logged to Error Log: once per row per day.",
+   "fieldname": "failed_on",
+   "fieldtype": "Date",
+   "hidden": 1,
+   "label": "Failed on",
+   "read_only": 1
+  }
+ ],
+ "in_create": 1,
+ "links": [],
+ "modified": "2026-10-22 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "HelixHR",
+ "name": "HelixHR Leaving",
+ "naming_rule": "Random",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "read": 1,
+   "report": 1,
+   "role": "System Manager"
+  }
+ ],
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": [],
+ "title_field": "employee_name",
+ "track_changes": 1
+}

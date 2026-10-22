@@ -2635,6 +2635,11 @@ RATE_LIMIT_POLICY = {
 	# an address HR typed -- so they are bounded like the reminder sends.
 	"create_employee_login": (20, 3600),
 	"send_employee_welcome": (10, 3600),
+	# U3: relieving moves a team and turns off a login -- an occasional
+	# administrative write, bounded like `save_person`.
+	"relieve_employee": (20, 3600),
+	"cancel_leaving": (20, 3600),
+	"retry_leaving": (20, 3600),
 	# P8-U12: an occasional administrative write, like the config saves above.
 	# Plan 2026-10-04-004 U4: the Email Templates page's celebrations group --
 	# the setup read fans out per (event, company); preview renders per

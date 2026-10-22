@@ -39,7 +39,7 @@ scoped to their own Employee record has no HR queue (P4-R11).
 import os
 
 import frappe
-from frappe.utils import cint, flt
+from frappe.utils import cint, flt, getdate
 
 from helixhr.patches.v1_0.apply_permission_deltas import DELTAS
 from helixhr.utils import (
@@ -51,6 +51,7 @@ from helixhr.utils import (
 	RATE_LIMIT_POLICY,
 	_company_role_holders,
 	active_employees_for_users,
+	company_today,
 	held_welcome_employees,
 	microsoft_sign_in_enabled,
 	portal_home_page,
@@ -687,6 +688,40 @@ def check_welcome_emails():
 		)
 	# `check_entra` already reports the missing key; nothing is waiting yet.
 	return _result("Welcome emails", PASS, "none held; a new login's welcome waits for Microsoft sign-in")
+
+
+def check_leavings():
+	"""Plan 2026-10-22-001 R13: a leaving that failed to apply leaves
+	someone who has left with a working login -- FAIL. An open one a full
+	day past its date means the half-hourly job is not running -- WARN."""
+	from helixhr.tasks import LEAVING_DOCTYPE
+
+	rows = frappe.get_all(
+		LEAVING_DOCTYPE,
+		filters={"status": ["in", ("Pending", "Failed")]},
+		fields=["employee", "employee_name", "company", "leaving_date", "status"],
+	)
+	failed = sorted(f"{row.employee_name} ({row.employee})" for row in rows if row.status == "Failed")
+	if failed:
+		return _result(
+			"Scheduled leavings",
+			FAIL,
+			f"{len(failed)} leaving(s) failed to apply, so these people still have access: {_listed(failed)}"
+			" -- open each person page for the reason, fix it and try again",
+		)
+	overdue = sorted(
+		f"{row.employee_name} ({row.employee})"
+		for row in rows
+		if getdate(row.leaving_date) < company_today(row.company)
+	)
+	if overdue:
+		return _result(
+			"Scheduled leavings",
+			WARN,
+			f"{len(overdue)} leaving(s) past their date and not applied ({_listed(overdue)}) -- is the "
+			"scheduler on? Try again from each person page meanwhile",
+		)
+	return _result("Scheduled leavings", PASS, f"{len(rows)} scheduled, none overdue")
 
 
 def check_password_policy():
@@ -2052,6 +2087,7 @@ CHECKS = [
 	check_password_login,
 	check_entra,
 	check_welcome_emails,
+	check_leavings,
 	check_password_policy,
 	check_file_settings,
 	check_employee_photo_hooks,
