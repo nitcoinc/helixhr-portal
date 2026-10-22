@@ -300,6 +300,9 @@ class TestRosterWrites(RosterTestCase):
 			self.assertNotIn("<", str(entry))
 
 	def test_hr_assigns_a_submitted_active_shift_that_check_in_resolves(self):
+		# Midday: the portal shift ends at 23:59, so a run in the last minute
+		# of the day has no window to resolve.
+		self.enterContext(self.freeze_time(f"{frappe.utils.getdate()} 12:00:00", tick=True))
 		employee = self.fresh("assign")
 		today = frappe.utils.getdate()
 		result = assign_shift(employee, PORTAL_SHIFT_TYPE, str(today), str(frappe.utils.add_days(today, 6)))
