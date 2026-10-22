@@ -7,7 +7,7 @@ from urllib.parse import quote
 
 import frappe
 from frappe import _
-from frappe.permissions import AUTOMATIC_ROLES
+from frappe.permissions import AUTOMATIC_ROLES, add_user_permission
 from frappe.utils import (
 	add_days,
 	add_to_date,
@@ -95,6 +95,7 @@ from helixhr.utils import (
 	HR_ROLES,
 	HR_USER_ROLE,
 	LEAVE_TYPE_EDITABLE_FIELDS,
+	LOGIN_CREATED_MARK,
 	NOTIFICATION_EVENTS,
 	ORG_VIEWER_ROLE,
 	PERSON_EDITABLE_FIELDS,
@@ -112,6 +113,7 @@ from helixhr.utils import (
 	SHIFT_TYPE_EDITABLE_FIELDS,
 	THEME_PLACEHOLDERS,
 	UPLOAD_MAX_BYTES,
+	WELCOME_SENT_MARK,
 	TemplateRejected,
 	_company_role_holders,
 	access_summary,
@@ -132,11 +134,13 @@ from helixhr.utils import (
 	has_all_orgs_authority,
 	has_bank_number,
 	has_custom_wording,
+	held_welcome_employees,
 	is_photo_content,
 	mask_identifier,
 	may_assign,
 	may_edit_target,
 	message_brand,
+	microsoft_sign_in_enabled,
 	photo_file_filters,
 	portal_home_page,
 	portal_role_scope,
@@ -13702,6 +13706,8 @@ def get_person(employee):
 		# and for someone outside the caller's admin scope.
 		"desk_url": get_url_to_form("Employee", employee) if can_edit and _can_open_desk(user) else None,
 		"can_edit": can_edit,
+		# Plan 2026-10-22-001 U1: only for a caller who may act on it.
+		"login": section("login", lambda: _person_login(employee)) if can_edit else None,
 		"failed_sections": failed,
 	}
 
@@ -13811,6 +13817,206 @@ def save_person(employee, **fields):
 	doc.save()
 
 	return _person_profile(employee)
+
+
+# ---------------------------------------------------------------------------
+# Plan 2026-10-22-001 U1: a basic login for an employee, and HelixHR's
+# welcome email. Creating a User needs `create` on User, which only System
+# Manager holds; a DocPerm for HR would let HR edit any user's roles in Desk
+# and bypass access assignments (KTD1). So the scope gate is the permission,
+# the roles are fixed here, and the Employee link goes through a normal save.
+# ---------------------------------------------------------------------------
+
+_EMPLOYEE_LOGIN_ROLES = ("Employee", "Employee Self Service")
+
+
+def _person_login(employee):
+	"""`get_person`'s login block: `state` (none, active or disabled), the
+	login `user`, and `welcome_held` -- an active login made in HelixHR
+	whose welcome email has not gone yet."""
+	user = frappe.db.get_value("Employee", employee, "user_id")
+	enabled = frappe.db.get_value("User", user, "enabled") if user else None
+	if enabled is None:
+		return {"state": "none", "user": None, "welcome_held": False}
+	return {
+		"state": "active" if enabled else "disabled",
+		"user": user,
+		"welcome_held": bool(enabled) and employee in held_welcome_employees([employee]),
+	}
+
+
+def _login_email_holder(employee, email):
+	"""Who already holds ``email`` -- a User, or another Employee's company
+	email or login -- named for the refusal; None when it is free. Rehire
+	and linking an existing account stay in Desk (R6)."""
+	user = frappe.db.get_value("User", email, ["name", "full_name"], as_dict=True)
+	if user:
+		linked = frappe.db.get_value("Employee", {"user_id": user.name}, "employee_name")
+		return linked or user.full_name or user.name
+	other = frappe.get_all(
+		"Employee",
+		filters={"name": ["!=", employee]},
+		or_filters={"company_email": email, "user_id": email},
+		pluck="employee_name",
+		limit=1,
+	)
+	return other[0] if other else None
+
+
+def _employee_note(employee, mark, content):
+	"""An Info comment on the Employee (R17), keyed by ``mark`` in `subject`
+	so `held_welcome_employees` can read the trail back."""
+	frappe.get_doc(
+		{
+			"doctype": "Comment",
+			"comment_type": "Info",
+			"reference_doctype": "Employee",
+			"reference_name": employee,
+			"subject": mark,
+			"content": content,
+		}
+	).insert(ignore_permissions=True)
+
+
+def _send_employee_welcome(employee):
+	"""Queue the welcome email to the company email: "sent", "held" while no
+	Microsoft sign-in is enabled (the login has no password), or "not_sent"
+	when the template is switched off or the send failed (logged). Never
+	raises, so a failed welcome cannot roll back the login (R8)."""
+	if not microsoft_sign_in_enabled():
+		return "held"
+	row = frappe.db.get_value(
+		"Employee", employee, ["first_name", "company", "company_email", "user_id"], as_dict=True
+	)
+	portal_url = get_url("/helixhr")
+	queued = 0
+	try:
+		queued = send_notification(
+			"employee_welcome",
+			[row.company_email],
+			{
+				# KTD8: a brand-new address may not resolve its company yet.
+				"recipient_first_name": row.first_name,
+				"company": row.company,
+				"login_email": row.user_id,
+				"portal_url": portal_url,
+				"action_url": portal_url,
+			},
+			reference_doctype="Employee",
+			reference_name=employee,
+		)
+	except Exception:
+		frappe.log_error(frappe.get_traceback(), "HelixHR employee_welcome mail failed")
+	if not queued:
+		return "not_sent"
+	_employee_note(
+		employee,
+		WELCOME_SENT_MARK,
+		_("{0} sent the welcome email to {1}.").format(
+			frappe.utils.get_fullname(frappe.session.user), row.company_email
+		),
+	)
+	return "sent"
+
+
+def _assert_can_administer(employee):
+	"""`save_person`'s gate: refused before anything is read, the same way
+	whether or not the employee exists."""
+	scope = resolve_admin_scope(frappe.session.user)
+	if scope["kind"] == "none" or not employee_in_admin_scope(employee, scope):
+		frappe.throw(_("You are not authorised to view this person."), frappe.PermissionError)
+
+
+@frappe.whitelist(methods=["POST"])
+def create_employee_login(employee):
+	"""Give ``employee`` a login (R4, R5): their company email, holding only
+	Employee and Employee Self Service, no password, no Frappe welcome
+	email, and the Employee and Company User Permissions -- the state
+	ERPNext's own `create_user` reaches with "Create User Permission" on.
+
+	Refused, with nothing written: a caller outside their admin scope, a
+	Left employee, no company email, a different login already linked, and
+	an email already held by a User or another Employee (R6). The same
+	email already linked returns that login, with no second mail.
+
+	Returns `{"login": <get_person's login block>, "created", "welcome"}`,
+	`welcome` being "sent", "held" or "not_sent" (None when nothing was
+	created)."""
+	rate_limit_per_user("create_employee_login")
+	_assert_can_administer(employee)
+
+	doc = frappe.get_doc("Employee", employee)
+	if doc.status == "Left":
+		frappe.throw(_("{0} has left, so they can't have a login.").format(doc.employee_name))
+	email = (doc.company_email or "").strip().lower()
+	if not email:
+		frappe.throw(_("Add a company email for {0} first: it becomes their login.").format(doc.employee_name))
+	if doc.user_id:
+		if doc.user_id.lower() == email:
+			return {"login": _person_login(employee), "created": False, "welcome": None}
+		frappe.throw(_("{0} already signs in as {1}.").format(doc.employee_name, doc.user_id))
+	holder = _login_email_holder(employee, email)
+	if holder:
+		frappe.throw(
+			_("{0} already belongs to {1}. Linking an existing account is done in Desk.").format(email, holder)
+		)
+
+	# ERPNext's own order (`employee.create_user`): the User hook
+	# `validate_employee_role` strips both roles from a User no Employee
+	# names yet, so the link is written first, inside this transaction.
+	frappe.db.set_value("Employee", employee, "user_id", email, update_modified=False)
+	# Documented `ignore_permissions` (KTD1): the gate above is the
+	# permission, and nothing from the request reaches the roles.
+	frappe.get_doc(
+		{
+			"doctype": "User",
+			"email": email,
+			"first_name": doc.first_name,
+			"middle_name": doc.middle_name,
+			"last_name": doc.last_name,
+			"gender": doc.gender,
+			"birth_date": doc.date_of_birth,
+			"phone": doc.cell_number,
+			"enabled": 1,
+			"send_welcome_email": 0,
+			"roles": [{"role": role} for role in _EMPLOYEE_LOGIN_ROLES],
+		}
+	).insert(ignore_permissions=True)
+	# The caller's own permissions: Employee's validation and on_update
+	# (user sync, User Permissions, HelixHR's hooks) run unchanged.
+	doc.user_id = email
+	doc.create_user_permission = 1
+	doc.save()
+	# `update_user_permissions` adds these only when the checkbox changed;
+	# ERPNext's `create_user` adds them either way.
+	add_user_permission("Employee", doc.name, email, ignore_permissions=True)
+	add_user_permission("Company", doc.company, email, ignore_permissions=True)
+	_employee_note(
+		employee,
+		LOGIN_CREATED_MARK,
+		_("{0} created a login for {1}.").format(frappe.utils.get_fullname(frappe.session.user), email),
+	)
+
+	welcome = _send_employee_welcome(employee)
+	return {"login": _person_login(employee), "created": True, "welcome": welcome}
+
+
+@frappe.whitelist(methods=["POST"])
+def send_employee_welcome(employee):
+	"""Send (or resend) the welcome email for ``employee``'s active login
+	(R7). Held, not sent, while no Microsoft sign-in is enabled.
+
+	Returns `{"login": <get_person's login block>, "welcome"}` as
+	`create_employee_login` does."""
+	rate_limit_per_user("send_employee_welcome")
+	_assert_can_administer(employee)
+	row = frappe.db.get_value("Employee", employee, ["employee_name", "company_email"], as_dict=True)
+	if _person_login(employee)["state"] != "active":
+		frappe.throw(_("{0} has no active login.").format(row.employee_name))
+	if not row.company_email:
+		frappe.throw(_("Add a company email for {0} first.").format(row.employee_name))
+	welcome = _send_employee_welcome(employee)
+	return {"login": _person_login(employee), "welcome": welcome}
 
 
 # ---------------------------------------------------------------------------

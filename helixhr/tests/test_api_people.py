@@ -281,6 +281,8 @@ class TestGetPerson(IntegrationTestCase):
 				"holiday_list",
 				"desk_url",
 				"can_edit",
+				# Plan 2026-10-22-001 U1: login state, for an editor only.
+				"login",
 				"failed_sections",
 			},
 		)

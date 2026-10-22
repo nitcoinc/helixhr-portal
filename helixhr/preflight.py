@@ -51,6 +51,8 @@ from helixhr.utils import (
 	RATE_LIMIT_POLICY,
 	_company_role_holders,
 	active_employees_for_users,
+	held_welcome_employees,
+	microsoft_sign_in_enabled,
 	portal_home_page,
 	portal_role_scope,
 	rate_limit_bounds,
@@ -413,11 +415,7 @@ def check_document_link_urls():
 
 
 def _entra_enabled():
-	return bool(
-		frappe.db.exists(
-			"Social Login Key", {"social_login_provider": "Office 365", "enable_social_login": 1}
-		)
-	)
+	return microsoft_sign_in_enabled()
 
 
 def check_portal_landing():
@@ -664,6 +662,31 @@ def check_entra():
 			"helixhr_auth_phase is entra but no Office 365 Social Login Key is enabled",
 		)
 	return _result("Entra ID (Office 365 key)", WARN, "not configured (expected in the local-login phase)")
+
+
+def check_welcome_emails():
+	"""Plan 2026-10-22-001 R7: a login HelixHR creates has no password, so
+	its welcome email is held until Microsoft sign-in is on. A WARN, not a
+	FAIL: the login exists and HR resends the welcome from the person page."""
+	if _entra_enabled():
+		return _result("Welcome emails", PASS, "sent when HR creates a login")
+	active = set(
+		frappe.get_all(
+			"Employee",
+			filters={"status": "Active", "user_id": ["is", "set"]},
+			pluck="name",
+		)
+	)
+	held = sorted(held_welcome_employees() & active)
+	if held:
+		return _result(
+			"Welcome emails",
+			WARN,
+			f"{len(held)} welcome email(s) held: no Office 365 Social Login Key is enabled, so new "
+			f"logins cannot sign in yet ({_listed(held)}) -- enable it, then resend from each person page",
+		)
+	# `check_entra` already reports the missing key; nothing is waiting yet.
+	return _result("Welcome emails", PASS, "none held; a new login's welcome waits for Microsoft sign-in")
 
 
 def check_password_policy():
@@ -2028,6 +2051,7 @@ CHECKS = [
 	check_signup_disabled,
 	check_password_login,
 	check_entra,
+	check_welcome_emails,
 	check_password_policy,
 	check_file_settings,
 	check_employee_photo_hooks,
