@@ -269,6 +269,15 @@ const routes = [
     component: () => import('@/pages/People.vue'),
   },
   {
+    // Plan 2026-10-22-001 U4. Registered before `/people/:employee` so the
+    // literal path reads as itself. `get_new_person_options` is the server's
+    // gate (`_can_add_people`), the same posture as /people.
+    path: '/people/new',
+    name: 'PersonNew',
+    meta: { title: 'Add employee', deskOnly: true },
+    component: () => import('@/pages/PersonNew.vue'),
+  },
+  {
     // The person's record is addressable directly, like every other detail
     // route (P2-R12): a reload or a shared link lands on the same person.
     path: '/people/:employee',

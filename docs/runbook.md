@@ -53,7 +53,10 @@ does not depend on it. Two consequences for a local-login site:
   `helixhr.preflight.run` fails on exactly that combination.
 - **System Settings → Enable Password Policy** is the only strength check, so turn it on.
 
-Portal users are ordinary Frappe Users: create the Employee first, then the User from the
+Portal users are ordinary Frappe Users. HR adds them from the portal (People → **Add employee**,
+"Create login now"); that login has **no password**, so on a local-login site its holder cannot
+sign in until a System Manager sets one in Desk or Entra ID is on (see *Onboarding and leaving
+in the portal* below). The Desk path still works: create the Employee, then the User from the
 Employee form (or set `user_id`), with the **Employee Self Service** role and "Create User
 Permission" checked. HR can reset a password from Desk. When Entra ID is ready, follow the
 section below; nothing in the app changes.
@@ -1536,6 +1539,44 @@ piece in words. Causes 1 and 2 need no data fix. If the report's `reports_to`
 still names the manager's *old* (Left) Employee id after a transfer, point it at
 the Active one; that is data, not this bug.
 
+## Onboarding and leaving in the portal (plan 2026-10-22-001)
+
+HR Manager adds and relieves people from People; Desk is the fallback for rehires and for
+linking an existing or privileged account ([deployment.md](deployment.md), "Adding an employee").
+
+**The welcome email is held until Microsoft sign-in is on.** A portal-made login holds only
+Employee and Employee Self Service and has no password, so `create_employee_login` sends the
+`employee_welcome` email only while an Office 365 Social Login Key is enabled
+(`utils.microsoft_sign_in_enabled`). Otherwise the response says "held" and nothing is sent.
+Preflight **Welcome emails** WARNs and lists who is waiting. Enable the key, then **Resend
+welcome** on each person page (`send_employee_welcome`). A template switched Off in Email
+templates, or a failed send, returns "not_sent" ("HelixHR employee_welcome mail failed" in Error
+Log); the login stays either way.
+
+**A failed leaving.** The person page shows a Failed banner with the reason and **Try again**
+(`retry_leaving`); the employee stays Active, login on, until it applies. Error Log title
+**HelixHR leaving failed**, once per row per company-local day. The job retries Failed rows every
+tick, so fixing the cause (usually the new manager left or is leaving first) is enough. Preflight
+**Scheduled leavings** FAILs on any Failed row and WARNs on a Pending one past its date (the
+scheduler is not running). The rows are `HelixHR Leaving` in Desk, read-only, System Manager only.
+
+**No scheduler on the dev bench, so a scheduled leaving never applies locally.** Apply what is due
+by hand:
+
+```bash
+bench --site test_site execute helixhr.tasks.apply_due_leavings
+```
+
+It applies only rows whose date has come on the company's clock; e2e uses today-dated relieves.
+
+Two side effects that look like bugs and are not:
+
+- **A scheduled leaving writes `relieving_date` (and `reason_for_leaving`) ahead on an Active
+  Employee.** Headcount, leavers and employment span already read it. Cancel clears both.
+- **Moving a report re-saves that Employee.** ERPNext's `on_update` re-syncs the login
+  (`update_user_status`): an Active report whose User was disabled by hand comes back enabled.
+  Disable it again, or set the report Inactive first.
+
 ## Access assignments: dry-run, deploy and rollback (plan 2026-10-19-001)
 
 Every elevated permission is an assignment: a person, a role, and the orgs it
@@ -1695,7 +1736,7 @@ banner counts people with a problem; "Needs attention" filters to them.
 |---|---|---|
 | Employee record Left or Inactive | Their Active Employee is gone; they reach nothing in the portal | Remove their rows, or rehire/reactivate them (reach comes back) |
 | User disabled | Login disabled; they reach nothing | Remove the rows, or enable the User |
-| No login | An employee in All employees has no User | Create the login in Desk first |
+| No login | An employee in All employees has no User | **Create login** on their People page (needs a company email), or in Desk |
 | Role set outside HelixHR | A managed Frappe role is held with no assignment (someone edited Roles in Desk). It gives no portal reach | **Give orgs** (add the role's orgs and save) or **Remove role** |
 | Role missing in Frappe | An assignment whose Frappe role was removed. For HR Manager, HR User and IT Admin the row then reaches nothing | **Restore role** (saves the row again) or **Remove role** |
 | Own org not covered by their roles | Their employee company is in none of their rows (often a transfer). Informational in effect: reach stays as assigned | Add their org if they should still act there, or leave it |

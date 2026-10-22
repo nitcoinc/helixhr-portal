@@ -251,6 +251,14 @@ export function today() {
   return live > calendar.today ? live : calendar.today
 }
 
+/** Whether a calendar date has come: on or before `companyToday`, the
+ * company's own today the server sent (`get_person`'s `company_today`), or
+ * the user's today when there is none. A relieve applies by the company's
+ * calendar, so an HR user a timezone away must not be told otherwise. */
+export function isDueBy(value, companyToday) {
+  return !!value && value <= (companyToday || today())
+}
+
 // --- rendering ---------------------------------------------------------
 
 const formatters = new Map()

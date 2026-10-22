@@ -19,7 +19,11 @@ site's operational configuration.
 import json
 
 import frappe
-from frappe.utils import add_to_date, cint, now_datetime
+from frappe import _
+from frappe.utils import add_to_date, cint, formatdate, get_fullname, getdate, now_datetime, strip_html
+
+from helixhr.helixhr.doctype.helixhr_leaving.helixhr_leaving import OPEN_STATUSES
+from helixhr.utils import _employee_note, company_today
 
 RETENTION_KEY = "helixhr_checkin_location_retention_days"
 # The three fields a punch's location lives in, and the value each one is
@@ -152,3 +156,269 @@ def _scrub_versions(names):
 				changed = True
 		if changed:
 			frappe.db.set_value("Version", row.name, "data", json.dumps(data), update_modified=False)
+
+
+# ---------------------------------------------------------------------------
+# Plan 2026-10-22-001 U3: applying a leaving scheduled from the portal.
+# One function serves `api.relieve_employee` (a date on or before today),
+# `api.retry_leaving` and the half-hourly job below.
+# ---------------------------------------------------------------------------
+
+LEAVING_DOCTYPE = "HelixHR Leaving"
+LEAVING_LOG_TITLE = "HelixHR leaving failed"
+LEAVING_APPLIED_MARK = "helixhr:leaving_applied"
+LEAVING_CLOSED_MARK = "helixhr:leaving_closed"
+_LEAVING_SAVEPOINT = "helixhr_leaving"
+
+
+def leaving_manager_problem(leaver, new_manager, leaving_date):
+	"""Why ``new_manager`` cannot take ``leaver``'s team on ``leaving_date``
+	(R14), in plain words, or None. Asked when the leaving is scheduled and
+	again when it applies: the manager may have left in between.
+
+	Scope is the caller's question and is asked by the endpoint; here the
+	manager must be someone else, Active, not leaving on or before the same
+	date (a scheduled leaving writes `relieving_date` ahead), and not below
+	the leaver except as a direct report -- ERPNext's tree refuses that move
+	in words HR cannot act on."""
+	if not new_manager:
+		return None
+	if new_manager == leaver:
+		return _("Choose someone other than the person leaving as the new manager.")
+	row = frappe.db.get_value(
+		"Employee", new_manager, ["employee_name", "status", "relieving_date", "reports_to"], as_dict=True
+	)
+	if not row:
+		return _("{0} isn't an employee here.").format(new_manager)
+	if row.status != "Active":
+		return _("{0} is {1}, so they can't take over the team. Choose another manager.").format(
+			row.employee_name, _(row.status)
+		)
+	if row.relieving_date and getdate(row.relieving_date) <= getdate(leaving_date):
+		return _("{0} is leaving on {1}, so they can't take over the team. Choose another manager.").format(
+			row.employee_name, formatdate(row.relieving_date)
+		)
+	# Walk up from the new manager; the leaver two or more levels up means
+	# the leaver's direct report would end up reporting to their own report.
+	seen, current, depth = set(), row.reports_to, 1
+	while current and current not in seen:
+		if current == leaver:
+			if depth > 1:
+				return _(
+					"{0} is further down {1}'s team. Choose one of {1}'s direct reports or someone outside the team."
+				).format(row.employee_name, frappe.db.get_value("Employee", leaver, "employee_name"))
+			break
+		seen.add(current)
+		current, depth = frappe.db.get_value("Employee", current, "reports_to"), depth + 1
+	return None
+
+
+def apply_leaving(name, actor=None):
+	"""Apply the open leaving ``name`` in the caller's transaction (R11,
+	KTD5): move every Active direct report found *now* to the new manager --
+	the new manager themself, if one of them, to the leaver's own manager
+	(KTD4) -- then set the leaver Left with the date and reason. ERPNext
+	disables the login and HelixHR's Left hooks run in the same save.
+
+	Raises a `frappe.ValidationError` in plain words when it cannot apply,
+	with nothing written. Report moves save with `ignore_permissions`
+	(KTD7): the leaver's scope gate already ran, and a report in another
+	company may sit outside the caller's User Permissions; validation still
+	runs. The leaver saves with the caller's own permissions (Administrator
+	in the job). ``actor`` names who applied it for the Info comment.
+
+	Locks the Employee, then the leaving -- the order `api._leaving_gate`
+	takes them in, so an HR change and the job cannot deadlock each other --
+	and re-reads the status under the lock. A leaver already set Left
+	outside the portal (Desk) has nothing left to apply: the row is closed
+	as Cancelled with an Info note instead of failing every tick; the
+	returned row's status says which happened."""
+	employee = frappe.db.get_value(LEAVING_DOCTYPE, name, "employee")
+	if not employee:
+		frappe.throw(_("This leaving no longer exists."))
+	leaver = frappe.get_doc("Employee", employee, for_update=True)
+	row = frappe.get_doc(LEAVING_DOCTYPE, name, for_update=True)
+	if row.status not in OPEN_STATUSES:
+		frappe.throw(_("This leaving is {0} and can't be applied.").format(_(row.status)))
+	if leaver.status == "Left":
+		row.status = "Cancelled"
+		row.error = None
+		row.save(ignore_permissions=True)
+		_employee_note(
+			leaver.name,
+			LEAVING_CLOSED_MARK,
+			_("{0} was already marked Left outside HelixHR, so the leaving set for {1} was closed.").format(
+				leaver.employee_name, formatdate(row.leaving_date)
+			),
+		)
+		return row
+	if leaver.status != "Active":
+		frappe.throw(
+			_("{0} is {1}, not Active, so the leaving can't be applied.").format(
+				leaver.employee_name, _(leaver.status)
+			)
+		)
+	problem = leaving_manager_problem(leaver.name, row.new_manager, row.leaving_date)
+	if problem:
+		frappe.throw(problem)
+
+	reports = frappe.get_all(
+		"Employee", filters={"reports_to": leaver.name, "status": "Active"}, pluck="name", order_by="name asc"
+	)
+	if reports and not row.new_manager:
+		frappe.throw(
+			_("{0} has {1} people reporting to them now. Choose who they report to next.").format(
+				leaver.employee_name, len(reports)
+			)
+		)
+	# The new manager first, so nobody is ever moved under someone who is
+	# still below the leaver.
+	reports.sort(key=lambda report: report != row.new_manager)
+	for report in reports:
+		doc = frappe.get_doc("Employee", report)
+		doc.reports_to = leaver.reports_to if report == row.new_manager else row.new_manager
+		save_employee_plainly(doc, ignore_permissions=True)
+
+	leaver.relieving_date = row.leaving_date
+	leaver.reason_for_leaving = row.reason
+	leaver.status = "Left"
+	save_employee_plainly(leaver)
+
+	row.status = "Applied"
+	row.applied_on = now_datetime()
+	row.error = None
+	row.save(ignore_permissions=True)
+
+	moved = (
+		_(" {0} direct report(s) now report to {1}.").format(len(reports), row.new_manager_name)
+		if reports
+		else ""
+	)
+	_employee_note(
+		leaver.name,
+		LEAVING_APPLIED_MARK,
+		_("{0} relieved {1} from {2}.").format(
+			actor or get_fullname(frappe.session.user), leaver.employee_name, formatdate(row.leaving_date)
+		)
+		+ moved,
+	)
+	return row
+
+
+def save_employee_plainly(doc, ignore_permissions=False):
+	"""`doc.save()`, with ERPNext's refusals turned into sentences HR can
+	act on (R13, the plan's "wording leaks" risk). The leaving's own checks
+	run first, so these are the races and the unforeseen."""
+	try:
+		doc.save(ignore_permissions=ignore_permissions)
+	except frappe.ValidationError as exc:
+		if isinstance(exc, frappe.PermissionError):
+			raise
+		frappe.clear_last_message()
+		message = " ".join(strip_html(str(exc)).split()) or _("an unknown error")
+		frappe.throw(_("{0} couldn't be saved: {1}").format(doc.employee_name, message))
+
+
+def apply_due_leavings():
+	"""On the hour and half hour (`hooks.scheduler_events["cron"]`, KTD6):
+	apply every open leaving whose date has come on its company's own clock
+	(`utils.company_today`), so each company relieves at its own midnight.
+
+	Idempotent by filter: an applied row is no longer open, so a second run
+	the same day finds nothing to do. A Failed row is retried each tick, so
+	fixing the cause is enough. Each row runs in its own savepoint; a
+	failure is rolled back to it, stored on the row in plain words, and
+	logged to Error Log once per row per company-local day. A row HR
+	cancelled or applied after the snapshot below is skipped, and a
+	deadlock or lock timeout leaves the row as it was for the next tick.
+	One row's trouble never stops the rest. Commits per row outside tests
+	only (the reminders' `_commit` rule)."""
+	result = {"applied": 0, "failed": 0}
+	today = {}
+	for row in frappe.get_all(
+		LEAVING_DOCTYPE,
+		filters={"status": ["in", OPEN_STATUSES]},
+		fields=["name", "company", "leaving_date", "scheduled_by"],
+		order_by="leaving_date asc",
+	):
+		if row.company not in today:
+			today[row.company] = company_today(row.company)
+		if getdate(row.leaving_date) > today[row.company]:
+			continue
+		try:
+			outcome = _apply_due_leaving(row, today[row.company])
+		except Exception:
+			# `_mark_leaving_failed` itself failed: log, undo, next row.
+			frappe.log_error(
+				title=LEAVING_LOG_TITLE, reference_doctype=LEAVING_DOCTYPE, reference_name=row.name
+			)
+			frappe.db.rollback()
+			outcome = None
+		if outcome:
+			result[outcome] += 1
+		_commit()
+	return result
+
+
+def _apply_due_leaving(row, day):
+	"""One due row for `apply_due_leavings`: "applied", "failed", or None
+	(closed because the leaver had already left, skipped because the row
+	was no longer open, or left for the next tick after a lock error)."""
+	frappe.db.savepoint(_LEAVING_SAVEPOINT)
+	try:
+		applied = apply_leaving(row.name, actor=_scheduled_actor(row.scheduled_by))
+	except Exception as exc:
+		try:
+			frappe.db.rollback(save_point=_LEAVING_SAVEPOINT)
+		except Exception:
+			# A deadlock or lock timeout rolls back the whole transaction,
+			# savepoint included; earlier rows have committed already.
+			frappe.db.rollback()
+		frappe.clear_last_message()
+		if isinstance(exc, frappe.QueryDeadlockError | frappe.QueryTimeoutError):
+			return None
+		plain = isinstance(exc, frappe.ValidationError) and " ".join(strip_html(str(exc)).split())
+		return "failed" if _mark_leaving_failed(row.name, plain or None, day) else None
+	return "applied" if applied.status == "Applied" else None
+
+
+def _scheduled_actor(user):
+	return _("HelixHR, as scheduled by {0},").format(get_fullname(user))
+
+
+def _mark_leaving_failed(name, message, day):
+	"""Failed, with ``message`` (None: an unexpected error, whose detail
+	goes to Error Log only). The employee stays Active. Logged once per row
+	per ``day``: the job retries every half hour.
+
+	Returns False, touching nothing, when the row is no longer open: HR
+	cancelled or applied it after the job's snapshot, and that refusal is
+	not a failure. Read under a lock, so a concurrent cancel cannot slip in
+	between this check and the write."""
+	message = message or _(
+		"Something went wrong applying this leaving. Try again, or ask your administrator to check the Error Log."
+	)
+	row = frappe.db.get_value(
+		LEAVING_DOCTYPE, name, ["status", "error", "failed_on"], as_dict=True, for_update=True
+	)
+	if not row or row.status not in OPEN_STATUSES:
+		return False
+	logged_today = row.failed_on and getdate(row.failed_on) == day
+	if row.status == "Failed" and row.error == message and logged_today:
+		return True
+	if not logged_today:
+		frappe.log_error(
+			title=LEAVING_LOG_TITLE,
+			message=f"{message}\n\n{frappe.get_traceback()}",
+			reference_doctype=LEAVING_DOCTYPE,
+			reference_name=name,
+		)
+	frappe.db.set_value(LEAVING_DOCTYPE, name, {"status": "Failed", "error": message, "failed_on": day})
+	return True
+
+
+def _commit():
+	"""A row's outcome commits on its own, except under tests: a test relies
+	on its rollback."""
+	if not frappe.flags.in_test:
+		frappe.db.commit()

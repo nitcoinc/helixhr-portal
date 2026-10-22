@@ -10,6 +10,7 @@ import {
   formatDayMonth,
   formatTime,
   isCalendarDate,
+  isDueBy,
   mondayOf,
   resetCalendar,
   today,
@@ -382,5 +383,32 @@ describe('unusable input falls back instead of showing nothing', () => {
       expect(formatDate('2026-01-01')).toMatch(/2026/)
       expect(todayInZone('Asia/Kolkata')).toMatch(/^\d{4}-\d{2}-\d{2}$/)
     })
+  })
+})
+
+// Plan 2026-10-22-001 U5. A leaving applies by the company's calendar, not
+// HR's: an HR user in New York on the evening of the 23rd is already on the
+// 24th in a Kolkata company, and a leaving dated the 24th applies now.
+describe('isDueBy uses the company today when the server sent one', () => {
+  afterEach(() => vi.useRealTimers())
+
+  it('decides by the company today, not the user today', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(Date.UTC(2026, 9, 23, 22, 0, 0)) // 18:00 New York, 03:30 on the 24th in Kolkata
+    configureCalendar({ timeZone: 'America/New_York', systemTimeZone: 'Asia/Kolkata' })
+    expect(today()).toBe('2026-10-23')
+    expect(isDueBy('2026-10-24', '2026-10-24')).toBe(true)
+    expect(isDueBy('2026-10-24')).toBe(false)
+    // ...and the other way round: a company still on the 23rd while HR is not.
+    expect(isDueBy('2026-10-23', '2026-10-22')).toBe(false)
+  })
+
+  it('falls back to the user today, and an empty date is never due', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(Date.UTC(2026, 9, 23, 12, 0, 0))
+    configureCalendar({ timeZone: 'Asia/Kolkata', systemTimeZone: 'Asia/Kolkata' })
+    expect(isDueBy('2026-10-23', null)).toBe(true)
+    expect(isDueBy('2026-10-24', undefined)).toBe(false)
+    expect(isDueBy('', '2026-10-24')).toBe(false)
   })
 })

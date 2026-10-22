@@ -181,6 +181,255 @@ test.describe('hr', () => {
     })
   }
 
+  // Plan 2026-10-22-001 U4 (R1, R4, R7). The dev site has no Microsoft
+  // sign-in, so the welcome email is held. A per-run name keeps a re-run
+  // clear of the duplicate refusal.
+  test('U4: HR adds an employee with a login and lands on their page', async ({ page }) => {
+    const stamp = Date.now()
+    const firstName = `Newstart ${stamp}`
+    await page.goto('/helixhr/people')
+    await page.getByRole('button', { name: 'Add employee' }).click()
+    await expect(page).toHaveURL(/\/helixhr\/people\/new$/)
+    await expect(page.getByRole('heading', { name: 'Add employee' })).toBeVisible()
+
+    await page.getByLabel('First name').fill(firstName)
+    await page.getByLabel('Last name').fill('Playwright')
+    const gender = page.getByLabel('Gender')
+    await expect(gender.locator('option')).not.toHaveCount(1)
+    await gender.selectOption({ index: 1 })
+    await page.getByLabel('Date of birth').fill('1995-05-05')
+    // Preselected when HR has one company; otherwise take the first.
+    const company = page.getByLabel('Company', { exact: true })
+    if (!(await company.inputValue())) await company.selectOption({ index: 1 })
+    await page.getByLabel('Joining date').fill('2025-01-06')
+    await page.getByLabel('Company email').fill(`newstart-${stamp}@helixhr.test`)
+    await expect(page.getByLabel('Create login now')).toBeChecked()
+
+    await page.getByRole('button', { name: 'Add employee' }).click()
+
+    await expect(page).toHaveURL(/\/helixhr\/people\/(?!new$)[^/]+$/)
+    await expect(page.getByRole('heading', { name: `${firstName} Playwright` })).toBeVisible()
+    await expect(
+      page.getByText(`Added ${firstName} Playwright. Login created; welcome email held until Microsoft sign-in is on.`).first(),
+    ).toBeVisible()
+  })
+
+  test('U4: a missing required field is marked inline and nothing is added', async ({ page }) => {
+    let posted = false
+    page.on('request', (request) => {
+      if (request.url().includes('helixhr.api.create_employee')) posted = true
+    })
+    await page.goto('/helixhr/people/new')
+    await expect(page.getByLabel('First name')).toBeVisible()
+    await page.getByLabel('Last name').fill('Nofirstname')
+    await page.getByRole('button', { name: 'Add employee' }).click()
+
+    const firstName = page.getByLabel('First name')
+    await expect(page.getByText('Enter their first name.')).toBeVisible()
+    await expect(firstName).toHaveAttribute('aria-invalid', 'true')
+    await expect(firstName).toBeFocused()
+    await expect(page.getByText(/fields need an answer/)).toBeVisible()
+    await expect(page).toHaveURL(/\/helixhr\/people\/new$/)
+    expect(posted).toBe(false)
+  })
+
+  // R16: the seeded "Directory Left" fixture (`ensure_directory_fixtures`).
+  test('U4: "Include people who have left" finds a relieved person', async ({ page }) => {
+    await page.goto('/helixhr/people')
+    await page.getByLabel('Search').fill('Directory Left')
+    await expect(page.getByText('Nobody matches that search')).toBeVisible()
+
+    await page.getByLabel('Include people who have left').check()
+    const row = page.getByTestId('people-row').filter({ hasText: 'Directory Left' })
+    await expect(row).toHaveCount(1)
+    await expect(row.getByTestId('people-status')).toHaveText('Left')
+  })
+
+  // Plan 2026-10-22-001 U5. A Left status disables the linked login outside
+  // any rollback, so every test that relieves or schedules works on throwaway
+  // people made here with per-run names -- never a Playwright fixture user.
+  async function api(page, method: string, params: Record<string, unknown>) {
+    return page.evaluate(
+      async ([method, params]) => {
+        const response = await fetch(`/api/method/${method}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Frappe-CSRF-Token': window.csrf_token },
+          body: JSON.stringify(params),
+        })
+        const body = await response.json()
+        if (!response.ok) throw new Error(`${method}: ${JSON.stringify(body)}`)
+        return body.message
+      },
+      [method, params] as const,
+    )
+  }
+
+  /** A throwaway Active employee in HR's first company, no login. */
+  async function throwaway(page, firstName: string, extra: Record<string, unknown> = {}) {
+    if (!page.url().includes('/helixhr')) await page.goto('/helixhr/people')
+    const options = await api(page, 'helixhr.api.get_new_person_options', {})
+    const created = await api(page, 'helixhr.api.create_employee', {
+      first_name: firstName,
+      last_name: 'Throwaway',
+      gender: options.genders[0],
+      date_of_birth: '1990-01-01',
+      company: options.companies[0],
+      date_of_joining: '2025-01-06',
+      create_login: 0,
+      ...extra,
+    })
+    return { id: created.employee as string, name: created.employee_name as string }
+  }
+
+  function isoDay(offset: number) {
+    const day = new Date()
+    day.setDate(day.getDate() + offset)
+    return day.toISOString().slice(0, 10)
+  }
+
+  test('U5: the joining card no longer offers Left', async ({ page }) => {
+    await page.goto('/helixhr/people')
+    await page.getByLabel('Search').fill(COLLEAGUE_NAME)
+    await page.getByRole('button', { name: new RegExp(COLLEAGUE_NAME) }).first().click()
+    await page.getByTestId('person-edit-joining').click()
+    const status = page.getByRole('dialog').getByLabel('Status')
+    await expect(status.locator('option')).toHaveText(['Active', 'Inactive', 'Suspended'])
+  })
+
+  test('U5: Create login on a person without one shows who they sign in as', async ({ page }) => {
+    const stamp = Date.now()
+    const email = `loginless-${stamp}@helixhr.test`
+    const person = await throwaway(page, `Loginless ${stamp}`, { company_email: email })
+    await page.goto(`/helixhr/people/${person.id}`)
+
+    const login = page.getByTestId('person-login')
+    await expect(login).toContainText('No login')
+    await login.getByRole('button', { name: 'Create login' }).click()
+    await expect(login).toContainText(`Signs in as ${email}`)
+    await expect(login).toContainText('Welcome email held until Microsoft sign-in is on.')
+    await expect(page.getByText(`Login created for ${person.name}.`).first()).toBeVisible()
+  })
+
+  test('U5: Create login waits for a work email', async ({ page }) => {
+    const person = await throwaway(page, `Noemail ${Date.now()}`)
+    await page.goto(`/helixhr/people/${person.id}`)
+    const login = page.getByTestId('person-login')
+    await expect(login.getByRole('button', { name: 'Create login' })).toBeDisabled()
+    await expect(login).toContainText('Add a work email first')
+  })
+
+  test('U5: schedule a leaving, change its date, then cancel it', async ({ page }) => {
+    const person = await throwaway(page, `Scheduled ${Date.now()}`)
+    await page.goto(`/helixhr/people/${person.id}`)
+    await page.getByTestId('person-relieve').click()
+
+    const sheet = page.getByTestId('relieve-sheet')
+    // Continue with nothing filled marks the fields, and saves nothing.
+    await sheet.getByRole('button', { name: 'Continue' }).click()
+    await expect(sheet.getByText('Choose the leaving date.')).toBeVisible()
+    await expect(sheet.getByRole('alert')).toHaveText('2 fields need an answer. They are marked below.')
+    await expect(sheet.getByLabel('Leaving date')).toBeFocused()
+
+    const first = isoDay(30)
+    await sheet.getByLabel('Leaving date').fill(first)
+    await sheet.getByLabel('Reason').fill('Moving abroad')
+    await sheet.getByRole('button', { name: 'Continue' }).click()
+    await expect(sheet.getByTestId('relieve-confirm')).toContainText('Until then nothing changes')
+    await sheet.getByRole('button', { name: 'Schedule leaving' }).click()
+
+    const banner = page.getByTestId('person-leaving')
+    await expect(banner).toContainText('Leaving on')
+    await expect(banner).toContainText('Moving abroad')
+    await expect(page.getByTestId('person-relieve')).toHaveCount(0)
+    const firstHeading = await banner.getByRole('heading').textContent()
+
+    await banner.getByRole('button', { name: 'Change' }).click()
+    await expect(sheet.getByLabel('Leaving date')).toHaveValue(first)
+    await sheet.getByLabel('Leaving date').fill(isoDay(40))
+    await sheet.getByRole('button', { name: 'Continue' }).click()
+    await sheet.getByRole('button', { name: 'Save new leaving' }).click()
+    await expect(banner.getByRole('heading')).not.toHaveText(firstHeading!)
+    await expect(page.getByText(new RegExp(`${person.name}'s leaving is now`)).first()).toBeVisible()
+
+    await banner.getByRole('button', { name: 'Cancel leaving' }).click()
+    await expect(banner).toHaveCount(0)
+    await expect(page.getByTestId('person-relieve')).toBeVisible()
+    await expect(page.getByText(`${person.name}'s leaving is cancelled.`, { exact: false }).first()).toBeVisible()
+  })
+
+  test('U5: relieve today moves the team to the new manager and the person shows Left', async ({ page }) => {
+    const stamp = Date.now()
+    const leaver = await throwaway(page, `Leaver ${stamp}`)
+    const successor = await throwaway(page, `Successor ${stamp}`)
+    const report = await throwaway(page, `Report ${stamp}`, { reports_to: leaver.id })
+
+    await page.goto(`/helixhr/people/${leaver.id}`)
+    await page.getByTestId('person-relieve').click()
+    const sheet = page.getByTestId('relieve-sheet')
+    // A couple of days back, so it is on or before every company's today.
+    await sheet.getByLabel('Leaving date').fill(isoDay(-2))
+    await sheet.getByLabel('Reason').fill('Resigned')
+    await expect(sheet.getByText(`1 person reports to ${leaver.name}; choose who they report to next.`)).toBeVisible()
+    await sheet.getByRole('button', { name: 'Continue' }).click()
+    await expect(sheet.getByText('Choose who their team reports to next.')).toBeVisible()
+
+    await sheet.getByLabel('Find a person').fill(`Successor ${stamp}`)
+    const manager = sheet.getByLabel('New manager')
+    await expect(manager.locator('option')).toHaveCount(2)
+    await manager.selectOption({ label: successor.name })
+    await sheet.getByRole('button', { name: 'Continue' }).click()
+    const confirm = sheet.getByTestId('relieve-confirm')
+    await expect(confirm).toContainText(`will report to ${successor.name}`)
+    await expect(confirm).toContainText("This can't be undone here.")
+    await sheet.getByRole('button', { name: `Relieve ${leaver.name} now` }).click()
+
+    await expect(page.getByTestId('person-left')).toContainText('Left on')
+    await expect(page.getByTestId('person-left')).toContainText('Resigned')
+    await expect(page.getByTestId('person-relieve')).toHaveCount(0)
+    await expect(page.getByText(`Their team now reports to ${successor.name}.`).first()).toBeVisible()
+
+    // Left is final in the portal: the status is read-only, with where to rehire.
+    await page.getByTestId('person-edit-joining').click()
+    const status = page.getByRole('dialog').getByLabel('Status')
+    await expect(status).toBeDisabled()
+    await expect(status).toHaveValue('Left')
+    await expect(page.getByRole('dialog').getByText('Rehiring is done in Desk.')).toBeVisible()
+    await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click()
+
+    await page.goto(`/helixhr/people/${report.id}`)
+    await expect(page.getByRole('region', { name: 'Approvers and shift' })).toContainText(successor.name)
+  })
+
+  // The employee-mobile-webkit project signs in as an employee, who has no
+  // People screen; this is the phone width in Chromium with HR's session.
+  test('U5: the relieve sheet works at phone width', async ({ browser }) => {
+    const context = await browser.newContext({
+      storageState: 'tests/.auth/hr.json',
+      viewport: { width: 390, height: 844 },
+      hasTouch: true,
+      isMobile: true,
+    })
+    const page = await context.newPage()
+    const person = await throwaway(page, `Phone ${Date.now()}`)
+    await page.goto(`/helixhr/people/${person.id}`)
+    await page.getByTestId('person-relieve').click()
+    const sheet = page.getByTestId('relieve-sheet')
+    await sheet.getByLabel('Leaving date').fill(isoDay(30))
+    await sheet.getByLabel('Reason').fill('Contract ends')
+    await sheet.getByRole('button', { name: 'Continue' }).click()
+    const schedule = sheet.getByRole('button', { name: 'Schedule leaving' })
+    await expect(schedule).toBeInViewport()
+    const box = await schedule.boundingBox()
+    const width = await page.evaluate(() => document.documentElement.scrollWidth)
+    // Back out: nothing is saved without the confirm.
+    await sheet.getByRole('button', { name: 'Back' }).click()
+    await sheet.getByRole('button', { name: 'Close' }).click()
+    await expect(page.getByTestId('person-leaving')).toHaveCount(0)
+    await context.close()
+    expect(box?.height).toBeGreaterThanOrEqual(44)
+    expect(width).toBeLessThanOrEqual(390)
+  })
+
   // HR-10 / U15: the shared SearchField, 44px under a coarse pointer.
   test('the search field is a 44px target on a phone', async ({ browser }) => {
     const context = await browser.newContext({
@@ -212,6 +461,12 @@ test('an employee identity has no People nav item, and a direct hit is refused s
 
   await page.goto('/helixhr/people/HR-EMP-00001')
   await expect(page.locator('[data-async-state="person:forbidden"]')).toBeVisible()
+
+  // Plan 2026-10-22-001 U4: no Add employee, and the form itself is refused.
+  await page.goto('/helixhr/people')
+  await expect(page.getByRole('button', { name: 'Add employee' })).toHaveCount(0)
+  await page.goto('/helixhr/people/new')
+  await expect(page.locator('[data-async-state="new-person:forbidden"]')).toBeVisible()
 })
 
 test('an IT Team identity -- a routed worker, not HR -- is refused the same way', async ({ page }, testInfo) => {

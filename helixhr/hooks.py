@@ -448,6 +448,9 @@ scheduler_events = {
 		"0,30 * * * *": [
 			"helixhr.reminders.send_celebration_reminders",
 			"helixhr.reminders.send_holiday_reminders",
+			# Plan 2026-10-22-001 U3 (KTD6): a leaving applies at its own
+			# company's midnight, and a failed one retries every tick.
+			"helixhr.tasks.apply_due_leavings",
 		],
 	},
 	# Off by default -- helixhr.telemetry.send_ping is a no-op until an

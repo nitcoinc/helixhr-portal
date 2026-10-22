@@ -8,7 +8,11 @@ import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
 import SearchField from '@/components/SearchField.vue'
 import SegmentedChips from '@/components/SegmentedChips.vue'
-import { formatDate } from '@/lib/dates'
+import RelieveSheet from '@/components/people/RelieveSheet.vue'
+import { call } from '@/lib/api'
+import { formatDate, isDueBy } from '@/lib/dates'
+import { FALLBACK_ERROR, toPlainMessage } from '@/lib/errorMap'
+import { notify } from '@/lib/notify'
 import { employeeNumberAddsNothing, fieldOptions, filterByField, sortRows } from '@/lib/lists'
 import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
 import { useIsDesktop } from '@/lib/useIsDesktop'
@@ -35,18 +39,24 @@ const router = useRouter()
 // rows -- the stated headcount -- so the department chips, the count and the
 // table's sort cover everyone the search matched, all client-side. Past 200
 // the count line says only the first 200 are loaded and a search narrows it.
-// The server returns Active employees only, so there is no status filter to
-// offer here.
 const LIMIT = 200
 
 const query = ref('')
 const search = ref('')
+// Plan 2026-10-22-001 R16: Active only unless HR asks for people who have
+// left too, so a relieved person can still be opened.
+const includeLeft = ref(false)
 
 const results = createResource({
   url: 'helixhr.api.search_people',
-  makeParams: () => ({ query: search.value || undefined, limit: LIMIT }),
+  makeParams: () => ({
+    query: search.value || undefined,
+    limit: LIMIT,
+    status: includeLeft.value ? 'all' : undefined,
+  }),
   auto: true,
 })
+watch(includeLeft, () => results.reload())
 
 // The server ignores a query under 2 characters (_PEOPLE_SEARCH_QUERY_MIN),
 // so a shorter one asks the same question as none, and an unchanged one is
@@ -122,6 +132,10 @@ function peopleCount(count) {
   return `${count} ${count === 1 ? 'person' : 'people'}`
 }
 
+// A row that is not Active (Left, with "Include people who have left" on)
+// says so in words, beside the name.
+const STATUS_PILL = 'mt-0.5 inline-block rounded-full bg-surface-gray-3 px-2 py-0.5 text-xs font-medium text-ink-gray-7'
+
 function openPerson(person) {
   router.push(`/people/${person.name}`)
 }
@@ -193,8 +207,14 @@ const APPROVER_PROBLEM_TEXT = {
 // Employee.status's own Select options (erpnext/setup/doctype/employee/
 // employee.json) -- small and stable enough on ERPNext's own core doctype
 // to name directly, the same way LeaveTypesSection names its own fixed
-// checkbox set rather than fetching it.
-const STATUS_OPTIONS = ['Active', 'Inactive', 'Suspended', 'Left']
+// checkbox set rather than fetching it. Plan 2026-10-22-001 R15: no Left --
+// Relieve is the only way there. Someone already Left keeps it as their
+// current value, read-only: `save_person` refuses any status change from
+// Left, and a rehire is done in Desk.
+const STATUS_OPTIONS = ['Active', 'Inactive', 'Suspended']
+const statusOptions = computed(() =>
+  profile.value?.status === 'Left' ? [...STATUS_OPTIONS, 'Left'] : STATUS_OPTIONS,
+)
 
 const editingCard = ref(null)
 const form = reactive({
@@ -278,6 +298,127 @@ async function submitEdit() {
     editError.value = error?.messages?.[0] || 'Could not save that. Please try again.'
   }
 }
+
+function plainError(error) {
+  return toPlainMessage(error?.messages?.[0] ?? error?.message) || FALLBACK_ERROR
+}
+
+// --- login (plan 2026-10-22-001 U5: R4, R7) ---------------------------------
+//
+// `login` is null for a caller who can't edit; the server refuses a Left
+// person, a missing company email and a taken address in a plain sentence.
+const login = computed(() => person.data?.login || null)
+const loginBusy = ref(false)
+
+const WELCOME_TEXT = {
+  sent: 'Welcome email sent.',
+  held: 'Welcome email held until Microsoft sign-in is on.',
+  not_sent: 'Welcome email not sent.',
+}
+
+async function loginAction(method, done) {
+  loginBusy.value = true
+  try {
+    const result = await call(method, { employee: props.employee })
+    person.data = { ...person.data, login: result.login }
+    notify.success(`${done} ${WELCOME_TEXT[result.welcome] || ''}`.trim())
+  } catch (error) {
+    notify.error(plainError(error))
+  } finally {
+    loginBusy.value = false
+  }
+}
+
+function createLogin() {
+  return loginAction('helixhr.api.create_employee_login', `Login created for ${profile.value.employee_name}.`)
+}
+
+function resendWelcome() {
+  return loginAction('helixhr.api.send_employee_welcome', '')
+}
+
+// --- leaving (plan 2026-10-22-001 U5: R9, R10, R12, R13) -------------------
+//
+// `leaving` is the open (Pending or Failed) row, or the Applied one for
+// someone who has left. A Desk leaver has none, so the Left card falls back
+// to the status alone. Every write sends the row's `modified`, and the page
+// re-reads the person quietly afterwards: a leaving that applied changes the
+// status, the login and the team in one go.
+const leaving = computed(() => person.data?.leaving || null)
+const openLeaving = computed(() =>
+  ['Pending', 'Failed'].includes(leaving.value?.status) ? leaving.value : null,
+)
+const hasLeft = computed(() => profile.value?.status === 'Left')
+// null for a caller who can't edit; isDueBy then falls back to the user's today.
+const companyToday = computed(() => person.data?.company_today || null)
+const canRelieve = computed(() => canEdit.value && profile.value?.status === 'Active' && !openLeaving.value)
+// A Pending leaving whose day has come applies on the half-hourly job; HR
+// can apply it now instead (the dev bench has no scheduler at all). Due by
+// the company's today, the one the job and `relieve_employee` go by.
+const leavingDue = computed(() => !!openLeaving.value && isDueBy(openLeaving.value.leaving_date, companyToday.value))
+
+const relieveOpen = ref(false)
+const confirmApply = ref(false)
+const leavingBusy = ref(false)
+
+function openRelieve() {
+  confirmApply.value = false
+  relieveOpen.value = true
+  // Always this person's: the list is their company's.
+  formOptions.reload()
+}
+
+async function refreshPerson() {
+  // Not `person.reload()`: that would swap the page for its skeleton.
+  try {
+    person.data = await call('helixhr.api.get_person', { employee: props.employee })
+  } catch {
+    person.reload()
+  }
+}
+
+function appliedText(name, managerName) {
+  return `${name} is relieved and their login is off.${managerName ? ` Their team now reports to ${managerName}.` : ''}`
+}
+
+function onRelieved({ applied, changed, leaving: row }) {
+  const name = profile.value.employee_name
+  if (applied) notify.success(appliedText(name, row?.new_manager_name))
+  else notify.success(`${name}'s leaving is ${changed ? 'now' : 'set for'} ${formatDate(row.leaving_date)}.`)
+  refreshPerson()
+}
+
+async function leavingAction(method, onDone) {
+  leavingBusy.value = true
+  try {
+    const result = await call(method, { employee: props.employee, expected_modified: openLeaving.value.modified })
+    onDone(result)
+    confirmApply.value = false
+    await refreshPerson()
+  } catch (error) {
+    notify.error(plainError(error))
+  } finally {
+    leavingBusy.value = false
+  }
+}
+
+function cancelLeaving() {
+  const name = profile.value.employee_name
+  return leavingAction('helixhr.api.cancel_leaving', () =>
+    notify.success(`${name}'s leaving is cancelled. Nothing changes for them.`),
+  )
+}
+
+// Applying is irreversible: the first press asks, the second does it.
+function applyLeaving() {
+  if (!confirmApply.value) {
+    confirmApply.value = true
+    return
+  }
+  const name = profile.value.employee_name
+  const managerName = openLeaving.value.new_manager_name
+  return leavingAction('helixhr.api.retry_leaving', () => notify.success(appliedText(name, managerName)))
+}
 </script>
 
 <template>
@@ -304,6 +445,14 @@ async function submitEdit() {
           >
             Open in Desk
           </a>
+          <Button
+            v-if="profile && canRelieve"
+            variant="subtle"
+            data-testid="person-relieve"
+            @click="openRelieve"
+          >
+            Relieve
+          </Button>
         </template>
       </PageHeader>
 
@@ -325,6 +474,107 @@ async function submitEdit() {
           >
             View only. This person is outside the company you manage, so their record can't be changed here.
           </p>
+
+          <!-- Plan 2026-10-22-001 U5: the leaving, in whichever state it is. -->
+          <section
+            v-if="openLeaving"
+            :class="openLeaving.status === 'Failed' ? 'surface-alert p-4' : 'surface-card elev-1 p-4'"
+            aria-labelledby="person-leaving-heading"
+            data-testid="person-leaving"
+          >
+            <h2
+              id="person-leaving-heading"
+              class="font-heading text-base font-semibold"
+              :class="openLeaving.status === 'Failed' ? '' : 'text-ink-gray-9'"
+            >
+              {{ openLeaving.status === 'Failed' ? `Leaving on ${formatDate(openLeaving.leaving_date)} didn't go through` : `Leaving on ${formatDate(openLeaving.leaving_date)}` }}
+            </h2>
+            <p
+              v-if="openLeaving.status === 'Failed'"
+              class="mt-1 text-sm"
+            >
+              {{ openLeaving.error || 'It could not be applied.' }} {{ profile.employee_name }} is still Active with their login on.
+            </p>
+            <p class="mt-1 text-sm text-ink-gray-7">
+              Reason: {{ openLeaving.reason }}<template v-if="openLeaving.new_manager_name">
+                · Team moves to {{ openLeaving.new_manager_name }}
+              </template><template v-if="openLeaving.scheduled_by_name">
+                · Set by {{ openLeaving.scheduled_by_name }}
+              </template>
+            </p>
+            <p
+              v-if="openLeaving.status === 'Pending' && !leavingDue"
+              class="mt-1 text-sm text-ink-gray-6"
+            >
+              Until then they keep their login. On that day their status becomes Left and their login is turned off.
+            </p>
+            <p
+              v-if="confirmApply"
+              class="mt-3 text-sm font-medium text-ink-gray-9"
+              role="alert"
+            >
+              Relieve {{ profile.employee_name }} now? Their login turns off straight away. This can't be undone here.
+            </p>
+            <div class="mt-3 flex flex-wrap gap-2">
+              <Button
+                v-if="openLeaving.status === 'Failed' || leavingDue"
+                variant="solid"
+                :theme="confirmApply ? 'red' : 'blue'"
+                :loading="leavingBusy"
+                data-testid="person-leaving-apply"
+                @click="applyLeaving"
+              >
+                {{ confirmApply ? 'Yes, relieve now' : openLeaving.status === 'Failed' ? 'Try again' : 'Relieve now' }}
+              </Button>
+              <template v-if="!confirmApply">
+                <Button
+                  variant="subtle"
+                  :disabled="leavingBusy"
+                  data-testid="person-leaving-change"
+                  @click="openRelieve"
+                >
+                  Change
+                </Button>
+                <Button
+                  variant="subtle"
+                  :disabled="leavingBusy"
+                  data-testid="person-leaving-cancel"
+                  @click="cancelLeaving"
+                >
+                  Cancel leaving
+                </Button>
+              </template>
+              <Button
+                v-else
+                variant="subtle"
+                @click="confirmApply = false"
+              >
+                Keep it
+              </Button>
+            </div>
+          </section>
+          <section
+            v-else-if="hasLeft"
+            class="surface-inset p-4"
+            aria-labelledby="person-left-heading"
+            data-testid="person-left"
+          >
+            <h2
+              id="person-left-heading"
+              class="font-heading text-base font-semibold text-ink-gray-9"
+            >
+              {{ leaving?.leaving_date ? `Left on ${formatDate(leaving.leaving_date)}` : 'Left' }}
+            </h2>
+            <p
+              v-if="leaving?.reason"
+              class="mt-1 text-sm text-ink-gray-7"
+            >
+              Reason: {{ leaving.reason }}
+            </p>
+            <p class="mt-1 text-sm text-ink-gray-6">
+              Their login is turned off. A leaving can't be undone here.
+            </p>
+          </section>
           <!-- Overview (P8-U8). -->
           <section
             class="surface-card elev-1 p-4"
@@ -379,6 +629,70 @@ async function submitEdit() {
                   {{ profile.company_email || '—' }}
                 </p>
               </div>
+            </div>
+            <!-- Plan 2026-10-22-001 U5 (R4, R7): the login, for a caller who
+                 can act on it. -->
+            <div
+              v-if="login"
+              class="mt-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 border-t border-outline-gray-1 pt-3"
+              data-testid="person-login"
+            >
+              <div class="min-w-0">
+                <p class="text-sm text-ink-gray-6">
+                  Login
+                </p>
+                <p
+                  v-if="login.state === 'active'"
+                  class="break-all font-medium text-ink-gray-9"
+                >
+                  Signs in as {{ login.user }}
+                </p>
+                <p
+                  v-else-if="login.state === 'disabled' || hasLeft"
+                  class="font-medium text-ink-gray-9"
+                >
+                  Login turned off
+                </p>
+                <p
+                  v-else
+                  class="font-medium text-ink-gray-9"
+                >
+                  No login
+                </p>
+                <p
+                  v-if="login.state === 'active' && login.welcome_held"
+                  class="mt-0.5 text-sm text-ink-gray-6"
+                >
+                  Welcome email held until Microsoft sign-in is on.
+                </p>
+                <p
+                  v-else-if="login.state === 'none' && !hasLeft && !profile.company_email"
+                  id="person-login-hint"
+                  class="mt-0.5 text-sm text-ink-gray-6"
+                >
+                  Add a work email first: it becomes their login.
+                </p>
+              </div>
+              <Button
+                v-if="login.state === 'none' && !hasLeft"
+                variant="subtle"
+                :disabled="!profile.company_email"
+                :loading="loginBusy"
+                :aria-describedby="profile.company_email ? undefined : 'person-login-hint'"
+                data-testid="person-create-login"
+                @click="createLogin"
+              >
+                Create login
+              </Button>
+              <Button
+                v-else-if="login.state === 'active'"
+                variant="subtle"
+                :loading="loginBusy"
+                data-testid="person-resend-welcome"
+                @click="resendWelcome"
+              >
+                Resend welcome
+              </Button>
             </div>
           </section>
 
@@ -788,16 +1102,25 @@ async function submitEdit() {
                 <select
                   id="person-edit-status"
                   v-model="form.status"
-                  class="mt-1 block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
+                  :disabled="hasLeft"
+                  :aria-describedby="hasLeft ? 'person-edit-status-help' : undefined"
+                  class="mt-1 block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8 disabled:bg-surface-gray-2 disabled:text-ink-gray-5"
                 >
                   <option
-                    v-for="option in STATUS_OPTIONS"
+                    v-for="option in statusOptions"
                     :key="option"
                     :value="option"
                   >
                     {{ option }}
                   </option>
                 </select>
+                <p
+                  v-if="hasLeft"
+                  id="person-edit-status-help"
+                  class="mt-1 text-xs text-ink-gray-5"
+                >
+                  Rehiring is done in Desk.
+                </p>
               </div>
               <FormControl
                 v-model="form.date_of_joining"
@@ -973,6 +1296,17 @@ async function submitEdit() {
           </div>
         </template>
       </Dialog>
+
+      <RelieveSheet
+        v-if="profile && canEdit"
+        v-model="relieveOpen"
+        :person="profile"
+        :leaving="openLeaving"
+        :direct-reports="person.data?.direct_reports || 0"
+        :people="formOptions.data?.people || []"
+        :company-today="companyToday"
+        @saved="onRelieved"
+      />
     </template>
 
     <!-- Search. Reached at /people. -->
@@ -980,18 +1314,40 @@ async function submitEdit() {
       <PageHeader
         title="People"
         subtitle="Find a colleague to see their leave, attendance and requests."
-      />
+      >
+        <template #actions>
+          <Button
+            v-if="session.canAddPeople"
+            variant="solid"
+            theme="blue"
+            @click="router.push('/people/new')"
+          >
+            Add employee
+          </Button>
+        </template>
+      </PageHeader>
 
       <div
         v-if="!forbidden"
-        class="mb-4 lg:w-80"
+        class="mb-4 flex flex-wrap items-end gap-x-4 gap-y-1"
       >
-        <SearchField
-          v-model="query"
-          label="Search"
-          placeholder="Name, employee number or work email"
-          maxlength="60"
-        />
+        <div class="w-full lg:w-80">
+          <SearchField
+            v-model="query"
+            label="Search"
+            placeholder="Name, employee number or work email"
+            maxlength="60"
+          />
+        </div>
+        <label class="flex min-h-11 items-center gap-2 text-sm text-ink-gray-8">
+          <input
+            v-model="includeLeft"
+            type="checkbox"
+            class="size-4"
+            data-testid="people-include-left"
+          >
+          Include people who have left
+        </label>
       </div>
 
       <AsyncState
@@ -1131,6 +1487,11 @@ async function submitEdit() {
                         data-testid="people-name"
                       >{{ row.employee_name }}</span>
                       <span
+                        v-if="row.status && row.status !== 'Active'"
+                        :class="STATUS_PILL"
+                        data-testid="people-status"
+                      >{{ row.status }}</span>
+                      <span
                         v-if="personNumber(row)"
                         class="block truncate text-xs text-ink-gray-6"
                       >{{ personNumber(row) }}</span>
@@ -1184,6 +1545,11 @@ async function submitEdit() {
               />
               <span class="min-w-0 flex-1">
                 <span class="block truncate font-medium text-ink-gray-9">{{ row.employee_name }}</span>
+                <span
+                  v-if="row.status && row.status !== 'Active'"
+                  :class="STATUS_PILL"
+                  data-testid="people-status"
+                >{{ row.status }}</span>
                 <span
                   v-if="cardLine(row)"
                   class="block truncate text-sm text-ink-gray-6"

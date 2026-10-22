@@ -536,6 +536,24 @@ NOTIFICATION_EVENTS = {
 		),
 		"action_label": "Open approvals",
 	},
+	# Plan 2026-10-22-001 U1 (R7, KTD8): a new login's welcome, sent to the
+	# company email. First name and company come in the context: the address
+	# may not resolve through `session_company` yet.
+	"employee_welcome": {
+		"label": "Welcome to HelixHR",
+		"audience": "Employee",
+		"variables": {
+			"login_email": ("The address they sign in with", "priya.sharma@example.com"),
+			"action_url": ("Link to sign in", "https://hr.example.com/helixhr"),
+		},
+		"subject": "Welcome to {{ company }}: your HelixHR login is ready",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>Your HelixHR account is ready. Sign in with your Microsoft work account,"
+			" {{ login_email }}, to see your leave, timesheets and payslips.</p>"
+		),
+		"action_label": "Sign in to HelixHR",
+	},
 	"bank_change_requested": {
 		"label": "Bank detail change requested",
 		"audience": "Security",
@@ -1209,6 +1227,58 @@ def send_notification(event_key, recipients, context, reference_doctype=None, re
 		except Exception:
 			frappe.log_error(frappe.get_traceback(), f"HelixHR {event_key} mail failed")
 	return queued
+
+
+def microsoft_sign_in_enabled():
+	"""Whether an Office 365 Social Login Key is enabled. A login HelixHR
+	creates has no password, so until this is true its holder cannot sign
+	in, and the welcome email is held (plan 2026-10-22-001 R7)."""
+	return bool(
+		frappe.db.exists(
+			"Social Login Key", {"social_login_provider": "Office 365", "enable_social_login": 1}
+		)
+	)
+
+
+# Plan 2026-10-22-001 U1 (R17): the Info comments a portal-made login leaves
+# on its Employee carry one of these in `subject`, so "is the welcome still
+# held" is read from the audit trail itself, never from translated wording.
+LOGIN_CREATED_MARK = "helixhr:login_created"
+WELCOME_SENT_MARK = "helixhr:welcome_sent"
+
+
+def _employee_note(employee, mark, content):
+	"""An Info comment on the Employee (R17), keyed by ``mark`` in `subject`
+	so `held_welcome_employees` can read the trail back. Inserted with
+	`ignore_permissions`: the caller's scope gate has already run, and the
+	comment is the audit trail, not a user's edit."""
+	frappe.get_doc(
+		{
+			"doctype": "Comment",
+			"comment_type": "Info",
+			"reference_doctype": "Employee",
+			"reference_name": employee,
+			"subject": mark,
+			"content": content,
+		}
+	).insert(ignore_permissions=True)
+
+
+def held_welcome_employees(employees=None):
+	"""The employees, of ``employees`` or of all, whose login was made in
+	HelixHR and who have had no welcome email yet. A login made in Desk has
+	no mark, so it is never reported held."""
+	filters = {"reference_doctype": "Employee", "comment_type": "Info"}
+	if employees is not None:
+		filters["reference_name"] = ["in", list(employees) or [""]]
+	marks = frappe.get_all(
+		"Comment",
+		filters={**filters, "subject": ["in", (LOGIN_CREATED_MARK, WELCOME_SENT_MARK)]},
+		fields=["reference_name", "subject"],
+	)
+	created = {row.reference_name for row in marks if row.subject == LOGIN_CREATED_MARK}
+	sent = {row.reference_name for row in marks if row.subject == WELCOME_SENT_MARK}
+	return created - sent
 
 
 # Plan 2026-10-08-001 U1: a company's own clock. A server whose System
@@ -2578,6 +2648,20 @@ RATE_LIMIT_POLICY = {
 	# administrative write like the config saves just above it.
 	"get_person_form_options": (60, 60),
 	"save_person": (30, 3600),
+	# Plan 2026-10-22-001 U1: both can send a welcome email -- real mail to
+	# an address HR typed -- so they are bounded like the reminder sends.
+	"create_employee_login": (20, 3600),
+	"send_employee_welcome": (10, 3600),
+	# Plan 2026-10-22-001 U2: the add form's read, and the insert -- an
+	# administrative write like `save_person`. Its login step spends
+	# `create_employee_login`'s own bucket.
+	"get_new_person_options": (60, 60),
+	"create_employee": (30, 3600),
+	# U3: relieving moves a team and turns off a login -- an occasional
+	# administrative write, bounded like `save_person`.
+	"relieve_employee": (20, 3600),
+	"cancel_leaving": (20, 3600),
+	"retry_leaving": (20, 3600),
 	# P8-U12: an occasional administrative write, like the config saves above.
 	# Plan 2026-10-04-004 U4: the Email Templates page's celebrations group --
 	# the setup read fans out per (event, company); preview renders per

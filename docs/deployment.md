@@ -152,8 +152,23 @@ against the new permission model.
 
 ## Adding an employee
 
-Four things have to be true before someone can use the portal. Three are
-automatic if you use the Employee form:
+Four things have to be true before someone can use the portal: an Active
+Employee record, a User linked in `user_id`, the `Employee` and `Employee
+Self Service` roles on that User, and User Permissions for Employee **and**
+Company.
+
+**In the portal (HR Manager, plan 2026-10-22-001).** People → **Add
+employee**: name, gender, date of birth, joining date and company (only the
+companies in your scope), optionally designation, department, manager and
+company email. Leave **Create login now** on and all four are done in one
+step: the login is the company email, holds only those two roles, has no
+password, and gets both User Permissions. A login can also be created later
+from the person page. HelixHR's welcome email is held until an Office 365
+Social Login Key is enabled (runbook, *Onboarding and leaving in the
+portal*). An email already used by any User or another Employee is refused.
+
+**In Desk (fallback).** Rehiring someone whose login already exists, and
+linking an existing or privileged account, stay here:
 
 | # | What | How |
 |---|---|---|
@@ -169,9 +184,13 @@ checkbox, which defaults to on. Take the button path and step 4 can be skipped
 records. `preflight`'s `Employee User Permissions` check FAILs on exactly this
 and names the user, so run preflight after onboarding a batch of people.
 
-To remove access, set the Employee's status to Left or disable the User. The
-landing rule checks Employee **status**, not merely the link, so a leaver is not
-redirected into a portal that would refuse every read.
+To remove access, **Relieve** the person from their People page: a leaving
+date (their first day without access), a reason, and, if anyone reports to
+them, a new manager for those reports. Today or earlier applies at once; a later date applies on that
+date at the company's midnight (needs the scheduler). The portal's person form
+no longer offers Left. Disabling the User in Desk still works for an immediate
+lock-out. The landing rule checks Employee **status**, not merely the link, so a
+leaver is not redirected into a portal that would refuse every read.
 
 ## What HR can change without a developer
 
@@ -299,9 +318,10 @@ to everybody: offboarding lag narrows their reach to zero rather than
 silently widening it to every company. Clear the role, or leave it — either
 way the portal shows them nothing until the Employee is Active again.
 and the person view answers leave balance, a month of attendance, open and
-recent requests, shift, holiday list, manager, joining date and status. It
-writes nothing, and a field above Employee permlevel 0 — salary, bank
-details, tax — never reaches this projection.
+recent requests, shift, holiday list, manager, joining date and status. A
+field above Employee permlevel 0 — salary, bank details, tax — never reaches
+this projection. (Since plan 2026-10-22-001 HR Manager also adds, gives a
+login to and relieves people here; see "Adding an employee".)
 
 `/reports` runs a curated catalog of reports in the portal and exports them
 as CSV, Excel or PDF (plan 2026-10-04-001). The catalog is `CATALOG` in

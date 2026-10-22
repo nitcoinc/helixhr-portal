@@ -113,6 +113,34 @@ There is no app-level auth code. Three Frappe mechanisms carry it:
      employee's company for non-HR handlers, open state) for handlers; the
      session-resolved ownership check for the employee.
 
+7. **People administration writes (documented `ignore_permissions`
+   exceptions, plan 2026-10-22-001).** Each runs after `resolve_admin_scope`
+   / `employee_in_admin_scope` has passed for the employee:
+   - `create_employee_login` inserts the User with `ignore_permissions`
+     (KTD1). Only System Manager holds `create` on User, and a User DocPerm
+     for HR would let HR edit any user's roles in Desk and bypass access
+     assignments, so HR gets none. The roles are fixed in code
+     (`_EMPLOYEE_LOGIN_ROLES`: Employee, Employee Self Service), nothing from
+     the request reaches them, there is no password and no Frappe welcome
+     mail. The Employee link (`user_id`, `create_user_permission = 1`) is a
+     normal save with the caller's permissions.
+   - `create_employee_login` then calls `add_user_permission` for Employee
+     (that employee) and Company (their company) with `ignore_permissions`,
+     for the new login only and only after the scope gate -- the pair
+     ERPNext's own `create_user` adds; nothing from the request picks either
+     value.
+   - `utils._employee_note` inserts the Info Comment audit trail (login
+     created, welcome sent, added, leaving scheduled / changed / cancelled /
+     applied / closed) with `ignore_permissions`, after the same gate or
+     from the job; the content is HelixHR's own wording.
+   - `tasks.apply_leaving` saves each moved direct report with
+     `ignore_permissions` (KTD7): a report in another company may sit outside
+     the caller's User Permissions. Validation still runs; the leaver saves
+     with the caller's own permissions (Administrator in the job).
+   - `relieve_employee`, `cancel_leaving`, `retry_leaving` and the job write
+     `HelixHR Leaving` rows with `ignore_permissions`; only System Manager
+     reads that DocType in Desk.
+
 Writes the employee should not be able to make are refused server-side:
 
 - `save_my_week` refuses a week that is not Draft or Sent Back, refuses projects
@@ -1608,7 +1636,8 @@ Holiday List, Shift Type -- `helixhr/utils.py`'s `*_EDITABLE_FIELDS`
 constants, not every field the doctype has). Everything else that changes
 rarely -- payroll runs, salary structures, onboarding, recruitment, company
 and department masters, role assignment -- stays in Desk; this plan does not
-touch it. A new HR-editable surface of this shape gets its own `save_*`
+touch it. (Adding and relieving an employee moved to the portal in plan
+2026-10-22-001; see *Adding and relieving employees* below.) A new HR-editable surface of this shape gets its own `save_*`
 method in `api.py` (explicit permission check, an allow-listed field set,
 `doc.save()` so the underlying doctype's own `validate` still runs -- never
 `db_set`), not a site config value and not a new Single.
@@ -1755,6 +1784,74 @@ roster keeps the same rules as every other HR surface here:
   `ignore_permissions` on a write, and nothing reaches `frappe.client`.
 - Recurring schedules (Shift Schedule Assignment), swaps and employee
   shift requests stay out; Desk still owns them.
+
+### Adding and relieving employees (plan 2026-10-22-001)
+
+Reverses `docs/plans/2026-09-15-001-feat-portal-for-every-role-plan.md`'s
+"creating and terminating employees" stay in Desk, for HR Manager only, the
+way 2026-09-20-002 KTD3 reversed the read-only person page. Elevated access
+does not move: it stays in People & access.
+
+- **Add.** `create_employee` (gate `_can_add_people`: an admin scope *and*
+  Frappe's own Employee `create`, which the insert runs under) takes only
+  `_NEW_PERSON_FIELDS`, checks company and manager against the scope,
+  refuses a likely duplicate (same name, date of birth and company, Active),
+  and inserts with the caller's permissions, so ERPNext and HelixHR
+  validation runs unchanged. `get_new_person_options` feeds the form;
+  bootstrap flag `can_add_people` shows the button.
+- **Login.** `create_employee_login` (bypass 7 above), alone or from
+  `create_employee` in its own savepoint, so a refused login never takes
+  the new employee with it. Refused: Left, no company email, an email held
+  by any User or another Employee's `company_email` / `user_id` (the holder
+  is named only when they are an Employee in the caller's admin scope, else
+  "someone else"). Rehire and
+  linking an existing or privileged account stay in Desk.
+- **Welcome.** `NOTIFICATION_EVENTS["employee_welcome"]`, sent through
+  `send_notification` to the company email, never raising. Held while
+  `utils.microsoft_sign_in_enabled()` is false (no enabled Office 365
+  Social Login Key): the login has no password. `held_welcome_employees`
+  reads it back from the Info-comment marks (`LOGIN_CREATED_MARK`,
+  `WELCOME_SENT_MARK`); `send_employee_welcome` resends.
+- **Relieve.** `relieve_employee`, `cancel_leaving`, `retry_leaving`.
+  `save_person` refuses `status = Left`; Relieve is the only portal path to
+  it (Inactive and Suspended still save there). For someone already Left it
+  refuses any status change ("Rehiring is done in Desk."); an unchanged
+  Left, re-sent by the joining card, still saves. `relieve_employee` also
+  refuses someone set as the new manager of another open leaving dated on
+  or after theirs, naming that person: that leaving would fail on its day.
+  `cancel_leaving` on someone set Left in Desk only closes the row; the
+  Desk date and reason stay. `get_person.company_today` (editors only) is
+  the company's own date for the relieve form. A date on or before the
+  company's `company_today` applies at once; a later one writes
+  `relieving_date` and `reason_for_leaving` ahead on the still-Active
+  Employee (KTD3) and waits. HR cannot relieve themselves.
+- **`HelixHR Leaving`.** One row per leaving: employee, company, leaving
+  date, reason, new manager, status **Pending / Applied / Failed /
+  Cancelled**, scheduled by, applied on, error. One open (Pending or
+  Failed) row per employee, enforced in the controller; Applied and
+  Cancelled are final. System Manager holds a read-only DocPerm and nothing
+  else; every write is one of the four paths named in bypass 7.
+- **Apply.** `tasks.apply_leaving`, shared by the endpoint, the retry and
+  `tasks.apply_due_leavings` (`0,30 * * * *` cron, beside the reminders).
+  Each tick applies open rows whose date has come on the company's own
+  clock, so each company relieves at its own midnight. It re-resolves the
+  Active direct reports *then* (KTD5), moves them to the new manager (that
+  manager, if one of them, to the leaver's own manager, KTD4), then sets the
+  leaver Left; ERPNext disables the login and HelixHR's Left hooks run, in
+  one transaction. Per row: a savepoint, a commit outside tests, and on
+  failure the row goes Failed with a plain message, the employee stays
+  Active, and Error Log gets `LEAVING_LOG_TITLE` ("HelixHR leaving failed")
+  once per row per company-local day. Failed rows retry every tick.
+  `apply_leaving` locks the Employee, then the row (the endpoints' order),
+  and re-checks the status under the lock; a row HR cancelled or applied
+  after the job's snapshot is skipped, never marked Failed. A leaver
+  already set Left in Desk closes the row as Cancelled with an Info note
+  (`helixhr:leaving_closed`). A deadlock or lock timeout that takes the
+  savepoint with it falls back to a full rollback and leaves the row for
+  the next tick; anything else unexpected is logged and the job moves on.
+- **Preflight.** `check_welcome_emails` WARNs on held welcomes;
+  `check_leavings` FAILs on a Failed row and WARNs on a Pending row past its
+  date.
 
 ### Approvals lanes and timesheet oversight (plan 2026-10-15-002)
 
