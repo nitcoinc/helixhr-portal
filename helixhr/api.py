@@ -123,6 +123,7 @@ from helixhr.utils import (
 	WELCOME_SENT_MARK,
 	TemplateRejected,
 	_company_role_holders,
+	_employee_note,
 	access_summary,
 	active_employee_for_user,
 	active_employees_for_users,
@@ -13680,7 +13681,8 @@ def get_person(employee):
 	Read-only (P6-R3): no field above Employee permlevel 0, no leave
 	*reason*, no check-in *coordinates* -- a faster route to what HR already
 	reaches in Desk through the roles it holds, never a wider one (P6-R5).
-	``can_edit`` is false for someone reached only through a company access
+	``company_today`` is the employee's company's own date (the relieve
+	form's "today"), for an editor only. ``can_edit`` is false for someone reached only through a company access
 	grant (plan 2026-10-14-001 KTD4): every edit endpoint refuses them too.
 	"""
 	rate_limit_per_user("get_person")
@@ -13734,6 +13736,12 @@ def get_person(employee):
 		# U3: the leaving HR can act on, and the team that would move.
 		"leaving": section("leaving", lambda: _person_leaving(employee)) if can_edit else None,
 		"direct_reports": section("direct_reports", lambda: _direct_report_count(employee))
+		if can_edit
+		else None,
+		"company_today": section(
+			"company_today",
+			lambda: str(company_today(frappe.db.get_value("Employee", employee, "company"))),
+		)
 		if can_edit
 		else None,
 		"failed_sections": failed,
@@ -13843,8 +13851,11 @@ def save_person(employee, **fields):
 
 	doc = frappe.get_doc("Employee", employee)
 	# Plan 2026-10-22-001 R15: Relieve is the only path to Left -- it asks
-	# for the date, moves the team, and leaves the audit row. Inactive and
-	# Suspended still save here.
+	# for the date, moves the team, and leaves the audit row -- and Desk the
+	# only path back. Inactive and Suspended still save here, and an
+	# unchanged status (the joining card re-sends it) is no change.
+	if doc.status == "Left" and fields.get("status", "Left") != "Left":
+		frappe.throw(_("{0} has left. Rehiring is done in Desk.").format(doc.employee_name))
 	if fields.get("status") == "Left" and doc.status != "Left":
 		frappe.throw(
 			_(
@@ -13890,35 +13901,27 @@ def _person_login(employee):
 
 def _login_email_holder(employee, email):
 	"""Who already holds ``email`` -- a User, or another Employee's company
-	email or login -- named for the refusal; None when it is free. Rehire
-	and linking an existing account stay in Desk (R6)."""
-	user = frappe.db.get_value("User", email, ["name", "full_name"], as_dict=True)
-	if user:
-		linked = frappe.db.get_value("Employee", {"user_id": user.name}, "employee_name")
-		return linked or user.full_name or user.name
+	email or login -- for the refusal; None when it is free. Named only when
+	the holder is an Employee inside the caller's admin scope, else "someone
+	else": the refusal must not tell HR who works at a company it cannot
+	see. Rehire and linking an existing account stay in Desk (R6)."""
+	scope = resolve_admin_scope(frappe.session.user)
+
+	def named(holder):
+		if holder and employee_in_admin_scope(holder.name, scope):
+			return holder.employee_name
+		return _("someone else")
+
+	if frappe.db.exists("User", email):
+		return named(frappe.db.get_value("Employee", {"user_id": email}, ["name", "employee_name"], as_dict=True))
 	other = frappe.get_all(
 		"Employee",
 		filters={"name": ["!=", employee]},
 		or_filters={"company_email": email, "user_id": email},
-		pluck="employee_name",
+		fields=["name", "employee_name"],
 		limit=1,
 	)
-	return other[0] if other else None
-
-
-def _employee_note(employee, mark, content):
-	"""An Info comment on the Employee (R17), keyed by ``mark`` in `subject`
-	so `held_welcome_employees` can read the trail back."""
-	frappe.get_doc(
-		{
-			"doctype": "Comment",
-			"comment_type": "Info",
-			"reference_doctype": "Employee",
-			"reference_name": employee,
-			"subject": mark,
-			"content": content,
-		}
-	).insert(ignore_permissions=True)
+	return named(other[0]) if other else None
 
 
 def _send_employee_welcome(employee):
@@ -14359,6 +14362,27 @@ def relieve_employee(employee, leaving_date, reason=None, new_manager=None, expe
 	problem = leaving_manager_problem(employee, new_manager, leaving_date)
 	if problem:
 		frappe.throw(problem)
+	# The other side of `leaving_manager_problem`: someone set to take over a
+	# team cannot leave on or before that team moves, or that leaving fails.
+	taking_over = frappe.db.get_value(
+		LEAVING_DOCTYPE,
+		{
+			"new_manager": employee,
+			"employee": ["!=", employee],
+			"status": ["in", OPEN_LEAVING_STATUSES],
+			"leaving_date": [">=", leaving_date],
+		},
+		["employee", "leaving_date"],
+		as_dict=True,
+		order_by="leaving_date asc",
+	)
+	if taking_over:
+		other = frappe.db.get_value("Employee", taking_over.employee, "employee_name")
+		frappe.throw(
+			_(
+				"{0} is taking over {1}'s team on {2}, so they can't leave before then. Choose a later date, or change {1}'s new manager first."
+			).format(doc.employee_name, other, frappe.utils.formatdate(taking_over.leaving_date))
+		)
 	reports = _direct_report_count(employee)
 	if reports and not new_manager:
 		frappe.throw(
@@ -14413,8 +14437,9 @@ def relieve_employee(employee, leaving_date, reason=None, new_manager=None, expe
 @frappe.whitelist(methods=["POST"])
 def cancel_leaving(employee, expected_modified=None):
 	"""Cancel ``employee``'s scheduled or failed leaving (R12) and clear the
-	`relieving_date` and reason it wrote. An applied leaving is not undone
-	here. Returns `{"leaving": <get_person's leaving block>}`."""
+	`relieving_date` and reason it wrote -- unless they were already set
+	Left in Desk, whose date and reason stay. An applied leaving is not
+	undone here. Returns `{"leaving": <get_person's leaving block>}`."""
 	rate_limit_per_user("cancel_leaving")
 	doc = _leaving_gate(employee)
 	open_row = _open_leaving(employee)
@@ -14424,9 +14449,12 @@ def cancel_leaving(employee, expected_modified=None):
 
 	open_row.status = "Cancelled"
 	open_row.save(ignore_permissions=True)
-	doc.relieving_date = None
-	doc.reason_for_leaving = None
-	save_employee_plainly(doc)
+	# Someone already set Left in Desk keeps the date and reason recorded
+	# there; only the portal's own schedule is cleared.
+	if doc.status != "Left":
+		doc.relieving_date = None
+		doc.reason_for_leaving = None
+		save_employee_plainly(doc)
 	_employee_note(
 		employee,
 		"helixhr:leaving_cancelled",
@@ -14444,7 +14472,9 @@ def retry_leaving(employee, expected_modified=None):
 	"""Apply ``employee``'s open leaving now (R13): after fixing why it
 	failed, or when the job has not run. Refused before its date, and in
 	plain words when it still cannot apply (the row keeps its last error).
-	Returns `{"leaving": <get_person's leaving block>, "applied": True}`."""
+	Returns `{"leaving": <get_person's leaving block>, "applied": bool}`:
+	false when the person had already been set Left in Desk, which closes
+	the leaving instead (`tasks.apply_leaving`)."""
 	rate_limit_per_user("retry_leaving")
 	doc = _leaving_gate(employee)
 	open_row = _open_leaving(employee)
@@ -14457,8 +14487,8 @@ def retry_leaving(employee, expected_modified=None):
 				doc.employee_name, frappe.utils.formatdate(open_row.leaving_date)
 			)
 		)
-	apply_leaving(open_row.name)
-	return {"leaving": _person_leaving(employee), "applied": True}
+	applied = apply_leaving(open_row.name)
+	return {"leaving": _person_leaving(employee), "applied": applied.status == "Applied"}
 
 
 # ---------------------------------------------------------------------------

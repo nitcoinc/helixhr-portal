@@ -124,6 +124,15 @@ There is no app-level auth code. Three Frappe mechanisms carry it:
      the request reaches them, there is no password and no Frappe welcome
      mail. The Employee link (`user_id`, `create_user_permission = 1`) is a
      normal save with the caller's permissions.
+   - `create_employee_login` then calls `add_user_permission` for Employee
+     (that employee) and Company (their company) with `ignore_permissions`,
+     for the new login only and only after the scope gate -- the pair
+     ERPNext's own `create_user` adds; nothing from the request picks either
+     value.
+   - `utils._employee_note` inserts the Info Comment audit trail (login
+     created, welcome sent, added, leaving scheduled / changed / cancelled /
+     applied / closed) with `ignore_permissions`, after the same gate or
+     from the job; the content is HelixHR's own wording.
    - `tasks.apply_leaving` saves each moved direct report with
      `ignore_permissions` (KTD7): a report in another company may sit outside
      the caller's User Permissions. Validation still runs; the leaver saves
@@ -1793,7 +1802,9 @@ does not move: it stays in People & access.
 - **Login.** `create_employee_login` (bypass 7 above), alone or from
   `create_employee` in its own savepoint, so a refused login never takes
   the new employee with it. Refused: Left, no company email, an email held
-  by any User or another Employee's `company_email` / `user_id`. Rehire and
+  by any User or another Employee's `company_email` / `user_id` (the holder
+  is named only when they are an Employee in the caller's admin scope, else
+  "someone else"). Rehire and
   linking an existing or privileged account stay in Desk.
 - **Welcome.** `NOTIFICATION_EVENTS["employee_welcome"]`, sent through
   `send_notification` to the company email, never raising. Held while
@@ -1803,7 +1814,14 @@ does not move: it stays in People & access.
   `WELCOME_SENT_MARK`); `send_employee_welcome` resends.
 - **Relieve.** `relieve_employee`, `cancel_leaving`, `retry_leaving`.
   `save_person` refuses `status = Left`; Relieve is the only portal path to
-  it (Inactive and Suspended still save there). A date on or before the
+  it (Inactive and Suspended still save there). For someone already Left it
+  refuses any status change ("Rehiring is done in Desk."); an unchanged
+  Left, re-sent by the joining card, still saves. `relieve_employee` also
+  refuses someone set as the new manager of another open leaving dated on
+  or after theirs, naming that person: that leaving would fail on its day.
+  `cancel_leaving` on someone set Left in Desk only closes the row; the
+  Desk date and reason stay. `get_person.company_today` (editors only) is
+  the company's own date for the relieve form. A date on or before the
   company's `company_today` applies at once; a later one writes
   `relieving_date` and `reason_for_leaving` ahead on the still-Active
   Employee (KTD3) and waits. HR cannot relieve themselves.
@@ -1824,6 +1842,13 @@ does not move: it stays in People & access.
   failure the row goes Failed with a plain message, the employee stays
   Active, and Error Log gets `LEAVING_LOG_TITLE` ("HelixHR leaving failed")
   once per row per company-local day. Failed rows retry every tick.
+  `apply_leaving` locks the Employee, then the row (the endpoints' order),
+  and re-checks the status under the lock; a row HR cancelled or applied
+  after the job's snapshot is skipped, never marked Failed. A leaver
+  already set Left in Desk closes the row as Cancelled with an Info note
+  (`helixhr:leaving_closed`). A deadlock or lock timeout that takes the
+  savepoint with it falls back to a full rollback and leaves the row for
+  the next tick; anything else unexpected is logged and the job moves on.
 - **Preflight.** `check_welcome_emails` WARNs on held welcomes;
   `check_leavings` FAILs on a Failed row and WARNs on a Pending row past its
   date.

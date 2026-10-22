@@ -6,6 +6,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import { today } from '@/lib/dates'
 import { notify } from '@/lib/notify'
+import { FALLBACK_ERROR, toPlainMessage } from '@/lib/errorMap'
 
 // Plan 2026-10-22-001 U4 (R1, R3, R4, R7, R18). HR adds a person, and
 // their login, on one screen.
@@ -116,7 +117,7 @@ async function submit() {
     announce(result)
     router.push(`/people/${result.employee}`)
   } catch (error) {
-    formError.value = error?.messages?.[0] || 'Could not add them. Please try again.'
+    formError.value = toPlainMessage(error?.messages?.[0] ?? error?.message) || FALLBACK_ERROR
   }
 }
 

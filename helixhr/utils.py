@@ -1247,6 +1247,23 @@ LOGIN_CREATED_MARK = "helixhr:login_created"
 WELCOME_SENT_MARK = "helixhr:welcome_sent"
 
 
+def _employee_note(employee, mark, content):
+	"""An Info comment on the Employee (R17), keyed by ``mark`` in `subject`
+	so `held_welcome_employees` can read the trail back. Inserted with
+	`ignore_permissions`: the caller's scope gate has already run, and the
+	comment is the audit trail, not a user's edit."""
+	frappe.get_doc(
+		{
+			"doctype": "Comment",
+			"comment_type": "Info",
+			"reference_doctype": "Employee",
+			"reference_name": employee,
+			"subject": mark,
+			"content": content,
+		}
+	).insert(ignore_permissions=True)
+
+
 def held_welcome_employees(employees=None):
 	"""The employees, of ``employees`` or of all, whose login was made in
 	HelixHR and who have had no welcome email yet. A login made in Desk has

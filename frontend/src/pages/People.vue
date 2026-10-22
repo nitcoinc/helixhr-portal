@@ -10,7 +10,7 @@ import SearchField from '@/components/SearchField.vue'
 import SegmentedChips from '@/components/SegmentedChips.vue'
 import RelieveSheet from '@/components/people/RelieveSheet.vue'
 import { call } from '@/lib/api'
-import { formatDate, today } from '@/lib/dates'
+import { formatDate, isDueBy } from '@/lib/dates'
 import { FALLBACK_ERROR, toPlainMessage } from '@/lib/errorMap'
 import { notify } from '@/lib/notify'
 import { employeeNumberAddsNothing, fieldOptions, filterByField, sortRows } from '@/lib/lists'
@@ -209,7 +209,8 @@ const APPROVER_PROBLEM_TEXT = {
 // to name directly, the same way LeaveTypesSection names its own fixed
 // checkbox set rather than fetching it. Plan 2026-10-22-001 R15: no Left --
 // Relieve is the only way there. Someone already Left keeps it as their
-// current value, which `save_person` still accepts.
+// current value, read-only: `save_person` refuses any status change from
+// Left, and a rehire is done in Desk.
 const STATUS_OPTIONS = ['Active', 'Inactive', 'Suspended']
 const statusOptions = computed(() =>
   profile.value?.status === 'Left' ? [...STATUS_OPTIONS, 'Left'] : STATUS_OPTIONS,
@@ -348,10 +349,13 @@ const openLeaving = computed(() =>
   ['Pending', 'Failed'].includes(leaving.value?.status) ? leaving.value : null,
 )
 const hasLeft = computed(() => profile.value?.status === 'Left')
+// null for a caller who can't edit; isDueBy then falls back to the user's today.
+const companyToday = computed(() => person.data?.company_today || null)
 const canRelieve = computed(() => canEdit.value && profile.value?.status === 'Active' && !openLeaving.value)
 // A Pending leaving whose day has come applies on the half-hourly job; HR
-// can apply it now instead (the dev bench has no scheduler at all).
-const leavingDue = computed(() => !!openLeaving.value && openLeaving.value.leaving_date <= today())
+// can apply it now instead (the dev bench has no scheduler at all). Due by
+// the company's today, the one the job and `relieve_employee` go by.
+const leavingDue = computed(() => !!openLeaving.value && isDueBy(openLeaving.value.leaving_date, companyToday.value))
 
 const relieveOpen = ref(false)
 const confirmApply = ref(false)
@@ -1098,7 +1102,9 @@ function applyLeaving() {
                 <select
                   id="person-edit-status"
                   v-model="form.status"
-                  class="mt-1 block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
+                  :disabled="hasLeft"
+                  :aria-describedby="hasLeft ? 'person-edit-status-help' : undefined"
+                  class="mt-1 block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8 disabled:bg-surface-gray-2 disabled:text-ink-gray-5"
                 >
                   <option
                     v-for="option in statusOptions"
@@ -1108,6 +1114,13 @@ function applyLeaving() {
                     {{ option }}
                   </option>
                 </select>
+                <p
+                  v-if="hasLeft"
+                  id="person-edit-status-help"
+                  class="mt-1 text-xs text-ink-gray-5"
+                >
+                  Rehiring is done in Desk.
+                </p>
               </div>
               <FormControl
                 v-model="form.date_of_joining"
@@ -1291,6 +1304,7 @@ function applyLeaving() {
         :leaving="openLeaving"
         :direct-reports="person.data?.direct_reports || 0"
         :people="formOptions.data?.people || []"
+        :company-today="companyToday"
         @saved="onRelieved"
       />
     </template>

@@ -327,6 +327,7 @@ test.describe('hr', () => {
     // Continue with nothing filled marks the fields, and saves nothing.
     await sheet.getByRole('button', { name: 'Continue' }).click()
     await expect(sheet.getByText('Choose the leaving date.')).toBeVisible()
+    await expect(sheet.getByRole('alert')).toHaveText('2 fields need an answer. They are marked below.')
     await expect(sheet.getByLabel('Leaving date')).toBeFocused()
 
     const first = isoDay(30)
@@ -386,6 +387,14 @@ test.describe('hr', () => {
     await expect(page.getByTestId('person-left')).toContainText('Resigned')
     await expect(page.getByTestId('person-relieve')).toHaveCount(0)
     await expect(page.getByText(`Their team now reports to ${successor.name}.`).first()).toBeVisible()
+
+    // Left is final in the portal: the status is read-only, with where to rehire.
+    await page.getByTestId('person-edit-joining').click()
+    const status = page.getByRole('dialog').getByLabel('Status')
+    await expect(status).toBeDisabled()
+    await expect(status).toHaveValue('Left')
+    await expect(page.getByRole('dialog').getByText('Rehiring is done in Desk.')).toBeVisible()
+    await page.getByRole('dialog').getByRole('button', { name: 'Cancel' }).click()
 
     await page.goto(`/helixhr/people/${report.id}`)
     await expect(page.getByRole('region', { name: 'Approvers and shift' })).toContainText(successor.name)

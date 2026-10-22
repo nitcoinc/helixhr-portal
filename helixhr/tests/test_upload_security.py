@@ -400,6 +400,14 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			# P8-U7/U8/U9.
 			"get_person_form_options": (60, 60),
 			"save_person": (30, 3600),
+			# Plan 2026-10-22-001 U1-U3: login + welcome, add, relieve.
+			"create_employee_login": (20, 3600),
+			"send_employee_welcome": (10, 3600),
+			"get_new_person_options": (60, 60),
+			"create_employee": (30, 3600),
+			"relieve_employee": (20, 3600),
+			"cancel_leaving": (20, 3600),
+			"retry_leaving": (20, 3600),
 			# P8-U12.
 			"save_celebration_reminder": (30, 3600),
 			# Plan 2026-09-29-001 U3.

@@ -2,7 +2,7 @@
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { createResource, Dialog, Button } from 'frappe-ui'
 import { FALLBACK_ERROR, toPlainMessage } from '@/lib/errorMap'
-import { formatDate, today } from '@/lib/dates'
+import { formatDate, isDueBy } from '@/lib/dates'
 
 // Plan 2026-10-22-001 U5 (R9, R10, R12, R14, R18). HR relieves a person, or
 // changes the leaving already set, in the same Dialog-as-sheet RosterShiftSheet
@@ -21,6 +21,8 @@ const props = defineProps({
   directReports: { type: Number, default: 0 },
   /** `{name, employee_name}` of everyone who could take the team. */
   people: { type: Array, default: () => [] },
+  /** `get_person`'s `company_today`: the person's company's own today. */
+  companyToday: { type: String, default: null },
 })
 const emit = defineEmits(['update:modelValue', 'saved'])
 
@@ -75,9 +77,10 @@ const reportsLine = computed(() => {
   return `${count} ${count === 1 ? 'person reports' : 'people report'} to ${name.value}; choose who they report to next.`
 })
 
-// On or before today it applies now; the server decides by the company's own
-// today, and its answer (`applied`) is what the toast reports.
-const appliesNow = computed(() => !!form.leaving_date && form.leaving_date <= today())
+// On or before the company's today it applies now -- the same today the
+// server decides by. Its answer (`applied`) is still what the toast reports.
+const appliesNow = computed(() => isDueBy(form.leaving_date, props.companyToday))
+const errorCount = computed(() => Object.values(errors).filter(Boolean).length)
 
 function validate() {
   for (const key of Object.keys(errors)) delete errors[key]
@@ -146,6 +149,14 @@ const errorClass = 'mt-1 text-sm text-ink-red-4'
         @submit.prevent="step === 'form' ? next() : save()"
       >
         <template v-if="step === 'form'">
+          <p
+            v-if="errorCount > 1"
+            class="surface-alert p-3 text-sm"
+            role="alert"
+          >
+            {{ errorCount }} fields need an answer. They are marked below.
+          </p>
+
           <div>
             <label
               for="relieve-leaving_date"

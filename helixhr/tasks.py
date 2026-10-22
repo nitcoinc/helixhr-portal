@@ -23,7 +23,7 @@ from frappe import _
 from frappe.utils import add_to_date, cint, formatdate, get_fullname, getdate, now_datetime, strip_html
 
 from helixhr.helixhr.doctype.helixhr_leaving.helixhr_leaving import OPEN_STATUSES
-from helixhr.utils import company_today
+from helixhr.utils import _employee_note, company_today
 
 RETENTION_KEY = "helixhr_checkin_location_retention_days"
 # The three fields a punch's location lives in, and the value each one is
@@ -167,6 +167,7 @@ def _scrub_versions(names):
 LEAVING_DOCTYPE = "HelixHR Leaving"
 LEAVING_LOG_TITLE = "HelixHR leaving failed"
 LEAVING_APPLIED_MARK = "helixhr:leaving_applied"
+LEAVING_CLOSED_MARK = "helixhr:leaving_closed"
 _LEAVING_SAVEPOINT = "helixhr_leaving"
 
 
@@ -224,13 +225,33 @@ def apply_leaving(name, actor=None):
 	(KTD7): the leaver's scope gate already ran, and a report in another
 	company may sit outside the caller's User Permissions; validation still
 	runs. The leaver saves with the caller's own permissions (Administrator
-	in the job). ``actor`` names who applied it for the Info comment."""
-	from helixhr.api import _employee_note
+	in the job). ``actor`` names who applied it for the Info comment.
 
+	Locks the Employee, then the leaving -- the order `api._leaving_gate`
+	takes them in, so an HR change and the job cannot deadlock each other --
+	and re-reads the status under the lock. A leaver already set Left
+	outside the portal (Desk) has nothing left to apply: the row is closed
+	as Cancelled with an Info note instead of failing every tick; the
+	returned row's status says which happened."""
+	employee = frappe.db.get_value(LEAVING_DOCTYPE, name, "employee")
+	if not employee:
+		frappe.throw(_("This leaving no longer exists."))
+	leaver = frappe.get_doc("Employee", employee, for_update=True)
 	row = frappe.get_doc(LEAVING_DOCTYPE, name, for_update=True)
 	if row.status not in OPEN_STATUSES:
 		frappe.throw(_("This leaving is {0} and can't be applied.").format(_(row.status)))
-	leaver = frappe.get_doc("Employee", row.employee, for_update=True)
+	if leaver.status == "Left":
+		row.status = "Cancelled"
+		row.error = None
+		row.save(ignore_permissions=True)
+		_employee_note(
+			leaver.name,
+			LEAVING_CLOSED_MARK,
+			_("{0} was already marked Left outside HelixHR, so the leaving set for {1} was closed.").format(
+				leaver.employee_name, formatdate(row.leaving_date)
+			),
+		)
+		return row
 	if leaver.status != "Active":
 		frappe.throw(
 			_("{0} is {1}, not Active, so the leaving can't be applied.").format(
@@ -307,8 +328,11 @@ def apply_due_leavings():
 	the same day finds nothing to do. A Failed row is retried each tick, so
 	fixing the cause is enough. Each row runs in its own savepoint; a
 	failure is rolled back to it, stored on the row in plain words, and
-	logged to Error Log once per row per company-local day. Commits per row
-	outside tests only (the reminders' `_commit` rule)."""
+	logged to Error Log once per row per company-local day. A row HR
+	cancelled or applied after the snapshot below is skipped, and a
+	deadlock or lock timeout leaves the row as it was for the next tick.
+	One row's trouble never stops the rest. Commits per row outside tests
+	only (the reminders' `_commit` rule)."""
 	result = {"applied": 0, "failed": 0}
 	today = {}
 	for row in frappe.get_all(
@@ -321,18 +345,41 @@ def apply_due_leavings():
 			today[row.company] = company_today(row.company)
 		if getdate(row.leaving_date) > today[row.company]:
 			continue
-		frappe.db.savepoint(_LEAVING_SAVEPOINT)
 		try:
-			apply_leaving(row.name, actor=_scheduled_actor(row.scheduled_by))
-			result["applied"] += 1
-		except Exception as exc:
-			frappe.db.rollback(save_point=_LEAVING_SAVEPOINT)
-			frappe.clear_last_message()
-			plain = isinstance(exc, frappe.ValidationError) and " ".join(strip_html(str(exc)).split())
-			_mark_leaving_failed(row.name, plain or None, today[row.company])
-			result["failed"] += 1
+			outcome = _apply_due_leaving(row, today[row.company])
+		except Exception:
+			# `_mark_leaving_failed` itself failed: log, undo, next row.
+			frappe.log_error(
+				title=LEAVING_LOG_TITLE, reference_doctype=LEAVING_DOCTYPE, reference_name=row.name
+			)
+			frappe.db.rollback()
+			outcome = None
+		if outcome:
+			result[outcome] += 1
 		_commit()
 	return result
+
+
+def _apply_due_leaving(row, day):
+	"""One due row for `apply_due_leavings`: "applied", "failed", or None
+	(closed because the leaver had already left, skipped because the row
+	was no longer open, or left for the next tick after a lock error)."""
+	frappe.db.savepoint(_LEAVING_SAVEPOINT)
+	try:
+		applied = apply_leaving(row.name, actor=_scheduled_actor(row.scheduled_by))
+	except Exception as exc:
+		try:
+			frappe.db.rollback(save_point=_LEAVING_SAVEPOINT)
+		except Exception:
+			# A deadlock or lock timeout rolls back the whole transaction,
+			# savepoint included; earlier rows have committed already.
+			frappe.db.rollback()
+		frappe.clear_last_message()
+		if isinstance(exc, frappe.QueryDeadlockError | frappe.QueryTimeoutError):
+			return None
+		plain = isinstance(exc, frappe.ValidationError) and " ".join(strip_html(str(exc)).split())
+		return "failed" if _mark_leaving_failed(row.name, plain or None, day) else None
+	return "applied" if applied.status == "Applied" else None
 
 
 def _scheduled_actor(user):
@@ -342,14 +389,23 @@ def _scheduled_actor(user):
 def _mark_leaving_failed(name, message, day):
 	"""Failed, with ``message`` (None: an unexpected error, whose detail
 	goes to Error Log only). The employee stays Active. Logged once per row
-	per ``day``: the job retries every half hour."""
+	per ``day``: the job retries every half hour.
+
+	Returns False, touching nothing, when the row is no longer open: HR
+	cancelled or applied it after the job's snapshot, and that refusal is
+	not a failure. Read under a lock, so a concurrent cancel cannot slip in
+	between this check and the write."""
 	message = message or _(
 		"Something went wrong applying this leaving. Try again, or ask your administrator to check the Error Log."
 	)
-	row = frappe.db.get_value(LEAVING_DOCTYPE, name, ["status", "error", "failed_on"], as_dict=True)
+	row = frappe.db.get_value(
+		LEAVING_DOCTYPE, name, ["status", "error", "failed_on"], as_dict=True, for_update=True
+	)
+	if not row or row.status not in OPEN_STATUSES:
+		return False
 	logged_today = row.failed_on and getdate(row.failed_on) == day
 	if row.status == "Failed" and row.error == message and logged_today:
-		return
+		return True
 	if not logged_today:
 		frappe.log_error(
 			title=LEAVING_LOG_TITLE,
@@ -358,6 +414,7 @@ def _mark_leaving_failed(name, message, day):
 			reference_name=name,
 		)
 	frappe.db.set_value(LEAVING_DOCTYPE, name, {"status": "Failed", "error": message, "failed_on": day})
+	return True
 
 
 def _commit():

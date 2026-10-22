@@ -215,7 +215,7 @@ class TestCreateEmployeeLoginRefusals(EmployeeLoginTestCase):
 		send.assert_not_called()
 		return str(caught.exception)
 
-	def test_an_email_that_is_already_a_user_is_refused_naming_them(self):
+	def test_an_email_that_is_already_a_user_without_an_employee_is_refused_unnamed(self):
 		frappe.get_doc(
 			{
 				"doctype": "User",
@@ -230,14 +230,17 @@ class TestCreateEmployeeLoginRefusals(EmployeeLoginTestCase):
 
 		message = self._refused(self.employee.name)
 
-		self.assertIn("Existing Holder", message)
+		# No Employee in the caller's scope holds the address, so the holder
+		# is not named (the refusal itself stays).
+		self.assertIn("someone else", message)
+		self.assertNotIn("Existing Holder", message)
 		after = frappe.get_doc("User", self.email)
 		self.assertEqual(after.modified, before.modified)
 		self.assertEqual(_roles(self.email), ["System Manager"])
 		self.assertFalse(frappe.db.get_value("Employee", self.employee.name, "user_id"))
 
 	def test_an_email_that_is_another_employees_company_email_is_refused(self):
-		holder = _throwaway_employee(self.other_company, email=self.email.upper())
+		holder = _throwaway_employee(self.company, email=self.email.upper())
 
 		message = self._refused(self.employee.name)
 
@@ -245,11 +248,33 @@ class TestCreateEmployeeLoginRefusals(EmployeeLoginTestCase):
 		self.assertFalse(frappe.db.exists("User", self.email))
 
 	def test_an_email_that_is_another_employees_login_is_refused(self):
-		holder = _throwaway_employee(self.other_company)
+		holder = _throwaway_employee(self.company)
 		frappe.db.set_value("Employee", holder.name, "user_id", self.email)
 
 		self.assertIn(holder.employee_name, self._refused(self.employee.name))
 		self.assertFalse(frappe.db.exists("User", self.email))
+
+	def test_a_holder_outside_the_callers_scope_is_not_named(self):
+		"""Security P3: the refusal stays, the cross-company name does not."""
+		holder = _throwaway_employee(self.other_company, email=self.email.upper())
+		message = self._refused(self.employee.name)
+		self.assertIn("someone else", message)
+		self.assertNotIn(holder.employee_name, message)
+
+		frappe.db.set_value("Employee", holder.name, {"company_email": None, "user_id": self.email})
+		frappe.get_doc(
+			{
+				"doctype": "User",
+				"email": self.email,
+				"first_name": "Abroad",
+				"last_name": "Holder",
+				"send_welcome_email": 0,
+			}
+		).insert(ignore_permissions=True)
+		message = self._refused(self.employee.name)
+		self.assertIn("someone else", message)
+		self.assertNotIn(holder.employee_name, message)
+		self.assertNotIn("Abroad Holder", message)
 
 	def test_a_left_employee_is_refused(self):
 		frappe.db.set_value("Employee", self.employee.name, {"status": "Left", "relieving_date": today()})

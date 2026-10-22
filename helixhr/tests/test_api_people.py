@@ -303,6 +303,8 @@ class TestGetPerson(IntegrationTestCase):
 				# U3: the open (or applied) leaving and the team that moves.
 				"leaving",
 				"direct_reports",
+				# The company's own date, for the relieve confirm step.
+				"company_today",
 				"failed_sections",
 			},
 		)
@@ -894,6 +896,16 @@ class TestCreateEmployee(IntegrationTestCase):
 		frappe.set_user("Administrator")
 		self.assertEqual(frappe.db.get_value("Employee", result["employee"], "status"), "Active")
 		self.assertIsNone(frappe.db.get_value("Employee", result["employee"], "user_id"))
+
+	def test_a_login_email_held_outside_the_callers_scope_is_not_named(self):
+		# OTHER_COMPANY_USER is a login linked to an Employee in a company
+		# outside the HR caller's scope (security P3).
+		holder = frappe.db.get_value("Employee", {"user_id": OTHER_COMPANY_USER}, "employee_name")
+		result = self._create(**self._payload(company_email=OTHER_COMPANY_USER, create_login=1))
+
+		self.assertFalse(result["login_created"])
+		self.assertIn("someone else", result["login_error"])
+		self.assertNotIn(holder, result["login_error"])
 
 	def test_a_failed_login_step_is_logged_and_still_keeps_the_employee(self):
 		from unittest.mock import patch

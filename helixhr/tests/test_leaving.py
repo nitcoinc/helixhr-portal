@@ -7,6 +7,7 @@ fixture identity is ever relieved. The dev bench runs no scheduler, so the
 job is called directly; it commits per row only outside tests."""
 
 import hashlib
+from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
@@ -105,6 +106,12 @@ class LeavingTestCase(IntegrationTestCase):
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
+
+	def _close_after(self, *rows):
+		"""Rows a test leaves open would be picked up by the next test's job
+		run (the class shares one transaction): cancel them on the way out."""
+		for row in rows:
+			self.addCleanup(frappe.db.set_value, LEAVING_DOCTYPE, row, "status", "Cancelled")
 
 	def _as_hr(self, fn, *args, **kwargs):
 		frappe.set_user(self.hr_user)
@@ -243,15 +250,15 @@ class TestScheduledLeaving(LeavingTestCase):
 		leaver = _person(self.company)
 		day = add_days(getdate(), 5)
 		# The server's zone is Asia/Kolkata on this bench and in CI: 08:00
-		# there is still the evening before in Chicago, 11:00 is past its
-		# midnight.
+		# there is still the evening before in Chicago, 12:00 is past its
+		# midnight -- 00:30 CST, 01:30 CDT, so it holds either side of DST.
 		with self.freeze_time(f"{add_days(day, -1)} 12:00:00", tick=True):
 			self._relieve(leaver, day)
 		with self.freeze_time(f"{day} 08:00:00", tick=True):
 			self.assertEqual(company_today(self.company), add_days(day, -1))
 			self.assertEqual(apply_due_leavings()["applied"], 0)
 		self.assertEqual(_emp(leaver, "status").status, "Active")
-		with self.freeze_time(f"{day} 11:00:00", tick=True):
+		with self.freeze_time(f"{day} 12:00:00", tick=True):
 			self.assertEqual(apply_due_leavings()["applied"], 1)
 		self.assertEqual(_emp(leaver, "status").status, "Left")
 
@@ -364,6 +371,21 @@ class TestRelieveRefusals(LeavingTestCase):
 		# Leaving later than this leaver is fine.
 		self._relieve(leaver, add_days(day, -1), new_manager=new_manager)
 
+	def test_someone_taking_over_a_later_leavers_team_cannot_leave_first(self):
+		_boss, other, _team, taker = self._team(reports=1)
+		day = add_days(self.today, 5)
+		self._close_after(self._relieve(other, day, new_manager=taker)["leaving"]["name"])
+		other_name = _emp(other, "employee_name").employee_name
+		for taker_day in (add_days(day, -2), day):
+			with self.assertRaises(frappe.ValidationError) as caught:
+				self._relieve(taker, taker_day)
+			self.assertIn(other_name, str(caught.exception))
+		self.assertIsNone(_open_row(taker))
+		# Leaving after the team has moved is fine.
+		later = self._relieve(taker, add_days(day, 1))
+		self._close_after(later["leaving"]["name"])
+		self.assertFalse(later["applied"])
+
 	def test_the_leaver_cannot_be_their_own_new_manager(self):
 		_boss, leaver, _team, _next = self._team(reports=1)
 		with self.assertRaises(frappe.ValidationError):
@@ -400,6 +422,35 @@ class TestRelieveRefusals(LeavingTestCase):
 			relieve_employee(leaver, str(self.today), reason="No.")
 		frappe.set_user("Administrator")
 		self.assertEqual(_emp(leaver, "status").status, "Active")
+
+	def test_cancel_and_retry_refuse_out_of_scope_and_employee_callers(self):
+		outsider = _person(_ensure_other_company())
+		abroad = frappe.get_doc(
+			{
+				"doctype": LEAVING_DOCTYPE,
+				"employee": outsider,
+				"company": _ensure_other_company(),
+				"leaving_date": self.today,
+				"reason": "Out of scope.",
+				"status": "Pending",
+				"scheduled_by": "Administrator",
+			}
+		).insert(ignore_permissions=True)
+		make_test_employee_and_manager()
+		leaver = _person(self.company)
+		home = self._relieve(leaver, add_days(self.today, 3))["leaving"]
+		self._close_after(abroad.name, home["name"])
+		for user, employee, row in (
+			(self.hr_user, outsider, {"name": abroad.name, "modified": str(abroad.modified)}),
+			(EMPLOYEE_USER, leaver, home),
+		):
+			frappe.set_user(user)
+			for endpoint in (cancel_leaving, retry_leaving):
+				with self.assertRaises(frappe.PermissionError):
+					endpoint(employee, expected_modified=row["modified"])
+			frappe.set_user("Administrator")
+			self.assertEqual(frappe.db.get_value(LEAVING_DOCTYPE, row["name"], "status"), "Pending")
+			self.assertEqual(_emp(employee, "status").status, "Active")
 
 	def test_a_missing_reason_or_date_and_a_date_before_joining_are_refused_in_plain_words(self):
 		leaver = _person(self.company)
@@ -453,6 +504,124 @@ class TestFailedLeaving(LeavingTestCase):
 		self.assertFalse(result["leaving"]["error"])
 		self.assertEqual(_emp(leaver, "status").status, "Left")
 		self.assertEqual(_emp(report, "reports_to").reports_to, new_manager)
+
+	def test_a_row_cancelled_after_the_job_read_it_stays_cancelled(self):
+		"""HR cancels between the job's snapshot and its lock: the row is
+		skipped, never marked Failed and applied on the next tick."""
+		leaver = _person(self.company)
+		day = add_days(self.today, 1)
+		row = self._relieve(leaver, day)["leaving"]["name"]
+		real_get_all = frappe.get_all
+
+		def get_all_then_cancel(doctype, *args, **kwargs):
+			rows = real_get_all(doctype, *args, **kwargs)
+			if doctype == LEAVING_DOCTYPE:
+				frappe.db.set_value(LEAVING_DOCTYPE, row, "status", "Cancelled")
+			return rows
+
+		with self.freeze_time(f"{day} 12:00:00", tick=True):
+			with patch("helixhr.tasks.frappe.get_all", side_effect=get_all_then_cancel):
+				self.assertEqual(apply_due_leavings(), {"applied": 0, "failed": 0})
+			self.assertEqual(apply_due_leavings(), {"applied": 0, "failed": 0})
+		stored = frappe.get_doc(LEAVING_DOCTYPE, row)
+		self.assertEqual(stored.status, "Cancelled")
+		self.assertFalse(stored.error)
+		self.assertEqual(_emp(leaver, "status").status, "Active")
+		self.assertEqual(_error_logs(row), 0)
+
+	def test_a_lost_savepoint_is_retried_next_tick_and_the_job_moves_on(self):
+		"""A deadlock rolls back the whole transaction, savepoint included:
+		the job falls back to a full rollback, leaves the row as it was, and
+		applies the next one."""
+		import helixhr.tasks as tasks
+
+		first, second = _person(self.company), _person(self.company)
+		day = add_days(self.today, 2)
+		stuck = self._relieve(first, add_days(day, -1))["leaving"]["name"]
+		self._close_after(stuck)
+		self._relieve(second, day)
+		real_apply = tasks.apply_leaving
+		full_rollbacks = []
+
+		def apply(name, actor=None):
+			if name == stuck:
+				raise frappe.QueryDeadlockError("Deadlock found when trying to get lock")
+			return real_apply(name, actor=actor)
+
+		def rollback(*, save_point=None, chain=False):
+			if save_point:
+				raise Exception(f"SAVEPOINT {save_point} does not exist")
+			full_rollbacks.append(True)
+
+		db_class = type(frappe.db._get_current_object())
+		with self.freeze_time(f"{day} 12:00:00", tick=True):
+			with patch("helixhr.tasks.apply_leaving", side_effect=apply), patch.object(
+				db_class, "rollback", side_effect=rollback
+			):
+				self.assertEqual(apply_due_leavings(), {"applied": 1, "failed": 0})
+		self.assertEqual(full_rollbacks, [True])
+		stored = frappe.get_doc(LEAVING_DOCTYPE, stuck)
+		self.assertEqual(stored.status, "Pending")
+		self.assertFalse(stored.error)
+		self.assertEqual(_emp(first, "status").status, "Active")
+		self.assertEqual(_emp(second, "status").status, "Left")
+
+	def test_a_failed_leaver_save_rolls_back_the_report_moves(self):
+		import helixhr.tasks as tasks
+
+		_boss, leaver, team, new_manager = self._team(reports=2)
+		day = add_days(self.today, 1)
+		row = self._relieve(leaver, day, new_manager=new_manager)["leaving"]["name"]
+		self._close_after(row)
+		real_save = tasks.save_employee_plainly
+
+		def save(doc, ignore_permissions=False):
+			if doc.name == leaver:
+				frappe.throw("The leaver couldn't be saved.")
+			return real_save(doc, ignore_permissions=ignore_permissions)
+
+		with self.freeze_time(f"{day} 12:00:00", tick=True):
+			with patch("helixhr.tasks.save_employee_plainly", side_effect=save):
+				self.assertEqual(apply_due_leavings(), {"applied": 0, "failed": 1})
+		for report in team:
+			self.assertEqual(_emp(report, "reports_to").reports_to, leaver)
+		self.assertEqual(frappe.db.get_value(LEAVING_DOCTYPE, row, "status"), "Failed")
+		self.assertEqual(_emp(leaver, "status").status, "Active")
+
+	def test_a_leaver_set_left_in_desk_closes_the_row_instead_of_failing(self):
+		leaver = _person(self.company)
+		day = add_days(self.today, 2)
+		row = self._relieve(leaver, day)["leaving"]["name"]
+		frappe.db.set_value(
+			"Employee", leaver, {"status": "Left", "relieving_date": self.today, "reason_for_leaving": "Desk."}
+		)
+
+		with self.freeze_time(f"{day} 12:00:00", tick=True):
+			self.assertEqual(apply_due_leavings(), {"applied": 0, "failed": 0})
+		self.assertEqual(frappe.db.get_value(LEAVING_DOCTYPE, row, "status"), "Cancelled")
+		self.assertEqual(_error_logs(row), 0)
+		self.assertEqual(len(_notes(leaver, "helixhr:leaving_closed")), 1)
+		emp = _emp(leaver, "status", "relieving_date", "reason_for_leaving")
+		self.assertEqual(emp.status, "Left")
+		self.assertEqual(getdate(emp.relieving_date), self.today)
+		self.assertEqual(emp.reason_for_leaving, "Desk.")
+
+	def test_cancelling_for_someone_set_left_in_desk_keeps_their_leaving_details(self):
+		leaver = _person(self.company)
+		scheduled = self._relieve(leaver, add_days(self.today, 4))
+		frappe.db.set_value(
+			"Employee", leaver, {"status": "Left", "relieving_date": self.today, "reason_for_leaving": "Desk."}
+		)
+
+		self._as_hr(cancel_leaving, leaver, expected_modified=scheduled["leaving"]["modified"])
+
+		self.assertEqual(
+			frappe.db.get_value(LEAVING_DOCTYPE, scheduled["leaving"]["name"], "status"), "Cancelled"
+		)
+		emp = _emp(leaver, "status", "relieving_date", "reason_for_leaving")
+		self.assertEqual(emp.status, "Left")
+		self.assertEqual(getdate(emp.relieving_date), self.today)
+		self.assertEqual(emp.reason_for_leaving, "Desk.")
 
 	def test_preflight_fails_on_a_failed_leaving_and_warns_on_an_overdue_one(self):
 		self.assertIn(preflight.check_leavings, preflight.CHECKS)
@@ -536,6 +705,7 @@ class TestLeavingIntegration(LeavingTestCase):
 		self.assertEqual(leaving["new_manager_name"], _emp(new_manager, "employee_name").employee_name)
 		self.assertEqual(leaving["reason"], "Resigned to study.")
 		self.assertTrue(leaving["modified"])
+		self.assertEqual(self._as_hr(get_person, leaver)["company_today"], str(self.today))
 
 	def test_get_person_shows_the_applied_leaving_of_someone_who_left(self):
 		leaver = _person(self.company)
@@ -553,6 +723,30 @@ class TestLeavingIntegration(LeavingTestCase):
 
 		self._as_hr(save_person, person, status="Inactive")
 		self.assertEqual(_emp(person, "status").status, "Inactive")
+
+	def test_save_person_refuses_any_status_change_for_someone_who_left(self):
+		person = _person(self.company)
+		frappe.db.set_value("Employee", person, {"status": "Left", "relieving_date": self.today})
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self._as_hr(save_person, person, status="Active")
+		self.assertIn("Rehiring is done in Desk", str(caught.exception))
+		self.assertEqual(_emp(person, "status").status, "Left")
+
+	def test_save_person_accepts_an_unchanged_left_status_with_other_fields(self):
+		"""The joining card re-sends `status: "Left"` when HR edits a leaver."""
+		person = _person(self.company)
+		frappe.db.set_value("Employee", person, {"status": "Left", "relieving_date": self.today})
+		designation = "U3 Probe Designation"
+		if not frappe.db.exists("Designation", designation):
+			frappe.get_doc({"doctype": "Designation", "designation_name": designation}).insert(
+				ignore_permissions=True
+			)
+
+		self._as_hr(save_person, person, status="Left", designation=designation)
+
+		row = _emp(person, "status", "designation")
+		self.assertEqual(row.status, "Left")
+		self.assertEqual(row.designation, designation)
 
 	def test_the_job_is_on_the_half_hourly_cron(self):
 		cron = frappe.get_hooks("scheduler_events").get("cron", {})
