@@ -35,18 +35,24 @@ const router = useRouter()
 // rows -- the stated headcount -- so the department chips, the count and the
 // table's sort cover everyone the search matched, all client-side. Past 200
 // the count line says only the first 200 are loaded and a search narrows it.
-// The server returns Active employees only, so there is no status filter to
-// offer here.
 const LIMIT = 200
 
 const query = ref('')
 const search = ref('')
+// Plan 2026-10-22-001 R16: Active only unless HR asks for people who have
+// left too, so a relieved person can still be opened.
+const includeLeft = ref(false)
 
 const results = createResource({
   url: 'helixhr.api.search_people',
-  makeParams: () => ({ query: search.value || undefined, limit: LIMIT }),
+  makeParams: () => ({
+    query: search.value || undefined,
+    limit: LIMIT,
+    status: includeLeft.value ? 'all' : undefined,
+  }),
   auto: true,
 })
+watch(includeLeft, () => results.reload())
 
 // The server ignores a query under 2 characters (_PEOPLE_SEARCH_QUERY_MIN),
 // so a shorter one asks the same question as none, and an unchanged one is
@@ -121,6 +127,10 @@ function cardLine(row) {
 function peopleCount(count) {
   return `${count} ${count === 1 ? 'person' : 'people'}`
 }
+
+// A row that is not Active (Left, with "Include people who have left" on)
+// says so in words, beside the name.
+const STATUS_PILL = 'mt-0.5 inline-block rounded-full bg-surface-gray-3 px-2 py-0.5 text-xs font-medium text-ink-gray-7'
 
 function openPerson(person) {
   router.push(`/people/${person.name}`)
@@ -980,18 +990,40 @@ async function submitEdit() {
       <PageHeader
         title="People"
         subtitle="Find a colleague to see their leave, attendance and requests."
-      />
+      >
+        <template #actions>
+          <Button
+            v-if="session.canAddPeople"
+            variant="solid"
+            theme="blue"
+            @click="router.push('/people/new')"
+          >
+            Add employee
+          </Button>
+        </template>
+      </PageHeader>
 
       <div
         v-if="!forbidden"
-        class="mb-4 lg:w-80"
+        class="mb-4 flex flex-wrap items-end gap-x-4 gap-y-1"
       >
-        <SearchField
-          v-model="query"
-          label="Search"
-          placeholder="Name, employee number or work email"
-          maxlength="60"
-        />
+        <div class="w-full lg:w-80">
+          <SearchField
+            v-model="query"
+            label="Search"
+            placeholder="Name, employee number or work email"
+            maxlength="60"
+          />
+        </div>
+        <label class="flex min-h-11 items-center gap-2 text-sm text-ink-gray-8">
+          <input
+            v-model="includeLeft"
+            type="checkbox"
+            class="size-4"
+            data-testid="people-include-left"
+          >
+          Include people who have left
+        </label>
       </div>
 
       <AsyncState
@@ -1131,6 +1163,11 @@ async function submitEdit() {
                         data-testid="people-name"
                       >{{ row.employee_name }}</span>
                       <span
+                        v-if="row.status && row.status !== 'Active'"
+                        :class="STATUS_PILL"
+                        data-testid="people-status"
+                      >{{ row.status }}</span>
+                      <span
                         v-if="personNumber(row)"
                         class="block truncate text-xs text-ink-gray-6"
                       >{{ personNumber(row) }}</span>
@@ -1184,6 +1221,11 @@ async function submitEdit() {
               />
               <span class="min-w-0 flex-1">
                 <span class="block truncate font-medium text-ink-gray-9">{{ row.employee_name }}</span>
+                <span
+                  v-if="row.status && row.status !== 'Active'"
+                  :class="STATUS_PILL"
+                  data-testid="people-status"
+                >{{ row.status }}</span>
                 <span
                   v-if="cardLine(row)"
                   class="block truncate text-sm text-ink-gray-6"

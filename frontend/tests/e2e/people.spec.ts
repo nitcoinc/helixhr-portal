@@ -181,6 +181,70 @@ test.describe('hr', () => {
     })
   }
 
+  // Plan 2026-10-22-001 U4 (R1, R4, R7). The dev site has no Microsoft
+  // sign-in, so the welcome email is held. A per-run name keeps a re-run
+  // clear of the duplicate refusal.
+  test('U4: HR adds an employee with a login and lands on their page', async ({ page }) => {
+    const stamp = Date.now()
+    const firstName = `Newstart ${stamp}`
+    await page.goto('/helixhr/people')
+    await page.getByRole('button', { name: 'Add employee' }).click()
+    await expect(page).toHaveURL(/\/helixhr\/people\/new$/)
+    await expect(page.getByRole('heading', { name: 'Add employee' })).toBeVisible()
+
+    await page.getByLabel('First name').fill(firstName)
+    await page.getByLabel('Last name').fill('Playwright')
+    const gender = page.getByLabel('Gender')
+    await expect(gender.locator('option')).not.toHaveCount(1)
+    await gender.selectOption({ index: 1 })
+    await page.getByLabel('Date of birth').fill('1995-05-05')
+    // Preselected when HR has one company; otherwise take the first.
+    const company = page.getByLabel('Company', { exact: true })
+    if (!(await company.inputValue())) await company.selectOption({ index: 1 })
+    await page.getByLabel('Joining date').fill('2025-01-06')
+    await page.getByLabel('Company email').fill(`newstart-${stamp}@helixhr.test`)
+    await expect(page.getByLabel('Create login now')).toBeChecked()
+
+    await page.getByRole('button', { name: 'Add employee' }).click()
+
+    await expect(page).toHaveURL(/\/helixhr\/people\/(?!new$)[^/]+$/)
+    await expect(page.getByRole('heading', { name: `${firstName} Playwright` })).toBeVisible()
+    await expect(
+      page.getByText(`Added ${firstName} Playwright. Login created; welcome email held until Microsoft sign-in is on.`).first(),
+    ).toBeVisible()
+  })
+
+  test('U4: a missing required field is marked inline and nothing is added', async ({ page }) => {
+    let posted = false
+    page.on('request', (request) => {
+      if (request.url().includes('helixhr.api.create_employee')) posted = true
+    })
+    await page.goto('/helixhr/people/new')
+    await expect(page.getByLabel('First name')).toBeVisible()
+    await page.getByLabel('Last name').fill('Nofirstname')
+    await page.getByRole('button', { name: 'Add employee' }).click()
+
+    const firstName = page.getByLabel('First name')
+    await expect(page.getByText('Enter their first name.')).toBeVisible()
+    await expect(firstName).toHaveAttribute('aria-invalid', 'true')
+    await expect(firstName).toBeFocused()
+    await expect(page.getByText(/fields need an answer/)).toBeVisible()
+    await expect(page).toHaveURL(/\/helixhr\/people\/new$/)
+    expect(posted).toBe(false)
+  })
+
+  // R16: the seeded "Directory Left" fixture (`ensure_directory_fixtures`).
+  test('U4: "Include people who have left" finds a relieved person', async ({ page }) => {
+    await page.goto('/helixhr/people')
+    await page.getByLabel('Search').fill('Directory Left')
+    await expect(page.getByText('Nobody matches that search')).toBeVisible()
+
+    await page.getByLabel('Include people who have left').check()
+    const row = page.getByTestId('people-row').filter({ hasText: 'Directory Left' })
+    await expect(row).toHaveCount(1)
+    await expect(row.getByTestId('people-status')).toHaveText('Left')
+  })
+
   // HR-10 / U15: the shared SearchField, 44px under a coarse pointer.
   test('the search field is a 44px target on a phone', async ({ browser }) => {
     const context = await browser.newContext({
@@ -212,6 +276,12 @@ test('an employee identity has no People nav item, and a direct hit is refused s
 
   await page.goto('/helixhr/people/HR-EMP-00001')
   await expect(page.locator('[data-async-state="person:forbidden"]')).toBeVisible()
+
+  // Plan 2026-10-22-001 U4: no Add employee, and the form itself is refused.
+  await page.goto('/helixhr/people')
+  await expect(page.getByRole('button', { name: 'Add employee' })).toHaveCount(0)
+  await page.goto('/helixhr/people/new')
+  await expect(page.locator('[data-async-state="new-person:forbidden"]')).toBeVisible()
 })
 
 test('an IT Team identity -- a routed worker, not HR -- is refused the same way', async ({ page }, testInfo) => {
