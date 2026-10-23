@@ -368,6 +368,51 @@ class TestCrossCompanyLineManager(_CrossCompanyCase):
 		self._act("Timesheet", week, "Approve")
 		self.assertEqual(frappe.db.get_value("Timesheet", week, "workflow_state"), "Approved")
 
+	def test_plain_manager_approves_a_report_leave_in_another_company(self):
+		# Not set by hand: `employee_validate` derives it from `reports_to`.
+		self.assertEqual(frappe.db.get_value("Employee", self.report, "leave_approver"), MANAGER_USER)
+		leave = self._open_leave(REPORT_USER, self.report)
+
+		frappe.set_user(MANAGER_USER)
+		self.assertIn(leave, {row["name"] for row in get_my_approvals()["pending"]})
+		self.assertIn("Approve", get_approval_detail("leave", leave)["actions"])
+		self._act("Leave Application", leave, "Approve")
+		row = frappe.db.get_value("Leave Application", leave, ["status", "docstatus"], as_dict=True)
+		self.assertEqual((row.status, row.docstatus), ("Approved", 1))
+
+	# --- an HR login as real logins are made ----------------------------------
+
+	def _grant_company_permission(self, user, company):
+		"""The Company User Permission ERPNext adds with "Create User
+		Permission" (and `create_employee_login` adds) -- which `HR_USER`'s
+		fixture deliberately lacks, so the tests above never met it."""
+		name = frappe.get_doc(
+			{"doctype": "User Permission", "user": user, "allow": "Company", "for_value": company}
+		).insert(ignore_permissions=True).name
+		frappe.clear_cache(user=user)
+		self.addCleanup(frappe.clear_cache, user=user)
+		self.addCleanup(frappe.delete_doc, "User Permission", name, ignore_permissions=True, force=True)
+
+	def test_hr_manager_with_a_company_permission_approves_their_report_week_elsewhere(self):
+		self._grant_company_permission(self.hr_user, self.company_a)
+		week = self._pending_timesheet(HR_REPORT_USER)
+
+		frappe.set_user(self.hr_user)
+		self.assertIn(week, {row["name"] for row in get_my_approvals()["pending"]})
+		self._act("Timesheet", week, "Approve")
+		self.assertEqual(frappe.db.get_value("Timesheet", week, "workflow_state"), "Approved")
+
+	def test_hr_manager_with_a_company_permission_approves_their_report_leave_elsewhere(self):
+		self._grant_company_permission(self.hr_user, self.company_a)
+		frappe.db.set_value("Employee", self.hr_report, "leave_approver", self.hr_user)
+		ensure_leave_approver_role(self.hr_user)
+		leave = self._open_leave(HR_REPORT_USER, self.hr_report)
+
+		frappe.set_user(self.hr_user)
+		self.assertIn(leave, {row["name"] for row in get_my_approvals()["pending"]})
+		self._act("Leave Application", leave, "Approve")
+		self.assertEqual(frappe.db.get_value("Leave Application", leave, "status"), "Approved")
+
 	# --- path 1: a newer Left row for the manager's login --------------------
 
 	def test_manager_with_a_newer_left_employee_row_can_still_approve(self):
