@@ -119,7 +119,7 @@ class TestTimesheetReminder(IntegrationTestCase):
 
 	def test_the_digest_guard_and_the_reminder_guard_are_independent(self):
 		make_timesheet(self, self.report, 3)
-		digest_guard = f"{reminders.OVERDUE_GUARD_PREFIX}{frappe.utils.getdate()}"
+		digest_guard = reminders.overdue_guard_key(self.company, reminders.company_today(self.company))
 		had_digest = frappe.cache.get_value(digest_guard)
 		frappe.cache.set_value(digest_guard, 1, expires_in_sec=60)
 		if not had_digest:

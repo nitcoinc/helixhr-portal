@@ -964,9 +964,10 @@ def _send_holiday_company(row, today, foreign, foreign_names, dropped, progress=
 
 # --- overdue digests (plan 2026-10-02-001 U11, R23..R25, KTD13) -------------
 
-# KTD13's rerun guard: one dated key per site day, kept through `clear-cache`
-# and `bench migrate` by `hooks.persistent_cache_keys`, and expiring on its
-# own a day and a half later so the store never accumulates them.
+# KTD13's rerun guard: one dated key per (company, company-local day) since
+# 2026-10-29 (`overdue_guard_key`), kept through `clear-cache` and `bench
+# migrate` by `hooks.persistent_cache_keys`, and expiring on its own a day and
+# a half later so the store never accumulates them.
 OVERDUE_GUARD_PREFIX = "helixhr-overdue-digest|"
 OVERDUE_GUARD_SECONDS = 36 * 60 * 60
 OVERDUE_ERROR_TITLE = "HelixHR overdue digests"
@@ -985,59 +986,91 @@ _KIND_LABELS = {
 }
 
 
-def send_overdue_digests():
-	"""Daily (`hooks.scheduler_events`). One `approval_overdue_digest` per
-	late approver (R23) and one `hr_overdue_summary` per HR Manager (R24).
+def overdue_guard_key(company, day):
+	"""The digest's rerun guard for one company's local `day`."""
+	return f"{OVERDUE_GUARD_PREFIX}{company}|{day}"
 
-	A same-day rerun sends nothing (the dated guard key). Switching either
-	event Off in Email templates is the off switch: `send_notification`
-	renders nothing for it. Failure is isolated per recipient and logged.
+
+def send_overdue_digests():
+	"""On the hour and half hour (`hooks.scheduler_events["cron"]`). Each
+	company's digest goes out on the first tick after midnight in *its own*
+	time zone (`utils.company_today`), with its items aged against that date
+	(since 2026-10-29). Per company: one `approval_overdue_digest` per late
+	approver (R23) and one `hr_overdue_summary` per HR Manager whose scope
+	reaches the company (R24) -- someone covering two companies gets one of
+	each per company, each at that company's midnight. A tick with every
+	company already sent is one Company read and a cache lookup per company.
+
+	A same-day rerun sends that company nothing (its dated guard). Switching
+	either event Off in Email templates is the off switch: `send_notification`
+	renders nothing for it. Failure is isolated per recipient and logged; a
+	company whose collector raises is logged once and retried next tick.
 	"""
 	from helixhr.utils import send_notification
 
-	today = getdate()
-	guard = f"{OVERDUE_GUARD_PREFIX}{today}"
-	if frappe.cache.get_value(guard):
-		return {"skipped": True}
-
-	items = collect_overdue(today)
-	hr_users = _active_hr_managers()
-	digests = summaries = 0
-
-	by_owner = {}
-	for item in items:
-		for user in item["owners"]:
-			by_owner.setdefault(user, []).append(item)
-	for user, owned in by_owner.items():
-		# An HR Manager reads their own items in the summary, marked (U11).
-		if user in hr_users:
+	result = {"companies": 0, "items": 0, "digests": 0, "summaries": 0}
+	due = {}
+	for company in frappe.get_all("Company", pluck="name", order_by="name asc"):
+		day = company_today(company)
+		# The pre-2026-10-29 site-wide key: the deploy day's old daily run
+		# already mailed this date. Expires within 36 h; drop next release.
+		if frappe.cache.get_value(overdue_guard_key(company, day)) or frappe.cache.get_value(
+			f"{OVERDUE_GUARD_PREFIX}{day}"
+		):
 			continue
-		try:
-			send_notification(
-				"approval_overdue_digest",
-				[user],
-				{"items": [_public(item) for item in owned], "count": len(owned)},
-			)
-			digests += 1
-		except Exception:
-			frappe.log_error(frappe.get_traceback(), OVERDUE_ERROR_TITLE)
+		due[company] = day
+	if not due:
+		return result
 
-	for user in hr_users:
+	hr_users = _active_hr_managers()
+	for company, day in due.items():
 		try:
-			owners = _summary_owners(items, user)
-			if not owners:
+			items = collect_overdue(day, companies=[company])
+		except Exception:
+			_log_once(
+				f"overdue|{company}|{day}",
+				f"The overdue digest for '{company}' could not be collected; it retries on the next tick."
+				f"\n\n{frappe.get_traceback()}",
+				OVERDUE_ERROR_TITLE,
+			)
+			continue
+
+		by_owner = {}
+		for item in items:
+			for user in item["owners"]:
+				by_owner.setdefault(user, []).append(item)
+		for user, owned in by_owner.items():
+			# An HR Manager reads their own items in the summary, marked (U11).
+			if user in hr_users:
 				continue
-			send_notification(
-				"hr_overdue_summary",
-				[user],
-				{"owners": owners, "count": sum(len(owner["items"]) for owner in owners)},
-			)
-			summaries += 1
-		except Exception:
-			frappe.log_error(frappe.get_traceback(), OVERDUE_ERROR_TITLE)
+			try:
+				send_notification(
+					"approval_overdue_digest",
+					[user],
+					{"items": [_public(item) for item in owned], "count": len(owned)},
+				)
+				result["digests"] += 1
+			except Exception:
+				frappe.log_error(frappe.get_traceback(), OVERDUE_ERROR_TITLE)
 
-	frappe.cache.set_value(guard, 1, expires_in_sec=OVERDUE_GUARD_SECONDS)
-	return {"items": len(items), "digests": digests, "summaries": summaries}
+		for user in hr_users if items else ():
+			try:
+				owners = _summary_owners(items, user)
+				if not owners:
+					continue
+				send_notification(
+					"hr_overdue_summary",
+					[user],
+					{"owners": owners, "count": sum(len(owner["items"]) for owner in owners)},
+				)
+				result["summaries"] += 1
+			except Exception:
+				frappe.log_error(frappe.get_traceback(), OVERDUE_ERROR_TITLE)
+
+		frappe.cache.set_value(overdue_guard_key(company, day), 1, expires_in_sec=OVERDUE_GUARD_SECONDS)
+		result["companies"] += 1
+		result["items"] += len(items)
+	return result
 
 
 # Plan 2026-10-15-002 KTD2: `collect_overdue(cutoff=ALL_PENDING)` reads every

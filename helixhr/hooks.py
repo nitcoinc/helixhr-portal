@@ -427,7 +427,8 @@ has_permission = {
 # removal, so having both senders on for one event is the thing
 # `events.hr_settings_validate` and preflight guard against.
 # Plan 2026-10-02-001 U11 / KTD13: the overdue digest's dated rerun guard
-# must survive `clear-cache` and `bench migrate`; it expires on its own.
+# (per company since 2026-10-29) must survive `clear-cache` and `bench
+# migrate`; it expires on its own.
 # Plan 2026-10-04-004 U1: the same guard, per (event, company, day), for
 # the celebration senders -- per-company settings multiply the blast radius
 # of a hand-run `bench execute`. Plan 2026-10-15-002 KTD6: the manual
@@ -437,7 +438,6 @@ persistent_cache_keys = ["helixhr-overdue-digest|*", "helixhr-celebration|*", "h
 scheduler_events = {
 	"daily": [
 		"helixhr.tasks.null_stale_checkin_coordinates",
-		"helixhr.reminders.send_overdue_digests",
 	],
 	# Plan 2026-10-08-001 U2: on the hour and half hour, so each company is
 	# mailed at *its own* midnight (whole- and half-hour zones: Chicago, IST)
@@ -451,6 +451,9 @@ scheduler_events = {
 			# Plan 2026-10-22-001 U3 (KTD6): a leaving applies at its own
 			# company's midnight, and a failed one retries every tick.
 			"helixhr.tasks.apply_due_leavings",
+			# Since 2026-10-29: each company's overdue digest at its own
+			# midnight, guarded per (company, local day).
+			"helixhr.reminders.send_overdue_digests",
 		],
 	},
 	# Off by default -- helixhr.telemetry.send_ping is a no-op until an

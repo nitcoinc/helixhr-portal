@@ -916,15 +916,15 @@ class TestCelebrationReminders(IntegrationTestCase):
 		self.assertEqual([mail["recipients"] for mail in mails], [[self._address("B2")]])
 		self.assertEqual(len(errors()), 1)
 
-	def test_the_job_ticks_every_half_hour_and_the_digest_stays_daily(self):
+	def test_the_job_ticks_every_half_hour_beside_the_digest(self):
 		"""Plan 2026-10-08-001 U2: a half-hour tick reaches every company's
-		own midnight; the site-wide digest keeps its daily slot."""
+		own midnight; the overdue digest has joined it (2026-10-29)."""
 		events = frappe.get_hooks("scheduler_events")
 		self.assertIn(
 			"helixhr.reminders.send_celebration_reminders", events["cron"]["0,30 * * * *"]
 		)
 		self.assertNotIn("helixhr.reminders.send_celebration_reminders", events["daily"])
-		self.assertIn("helixhr.reminders.send_overdue_digests", events["daily"])
+		self.assertIn("helixhr.reminders.send_overdue_digests", events["cron"]["0,30 * * * *"])
 
 	# --- P8-U11: "Selected employees" recipient mode ------------------------
 
@@ -1710,9 +1710,11 @@ class TestOverdueDigests(IntegrationTestCase):
 		self.company = frappe.db.get_value("Employee", self.employee, "company")
 		frappe.local.conf["helixhr_approval_overdue_days"] = 2
 		self.addCleanup(frappe.local.conf.pop, "helixhr_approval_overdue_days", None)
-		self.guard = f"{reminders.OVERDUE_GUARD_PREFIX}{getdate()}"
-		frappe.cache.delete_value(self.guard)
-		self.addCleanup(frappe.cache.delete_value, self.guard)
+		self.day = reminders.company_today(self.company)
+		self.guard = reminders.overdue_guard_key(self.company, self.day)
+		for key in (self.guard, f"{reminders.OVERDUE_GUARD_PREFIX}{self.day}"):
+			frappe.cache.delete_value(key)
+			self.addCleanup(frappe.cache.delete_value, key)
 		frappe.db.delete("HelixHR Message Template", {"name": ["in", ["approval_overdue_digest", "hr_overdue_summary"]]})
 		self.since = now_datetime()
 
@@ -1765,7 +1767,7 @@ class TestOverdueDigests(IntegrationTestCase):
 		reminders.send_overdue_digests()
 		self.assertEqual(len(self._mail_to(self.manager_user)), 1)
 		frappe.clear_cache()
-		self.assertEqual(reminders.send_overdue_digests(), {"skipped": True})
+		self.assertEqual(reminders.send_overdue_digests()["companies"], 0)
 		self.assertEqual(len(self._mail_to(self.manager_user)), 1)
 		for row in self._mail_to(self.manager_user) + self._mail_to(self.hr_user):
 			frappe.delete_doc("Email Queue", row.name, force=True, ignore_permissions=True)
@@ -1866,8 +1868,75 @@ class TestOverdueDigests(IntegrationTestCase):
 		self.assertGreater(frappe.db.count("Error Log", {"method": reminders.OVERDUE_ERROR_TITLE}), before)
 
 	def test_the_job_and_its_guard_are_registered(self):
-		self.assertIn("helixhr.reminders.send_overdue_digests", frappe.get_hooks("scheduler_events")["daily"])
+		events = frappe.get_hooks("scheduler_events")
+		self.assertIn("helixhr.reminders.send_overdue_digests", events["cron"]["0,30 * * * *"])
+		self.assertNotIn("helixhr.reminders.send_overdue_digests", events["daily"])
 		self.assertIn(f"{reminders.OVERDUE_GUARD_PREFIX}*", frappe.get_hooks("persistent_cache_keys"))
+
+	def _company_ahead(self, days):
+		"""This company's clock `days` past the server's; every other company on the server's."""
+		ahead = add_days(getdate(), days)
+		key = reminders.overdue_guard_key(self.company, ahead)
+		frappe.cache.delete_value(key)
+		self.addCleanup(frappe.cache.delete_value, key)
+		return patch.object(
+			reminders, "company_today", side_effect=lambda c: ahead if c == self.company else getdate()
+		)
+
+	def test_items_are_aged_on_the_company_date(self):
+		"""Two days old on the server's date is within the threshold; the
+		company's clock is a day ahead, so on its date it is three -- late."""
+		name = self._leave(2, 0)
+		send = mock_send()
+		with send, self._company_ahead(1):
+			reminders.send_overdue_digests()
+		digest = next(c for c in send.calls if c[0] == "approval_overdue_digest" and c[1] == [self.manager_user])
+		self.assertTrue(any(item["url"].endswith(name) for item in digest[2]["items"]))
+
+	def test_a_company_sends_once_per_its_own_day(self):
+		self._leave(3, 0)
+		send = mock_send()
+		with send:
+			reminders.send_overdue_digests()
+			self.assertTrue(frappe.cache.get_value(self.guard))
+			before = len(send.calls)
+			reminders.send_overdue_digests()
+			self.assertEqual(len(send.calls), before)
+			# Its own midnight has passed: a new local day, a new digest.
+			with self._company_ahead(1):
+				reminders.send_overdue_digests()
+		self.assertTrue(any(c[1] == [self.manager_user] for c in send.calls[before:]))
+
+	def test_the_old_site_wide_guard_holds_the_deploy_day(self):
+		self._leave(3, 0)
+		frappe.cache.set_value(f"{reminders.OVERDUE_GUARD_PREFIX}{self.day}", 1, expires_in_sec=60)
+		send = mock_send()
+		with send:
+			reminders.send_overdue_digests()
+		self.assertFalse(any(c[1] == [self.manager_user] for c in send.calls))
+
+	def test_a_company_whose_collector_raises_retries_and_spares_the_others(self):
+		self._leave(3, 0)
+		real = reminders.collect_overdue
+		seen = []
+
+		def collect(day, companies=None, **kwargs):
+			seen.append(companies[0])
+			if companies == [self.company]:
+				raise RuntimeError("boom")
+			return real(day, companies=companies, **kwargs)
+
+		others = [c for c in frappe.get_all("Company", pluck="name") if c != self.company]
+		for company in others:
+			key = reminders.overdue_guard_key(company, reminders.company_today(company))
+			frappe.cache.delete_value(key)
+			self.addCleanup(frappe.cache.delete_value, key)
+		with mock_send(), patch.object(reminders, "collect_overdue", side_effect=collect):
+			reminders.send_overdue_digests()
+		self.assertFalse(frappe.cache.get_value(self.guard))
+		self.assertEqual(sorted(seen), sorted([self.company, *others]))
+		for company in others:
+			self.assertTrue(frappe.cache.get_value(reminders.overdue_guard_key(company, reminders.company_today(company))))
 
 
 class mock_send:

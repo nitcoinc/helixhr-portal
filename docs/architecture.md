@@ -1130,7 +1130,8 @@ switchable itself and the contradiction has to be refused somewhere.
   only counted (R4).
 - **Each company on its own clock** (plan 2026-10-08-001). `Company.helixhr_time_zone`
   (blank: the system zone) decides the company's date through
-  `utils.company_today` -- the one resolver the reminders and the backdated
+  `utils.company_today` -- the one resolver the reminders, the overdue
+  digest, the leaving job and the backdated
   grace rule share. A half-hour tick lands on every company's own midnight
   (whole- and half-hour zones) and retries a failed send 30 minutes later; a
   tick with nobody due is one query (`_due`) and stops before reading any
@@ -1420,11 +1421,17 @@ from `helixhr_pending_since` (Datetime on Leave Application, Timesheet,
 Attendance Request; stamped on entry to a new pending stage, backfilled from
 `modified`). The HR queue calls `is_overdue` directly; the Overdue tab and
 the daily digests both read `reminders.collect_overdue`, so tab and email
-counts agree. The daily job sends one
-`approval_overdue_digest` per late approver and one `hr_overdue_summary` per
-HR Manager (their admin scope). The dated rerun guard key is set **after**
-sending (a crash mid-run retries the next run rather than skipping the day),
-kept through `clear-cache` by `persistent_cache_keys`, expiring after 36 h.
+counts agree. The digest runs on the half-hour cron, once per company per
+company-local day (`utils.company_today`, since 2026-10-29): each company's
+items are collected with `companies=[company]` and aged against its own date,
+then it sends one `approval_overdue_digest` per late approver and one
+`hr_overdue_summary` per HR Manager whose admin scope reaches that company. A
+person covering two companies gets one of each per company, each at that
+company's midnight. The rerun guard `overdue_guard_key(company, day)` is set
+**after** sending (a crash mid-run retries the next tick rather than skipping
+the day), kept through `clear-cache` by `persistent_cache_keys`, expiring
+after 36 h. The pre-2026-10-29 site-wide key is still honoured for the deploy
+day only.
 
 ### Profile corrections for bank details
 
@@ -1877,8 +1884,8 @@ first. `?view=overdue` is an alias for All pending with Overdue only on.
   disclosure after My team (first when My team is empty). HR still sees only
   its own decisions (`modified_by`).
 - **One collector.** `reminders.collect_overdue(today, cutoff, companies,
-  kinds, resolve_owners, stats)`. The digest calls it with defaults (overdue
-  only, every company, owners resolved). `cutoff=ALL_PENDING` reads every
+  kinds, resolve_owners, stats)`. The digest calls it once per company
+  (overdue only, that company's date, owners resolved). `cutoff=ALL_PENDING` reads every
   pending item, including rows with no `helixhr_pending_since` (age `None`,
   shown "Since unknown"). `companies` filters by the employee's company in
   SQL, before the 500-per-doctype bound; `stats["capped"]` reports the bound.
