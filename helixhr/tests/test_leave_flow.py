@@ -316,6 +316,10 @@ class TestPortalLeaveApi(IntegrationTestCase):
 	def _add_holiday(self, date):
 		frappe.set_user("Administrator")
 		holiday_list = frappe.get_doc("Holiday List", "_Test Holiday List")
+		# The list covers this calendar year; late in the year the date falls
+		# past its end, which ERPNext refuses.
+		if getdate(date) > getdate(holiday_list.to_date):
+			holiday_list.to_date = getdate(date)
 		if not any(str(row.holiday_date) == str(getdate(date)) for row in holiday_list.holidays):
 			holiday_list.append(
 				"holidays", {"holiday_date": str(getdate(date)), "description": "Test holiday"}
