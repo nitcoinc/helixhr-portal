@@ -408,8 +408,14 @@ records it).
 scheduler status`; preflight "Overdue digests" WARNs when off); a default outgoing Email
 Account; the item is really past `helixhr_approval_overdue_days` counted from
 `helixhr_pending_since`, not from creation; the digest event not switched Off on the Email
-templates page. The run sets a dated guard key **after** sending, kept through
-`clear-cache` and expiring after 36 h, so a same-day manual rerun sends nothing by design.
+templates page. The digest ticks on the hour and half hour and goes out per company, on the
+first tick after midnight in *that company's* time zone (Desk → Company → **Time Zone**;
+blank means System Settings' zone), with items aged against the company's own date. Someone
+covering two companies gets one digest per company. Each company's run sets a guard key
+`helixhr-overdue-digest|<company>|<local date>` **after** sending, kept through `clear-cache`
+and expiring after 36 h, so a same-day manual rerun sends that company nothing by design. A
+company whose collector raises is logged once (title `HelixHR overdue digests`) and retried
+on the next tick.
 
 **Bank-detail corrections** can be filed only from the portal (`create_my_request` passes the
 double entry and proof as flags); a Desk-created HR Request with a correction field is
