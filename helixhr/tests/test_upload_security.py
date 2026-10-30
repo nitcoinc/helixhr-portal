@@ -345,6 +345,10 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"create_project": (20, 3600),
 			"save_task": (30, 3600),
 			"set_project_members": (20, 3600),
+			# Plan 2026-10-31-001 U1/U4/U5.
+			"add_tasks": (30, 3600),
+			"set_project_open_to_all": (30, 3600),
+			"add_project_members": (20, 3600),
 			"run_report": (30, 60),
 			# Plan 2026-10-04-001 U3-U13: catalog, export, access matrix, views.
 			"search_report_options": (60, 60),

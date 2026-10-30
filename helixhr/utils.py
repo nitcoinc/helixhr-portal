@@ -2573,6 +2573,11 @@ RATE_LIMIT_POLICY = {
 	"create_project": (20, 3600),
 	"save_task": (30, 3600),
 	"set_project_members": (20, 3600),
+	# Plan 2026-10-31-001 U1/U4/U5: one call stands in for up to 100 tasks
+	# or 500 people, so each is bounded like the single writes above.
+	"add_tasks": (30, 3600),
+	"set_project_open_to_all": (30, 3600),
+	"add_project_members": (20, 3600),
 	# Plan 2026-10-04-001 U2: one runner for every catalog report. Wrapped
 	# HRMS reports are the heaviest read the portal makes, so it keeps
 	# `run_portal_report`'s tighter bound.

@@ -5738,18 +5738,32 @@ def get_timesheet_week_start(name):
 
 
 def _my_project_names(user):
-	"""Projects `user` belongs to: a Project Users row or a User Permission
-	on Project. The one membership rule `get_my_projects` and
-	`get_my_project_overview` share."""
-	return set(frappe.get_all("Project User", filters={"user": user}, pluck="parent")) | set(
+	"""Projects `user` may book on: a Project Users row, a User Permission
+	on Project, or (plan 2026-10-31-001 KTD6) an Open project marked "Open
+	to everyone" in the company of `user`'s current Active Employee. The one
+	booking rule the task picker, week reads and save/submit validation
+	share (R9). The open branch writes no row anywhere, so it widens booking
+	only, never access to the project."""
+	names = set(frappe.get_all("Project User", filters={"user": user}, pluck="parent")) | set(
 		frappe.get_all("User Permission", filters={"user": user, "allow": "Project"}, pluck="for_value")
 	)
+	company = active_employee_for_user(user).company
+	if company:
+		names |= set(
+			frappe.get_all(
+				"Project",
+				filters={"company": company, "status": "Open", "helixhr_open_to_all": 1},
+				pluck="name",
+			)
+		)
+	return names
 
 
 @frappe.whitelist()
 def get_my_projects():
-	"""Open Projects the session user may book time on -- Project Users
-	or a User Permission on Project, each with its own open Tasks
+	"""Open Projects the session user may book time on (`_my_project_names`:
+	Project Users, a User Permission on Project, or an "Open to everyone"
+	project in their company), each with its own open Tasks
 	(KTD11: no "bookable projects" API exists upstream).
 
 	Tasks come back in **one** query for the whole allowed project set
@@ -14620,7 +14634,18 @@ def retry_leaving(employee, expected_modified=None):
 
 _PROJECT_NOT_FOUND = "That project isn't here."
 
-_PROJECT_SEARCH_FIELDS = ("name", "project_name", "status", "company")
+_PROJECT_SEARCH_FIELDS = (
+	"name",
+	"project_name",
+	"status",
+	"company",
+	# Plan 2026-10-31-001 U1: the list table's columns and filters.
+	"project_type",
+	"priority",
+	"helixhr_is_billable",
+	"expected_end_date",
+	"helixhr_open_to_all",
+)
 
 _PROJECT_FIELDS = (
 	"name",
@@ -14629,6 +14654,7 @@ _PROJECT_FIELDS = (
 	"expected_start_date",
 	"expected_end_date",
 	"helixhr_is_billable",
+	"helixhr_open_to_all",
 	"priority",
 	"project_type",
 )
@@ -14654,6 +14680,11 @@ def _project_search_projection(row):
 		"project_name": row.project_name,
 		"status": row.status,
 		"company": row.company,
+		"project_type": row.project_type,
+		"priority": row.priority,
+		"billable": bool(row.helixhr_is_billable),
+		"expected_end_date": row.expected_end_date,
+		"open_to_all": bool(row.helixhr_open_to_all),
 	}
 
 
@@ -14822,20 +14853,42 @@ def get_project(project):
 		frappe.throw(_(_PROJECT_NOT_FOUND), frappe.PermissionError)
 
 	data = frappe.db.get_value("Project", project, list(_PROJECT_FIELDS), as_dict=True)
+	write = resolve_project_scope(frappe.session.user)
+	can_edit = project_in_scope(project, write)
 
 	return {
 		"name": data.name,
 		"project_name": data.project_name,
 		"status": data.status,
 		"billable": bool(data.helixhr_is_billable),
+		"open_to_all": bool(data.helixhr_open_to_all),
 		"priority": data.priority,
 		"project_type": data.project_type,
 		"expected_start_date": data.expected_start_date,
 		"expected_end_date": data.expected_end_date,
 		"tasks": _project_open_tasks(project),
 		"members": _project_members(project),
-		"can_edit": project_in_scope(project, resolve_project_scope(frappe.session.user)),
+		"can_edit": can_edit,
+		# Plan 2026-10-31-001 U5: the bulk-add picker's department choices,
+		# only for a caller who may add people.
+		"departments": _project_departments(write) if can_edit else [],
 	}
+
+
+def _project_departments(scope):
+	"""Departments of the companies ``scope`` (`resolve_project_scope`)
+	covers, for the "add a whole department" picker. The company-less tree
+	root is left out: it would mean every company's people."""
+	companies = read_companies(scope)
+	if companies == []:
+		return []
+	return frappe.get_all(
+		"Department",
+		filters={"company": ["in", companies] if companies is not None else ["is", "set"]},
+		fields=["name", "department_name", "company"],
+		order_by="department_name asc",
+		ignore_permissions=True,
+	)
 
 
 # ---------------------------------------------------------------------------
@@ -15103,6 +15156,208 @@ def set_project_members(project, employees):
 	_write_project_users(doc, insert=False)
 
 	return {"members": _project_members(project)}
+
+
+# ---------------------------------------------------------------------------
+# Plan 2026-10-31-001 U1/U4/U5: bulk task add, "Open to everyone", bulk
+# member add. Gated by the same `resolve_project_scope` / `project_in_scope`
+# pair as the writes above.
+# ---------------------------------------------------------------------------
+
+_BULK_TASK_LIMIT = 100
+# `Task.subject` is a Data field.
+_TASK_SUBJECT_MAX = 140
+_BULK_MEMBER_LIMIT = 500
+
+
+def _project_write_gate(project):
+	"""Refuse ``project`` unless the caller's write scope covers it, with the
+	one not-found wording (no oracle for which ids exist)."""
+	scope = resolve_project_scope(frappe.session.user)
+	if scope["kind"] == "none" or not project_in_scope(project, scope):
+		frappe.throw(_(_PROJECT_NOT_FOUND), frappe.PermissionError)
+	return scope
+
+
+def _string_list(value, label):
+	"""A JSON list of strings from the request, or a plain refusal."""
+	if isinstance(value, str):
+		value = frappe.parse_json(value)
+	if value is None:
+		return []
+	if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+		frappe.throw(_("{0} must be a list of text lines.").format(label))
+	return value
+
+
+@frappe.whitelist(methods=["POST"])
+def add_tasks(project, subjects):
+	"""Add one Open task per non-blank line of ``subjects`` to ``project``
+	(plan 2026-10-31-001 U1, R4), all or nothing.
+
+	Lines are trimmed; blanks are dropped; a line that repeats an earlier
+	line or an existing open task (case-insensitive) is dropped and reported
+	in ``duplicates``. More than 100 lines, or one longer than 140
+	characters (named by its line number), refuses the whole call. Refused
+	on a project that is not Open. Every insert runs in one savepoint, so a
+	failure leaves no task behind. Subjects go through the same
+	`Task.insert` as `save_task`, so Frappe's own HTML sanitising applies.
+	"""
+	rate_limit_per_user("add_tasks")
+	_project_write_gate(project)
+	lines = _string_list(subjects, _("Tasks"))
+
+	if frappe.db.get_value("Project", project, "status") != "Open":
+		frappe.throw(_("Tasks can only be added to an Open project."))
+
+	numbered = [(number, line.strip()) for number, line in enumerate(lines, start=1) if line.strip()]
+	if not numbered:
+		frappe.throw(_("Give at least one task a subject."))
+	if len(numbered) > _BULK_TASK_LIMIT:
+		frappe.throw(_("Add at most {0} tasks at a time.").format(_BULK_TASK_LIMIT))
+	for number, subject in numbered:
+		if len(subject) > _TASK_SUBJECT_MAX:
+			frappe.throw(_("Line {0} is longer than {1} characters.").format(number, _TASK_SUBJECT_MAX))
+
+	existing = frappe.get_all(
+		"Task",
+		filters={"project": project, "status": ["not in", _CLOSED_TASK_STATUSES]},
+		pluck="subject",
+		ignore_permissions=True,
+	)
+	seen = {subject.casefold() for subject in existing if subject}
+	fresh, duplicates = [], []
+	for _number, subject in numbered:
+		if subject.casefold() in seen:
+			duplicates.append(subject)
+			continue
+		seen.add(subject.casefold())
+		fresh.append(subject)
+
+	savepoint = "helixhr_add_tasks"
+	frappe.db.savepoint(savepoint)
+	try:
+		created = [
+			frappe.get_doc(
+				{"doctype": "Task", "project": project, "subject": subject, "status": "Open"}
+			).insert(ignore_permissions=True)
+			for subject in fresh
+		]
+	except Exception:
+		frappe.db.rollback(save_point=savepoint)
+		raise
+	frappe.db.release_savepoint(savepoint)
+
+	return {"tasks": [_task_projection(doc) for doc in created], "duplicates": duplicates}
+
+
+@frappe.whitelist(methods=["POST"])
+def set_project_open_to_all(project, value):
+	"""Mark ``project`` "Open to everyone" or not (plan 2026-10-31-001 U4,
+	R8). Booking reads the flag in `_my_project_names`; nothing else is
+	written -- no Project User row, User Permission or DocShare -- so it
+	never widens access to the project itself. Turning it off follows the
+	member-removal rule: a draft week still naming the project is refused
+	on its next save."""
+	rate_limit_per_user("set_project_open_to_all")
+	_project_write_gate(project)
+	open_to_all = cint(value) == 1
+	frappe.db.set_value("Project", project, "helixhr_open_to_all", int(open_to_all))
+	return {"open_to_all": open_to_all}
+
+
+def _department_candidates(department, scope):
+	"""Active employees in ``department`` and its sub-departments, in a
+	company ``scope`` covers. Refuses a department outside scope, or one
+	resolving to more than `_BULK_MEMBER_LIMIT` people."""
+	if not isinstance(department, str):
+		frappe.throw(_("That department isn't here."))
+	dept = frappe.db.get_value(
+		"Department", department, ["lft", "rgt", "company", "department_name"], as_dict=True
+	)
+	if not dept or (dept.company and not scope_covers(scope, dept.company)):
+		frappe.throw(_("That department isn't here."))
+	subtree = frappe.get_all(
+		"Department", filters={"lft": [">=", dept.lft], "rgt": ["<=", dept.rgt]}, pluck="name"
+	)
+	filters = {"department": ["in", subtree], "status": "Active"}
+	companies = read_companies(scope)
+	if companies is not None:
+		filters["company"] = ["in", companies]
+	if frappe.db.count("Employee", filters) > _BULK_MEMBER_LIMIT:
+		frappe.throw(
+			_("{0} has more than {1} people. Add a smaller department.").format(
+				dept.department_name or department, _BULK_MEMBER_LIMIT
+			)
+		)
+	return frappe.get_all("Employee", filters=filters, pluck="name", order_by="employee_name asc")
+
+
+@frappe.whitelist(methods=["POST"])
+def add_project_members(project, employees=None, department=None):
+	"""Append people to ``project``'s members (plan 2026-10-31-001 U5, R5-R7,
+	KTD4, KTD5): the named ``employees``, and/or every Active employee in
+	``department`` and its sub-departments. Never removes anyone.
+
+	Only Active employees in a company the caller's project write scope
+	covers are added. Existing members and people with no portal login are
+	skipped and named. An id that is not one of those (missing, not Active,
+	another company) comes back as ``"not available"`` with no name, so the
+	response cannot be used to read names across companies.
+
+	Appended rows carry ``welcome_email_sent = 1`` (ERPNext's
+	`Project.validate` would otherwise mail each one a "Project
+	Collaboration Invitation"), and the write goes through
+	`_write_project_users`, which strips ERPNext's auto-share."""
+	rate_limit_per_user("add_project_members")
+	scope = _project_write_gate(project)
+
+	ids = _string_list(employees, _("People"))
+	if department:
+		ids += _department_candidates(department, scope)
+	ids = list(dict.fromkeys(ids))
+	if not ids:
+		frappe.throw(_("Choose people or a department to add."))
+	if len(ids) > _BULK_MEMBER_LIMIT:
+		frappe.throw(_("Add at most {0} people at a time.").format(_BULK_MEMBER_LIMIT))
+
+	doc = frappe.get_doc("Project", project, for_update=True)
+	rows = frappe.get_all(
+		"Employee",
+		filters={"name": ["in", ids]},
+		fields=["name", "employee_name", "user_id", "company", "status"],
+	)
+	by_name = {row.name: row for row in rows}
+	members = {row.user for row in doc.users}
+
+	added, skipped = [], []
+	for employee in ids:
+		row = by_name.get(employee)
+		if not row or row.status != "Active" or not scope_covers(scope, row.company):
+			skipped.append({"employee": employee, "employee_name": None, "reason": _("not available")})
+		elif not row.user_id:
+			skipped.append(
+				{"employee": row.name, "employee_name": row.employee_name, "reason": _("no portal login")}
+			)
+		elif row.user_id in members:
+			skipped.append(
+				{"employee": row.name, "employee_name": row.employee_name, "reason": _("already a member")}
+			)
+		else:
+			members.add(row.user_id)
+			doc.append("users", {"user": row.user_id, "welcome_email_sent": 1})
+			added.append(
+				{
+					"employee": row.name,
+					"employee_name": row.employee_name,
+					"initials": _initials(row.employee_name),
+				}
+			)
+
+	if added:
+		_write_project_users(doc, insert=False)
+
+	return {"added": _with_photo_urls(added), "skipped": skipped, "members": _project_members(project)}
 
 
 # ---------------------------------------------------------------------------
