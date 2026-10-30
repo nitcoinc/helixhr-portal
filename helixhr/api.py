@@ -77,6 +77,13 @@ from helixhr.events import (
 )
 from helixhr.helixhr.doctype.helixhr_leaving.helixhr_leaving import OPEN_STATUSES as OPEN_LEAVING_STATUSES
 from helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export import expire_unreachable_exports
+from helixhr.helixhr.doctype.helixhr_roster_change.helixhr_roster_change import (
+	ROSTER_DRAFT,
+	ROSTER_PENDING,
+	ROSTER_RETURNED,
+	ROSTER_WITHDRAWN,
+	pending_requests,
+)
 from helixhr.helixhr.doctype.helixhr_timesheet_change.helixhr_timesheet_change import (
 	comment_problem,
 )
@@ -85,6 +92,10 @@ from helixhr.helixhr.doctype.helixhr_timesheet_change.helixhr_timesheet_change i
 # permission scope), reused here rather than re-listed so this gate and
 # `hr_request.get_permission_query_conditions` cannot drift apart.
 from helixhr.helixhr.doctype.hr_request.hr_request import _WORKER_ROLES as _ROUTED_WORKER_ROLES
+from helixhr.roster_ops import ASSIGN as ROSTER_OP_ASSIGN
+from helixhr.roster_ops import CHANGE as ROSTER_OP_CHANGE
+from helixhr.roster_ops import END as ROSTER_OP_END
+from helixhr.roster_ops import affected_window, op_date, read_coverage, simulate, snapshot_key
 from helixhr.tasks import (
 	LEAVING_DOCTYPE,
 	apply_leaving,
@@ -15917,9 +15928,12 @@ def _roster_employee_scope(mode):
 	return {"name": ["in", [me, *reports]]}
 
 
-def _roster_cells(rows, monday, sunday, can_edit):
+def _roster_cells(rows, monday, sunday, can_edit, exposed=()):
 	"""`{employee: [cell x 7]}` from one Shift Assignment read and one Shift
-	Type read for the whole page, whatever the row count."""
+	Type read for the whole page, whatever the row count. A cell names its
+	assignment for HR (`can_edit`) and for the `exposed` employees -- a
+	manager's direct reports, whose roster request rows point at one (plan
+	2026-10-31-001 U8)."""
 	ids = [row.name for row in rows]
 	if not ids:
 		return {}, {}
@@ -15970,8 +15984,9 @@ def _roster_cells(rows, monday, sunday, can_edit):
 				"start_time": _hh_mm(shift.start_time) if shift else None,
 				"end_time": _hh_mm(shift.end_time) if shift else None,
 			}
-			if can_edit:
-				# Only HR acts on a cell, so only HR's payload names the record.
+			if can_edit or employee in exposed:
+				# Only HR acts on a cell, and a manager proposes on a report's,
+				# so only those payloads name the record.
 				cell["assignment"] = found.name if found else None
 				cell["assignment_start"] = str(getdate(found.start_date)) if found else None
 				cell["assignment_end"] = str(getdate(found.end_date)) if found and found.end_date else None
@@ -16012,7 +16027,15 @@ def get_roster_week(week_start=None, mode="mine", search=None, start=0):
 	total = _aggregate_count(frappe.get_all("Employee", fields=[{"COUNT": "*"}], **scope)[0])
 
 	can_edit = mode == "hr" and bool(frappe.has_permission("Shift Assignment", "create"))
-	cells, times = _roster_cells(employees, monday, sunday, can_edit)
+	# Plan 2026-10-31-001 U8 / R10: team mode is only reachable with Active
+	# direct reports (`_roster_employee_scope`), so it always may propose.
+	can_request = mode == "team"
+	me = _my_employee() if can_request else None
+	exposed = {row.name for row in employees if row.name != me} if can_request else ()
+	cells, times = _roster_cells(employees, monday, sunday, can_edit, exposed)
+	# R19: who is already in a Pending request, for HR's pill and the
+	# manager's "already asked" state.
+	pending = pending_requests([row.name for row in employees]) if mode in ("team", "hr") else {}
 	leaves = _team_leaves([row.name for row in employees], monday, sunday)[0]
 	holiday_cache = {}
 	rows = []
@@ -16037,13 +16060,16 @@ def get_roster_week(week_start=None, mode="mine", search=None, start=0):
 				"cells": cells[row.name],
 				"leaves": leaves.get(row.name, []),
 				"holidays": sorted(_team_holiday_dates(row.name, monday, sunday, holiday_cache)),
+				"pending_request": pending.get(row.name),
 			}
 		)
 	_with_photo_urls(rows)
 
 	shift_types = []
-	if can_edit:
-		# One past the cap, so a full list is told apart from a cut one.
+	if can_edit or can_request:
+		# One past the cap, so a full list is told apart from a cut one. A
+		# proposing manager picks from the same list HR does; Shift Type
+		# names and times are not personal data.
 		shift_types = [
 			{"name": shift.name, "start_time": _hh_mm(shift.start_time), "end_time": _hh_mm(shift.end_time)}
 			for shift in frappe.get_all(
@@ -16051,6 +16077,7 @@ def get_roster_week(week_start=None, mode="mine", search=None, start=0):
 				fields=["name", "start_time", "end_time"],
 				order_by="name asc",
 				limit=_ROSTER_SHIFT_TYPE_LIMIT + 1,
+				ignore_permissions=can_request,
 			)
 		]
 	shift_types_truncated = len(shift_types) > _ROSTER_SHIFT_TYPE_LIMIT
@@ -16071,6 +16098,8 @@ def get_roster_week(week_start=None, mode="mine", search=None, start=0):
 		"start": start,
 		"limit": _ROSTER_ROW_LIMIT,
 		"can_edit": can_edit,
+		"can_request": can_request,
+		"draft": _roster_draft_payload(me) if can_request else None,
 		"shift_types": shift_types,
 		"shift_types_truncated": shift_types_truncated,
 	}
@@ -16249,6 +16278,436 @@ def cancel_shift_assignment(assignment, **kwargs):
 		frappe.throw(_(_ROSTER_REFUSED), frappe.PermissionError)
 	_run_roster_write(doc.cancel, refused=_(_ROSTER_CANCEL_BLOCKED))
 	return {"name": doc.name, "cancelled": True}
+
+
+# Manager roster requests (plan 2026-10-31-001 U8 / R10-R13, R17, R20)
+#
+# A manager drafts shift operations for their Active direct reports and
+# submits them to HR as `HelixHR Roster Change` requests (KTD7). The DocType
+# has no Employee DocPerm: every read and write here is a projection that
+# authorizes first, and every status move sets `flags.helixhr_roster_api`,
+# which the controller's lifecycle guard requires. The rules each operation
+# must pass are `roster_ops.simulate` (KTD9), run at save, submit and (U9)
+# approval against live coverage. U9 adds HR's decision through Approvals.
+
+_ROSTER_CHANGE = "HelixHR Roster Change"
+_ROSTER_DRAFT_MAX_ROWS = 200
+_ROSTER_NOTE_MAX = 1000
+_ROSTER_RECENT_LIMIT = 10
+# Fields an operation keeps per action; the rest are blanked, so a stray
+# `to_date` on a Change never reaches a Date column unvalidated.
+_ROSTER_OP_FIELDS = {
+	ROSTER_OP_ASSIGN: ("shift_type", "from_date", "to_date"),
+	ROSTER_OP_CHANGE: ("shift_type", "from_date", "assignment"),
+	ROSTER_OP_END: ("to_date", "assignment"),
+}
+_ROSTER_ALL_OP_FIELDS = ("shift_type", "from_date", "to_date", "assignment")
+_ROSTER_REQUEST_NOT_FOUND = "That roster request could not be found."
+_ROSTER_REQUEST_NOT_YOURS = "That roster request isn't yours."
+
+
+def _roster_draft_ops(rows):
+	"""The draft payload as plain operation dicts, refused whole when it is
+	not a list of objects or is longer than the cap. The simulator, not
+	this, judges each operation."""
+	rows = _parse_json_arg(rows)
+	if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+		frappe.throw(_("Invalid shift changes."))
+	if len(rows) > _ROSTER_DRAFT_MAX_ROWS:
+		frappe.throw(_("A request can hold at most {0} shift changes.").format(_ROSTER_DRAFT_MAX_ROWS))
+	ops = []
+	for row in rows:
+		action = str(row.get("action") or "").strip()
+		keep = _ROSTER_OP_FIELDS.get(action, _ROSTER_ALL_OP_FIELDS)
+		op = {"employee": str(row.get("employee") or "").strip(), "action": action}
+		for field in _ROSTER_ALL_OP_FIELDS:
+			value = str(row.get(field) or "").strip() if field in keep else ""
+			op[field] = value or None
+		ops.append(op)
+	return ops
+
+
+def _roster_note(note):
+	text = (note or "").strip()
+	if len(text) > _ROSTER_NOTE_MAX:
+		frappe.throw(_("Keep the note under {0} characters.").format(_ROSTER_NOTE_MAX))
+	return text
+
+
+def _request_ops(doc):
+	return [
+		{
+			"employee": row.employee,
+			"action": row.action,
+			"shift_type": row.shift_type,
+			"from_date": str(getdate(row.from_date)) if row.from_date else None,
+			"to_date": str(getdate(row.to_date)) if row.to_date else None,
+			"assignment": row.assignment,
+		}
+		for row in doc.rows
+	]
+
+
+def _review_roster_ops(me, ops):
+	"""R10, R13, KTD9 for `ops` as `me` would submit them. Returns
+	`_dict(team, before, after, problems)`: `team` the direct reports the
+	ops name (`{employee: row}`), `before`/`after` their live and simulated
+	coverage, and `problems` every refusal as `{index, employee, message}`,
+	each a plain sentence naming the person, in operation order.
+
+	Only Active direct reports (`_direct_report_filters`) -- never the
+	manager -- and only from tomorrow on that employee's company clock. An
+	operation that fails those is left out of the simulation."""
+	ids = list(dict.fromkeys(op["employee"] for op in ops if op["employee"]))
+	team = {}
+	if ids:
+		team = {
+			row.name: row
+			for row in frappe.get_all(
+				"Employee",
+				filters={**_direct_report_filters(me), "name": ["in", ids]},
+				fields=["name", "employee_name", "company"],
+				ignore_permissions=True,
+			)
+		}
+		team.pop(me, None)
+	shift_types = {op["shift_type"] for op in ops if op["shift_type"]}
+	known_types = (
+		set(
+			frappe.get_all(
+				"Shift Type",
+				filters={"name": ["in", list(shift_types)]},
+				pluck="name",
+				ignore_permissions=True,
+			)
+		)
+		if shift_types
+		else set()
+	)
+	todays = {}
+	problems = []
+	runnable = []
+	for index, op in enumerate(ops):
+		employee = op["employee"]
+		person = team.get(employee)
+
+		def refuse(message, index=index, employee=employee):
+			problems.append({"index": index, "employee": employee, "message": message})
+
+		if employee and employee == me:
+			refuse(_("You can't request changes to your own shifts."))
+			continue
+		if not person:
+			# Named only when they are the caller's own report: an arbitrary
+			# id gets no name back.
+			name = (
+				frappe.db.get_value("Employee", {"name": employee, "reports_to": me}, "employee_name")
+				if employee
+				else None
+			)
+			if name:
+				refuse(_("{0} is no longer active, so their shifts can't be changed.").format(name))
+			else:
+				refuse(_("{0} doesn't report to you.").format(employee or _("That person")))
+			continue
+		day = op_date(op)
+		if day:
+			if person.company not in todays:
+				todays[person.company] = company_today(person.company)
+			if day <= todays[person.company]:
+				refuse(_("{0}: a change can start tomorrow at the earliest.").format(person.employee_name))
+				continue
+		if op["shift_type"] and op["shift_type"] not in known_types:
+			refuse(_("{0}: that shift doesn't exist.").format(person.employee_name))
+			continue
+		runnable.append((index, op))
+
+	before, after = {}, {}
+	dates = [op_date(op) for _index, op in runnable if op_date(op)]
+	if runnable:
+		employees = {op["employee"] for _index, op in runnable}
+		before = read_coverage(employees, min(dates) if dates else user_today())
+		after, simulated = simulate(before, [op for _index, op in runnable])
+		for problem in simulated:
+			index, op = runnable[problem["index"]]
+			problems.append(
+				{
+					"index": index,
+					"employee": op["employee"],
+					"message": _("{0}: {1}").format(
+						team[op["employee"]].employee_name, _(problem["message"])
+					),
+				}
+			)
+	problems.sort(key=lambda problem: problem["index"])
+	return frappe._dict(team=team, before=before, after=after, problems=problems)
+
+
+def _refuse_roster_problems(review):
+	if review.problems:
+		frappe.throw(review.problems[0]["message"])
+
+
+def _coverage_payload(coverage):
+	"""The simulator's coverage as JSON-ready `{employee: [assignment]}`."""
+	return {
+		employee: [
+			{
+				"key": item["key"],
+				"shift_type": item["shift_type"],
+				"start_date": str(item["start_date"]),
+				"end_date": str(item["end_date"]) if item["end_date"] else None,
+			}
+			for item in rows
+		]
+		for employee, rows in coverage.items()
+	}
+
+
+def _roster_request_payload(doc):
+	return {
+		"name": doc.name,
+		"status": doc.status,
+		"company": doc.company,
+		"note": doc.note or "",
+		"return_reasons": doc.return_reasons or "",
+		"decision_note": doc.decision_note or "",
+		"decided_on": str(doc.decided_on) if doc.decided_on else None,
+		"modified": str(doc.modified),
+		"rows": [
+			{"employee_name": row.employee_name, **op}
+			for row, op in zip(doc.rows, _request_ops(doc), strict=True)
+		],
+	}
+
+
+def _my_roster_draft(me, for_update=False):
+	"""The manager's one Draft (R11), or None."""
+	name = frappe.db.get_value(
+		_ROSTER_CHANGE,
+		{"employee": me, "status": ROSTER_DRAFT},
+		"name",
+		order_by="creation asc",
+		for_update=for_update,
+	)
+	return frappe.get_doc(_ROSTER_CHANGE, name) if name else None
+
+
+def _roster_draft_payload(me, doc=None):
+	"""The Draft with its preview: `preview` is the simulated coverage of
+	every employee it names (the server's answer the browser mirror of
+	`roster_ops` must agree with), `problems` what would refuse it now --
+	coverage moves under a saved draft. None when there is no draft."""
+	doc = doc or _my_roster_draft(me)
+	if not doc:
+		return None
+	review = _review_roster_ops(me, _request_ops(doc))
+	return {
+		**_roster_request_payload(doc),
+		"preview": _coverage_payload(review.after),
+		"problems": review.problems,
+	}
+
+
+@frappe.whitelist()
+def get_roster_draft():
+	"""The caller's Draft (rows plus simulated preview) and their latest
+	non-draft requests with status and HR's words (R11, R17)."""
+	rate_limit_per_user("get_roster_draft")
+	me = _my_employee()
+	recent = frappe.get_all(
+		_ROSTER_CHANGE,
+		filters={"employee": me, "status": ["!=", ROSTER_DRAFT]},
+		pluck="name",
+		order_by="modified desc",
+		limit=_ROSTER_RECENT_LIMIT,
+		ignore_permissions=True,
+	)
+	return {
+		"draft": _roster_draft_payload(me),
+		"recent": [_roster_request_payload(frappe.get_doc(_ROSTER_CHANGE, name)) for name in recent],
+	}
+
+
+def _save_draft_rows(doc, me, ops, note=None):
+	doc.set("rows", ops)
+	if note is not None:
+		doc.note = note
+	doc.employee = me
+	doc.manager_user = frappe.session.user
+	doc.flags.helixhr_roster_api = True
+	doc.save(ignore_permissions=True)
+	return doc
+
+
+@frappe.whitelist(methods=["POST"])
+def save_roster_draft(rows, note=None):
+	"""Replace the caller's one Draft with `rows` (R10, R11, R13), creating
+	it on first save. Refused whole, naming the person, when any operation
+	is not one the caller may ask for. An empty list keeps an empty Draft
+	rather than deleting it: a reopened request keeps its history."""
+	rate_limit_per_user("save_roster_draft")
+	me = _my_employee()
+	ops = _roster_draft_ops(rows)
+	note = _roster_note(note) if note is not None else None
+	# The manager's own row serialises their saves, submits and reopens, so
+	# two tabs cannot each create "the" Draft.
+	_lock_employee(me)
+	review = _review_roster_ops(me, ops)
+	_refuse_roster_problems(review)
+	doc = _my_roster_draft(me, for_update=True)
+	if not doc:
+		if not ops:
+			return {"draft": None}
+		doc = frappe.new_doc(_ROSTER_CHANGE)
+		doc.status = ROSTER_DRAFT
+	_save_draft_rows(doc, me, ops, note)
+	return {"draft": _roster_draft_payload(me, doc)}
+
+
+@frappe.whitelist(methods=["POST"])
+def submit_roster_change(note=None):
+	"""Send the caller's Draft to HR (R12, R13): one Pending request per
+	company in the batch (KTD12), each carrying its KTD8 coverage snapshot.
+	The Draft itself becomes the first company's request. Refused when any
+	person in it is already in another Pending request."""
+	rate_limit_per_user("submit_roster_change")
+	me = _my_employee()
+	note = _roster_note(note) if note is not None else None
+	_lock_employee(me)
+	draft = _my_roster_draft(me, for_update=True)
+	if not draft or not draft.rows:
+		frappe.throw(_("There is nothing in your draft to send."))
+	ops = _request_ops(draft)
+	# Every person's row, in one order, so a concurrent submit naming the
+	# same people waits here and then sees this one's Pending request.
+	for employee in sorted({op["employee"] for op in ops}):
+		_lock_employee(employee)
+	review = _review_roster_ops(me, ops)
+	_refuse_roster_problems(review)
+	taken = pending_requests(list(review.team))
+	if taken:
+		names = ", ".join(
+			review.team[employee].employee_name for employee in review.team if employee in taken
+		)
+		frappe.throw(
+			_(
+				"Already waiting for HR in another request: {0}. Wait for HR's decision or withdraw it."
+			).format(names)
+		)
+
+	by_company = {}
+	for op in ops:
+		by_company.setdefault(review.team[op["employee"]].company, []).append(op)
+	if note is not None:
+		draft.note = note
+	created = []
+	for position, (company, company_ops) in enumerate(by_company.items()):
+		doc = draft if position == 0 else frappe.new_doc(_ROSTER_CHANGE)
+		if position:
+			doc.update({"employee": me, "manager_user": frappe.session.user, "note": draft.note})
+		doc.set("rows", company_ops)
+		doc.company = company
+		doc.snapshot = json.dumps(_roster_snapshot(review.before, company_ops), sort_keys=True)
+		doc.status = ROSTER_PENDING
+		doc.flags.helixhr_roster_api = True
+		if position:
+			doc.insert(ignore_permissions=True)
+		else:
+			doc.save(ignore_permissions=True)
+		created.append(doc.name)
+	return {"names": created}
+
+
+def _roster_snapshot(coverage, ops):
+	"""KTD8: per employee, the affected window and the coverage key over it.
+	The window is stored so approval re-derives over exactly the same days."""
+	snapshot = {}
+	for employee, (start, end) in affected_window(ops).items():
+		snapshot[employee] = {
+			"window": [str(start), str(end) if end else None],
+			"coverage": snapshot_key(coverage.get(employee, []), (start, end)),
+		}
+	return snapshot
+
+
+def _my_roster_request(name, me):
+	"""The caller's own request `name`, locked; refused for anybody else's
+	(R21's other half: only the submitting manager withdraws or reopens)."""
+	owner = frappe.db.get_value(_ROSTER_CHANGE, name, "employee", for_update=True) if name else None
+	if not owner:
+		frappe.throw(_(_ROSTER_REQUEST_NOT_FOUND), frappe.DoesNotExistError)
+	if owner != me:
+		frappe.throw(_(_ROSTER_REQUEST_NOT_YOURS), frappe.PermissionError)
+	return frappe.get_doc(_ROSTER_CHANGE, name)
+
+
+@frappe.whitelist(methods=["POST"])
+def withdraw_roster_change(name):
+	"""Take back the caller's own Pending request (R15)."""
+	rate_limit_per_user("withdraw_roster_change")
+	me = _my_employee()
+	doc = _my_roster_request(name, me)
+	if doc.status != ROSTER_PENDING:
+		frappe.throw(_("Only a request waiting for HR can be withdrawn."))
+	doc.status = ROSTER_WITHDRAWN
+	doc.flags.helixhr_roster_api = True
+	doc.save(ignore_permissions=True)
+	return {"name": doc.name, "status": doc.status}
+
+
+# The marker a merged request carries, so it is not reopened twice. English
+# on purpose: it is matched, not shown in the portal.
+_ROSTER_MERGED_INTO = "Reopened into draft {0}"
+
+
+@frappe.whitelist(methods=["POST"])
+def reopen_roster_change(name):
+	"""Bring the caller's Returned or Withdrawn request back as their Draft
+	(R17). With no Draft, the request itself becomes it. With one, its rows
+	are appended to that Draft -- refused, naming the person, when somebody
+	is in both or the merged draft would not pass -- and the reopened
+	request keeps its status and history, marked as merged, so there is
+	still exactly one Draft (R11)."""
+	rate_limit_per_user("reopen_roster_change")
+	me = _my_employee()
+	_lock_employee(me)
+	doc = _my_roster_request(name, me)
+	if doc.status not in (ROSTER_RETURNED, ROSTER_WITHDRAWN):
+		frappe.throw(_("Only a returned or withdrawn request can be reopened."))
+	if frappe.db.exists(
+		"Comment",
+		{
+			"reference_doctype": _ROSTER_CHANGE,
+			"reference_name": doc.name,
+			"comment_type": "Info",
+			"content": ["like", _ROSTER_MERGED_INTO.format("%")],
+		},
+	):
+		frappe.throw(_("This request is already in your draft."))
+
+	draft = _my_roster_draft(me, for_update=True)
+	if not draft:
+		doc.status = ROSTER_DRAFT
+		doc.flags.helixhr_roster_api = True
+		doc.save(ignore_permissions=True)
+		return {"draft": _roster_draft_payload(me, doc), "merged": False}
+
+	drafted = {row.employee for row in draft.rows}
+	for row in doc.rows:
+		if row.employee in drafted:
+			frappe.throw(
+				_(
+					"{0} is already in your draft. Send or clear that draft before reopening this request."
+				).format(row.employee_name or row.employee)
+			)
+	ops = _request_ops(draft) + _request_ops(doc)
+	if len(ops) > _ROSTER_DRAFT_MAX_ROWS:
+		frappe.throw(_("A request can hold at most {0} shift changes.").format(_ROSTER_DRAFT_MAX_ROWS))
+	_refuse_roster_problems(_review_roster_ops(me, ops))
+	_save_draft_rows(draft, me, ops)
+	doc.add_comment("Info", _ROSTER_MERGED_INTO.format(draft.name))
+	return {"draft": _roster_draft_payload(me, draft), "merged": True}
 
 
 # Organisation view (P5-U15 / P5-R20, P5-R23)

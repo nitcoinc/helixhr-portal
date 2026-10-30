@@ -43,6 +43,9 @@ class TestRosterChangeGuard(IntegrationTestCase):
 		doc.status = "Approved"
 		with self.assertRaises(frappe.ValidationError):
 			doc.save(ignore_permissions=True)
+		# The refused save already stamped a new `modified` in memory.
+		doc.reload()
+		doc.flags.helixhr_roster_api = True
 		doc.status = "Pending"
 		doc.save(ignore_permissions=True)
 		self.assertEqual(frappe.db.get_value(DOCTYPE, doc.name, "status"), "Pending")

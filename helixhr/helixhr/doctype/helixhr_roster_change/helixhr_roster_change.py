@@ -32,6 +32,29 @@ TRANSITIONS = {
 API_ONLY_FIELDS = ("snapshot", "decided_by", "decided_on", "decision_note", "return_reasons")
 
 
+def pending_requests(employees):
+	"""`{employee: request name}` for every one of `employees` named in a
+	Pending request (R12: at most one each). One join, unpermissioned:
+	callers have already scoped `employees`."""
+	employees = list(employees or [])
+	if not employees:
+		return {}
+	request = frappe.qb.DocType("HelixHR Roster Change")
+	row = frappe.qb.DocType("HelixHR Roster Change Row")
+	found = (
+		frappe.qb.from_(row)
+		.join(request)
+		.on(row.parent == request.name)
+		.select(row.employee, request.name)
+		.where(row.parenttype == "HelixHR Roster Change")
+		.where(request.status == ROSTER_PENDING)
+		.where(row.employee.isin(employees))
+		.orderby(request.creation)
+		.run(as_dict=True)
+	)
+	return {item.employee: item.name for item in reversed(found)}
+
+
 class HelixHRRosterChange(Document):
 	def validate(self):
 		self._guard_transition()
