@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
 
 // P7-U5 / P7-R1-R3. Administer a project end to end -- HR-scoped in this
 // suite (an HR Manager resolves to the "company" branch of
@@ -9,13 +9,30 @@ import { test, expect } from '@playwright/test'
 // fixture's own company -- the same fixture people.spec.ts and
 // directory.spec.ts already search for -- reused here to assign a member.
 const COLLEAGUE_NAME = 'Manager'
+// Plan 2026-10-31-001: `ensure_projects_workspace_fixtures` seeds a project
+// with 60 open tasks and three people with logins named "Projpick ...". The
+// department add reuses the directory fixture's department, whose only
+// person (Directory Colleague) has no login, so is always skipped.
+const SIXTY_PROJECT = '_E2E Sixty Tasks'
+const PICK_NAMES = ['Projpick Ada', 'Projpick Ben', 'Projpick Cy']
+const DIRECTORY_DEPARTMENT = '_Test Directory Department'
+
+async function openSixtyProject(page: Page) {
+  // The search filter rides the URL, so the list opens already narrowed.
+  await page.goto(`/helixhr/projects?q=${encodeURIComponent(SIXTY_PROJECT)}`)
+  await page.getByRole('button', { name: new RegExp(SIXTY_PROJECT) }).first().click()
+  await expect(page.getByRole('heading', { name: SIXTY_PROJECT })).toBeVisible()
+}
 
 test.describe('hr', () => {
   test.beforeEach(async ({}, testInfo) => {
     test.skip(testInfo.project.name !== 'hr', 'projects is scoped by resolve_project_scope; hr covers the "company" branch')
   })
 
-  test('an HR identity sees the Projects nav entry and administers a project end to end', async ({ page }) => {
+  test('an HR identity sees the Projects nav entry and administers a project end to end', async ({
+    page,
+    browser,
+  }) => {
     await page.goto('/helixhr/')
     // U15: the HR section starts collapsed on a first visit.
     const hrSection = page.getByRole('button', { name: 'HR', exact: true })
@@ -25,80 +42,256 @@ test.describe('hr', () => {
     await page.goto('/helixhr/projects')
     await expect(page.getByRole('heading', { name: 'Projects' })).toBeVisible()
 
-    // Creating a project shows it in the list without a reload -- this test
-    // proves it by landing straight on the new project's own detail route,
-    // built from the create call's own response.
+    // Creating a project lands straight on its own detail route, built from
+    // the create call's own response. U2: the form is a dialog now, so it
+    // never pushes the table down.
     const projectName = `E2E Project ${Date.now()}`
     await page.getByRole('button', { name: 'New project' }).click()
-    // P8-U2: name/priority/type/billable, the same fields Desk asks for
-    // minus the server-derived company (shown as static text, never asked
-    // for -- KTD2 -- so this only confirms it renders, not its wording).
-    // `exact: true` on Create below -- a stray fixture project from
-    // another spec file whose name happens to contain "creates" would
-    // otherwise collide with this button under Playwright's default
-    // case-insensitive substring match.
-    await expect(page.getByTestId('project-create-form').getByText('Company', { exact: false })).toBeVisible()
-    await page.getByLabel('Project name').fill(projectName)
-    await page.getByLabel('Priority').selectOption('High')
-    await page.getByLabel('Billable').check()
-    await page.getByRole('button', { name: 'Create', exact: true }).click()
+    const createForm = page.getByTestId('project-create-form')
+    // P8-U2: the server-derived company is shown, never asked for (KTD2).
+    await expect(createForm.getByText('This project will be created in', { exact: false })).toBeVisible()
+    await createForm.getByLabel('Project name').fill(projectName)
+    await createForm.getByLabel('Priority').selectOption('High')
+    await createForm.getByLabel('Billable').check()
+    await createForm.getByRole('button', { name: 'Create', exact: true }).click()
 
     await expect(page).toHaveURL(/\/helixhr\/projects\/[^/]+$/)
     await expect(page.getByRole('heading', { name: projectName })).toBeVisible()
     await expect(page.getByTestId('project-billable')).toHaveText('Yes')
 
-    // Marking a project billable persists across a reload -- not just in the
-    // create response held in memory, but read back from `get_project`.
-    // Priority rides along the same way.
+    // Billable and priority persist across a reload, read back from
+    // `get_project`, on the one-line facts strip (U3).
     await page.reload()
     await expect(page.getByRole('heading', { name: projectName })).toBeVisible()
     await expect(page.getByTestId('project-billable')).toHaveText('Yes')
-    await expect(page.getByText('High')).toBeVisible()
+    await expect(page.getByTestId('project-facts').getByText('High')).toBeVisible()
 
-    // Adding a task shows it under the project.
+    const tasksPane = page.getByTestId('project-tasks-pane')
+    const peoplePane = page.getByTestId('project-people-pane')
+
+    // One line adds one task.
     const taskName = `Kickoff call ${Date.now()}`
     await page.getByPlaceholder('New task').fill(taskName)
-    await page.getByRole('button', { name: 'Add task' }).click()
-    await expect(page.getByText(taskName)).toBeVisible()
+    await tasksPane.getByRole('button', { name: 'Add task' }).click()
+    await expect(tasksPane.getByText(taskName)).toBeVisible()
 
-    // Assigning a person shows them in the member list by name. The
-    // creator (this HR identity) is already a member the moment the
-    // project exists -- create_project adds them in the same write, or
-    // they would fall straight back out of their own scope the instant
-    // they created it (see the endpoint's own docstring) -- so "Nobody is
-    // assigned" is never true here; the count going from one to two is
-    // what proves the add.
+    // R4: three pasted lines are one `add_tasks` call that adds three, shown
+    // in the Tasks pane beside -- not below -- the people.
+    const stamp = Date.now()
+    const pasted = [`Design ${stamp}`, `Build ${stamp}`, `Ship ${stamp}`]
+    const addTaskCalls: string[] = []
+    page.on('request', (request) => {
+      if (request.url().includes('helixhr.api.add_tasks')) addTaskCalls.push(request.url())
+    })
+    await page.getByPlaceholder('New task').fill(pasted.join('\n'))
+    await tasksPane.getByRole('button', { name: 'Add 3 tasks' }).click()
+    for (const subject of pasted) await expect(tasksPane.getByText(subject)).toBeVisible()
+    expect(addTaskCalls).toHaveLength(1)
+    const tasksBox = await tasksPane.boundingBox()
+    const peopleBox = await peoplePane.boundingBox()
+    expect(tasksBox && peopleBox && tasksBox.y < peopleBox.y + peopleBox.height).toBeTruthy()
+
+    // R5 (U6): pick three people and add them in one request. The creator
+    // is already a member, so "Nobody is assigned" is never true here.
     await expect(page.getByText('Nobody is assigned to this project yet.')).toHaveCount(0)
-    // Scoped to the section housing the picker, so this never counts the
-    // picker's own dropdown <li> rows once one opens.
-    const membersSection = page.locator('section', { has: page.getByLabel('Add a person') })
-    const before = await membersSection.locator('li').count()
-    await page.getByLabel('Add a person').fill(COLLEAGUE_NAME)
-    const match = page.getByRole('button', { name: new RegExp(COLLEAGUE_NAME) }).first()
-    await expect(match).toBeVisible()
-    await match.click()
-    await expect(page.locator('ul li').filter({ hasText: COLLEAGUE_NAME }).first()).toBeVisible()
-    // The picker dropdown closes itself on a successful add (memberQuery is
-    // cleared), so this count is the members list alone again, not the
-    // dropdown's own <li> rows.
-    await expect(membersSection.locator('li')).toHaveCount(before + 1)
+    const members = peoplePane.getByTestId('project-member')
+    const before = await members.count()
+    const memberCalls: string[] = []
+    page.on('request', (request) => {
+      if (request.url().includes('helixhr.api.add_project_members')) memberCalls.push(request.url())
+    })
+    await peoplePane.getByRole('button', { name: 'Add people' }).click()
+    const picker = page.getByRole('dialog')
+    await picker.getByLabel('Find people').fill('Projpick')
+    for (const name of PICK_NAMES) await picker.getByRole('checkbox', { name: new RegExp(name) }).check()
+    await expect(picker.getByTestId('project-picker-count')).toHaveText('3 people selected.')
+    await picker.getByRole('button', { name: 'Add 3 people' }).click()
+    await expect(picker.getByTestId('project-picker-result')).toContainText('Added 3, skipped 0.')
+    expect(memberCalls).toHaveLength(1)
+    await picker.getByRole('button', { name: 'Done' }).click()
+    await expect(members).toHaveCount(before + 3)
+    for (const name of PICK_NAMES) await expect(peoplePane.getByText(name)).toBeVisible()
 
-    // Back to the list: the new project narrows into view by name, without a
-    // full reload of the page.
-    await page.goto('/helixhr/projects')
-    await page.getByLabel('Search').fill(projectName)
-    await expect(page.getByRole('button', { name: new RegExp(projectName) })).toBeVisible()
+    // R6/R7: a whole department; its one person has no login and is named
+    // as skipped, with the reason, until dismissed.
+    await peoplePane.getByRole('button', { name: 'Add people' }).click()
+    await picker.getByRole('button', { name: 'Department' }).click()
+    const addDepartment = picker.getByRole('button', { name: /^Add everyone/ })
+    await expect(addDepartment).toBeDisabled()
+    await picker.getByLabel('Department').selectOption({ label: DIRECTORY_DEPARTMENT })
+    await picker.getByRole('button', { name: `Add everyone in ${DIRECTORY_DEPARTMENT}` }).click()
+    const result = picker.getByTestId('project-picker-result')
+    await expect(result).toContainText(/Added \d+, skipped [1-9]/)
+    await expect(result).toContainText('Directory Colleague · no portal login')
+    await result.getByRole('button', { name: 'Dismiss' }).click()
+    await expect(result).toHaveCount(0)
+    await picker.getByRole('button', { name: 'Done' }).click()
+
+    // The older single-person path still works through the same picker.
+    await peoplePane.getByRole('button', { name: 'Add people' }).click()
+    await picker.getByLabel('Find people').fill(COLLEAGUE_NAME)
+    await picker.getByRole('checkbox', { name: new RegExp(COLLEAGUE_NAME) }).first().check()
+    await picker.getByRole('button', { name: 'Add 1 person' }).click()
+    await expect(picker.getByTestId('project-picker-result')).toContainText('Added 1')
+    await picker.getByRole('button', { name: 'Done' }).click()
+    await expect(peoplePane.getByText(COLLEAGUE_NAME).first()).toBeVisible()
+
+    // R8: open to everyone, confirmed first with its effect named.
+    const toggle = peoplePane.getByRole('switch', { name: /Open to everyone in/ })
+    await expect(toggle).toHaveAttribute('aria-checked', 'false')
+    await toggle.click()
+    await expect(page.getByTestId('project-open-confirm')).toContainText(
+      'can book time on this project.',
+    )
+    await page.getByRole('button', { name: 'Open to everyone', exact: true }).click()
+    await expect(toggle).toHaveAttribute('aria-checked', 'true')
+    await expect(peoplePane.getByTestId('project-open-note')).toBeVisible()
+    // Members stay listed (and removable) while the project is open.
+    await expect(members.first()).toBeVisible()
+
+    // The list says "Everyone" in the members column.
+    await page.goto(`/helixhr/projects?q=${encodeURIComponent(projectName)}`)
+    const row = page.getByTestId('project-row').filter({ hasText: projectName })
+    await expect(row.getByTestId('project-members-cell')).toHaveText('Everyone')
+
+    // A non-member employee of the same company can now book it: the
+    // timesheet's task picker is built from `get_my_projects` (Timesheet.vue),
+    // asked here directly so the run never depends on which week is open.
+    const employee = await browser.newContext({ storageState: 'tests/.auth/employee.json' })
+    try {
+      const response = await employee.request.get('/api/method/helixhr.api.get_my_projects')
+      expect(response.ok()).toBeTruthy()
+      const bookable = (await response.json()).message as { project_name: string; tasks: { subject: string }[] }[]
+      const project = bookable.find((entry) => entry.project_name === projectName)
+      expect(project, 'the open project is bookable by a non-member').toBeTruthy()
+      expect(project?.tasks.map((task) => task.subject)).toContain(pasted[0])
+    } finally {
+      await employee.close()
+    }
+
+    // And back off, so this run's project stops widening the employee's
+    // picker. The confirm names what turning it off costs.
+    await row.getByRole('button', { name: new RegExp(projectName) }).click()
+    await expect(page.getByRole('heading', { name: projectName })).toBeVisible()
+    await page.getByRole('switch', { name: /Open to everyone in/ }).click()
+    await expect(page.getByTestId('project-open-confirm')).toContainText(
+      'Only listed members can book.',
+    )
+    await page.getByRole('button', { name: 'Members only', exact: true }).click()
+    await expect(page.getByRole('switch', { name: /Open to everyone in/ })).toHaveAttribute('aria-checked', 'false')
+    await expect(page.getByTestId('project-open-note')).toHaveCount(0)
   })
 
-  test('the screen renders at phone width with no horizontal scroll', async ({ page }) => {
+  // R2: the filters live in the URL, so a reload keeps them.
+  test('filters the list by billable, and a reload keeps the filter', async ({ page }) => {
+    await page.goto('/helixhr/projects')
+    const count = page.getByTestId('projects-count')
+    await expect(count).toHaveText(/^\d+ projects?\./)
+    const all = Number((await count.textContent())?.match(/\d+/)?.[0])
+
+    await page.getByLabel('Billable', { exact: true }).selectOption({ label: 'Non-billable' })
+    await expect(page).toHaveURL(/[?&]billable=no/)
+    await expect(count).toHaveText(new RegExp(`^\\d+ of ${all} projects?\\.`))
+    const narrowed = await count.textContent()
+    // The seeded sixty-task project is non-billable.
+    await expect(page.getByRole('button', { name: new RegExp(SIXTY_PROJECT) })).toBeVisible()
+
+    await page.reload()
+    await expect(page.getByLabel('Billable', { exact: true })).toHaveValue(/no/)
+    await expect(count).toHaveText((narrowed || '').trim())
+
+    // Nothing matches: say so, and offer the way back.
+    await page.getByLabel('Search', { exact: true }).fill(`no-such-project-${Date.now()}`)
+    await expect(page.getByText('No projects match.')).toBeVisible()
+    await page.getByRole('button', { name: 'Clear filters' }).click()
+    await expect(count).toHaveText(`${all} ${all === 1 ? 'project' : 'projects'}.`)
+    await expect(page).not.toHaveURL(/billable=/)
+  })
+
+  test('the screen renders at phone width as cards, with no horizontal scroll', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 })
     await page.goto('/helixhr/projects')
     await expect(page.getByRole('heading', { name: 'Projects' })).toBeVisible()
+    await expect(page.getByTestId('project-card').first()).toBeVisible()
+    await expect(page.getByTestId('projects-table')).toHaveCount(0)
 
     const hasHorizontalScroll = await page.evaluate(
       () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
     )
     expect(hasHorizontalScroll).toBe(false)
+
+    // The detail's panes are tabs on a phone.
+    await openSixtyProject(page)
+    const tabs = page.getByRole('tablist', { name: 'Project sections' })
+    await expect(tabs.getByRole('tab', { name: /Tasks/ })).toHaveAttribute('aria-selected', 'true')
+    await tabs.getByRole('tab', { name: /People/ }).click()
+    await expect(page.getByTestId('project-people-pane')).toBeVisible()
+    await expect(page.getByTestId('project-tasks-pane')).toBeHidden()
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth),
+    ).toBe(false)
+  })
+
+  // R3: each pane shows 25 rows, then "Show N more"; its search narrows.
+  test('a project with 60 tasks shows 25, searches, and shows more', async ({ page }) => {
+    await openSixtyProject(page)
+    const pane = page.getByTestId('project-tasks-pane')
+    const rows = pane.getByTestId('project-task')
+    await expect(rows).toHaveCount(25)
+    await expect(pane.getByTestId('project-tasks-count')).toHaveText('Showing 25 of 60 tasks.')
+
+    await pane.getByLabel('Search tasks').fill('Sixty task 42')
+    await expect(rows).toHaveCount(1)
+    await expect(rows.first()).toContainText('Sixty task 42')
+    await pane.getByLabel('Search tasks').fill(`nothing-${Date.now()}`)
+    await expect(pane.getByText(/^No tasks match/)).toBeVisible()
+    await pane.getByLabel('Search tasks').fill('')
+
+    await pane.getByRole('button', { name: 'Show 25 more' }).click()
+    await expect(rows).toHaveCount(50)
+    await pane.getByRole('button', { name: 'Show 10 more' }).click()
+    await expect(rows).toHaveCount(60)
+    await expect(pane.getByRole('button', { name: /^Show \d+ more$/ })).toHaveCount(0)
+  })
+
+  // A company access grant reads a project but never changes it (plan
+  // 2026-10-14-001 KTD4). The server's own `can_edit` is flipped in flight,
+  // so this proves what the page hides, not who may write.
+  test('a view-only caller sees no add controls in either pane', async ({ page }) => {
+    await page.route('**/api/method/helixhr.api.get_project*', async (route) => {
+      const response = await route.fetch()
+      const body = await response.json()
+      body.message = { ...body.message, can_edit: false, departments: [] }
+      await route.fulfill({ response, json: body })
+    })
+    await openSixtyProject(page)
+    await expect(page.getByTestId('project-view-only')).toBeVisible()
+    await expect(page.getByTestId('project-task').first()).toBeVisible()
+    await expect(page.getByPlaceholder('New task')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /^Add (task|\d+ tasks)$/ })).toHaveCount(0)
+    await expect(page.getByRole('button', { name: 'Add people' })).toHaveCount(0)
+    await expect(page.getByRole('switch')).toHaveCount(0)
+    await expect(page.getByRole('button', { name: /^(Close|Remove) / })).toHaveCount(0)
+  })
+
+  // U6: the picker is a real dialog -- reachable by keyboard, focus kept
+  // inside it, and handed back to the button that opened it.
+  test('the member picker is keyboard reachable and returns focus', async ({ page }) => {
+    await openSixtyProject(page)
+    const opener = page.getByTestId('project-people-pane').getByRole('button', { name: 'Add people' })
+    await opener.focus()
+    await page.keyboard.press('Enter')
+    const picker = page.getByRole('dialog')
+    await expect(picker).toBeVisible()
+    for (let step = 0; step < 8; step += 1) {
+      await page.keyboard.press('Tab')
+      expect(await picker.evaluate((dialog) => dialog.contains(document.activeElement))).toBe(true)
+    }
+    await picker.getByLabel('Find people').fill('Projpick')
+    await expect(picker.getByRole('checkbox', { name: /Projpick Ada/ })).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(picker).toHaveCount(0)
+    await expect(opener).toBeFocused()
   })
 
   // HR-10 / U15: the shared SearchField, 44px under a coarse pointer.

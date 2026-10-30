@@ -1170,7 +1170,51 @@ def setup_playwright_fixtures():
 	# approver group in the HR User's company on every run.
 	ensure_timesheet_oversight_fixture()
 
+	# Plan 2026-10-31-001 U2/U3/U6: projects.spec.ts.
+	ensure_projects_workspace_fixtures()
+
 	frappe.db.commit()  # nosemgrep
+
+
+# Plan 2026-10-31-001 U2/U3/U6: projects.spec.ts. A project with 60 open
+# tasks for the panes' search and "show more", and three people with logins
+# who share a searchable name, for the multi-select add.
+PROJECTS_SIXTY_TASKS = "_E2E Sixty Tasks"
+PROJECT_PICK_USERS = (
+	"projpick-ada@helixhr.test",
+	"projpick-ben@helixhr.test",
+	"projpick-cy@helixhr.test",
+)
+
+
+def ensure_projects_workspace_fixtures():
+	"""Idempotent. The sixty-task project is Open and not open to everyone
+	on every run, so a spec that failed half-way leaves nothing behind that
+	changes the next run. The department-add scenario reuses the directory
+	fixture's department (`ensure_directory_fixtures`), whose colleague has
+	no login and is therefore always reported as skipped."""
+	company = ensure_test_company()
+	for user in PROJECT_PICK_USERS:
+		make_test_user(
+			user, company, first_name="Projpick", last_name=user.split("-")[1].split("@")[0].capitalize()
+		)
+	project = make_test_project(company, PROJECTS_SIXTY_TASKS)
+	frappe.db.set_value("Project", project, {"status": "Open", "helixhr_open_to_all": 0})
+	existing = set(frappe.get_all("Task", filters={"project": project}, pluck="subject"))
+	for number in range(1, 61):
+		subject = f"Sixty task {number:02d}"
+		if subject not in existing:
+			frappe.get_doc(
+				{"doctype": "Task", "project": project, "subject": subject, "status": "Open"}
+			).insert(ignore_permissions=True)
+	frappe.db.set_value(
+		"Task",
+		{"project": project, "subject": ["like", "Sixty task %"]},
+		"status",
+		"Open",
+		update_modified=False,
+	)
+	return project
 
 
 OVERSIGHT_MANAGER_USER = "oversight-manager@helixhr.test"
