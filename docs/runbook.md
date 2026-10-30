@@ -995,6 +995,15 @@ Attendance"). The roster sheet warns whenever the edited date is today. Prefer c
 tomorrow; if today must change, check the person's punches for the day afterwards and fix the day
 through an Attendance Request if needed.
 
+**Roster change requests use a coverage snapshot, not `modified`** (plan 2026-10-31-001). A
+manager's request stores, per employee, the window it touches and the submitted assignments
+overlapping it. Approval compares that snapshot again; `status` and `modified` are ignored because
+the nightly Inactive job rewrites them, and names are ignored because HR's "change from date"
+creates new records. A mismatch sends the request back to the manager with the employee named --
+that is the expected outcome when HR edited the same person directly, not a bug. Requests only
+accept dates from tomorrow in the employee's company time zone, which also keeps them clear of the
+"editing today's shift" problem above.
+
 ## Punch coordinates are erased on a schedule, and the period is unset by default (P3-R28)
 
 `helixhr.tasks.null_stale_checkin_coordinates` runs daily and does nothing at all until an operator
@@ -2247,3 +2256,12 @@ never replied, handlers had no exit transition, leaving the ticket open indefini
 2. Transitions are imported by fixture and ensured idempotently by patch
    `helixhr.patches.v1_0.ensure_close_from_waiting`.
 3. Handlers can now cleanly close abandoned waiting requests from the Team inbox detail.
+
+## Open-to-everyone projects refused on a timesheet row (plan 2026-10-31-001)
+
+If an employee who should be able to book an open project gets a permission error when the week
+is saved, check that the two property setters `Timesheet Detail-project-ignore_user_permissions`
+and `Timesheet Detail-task-ignore_user_permissions` are on the site (`bench migrate` syncs them).
+Without them, any User Permission on Project -- strict mode or not -- makes Frappe's link check
+refuse a project outside that user's permitted set, even though `_validate_rows` allows it.
+`test_project_open_to_all` fails in both strict modes when they are missing.
