@@ -168,3 +168,16 @@ export function resolveStatus({
 
   return { label, toneClass: TONE[tone] || TONE.resting }
 }
+
+/**
+ * Plan 2026-10-31-001 R25: who made a leave's final decision, beside the
+ * badge -- "Approved by Priya Shah", or "Rejected by Ananya Rao (HR)" when HR
+ * decided in the approver's place. Only the server's stamp names anyone: a
+ * leave decided before the stamp existed reads nothing rather than guessing
+ * the approver. `app` is `get_my_leave`'s projection.
+ */
+export function decidedByLine(app) {
+  const verb = { approved: 'Approved', rejected: 'Rejected' }[app?.state]
+  if (!verb || !app.decided_by_name) return ''
+  return `${verb} by ${app.decided_by_name}${app.decided_by_hr ? ' (HR)' : ''}`
+}

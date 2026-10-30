@@ -8,11 +8,15 @@ import {
   batchLabel,
   decidedForTab,
   groupByPerson,
+  hrLine,
+  hrReasonLabel,
   isBatchable,
+  isWithManager,
   laneSections,
   laneSubsections,
   readShortcuts,
   selectionState,
+  showsHrChip,
   writeShortcuts,
 } from './approvalLanes'
 import { APPROVALS_SHORTCUTS_PREFIX } from './viewerStorage'
@@ -48,6 +52,76 @@ describe('laneSections', () => {
     ])
     expect(lane.sections.map((section) => section.key)).toEqual(['change', 'flagged', 'normal'])
     expect(lane.sections[0].rows.map((r) => r.name)).toEqual(['c'])
+  })
+})
+
+// Plan 2026-10-31-001 U13 (R22, R23): a manager-stage leave HR sees is never
+// HR's work in the words or the grouping.
+describe('manager-stage leave in HR\'s queue', () => {
+  const hrRow = (name, extra = {}) => row('hr', name, { for_hr: true, ...extra })
+
+  it('puts stalled rows after HR and the With managers group last, one section', () => {
+    const lanes = laneSections(
+      [
+        hrRow('w', { hr_reason: 'with_manager', approver_name: 'Arjun Mehta' }),
+        hrRow('o', { hr_reason: 'overdue', approver_name: 'Arjun Mehta' }),
+        hrRow('h'),
+        row('team', 't'),
+      ],
+      1,
+    )
+    expect(lanes.map((lane) => lane.key)).toEqual(['team', 'decided', 'hr', 'stalled', 'with-managers'])
+    const byKey = Object.fromEntries(lanes.map((lane) => [lane.key, lane]))
+    expect(byKey.hr.rows.map((r) => r.name)).toEqual(['h'])
+    expect(byKey.stalled.rows.map((r) => r.name)).toEqual(['o'])
+    expect(byKey['with-managers'].title).toBe('With managers')
+    expect(byKey['with-managers'].sections).toEqual([
+      { key: 'with-managers', title: '', note: '', rows: [byKey['with-managers'].rows[0]] },
+    ])
+  })
+
+  it('leaves no HR lane when HR only has rows waiting on managers', () => {
+    const lanes = laneSections([hrRow('a', { hr_reason: 'approver_away' }), hrRow('w', { hr_reason: 'with_manager' })])
+    expect(lanes.map((lane) => lane.key)).toEqual(['stalled', 'with-managers'])
+  })
+
+  it('names the approver, never HR', () => {
+    expect(hrReasonLabel({ hr_reason: 'with_manager', approver_name: 'Arjun Mehta' })).toBe('Waiting on Arjun Mehta')
+    expect(hrReasonLabel({ hr_reason: 'with_manager', approver_name: null })).toBe('No approver set')
+    expect(hrReasonLabel({ hr_reason: 'approver_away', approver_name: 'Arjun Mehta' })).toBe(
+      'Approver on leave · Arjun Mehta',
+    )
+    expect(hrReasonLabel({ hr_reason: 'overdue', approver_name: 'Arjun Mehta' })).toBe('Overdue with Arjun Mehta')
+    expect(hrReasonLabel({ hr_reason: 'overdue', approver_name: null })).toBe('Overdue · No approver set')
+    expect(hrReasonLabel({ hr_reason: null })).toBe('')
+  })
+
+  it('keeps the HR chip for HR-stage work only', () => {
+    expect(showsHrChip(hrRow('h'))).toBe(true)
+    expect(showsHrChip(hrRow('o', { hr_reason: 'overdue' }))).toBe(false)
+    expect(showsHrChip(hrRow('w', { hr_reason: 'with_manager' }))).toBe(false)
+    expect(showsHrChip(row('team', 't'))).toBe(false)
+  })
+
+  it('tells With managers rows apart', () => {
+    expect(isWithManager({ hr_reason: 'with_manager' })).toBe(true)
+    expect(isWithManager({ hr_reason: 'overdue' })).toBe(false)
+    expect(isWithManager(null)).toBe(false)
+  })
+})
+
+describe('hrLine', () => {
+  it('joins why HR sees a row, who sent it and their note', () => {
+    expect(hrLine({ for_hr: true, sent_to_hr_by: 'Arjun', hr_note: 'policy check' })).toBe(
+      'Sent by Arjun · “policy check”',
+    )
+    expect(hrLine({ for_hr: true, hr_reason: 'overdue', approver_name: 'Arjun' })).toBe('Overdue with Arjun')
+  })
+
+  it('names who a manager-stage detail is waiting on', () => {
+    expect(hrLine({ for_hr: false, waiting_on: 'Arjun Mehta' })).toBe('Waiting on Arjun Mehta')
+    expect(hrLine({ for_hr: false, waiting_on: null })).toBe('')
+    expect(hrLine(null)).toBe('')
   })
 })
 

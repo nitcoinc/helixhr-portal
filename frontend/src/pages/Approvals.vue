@@ -23,11 +23,14 @@ import {
   batchLabel,
   decidedForTab,
   groupByPerson,
+  hrLine,
   isBatchable,
+  isWithManager,
   laneSections,
   laneSubsections,
   readShortcuts,
   selectionState,
+  showsHrChip,
   writeShortcuts,
 } from '@/lib/approvalLanes'
 import { session } from '@/lib/session'
@@ -223,14 +226,20 @@ watch(search, () => {
 const pending = computed(() => queue.data?.pending || [])
 const decided = computed(() => queue.data?.decided || [])
 const decidedRows = computed(() => decidedForTab(decided.value, view.value, searching.value))
-const overflow = computed(() => Math.max(0, (queue.data?.total || 0) - pending.value.length))
+// Plan 2026-10-31-001 KTD15: what is waiting on this caller. The "With
+// managers" rows ride in `pending` but are counted nowhere -- not in `total`,
+// the header pill or the overflow line.
+const owedPending = computed(() => pending.value.filter((row) => !isWithManager(row)))
+const overflow = computed(() => Math.max(0, (queue.data?.total || 0) - owedPending.value.length))
 
 // P4-R11. The queue's own sentence used to promise "you only see people who
 // report to you", which is still true for a line manager and false for an HR
 // Manager, whose queue is their reports *plus* everything handed to HR. The
 // rows themselves are the honest signal, so the sentence follows them rather
 // than asking the server a second question about roles.
-const hasHrWork = computed(() => pending.value.some((row) => row.for_hr))
+// Plan 2026-10-31-001 R23: the "With managers" rows are not HR's work, so
+// they never turn this sentence on.
+const hasHrWork = computed(() => owedPending.value.some((row) => row.for_hr))
 
 // MH-09: an HR User approves nothing, so an empty "waiting on you" card would
 // only push the work they do have -- oversight -- below the fold.
@@ -585,26 +594,6 @@ const evidence = computed(() => ({
   noteOpen: noteOpen.value,
 }))
 
-/** P4-R11. Who handed this to HR, and what they said -- one line, on the
- * queue row and again on the detail head, so the HR chip is never the only
- * thing distinguishing HR's work from a manager's own. Both halves are
- * optional: a request of an HR-approves leave type reached HR with nobody
- * sending it (P4-R7). */
-// U4 / R10: why a manager-stage leave is in HR's queue at all.
-const HR_REASON_LABEL = {
-  approver_away: 'Approver on leave',
-  overdue: 'Overdue with approver',
-}
-
-function hrLine(row) {
-  if (!row?.for_hr) return ''
-  const parts = []
-  if (HR_REASON_LABEL[row.hr_reason]) parts.push(HR_REASON_LABEL[row.hr_reason])
-  if (row.sent_to_hr_by) parts.push(`Sent by ${row.sent_to_hr_by}`)
-  if (row.hr_note) parts.push(`“${row.hr_note}”`)
-  return parts.join(' · ')
-}
-
 // --- the queue's three lanes, and the bulk bar (plan 2026-10-04-003 U7) ---
 //
 // R19: the queue is sections, not a flat page -- the change requests that are
@@ -640,6 +629,18 @@ const leaveAttendanceRows = computed(() =>
 const tabRows = computed(() =>
   view.value === 'timesheets' ? timesheetRows.value : leaveAttendanceRows.value,
 )
+// Plan 2026-10-31-001 R23: what is actually waiting on this caller. With only
+// "With managers" rows, the queue still says nothing is waiting on you.
+const owedTabRows = computed(() => tabRows.value.filter((row) => !isWithManager(row)))
+// Collapsed by default; a link straight to one of its rows opens it.
+const withManagersOpen = ref(false)
+watch(
+  () => !!props.name && pending.value.some((row) => row.name === props.name && isWithManager(row)),
+  (inside) => {
+    if (inside) withManagersOpen.value = true
+  },
+  { immediate: true },
+)
 const lanes = computed(() => {
   if (view.value !== 'timesheets') return laneSections(leaveAttendanceRows.value, decidedRows.value.length)
   return [
@@ -658,7 +659,13 @@ const decidedOpen = ref(false)
 watch(searching, (on) => {
   decidedOpen.value = on
 })
-const openInQueue = computed(() => !!props.name && pending.value.some((row) => row.name === props.name))
+// A "With managers" row folded away is not on screen, so its detail takes the
+// column too.
+const openInQueue = computed(
+  () =>
+    !!props.name &&
+    pending.value.some((row) => row.name === props.name && (!isWithManager(row) || withManagersOpen.value)),
+)
 
 // R20: selection exists from 640px up. A phone queue is one column of
 // single decisions; the checkboxes would only crowd it. Approve all (MH-04)
@@ -970,7 +977,9 @@ function restoreFocus(plan) {
 // without it.
 const shortcutsOn = ref(readShortcuts(session.user))
 const shortcutsOpen = ref(false)
-const firstPendingLane = computed(() => lanes.value.find((lane) => lane.key !== 'decided')?.key)
+const firstPendingLane = computed(
+  () => lanes.value.find((lane) => lane.key !== 'decided' && lane.key !== 'with-managers')?.key,
+)
 
 function toggleShortcuts() {
   shortcutsOn.value = !shortcutsOn.value
@@ -1015,10 +1024,10 @@ function onQueueKey(event) {
     <PageHeader title="Approvals">
       <template #actions>
         <span
-          v-if="pending.length && !searching"
+          v-if="owedPending.length && !searching"
           class="rounded-full bg-surface-amber-1 px-3 py-1 text-sm font-medium text-ink-amber-3"
         >
-          <span class="tabular">{{ pending.length }}</span> waiting
+          <span class="tabular">{{ owedPending.length }}</span> waiting
         </span>
       </template>
     </PageHeader>
@@ -1038,7 +1047,7 @@ function onQueueKey(event) {
       class="mb-4 text-sm text-ink-gray-5"
     >
       <template v-if="hasHrWork">
-        Oldest first. Your own team, plus anything marked HR.
+        Oldest first. Your own team, plus HR's work.
       </template>
       <template v-else>
         Oldest first. You only see people who report to you.
@@ -1239,7 +1248,7 @@ function onQueueKey(event) {
           <!-- R2: with every pending lane empty, the empty copy sits above
                the Decided disclosure. -->
           <p
-            v-if="!tabRows.length"
+            v-if="!owedTabRows.length"
             class="surface-inset mb-6 p-4 text-sm text-ink-gray-7"
           >
             <template v-if="searching">
@@ -1325,7 +1334,31 @@ function onQueueKey(event) {
                 </ul>
               </template>
               <template v-else>
-                <div class="relative mb-3 flex flex-wrap items-center gap-2">
+                <!-- Plan 2026-10-31-001 R23: manager-stage leave HR may decide
+                     but is not waiting on. Quieter than HR's own work and
+                     collapsed; counted nowhere. -->
+                <button
+                  v-if="lane.key === 'with-managers'"
+                  type="button"
+                  class="mb-2 flex min-h-11 w-full cursor-pointer items-center gap-2 text-left"
+                  :aria-expanded="withManagersOpen"
+                  aria-controls="approvals-with-managers"
+                  data-testid="with-managers-toggle"
+                  data-lane-heading
+                  @click="withManagersOpen = !withManagersOpen"
+                >
+                  <Icon
+                    name="chevronRight"
+                    class="shrink-0 text-ink-gray-5 transition-transform duration-200"
+                    :class="withManagersOpen ? 'rotate-90' : ''"
+                  />
+                  <span class="label">{{ lane.title }}</span>
+                  <span class="tabular text-sm text-ink-gray-5">({{ lane.rows.length }})</span>
+                </button>
+                <div
+                  v-else
+                  class="relative mb-3 flex flex-wrap items-center gap-2"
+                >
                   <!-- KTD16: focus lands here when the lane's last row leaves. -->
                   <h2
                     class="text-base font-semibold text-ink-gray-9 focus:outline-none"
@@ -1397,316 +1430,332 @@ function onQueueKey(event) {
                     </div>
                   </template>
                 </div>
-                <!-- Plan 2026-10-04-003 U7 (R13, R19): inside a lane, oldest waiting
+                <!-- R23: the With managers rows are not rendered while it is
+                     collapsed, so keyboard triage never walks hidden rows. -->
+                <div :id="lane.key === 'with-managers' ? 'approvals-with-managers' : undefined">
+                  <template v-if="lane.key !== 'with-managers' || withManagersOpen">
+                    <p
+                      v-if="lane.key === 'with-managers'"
+                      class="mb-3 text-sm text-ink-gray-5"
+                    >
+                      Still with their manager, so not counted as yours. Open one to decide it for them.
+                    </p>
+                    <!-- Plan 2026-10-04-003 U7 (R13, R19): inside a lane, oldest waiting
                  first -- change requests (never batchable), the rows the
                  server flagged, and everything else. -->
-                <section
-                  v-for="section in lane.sections"
-                  :key="section.key"
-                  class="mb-6"
-                  :data-testid="`queue-section-${section.key}`"
-                >
-                  <div class="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1">
-                    <!-- MH-06 / HR-12: select the whole of Looks normal. -->
-                    <button
-                      v-if="section.key === 'normal' && canBulkSelect && selectableCount(section.rows) > 1"
-                      type="button"
-                      role="checkbox"
-                      class="-my-2 flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center"
-                      :aria-checked="ARIA_CHECKED[selectAllState(section.rows)]"
-                      :aria-label="`Select all ${selectableCount(section.rows)} that look normal`"
-                      data-testid="select-all-normal"
-                      @click="toggleAll(section.rows)"
+                    <section
+                      v-for="section in lane.sections"
+                      :key="section.key"
+                      class="mb-6"
+                      :data-testid="`queue-section-${section.key}`"
                     >
-                      <span
-                        class="flex h-5 w-5 items-center justify-center rounded border"
-                        :class="selectAllState(section.rows) === 'none' ? 'border-outline-gray-3' : 'border-heading bg-heading text-white'"
-                        aria-hidden="true"
+                      <div
+                        v-if="section.title"
+                        class="mb-2 flex flex-wrap items-center gap-x-2 gap-y-1"
                       >
-                        <Icon
-                          v-if="selectAllState(section.rows) === 'all'"
-                          name="check"
-                          class="h-3 w-3"
-                        />
-                        <span
-                          v-else-if="selectAllState(section.rows) === 'some'"
-                          class="h-0.5 w-2.5 rounded bg-white"
-                        />
-                      </span>
-                    </button>
-                    <h3 class="label">
-                      {{ section.title }}
-                      <span class="tabular text-ink-gray-5">{{ section.rows.length }}</span>
-                    </h3>
-                    <!-- MH-04: the clean lane in two taps, at every width. The
+                        <!-- MH-06 / HR-12: select the whole of Looks normal. -->
+                        <button
+                          v-if="section.key === 'normal' && canBulkSelect && selectableCount(section.rows) > 1"
+                          type="button"
+                          role="checkbox"
+                          class="-my-2 flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center"
+                          :aria-checked="ARIA_CHECKED[selectAllState(section.rows)]"
+                          :aria-label="`Select all ${selectableCount(section.rows)} that look normal`"
+                          data-testid="select-all-normal"
+                          @click="toggleAll(section.rows)"
+                        >
+                          <span
+                            class="flex h-5 w-5 items-center justify-center rounded border"
+                            :class="selectAllState(section.rows) === 'none' ? 'border-outline-gray-3' : 'border-heading bg-heading text-white'"
+                            aria-hidden="true"
+                          >
+                            <Icon
+                              v-if="selectAllState(section.rows) === 'all'"
+                              name="check"
+                              class="h-3 w-3"
+                            />
+                            <span
+                              v-else-if="selectAllState(section.rows) === 'some'"
+                              class="h-0.5 w-2.5 rounded bg-white"
+                            />
+                          </span>
+                        </button>
+                        <h3 class="label">
+                          {{ section.title }}
+                          <span class="tabular text-ink-gray-5">{{ section.rows.length }}</span>
+                        </h3>
+                        <!-- MH-04: the clean lane in two taps, at every width. The
                          batch is the lane's own eligible rows, never the
                          checkboxes, and it always goes through the confirm. -->
-                    <Button
-                      v-if="section.key === 'normal' && approveAllLabel(laneBatch(lane.key))"
-                      class="ml-auto"
-                      variant="subtle"
-                      theme="green"
-                      data-testid="approve-all"
-                      @click="openConfirm({ type: 'lane', lane: lane.key })"
-                    >
-                      {{ approveAllLabel(laneBatch(lane.key)) }}
-                    </Button>
-                  </div>
-                  <p
-                    v-if="section.note"
-                    class="mb-2 text-sm text-ink-gray-5"
-                  >
-                    {{ section.note }}
-                  </p>
-
-                  <!-- R14: one header per person, their oldest item leading. -->
-                  <div
-                    v-for="group in groupByPerson(section.rows)"
-                    :key="group.employee"
-                    class="mb-4"
-                    :data-testid="`person-group-${section.key}`"
-                    :data-person="group.employee_name"
-                  >
-                    <div class="mb-1.5 flex items-center gap-2 px-1">
-                      <!-- HR-12: one person's clean rows together. -->
-                      <button
-                        v-if="section.key === 'normal' && canBulkSelect && selectableCount(group.rows) > 1"
-                        type="button"
-                        role="checkbox"
-                        class="-my-2 -ml-1 flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center"
-                        :aria-checked="ARIA_CHECKED[selectAllState(group.rows)]"
-                        :aria-label="`Select all of ${group.employee_name}'s ${selectableCount(group.rows)}`"
-                        data-testid="select-all-person"
-                        @click="toggleAll(group.rows)"
-                      >
-                        <span
-                          class="flex h-5 w-5 items-center justify-center rounded border"
-                          :class="selectAllState(group.rows) === 'none' ? 'border-outline-gray-3' : 'border-heading bg-heading text-white'"
-                          aria-hidden="true"
+                        <Button
+                          v-if="section.key === 'normal' && approveAllLabel(laneBatch(lane.key))"
+                          class="ml-auto"
+                          variant="subtle"
+                          theme="green"
+                          data-testid="approve-all"
+                          @click="openConfirm({ type: 'lane', lane: lane.key })"
                         >
-                          <Icon
-                            v-if="selectAllState(group.rows) === 'all'"
-                            name="check"
-                            class="h-3 w-3"
-                          />
-                          <span
-                            v-else-if="selectAllState(group.rows) === 'some'"
-                            class="h-0.5 w-2.5 rounded bg-white"
-                          />
-                        </span>
-                      </button>
-                      <Avatar
-                        class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-[10px] font-bold text-ink-gray-7"
-                        :photo-url="group.photo_url"
-                        :initials="group.initials"
-                        :size="24"
-                      />
-                      <span class="min-w-0 truncate text-sm font-medium text-ink-gray-9">
-                        {{ group.employee_name }}
-                      </span>
-                      <!-- MH-07: with one row, the row already says how long. -->
-                      <span class="tabular text-xs text-ink-gray-5">
-                        {{ group.rows.length }} {{ group.rows.length === 1 ? 'item' : 'items' }}
-                        <template v-if="group.rows.length > 1 && ageLabel(group.oldest)">
-                          · waiting {{ ageLabel(group.oldest) }}
-                        </template>
-                      </span>
-                    </div>
-
-                    <ul class="space-y-2">
-                      <li
-                        v-for="row in group.rows"
-                        :key="row.id"
-                        class="surface-card elev-1"
-                        :class="row.name === name ? 'ring-2 ring-field' : ''"
-                        data-testid="approval-row"
-                        :data-approval-kind="row.kind"
-                        :data-approval-name="row.name"
+                          {{ approveAllLabel(laneBatch(lane.key)) }}
+                        </Button>
+                      </div>
+                      <p
+                        v-if="section.note"
+                        class="mb-2 text-sm text-ink-gray-5"
                       >
-                        <div class="flex items-stretch">
-                          <!-- R17: selection exists only in Looks normal, only for
-                           the two kinds the batch takes, and only while the
-                           server still calls the row clean. -->
+                        {{ section.note }}
+                      </p>
+
+                      <!-- R14: one header per person, their oldest item leading. -->
+                      <div
+                        v-for="group in groupByPerson(section.rows)"
+                        :key="group.employee"
+                        class="mb-4"
+                        :data-testid="`person-group-${section.key}`"
+                        :data-person="group.employee_name"
+                      >
+                        <div class="mb-1.5 flex items-center gap-2 px-1">
+                          <!-- HR-12: one person's clean rows together. -->
                           <button
-                            v-if="section.key === 'normal' && canBulkSelect"
+                            v-if="section.key === 'normal' && canBulkSelect && selectableCount(group.rows) > 1"
                             type="button"
-                            class="flex w-11 shrink-0 cursor-pointer items-center justify-center border-r border-outline-gray-2"
-                            :class="selectable(row) ? '' : 'cursor-default'"
-                            :aria-label="isSelected(row) ? `Unselect ${rowSummary(row)}` : `Select ${rowSummary(row)}`"
-                            :aria-pressed="isSelected(row)"
-                            :data-testid="`bulk-check-${row.kind}`"
-                            :tabindex="selectable(row) ? 0 : -1"
-                            @click.stop="toggleBulk(row)"
+                            role="checkbox"
+                            class="-my-2 -ml-1 flex h-11 w-11 shrink-0 cursor-pointer items-center justify-center"
+                            :aria-checked="ARIA_CHECKED[selectAllState(group.rows)]"
+                            :aria-label="`Select all of ${group.employee_name}'s ${selectableCount(group.rows)}`"
+                            data-testid="select-all-person"
+                            @click="toggleAll(group.rows)"
                           >
-                            <!-- A row the batch can't take keeps the column and its
-                                 rule, so every avatar in the lane lines up; only
-                                 the box is hidden. -->
                             <span
                               class="flex h-5 w-5 items-center justify-center rounded border"
-                              :class="[
-                                isSelected(row) ? 'border-heading bg-heading text-white' : 'border-outline-gray-3',
-                                selectable(row) ? '' : 'invisible',
-                              ]"
+                              :class="selectAllState(group.rows) === 'none' ? 'border-outline-gray-3' : 'border-heading bg-heading text-white'"
                               aria-hidden="true"
                             >
                               <Icon
-                                v-if="isSelected(row)"
+                                v-if="selectAllState(group.rows) === 'all'"
                                 name="check"
                                 class="h-3 w-3"
                               />
+                              <span
+                                v-else-if="selectAllState(group.rows) === 'some'"
+                                class="h-0.5 w-2.5 rounded bg-white"
+                              />
                             </span>
                           </button>
+                          <Avatar
+                            class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-[10px] font-bold text-ink-gray-7"
+                            :photo-url="group.photo_url"
+                            :initials="group.initials"
+                            :size="24"
+                          />
+                          <span class="min-w-0 truncate text-sm font-medium text-ink-gray-9">
+                            {{ group.employee_name }}
+                          </span>
+                          <!-- MH-07: with one row, the row already says how long. -->
+                          <span class="tabular text-xs text-ink-gray-5">
+                            {{ group.rows.length }} {{ group.rows.length === 1 ? 'item' : 'items' }}
+                            <template v-if="group.rows.length > 1 && ageLabel(group.oldest)">
+                              · waiting {{ ageLabel(group.oldest) }}
+                            </template>
+                          </span>
+                        </div>
 
-                          <button
-                            type="button"
-                            class="flex w-full min-w-0 cursor-pointer items-center gap-3 p-3 text-left"
-                            data-row-toggle
-                            :aria-expanded="row.name === name"
-                            @click="row.name === name ? closeDetail() : open(row)"
+                        <ul class="space-y-2">
+                          <li
+                            v-for="row in group.rows"
+                            :key="row.id"
+                            class="surface-card elev-1"
+                            :class="row.name === name ? 'ring-2 ring-field' : ''"
+                            data-testid="approval-row"
+                            :data-approval-kind="row.kind"
+                            :data-approval-name="row.name"
                           >
-                            <Avatar
-                              class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-sm font-bold text-ink-green-3"
-                              :photo-url="row.photo_url"
-                              :initials="row.initials"
-                              :size="40"
-                            />
-
-                            <span class="min-w-0 flex-1">
-                              <span class="flex min-w-0 items-center gap-2">
-                                <KindTag :row="row" />
-                                <span class="min-w-0 truncate font-medium text-ink-gray-9">
-                                  {{ row.employee_name }}
+                            <div class="flex items-stretch">
+                              <!-- R17: selection exists only in Looks normal, only for
+                           the two kinds the batch takes, and only while the
+                           server still calls the row clean. -->
+                              <button
+                                v-if="section.key === 'normal' && canBulkSelect"
+                                type="button"
+                                class="flex w-11 shrink-0 cursor-pointer items-center justify-center border-r border-outline-gray-2"
+                                :class="selectable(row) ? '' : 'cursor-default'"
+                                :aria-label="isSelected(row) ? `Unselect ${rowSummary(row)}` : `Select ${rowSummary(row)}`"
+                                :aria-pressed="isSelected(row)"
+                                :data-testid="`bulk-check-${row.kind}`"
+                                :tabindex="selectable(row) ? 0 : -1"
+                                @click.stop="toggleBulk(row)"
+                              >
+                                <!-- A row the batch can't take keeps the column and its
+                                 rule, so every avatar in the lane lines up; only
+                                 the box is hidden. -->
+                                <span
+                                  class="flex h-5 w-5 items-center justify-center rounded border"
+                                  :class="[
+                                    isSelected(row) ? 'border-heading bg-heading text-white' : 'border-outline-gray-3',
+                                    selectable(row) ? '' : 'invisible',
+                                  ]"
+                                  aria-hidden="true"
+                                >
+                                  <Icon
+                                    v-if="isSelected(row)"
+                                    name="check"
+                                    class="h-3 w-3"
+                                  />
                                 </span>
-                                <!-- P4-R11. One queue, two hats. The chip is a word, not
+                              </button>
+
+                              <button
+                                type="button"
+                                class="flex w-full min-w-0 cursor-pointer items-center gap-3 p-3 text-left"
+                                data-row-toggle
+                                :aria-expanded="row.name === name"
+                                @click="row.name === name ? closeDetail() : open(row)"
+                              >
+                                <Avatar
+                                  class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-sm font-bold text-ink-green-3"
+                                  :photo-url="row.photo_url"
+                                  :initials="row.initials"
+                                  :size="40"
+                                />
+
+                                <span class="min-w-0 flex-1">
+                                  <span class="flex min-w-0 items-center gap-2">
+                                    <KindTag :row="row" />
+                                    <span class="min-w-0 truncate font-medium text-ink-gray-9">
+                                      {{ row.employee_name }}
+                                    </span>
+                                    <!-- P4-R11. One queue, two hats. The chip is a word, not
                                  a tint, because it is the only thing that says whether
                                  this row is HR's work or this manager's own. -->
-                                <span
-                                  v-if="row.for_hr"
-                                  class="shrink-0 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-bold text-ink-gray-7"
-                                  data-testid="hr-chip"
-                                >HR</span>
-                              </span>
-                              <!-- MH-02: on a phone the dates are why the row is
+                                    <span
+                                      v-if="showsHrChip(row)"
+                                      class="shrink-0 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-bold text-ink-gray-7"
+                                      data-testid="hr-chip"
+                                    >HR</span>
+                                  </span>
+                                  <!-- MH-02: on a phone the dates are why the row is
                                    read, so the summary wraps there rather than
                                    cutting them off; wider screens have room. -->
-                              <span class="block break-words text-sm text-ink-gray-6 sm:truncate">
-                                {{ rowSummary(row) }}
-                              </span>
-                              <span
-                                v-if="row.kind === 'timesheet' && row.expected_hours != null"
-                                class="tabular block text-xs text-ink-gray-5"
-                              >
-                                {{ trimNumber(row.total_hours) }} of
-                                {{ trimNumber(row.expected_hours) }} h expected
-                              </span>
-                              <span
-                                v-if="row.kind === 'leave' && row.balance_after != null"
-                                class="block text-xs text-ink-gray-5"
-                              >
-                                Balance after:
-                                <span class="tabular">{{ trimNumber(row.balance_after) }}</span>
-                                <template v-if="row.overlap_count">
-                                  · {{ row.overlap_count }}
-                                  {{ row.overlap_count === 1 ? 'other person is' : 'other people are' }} off then
-                                </template>
-                              </span>
-                              <!-- R16: the flags in words, never colour alone. -->
-                              <span
-                                v-if="row.needs_look"
-                                class="mt-1 flex flex-wrap gap-1"
-                                data-testid="flag-chips"
-                              >
-                                <span
-                                  v-for="flag in flagLabels(row)"
-                                  :key="flag"
-                                  class="rounded-full bg-surface-amber-1 px-2 py-0.5 text-xs font-medium text-ink-amber-3"
-                                >
-                                  {{ flag }}
-                                </span>
-                              </span>
-                              <span
-                                v-if="hrLine(row)"
-                                class="block truncate text-xs text-ink-gray-5"
-                              >
-                                {{ hrLine(row) }}
-                              </span>
-                              <!-- Plan 2026-10-18-001 R10: this approver's own row,
+                                  <span class="block break-words text-sm text-ink-gray-6 sm:truncate">
+                                    {{ rowSummary(row) }}
+                                  </span>
+                                  <span
+                                    v-if="row.kind === 'timesheet' && row.expected_hours != null"
+                                    class="tabular block text-xs text-ink-gray-5"
+                                  >
+                                    {{ trimNumber(row.total_hours) }} of
+                                    {{ trimNumber(row.expected_hours) }} h expected
+                                  </span>
+                                  <span
+                                    v-if="row.kind === 'leave' && row.balance_after != null"
+                                    class="block text-xs text-ink-gray-5"
+                                  >
+                                    Balance after:
+                                    <span class="tabular">{{ trimNumber(row.balance_after) }}</span>
+                                    <template v-if="row.overlap_count">
+                                      · {{ row.overlap_count }}
+                                      {{ row.overlap_count === 1 ? 'other person is' : 'other people are' }} off then
+                                    </template>
+                                  </span>
+                                  <!-- R16: the flags in words, never colour alone. -->
+                                  <span
+                                    v-if="row.needs_look"
+                                    class="mt-1 flex flex-wrap gap-1"
+                                    data-testid="flag-chips"
+                                  >
+                                    <span
+                                      v-for="flag in flagLabels(row)"
+                                      :key="flag"
+                                      class="rounded-full bg-surface-amber-1 px-2 py-0.5 text-xs font-medium text-ink-amber-3"
+                                    >
+                                      {{ flag }}
+                                    </span>
+                                  </span>
+                                  <span
+                                    v-if="hrLine(row)"
+                                    class="block truncate text-xs text-ink-gray-5"
+                                    data-testid="hr-line"
+                                  >
+                                    {{ hrLine(row) }}
+                                  </span>
+                                  <!-- Plan 2026-10-18-001 R10: this approver's own row,
                                    which their account cannot change yet. -->
-                              <span
-                                v-if="row.blocked_reason"
-                                class="block text-xs font-medium text-ink-amber-3"
-                                data-testid="row-blocked-reason"
-                              >
-                                View only: {{ row.blocked_reason }}
-                              </span>
-                              <!-- R18: a batch refused this row and it is still
+                                  <span
+                                    v-if="row.blocked_reason"
+                                    class="block text-xs font-medium text-ink-amber-3"
+                                    data-testid="row-blocked-reason"
+                                  >
+                                    View only: {{ row.blocked_reason }}
+                                  </span>
+                                  <!-- R18: a batch refused this row and it is still
                                    pending; the reason stays with it. -->
-                              <span
-                                v-if="refusedReasons[row.name]"
-                                class="block text-xs font-medium text-ink-red-4"
-                                data-testid="bulk-refused-reason"
-                              >
-                                Not approved: {{ refusedReasons[row.name] }}
-                              </span>
-                            </span>
+                                  <span
+                                    v-if="refusedReasons[row.name]"
+                                    class="block text-xs font-medium text-ink-red-4"
+                                    data-testid="bulk-refused-reason"
+                                  >
+                                    Not approved: {{ refusedReasons[row.name] }}
+                                  </span>
+                                </span>
 
-                            <span class="shrink-0 text-right">
-                              <span
-                                class="tabular block font-medium text-ink-gray-9"
-                                :data-testid="row.kind === 'request' ? 'request-claim' : null"
-                              >{{ rowAmount(row) }}</span>
-                              <!-- MH-07: the amount above is the request's; this is
+                                <span class="shrink-0 text-right">
+                                  <span
+                                    class="tabular block font-medium text-ink-gray-9"
+                                    :data-testid="row.kind === 'request' ? 'request-claim' : null"
+                                  >{{ rowAmount(row) }}</span>
+                                  <!-- MH-07: the amount above is the request's; this is
                                    how long it has waited, and says so. -->
-                              <span
-                                v-if="ageLabel(row)"
-                                class="tabular block text-xs text-ink-gray-5"
-                              >waiting {{ ageLabel(row) }}</span>
-                            </span>
+                                  <span
+                                    v-if="ageLabel(row)"
+                                    class="tabular block text-xs text-ink-gray-5"
+                                  >waiting {{ ageLabel(row) }}</span>
+                                </span>
 
-                            <Icon
-                              v-if="!isDesktop"
-                              name="chevronRight"
-                              class="shrink-0 text-ink-gray-4 transition-transform duration-200"
-                              :class="row.name === name ? 'rotate-90' : ''"
-                            />
-                          </button>
-                        </div>
+                                <Icon
+                                  v-if="!isDesktop"
+                                  name="chevronRight"
+                                  class="shrink-0 text-ink-gray-4 transition-transform duration-200"
+                                  :class="row.name === name ? 'rotate-90' : ''"
+                                />
+                              </button>
+                            </div>
 
-                        <!-- Phone: the selected item opens where it is, so the manager
+                            <!-- Phone: the selected item opens where it is, so the manager
                          never loses their place in the queue (P2-U7 step 7). -->
-                        <div
-                          v-if="!isDesktop && row.name === name"
-                          class="border-t border-outline-gray-2 px-3 pb-3"
-                        >
-                          <AsyncState
-                            section="approvals-detail"
-                            class="pt-3"
-                            :resource="detail"
-                            :empty="!detail.data"
-                            empty-title="That request isn't here any more"
-                            empty-body="It may have been withdrawn or already decided."
-                            skeleton="block"
-                            skeleton-height="h-40"
-                          >
-                            <template #error-title>
-                              We couldn't load this request
-                            </template>
-                            <ApprovalEvidence
-                              v-if="selected"
-                              v-bind="evidence"
-                              v-model:reason="reason"
-                              v-model:note="note"
-                              layout="inline"
-                              @act="decide"
-                              @close-reason="closeReason"
-                              @close-note="closeNote"
-                            />
-                          </AsyncState>
-                        </div>
-                      </li>
-                    </ul>
-                  </div>
-                </section>
+                            <div
+                              v-if="!isDesktop && row.name === name"
+                              class="border-t border-outline-gray-2 px-3 pb-3"
+                            >
+                              <AsyncState
+                                section="approvals-detail"
+                                class="pt-3"
+                                :resource="detail"
+                                :empty="!detail.data"
+                                empty-title="That request isn't here any more"
+                                empty-body="It may have been withdrawn or already decided."
+                                skeleton="block"
+                                skeleton-height="h-40"
+                              >
+                                <template #error-title>
+                                  We couldn't load this request
+                                </template>
+                                <ApprovalEvidence
+                                  v-if="selected"
+                                  v-bind="evidence"
+                                  v-model:reason="reason"
+                                  v-model:note="note"
+                                  layout="inline"
+                                  @act="decide"
+                                  @close-reason="closeReason"
+                                  @close-note="closeNote"
+                                />
+                              </AsyncState>
+                            </div>
+                          </li>
+                        </ul>
+                      </div>
+                    </section>
+                  </template>
+                </div>
               </template>
             </section>
           </div>
@@ -1715,7 +1764,7 @@ function onQueueKey(event) {
             v-if="overflow"
             class="mt-3 text-sm text-ink-gray-5"
           >
-            Showing the <span class="tabular">{{ pending.length }}</span> oldest.
+            Showing the <span class="tabular">{{ owedPending.length }}</span> oldest.
             <span class="tabular">{{ overflow }}</span> more are waiting.
           </p>
         </AsyncState>

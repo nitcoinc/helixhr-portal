@@ -637,6 +637,16 @@ const reasonPlaceholder = computed(() =>
     >
       View only: {{ selected.read_only_reason || "you can't approve timesheets." }}
     </p>
+    <!-- Plan 2026-10-31-001 R22/R23: HR deciding a leave still with its
+         manager steps in for them; the action row says so before it is used. -->
+    <p
+      v-if="selected.waiting_on && actions.includes('Approve') && !armed"
+      class="text-sm text-ink-gray-6"
+      :class="gap"
+      data-testid="decides-for"
+    >
+      Approving here decides for {{ selected.waiting_on }}.
+    </p>
     <!-- P4-R1. Exactly the outcomes the server allows, in one order on every
          kind: the decision, the recoverable no, the final no, the hand-over.
          An outcome missing from `actions` is not rendered rather than
