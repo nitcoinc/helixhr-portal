@@ -2208,9 +2208,20 @@ class TestFourOutcomesAndTheHrQueue(IntegrationTestCase):
 
 		frappe.set_user(self.hr_user)
 		boot = get_portal_bootstrap()
-		self.assertEqual(self._queue(), {})
+		# Plan 2026-10-31-001 KTD15: "With managers" rows are not work HR owes.
+		self.assertEqual(
+			{name for name, row in self._queue().items() if row["hr_reason"] != "with_manager"}, set()
+		)
 		self.assertFalse(boot["has_reports"])
 		self.assertTrue(boot["can_approve"])
+
+
+def _count_only_rows(employee):
+	"""The names the bootstrap's badge counts (`count_only`), as the session."""
+	from helixhr.api import _approval_summaries
+
+	rows, _capped, _lanes = _approval_summaries(employee, include_requests=False, count_only=True)
+	return {row["name"] for row in rows}
 
 
 class TestHrSeesStalledManagerLeave(IntegrationTestCase):
@@ -2276,11 +2287,12 @@ class TestHrSeesStalledManagerLeave(IntegrationTestCase):
 		self.addCleanup(frappe.db.delete, "Leave Application", {"name": doc.name})
 		return doc.name
 
-	def _open_leave(self):
+	def _open_leave(self, offset=0):
 		ensure_leave_allocation(self.employee, "Casual Leave", 30)
+		day = str(add_days(self.leave_date, offset))
 		for existing in frappe.get_all(
 			"Leave Application",
-			filters={"employee": self.employee, "from_date": str(self.leave_date)},
+			filters={"employee": self.employee, "from_date": day},
 			pluck="name",
 		):
 			frappe.delete_doc("Leave Application", existing, force=True, ignore_permissions=True)
@@ -2290,8 +2302,8 @@ class TestHrSeesStalledManagerLeave(IntegrationTestCase):
 				"doctype": "Leave Application",
 				"employee": self.employee,
 				"leave_type": "Casual Leave",
-				"from_date": str(self.leave_date),
-				"to_date": str(self.leave_date),
+				"from_date": day,
+				"to_date": day,
 				"description": "u4",
 				"leave_approver": MANAGER_USER,
 			}
@@ -2349,7 +2361,8 @@ class TestHrSeesStalledManagerLeave(IntegrationTestCase):
 		frappe.set_user("Administrator")
 		self._manager_on_leave_today(docstatus=0, status="Open")
 
-		self.assertNotIn(leave, self._hr_queue())
+		# Still listed, but as waiting on the manager, not as theirs to decide.
+		self.assertEqual(self._hr_queue()[leave]["hr_reason"], "with_manager")
 
 	def test_a_request_pending_past_the_threshold_is_listed_as_overdue(self):
 		leave = self._open_leave()
@@ -2359,9 +2372,116 @@ class TestHrSeesStalledManagerLeave(IntegrationTestCase):
 		self.assertIsNotNone(row)
 		self.assertEqual(row["hr_reason"], "overdue")
 
-	def test_a_fresh_request_with_a_present_approver_is_not_listed(self):
+	def test_hrs_home_names_the_approver_of_a_stalled_leave_not_hr(self):
+		"""Plan 2026-10-31-001 R22, the reproduced "Waiting for HR": an
+		overdue manager-stage leave reached HR's Home decisions as
+		"... · waiting for HR", because the stalled rows are tagged `for_hr`
+		and `_pending_approvals` worded every `for_hr` row that way."""
+		from helixhr.api import _pending_approvals
+
 		leave = self._open_leave()
-		self.assertNotIn(leave, self._hr_queue())
+		self._age(leave, 3)
+
+		frappe.set_user(self.hr_user)
+		titles = {row["reference_name"]: row["title"] for row in _pending_approvals(self.hr_employee)}
+		self.assertIn(leave, titles)
+		self.assertNotIn("waiting for HR", titles[leave])
+		self.assertIn(f"waiting for {self._manager_display_name()}", titles[leave])
+
+	def _manager_display_name(self):
+		return frappe.db.get_value("Employee", self.manager_name, "employee_name")
+
+	# --- plan 2026-10-31-001 U12: "With managers" -----------------------------
+
+	def test_a_fresh_request_is_with_the_manager_and_counted_nowhere(self):
+		"""R23 / KTD15: listed for HR, named, decidable -- and not work HR owes."""
+		from helixhr.api import _pending_approvals
+
+		leave = self._open_leave()
+
+		row = self._hr_queue().get(leave)
+		self.assertIsNotNone(row)
+		self.assertEqual(row["hr_reason"], "with_manager")
+		self.assertEqual(row["approver_name"], self._manager_display_name())
+		self.assertTrue(row["for_hr"])
+
+		frappe.set_user(self.hr_user)
+		result = get_my_approvals()
+		self.assertEqual(result["total"], get_portal_bootstrap()["approvals_count"])
+		self.assertEqual(
+			result["total"], sum(1 for row in result["pending"] if row["hr_reason"] != "with_manager")
+		)
+		self.assertNotIn(leave, _count_only_rows(self.hr_employee))
+		self.assertNotIn(leave, {row["reference_name"] for row in _pending_approvals(self.hr_employee)})
+
+	def test_an_away_approvers_row_keeps_its_reason_and_gains_the_name(self):
+		leave = self._open_leave()
+		frappe.set_user("Administrator")
+		self._manager_on_leave_today()
+
+		row = self._hr_queue()[leave]
+		self.assertEqual(row["hr_reason"], "approver_away")
+		self.assertEqual(row["approver_name"], self._manager_display_name())
+		frappe.set_user(self.hr_user)
+		self.assertIn(leave, _count_only_rows(self.hr_employee))
+
+	def test_an_approver_who_left_or_lost_the_login_is_still_named(self):
+		leave = self._open_leave()
+		frappe.set_user("Administrator")
+		for doctype, name, field, before, after in (
+			("Employee", self.manager_name, "status", "Active", "Inactive"),
+			("User", MANAGER_USER, "enabled", 1, 0),
+		):
+			frappe.db.set_value(doctype, name, field, after, update_modified=False)
+			self.addCleanup(frappe.db.set_value, doctype, name, field, before, update_modified=False)
+
+		row = self._hr_queue()[leave]
+		self.assertEqual(row["hr_reason"], "with_manager")
+		self.assertEqual(row["approver_name"], self._manager_display_name())
+
+	def test_a_leave_with_no_approver_is_listed_with_no_name(self):
+		leave = self._open_leave()
+		frappe.db.set_value("Leave Application", leave, "leave_approver", None, update_modified=False)
+
+		row = self._hr_queue()[leave]
+		self.assertEqual(row["hr_reason"], "with_manager")
+		self.assertIsNone(row["approver_name"])
+
+	def test_hr_opens_a_manager_stage_leave_and_sees_who_it_waits_on(self):
+		leave = self._open_leave()
+
+		frappe.set_user(self.hr_user)
+		detail = get_approval_detail("leave", leave)
+		self.assertEqual(detail["waiting_on"], self._manager_display_name())
+		self.assertFalse(detail["for_hr"])
+		self.assertIn("Approve", detail["actions"])
+
+		# The approver's own view names nobody: it is waiting on them.
+		frappe.set_user(MANAGER_USER)
+		self.assertIsNone(get_approval_detail("leave", leave)["waiting_on"])
+
+	def test_fresh_requests_never_crowd_a_stalled_one_out_of_the_bound(self):
+		"""The stalled read is its own, so the cap holds for each half."""
+		from unittest.mock import patch
+
+		from helixhr import api
+
+		fresh = self._open_leave()
+		stalled = self._open_leave(1)
+		self._age(stalled, 3)
+
+		frappe.set_user(self.hr_user)
+		with patch.object(api, "_QUEUE_FETCH", 1):
+			rows = api._hr_stalled_leave_summaries(
+				self.hr_employee, getdate(today()), ["in", [self.employee]]
+			)
+			counted = api._hr_stalled_leave_summaries(
+				self.hr_employee, getdate(today()), ["in", [self.employee]], count_only=True
+			)
+		self.assertEqual(
+			{row["name"]: row["hr_reason"] for row in rows}, {stalled: "overdue", fresh: "with_manager"}
+		)
+		self.assertEqual([row["name"] for row in counted], [stalled])
 
 	def test_an_employee_outside_hrs_admin_scope_is_not_listed(self):
 		leave = self._open_leave()
@@ -3147,7 +3267,9 @@ class TestBootstrapApprovalsCount(IntegrationTestCase):
 
 		def names(user, collect, employee):
 			today_ = api._as_date(api.user_today())
-			full = self._as(user, collect, employee, today_)
+			# Plan 2026-10-31-001 KTD15: "With managers" rows are the full
+			# read's alone; `count_only` keeps exactly the owed ones.
+			full = [row for row in self._as(user, collect, employee, today_) if api._owed(row)]
 			bare = self._as(user, collect, employee, today_, count_only=True)
 			self.assertEqual(len(full), len(bare))
 			return {row["name"] for row in full}, {row["name"] for row in bare}

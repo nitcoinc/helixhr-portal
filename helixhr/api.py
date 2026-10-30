@@ -1013,18 +1013,23 @@ def _ordered_celebrations(entries):
 
 
 def _open_leave(employee):
-	"""This employee's leave that is still with their manager -- the rows
-	the queue's "Waiting on others" list is drawn from.
+	"""This employee's leave still waiting on somebody -- the rows the
+	queue's "Waiting on others" list is drawn from -- with the stage and the
+	approver's display name (plan 2026-10-31-001 R26).
 
 	Bounded by _QUEUE_FETCH like every other queue source.
 	"""
-	return frappe.get_all(
+	rows = frappe.get_all(
 		"Leave Application",
 		filters={"employee": employee, "status": "Open"},
-		fields=["name", "leave_type", "from_date", "to_date"],
+		fields=["name", "leave_type", "from_date", "to_date", "helixhr_stage", "leave_approver"],
 		order_by="from_date asc",
 		limit=_QUEUE_FETCH,
 	)
+	names = _leave_approver_names(row.leave_approver for row in rows)
+	for row in rows:
+		row.approver_name = names.get(row.leave_approver)
+	return rows
 
 
 def _get_week_spine(employee, once):
@@ -1427,18 +1432,22 @@ def _get_needs_you(employee, once):
 		)
 
 	for row in once("open_leave", lambda: _open_leave(employee)):
+		# Plan 2026-10-31-001 R26: "waiting for HR" only for the HR stage;
+		# otherwise the manager by name, and the old words with nobody to name.
+		with_hr = row.helixhr_stage == LEAVE_STAGE_HR
+		waiting_for = "HR" if with_hr else row.approver_name or "your manager"
 		waiting.append(
 			_queue_item(
 				kind="leave_waiting",
 				name=row.name,
 				doctype="Leave Application",
-				title=f"{row.leave_type} waiting for your manager",
+				title=f"{row.leave_type} waiting for {waiting_for}",
 				detail=None,
 				date=str(row.from_date),
 				day=day_for(row.from_date),
 				age_days=age_days(row.from_date),
 				action="View",
-				owner="manager",
+				owner="hr" if with_hr else "manager",
 				urgency="waiting",
 				to={"name": "LeaveDetail", "params": {"name": row.name}},
 			)
@@ -1760,9 +1769,13 @@ def _summary_row(
 		"for_hr": False,
 		"sent_to_hr_by": None,
 		"hr_note": None,
-		# U4 / R10: why HR sees a manager-stage leave -- "approver_away" or
-		# "overdue" -- and None for everything else.
+		# U4 / R10: why HR sees a manager-stage leave -- "approver_away",
+		# "overdue" or, plan 2026-10-31-001 KTD15, "with_manager" -- and None
+		# for everything else.
 		"hr_reason": None,
+		# Plan 2026-10-31-001 R22: who a manager-stage leave HR sees is
+		# waiting on. None on every other row, and on a leave with no approver.
+		"approver_name": None,
 		# Plan 2026-10-04-003 KTD7: the "Needs a look" flags, computed on the
 		# server and shipped on the row, so the display and the batch
 		# endpoint's re-check can never disagree. None for the kinds that
@@ -2616,72 +2629,119 @@ def _approvers_away(users, today):
 	return {employees[name] for name in on_leave}
 
 
+# Plan 2026-10-31-001 KTD15 (R23): a manager-stage leave HR may see but does
+# not owe -- the "With managers" group. Never in a count: not the badge, not
+# `total`, not Home's decisions.
+HR_REASON_WITH_MANAGER = "with_manager"
+
+
+def _owed(row):
+	"""Whether a queue row is work the caller owes (KTD15): everything except
+	the "With managers" rows, which HR may decide but is not waiting on."""
+	return row.get("hr_reason") != HR_REASON_WITH_MANAGER
+
+
+def _leave_approver_names(users):
+	"""The display name of each leave approver login, through the overdue
+	digest's own resolver -- one Employee read and one User read whatever the
+	count. An approver who has left or lost their login keeps a name; only
+	"nobody" has none."""
+	items = [{"approver": {"user": user}} for user in {user for user in users if user}]
+	return {item["approver_user"]: item["approver_name"] for item in reminders.resolve_approvers(items)}
+
+
 def _hr_stalled_leave_summaries(employee, today, employee_filter, count_only=False):
-	"""Manager-stage leave HR may decide because the approver is away or the
-	request is overdue (R10, KTD4). Admin-scoped by `employee_filter`, never
-	narrowed by `_line_manager_filter`: these are other managers' reports.
-	The caller's own approvals are already in their line-manager half."""
+	"""Manager-stage leave HR sees (R10, KTD4; plan 2026-10-31-001 KTD15).
+	Admin-scoped by `employee_filter`, never narrowed by
+	`_line_manager_filter`: these are other managers' reports. The caller's
+	own approvals are already in their line-manager half.
+
+	Two kinds of row. `approver_away` and `overdue` are HR's to decide and
+	count; `with_manager` is everything else, shown so HR can see who it is
+	waiting on, and counted nowhere (`count_only` leaves it out).
+
+	The stalled rows are read first, by their own filter, so a backlog of
+	fresh requests can never push one past `_QUEUE_FETCH`: who is away comes
+	from the distinct approvers in scope (one small read), and overdue is the
+	same strict `is_overdue` test as a date bound on `helixhr_pending_since`.
+	The "With managers" read is a second, separately bounded one.
+	"""
+	scope = {
+		"status": "Open",
+		"docstatus": 0,
+		"helixhr_stage": ["in", ["", None, _LEAVE_STAGE_MANAGER]],
+		"employee": employee_filter,
+		# Not "not in ['', user]": a request with no approver is still waiting
+		# on somebody, and HR is the one who can see that.
+		"leave_approver": ["!=", frappe.session.user],
+	}
+	approvers = frappe.get_all("Leave Application", filters=scope, pluck="leave_approver", distinct=True)
+	away = _approvers_away({user for user in approvers if user}, today)
+	threshold = approval_overdue_days()
+	stalled_or = {PENDING_SINCE_FIELD: ["<", str(add_days(today, -threshold))]}
+	if away:
+		stalled_or["leave_approver"] = ["in", list(away)]
+	fields = [
+		"name",
+		"employee",
+		"employee_name",
+		"leave_type",
+		"from_date",
+		"to_date",
+		"total_leave_days",
+		"status",
+		"creation",
+		"leave_approver",
+		PENDING_SINCE_FIELD,
+	]
 	rows = frappe.get_all(
 		"Leave Application",
-		filters={
-			"status": "Open",
-			"docstatus": 0,
-			"helixhr_stage": ["in", ["", None, _LEAVE_STAGE_MANAGER]],
-			"employee": employee_filter,
-			"leave_approver": ["not in", ["", frappe.session.user]],
-		},
-		fields=["name", "leave_approver", PENDING_SINCE_FIELD]
-		if count_only
-		else [
-			"name",
-			"employee",
-			"employee_name",
-			"leave_type",
-			"from_date",
-			"to_date",
-			"total_leave_days",
-			"status",
-			"creation",
-			"leave_approver",
-			PENDING_SINCE_FIELD,
-		],
+		filters=scope,
+		or_filters=stalled_or,
+		fields=["name", "leave_approver", PENDING_SINCE_FIELD] if count_only else fields,
 		order_by="creation asc",
 		limit=_QUEUE_FETCH,
 	)
-	away = _approvers_away({row.leave_approver for row in rows}, today)
-	threshold = approval_overdue_days()
-	stalled = []
+	reasons = {}
 	for row in rows:
 		if row.leave_approver in away:
-			reason = "approver_away"
+			reasons[row.name] = "approver_away"
 		elif is_overdue(row.get(PENDING_SINCE_FIELD), today, threshold):
-			reason = "overdue"
-		else:
-			continue
-		if count_only:
-			# The away/overdue test above is the subtraction, so `count_only`
-			# keeps it, and appends only what `_count_rows` would keep.
-			stalled.append({"kind": "leave", "name": row.name})
-			continue
-		stalled.append(
-			_summary_row(
-				"leave",
-				"Leave Application",
-				row.name,
-				row.employee,
-				row.employee_name,
-				row.from_date,
-				row.to_date,
-				row.creation,
-				row.status,
-				today,
-				leave_type=row.leave_type,
-				total_days=flt(row.total_leave_days),
-				for_hr=True,
-				hr_reason=reason,
-			)
+			reasons[row.name] = "overdue"
+	if count_only:
+		# The away/overdue test is the subtraction, so `count_only` keeps it,
+		# and appends only what `_count_rows` would keep.
+		return [{"kind": "leave", "name": row.name} for row in rows if row.name in reasons]
+
+	rows = [row for row in rows if row.name in reasons]
+	rows += frappe.get_all(
+		"Leave Application",
+		filters={**scope, "name": ["not in", [row.name for row in rows] or [""]]},
+		fields=fields,
+		order_by="creation asc",
+		limit=_QUEUE_FETCH,
+	)
+	names = _leave_approver_names(row.leave_approver for row in rows)
+	return [
+		_summary_row(
+			"leave",
+			"Leave Application",
+			row.name,
+			row.employee,
+			row.employee_name,
+			row.from_date,
+			row.to_date,
+			row.creation,
+			row.status,
+			today,
+			leave_type=row.leave_type,
+			total_days=flt(row.total_leave_days),
+			for_hr=True,
+			hr_reason=reasons.get(row.name, HR_REASON_WITH_MANAGER),
+			approver_name=names.get(row.leave_approver),
 		)
-	return stalled
+		for row in rows
+	]
 
 
 def _hr_timesheet_summaries(employee, today, count_only=False):
@@ -3380,7 +3440,10 @@ def _collect_approval_summaries(employee, include_requests, count_only, today):
 				row["lane"] = "it" if row.get("routed_to_role") == _IT_ROLE else "hr"
 			else:
 				row["lane"] = lane
-			lane_counts[row["lane"]] += 1
+			# Plan 2026-10-31-001 KTD15: "With managers" rows ride in the HR
+			# lane but count nowhere, so the full read's counts are the badge's.
+			if _owed(row):
+				lane_counts[row["lane"]] += 1
 		rows.extend(collected)
 
 	# A routed-role holder who is not also an Employee (P5-U2 ships IT Team
@@ -3408,7 +3471,7 @@ def _collect_approval_summaries(employee, include_requests, count_only, today):
 			if doctype == "HR Request" and not include_requests:
 				continue
 			collected = kind["hr_queue"](employee, today, count_only=count_only)
-			capped = capped or len(collected) >= _QUEUE_FETCH
+			capped = capped or sum(1 for row in collected if _owed(row)) >= _QUEUE_FETCH
 			_extend(collected, "hr")
 	elif include_requests and _holds_routed_role():
 		# P5-R11: a routed-role holder (IT Team today) has no line-manager
@@ -3487,8 +3550,18 @@ def _pending_approvals(employee):
 	decisions = []
 	rows, _capped, _lane_counts = _approval_summaries(employee)
 	for row in rows:
+		# Plan 2026-10-31-001 KTD15: "With managers" is not a decision owed.
+		if not _owed(row):
+			continue
 		title = _QUEUE_TITLE[row["kind"]](row)
-		if row["for_hr"]:
+		if row.get("hr_reason"):
+			# Plan 2026-10-31-001 R22: a manager-stage leave HR may decide
+			# (approver away, or overdue) is still waiting on its approver,
+			# not on HR -- it used to read "waiting for HR" here.
+			approver = row.get("approver_name")
+			waiting = f"waiting for {approver}" if approver else "no approver set"
+			title = f"{title} · {waiting}"
+		elif row["for_hr"]:
 			# P4-R11: Home's queue says which hat this decision is under.
 			# Without it an HR Manager who is also a line manager reads five
 			# identical lines and cannot tell which are theirs as a manager.
@@ -3653,6 +3726,7 @@ def _leave_reason(names, owners):
 def _leave_projection(row, approver_names, reasons):
 	state = _leave_state(row.get("status"), row.get("docstatus"))
 	approver = row.get("leave_approver")
+	decided_by = row.get("helixhr_decided_by")
 	return {
 		"name": row.get("name"),
 		"leave_type": row.get("leave_type"),
@@ -3675,6 +3749,11 @@ def _leave_projection(row, approver_names, reasons):
 		# `frappe.client.get_list` against User -- a generic read of an
 		# unrelated DocType, issued once per page load, to render one word.
 		"approver_name": approver_names.get(approver),
+		# Plan 2026-10-31-001 U11 (R25): who made the final decision, from the
+		# stamp alone. A record decided before the stamp existed names nobody
+		# rather than guessing the approver.
+		"decided_by_name": approver_names.get(decided_by) if decided_by else None,
+		"decided_by_hr": bool(cint(row.get("helixhr_decided_as_hr"))),
 		# Only ever populated for a sent-back record; see _leave_reason.
 		"reason": reasons.get(row.get("name")),
 		"posting_date": str(row.get("posting_date")) if row.get("posting_date") else None,
@@ -3696,6 +3775,8 @@ _LEAVE_FIELDS = [
 	"docstatus",
 	"leave_approver",
 	"helixhr_stage",
+	"helixhr_decided_by",
+	"helixhr_decided_as_hr",
 	"posting_date",
 	"owner",
 	"creation",
@@ -3704,7 +3785,11 @@ _LEAVE_FIELDS = [
 
 
 def _approver_names(rows):
-	ids = {row.get("leave_approver") for row in rows if row.get("leave_approver")}
+	"""Display names for the approver and the decider of each row, in one
+	User read."""
+	ids = {
+		row.get(field) for row in rows for field in ("leave_approver", "helixhr_decided_by") if row.get(field)
+	}
 	if not ids:
 		return {}
 	return {
@@ -6611,12 +6696,16 @@ def get_my_approvals(kind=None, category=None, q=None):
 	# Plan 2026-10-16-001 KTD1: requests leave Approvals rows, lanes, counts,
 	# categories and Decided list.
 	pending, capped, _lane_counts = _approval_summaries(employee, include_requests=False)
-	lanes = {"team": sum(1 for row in pending if row.get("lane") == "team")}
+	# Plan 2026-10-31-001 KTD15: the counts and `total` are owed work only, so
+	# the badge `total` sets is the bootstrap's; "With managers" rows are
+	# still in `pending`, for the screen to group.
+	owed = [row for row in pending if _owed(row)]
+	lanes = {"team": sum(1 for row in owed if row.get("lane") == "team")}
 	if _is_hr():
-		lanes["hr"] = sum(1 for row in pending if row.get("lane") == "hr")
+		lanes["hr"] = sum(1 for row in owed if row.get("lane") == "hr")
 	counts = {
 		"kinds": [
-			{"name": name, "count": sum(1 for row in pending if row["kind"] == name)}
+			{"name": name, "count": sum(1 for row in owed if row["kind"] == name)}
 			for name in _APPROVAL_FILTER_KINDS
 		],
 		"categories": [],
@@ -6659,7 +6748,7 @@ def get_my_approvals(kind=None, category=None, q=None):
 	return {
 		"today": user_today(),
 		"pending": shown,
-		"total": len(pending),
+		"total": sum(1 for row in pending if _owed(row)),
 		"counts": counts,
 		"people": people,
 		# `total` is what came back, and every kind's read is bounded, so on a
@@ -6771,22 +6860,16 @@ def _decided_leave(employee, since, pattern=None):
 			)
 		]
 
-	return handed_over + [
-		_decided_row(
-			"leave",
-			row.name,
-			row.employee_name,
-			row.leave_type,
-			row.from_date,
-			row.to_date,
-			row.status,
-			row.modified,
-			row.docstatus,
-		)
-		for row in frappe.get_list(
+	# Plan 2026-10-31-001 U11 (R27): a final decision belongs to whoever the
+	# stamp names, so HR deciding a manager-stage leave lands in HR's list and
+	# not the manager's. `leave_approver` answers only for a row with no stamp:
+	# a send-back (a save, never stamped) and anything decided before the
+	# stamp existed. Two reads because `or_filters` already carries the search.
+	def decided(filters):
+		return frappe.get_list(
 			"Leave Application",
 			filters={
-				"leave_approver": frappe.session.user,
+				**filters,
 				"employee": ["!=", employee],
 				"status": ["in", ["Approved", "Rejected"]],
 				**window,
@@ -6805,6 +6888,25 @@ def _decided_leave(employee, since, pattern=None):
 			order_by="modified desc",
 			limit=limit,
 		)
+
+	user = frappe.session.user
+	rows = decided({"helixhr_decided_by": user}) + decided(
+		{"helixhr_decided_by": ["is", "not set"], "leave_approver": user}
+	)
+	rows.sort(key=lambda row: row.modified, reverse=True)
+	return handed_over + [
+		_decided_row(
+			"leave",
+			row.name,
+			row.employee_name,
+			row.leave_type,
+			row.from_date,
+			row.to_date,
+			row.status,
+			row.modified,
+			row.docstatus,
+		)
+		for row in rows[:limit]
 	]
 
 
@@ -7755,9 +7857,20 @@ def _leave_decision_detail(doc):
 	"""Reason, dates, day count and current status -- everything the
 	approver needs before the balance is consumed (P2-U7 scenario 2)."""
 	detail = _decision_head(doc, doc.employee_name)
+	# Plan 2026-10-31-001 R22: a manager-stage leave opened by anyone but its
+	# approver (HR, in practice) names who it is waiting on. None when there
+	# is no approver, when it is with HR, or when the caller is the approver.
+	waiting_on = None
+	if (
+		(doc.get("helixhr_stage") or _LEAVE_STAGE_MANAGER) != LEAVE_STAGE_HR
+		and doc.leave_approver
+		and doc.leave_approver != frappe.session.user
+	):
+		waiting_on = _leave_approver_names([doc.leave_approver]).get(doc.leave_approver)
 	detail.update(
 		{
 			"kind": "leave",
+			"waiting_on": waiting_on,
 			"state": doc.status,
 			"status": doc.status,
 			"docstatus": cint(doc.docstatus),

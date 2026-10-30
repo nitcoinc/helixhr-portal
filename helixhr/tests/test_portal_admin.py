@@ -210,7 +210,14 @@ class TestApproverCleanup(IntegrationTestCase):
 			["name", "employee", "company", "docstatus", "status", "leave_approver"],
 			[(name, self.employee, self.company, 0, "Open", approver)],
 		)
+		# The cleanup commits, so the row would outlive the test and sit in
+		# every HR queue as a leave waiting on its manager.
+		self.addCleanup(self._remove_leave, name)
 		return name
+
+	def _remove_leave(self, name):
+		frappe.db.delete("Leave Application", {"name": name})
+		frappe.db.commit()
 
 	def test_a_portal_admin_previews_and_applies_the_fix(self):
 		frappe.db.set_value("Employee", self.employee, "leave_approver", self.admin)

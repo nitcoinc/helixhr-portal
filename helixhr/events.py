@@ -831,6 +831,23 @@ def leave_application_before_submit(doc, method=None):
 			frappe.PermissionError,
 		)
 
+	# Plan 2026-10-31-001 U11 (R24, KTD14): every final decision names its
+	# decider, from the portal and from Desk alike. Set on the document, not
+	# with `db_set`: `validate_higher_perm_levels` has already run by
+	# `before_submit`, so the permlevel-1 values reach `db_update` as written.
+	# The session user is the real decider -- the portal submits as the
+	# caller with `ignore_permissions`, never under `as_administrator`.
+	# "As HR" means HR in scope deciding in the approver's place, so an HR
+	# user who is also this leave's own manager approving it at the manager
+	# stage decided as the manager.
+	if doc.status in ("Approved", "Rejected"):
+		from helixhr.api import _decides_as_hr
+
+		doc.helixhr_decided_by = user
+		doc.helixhr_decided_as_hr = int(
+			_decides_as_hr(doc, user) and (stored_stage == LEAVE_STAGE_HR or user != doc.leave_approver)
+		)
+
 
 def leave_application_validate(doc, method=None):
 	"""The *save* half of P4-R8a, which `before_submit` cannot reach.
