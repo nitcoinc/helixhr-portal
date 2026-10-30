@@ -125,6 +125,20 @@ const CASES = [
     problems: [[0, NO_SHIFT_ON_DATE]],
   },
   {
+    name: 'a change whose assignment is gone falls back to the one covering the date',
+    coverage: { E1: [['SA-2', 'Day', '2026-11-01', '2026-11-30']] },
+    ops: [
+      { employee: 'E1', action: 'Change', shift_type: 'Night', from_date: '2026-11-10', assignment: 'SA-1' },
+    ],
+    expect: {
+      E1: [
+        ['SA-2', 'Day', '2026-11-01', '2026-11-09'],
+        ['new-0', 'Night', '2026-11-10', '2026-11-30'],
+      ],
+    },
+    problems: [],
+  },
+  {
     name: 'assign without a shift is refused',
     coverage: {},
     ops: [{ employee: 'E1', action: 'Assign', from_date: '2026-11-02' }],

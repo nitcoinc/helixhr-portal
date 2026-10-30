@@ -9,7 +9,6 @@ from datetime import date
 
 from frappe.tests import UnitTestCase
 
-from helixhr import roster_ops
 from helixhr.roster_ops import (
 	AFTER_END,
 	CHANGE_ON_START,
@@ -177,6 +176,20 @@ CASES = [
 		"problems": [[0, NO_SHIFT_ON_DATE]],
 	},
 	{
+		"name": "a change whose assignment is gone falls back to the one covering the date",
+		"coverage": {"E1": [["SA-2", "Day", "2026-11-01", "2026-11-30"]]},
+		"ops": [
+			{"employee": "E1", "action": "Change", "shift_type": "Night", "from_date": "2026-11-10", "assignment": "SA-1"}
+		],
+		"expect": {
+			"E1": [
+				["SA-2", "Day", "2026-11-01", "2026-11-09"],
+				["new-0", "Night", "2026-11-10", "2026-11-30"],
+			]
+		},
+		"problems": [],
+	},
+	{
 		"name": "assign without a shift is refused",
 		"coverage": {},
 		"ops": [{"employee": "E1", "action": "Assign", "from_date": "2026-11-02"}],
@@ -340,17 +353,3 @@ class TestSnapshotKey(UnitTestCase):
 			snapshot_key(rows, window),
 			[["Day", "2026-11-01", "2026-11-07"], ["Night", "2026-11-08", None]],
 		)
-
-
-class TestMessagesMatchTheHrEndpoints(UnitTestCase):
-	def test_sentences_equal_api_constants(self):
-		"""roster_ops keeps its own copies (api.py will import roster_ops in
-		U9, so the reverse import would cycle); this pins them together."""
-		from helixhr import api
-
-		self.assertEqual(roster_ops.OVERLAP, api._ROSTER_OVERLAP)
-		self.assertEqual(roster_ops.END_BEFORE_START, api._ROSTER_END_BEFORE_START)
-		self.assertEqual(roster_ops.CHANGE_ON_START, api._ROSTER_CHANGE_ON_START)
-		self.assertEqual(roster_ops.AFTER_END, api._ROSTER_CHANGE_AFTER_END)
-		self.assertEqual(roster_ops.NO_SHIFT_TYPE, api._ROSTER_NO_SHIFT_TYPE)
-		self.assertEqual(roster_ops.BAD_DATE, api._ROSTER_BAD_DATE)

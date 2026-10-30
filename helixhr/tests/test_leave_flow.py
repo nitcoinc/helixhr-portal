@@ -7,6 +7,7 @@ from frappe.utils import add_days, formatdate, getdate, today
 from helixhr.api import (
 	_act_on_leave_application,
 	_assert_may_act_on,
+	_leave_approver_names,
 	act_on_approval,
 	apply_for_leave,
 	get_approval_detail,
@@ -1058,7 +1059,10 @@ class TestLeaveDecider(IntegrationTestCase):
 
 		self.assertEqual(self._stamp(leave), {"helixhr_decided_by": MANAGER_USER, "helixhr_decided_as_hr": 0})
 		row = self._detail(leave)
-		self.assertEqual(row["decided_by_name"], frappe.utils.get_fullname(MANAGER_USER))
+		# The same resolver as `approver_name` (Employee name first), so the
+		# decider and the approver read alike for one person.
+		self.assertEqual(row["decided_by_name"], _leave_approver_names([MANAGER_USER])[MANAGER_USER])
+		self.assertEqual(row["decided_by_name"], row["approver_name"])
 		self.assertFalse(row["decided_by_hr"])
 		self.assertIn(leave, self._decided(MANAGER_USER))
 
@@ -1075,10 +1079,21 @@ class TestLeaveDecider(IntegrationTestCase):
 		self.assertEqual((stored.status, stored.docstatus), ("Approved", 1))
 		self.assertEqual(self._stamp(leave), {"helixhr_decided_by": self.hr_user, "helixhr_decided_as_hr": 1})
 		row = self._detail(leave)
-		self.assertEqual(row["decided_by_name"], frappe.utils.get_fullname(self.hr_user))
+		self.assertEqual(row["decided_by_name"], _leave_approver_names([self.hr_user])[self.hr_user])
 		self.assertTrue(row["decided_by_hr"])
 		# The approver is still the manager; only the decider moved.
 		self.assertEqual(row["approver"], MANAGER_USER)
+
+	def test_a_decided_manager_stage_leave_is_waiting_on_nobody(self):
+		"""Review B6: the detail serves decided records too, and a leave HR
+		decided in its approver's place is no longer waiting on them."""
+		leave = self._open_leave(197)
+		frappe.set_user(self.hr_user)
+		self.assertTrue(get_approval_detail("leave", leave)["waiting_on"])
+		self._act(self.hr_user, leave, "Approve")
+
+		frappe.set_user(self.hr_user)
+		self.assertIsNone(get_approval_detail("leave", leave)["waiting_on"])
 
 	def test_a_desk_reject_by_an_hr_manager_stamps_the_hr_manager(self):
 		leave = self._open_leave(200)

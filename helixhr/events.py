@@ -566,7 +566,12 @@ def _withdraw_roster_requests(employee, reason, keep_manager=None):
 	):
 		if keep_manager and row.employee == keep_manager:
 			continue
-		doc = frappe.get_doc(ROSTER_CHANGE, row.name)
+		# Re-read under the row lock an approval also takes: one that decided
+		# it while this save waited leaves it alone, rather than this save
+		# failing on a stale `modified`.
+		doc = frappe.get_doc(ROSTER_CHANGE, row.name, for_update=True)
+		if doc.status != ROSTER_PENDING:
+			continue
 		doc.status = ROSTER_WITHDRAWN
 		doc.decision_note = reason
 		doc.decided_on = frappe.utils.now_datetime()

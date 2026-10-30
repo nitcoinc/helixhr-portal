@@ -33,9 +33,7 @@ CHANGE = "Change"
 END = "End"
 ACTIONS = (ASSIGN, CHANGE, END)
 
-# The HR endpoints' sentences. Copies, not imports: `helixhr.api` will
-# import this module (U9), so the reverse import would cycle.
-# `test_roster_ops.TestMessagesMatchTheHrEndpoints` pins them together.
+# The HR endpoints' sentences, single source: `helixhr.api` imports them.
 OVERLAP = "This person already has a shift on some of those dates. End or change that one first."
 END_BEFORE_START = "The end date can't be before the shift starts."
 CHANGE_ON_START = "That is the day this shift starts. Cancel it and assign the new shift instead."
@@ -78,10 +76,11 @@ def _overlaps(assignment, start, end):
 
 
 def _target(rows, key, day):
-	"""The assignment `key` names, else the first one covering `day`."""
-	if key:
-		return next((a for a in rows if a["key"] == key), None)
-	return next((a for a in rows if _overlaps(a, day, day)), None)
+	"""The assignment `key` names while it is still in `rows`, else the first
+	one covering `day` -- as `api._roster_op_target` does at apply time, so a
+	key HR's edit has since replaced falls back rather than refusing."""
+	named = next((a for a in rows if a["key"] == key), None) if key else None
+	return named or next((a for a in rows if _overlaps(a, day, day)), None)
 
 
 def _apply(rows, op, index):
@@ -198,23 +197,26 @@ def snapshot_key(assignments, window):
 	return [[shift, first.isoformat(), last.isoformat() if last else None] for shift, first, last in rows]
 
 
-def read_coverage(employees, window_start):
+def read_coverage(employees, window_start, for_update=False):
 	"""Live coverage for `employees`: every submitted (docstatus 1) Shift
 	Assignment still running on or after `window_start`, whatever its
 	`status` (the roster's own read, runbook "Roster"). Unpermissioned:
-	callers have already scoped `employees`."""
+	callers have already scoped `employees`. `for_update` makes it a locking
+	read of the latest committed rows, not the transaction's older snapshot
+	-- approval's re-check, run under the Employee locks."""
 	employees = list(employees or [])
 	coverage = {employee: [] for employee in employees}
 	if not employees:
 		return coverage
-	rows = frappe.get_all(
+	# `frappe.qb.get_query`, not `get_all`: only the former takes `for_update`.
+	rows = frappe.qb.get_query(
 		"Shift Assignment",
 		filters={"employee": ["in", employees], "docstatus": 1},
 		or_filters=[["end_date", "is", "not set"], ["end_date", ">=", str(getdate(window_start))]],
 		fields=["name", "employee", "shift_type", "start_date", "end_date"],
 		order_by="start_date asc, name asc",
-		ignore_permissions=True,
-	)
+		for_update=for_update,
+	).run(as_dict=True)
 	for row in rows:
 		coverage[row.employee].append(
 			{

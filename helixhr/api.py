@@ -94,9 +94,16 @@ from helixhr.helixhr.doctype.helixhr_timesheet_change.helixhr_timesheet_change i
 # permission scope), reused here rather than re-listed so this gate and
 # `hr_request.get_permission_query_conditions` cannot drift apart.
 from helixhr.helixhr.doctype.hr_request.hr_request import _WORKER_ROLES as _ROUTED_WORKER_ROLES
+from helixhr.roster_ops import AFTER_END as _ROSTER_CHANGE_AFTER_END
 from helixhr.roster_ops import ASSIGN as ROSTER_OP_ASSIGN
+from helixhr.roster_ops import BAD_DATE as _ROSTER_BAD_DATE
 from helixhr.roster_ops import CHANGE as ROSTER_OP_CHANGE
+from helixhr.roster_ops import CHANGE_ON_START as _ROSTER_CHANGE_ON_START
 from helixhr.roster_ops import END as ROSTER_OP_END
+from helixhr.roster_ops import END_BEFORE_START as _ROSTER_END_BEFORE_START
+from helixhr.roster_ops import NO_SHIFT_ON_DATE as _ROSTER_NO_SHIFT_ON_DATE
+from helixhr.roster_ops import NO_SHIFT_TYPE as _ROSTER_NO_SHIFT_TYPE
+from helixhr.roster_ops import OVERLAP as _ROSTER_OVERLAP
 from helixhr.roster_ops import affected_window, op_date, read_coverage, simulate, snapshot_key
 from helixhr.tasks import (
 	LEAVING_DOCTYPE,
@@ -7902,10 +7909,13 @@ def _leave_decision_detail(doc):
 	detail = _decision_head(doc, doc.employee_name)
 	# Plan 2026-10-31-001 R22: a manager-stage leave opened by anyone but its
 	# approver (HR, in practice) names who it is waiting on. None when there
-	# is no approver, when it is with HR, or when the caller is the approver.
+	# is no approver, when it is with HR, when the caller is the approver, or
+	# once it is decided -- the detail also serves decided records.
 	waiting_on = None
 	if (
-		(doc.get("helixhr_stage") or _LEAVE_STAGE_MANAGER) != LEAVE_STAGE_HR
+		doc.status == "Open"
+		and cint(doc.docstatus) == 0
+		and (doc.get("helixhr_stage") or _LEAVE_STAGE_MANAGER) != LEAVE_STAGE_HR
 		and doc.leave_approver
 		and doc.leave_approver != frappe.session.user
 	):
@@ -15898,17 +15908,11 @@ _ROSTER_REFUSED = "You don't have permission to do that."
 _ROSTER_NO_TEAM = "Only a manager with people reporting to them has a team roster to show."
 _ROSTER_NOT_HR = "Only HR can see everyone's shifts."
 _ROSTER_NOT_FOUND = "That shift assignment could not be found."
-_ROSTER_OVERLAP = "This person already has a shift on some of those dates. End or change that one first."
 _ROSTER_CANCEL_BLOCKED = (
 	"This shift can't be cancelled because check-ins or attendance are already recorded against it. "
 	"End it on a date instead."
 )
-_ROSTER_END_BEFORE_START = "The end date can't be before the shift starts."
-_ROSTER_CHANGE_ON_START = "That is the day this shift starts. Cancel it and assign the new shift instead."
-_ROSTER_CHANGE_AFTER_END = "That date is after this shift ends."
 _ROSTER_INACTIVE_EMPLOYEE = "Shifts can only be assigned to someone who is currently employed."
-_ROSTER_NO_SHIFT_TYPE = "Choose a shift."
-_ROSTER_BAD_DATE = "Give a valid date."
 _ROSTER_SAVE_FAILED = "The shift couldn't be saved."
 
 
@@ -16143,7 +16147,9 @@ def _assert_roster_employee(employee):
 def _roster_assignment(name):
 	"""The submitted Shift Assignment `name`, once the caller is known to
 	administer its employee. A draft or a cancelled one is "not found": the
-	roster never shows either, so neither is anything to act on."""
+	roster never shows either, so neither is anything to act on. Loaded under
+	the employee's row lock, which roster request approval also takes, so an
+	HR write and an approval for the same person serialise."""
 	if resolve_admin_scope(frappe.session.user)["kind"] == "none":
 		frappe.throw(_(_ROSTER_REFUSED), frappe.PermissionError)
 	row = (
@@ -16154,6 +16160,7 @@ def _roster_assignment(name):
 	if not row or cint(row.docstatus) != 1:
 		frappe.throw(_(_ROSTER_NOT_FOUND), frappe.DoesNotExistError)
 	_assert_roster_employee(row.employee)
+	_lock_employee(row.employee)
 	return frappe.get_doc("Shift Assignment", name)
 
 
@@ -16253,9 +16260,11 @@ def _run_roster_write(write, refused=None):
 def assign_shift(employee, shift_type, start_date, end_date=None, **kwargs):
 	"""HR assigns `shift_type` to `employee` from `start_date`, open-ended
 	or to `end_date` (U8, R9). HRMS refuses an overlap; anything else in
-	the payload, `company` included, is ignored."""
+	the payload, `company` included, is ignored. Takes the employee's row
+	lock, as roster request approval does, so the two serialise."""
 	rate_limit_per_user("assign_shift")
 	_assert_roster_employee(employee)
+	_lock_employee(employee)
 	start = _roster_date(start_date)
 	if not start:
 		frappe.throw(_(_ROSTER_BAD_DATE))
@@ -16500,10 +16509,13 @@ def _coverage_payload(coverage):
 	}
 
 
-def _roster_request_payload(doc):
+def _roster_request_payload(doc, merged=False):
+	"""`merged`: already reopened into a Draft (`_roster_merged`), so the
+	strip offers no Reopen that would only refuse."""
 	return {
 		"name": doc.name,
 		"status": doc.status,
+		"merged": merged,
 		"company": doc.company,
 		"note": doc.note or "",
 		"return_reasons": doc.return_reasons or "",
@@ -16559,9 +16571,13 @@ def get_roster_draft():
 		limit=_ROSTER_RECENT_LIMIT,
 		ignore_permissions=True,
 	)
+	merged = _roster_merged(recent)
 	return {
 		"draft": _roster_draft_payload(me),
-		"recent": [_roster_request_payload(frappe.get_doc(_ROSTER_CHANGE, name)) for name in recent],
+		"recent": [
+			_roster_request_payload(frappe.get_doc(_ROSTER_CHANGE, name), merged=name in merged)
+			for name in recent
+		],
 	}
 
 
@@ -16645,6 +16661,9 @@ def submit_roster_change(note=None):
 		doc.set("rows", company_ops)
 		doc.company = company
 		doc.snapshot = json.dumps(_roster_snapshot(review.before, company_ops), sort_keys=True)
+		# A reopened request is resent as itself: last round's decision is
+		# not this round's, so HR and the strip start from a clean slate.
+		doc.update({"decided_by": None, "decided_on": None, "decision_note": None, "return_reasons": None})
 		doc.status = ROSTER_PENDING
 		doc.flags.helixhr_roster_api = True
 		if position:
@@ -16697,6 +16716,24 @@ def withdraw_roster_change(name):
 _ROSTER_MERGED_INTO = "Reopened into draft {0}"
 
 
+def _roster_merged(names):
+	"""Which of the requests `names` were merged into a Draft, in one read."""
+	if not names:
+		return set()
+	return set(
+		frappe.get_all(
+			"Comment",
+			filters={
+				"reference_doctype": _ROSTER_CHANGE,
+				"reference_name": ["in", list(names)],
+				"comment_type": "Info",
+				"content": ["like", _ROSTER_MERGED_INTO.format("%")],
+			},
+			pluck="reference_name",
+		)
+	)
+
+
 @frappe.whitelist(methods=["POST"])
 def reopen_roster_change(name):
 	"""Bring the caller's Returned or Withdrawn request back as their Draft
@@ -16711,15 +16748,7 @@ def reopen_roster_change(name):
 	doc = _my_roster_request(name, me)
 	if doc.status not in (ROSTER_RETURNED, ROSTER_WITHDRAWN):
 		frappe.throw(_("Only a returned or withdrawn request can be reopened."))
-	if frappe.db.exists(
-		"Comment",
-		{
-			"reference_doctype": _ROSTER_CHANGE,
-			"reference_name": doc.name,
-			"comment_type": "Info",
-			"content": ["like", _ROSTER_MERGED_INTO.format("%")],
-		},
-	):
+	if _roster_merged([doc.name]):
 		frappe.throw(_("This request is already in your draft."))
 
 	draft = _my_roster_draft(me, for_update=True)
@@ -16855,13 +16884,15 @@ def _roster_change_summaries(employee, today, count_only=False):
 	return summaries
 
 
-def _roster_request_review(doc, ops):
+def _roster_request_review(doc, ops, for_update=False):
 	"""R16, read now: each employee's stored window (KTD8), live coverage
 	over it (`before`), the simulated result (`after`), and every reason the
 	request cannot be applied as it stands -- `conflicts`, one per employee,
 	`{employee, employee_name, message}`, the message naming them. The
 	detail shows these before HR clicks; approval re-runs it under the
-	Employee locks and returns the request on any of them."""
+	Employee locks with `for_update` (a locking coverage read, so an HR
+	roster edit committed while it waited is seen) and returns the request
+	on any of them."""
 	employees = list(dict.fromkeys(op["employee"] for op in ops))
 	stored = json.loads(doc.snapshot) if doc.snapshot else {}
 	computed = affected_window(ops)
@@ -16881,7 +16912,7 @@ def _roster_request_review(doc, ops):
 	}
 	names = {row.employee: row.employee_name or row.employee for row in doc.rows}
 	starts = [window[0] for window in windows.values() if window]
-	before = read_coverage(employees, min(starts) if starts else user_today())
+	before = read_coverage(employees, min(starts) if starts else user_today(), for_update=for_update)
 	after, simulated = simulate(before, ops)
 	manager_name = doc.employee_name or doc.employee
 	todays = {}
@@ -17029,15 +17060,13 @@ def _roster_op_target(employee, assignment, day):
 def _apply_roster_op(op):
 	"""One operation through the HR roster's own writers (KTD10). Raises on
 	any refusal; the caller owns the savepoint."""
-	from helixhr.roster_ops import NO_SHIFT_ON_DATE
-
 	day = op_date(op)
 	if op["action"] == ROSTER_OP_ASSIGN:
 		end = getdate(op["to_date"]) if op["to_date"] else None
 		return _new_roster_assignment(op["employee"], op["shift_type"], day, end)
 	target = _roster_op_target(op["employee"], op["assignment"], day)
 	if not target:
-		frappe.throw(_(NO_SHIFT_ON_DATE))
+		frappe.throw(_(_ROSTER_NO_SHIFT_ON_DATE))
 	if op["action"] == ROSTER_OP_CHANGE:
 		return _change_roster_assignment(target, day, op["shift_type"])
 	return _end_roster_assignment(target, day)
@@ -17056,7 +17085,7 @@ def _approve_roster_change(doc):
 	ops = _request_ops(doc)
 	for employee in sorted({op["employee"] for op in ops}):
 		_lock_employee(employee)
-	conflicts = _roster_request_review(doc, ops).conflicts
+	conflicts = _roster_request_review(doc, ops, for_update=True).conflicts
 	if conflicts:
 		return _return_roster_change(doc, conflicts)
 

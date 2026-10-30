@@ -318,9 +318,14 @@ class TestWithdrawAndReopen(RosterChangeTestCase):
 		self.as_manager()
 		withdraw_roster_change(name)
 		draft = save_roster_draft([assign(new, TOMORROW)])["draft"]
+		recent = {row["name"]: row for row in get_roster_draft()["recent"]}
+		self.assertFalse(recent[name]["merged"])
 
 		merged = reopen_roster_change(name)
 		self.assertTrue(merged["merged"])
+		# Review B5: the strip hides Reopen on a merged request.
+		recent = {row["name"]: row for row in get_roster_draft()["recent"]}
+		self.assertTrue(recent[name]["merged"])
 		self.assertEqual(merged["draft"]["name"], draft["name"])
 		self.assertEqual([row["employee"] for row in merged["draft"]["rows"]], [new, old])
 		self.assertEqual(frappe.db.get_value(DOCTYPE, name, "status"), "Withdrawn")
@@ -785,6 +790,25 @@ class TestSendBackAndDecline(RosterApprovalTestCase):
 		self.assertEqual(coverage(report), [])
 		(call,) = decision_calls(send)
 		self.assertEqual(call[2]["decision_note"], "Split the late shifts")
+
+	def test_a_resent_request_carries_no_decision_from_the_last_round(self):
+		"""Review B1: send back, reopen (no draft, so the request becomes
+		it), resend -- the Pending request starts with no decision fields."""
+		report = self.report("resend")
+		(name,) = self.submit([assign(report, TOMORROW)])
+		self.decide(HR_IN_SCOPE, name, "Send Back", comment="Split the late shifts")
+		self.as_manager()
+		try:
+			self.assertEqual(reopen_roster_change(name)["draft"]["name"], name)
+			self.assertEqual(submit_roster_change()["names"], [name])
+		finally:
+			frappe.set_user("Administrator")
+
+		doc = frappe.get_doc(DOCTYPE, name)
+		self.assertEqual(doc.status, "Pending")
+		self.assertEqual(
+			(doc.decided_by, doc.decided_on, doc.decision_note, doc.return_reasons), (None, None, None, None)
+		)
 
 	def test_decline_is_final_and_lands_in_decided_by_me(self):
 		report = self.report("decline")

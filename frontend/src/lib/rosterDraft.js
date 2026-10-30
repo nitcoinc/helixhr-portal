@@ -51,9 +51,12 @@ function overlaps(assignment, start, end) {
   )
 }
 
+// The assignment `key` names while it is still in `rows`, else the first one
+// covering `day` -- a key HR's edit has since replaced falls back, as the
+// server's apply does (`roster_ops._target`).
 function findTarget(rows, key, day) {
-  if (key) return rows.find((a) => a.key === key) ?? null
-  return rows.find((a) => overlaps(a, day, day)) ?? null
+  const named = key ? rows.find((a) => a.key === key) : null
+  return named ?? rows.find((a) => overlaps(a, day, day)) ?? null
 }
 
 function apply(rows, op, index) {

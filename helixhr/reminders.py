@@ -1363,7 +1363,7 @@ def _summary_owners(items, hr_user, project=None):
 	companies = read_companies(resolve_admin_scope(hr_user)) if filters else None
 	groups = {}
 	for item in items:
-		if item["doctype"] == ROSTER_CHANGE:
+		if item.get("doctype") == ROSTER_CHANGE:
 			# Its company is the scope; its employee is the submitting manager.
 			if companies is not None and item["company"] not in companies:
 				continue
