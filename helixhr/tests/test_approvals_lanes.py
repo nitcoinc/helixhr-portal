@@ -86,6 +86,17 @@ class TestApprovalLanes(IntegrationTestCase):
 		self.assertEqual(result["counts"]["lanes"], {"team": 1, "hr": 1})
 		self.assertEqual(result["counts"]["categories"], [])
 
+	def test_a_roster_request_rides_the_hr_lane_and_counts_as_its_own_kind(self):
+		"""Plan 2026-10-31-001 U9: HR's alone -- the HR lane, never the team
+		lane, even though its `employee` is a manager."""
+		team = [_row("leave", "L-TEAM", "E1", doctype="Leave Application")]
+		hr = [_row("roster", "HRC-1", "E5", doctype="HelixHR Roster Change", for_hr=True)]
+		lanes, result = self._lanes(team, hr)
+		self.assertEqual(lanes, {"L-TEAM": "team", "HRC-1": "hr"})
+		self.assertEqual(result["counts"]["lanes"], {"team": 1, "hr": 1})
+		counts = {kind["name"]: kind["count"] for kind in result["counts"]["kinds"]}
+		self.assertEqual(counts["roster"], 1)
+
 	def test_every_row_has_a_lane_and_the_lane_counts_are_the_home_count(self):
 		team = [_row("timesheet", "T-1", "E1", doctype="Timesheet")]
 		hr = [_row("attendance", "A-1", "E2", doctype="Attendance Request")]

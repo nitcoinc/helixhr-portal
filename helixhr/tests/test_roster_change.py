@@ -1,5 +1,6 @@
 """Plan 2026-10-31-001 U8: a manager's roster request -- draft, submit,
-withdraw, reopen -- the team and HR roster payloads, and the notices.
+withdraw, reopen -- the team and HR roster payloads, and the notices. U9:
+HR's decision through Approvals -- the queue, the re-check and the apply.
 
 Every report here is a throwaway, login-less Employee (`roster_employee`)
 whose assignments are cleared per test, every date is in 2031 under a
@@ -8,12 +9,19 @@ tests own their rows (CI order varies and nothing is rolled back).
 """
 
 import json
+from datetime import timedelta
 from unittest.mock import patch
 
 import frappe
 from frappe.tests import IntegrationTestCase
 
+from helixhr import api, reminders
 from helixhr.api import (
+	act_on_approval,
+	get_approval_detail,
+	get_my_approvals,
+	get_pending_by_approver,
+	get_portal_bootstrap,
 	get_roster_draft,
 	get_roster_week,
 	reopen_roster_change,
@@ -471,3 +479,374 @@ class TestRosterWeekPayload(RosterChangeTestCase):
 		self.assertFalse(payload["can_request"])
 		self.assertEqual(row_for(payload, waiting)["pending_request"], name)
 		self.assertIsNone(row_for(payload, idle)["pending_request"])
+
+
+def end_op(employee, to_date, assignment=None):
+	return {"employee": employee, "action": "End", "to_date": to_date, "assignment": assignment}
+
+
+def change_op(employee, from_date, shift_type=LATE_SHIFT):
+	return {"employee": employee, "action": "Change", "shift_type": shift_type, "from_date": from_date}
+
+
+def coverage(employee):
+	"""Submitted assignments as `(shift_type, start, end)`, oldest first."""
+	return [
+		(row.shift_type, str(row.start_date), str(row.end_date) if row.end_date else None)
+		for row in frappe.get_all(
+			"Shift Assignment",
+			filters={"employee": employee, "docstatus": 1},
+			fields=["shift_type", "start_date", "end_date"],
+			order_by="start_date asc",
+		)
+	]
+
+
+def decision_calls(send):
+	return [call.args for call in send.call_args_list if call.args[0] == "roster_change_decided"]
+
+
+class RosterApprovalTestCase(RosterChangeTestCase):
+	"""U9. Two HR Managers, one per company, with no self-scoping User
+	Permission (an HR Manager's Shift Assignment writes would trip it)."""
+
+	def setUp(self):
+		super().setUp()
+		for user, company in ((HR_IN_SCOPE, TEST_COMPANY), (HR_OUT_OF_SCOPE, self.other_company)):
+			make_test_user(user, company, create_user_permission=0)
+			frappe.db.delete("User Permission", {"user": user, "allow": "Employee"})
+			remove_assignment(user, "HR Manager")
+			make_assignment(user, "HR Manager", [company])
+
+	def submit(self, ops, note="Holiday cover"):
+		self.as_manager()
+		try:
+			save_roster_draft(ops)
+			return submit_roster_change(note)["names"]
+		finally:
+			frappe.set_user("Administrator")
+
+	def detail(self, user, name):
+		frappe.set_user(user)
+		try:
+			return get_approval_detail("roster", name)
+		finally:
+			frappe.set_user("Administrator")
+
+	def decide(self, user, name, action="Approve", comment=None, detail=None):
+		"""Act the way the screen does: with the token the detail handed out."""
+		detail = detail or self.detail(user, name)
+		frappe.set_user(user)
+		try:
+			return act_on_approval(
+				DOCTYPE,
+				name,
+				action,
+				comment=comment,
+				expected_modified=detail["modified"],
+				expected_state=detail["status"],
+			)
+		finally:
+			frappe.set_user("Administrator")
+
+	def queue(self, user):
+		frappe.set_user(user)
+		try:
+			return get_my_approvals()
+		finally:
+			frappe.set_user("Administrator")
+
+	def employee_name(self, employee):
+		return frappe.db.get_value("Employee", employee, "employee_name")
+
+
+class TestApproveApplies(RosterApprovalTestCase):
+	def test_a_clean_approve_applies_three_operations_across_two_people_as_simulated(self):
+		"""R18: in order, chained (the End acts on the Assign before it), as
+		the HR Manager's own writes."""
+		first, second = self.report("apply-1"), self.report("apply-2")
+		seed_assignment(second, "2031-01-01")
+		ops = [assign(first, TOMORROW, "2031-03-20"), change_op(second, "2031-03-10"), end_op(first, "2031-03-15")]
+		self.as_manager()
+		preview = save_roster_draft(ops)["draft"]["preview"]
+		frappe.set_user("Administrator")
+		(name,) = self.submit(ops)
+
+		detail = self.detail(HR_IN_SCOPE, name)
+		self.assertEqual(detail["kind"], "roster")
+		self.assertEqual(detail["actions"], ["Approve", "Send Back", "Decline"])
+		self.assertEqual(detail["manager_name"], frappe.db.get_value("Employee", self.manager, "employee_name"))
+		self.assertEqual((detail["company"], detail["note"], detail["change_count"]), (TEST_COMPANY, "Holiday cover", 3))
+		self.assertTrue(detail["submitted_on"])
+		self.assertEqual(detail["conflicts"], [])
+		by_employee = {row["employee"]: row for row in detail["employees"]}
+		self.assertEqual([op["index"] for op in by_employee[first]["operations"]], [0, 2])
+		self.assertEqual(by_employee[first]["before"], [])
+		self.assertEqual(
+			by_employee[first]["after"],
+			[{"shift_type": PORTAL_SHIFT_TYPE, "start_date": TOMORROW, "end_date": "2031-03-15", "new": True}],
+		)
+		self.assertEqual(
+			[(row["shift_type"], row["start_date"], row["end_date"]) for row in by_employee[second]["before"]],
+			[(PORTAL_SHIFT_TYPE, "2031-01-01", None)],
+		)
+
+		with patch("helixhr.events.send_notification") as send:
+			result = self.decide(HR_IN_SCOPE, name, detail=detail)
+		self.assertEqual((result["state"], result["returned"], result["reasons"]), ("Approved", False, []))
+		for employee in (first, second):
+			self.assertEqual(
+				coverage(employee),
+				[(row["shift_type"], row["start_date"], row["end_date"]) for row in preview[employee]],
+			)
+		doc = frappe.get_doc(DOCTYPE, name)
+		self.assertEqual((doc.status, doc.decided_by), ("Approved", HR_IN_SCOPE))
+		self.assertTrue(doc.decided_on)
+		# KTD10: HR's own session wrote the new assignments, not Administrator.
+		self.assertEqual(
+			set(frappe.get_all("Shift Assignment", filters={"employee": first, "docstatus": 1}, pluck="owner")),
+			{HR_IN_SCOPE},
+		)
+		(call,) = decision_calls(send)
+		self.assertEqual((call[1], call[2]["state"]), ([MANAGER_USER], "approved"))
+
+	def test_the_nightly_inactive_flip_after_submit_is_not_a_conflict(self):
+		"""KTD8: HRMS's job rewrites `status`; the snapshot never reads it."""
+		report = self.report("nightly")
+		seeded = seed_assignment(report, "2031-01-01", "2031-03-31")
+		(name,) = self.submit([end_op(report, "2031-03-15")])
+		frappe.db.set_value("Shift Assignment", seeded.name, "status", "Inactive")
+
+		self.assertEqual(self.detail(HR_IN_SCOPE, name)["conflicts"], [])
+		self.assertEqual(self.decide(HR_IN_SCOPE, name)["state"], "Approved")
+		self.assertEqual(coverage(report), [(PORTAL_SHIFT_TYPE, "2031-01-01", "2031-03-15")])
+
+
+class TestApproveReturns(RosterApprovalTestCase):
+	def test_hr_changing_a_shift_after_submit_returns_it_naming_that_person_and_writes_nothing(self):
+		"""R16 / KTD11."""
+		kept, changed = self.report("conflict-1"), self.report("conflict-2")
+		(name,) = self.submit([assign(kept, TOMORROW), assign(changed, TOMORROW)])
+		seed_assignment(changed, "2031-03-10", "2031-03-12")  # HR, straight in the roster
+
+		conflicts = self.detail(HR_IN_SCOPE, name)["conflicts"]
+		self.assertEqual([item["employee"] for item in conflicts], [changed])
+		with patch("helixhr.events.send_notification") as send:
+			result = self.decide(HR_IN_SCOPE, name)
+
+		self.assertTrue(result["returned"])
+		self.assertEqual((result["action"], result["state"]), ("Approve", "Returned"))
+		self.assertEqual([item["employee"] for item in result["reasons"]], [changed])
+		self.assertIn(self.employee_name(changed), result["reasons"][0]["message"])
+		self.assertEqual(coverage(kept), [])
+		self.assertEqual(coverage(changed), [(PORTAL_SHIFT_TYPE, "2031-03-10", "2031-03-12")])
+		doc = frappe.get_doc(DOCTYPE, name)
+		self.assertEqual((doc.status, doc.decided_by), ("Returned", HR_IN_SCOPE))
+		self.assertIn(self.employee_name(changed), doc.return_reasons)
+		self.assertNotIn(self.employee_name(kept), doc.return_reasons)
+		(call,) = decision_calls(send)
+		self.assertEqual((call[1], call[2]["state"]), ([MANAGER_USER], "sent back"))
+		self.assertIn(self.employee_name(changed), call[2]["decision_note"])
+
+	def test_an_operation_date_that_has_passed_returns_it(self):
+		report = self.report("passed")
+		(name,) = self.submit([assign(report, TOMORROW)])
+		self.enterContext(self.freeze_time("2031-03-07 12:00:00", tick=True))
+
+		result = self.decide(HR_IN_SCOPE, name)
+		self.assertTrue(result["returned"])
+		self.assertIn("date has passed", result["reasons"][0]["message"])
+		self.assertEqual(coverage(report), [])
+
+	def test_a_report_who_moved_or_went_inactive_returns_it_with_a_reason_each(self):
+		"""The reporting-line hook withdraws on a `reports_to` save (U8); a
+		direct write skips it, so the approval's own re-check is what holds."""
+		moved, inactive = self.report("moved"), self.report("inactive-later")
+		(name,) = self.submit([assign(moved, TOMORROW), assign(inactive, TOMORROW)])
+		frappe.db.set_value("Employee", moved, "reports_to", self.other_manager)
+		frappe.db.set_value("Employee", inactive, "status", "Inactive")
+
+		result = self.decide(HR_IN_SCOPE, name)
+		self.assertTrue(result["returned"])
+		messages = {item["employee"]: item["message"] for item in result["reasons"]}
+		self.assertIn("no longer reports to", messages[moved])
+		self.assertIn("no longer active", messages[inactive])
+		self.assertEqual(coverage(moved) + coverage(inactive), [])
+
+	def test_a_refusal_on_the_last_operation_rolls_back_the_first_two(self):
+		"""KTD11. Another writer's assignment lands after the re-check, just
+		before the third operation (modelled by inserting it there): HRMS
+		refuses the overlap, ops 1 and 2 are undone and no message leaks."""
+		first, second, third = self.report("mid-1"), self.report("mid-2"), self.report("mid-3")
+		seed_assignment(second, "2031-01-01", "2031-03-31")
+		(name,) = self.submit(
+			[assign(first, TOMORROW, "2031-03-20"), end_op(second, "2031-03-15"), assign(third, TOMORROW, "2031-03-20")]
+		)
+		real = api._new_roster_assignment
+
+		def racing(employee, *args):
+			if employee == third:
+				seed_assignment(third, "2031-03-10", "2031-03-12")
+			return real(employee, *args)
+
+		detail = self.detail(HR_IN_SCOPE, name)
+		frappe.local.message_log = []
+		with patch.object(api, "_new_roster_assignment", side_effect=racing):
+			result = self.decide(HR_IN_SCOPE, name, detail=detail)
+
+		self.assertTrue(result["returned"])
+		self.assertEqual(result["state"], "Returned")
+		(reason,) = result["reasons"]
+		self.assertEqual(reason["employee"], third)
+		self.assertIn(self.employee_name(third), reason["message"])
+		self.assertIn("already has a shift", reason["message"])
+		self.assertNotIn("<", reason["message"])
+		self.assertEqual(coverage(first), [])
+		self.assertEqual(coverage(second), [(PORTAL_SHIFT_TYPE, "2031-01-01", "2031-03-31")])
+		self.assertEqual(coverage(third), [])
+		self.assertEqual(frappe.local.message_log, [])
+		self.assertEqual(frappe.db.get_value(DOCTYPE, name, "status"), "Returned")
+
+
+class TestWhoDecides(RosterApprovalTestCase):
+	def test_two_hr_managers_with_the_same_token_only_the_first_decides(self):
+		report = self.report("twice")
+		(name,) = self.submit([assign(report, TOMORROW)])
+		_hr_employee, second_hr = make_test_hr_manager_employee()
+		first_detail = self.detail(HR_IN_SCOPE, name)
+		second_detail = self.detail(second_hr, name)
+		self.assertEqual(first_detail["modified"], second_detail["modified"])
+
+		self.decide(HR_IN_SCOPE, name, detail=first_detail)
+		with self.assertRaises(frappe.ValidationError):
+			self.decide(second_hr, name, detail=second_detail)
+		self.assertEqual(len(coverage(report)), 1)
+		self.assertEqual(frappe.db.get_value(DOCTYPE, name, "decided_by"), HR_IN_SCOPE)
+
+	def test_a_manager_who_is_also_hr_cannot_decide_their_own_request(self):
+		"""R21."""
+		make_assignment(MANAGER_USER, "HR Manager", [TEST_COMPANY])
+		self.addCleanup(frappe.clear_cache, user=MANAGER_USER)
+		self.addCleanup(lambda: frappe.get_doc("User", MANAGER_USER).remove_roles("HR Manager"))
+		self.addCleanup(remove_assignment, MANAGER_USER, "HR Manager")
+		report = self.report("self")
+		(name,) = self.submit([assign(report, TOMORROW)])
+
+		self.assertNotIn(name, {row["name"] for row in self.queue(MANAGER_USER)["pending"]})
+		with self.assertRaises(frappe.PermissionError):
+			self.detail(MANAGER_USER, name)
+		with self.assertRaises(frappe.PermissionError):
+			self.decide(MANAGER_USER, name, detail=self.detail(HR_IN_SCOPE, name))
+		self.assertEqual(frappe.db.get_value(DOCTYPE, name, "status"), "Pending")
+
+	def test_hr_of_another_company_neither_sees_nor_decides_it(self):
+		report = self.report("out-of-scope")
+		(name,) = self.submit([assign(report, TOMORROW)])
+
+		self.assertNotIn(name, {row["name"] for row in self.queue(HR_OUT_OF_SCOPE)["pending"]})
+		with self.assertRaises(frappe.PermissionError):
+			self.detail(HR_OUT_OF_SCOPE, name)
+		with self.assertRaises(frappe.PermissionError):
+			self.decide(HR_OUT_OF_SCOPE, name, detail=self.detail(HR_IN_SCOPE, name))
+		self.assertEqual(coverage(report), [])
+
+	def test_a_request_for_another_company_is_that_companys_hr_not_the_managers(self):
+		"""KTD12: scope follows the request's company, not the manager's."""
+		away = self.report("xco", company=self.other_company)
+		(name,) = self.submit([assign(away, TOMORROW)])
+		self.assertEqual(frappe.db.get_value(DOCTYPE, name, "company"), self.other_company)
+
+		self.assertNotIn(name, {row["name"] for row in self.queue(HR_IN_SCOPE)["pending"]})
+		with self.assertRaises(frappe.PermissionError):
+			self.detail(HR_IN_SCOPE, name)
+
+		rows = {row["name"]: row for row in self.queue(HR_OUT_OF_SCOPE)["pending"]}
+		self.assertEqual((rows[name]["kind"], rows[name]["lane"]), ("roster", "hr"))
+		self.assertEqual(self.decide(HR_OUT_OF_SCOPE, name)["state"], "Approved")
+		self.assertEqual(
+			frappe.get_all("Shift Assignment", filters={"employee": away, "docstatus": 1}, pluck="company"),
+			[self.other_company],
+		)
+
+
+class TestSendBackAndDecline(RosterApprovalTestCase):
+	def test_send_back_needs_a_reason_and_returns_it_with_hrs_words(self):
+		report = self.report("send-back")
+		(name,) = self.submit([assign(report, TOMORROW)])
+		with self.assertRaises(frappe.ValidationError):
+			self.decide(HR_IN_SCOPE, name, "Send Back")
+
+		with patch("helixhr.events.send_notification") as send:
+			result = self.decide(HR_IN_SCOPE, name, "Send Back", comment="Split the late shifts")
+		self.assertEqual(result["state"], "Returned")
+		self.assertNotIn("returned", result)
+		doc = frappe.get_doc(DOCTYPE, name)
+		self.assertEqual((doc.return_reasons, doc.decision_note), ("Split the late shifts", "Split the late shifts"))
+		self.assertEqual(coverage(report), [])
+		(call,) = decision_calls(send)
+		self.assertEqual(call[2]["decision_note"], "Split the late shifts")
+
+	def test_decline_is_final_and_lands_in_decided_by_me(self):
+		report = self.report("decline")
+		(name,) = self.submit([assign(report, TOMORROW)])
+		with self.assertRaises(frappe.ValidationError):
+			self.decide(HR_IN_SCOPE, name, "Decline")
+		self.assertEqual(self.decide(HR_IN_SCOPE, name, "Decline", comment="Budget freeze")["state"], "Declined")
+		self.assertEqual(frappe.db.get_value(DOCTYPE, name, "decision_note"), "Budget freeze")
+		with self.assertRaises(frappe.ValidationError):
+			self.decide(HR_IN_SCOPE, name, "Approve")
+
+		decided = {row["name"]: row for row in self.queue(HR_IN_SCOPE)["decided"]}
+		self.assertEqual((decided[name]["kind"], decided[name]["status"]), ("roster", "Declined"))
+		self.assertNotIn(name, {row["name"] for row in self.queue(HR_OUT_OF_SCOPE)["decided"]})
+		self.assertEqual(coverage(report), [])
+
+
+class TestQueueAndOversight(RosterApprovalTestCase):
+	def test_the_badge_counts_it_and_equals_the_page(self):
+		report = self.report("badge")
+		(name,) = self.submit([assign(report, TOMORROW), end_op(report, "2031-03-20")])
+		frappe.set_user(HR_IN_SCOPE)
+		try:
+			page = get_my_approvals()
+			boot = get_portal_bootstrap()
+		finally:
+			frappe.set_user("Administrator")
+
+		row = next(row for row in page["pending"] if row["name"] == name)
+		self.assertEqual((row["kind"], row["lane"], row["for_hr"]), ("roster", "hr", True))
+		self.assertEqual((row["change_count"], row["people_count"]), (2, 1))
+		self.assertEqual((row["from_date"], row["to_date"]), (TOMORROW, "2031-03-20"))
+		self.assertEqual(row["company"], TEST_COMPANY)
+		counts = {kind["name"]: kind["count"] for kind in page["counts"]["kinds"]}
+		self.assertGreaterEqual(counts["roster"], 1)
+		self.assertEqual(boot["approvals_count"], page["total"])
+
+	def test_pending_since_the_overdue_digest_and_all_pending_include_it(self):
+		report = self.report("overdue")
+		(name,) = self.submit([assign(report, TOMORROW)])
+		since = frappe.db.get_value(DOCTYPE, name, "helixhr_pending_since")
+		self.assertTrue(since)
+		frappe.db.set_value(DOCTYPE, name, "helixhr_pending_since", since - timedelta(days=30), update_modified=False)
+
+		items = reminders.collect_overdue(frappe.utils.getdate(NOON), companies=[TEST_COMPANY])
+		item = next(item for item in items if item["name"] == name)
+		self.assertEqual((item["kind"], item["route_kind"], item["company"]), ("Roster change", "roster", TEST_COMPANY))
+		self.assertTrue(item["overdue"])
+		self.assertIn(HR_IN_SCOPE, item["owners"])
+		self.assertNotIn(MANAGER_USER, item["owners"])
+		self.assertTrue(item["url"].endswith(f"/helixhr/approvals/roster/{name}"))
+		self.assertNotIn(name, {item["name"] for item in reminders.collect_overdue(frappe.utils.getdate(NOON), companies=[self.other_company])})
+		summary = [entry for owner in reminders._summary_owners(items, HR_IN_SCOPE) for entry in owner["items"]]
+		self.assertIn(self.employee_name(self.manager), {entry["employee_name"] for entry in summary})
+		self.assertEqual(reminders._summary_owners([item], HR_OUT_OF_SCOPE), [])
+
+		frappe.set_user(HR_IN_SCOPE)
+		try:
+			groups = get_pending_by_approver(kind="roster")["groups"]
+		finally:
+			frappe.set_user("Administrator")
+		(group,) = [group for group in groups if any(entry["name"] == name for entry in group["items"])]
+		self.assertEqual((group["key"], group["approver_role"]), ("role:HR Manager", "HR Manager"))
+		entry = next(entry for entry in group["items"] if entry["name"] == name)
+		self.assertEqual((entry["doctype"], entry["can_decide"], entry["is_own"]), (DOCTYPE, True, False))

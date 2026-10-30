@@ -78,6 +78,8 @@ from helixhr.events import (
 from helixhr.helixhr.doctype.helixhr_leaving.helixhr_leaving import OPEN_STATUSES as OPEN_LEAVING_STATUSES
 from helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export import expire_unreachable_exports
 from helixhr.helixhr.doctype.helixhr_roster_change.helixhr_roster_change import (
+	ROSTER_APPROVED,
+	ROSTER_DECLINED,
 	ROSTER_DRAFT,
 	ROSTER_PENDING,
 	ROSTER_RETURNED,
@@ -3601,7 +3603,13 @@ _QUEUE_TITLE = {
 	# the possessive drops the "a IT" article. Fields already on the row.
 	"request": lambda row: f"{row['employee_name']}'s {row['category']} request: {row['subject']}",
 	"change": lambda row: f"{row['employee_name']} asked to change an approved week",
+	# Plan 2026-10-31-001 U9: the submitting manager, and how many people.
+	"roster": lambda row: f"{row['employee_name']} asked to change shifts for {_people_count(row['people_count'])}",
 }
+
+
+def _people_count(count):
+	return f"{count} {'person' if count == 1 else 'people'}"
 
 
 # ---------------------------------------------------------------------------
@@ -6667,7 +6675,8 @@ _LEAVE_PENDING_HR = "Pending HR"
 
 # U6 / R13. The kinds a queue row can be, in the order the chips render.
 # Plan 2026-10-16-001 KTD1: requests leave Approvals.
-_APPROVAL_FILTER_KINDS = ("leave", "timesheet", "attendance", "change")
+# Plan 2026-10-31-001 U9: roster requests are HR's, in the HR lane.
+_APPROVAL_FILTER_KINDS = ("leave", "timesheet", "attendance", "change", "roster")
 
 
 def _valid_request_category(category):
@@ -7305,7 +7314,10 @@ def _pending_groups(scope, kinds, overdue_only):
 				"doctype": _APPROVAL_DOCTYPES[item["route_kind"]],
 				"name": item["name"],
 				"is_own": item["employee"] == own_employee,
-				"can_decide": bool(scope["hr_manager"]) and item["employee"] != own_employee,
+				"can_decide": bool(scope["hr_manager"])
+				and item["employee"] != own_employee
+				# A roster request is the HR Manager role's of its own company.
+				and (item["route_kind"] != "roster" or _may_decide_roster_for(frappe.session.user, item["company"])),
 				"title": item["title"],
 				"employee": item["employee"],
 				"employee_name": item["employee_name"],
@@ -7343,7 +7355,9 @@ def _pending_groups(scope, kinds, overdue_only):
 
 
 # Plan 2026-10-16-001 KTD1: requests leave All pending oversight.
-_OVERSIGHT_KINDS = ("leave", "attendance", "change")
+# Plan 2026-10-31-001 U9: a Pending roster request waits on HR, grouped under
+# the HR Manager role -- the shared queue, never one named approver.
+_OVERSIGHT_KINDS = ("leave", "attendance", "change", "roster")
 
 
 @frappe.whitelist()
@@ -7676,6 +7690,8 @@ _APPROVAL_DOCTYPES = {
 	"request": "HR Request",
 	# Plan 2026-10-04-003 U3: the change request is a queue kind of its own.
 	"change": "HelixHR Timesheet Change",
+	# Plan 2026-10-31-001 U9 / KTD13: a manager's roster request, HR's alone.
+	"roster": "HelixHR Roster Change",
 }
 
 # One refusal for "missing", "not yours to decide" and "outside your company"
@@ -7758,6 +7774,8 @@ def _allowed_actions(doc, user):
 		actions = _leave_allowed_actions(doc, user)
 	elif doc.doctype == "HelixHR Timesheet Change":
 		actions = _change_allowed_actions(doc, user)
+	elif doc.doctype == _ROSTER_CHANGE:
+		actions = _roster_allowed_actions(doc, user)
 	else:
 		# Plan 2026-10-18-001 KTD6 / R8: outside their HR scope an HR user is
 		# this record's line manager and nothing more, so the HR-role
@@ -8171,12 +8189,15 @@ def _decide_one(doctype, name, action, reason, expected_modified, expected_state
 	# U9: leave keeps its reason as a Comment, so the decision email reads it
 	# from here (`events.leave_application_on_submit` / `_on_update`).
 	doc.flags.helixhr_decision_note = reason
-	_APPROVAL_KINDS[doctype]["act"](doc, action)
+	outcome = _APPROVAL_KINDS[doctype]["act"](doc, action)
 	_record_hr_acting_for_approver(doc, action)
 	return {
 		"name": doc.name,
 		"action": action,
 		"state": doc.get(_APPROVAL_KINDS[doctype]["state_field"]),
+		# A kind whose decision can end other than as asked says so here: a
+		# roster approval that came back Returned (`returned`, `reasons`).
+		**(outcome if isinstance(outcome, dict) else {}),
 	}
 
 
@@ -8415,6 +8436,12 @@ def _assert_may_act_on(doc):
 			_("You can't decide your own request. Ask your manager or HR."),
 			frappe.PermissionError,
 		)
+	if doc.doctype == _ROSTER_CHANGE:
+		# Plan 2026-10-31-001 U9: scoped by the request's own company (KTD12),
+		# not by the submitting manager's -- HR's general reach below would
+		# read `doc.employee`, who is that manager.
+		_may_act_on_roster_change(doc, user)
+		return
 	if doc.doctype == "HR Request" and doc.routed_to_role != "HR Manager":
 		# Plan 2026-10-19-001 U3 (R3): a request routed to a worker role (IT
 		# Team) is that role's, for HR and non-HR callers alike -- the Frappe
@@ -16168,6 +16195,29 @@ def _new_roster_assignment(employee, shift_type, start_date, end_date):
 	return doc
 
 
+def _end_roster_assignment(doc, end):
+	"""End the submitted assignment `doc` on `end` (`end_date` is
+	`allow_on_submit`). No savepoint and no date rules of its own: the HR
+	endpoint wraps it in `_run_roster_write` after its own checks, and a
+	roster request's approval runs it inside its one savepoint after the
+	simulator (plan 2026-10-31-001 KTD10). Raises on refusal."""
+	_assert_config_write(doc)
+	doc.end_date = end
+	doc.save()
+	return doc
+
+
+def _change_roster_assignment(doc, start, shift_type):
+	"""Change `doc`'s shift from `start`: it ends the day before and a new
+	assignment of `shift_type` starts on `start`, keeping the old end.
+	Savepoint-free, like `_end_roster_assignment`; returns `(ended, new)`."""
+	old_end = getdate(doc.end_date) if doc.end_date else None
+	_assert_config_write(doc)
+	doc.end_date = add_days(start, -1)
+	doc.save()
+	return doc, _new_roster_assignment(doc.employee, shift_type, start, old_end)
+
+
 def _run_roster_write(write, refused=None):
 	"""Run `write` inside a savepoint. A refusal rolls back to it -- so a
 	change whose new half fails leaves the old `end_date` as it was
@@ -16225,14 +16275,7 @@ def end_shift_assignment(assignment, end_date, **kwargs):
 		frappe.throw(_(_ROSTER_BAD_DATE))
 	if end < getdate(doc.start_date):
 		frappe.throw(_(_ROSTER_END_BEFORE_START))
-
-	def write():
-		_assert_config_write(doc)
-		doc.end_date = end
-		doc.save()
-		return doc
-
-	return _roster_assignment_projection(_run_roster_write(write))
+	return _roster_assignment_projection(_run_roster_write(lambda: _end_roster_assignment(doc, end)))
 
 
 @frappe.whitelist(methods=["POST"])
@@ -16253,14 +16296,7 @@ def change_shift_assignment(assignment, from_date, shift_type, **kwargs):
 	old_end = getdate(doc.end_date) if doc.end_date else None
 	if old_end and start > old_end:
 		frappe.throw(_(_ROSTER_CHANGE_AFTER_END))
-
-	def write():
-		_assert_config_write(doc)
-		doc.end_date = add_days(start, -1)
-		doc.save()
-		return doc, _new_roster_assignment(doc.employee, shift_type, start, old_end)
-
-	ended, assigned = _run_roster_write(write)
+	ended, assigned = _run_roster_write(lambda: _change_roster_assignment(doc, start, shift_type))
 	return {
 		"ended": _roster_assignment_projection(ended),
 		"assigned": _roster_assignment_projection(assigned),
@@ -16708,6 +16744,411 @@ def reopen_roster_change(name):
 	_save_draft_rows(draft, me, ops)
 	doc.add_comment("Info", _ROSTER_MERGED_INTO.format(draft.name))
 	return {"draft": _roster_draft_payload(me, draft), "merged": True}
+
+
+# Roster requests in Approvals (plan 2026-10-31-001 U9 / R14-R16, R18, R21)
+#
+# The sixth approval kind (KTD13). `act_on_approval` -> `_decide_one` lock the
+# request row, authorize (`_may_act_on_roster_change`) and check the
+# `expected_modified` token before `_act_on_roster_change` runs. Approve
+# re-checks every employee under the Employee row locks (KTD8, R16) and then
+# applies every operation in one savepoint, as the HR Manager's own session
+# (KTD10), so HRMS's validation runs and the assignments are HR's. A failed
+# re-check or a refusal mid-apply leaves no shift written and the request
+# Returned with the reasons (KTD11).
+
+_ROSTER_DECIDER_ROLE = "HR Manager"
+# Its own name: an HR endpoint's `helixhr_roster_write` savepoint never nests
+# in it, but a shared name would make the two indistinguishable in a trace.
+_ROSTER_APPROVE_SAVEPOINT = "helixhr_roster_approve"
+_ROSTER_DECISIONS = ["Approve", "Send Back", "Decline"]
+
+
+def _may_decide_roster_for(user, company):
+	"""Whether `user` decides roster requests for `company` (R14): the HR
+	Manager Frappe role -- the one that holds create, submit and write on
+	Shift Assignment, so a System Manager without it is not offered a
+	decision its apply could not make -- and an HR scope covering the
+	request's company, never the submitting manager's (KTD12)."""
+	if _ROSTER_DECIDER_ROLE not in frappe.get_roles(user):
+		return False
+	return scope_covers(resolve_admin_scope(user), company)
+
+
+def _may_act_on_roster_change(doc, user):
+	"""R14, R21. `_assert_may_act_on` has already refused the submitter by
+	their Employee login; `manager_user` is the login that submitted, kept
+	in case the Employee's login has changed since."""
+	if user == doc.manager_user:
+		frappe.throw(_("You can't decide your own request. Ask your manager or HR."), frappe.PermissionError)
+	if not _may_decide_roster_for(user, doc.company):
+		frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
+
+
+def _roster_allowed_actions(doc, user):
+	"""R15: Approve, Send back or Decline, each final for this round. The
+	change request's "Decline" (reason required) is the vocabulary, so the
+	screen's existing reason dialog serves it."""
+	if user == doc.manager_user or not _may_decide_roster_for(user, doc.company):
+		return []
+	return list(_ROSTER_DECISIONS)
+
+
+def _roster_change_summaries(employee, today, count_only=False):
+	"""Pending roster requests in the HR Manager's scope (R14), by the
+	request's company, oldest wait first. Never the caller's own (R21): a
+	manager who is also HR does not see their request in their queue."""
+	user = frappe.session.user
+	if _ROSTER_DECIDER_ROLE not in frappe.get_roles(user):
+		return []
+	companies = read_companies(resolve_admin_scope(user))
+	if companies is not None and not companies:
+		return []
+	filters = {"status": ROSTER_PENDING, "manager_user": ["!=", user]}
+	if employee:
+		filters["employee"] = ["!=", employee]
+	if companies is not None:
+		filters["company"] = ["in", companies]
+	rows = frappe.get_all(
+		_ROSTER_CHANGE,
+		filters=filters,
+		fields=["name"]
+		if count_only
+		else ["name", "employee", "employee_name", "company", "note", "helixhr_pending_since", "modified"],
+		order_by="helixhr_pending_since asc, creation asc",
+		limit=_QUEUE_FETCH,
+	)
+	if count_only:
+		return _count_rows("roster", rows)
+	ops = {}
+	if rows:
+		for op in frappe.get_all(
+			"HelixHR Roster Change Row",
+			filters={"parenttype": _ROSTER_CHANGE, "parent": ["in", [row.name for row in rows]]},
+			fields=["parent", "employee", "action", "from_date", "to_date"],
+			order_by="idx asc",
+		):
+			ops.setdefault(op.parent, []).append(op)
+	summaries = []
+	for row in rows:
+		mine = ops.get(row.name, [])
+		dates = [day for day in map(op_date, mine) if day]
+		summaries.append(
+			_summary_row(
+				"roster",
+				_ROSTER_CHANGE,
+				row.name,
+				row.employee,
+				row.employee_name,
+				min(dates) if dates else None,
+				max(dates) if dates else None,
+				row.helixhr_pending_since or row.modified,
+				ROSTER_PENDING,
+				today,
+				for_hr=True,
+				company=row.company,
+				change_count=len(mine),
+				people_count=len({op.employee for op in mine}),
+				note=(row.note or "").strip() or None,
+			)
+		)
+	return summaries
+
+
+def _roster_request_review(doc, ops):
+	"""R16, read now: each employee's stored window (KTD8), live coverage
+	over it (`before`), the simulated result (`after`), and every reason the
+	request cannot be applied as it stands -- `conflicts`, one per employee,
+	`{employee, employee_name, message}`, the message naming them. The
+	detail shows these before HR clicks; approval re-runs it under the
+	Employee locks and returns the request on any of them."""
+	employees = list(dict.fromkeys(op["employee"] for op in ops))
+	stored = json.loads(doc.snapshot) if doc.snapshot else {}
+	computed = affected_window(ops)
+	windows = {}
+	for employee in employees:
+		window = (stored.get(employee) or {}).get("window")
+		windows[employee] = (
+			(getdate(window[0]), getdate(window[1]) if window[1] else None) if window else computed.get(employee)
+		)
+	people = {
+		row.name: row
+		for row in frappe.get_all(
+			"Employee",
+			filters={"name": ["in", employees or [""]]},
+			fields=["name", "employee_name", "status", "reports_to", "company"],
+		)
+	}
+	names = {row.employee: row.employee_name or row.employee for row in doc.rows}
+	starts = [window[0] for window in windows.values() if window]
+	before = read_coverage(employees, min(starts) if starts else user_today())
+	after, simulated = simulate(before, ops)
+	manager_name = doc.employee_name or doc.employee
+	todays = {}
+	conflicts = []
+	for employee in employees:
+		person = people.get(employee)
+		name = (person and person.employee_name) or names.get(employee) or employee
+		days = [op_date(op) for op in ops if op["employee"] == employee]
+		message = None
+		if not person or person.status != "Active":
+			message = _("{0} is no longer active.").format(name)
+		elif person.reports_to != doc.employee:
+			message = _("{0} no longer reports to {1}.").format(name, manager_name)
+		elif person.company != doc.company:
+			message = _("{0} has moved to another company.").format(name)
+		else:
+			if person.company not in todays:
+				todays[person.company] = company_today(person.company)
+			if any(day is None or day <= todays[person.company] for day in days):
+				message = _("{0}: a change date has passed. Changes can start tomorrow at the earliest.").format(
+					name
+				)
+			elif employee not in stored or snapshot_key(before.get(employee, []), windows[employee]) != stored[
+				employee
+			].get("coverage"):
+				message = _("{0}'s shifts changed after this request was sent.").format(name)
+			else:
+				problem = next((item for item in simulated if item["employee"] == employee), None)
+				if problem:
+					message = _("{0}: {1}").format(name, _(problem["message"]))
+		if message:
+			conflicts.append({"employee": employee, "employee_name": name, "message": message})
+	return frappe._dict(windows=windows, before=before, after=after, conflicts=conflicts)
+
+
+def _roster_window_rows(rows, window):
+	"""Coverage `rows` that touch `window`, for the detail's before and after."""
+	if not window:
+		return []
+	start, end = window
+	return [
+		{
+			"shift_type": row["shift_type"],
+			"start_date": str(row["start_date"]),
+			"end_date": str(row["end_date"]) if row["end_date"] else None,
+			# Made by one of this request's operations (`roster_ops` keys).
+			"new": str(row["key"]).startswith("new-"),
+		}
+		for row in rows
+		if (end is None or row["start_date"] <= end) and (row["end_date"] is None or row["end_date"] >= start)
+	]
+
+
+def _roster_change_decision_detail(doc):
+	"""The request as HR decides it: who asked, for which company, their
+	note, and per employee the operations with the affected days before and
+	after (U9). `conflicts` is R16's re-check run now, so the screen can warn
+	before Approve; a request no longer Pending has no before/after or
+	conflicts -- its coverage has moved on."""
+	ops = _request_ops(doc)
+	review = _roster_request_review(doc, ops) if doc.status == ROSTER_PENDING else None
+	names = {row.employee: row.employee_name or row.employee for row in doc.rows}
+	employees = []
+	for employee in dict.fromkeys(op["employee"] for op in ops):
+		window = review.windows.get(employee) if review else None
+		employees.append(
+			{
+				"employee": employee,
+				"employee_name": names.get(employee),
+				"window_start": str(window[0]) if window else None,
+				"window_end": str(window[1]) if window and window[1] else None,
+				"operations": [
+					{"index": index, **op} for index, op in enumerate(ops) if op["employee"] == employee
+				],
+				"before": _roster_window_rows(review.before.get(employee, []), window) if review else None,
+				"after": _roster_window_rows(review.after.get(employee, []), window) if review else None,
+			}
+		)
+	dates = [day for day in map(op_date, ops) if day]
+	manager_name = doc.employee_name or doc.employee
+	sent_on = doc.helixhr_pending_since or doc.modified
+	detail = _decision_head(doc, manager_name)
+	detail.update(
+		{
+			"kind": "roster",
+			"state": doc.status,
+			"status": doc.status,
+			"manager": doc.employee,
+			"manager_name": manager_name,
+			"company": doc.company,
+			"note": (doc.note or "").strip() or None,
+			"from_date": str(min(dates)) if dates else None,
+			"to_date": str(max(dates)) if dates else None,
+			"change_count": len(ops),
+			"employees": employees,
+			"conflicts": review.conflicts if review else [],
+			"decision_note": doc.decision_note or None,
+			"return_reasons": doc.return_reasons or None,
+			"submitted_on": str(sent_on) if sent_on else None,
+			"sent_on": str(sent_on) if sent_on else None,
+			"age_days": _age_in_days(sent_on, _as_date(user_today())),
+		}
+	)
+	return detail
+
+
+def _close_roster_change(doc, status, note=None, return_reasons=None):
+	"""Record HR's outcome. A flagged `save`, so the lifecycle guard allows it
+	and `events.roster_change_on_change` tells the manager (R20)."""
+	doc.status = status
+	doc.decided_by = frappe.session.user
+	doc.decided_on = now_datetime()
+	doc.decision_note = note or None
+	doc.return_reasons = return_reasons or None
+	doc.flags.helixhr_roster_api = True
+	doc.save(ignore_permissions=True)
+
+
+def _return_roster_change(doc, reasons):
+	_close_roster_change(doc, ROSTER_RETURNED, return_reasons="\n".join(item["message"] for item in reasons))
+	return {"returned": True, "reasons": reasons}
+
+
+def _roster_op_target(employee, assignment, day):
+	"""The submitted assignment a Change or End acts on, read now -- after
+	the earlier operations of the same approval. The row's stored
+	`assignment` only while it still exists and covers `day`; otherwise the
+	one covering `day` (a chained operation on what an earlier one made)."""
+	filters = {"employee": employee, "docstatus": 1, "start_date": ["<=", str(day)]}
+	or_filters = [["end_date", "is", "not set"], ["end_date", ">=", str(day)]]
+	for extra in ([{"name": assignment}] if assignment else []) + [{}]:
+		found = frappe.get_all(
+			"Shift Assignment",
+			filters={**filters, **extra},
+			or_filters=or_filters,
+			pluck="name",
+			order_by="start_date asc, name asc",
+			limit=1,
+		)
+		if found:
+			return frappe.get_doc("Shift Assignment", found[0])
+	return None
+
+
+def _apply_roster_op(op):
+	"""One operation through the HR roster's own writers (KTD10). Raises on
+	any refusal; the caller owns the savepoint."""
+	from helixhr.roster_ops import NO_SHIFT_ON_DATE
+
+	day = op_date(op)
+	if op["action"] == ROSTER_OP_ASSIGN:
+		end = getdate(op["to_date"]) if op["to_date"] else None
+		return _new_roster_assignment(op["employee"], op["shift_type"], day, end)
+	target = _roster_op_target(op["employee"], op["assignment"], day)
+	if not target:
+		frappe.throw(_(NO_SHIFT_ON_DATE))
+	if op["action"] == ROSTER_OP_CHANGE:
+		return _change_roster_assignment(target, day, op["shift_type"])
+	return _end_roster_assignment(target, day)
+
+
+def _approve_roster_change(doc):
+	"""R16 then R18. The request row is already locked (`_decide_one`); the
+	Employee rows are locked here in one order, then re-checked. Any
+	conflict returns the request with nothing written. Clean, every
+	operation runs in order inside one savepoint; a refusal rolls all of
+	them back, its stray messages are cleared, and the request is returned
+	with HRMS's sentence. Either way the response says `returned`."""
+	from frappe.utils.messages import clear_messages
+	from hrms.hr.doctype.shift_assignment.shift_assignment import MultipleShiftError, OverlappingShiftError
+
+	ops = _request_ops(doc)
+	for employee in sorted({op["employee"] for op in ops}):
+		_lock_employee(employee)
+	conflicts = _roster_request_review(doc, ops).conflicts
+	if conflicts:
+		return _return_roster_change(doc, conflicts)
+
+	names = {row.employee: row.employee_name or row.employee for row in doc.rows}
+	frappe.db.savepoint(_ROSTER_APPROVE_SAVEPOINT)
+	current = None
+	try:
+		for current in ops:
+			_apply_roster_op(current)
+	except frappe.PermissionError:
+		# HR's own access, not the request: it stays Pending.
+		frappe.db.rollback(save_point=_ROSTER_APPROVE_SAVEPOINT)
+		clear_messages()
+		frappe.throw(_(_ROSTER_REFUSED), frappe.PermissionError)
+	except frappe.ValidationError as error:
+		frappe.db.rollback(save_point=_ROSTER_APPROVE_SAVEPOINT)
+		clear_messages()
+		if isinstance(error, OverlappingShiftError | MultipleShiftError):
+			sentence = _(_ROSTER_OVERLAP)
+		else:
+			sentence = frappe.utils.strip_html(str(error)).strip() or _(_ROSTER_SAVE_FAILED)
+		name = names.get(current["employee"]) or current["employee"]
+		return _return_roster_change(
+			doc,
+			[{"employee": current["employee"], "employee_name": name, "message": _("{0}: {1}").format(name, sentence)}],
+		)
+	frappe.db.release_savepoint(_ROSTER_APPROVE_SAVEPOINT)
+	_close_roster_change(doc, ROSTER_APPROVED)
+	return {"returned": False, "reasons": []}
+
+
+def _act_on_roster_change(doc, action):
+	"""R15. Send back returns it to the manager with HR's reason; Decline is
+	final. Both reasons are required by `act_on_approval`."""
+	reason = (doc.flags.helixhr_decision_note or "").strip()
+	if action == "Approve":
+		return _approve_roster_change(doc)
+	if action == "Send Back":
+		_close_roster_change(doc, ROSTER_RETURNED, note=reason, return_reasons=reason)
+	elif action == "Decline":
+		_close_roster_change(doc, ROSTER_DECLINED, note=reason)
+	else:
+		frappe.throw(_("Not a valid action."))
+	return None
+
+
+def _decided_roster_changes(employee, since, pattern=None):
+	"""Roster requests this caller approved, declined or sent back --
+	`decided_by` is the scope, as for change requests. An automatic
+	withdrawal stamps no decider, so it is nobody's receipt."""
+	window, or_filters, limit = _decided_window(since, pattern, date_field="decided_on")
+	return [
+		_decided_row(
+			"roster",
+			row.name,
+			row.employee_name,
+			"Roster change",
+			None,
+			None,
+			row.status,
+			row.decided_on,
+		)
+		for row in frappe.get_all(
+			_ROSTER_CHANGE,
+			filters={
+				"decided_by": frappe.session.user,
+				"employee": ["!=", employee],
+				"status": ["in", [ROSTER_APPROVED, ROSTER_DECLINED, ROSTER_RETURNED]],
+				**window,
+			},
+			or_filters=or_filters,
+			fields=["name", "employee_name", "status", "decided_on"],
+			order_by="decided_on desc",
+			limit=limit,
+		)
+	]
+
+
+# The kind joins the approval tables here, beside its functions, the way the
+# change kind joins `_APPROVAL_SUMMARY_COLLECTORS`. It has no line-manager
+# half: like HR Request, its whole queue is its `hr_queue`.
+_APPROVAL_KINDS[_ROSTER_CHANGE] = {
+	"state_field": "status",
+	"detail": _roster_change_decision_detail,
+	"may_act": _may_act_on_roster_change,
+	"is_open": lambda doc: doc.status == ROSTER_PENDING,
+	"open_message": "This roster request is no longer waiting for HR. Reload to see where it is.",
+	"hr_state": lambda doc: True,
+	"hr_queue": _roster_change_summaries,
+	"act": _act_on_roster_change,
+}
+_DECIDED_STAMPED_COLLECTORS = (*_DECIDED_STAMPED_COLLECTORS, _decided_roster_changes)
 
 
 # Organisation view (P5-U15 / P5-R20, P5-R23)

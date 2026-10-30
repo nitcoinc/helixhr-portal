@@ -470,7 +470,8 @@ class TestApprovalQueueAndEvidence(IntegrationTestCase):
 		kinds = {row["name"]: row["count"] for row in result["counts"]["kinds"]}
 		# Plan 2026-10-16-001 KTD1: requests left Approvals; `kind=request`
 		# stays a valid, empty answer because the dotted path is public.
-		self.assertEqual(list(kinds), ["leave", "timesheet", "attendance", "change"])
+		# Plan 2026-10-31-001 U9: the roster request is the newest chip.
+		self.assertEqual(list(kinds), ["leave", "timesheet", "attendance", "change", "roster"])
 		self.assertEqual(result["total"], kinds["timesheet"])
 		self.assertGreaterEqual(kinds["leave"], 1)
 		self.assertEqual(get_my_approvals(kind="request")["pending"], [])
@@ -1421,7 +1422,13 @@ class TestAttendanceRequestApprovals(IntegrationTestCase):
 		# through `timesheet_change_decided`, and the request's own record
 		# carries the outcome (R21). Timesheets left the receipt list too
 		# (plan 2026-10-15-002 KTD8): they have their own tab.
-		line_manager_doctypes = doctypes - {"HR Request"}
+		# Plan 2026-10-31-001 U9: the roster request (the sixth kind) is HR's
+		# alone like HR Request -- the submitting manager is its `employee`, so
+		# a line-manager half would be their own manager deciding it. Its
+		# receipt is stamped (`_DECIDED_STAMPED_COLLECTORS`), like the change
+		# request's.
+		self.assertEqual(len(doctypes), 6)
+		line_manager_doctypes = doctypes - {"HR Request", "HelixHR Roster Change"}
 		self.assertEqual(len(api._APPROVAL_SUMMARY_COLLECTORS), len(line_manager_doctypes))
 		self.assertEqual(
 			len(api._DECIDED_COLLECTORS),
