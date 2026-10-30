@@ -110,8 +110,10 @@ function reopen(request) {
           >
             Withdraw
           </button>
+          <!-- `merged`: already reopened into a draft, so a second reopen
+               would only be refused. -->
           <button
-            v-if="request.status === 'Returned' || request.status === 'Withdrawn'"
+            v-if="(request.status === 'Returned' || request.status === 'Withdrawn') && !request.merged"
             type="button"
             class="inline-flex min-h-11 shrink-0 cursor-pointer items-center rounded px-2 text-sm font-medium text-ink-blue-link underline underline-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
             :disabled="!!busy"

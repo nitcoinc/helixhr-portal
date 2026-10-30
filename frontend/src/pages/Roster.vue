@@ -42,14 +42,25 @@ const search = ref('')
 const query = ref('')
 const start = ref(0)
 
+// Bumped by every draft write (a save starting or landing, a submit). The
+// roster fetch notes it when it starts, so a payload asked for before a
+// write cannot put an older draft back (see the `roster.data` watcher).
+// frappe-ui keeps whichever fetch lands last, so two overlapping fetches can
+// still land out of order; that is the grid's existing behaviour too.
+let draftEpoch = 0
+let rosterEpoch = 0
+
 const roster = createResource({
   url: 'helixhr.api.get_roster_week',
-  makeParams: () => ({
-    week_start: weekStart.value,
-    mode: mode.value,
-    search: mode.value === 'hr' ? query.value || undefined : undefined,
-    start: start.value,
-  }),
+  makeParams: () => {
+    rosterEpoch = draftEpoch
+    return {
+      week_start: weekStart.value,
+      mode: mode.value,
+      search: mode.value === 'hr' ? query.value || undefined : undefined,
+      start: start.value,
+    }
+  },
   auto: true,
 })
 watch([weekStart, mode, query, start], () => roster.fetch())
@@ -199,11 +210,13 @@ function clickable(row) {
 
 // The saved draft as the server last answered it (`get_roster_week` or a
 // save): its rows, and `preview`, the simulated coverage the grid overlays.
+// A payload whose fetch started before the latest draft write is older than
+// what the save already answered, so its draft is ignored.
 const draft = ref(null)
 watch(
   () => roster.data,
   (data) => {
-    if (data?.can_request) draft.value = data.draft || null
+    if (data?.can_request && rosterEpoch === draftEpoch) draft.value = data.draft || null
   },
 )
 const ops = computed(() => draftOps(draft.value))
@@ -233,7 +246,8 @@ watch(
 
 const saveCall = createResource({ url: 'helixhr.api.save_roster_draft', method: 'POST' })
 const submitCall = createResource({ url: 'helixhr.api.submit_roster_change', method: 'POST' })
-const saving = ref(false)
+const pendingSaves = ref(0)
+const saving = computed(() => pendingSaves.value > 0)
 const saveError = ref('')
 const submitting = ref(false)
 const submitError = ref('')
@@ -242,49 +256,60 @@ function plainError(e) {
   return toPlainMessage(e?.messages?.[0] ?? e?.message) || FALLBACK_ERROR
 }
 
-/** Replace the draft with `next`. Throws an Error carrying the server's
- * sentence, which names the person, so the caller shows it where it was
- * asked for: the sheet, or the bar. */
-let saveInflight = null
-async function saveOps(next) {
-  saving.value = true
-  const call = saveCall.submit({ rows: JSON.stringify(next), note: note.value })
-  saveInflight = call
-  try {
-    const result = await call
-    draft.value = result?.draft || null
-    saveError.value = ''
-    submitError.value = ''
-  } catch (e) {
-    throw new Error(plainError(e))
-  } finally {
-    if (saveInflight === call) {
-      saveInflight = null
-      saving.value = false
-    }
-  }
+/** Replace the draft with `build(ops)`. Saves run one at a time, each
+ * building from the draft the previous one answered, so a note saved on blur
+ * and a sheet's Add cannot land out of order or drop each other's rows.
+ * Throws an Error carrying the server's sentence, which names the person, so
+ * the caller shows it where it was asked for: the sheet, or the bar. */
+let saveChain = Promise.resolve()
+function saveOps(build) {
+  pendingSaves.value += 1
+  const run = saveChain
+    .then(async () => {
+      const next = build(ops.value)
+      const token = ++draftEpoch
+      let result
+      try {
+        result = await saveCall.submit({ rows: JSON.stringify(next), note: note.value })
+      } catch (e) {
+        throw new Error(plainError(e))
+      }
+      // Only the newest write's answer is the draft.
+      if (token !== draftEpoch) return
+      draftEpoch += 1
+      draft.value = result?.draft || null
+      saveError.value = ''
+      submitError.value = ''
+    })
+    .finally(() => {
+      pendingSaves.value -= 1
+    })
+  saveChain = run.catch(() => {})
+  return run
 }
 
 /** The sheet's Add / Save: the simulator first, against what this week shows,
  * so an obvious refusal costs no round trip; then the server's own check. */
-async function proposeChange(op, index) {
-  const next = [...ops.value]
-  const at = index == null ? next.length : index
-  next[at] = op
-  const name = serverRows.value.find((row) => row.employee === op.employee)?.employee_name
-  const problem = checkProposal({
-    ops: next,
-    index: at,
-    coverage: coverageFromRows(serverRows.value),
-    today: roster.data?.today,
-    name,
+function proposeChange(op, index) {
+  return saveOps((current) => {
+    const next = [...current]
+    const at = index == null ? next.length : index
+    next[at] = op
+    const name = serverRows.value.find((row) => row.employee === op.employee)?.employee_name
+    const problem = checkProposal({
+      ops: next,
+      index: at,
+      coverage: coverageFromRows(serverRows.value),
+      today: roster.data?.today,
+      name,
+    })
+    if (problem) throw new Error(problem)
+    return next
   })
-  if (problem) throw new Error(problem)
-  await saveOps(next)
 }
 
 function removeChange(index) {
-  return saveOps(ops.value.filter((_, position) => position !== index))
+  return saveOps((current) => current.filter((_, position) => position !== index))
 }
 
 async function fromBar(write) {
@@ -298,7 +323,7 @@ async function fromBar(write) {
 
 function saveNote() {
   if (!draftRows.value.length || note.value === (draft.value?.note || '')) return
-  return fromBar(() => saveOps(ops.value))
+  return fromBar(() => saveOps((current) => current))
 }
 
 const recent = createResource({ url: 'helixhr.api.get_roster_draft' })
@@ -322,10 +347,11 @@ async function submitDraft() {
   submitError.value = ''
   saveError.value = ''
   try {
-    // A note saved on blur may still be in flight; the submit reads the
-    // draft it writes. Its own failure is already on the bar.
-    await Promise.resolve(saveInflight).catch(() => {})
+    // A note saved on blur may still be queued or in flight; the submit reads
+    // the draft it writes. Its own failure is already on the bar.
+    await saveChain
     const result = await submitCall.submit({ note: note.value })
+    draftEpoch += 1
     draft.value = null
     note.value = ''
     notify.success(submittedMessage(result?.names))
@@ -897,7 +923,7 @@ const scopeLine = computed(() => {
       :submitting="submitting"
       :submit-error="submitError"
       @remove="(index) => fromBar(() => removeChange(index))"
-      @discard="fromBar(() => saveOps([]))"
+      @discard="fromBar(() => saveOps(() => []))"
       @submit="submitDraft"
       @save-note="saveNote"
     />

@@ -1,12 +1,12 @@
 <script setup>
-import Avatar from '@/components/Avatar.vue'
 import { computed, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
-import ProjectMemberPicker from '@/components/ProjectMemberPicker.vue'
+import ProjectPeoplePane from '@/components/projects/ProjectPeoplePane.vue'
+import ProjectTasksPane from '@/components/projects/ProjectTasksPane.vue'
 import SearchField from '@/components/SearchField.vue'
 import SegmentedChips from '@/components/SegmentedChips.vue'
 import TabBar from '@/components/TabBar.vue'
@@ -15,15 +15,12 @@ import { fieldOptions } from '@/lib/lists'
 import {
   NO_FILTERS,
   PROJECT_SORTS,
-  TASK_PASTE_LIMIT,
   distinctValues,
   filterProjects,
   filtersFromQuery,
   filtersToQuery,
   isFiltered,
-  matchRows,
   membersLabel,
-  parseTaskLines,
   showCompanyFilter,
   sortProjects,
 } from '@/lib/projects'
@@ -231,7 +228,8 @@ async function submitCreate() {
 // Plan 2026-10-31-001 U3 (R3, R4). Facts on one line; Tasks and People as
 // two panes -- side by side on desktop, a TabBar on a phone -- each with its
 // own search, revealing 25 rows at a time (KTD3: `get_project` already
-// returns every open task and member).
+// returns every open task and member). Each pane owns its writes and hands
+// the changed list back here, into `detail`.
 
 const detail = createResource({
   url: 'helixhr.api.get_project',
@@ -242,7 +240,6 @@ const canEdit = computed(() => !!detail.data?.can_edit)
 
 const tasks = computed(() => detail.data?.tasks || [])
 const members = computed(() => detail.data?.members || [])
-const memberEmployeeIds = computed(() => members.value.map((m) => m.employee).filter(Boolean))
 // `get_project` carries no company; the list row this page already loaded
 // does.
 const projectCompany = computed(() => rows.value.find((row) => row.name === props.project)?.company || '')
@@ -260,187 +257,29 @@ const facts = computed(() => {
   ]
 })
 
-const PANE_PAGE = 25
 const paneTab = ref('tasks')
 const paneTabs = computed(() => [
   { key: 'tasks', label: 'Tasks', count: tasks.value.length },
   { key: 'people', label: 'People', count: members.value.length },
 ])
 
-/** One pane's search and "show more" window over `source`. */
-function usePane(source, field) {
-  const query = ref('')
-  const limit = ref(PANE_PAGE)
-  watch(query, () => (limit.value = PANE_PAGE))
-  const matched = computed(() => matchRows(source.value, query.value, field))
-  const shown = computed(() => matched.value.slice(0, limit.value))
-  const more = computed(() => Math.min(PANE_PAGE, matched.value.length - shown.value.length))
-  function showMore() {
-    limit.value += PANE_PAGE
-  }
-  function reset() {
-    query.value = ''
-    limit.value = PANE_PAGE
-  }
-  return { query, matched, shown, more, showMore, reset }
-}
-
-const taskPane = usePane(tasks, 'subject')
-const memberPane = usePane(members, 'employee_name')
-const taskQuery = taskPane.query
-const memberQuery = memberPane.query
-
-function countLine(pane, total, noun) {
-  if (!total) return ''
-  const shown = pane.shown.value.length
-  const matched = pane.matched.value.length
-  if (pane.query.value.trim()) return `${matched} of ${total} ${noun} match.`
-  return shown < total ? `Showing ${shown} of ${total} ${noun}.` : ''
-}
-
-// --- tasks -------------------------------------------------------------------
-
-const newTasks = ref('')
-const taskError = ref('')
-const taskNotice = ref('')
-const editingTask = ref(null)
-const editingSubject = ref('')
-const saveTask = createResource({ url: 'helixhr.api.save_task', method: 'POST' })
-const addTasks = createResource({ url: 'helixhr.api.add_tasks', method: 'POST' })
-
-const parsedTasks = computed(() => parseTaskLines(newTasks.value))
-const tooManyTasks = computed(() => parsedTasks.value.total > TASK_PASTE_LIMIT)
-const addTaskLabel = computed(() => {
-  const count = parsedTasks.value.subjects.length
-  return count > 1 ? `Add ${count} tasks` : 'Add task'
-})
-
-/** One `add_tasks` call for every line (R4): all of them land, or none. */
-async function submitTasks() {
-  taskError.value = ''
-  taskNotice.value = ''
-  const { subjects, duplicates } = parsedTasks.value
-  if (!subjects.length || tooManyTasks.value) return
-  try {
-    const response = await addTasks.submit({ project: props.project, subjects })
-    // Newest first, so what was just added is in view however long the
-    // list is; a reload shows the server's own order.
-    detail.data.tasks = [...(response?.tasks || []), ...tasks.value]
-    newTasks.value = ''
-    taskQuery.value = ''
-    const skipped = response?.duplicates || []
-    const notes = []
-    if (skipped.length) {
-      notes.push(
-        `${skipped.length === 1 ? 'One was' : `${skipped.length} were`} already open here, so left out: ${skipped.join(', ')}.`,
-      )
-    }
-    if (duplicates) notes.push(`${duplicates} repeated ${duplicates === 1 ? 'line was' : 'lines were'} left out.`)
-    taskNotice.value = notes.join(' ')
-  } catch (error) {
-    taskError.value = error?.messages?.[0] || 'Could not add those tasks. Please try again.'
+/** A pane's attributes: shown side by side on desktop, a tabpanel on a phone. */
+function paneAttrs(key, headingId) {
+  const desktop = isDesktop.value
+  return {
+    id: !desktop && paneTab.value === key ? 'project-pane' : undefined,
+    role: desktop ? undefined : 'tabpanel',
+    'aria-labelledby': desktop ? headingId : `project-pane-tab-${key}`,
   }
 }
 
-function startRename(task) {
-  editingTask.value = task.name
-  editingSubject.value = task.subject
-}
-
-function cancelRename() {
-  editingTask.value = null
-}
-
-async function saveRename(task) {
-  const subject = editingSubject.value.trim()
-  editingTask.value = null
-  if (!subject || subject === task.subject) return
-  taskError.value = ''
-  try {
-    const updated = await saveTask.submit({ project: props.project, task: task.name, subject })
-    Object.assign(task, updated)
-  } catch (error) {
-    taskError.value = error?.messages?.[0] || 'Could not rename that task. Please try again.'
-  }
-}
-
-async function closeTask(task) {
-  taskError.value = ''
-  try {
-    await saveTask.submit({ project: props.project, task: task.name, status: 'Completed' })
-    // `get_project` only ever returns open tasks (_project_open_tasks), so a
-    // closed task's row is removed locally rather than updated in place.
-    detail.data.tasks = tasks.value.filter((row) => row.name !== task.name)
-  } catch (error) {
-    taskError.value = error?.messages?.[0] || 'Could not close that task. Please try again.'
-  }
-}
-
-// --- members -------------------------------------------------------------------
-//
-// U6: adding goes through ProjectMemberPicker (`add_project_members`, which
-// appends). Removing still replaces the list through `set_project_members`.
-
-const memberError = ref('')
-const pickerOpen = ref(false)
-const setMembers = createResource({ url: 'helixhr.api.set_project_members', method: 'POST' })
-
-function onMembersAdded(response) {
-  memberError.value = ''
-  if (response?.members) detail.data.members = response.members
-}
-
-async function removeMember(member) {
-  if (!member.employee) return
-  memberError.value = ''
-  const employees = memberEmployeeIds.value.filter((id) => id !== member.employee)
-  try {
-    await setMembers.submit({ project: props.project, employees })
-    detail.data.members = members.value.filter((row) => row.employee !== member.employee)
-  } catch (error) {
-    memberError.value = error?.messages?.[0] || 'Could not remove that person. Please try again.'
-  }
-}
-
-// --- "Open to everyone" (U6, R8) ----------------------------------------------
-//
-// Either direction is confirmed first, naming its effect. While the write is
-// in flight the switch shows the new state as pending; a refusal puts it
-// back and says why.
-
-const confirmOpenToAll = ref(false)
-const openTarget = ref(false)
-const openPending = ref(null)
-const openError = ref('')
-const setOpenToAll = createResource({ url: 'helixhr.api.set_project_open_to_all', method: 'POST' })
-const openToAll = computed(() => !!detail.data?.open_to_all)
-const switchOn = computed(() => openPending.value ?? openToAll.value)
-
-function askOpenToAll() {
-  if (openPending.value !== null) return
-  openError.value = ''
-  openTarget.value = !openToAll.value
-  confirmOpenToAll.value = true
-}
-
-async function applyOpenToAll() {
-  const target = openTarget.value
-  confirmOpenToAll.value = false
-  openPending.value = target
-  try {
-    const response = await setOpenToAll.submit({ project: props.project, value: target ? 1 : 0 })
-    detail.data.open_to_all = !!response?.open_to_all
-  } catch (error) {
-    openError.value =
-      error?.messages?.[0] || `Could not change that. The project is still ${target ? 'members only' : 'open to everyone'}.`
-  } finally {
-    openPending.value = null
-  }
+function setDetail(field, value) {
+  if (detail.data) detail.data[field] = value
 }
 
 // Declared after every ref it resets: `immediate` runs it during setup, and a
 // ref still in its temporal dead zone throws there, skipping the first mount's
-// resets (HR-01).
+// resets (HR-01). The panes reset their own state on a project change.
 watch(
   () => props.project,
   (project) => {
@@ -448,15 +287,7 @@ watch(
     // Back on the list after working on a project: its counts and flags
     // may have changed.
     else if (projects.data) projects.reload()
-    taskPane.reset()
-    memberPane.reset()
     paneTab.value = 'tasks'
-    newTasks.value = ''
-    taskError.value = ''
-    taskNotice.value = ''
-    memberError.value = ''
-    openError.value = ''
-    pickerOpen.value = false
     showCreateForm.value = false
   },
   { immediate: true },
@@ -530,372 +361,27 @@ watch(
           />
 
           <div :class="isDesktop ? 'grid grid-cols-2 items-start gap-4' : ''">
-            <section
+            <ProjectTasksPane
               v-show="isDesktop || paneTab === 'tasks'"
-              :id="!isDesktop && paneTab === 'tasks' ? 'project-pane' : undefined"
-              :role="isDesktop ? undefined : 'tabpanel'"
-              :aria-labelledby="isDesktop ? 'project-tasks-heading' : 'project-pane-tab-tasks'"
-              class="surface-card elev-1 min-w-0 p-4"
-              data-testid="project-tasks-pane"
-            >
-              <h2
-                id="project-tasks-heading"
-                class="font-heading text-base font-semibold text-ink-gray-9"
-              >
-                Tasks <span class="tabular text-sm font-normal text-ink-gray-5">{{ tasks.length }}</span>
-              </h2>
-
-              <div
-                v-if="tasks.length"
-                class="mt-3"
-              >
-                <SearchField
-                  v-model="taskQuery"
-                  label="Search tasks"
-                  placeholder="Task name"
-                  maxlength="140"
-                />
-              </div>
-              <p
-                class="mt-2 text-xs text-ink-gray-5"
-                aria-live="polite"
-                data-testid="project-tasks-count"
-              >
-                {{ countLine(taskPane, tasks.length, tasks.length === 1 ? 'task' : 'tasks') }}
-              </p>
-
-              <ul
-                v-if="taskPane.shown.value.length"
-                class="divide-y divide-outline-gray-1"
-              >
-                <li
-                  v-for="task in taskPane.shown.value"
-                  :key="task.name"
-                  class="flex items-center gap-3 py-2"
-                  data-testid="project-task"
-                >
-                  <template v-if="editingTask === task.name">
-                    <input
-                      v-model="editingSubject"
-                      type="text"
-                      maxlength="140"
-                      :aria-label="`Rename ${task.subject}`"
-                      class="min-w-0 flex-1 rounded-md border border-outline-gray-2 px-2.5 py-1.5 text-sm text-ink-gray-8"
-                      @keyup.enter="saveRename(task)"
-                      @keyup.esc="cancelRename"
-                    >
-                    <Button
-                      variant="solid"
-                      theme="blue"
-                      @click="saveRename(task)"
-                    >
-                      Save
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      @click="cancelRename"
-                    >
-                      Cancel
-                    </Button>
-                  </template>
-                  <template v-else>
-                    <button
-                      v-if="canEdit"
-                      type="button"
-                      class="min-w-0 flex-1 break-words text-left text-sm font-medium text-ink-gray-9"
-                      @click="startRename(task)"
-                    >
-                      {{ task.subject }}
-                    </button>
-                    <span
-                      v-else
-                      class="min-w-0 flex-1 break-words text-sm font-medium text-ink-gray-9"
-                    >
-                      {{ task.subject }}
-                    </span>
-                    <span class="shrink-0 text-sm text-ink-gray-5">{{ task.status }}</span>
-                    <Button
-                      v-if="canEdit"
-                      variant="ghost"
-                      :aria-label="`Close ${task.subject}`"
-                      @click="closeTask(task)"
-                    >
-                      Close
-                    </Button>
-                  </template>
-                </li>
-              </ul>
-              <p
-                v-else
-                class="text-sm text-ink-gray-6"
-              >
-                {{ tasks.length ? `No tasks match “${taskQuery.trim()}”.` : 'No open tasks yet.' }}
-              </p>
-
-              <div
-                v-if="taskPane.more.value > 0"
-                class="mt-2 text-center"
-              >
-                <Button
-                  variant="ghost"
-                  @click="taskPane.showMore"
-                >
-                  Show {{ taskPane.more.value }} more
-                </Button>
-              </div>
-
-              <p
-                v-if="taskError"
-                class="surface-alert mt-3 p-3 text-sm"
-                role="alert"
-              >
-                {{ taskError }}
-              </p>
-              <p
-                v-if="taskNotice"
-                class="mt-3 text-sm text-ink-gray-7"
-                role="status"
-                data-testid="project-task-notice"
-              >
-                {{ taskNotice }}
-              </p>
-
-              <form
-                v-if="canEdit"
-                class="mt-4 space-y-2"
-                @submit.prevent="submitTasks"
-              >
-                <label
-                  for="project-new-tasks"
-                  class="block text-sm text-ink-gray-7"
-                >
-                  Add tasks
-                </label>
-                <textarea
-                  id="project-new-tasks"
-                  v-model="newTasks"
-                  rows="3"
-                  placeholder="New task"
-                  aria-describedby="project-new-tasks-hint"
-                  class="block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
-                  @keydown.enter.exact.prevent="submitTasks"
-                />
-                <p
-                  id="project-new-tasks-hint"
-                  class="text-xs text-ink-gray-5"
-                >
-                  One task per line; paste up to {{ TASK_PASTE_LIMIT }} at once. Shift+Enter starts a new line.
-                </p>
-                <p
-                  v-if="tooManyTasks"
-                  class="text-sm text-ink-red-4"
-                  role="alert"
-                >
-                  That is {{ parsedTasks.total }} lines. Add at most {{ TASK_PASTE_LIMIT }} at a time.
-                </p>
-                <Button
-                  type="submit"
-                  variant="outline"
-                  :loading="addTasks.loading"
-                  :disabled="!parsedTasks.subjects.length || tooManyTasks"
-                >
-                  {{ addTaskLabel }}
-                </Button>
-              </form>
-            </section>
-
-            <section
+              v-bind="paneAttrs('tasks', 'project-tasks-heading')"
+              :project="project"
+              :tasks="tasks"
+              :can-edit="canEdit"
+              @update:tasks="(list) => setDetail('tasks', list)"
+            />
+            <ProjectPeoplePane
               v-show="isDesktop || paneTab === 'people'"
-              :id="!isDesktop && paneTab === 'people' ? 'project-pane' : undefined"
-              :role="isDesktop ? undefined : 'tabpanel'"
-              :aria-labelledby="isDesktop ? 'project-members-heading' : 'project-pane-tab-people'"
-              class="surface-card elev-1 min-w-0 p-4"
-              data-testid="project-people-pane"
-            >
-              <div class="flex flex-wrap items-center justify-between gap-2">
-                <h2
-                  id="project-members-heading"
-                  class="font-heading text-base font-semibold text-ink-gray-9"
-                >
-                  People <span class="tabular text-sm font-normal text-ink-gray-5">{{ members.length }}</span>
-                </h2>
-                <button
-                  v-if="canEdit"
-                  type="button"
-                  role="switch"
-                  class="flex min-h-11 cursor-pointer items-center gap-3 text-left text-sm font-medium text-ink-gray-9 aria-disabled:cursor-progress"
-                  :aria-checked="switchOn ? 'true' : 'false'"
-                  :aria-disabled="openPending !== null ? 'true' : undefined"
-                  :aria-busy="openPending !== null ? 'true' : undefined"
-                  data-testid="project-open-toggle"
-                  @click="askOpenToAll"
-                >
-                  <span
-                    class="flex h-6 w-10 shrink-0 items-center rounded-full p-0.5 transition-colors duration-200"
-                    :class="[
-                      switchOn ? 'justify-end bg-heading' : 'justify-start bg-surface-gray-3',
-                      openPending !== null ? 'opacity-60' : '',
-                    ]"
-                    aria-hidden="true"
-                  >
-                    <span class="h-5 w-5 rounded-full bg-white" />
-                  </span>
-                  <span class="break-words">Open to everyone in {{ companyName }}</span>
-                  <span
-                    v-if="openPending !== null"
-                    class="text-xs font-normal text-ink-gray-5"
-                  >Saving…</span>
-                </button>
-              </div>
-
-              <p
-                v-if="openError"
-                class="surface-alert mt-3 p-3 text-sm"
-                role="alert"
-              >
-                {{ openError }}
-              </p>
-              <p
-                v-if="openToAll"
-                class="mt-2 text-sm text-ink-gray-7"
-                data-testid="project-open-note"
-              >
-                Everyone active in {{ companyName }} can book time here. People below were added by name.
-              </p>
-
-              <div
-                v-if="members.length"
-                class="mt-3"
-              >
-                <SearchField
-                  v-model="memberQuery"
-                  label="Search people"
-                  placeholder="Name"
-                  maxlength="140"
-                />
-              </div>
-              <p
-                class="mt-2 text-xs text-ink-gray-5"
-                aria-live="polite"
-              >
-                {{ countLine(memberPane, members.length, members.length === 1 ? 'person' : 'people') }}
-              </p>
-
-              <ul
-                v-if="memberPane.shown.value.length"
-                class="divide-y divide-outline-gray-1"
-              >
-                <li
-                  v-for="member in memberPane.shown.value"
-                  :key="member.employee || member.employee_name"
-                  class="flex items-center gap-3 py-2"
-                  data-testid="project-member"
-                >
-                  <Avatar
-                    class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-xs font-bold text-ink-green-3"
-                    :photo-url="member.photo_url"
-                    :initials="member.initials"
-                    :size="32"
-                  />
-                  <span class="min-w-0 flex-1 break-words text-sm font-medium text-ink-gray-9">
-                    {{ member.employee_name }}
-                  </span>
-                  <Button
-                    v-if="member.employee && canEdit"
-                    variant="ghost"
-                    :aria-label="`Remove ${member.employee_name}`"
-                    :disabled="setMembers.loading"
-                    @click="removeMember(member)"
-                  >
-                    Remove
-                  </Button>
-                </li>
-              </ul>
-              <p
-                v-else
-                class="text-sm text-ink-gray-6"
-              >
-                {{
-                  members.length
-                    ? `Nobody here matches “${memberQuery.trim()}”.`
-                    : openToAll
-                      ? 'Nobody is listed by name.'
-                      : 'Nobody is assigned to this project yet.'
-                }}
-              </p>
-
-              <div
-                v-if="memberPane.more.value > 0"
-                class="mt-2 text-center"
-              >
-                <Button
-                  variant="ghost"
-                  @click="memberPane.showMore"
-                >
-                  Show {{ memberPane.more.value }} more
-                </Button>
-              </div>
-
-              <p
-                v-if="memberError"
-                class="surface-alert mt-3 p-3 text-sm"
-                role="alert"
-              >
-                {{ memberError }}
-              </p>
-
-              <Button
-                v-if="canEdit"
-                class="mt-4"
-                variant="outline"
-                @click="pickerOpen = true"
-              >
-                Add people
-              </Button>
-            </section>
+              v-bind="paneAttrs('people', 'project-members-heading')"
+              :project="project"
+              :members="members"
+              :departments="detail.data.departments || []"
+              :open-to-all="!!detail.data.open_to_all"
+              :can-edit="canEdit"
+              :company-name="companyName"
+              @update:members="(list) => setDetail('members', list)"
+              @update:open-to-all="(value) => setDetail('open_to_all', value)"
+            />
           </div>
-
-          <ProjectMemberPicker
-            v-if="canEdit"
-            v-model="pickerOpen"
-            :project="project"
-            :departments="detail.data.departments || []"
-            :member-ids="memberEmployeeIds"
-            @added="onMembersAdded"
-          />
-
-          <Dialog
-            v-model="confirmOpenToAll"
-            :options="{ title: openTarget ? 'Open to everyone?' : 'Only listed members?', size: 'sm' }"
-          >
-            <template #body-content>
-              <p
-                class="text-sm text-ink-gray-7"
-                data-testid="project-open-confirm"
-              >
-                {{
-                  openTarget
-                    ? `Every active employee in ${companyName} can book time on this project.`
-                    : 'Only listed members can book. Saved timesheet weeks that still use this project will need that row removed.'
-                }}
-              </p>
-              <div class="mt-4 flex flex-wrap items-center gap-2">
-                <Button
-                  variant="solid"
-                  theme="blue"
-                  @click="applyOpenToAll"
-                >
-                  {{ openTarget ? 'Open to everyone' : 'Members only' }}
-                </Button>
-                <Button
-                  variant="subtle"
-                  @click="confirmOpenToAll = false"
-                >
-                  Cancel
-                </Button>
-              </div>
-            </template>
-          </Dialog>
         </div>
       </AsyncState>
     </template>
