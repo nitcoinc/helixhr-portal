@@ -42,6 +42,7 @@ import { toPlainLeaveError } from '@/lib/errorMap'
 import { notify } from '@/lib/notify'
 import { useIsDesktop } from '@/lib/useIsDesktop'
 import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
+import { returnedNotice } from '@/lib/rosterRequests'
 
 // P2-U7 / KTD5. `/approvals` and `/approvals/:kind/:name` are one component:
 // the selected decision is a route parameter, so a manager can be sent the
@@ -110,9 +111,11 @@ watch(
 )
 
 // Plan 2026-10-16-001 R16: in Leave & attendance tab, chips filter leave / attendance.
+// Plan 2026-10-31-001 U10 (R14): roster requests are HR's, in this tab too.
+const QUEUE_KINDS = ['leave', 'attendance', 'roster']
 const kindChips = computed(() =>
   (queue.data?.counts?.kinds || []).filter(
-    (chip) => (chip.name === 'leave' || chip.name === 'attendance') && (chip.count || chip.name === kindFilter.value),
+    (chip) => QUEUE_KINDS.includes(chip.name) && (chip.count || chip.name === kindFilter.value),
   ),
 )
 
@@ -138,9 +141,7 @@ const timesheetCount = computed(() => {
 })
 const leaveAttendanceCount = computed(() => {
   const kinds = queue.data?.counts?.kinds || []
-  const lv = kinds.find((k) => k.name === 'leave')?.count || 0
-  const at = kinds.find((k) => k.name === 'attendance')?.count || 0
-  return lv + at
+  return QUEUE_KINDS.reduce((sum, name) => sum + (kinds.find((k) => k.name === name)?.count || 0), 0)
 })
 
 const VIEW_TABS = computed(() =>
@@ -291,7 +292,13 @@ const note = ref('')
 // Plan 2026-10-05-001 U3 (KTD2). Accept cancels an approved week and
 // reopens it for the employee, so it never fires on one click: the first
 // click opens this confirm, and only its own button carries the decision.
+// Plan 2026-10-31-001 U10: a roster request's Approve writes several people's
+// shifts at once, so it takes the same confirm.
 const confirmAccept = ref(false)
+const confirmAction = computed(() => (selected.value?.kind === 'roster' ? 'Approve' : 'Accept'))
+function needsConfirm(action) {
+  return action === confirmAction.value
+}
 watch(confirmAccept, async (open) => {
   if (!open) return
   // Cancel takes the initial focus, after the dialog's own focus trap has
@@ -398,7 +405,7 @@ function openNote() {
 // What the reason field is called, per outcome: the one kind map's copy
 // (KTD6). The page reads only its "missing" sentence; ApprovalEvidence draws
 // the rest.
-const reasonCopy = computed(() => getReasonCopy(reasonFor.value))
+const reasonCopy = computed(() => getReasonCopy(reasonFor.value, selected.value?.kind))
 
 /**
  * P2-U7 steps 3 and 4. One decision at a time, always carrying the `modified`
@@ -422,7 +429,7 @@ async function decide(action, { confirmed = false } = {}) {
   // server would refuse anyway.
   if (!may(action)) return
 
-  if (action === 'Accept' && !confirmed) {
+  if (needsConfirm(action) && !confirmed) {
     actionError.value = ''
     confirmAccept.value = true
     return
@@ -455,7 +462,7 @@ async function decide(action, { confirmed = false } = {}) {
   const fromAllPending = view.value === 'all-pending'
   const nextOversight = fromAllPending ? allPendingNeighbour(item.name) : null
   try {
-    await act.submit({
+    const outcome = await act.submit({
       doctype: item.doctype,
       name: item.name,
       action,
@@ -464,6 +471,10 @@ async function decide(action, { confirmed = false } = {}) {
       expected_state: item.state,
     })
     clearDecisionSurfaces()
+    // Plan 2026-10-31-001 R16: an Approve the re-check turned into a return
+    // applied nothing. It leaves the queue like any decision, but is never
+    // reported as a success.
+    if (outcome?.returned) notify.error(returnedNotice(item.manager_name || item.employee_name, outcome.reasons))
     // KTD8: the badge moves now; the reload below then answers with the
     // queue's own total. An All pending item is often not in the caller's
     // own queue, so only a queued one moves the badge.
@@ -540,6 +551,19 @@ const KIND = {
     approve: () => 'Accept',
     quote: (item) => item.comment,
   },
+  // Plan 2026-10-31-001 U10: a manager's roster request -- how many changes
+  // for how many people, the manager's note as the quote.
+  roster: {
+    summary: (row) =>
+      `Roster change · ${plural(row.people_count, 'person', 'people')} · ${formatDateRange(row.from_date, row.to_date)}`,
+    amount: (row) => (row.change_count != null ? plural(row.change_count, 'change', 'changes') : ''),
+    approve: (item) => `Approve ${plural(item.change_count, 'change', 'changes')}`,
+    quote: (item) => item.note,
+  },
+}
+
+function plural(count, one, many) {
+  return `${count} ${count === 1 ? one : many}`
 }
 
 const FALLBACK_KIND = {
@@ -584,7 +608,7 @@ const evidence = computed(() => ({
   selected: selected.value,
   actions: actions.value,
   busy: !!selected.value && acting.value === selected.value.name,
-  armed: reasonFor.value || (noteOpen.value ? 'Send to HR' : confirmAccept.value ? 'Accept' : ''),
+  armed: reasonFor.value || (noteOpen.value ? 'Send to HR' : confirmAccept.value ? confirmAction.value : ''),
   approveLabel: approveLabel.value,
   quote: quote.value || '',
   hrLine: hrLine(selected.value),
@@ -623,9 +647,7 @@ function flagLabels(row) {
 const timesheetRows = computed(() =>
   pending.value.filter((row) => row.kind === 'timesheet' || row.kind === 'change'),
 )
-const leaveAttendanceRows = computed(() =>
-  pending.value.filter((row) => row.kind === 'leave' || row.kind === 'attendance'),
-)
+const leaveAttendanceRows = computed(() => pending.value.filter((row) => QUEUE_KINDS.includes(row.kind)))
 const tabRows = computed(() =>
   view.value === 'timesheets' ? timesheetRows.value : leaveAttendanceRows.value,
 )
@@ -1902,13 +1924,37 @@ function onQueueKey(event) {
     <!-- Plan 2026-10-05-001 U3: the change request's Accept, confirmed.
          Errors stay inside the dialog so the manager reads them where they
          clicked; the confirm stays disabled while the decision is in flight. -->
+    <!-- Plan 2026-10-31-001 U10: the same confirm guards a roster request's
+         Approve, which writes several people's shifts in one go. -->
     <Dialog
       :model-value="confirmAccept"
-      :options="{ title: 'Accept this change request?' }"
+      :options="{ title: confirmAction === 'Approve' ? 'Approve these shift changes?' : 'Accept this change request?' }"
       @update:model-value="(value) => !value && closeAcceptConfirm()"
     >
       <template #body-content>
-        <p class="text-sm text-ink-gray-7">
+        <template v-if="confirmAction === 'Approve'">
+          <p class="text-sm text-ink-gray-7">
+            {{ approveLabel }} for
+            {{ (selected?.employees || []).map((person) => person.employee_name).join(', ') }}.
+            The new shifts are written now, in your name.
+          </p>
+          <p class="mt-2 text-sm text-ink-gray-6">
+            If anyone's shifts have moved since {{ selected?.manager_name || 'the manager' }} sent this,
+            nothing is applied and it goes back to them with the reason.
+          </p>
+          <p
+            v-if="selected?.conflicts?.length"
+            class="surface-alert mt-3 p-3 text-sm"
+            data-testid="roster-confirm-conflicts"
+          >
+            Approving will send this back:
+            {{ selected.conflicts.map((conflict) => conflict.message).join(' ') }}
+          </p>
+        </template>
+        <p
+          v-else
+          class="text-sm text-ink-gray-7"
+        >
           This cancels the approved week and reopens it for
           {{ selected?.employee_name || 'the employee' }} to edit.
         </p>
@@ -1937,9 +1983,9 @@ function onQueueKey(event) {
             :loading="!!acting"
             :disabled="!!acting"
             data-testid="accept-confirm"
-            @click="decide('Accept', { confirmed: true })"
+            @click="decide(confirmAction, { confirmed: true })"
           >
-            Accept and reopen
+            {{ confirmAction === 'Approve' ? approveLabel : 'Accept and reopen' }}
           </Button>
         </div>
       </template>

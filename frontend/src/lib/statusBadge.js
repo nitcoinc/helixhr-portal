@@ -13,7 +13,7 @@ export const TONE = {
   resting: 'bg-surface-gray-2 text-ink-gray-7',
 }
 
-export const KINDS = ['leave', 'timesheet', 'request', 'attendance', 'change']
+export const KINDS = ['leave', 'timesheet', 'request', 'attendance', 'change', 'roster']
 
 // `waiting: true` marks the one state per kind that names a person when the
 // portal knows who: "Waiting for Priya".
@@ -91,6 +91,16 @@ const MAP = {
   change: {
     Open: { label: 'Waiting', tone: 'waiting', waiting: true },
     Accepted: { label: 'Accepted', tone: 'done' },
+    Declined: { label: 'Declined', tone: 'sentBack' },
+    Withdrawn: { label: 'Withdrawn', tone: 'resting' },
+  },
+  // Plan 2026-10-31-001 U10 / R15, R17: a manager's roster request. Returned
+  // is the recoverable no (it reopens as the draft); Declined is final.
+  roster: {
+    Draft: { label: 'Draft', tone: 'resting' },
+    Pending: { label: 'Waiting for HR', tone: 'waiting' },
+    Approved: { label: 'Approved', tone: 'done' },
+    Returned: { label: 'Sent back', tone: 'sentBack' },
     Declined: { label: 'Declined', tone: 'sentBack' },
     Withdrawn: { label: 'Withdrawn', tone: 'resting' },
   },

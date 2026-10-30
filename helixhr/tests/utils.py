@@ -2283,11 +2283,23 @@ def ensure_roster_fixtures():
 	- `hr-manager-employee` (HR Manager, company-scoped, no self-scoping
 	  User Permission) is the identity that edits; `make_test_hr_manager_employee`
 	  already grants it, and `test_api_roster` pins that it can.
+	- Plan 2026-10-31-001 U10: the manager fixture's roster requests (draft,
+	  pending and decided) are deleted, so the request specs start with no
+	  draft and nobody already waiting for HR. The manager's two reports
+	  (the fixture employee and the colleague) are who those specs propose
+	  for; `hr-manager-employee` covers their company and decides.
 
 	Idempotent. Returns the names by role."""
 	from helixhr.utils import get_week_bounds
 
-	employee_name, _, _, _ = make_test_employee_and_manager()
+	employee_name, _, manager_name, _ = make_test_employee_and_manager()
+	requests = frappe.get_all("HelixHR Roster Change", filters={"employee": manager_name}, pluck="name")
+	if requests:
+		frappe.db.delete(
+			"HelixHR Roster Change Row",
+			{"parenttype": "HelixHR Roster Change", "parent": ["in", requests]},
+		)
+		frappe.db.delete("HelixHR Roster Change", {"name": ["in", requests]})
 	ensure_test_shift_type()
 	monday, sunday = get_week_bounds(frappe.utils.today())
 	covered = frappe.db.exists(

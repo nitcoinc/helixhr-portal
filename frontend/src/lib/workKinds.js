@@ -12,6 +12,8 @@ export const KIND_TAGS = {
   attendance: { label: 'Attendance', icon: 'attendance' },
   request_hr: { label: 'HR request', icon: 'requests' },
   request_it: { label: 'IT request', icon: 'itRequest' },
+  // Plan 2026-10-31-001 U10: a manager's roster request, decided by HR.
+  roster: { label: 'Roster change', icon: 'calendarClock' },
 }
 
 export function getKindTag(kindOrRow, routedToRole = null) {
@@ -36,6 +38,9 @@ export function getKindTag(kindOrRow, routedToRole = null) {
   if (kind === 'attendance') {
     return KIND_TAGS.attendance
   }
+  if (kind === 'roster') {
+    return KIND_TAGS.roster
+  }
   return { label: kind || '—', icon: 'requests' }
 }
 
@@ -59,6 +64,13 @@ export const KIND_ACTIONS = {
     { action: 'Send Back', label: 'Send back', variant: 'subtle' },
     { action: 'Reject', label: 'Reject', variant: 'subtle' },
     { action: 'Send to HR', label: 'Send to HR', variant: 'subtle' },
+  ],
+  // Plan 2026-10-31-001 R15: Decline is final, Send back reopens it as the
+  // manager's draft; both carry a reason.
+  roster: [
+    { action: 'Approve', label: 'Approve', variant: 'solid' },
+    { action: 'Send Back', label: 'Send back', variant: 'subtle' },
+    { action: 'Decline', label: 'Decline', variant: 'subtle' },
   ],
   request: [
     { action: 'Pick up', label: 'Assign to me', variant: 'subtle' },
@@ -97,6 +109,18 @@ export const REASON_COPY = {
   },
 }
 
-export function getReasonCopy(action) {
-  return REASON_COPY[action] || REASON_COPY['Send Back']
+// A kind whose reason reads differently from the shared copy. Decline's
+// shared placeholder is the timesheet change's "week".
+const KIND_REASON_COPY = {
+  roster: {
+    Decline: {
+      heading: 'Decline with a reason',
+      placeholder: 'Why are the shifts staying as they are?',
+      missing: 'Say why before declining this.',
+    },
+  },
+}
+
+export function getReasonCopy(action, kind = '') {
+  return KIND_REASON_COPY[kind]?.[action] || REASON_COPY[action] || REASON_COPY['Send Back']
 }

@@ -121,6 +121,17 @@ describe('resolveStatus', () => {
     })
   })
 
+  it('words a roster request: Returned is a send-back, Declined is final', () => {
+    expect(KINDS).toContain('roster')
+    expect(resolveStatus({ kind: 'roster', status: 'Pending' })).toEqual({
+      label: 'Waiting for HR',
+      toneClass: TONE.waiting,
+    })
+    expect(resolveStatus({ kind: 'roster', status: 'Returned' }).label).toBe('Sent back')
+    expect(resolveStatus({ kind: 'roster', status: 'Declined' }).label).toBe('Declined')
+    expect(resolveStatus({ kind: 'roster', status: 'Approved' }).toneClass).toBe(TONE.done)
+  })
+
   it('words request statuses by audience', () => {
     // Waiting on employee
     expect(

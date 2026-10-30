@@ -53,6 +53,14 @@ describe('laneSections', () => {
     expect(lane.sections.map((section) => section.key)).toEqual(['change', 'flagged', 'normal'])
     expect(lane.sections[0].rows.map((r) => r.name)).toEqual(['c'])
   })
+
+  it('puts a roster request with the change requests, never in Looks normal', () => {
+    const [lane] = laneSections([row('hr', 'n'), row('hr', 'r', { kind: 'roster' })])
+    expect(lane.key).toBe('hr')
+    expect(lane.sections.map((section) => section.key)).toEqual(['change', 'normal'])
+    expect(lane.sections[0].rows.map((r) => r.name)).toEqual(['r'])
+    expect(isBatchable({ kind: 'roster', needs_look: false })).toBe(false)
+  })
 })
 
 // Plan 2026-10-31-001 U13 (R22, R23): a manager-stage leave HR sees is never

@@ -8,7 +8,7 @@ import { ensureBootstrap, session } from './lib/session'
 //   ---------------------------------------------------------------------
 //   /leave           /leave/:name                      Leave Application id
 //   /requests        /requests/:name                   HR Request id
-//   /approvals       /approvals/:kind/:name            kind = leave|timesheet|attendance|request
+//   /approvals       /approvals/:kind/:name            kind = leave|timesheet|attendance|change|roster
 //   /timesheet       /timesheet/:weekStart             Monday, YYYY-MM-DD
 //   /payslips        /payslips/:name                   Salary Slip id (P3-U2)
 //   /attendance      /attendance/requests/:name        Attendance Request id (P3-U6)
@@ -182,7 +182,7 @@ const routes = [
     component: () => import('@/pages/Approvals.vue'),
   },
   {
-    path: '/approvals/:kind(leave|timesheet|attendance|change)/:name',
+    path: '/approvals/:kind(leave|timesheet|attendance|change|roster)/:name',
     name: 'ApprovalDetail',
     meta: { title: 'Approvals' },
     component: () => import('@/pages/Approvals.vue'),

@@ -6,12 +6,17 @@ import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
 import RosterShiftSheet from '@/components/RosterShiftSheet.vue'
+import RosterDraftBar from '@/components/RosterDraftBar.vue'
+import RosterRequestStrip from '@/components/RosterRequestStrip.vue'
 import SearchField from '@/components/SearchField.vue'
 import SegmentedChips from '@/components/SegmentedChips.vue'
 import { session } from '@/lib/session'
 import { addCalendarDays, dateTileParts, formatDateRange, mondayOf, today } from '@/lib/dates'
 import { offFirst } from '@/lib/lists'
 import { isEmptyWeek, leaveLabel, rosterModes, shiftHours } from '@/lib/roster'
+import { cellProposal, checkProposal, coverageFromRows, draftOps, submittedMessage } from '@/lib/rosterRequests'
+import { FALLBACK_ERROR, toPlainMessage } from '@/lib/errorMap'
+import { notify } from '@/lib/notify'
 import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
 import { WEEKDAYS } from '@/lib/week'
 
@@ -147,7 +152,16 @@ function cellLabel(row, cell, index) {
   if (leave) parts.push(`on leave: ${leave}`)
   const off = offLabel(days.value[index] || {}, row)
   if (off) parts.push(off)
+  const proposal = proposalAt(row, cell)
+  if (proposal) parts.push(proposal.label)
   return parts.join(', ')
+}
+
+/** What pressing a cell does, appended to its accessible name. */
+function cellAction(row, cell) {
+  if (canEdit.value) return cell.assignment ? '. Edit shift' : '. Assign a shift'
+  if (!proposable(row)) return ''
+  return proposalAt(row, cell) ? '. Edit or remove the proposed change' : '. Propose a change'
 }
 
 function tile(date) {
@@ -169,6 +183,170 @@ const dayRows = computed(() =>
 // `can_edit` is the server's answer (HR mode plus Shift Assignment create);
 // without it no cell is a button, so an employee has nothing to press.
 const canEdit = computed(() => !!roster.data?.can_edit)
+
+// --- a manager's roster request (plan 2026-10-31-001 U10 / R10-R12, R17) ---
+
+// The server's answer: team mode with direct reports. The manager's own row
+// is never proposable, nor a row already in a Pending request (R12).
+const canRequest = computed(() => mode.value === 'team' && !!roster.data?.can_request)
+const myEmployee = computed(() => session.employee?.name || '')
+function proposable(row) {
+  return canRequest.value && row.employee !== myEmployee.value && !row.pending_request
+}
+function clickable(row) {
+  return canEdit.value || proposable(row)
+}
+
+// The saved draft as the server last answered it (`get_roster_week` or a
+// save): its rows, and `preview`, the simulated coverage the grid overlays.
+const draft = ref(null)
+watch(
+  () => roster.data,
+  (data) => {
+    if (data?.can_request) draft.value = data.draft || null
+  },
+)
+const ops = computed(() => draftOps(draft.value))
+const draftRows = computed(() => draft.value?.rows || [])
+const proposals = computed(() => {
+  const map = {}
+  if (!canRequest.value || !ops.value.length) return map
+  for (const row of serverRows.value) {
+    for (const cell of row.cells) {
+      const proposal = cellProposal(ops.value, draft.value?.preview, row.employee, cell)
+      if (proposal) map[`${row.employee}|${cell.date}`] = proposal
+    }
+  }
+  return map
+})
+function proposalAt(row, cell) {
+  return proposals.value[`${row.employee}|${cell.date}`] || null
+}
+
+const note = ref('')
+watch(
+  () => draft.value?.name,
+  () => {
+    note.value = draft.value?.note || ''
+  },
+)
+
+const saveCall = createResource({ url: 'helixhr.api.save_roster_draft', method: 'POST' })
+const submitCall = createResource({ url: 'helixhr.api.submit_roster_change', method: 'POST' })
+const saving = ref(false)
+const saveError = ref('')
+const submitting = ref(false)
+const submitError = ref('')
+
+function plainError(e) {
+  return toPlainMessage(e?.messages?.[0] ?? e?.message) || FALLBACK_ERROR
+}
+
+/** Replace the draft with `next`. Throws an Error carrying the server's
+ * sentence, which names the person, so the caller shows it where it was
+ * asked for: the sheet, or the bar. */
+let saveInflight = null
+async function saveOps(next) {
+  saving.value = true
+  const call = saveCall.submit({ rows: JSON.stringify(next), note: note.value })
+  saveInflight = call
+  try {
+    const result = await call
+    draft.value = result?.draft || null
+    saveError.value = ''
+    submitError.value = ''
+  } catch (e) {
+    throw new Error(plainError(e))
+  } finally {
+    if (saveInflight === call) {
+      saveInflight = null
+      saving.value = false
+    }
+  }
+}
+
+/** The sheet's Add / Save: the simulator first, against what this week shows,
+ * so an obvious refusal costs no round trip; then the server's own check. */
+async function proposeChange(op, index) {
+  const next = [...ops.value]
+  const at = index == null ? next.length : index
+  next[at] = op
+  const name = serverRows.value.find((row) => row.employee === op.employee)?.employee_name
+  const problem = checkProposal({
+    ops: next,
+    index: at,
+    coverage: coverageFromRows(serverRows.value),
+    today: roster.data?.today,
+    name,
+  })
+  if (problem) throw new Error(problem)
+  await saveOps(next)
+}
+
+function removeChange(index) {
+  return saveOps(ops.value.filter((_, position) => position !== index))
+}
+
+async function fromBar(write) {
+  saveError.value = ''
+  try {
+    await write()
+  } catch (e) {
+    saveError.value = e.message
+  }
+}
+
+function saveNote() {
+  if (!draftRows.value.length || note.value === (draft.value?.note || '')) return
+  return fromBar(() => saveOps(ops.value))
+}
+
+const recent = createResource({ url: 'helixhr.api.get_roster_draft' })
+watch(canRequest, (value) => value && recent.fetch(), { immediate: true })
+
+/** The grid and the strip again, without the skeleton. */
+async function reloadQuietly() {
+  refreshing.value = true
+  try {
+    await Promise.all([roster.reload(), canRequest.value ? recent.reload() : null])
+  } catch {
+    // AsyncState shows a failed load.
+  } finally {
+    refreshing.value = false
+  }
+}
+
+async function submitDraft() {
+  if (submitting.value) return
+  submitting.value = true
+  submitError.value = ''
+  saveError.value = ''
+  try {
+    // A note saved on blur may still be in flight; the submit reads the
+    // draft it writes. Its own failure is already on the bar.
+    await Promise.resolve(saveInflight).catch(() => {})
+    const result = await submitCall.submit({ note: note.value })
+    draft.value = null
+    note.value = ''
+    notify.success(submittedMessage(result?.names))
+  } catch (e) {
+    submitError.value = plainError(e)
+    return
+  } finally {
+    submitting.value = false
+  }
+  await reloadQuietly()
+}
+
+function onRequestsChanged() {
+  return reloadQuietly()
+}
+
+// R19 / R12: who already has a change waiting for HR, by name.
+const pendingNames = computed(() =>
+  serverRows.value.filter((row) => row.pending_request).map((row) => row.employee_name),
+)
+
 const sheetOpen = ref(false)
 const selected = ref(null)
 // The `data-cell-key` of the control that opened the sheet, so focus goes
@@ -176,8 +354,14 @@ const selected = ref(null)
 let returnKey = ''
 
 function openCell(row, cell, layout) {
+  if (!clickable(row)) return
   returnKey = `${row.employee}|${cell.date}|${layout}`
-  selected.value = { person: { employee: row.employee, employee_name: row.employee_name }, cell }
+  const proposal = canRequest.value ? proposalAt(row, cell) : null
+  selected.value = {
+    person: { employee: row.employee, employee_name: row.employee_name },
+    cell,
+    proposal: proposal ? { ...proposal, op: ops.value[proposal.index] || null } : null,
+  }
   sheetOpen.value = true
 }
 
@@ -283,6 +467,14 @@ const scopeLine = computed(() => {
       </button>
     </div>
 
+    <!-- Plan 2026-10-31-001 U10: the manager's recent requests, above the
+         grid they change. -->
+    <RosterRequestStrip
+      v-if="mode === 'team'"
+      :requests="recent.data?.recent || []"
+      @changed="onRequestsChanged"
+    />
+
     <div
       v-if="mode === 'hr'"
       class="mb-4 max-w-sm"
@@ -360,6 +552,24 @@ const scopeLine = computed(() => {
         >
           Nobody is off this week.
         </p>
+        <p
+          v-if="canRequest"
+          class="mb-3 text-sm text-ink-gray-6"
+        >
+          Choose a day on someone's row to propose a shift change. Changes go to HR for approval
+          and start tomorrow at the earliest.
+        </p>
+        <!-- R12: one Pending request per person, so their cells take no new
+             proposal until HR decides or the request is withdrawn. -->
+        <p
+          v-if="canRequest && pendingNames.length"
+          class="mb-3 text-sm text-ink-gray-7"
+          data-testid="roster-pending-note"
+        >
+          A change for {{ pendingNames.join(', ') }} is already waiting for HR, so you can't propose
+          more for {{ pendingNames.length === 1 ? 'them' : 'those people' }} until HR decides or you
+          withdraw it.
+        </p>
       </template>
 
       <!-- Desktop: the week across. Scrolls inside its own container, never
@@ -419,8 +629,17 @@ const scopeLine = computed(() => {
                   :initials="row.initials"
                   :size="32"
                 />
-                <span class="min-w-0 truncate text-sm font-medium text-ink-gray-9">
-                  {{ row.employee_name }}
+                <span class="min-w-0">
+                  <span class="block truncate text-sm font-medium text-ink-gray-9">
+                    {{ row.employee_name }}
+                  </span>
+                  <!-- R19: a manager has asked HR to change this person's shifts. -->
+                  <span
+                    v-if="row.pending_request"
+                    class="mt-0.5 inline-block rounded-full bg-surface-amber-1 px-2 py-0.5 text-xs font-medium text-ink-amber-3"
+                    data-testid="roster-pending-pill"
+                    :title="mode === 'team' ? 'Waiting for HR. Nothing new can be proposed until HR decides.' : 'A manager has asked to change these shifts. It is waiting in Approvals.'"
+                  >Change pending</span>
                 </span>
               </div>
 
@@ -432,17 +651,22 @@ const scopeLine = computed(() => {
                 data-testid="roster-cell"
                 :data-date="cell.date"
               >
+                <!-- Plan 2026-10-31-001 U10: a proposed day carries a dashed
+                     edge *and* the words "Proposed: <shift>" -- never the
+                     outline alone. -->
                 <component
-                  :is="canEdit ? 'button' : 'div'"
-                  :type="canEdit ? 'button' : undefined"
-                  class="flex h-full min-h-14 w-full flex-col justify-center gap-0.5 rounded px-2 py-1.5 text-left"
+                  :is="clickable(row) ? 'button' : 'div'"
+                  :type="clickable(row) ? 'button' : undefined"
+                  class="flex h-full min-h-14 w-full flex-col justify-center gap-0.5 rounded border-2 px-2 py-1.5 text-left"
                   :class="[
                     isOff(days[index] || {}, row) ? 'bg-surface-gray-3' : 'bg-surface-gray-1',
-                    canEdit && 'cursor-pointer hover:ring-1 hover:ring-outline-gray-3',
+                    clickable(row) && 'cursor-pointer hover:ring-1 hover:ring-outline-gray-3',
+                    proposalAt(row, cell) ? 'border-dashed border-[color:var(--ink-gray-7)]' : 'border-transparent',
                   ]"
-                  :aria-label="cellLabel(row, cell, index) + (canEdit ? (cell.assignment ? '. Edit shift' : '. Assign a shift') : '')"
+                  :aria-label="cellLabel(row, cell, index) + cellAction(row, cell)"
                   :data-cell-key="`${row.employee}|${cell.date}|grid`"
-                  @click="canEdit && openCell(row, cell, 'grid')"
+                  :data-proposed="proposalAt(row, cell) ? '' : undefined"
+                  @click="openCell(row, cell, 'grid')"
                 >
                   <template v-if="cell.shift_type">
                     <span
@@ -465,6 +689,11 @@ const scopeLine = computed(() => {
                     v-if="leaveLabel(row, cell.date)"
                     class="truncate rounded bg-surface-green-2 px-1.5 text-xs font-medium text-ink-green-3"
                   >{{ leaveLabel(row, cell.date) }}</span>
+                  <span
+                    v-if="proposalAt(row, cell)"
+                    class="truncate text-xs font-bold text-ink-gray-9"
+                    :title="proposalAt(row, cell).label"
+                  >{{ proposalAt(row, cell).label }}</span>
                 </component>
               </div>
             </div>
@@ -504,7 +733,7 @@ const scopeLine = computed(() => {
               <li
                 v-for="{ row, cell } in day.people"
                 :key="row.employee"
-                class="flex min-w-0 items-center gap-2"
+                class="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1"
               >
                 <!-- HR-21: your own avatar on every day says nothing. -->
                 <Avatar
@@ -539,6 +768,10 @@ const scopeLine = computed(() => {
                   v-if="leaveLabel(row, day.date)"
                   class="shrink-0 rounded-full bg-surface-green-2 px-2 py-0.5 text-xs font-medium text-ink-green-3"
                 >{{ leaveLabel(row, day.date) }}</span>
+                <span
+                  v-if="row.pending_request"
+                  class="shrink-0 rounded-full bg-surface-amber-1 px-2 py-0.5 text-xs font-medium text-ink-amber-3"
+                >Change pending</span>
                 <button
                   v-if="canEdit"
                   type="button"
@@ -548,6 +781,21 @@ const scopeLine = computed(() => {
                   @click="openCell(row, cell, 'list')"
                 >
                   {{ cell.assignment ? 'Edit' : 'Assign' }}
+                </button>
+                <button
+                  v-else-if="proposable(row)"
+                  type="button"
+                  class="-my-2 inline-flex min-h-11 shrink-0 cursor-pointer items-center rounded px-1 text-sm font-medium text-ink-blue-link underline underline-offset-2"
+                  :class="proposalAt(row, cell) ? 'border-2 border-dashed border-[color:var(--ink-gray-7)] no-underline' : ''"
+                  :aria-label="
+                    proposalAt(row, cell)
+                      ? `${proposalAt(row, cell).label}. Edit or remove ${row.employee_name}'s proposed change on ${day.weekday}`
+                      : `Propose a change to ${row.employee_name}'s shift on ${day.weekday}`
+                  "
+                  :data-cell-key="`${row.employee}|${cell.date}|list`"
+                  @click="openCell(row, cell, 'list')"
+                >
+                  {{ proposalAt(row, cell) ? proposalAt(row, cell).label : 'Propose' }}
                 </button>
               </li>
             </ul>
@@ -602,6 +850,16 @@ const scopeLine = computed(() => {
           />
           Weekend or holiday
         </span>
+        <span
+          v-if="Object.keys(proposals).length"
+          class="inline-flex items-center gap-1.5"
+        >
+          <span
+            class="h-3 w-6 rounded border-2 border-dashed border-[color:var(--ink-gray-7)]"
+            aria-hidden="true"
+          />
+          Proposed in your draft, not yet approved
+        </span>
         <span v-if="showsDefault">“(default)” is the shift used when none is assigned.</span>
       </div>
 
@@ -616,13 +874,32 @@ const scopeLine = computed(() => {
     </AsyncState>
 
     <RosterShiftSheet
-      v-if="canEdit"
+      v-if="canEdit || canRequest"
       v-model="sheetOpen"
+      :mode="canEdit ? 'hr' : 'propose'"
       :person="selected?.person"
       :cell="selected?.cell"
+      :proposal="selected?.proposal"
       :shift-types="roster.data?.shift_types || []"
       :today="roster.data?.today || ''"
+      :propose-change="proposeChange"
+      :remove-change="removeChange"
       @changed="onChanged"
+    />
+
+    <RosterDraftBar
+      v-if="canRequest && draftRows.length"
+      v-model:note="note"
+      :rows="draftRows"
+      :problems="draft?.problems || []"
+      :saving="saving"
+      :save-error="saveError"
+      :submitting="submitting"
+      :submit-error="submitError"
+      @remove="(index) => fromBar(() => removeChange(index))"
+      @discard="fromBar(() => saveOps([]))"
+      @submit="submitDraft"
+      @save-note="saveNote"
     />
   </div>
 </template>

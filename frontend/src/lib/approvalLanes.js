@@ -78,26 +78,29 @@ function laneOf(row) {
 
 /** Plan 2026-10-04-003 U7 (R13, R19): inside a lane, change requests (never
  * batchable) first, then the rows the server flagged, then everything else.
- * Empty sub-sections are dropped. */
+ * Empty sub-sections are dropped. Plan 2026-10-31-001 U10: a roster request
+ * is a change request too -- one decision at a time. */
+const CHANGE_KINDS = ['change', 'roster']
+
 export function laneSubsections(rows) {
   return [
     {
       key: 'change',
       title: 'Change requests',
       note: 'One decision at a time, never in bulk.',
-      rows: rows.filter((row) => row.kind === 'change'),
+      rows: rows.filter((row) => CHANGE_KINDS.includes(row.kind)),
     },
     {
       key: 'flagged',
       title: 'Needs a look',
       note: 'Something on these rows is unusual. Decide each one on its own evidence.',
-      rows: rows.filter((row) => row.kind !== 'change' && row.needs_look),
+      rows: rows.filter((row) => !CHANGE_KINDS.includes(row.kind) && row.needs_look),
     },
     {
       key: 'normal',
       title: 'Looks normal',
       note: '',
-      rows: rows.filter((row) => row.kind !== 'change' && !row.needs_look),
+      rows: rows.filter((row) => !CHANGE_KINDS.includes(row.kind) && !row.needs_look),
     },
   ].filter((section) => section.rows.length)
 }
