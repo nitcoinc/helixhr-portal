@@ -1365,6 +1365,26 @@ def clear_open_leave(employee, leave_type="Casual Leave"):
 		pluck="name",
 	):
 		frappe.delete_doc("Leave Application", name, force=True, ignore_permissions=True)
+	# HRMS marks Attendance for every day of an approved leave and only
+	# cancels it with the leave. Suites then force-delete the leave, Frappe
+	# reverts the naming series, and the next leave reuses the name -- so a
+	# plain delete (the portal's withdraw) finds the orphan and refuses.
+	# Site-wide: the series is shared, so any employee's orphan can collide.
+	attendance = frappe.qb.DocType("Attendance")
+	leave = frappe.qb.DocType("Leave Application")
+	orphans = (
+		frappe.qb.from_(attendance)
+		.left_join(leave)
+		.on(leave.name == attendance.leave_application)
+		.select(attendance.name)
+		.where(
+			attendance.leave_application.isnotnull()
+			& (attendance.leave_application != "")
+			& leave.name.isnull()
+		)
+	).run(pluck=True)
+	if orphans:
+		frappe.db.delete("Attendance", {"name": ["in", orphans]})
 
 
 def ensure_leave_allocation(employee, leave_type, leaves):

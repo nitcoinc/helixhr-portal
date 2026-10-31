@@ -54,13 +54,15 @@ class _Request:
 	build an absolute URL from (None, so `get_url` falls back to the site
 	config the way it does in a background job), and `path` -- which the
 	email footer's Jinja globals read while queueing the notices these
-	writes trigger (seen on frappe 16.36)."""
+	writes trigger (seen on frappe 16.36). `headers` is the raw-host
+	fallback `get_request_host` reads when `host` is empty (frappe 16.54)."""
 
 	host = None
 	path = "/"
 
 	def __init__(self, files):
 		self.files = files
+		self.headers = {}
 
 
 # One real, one-page PDF, produced once by pypdf. The P2-U9 upload policy

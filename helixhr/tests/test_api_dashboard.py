@@ -11,6 +11,7 @@ from helixhr.tests.utils import (
 	ensure_test_company,
 	make_celebration_employee,
 	make_test_employee_and_manager,
+	make_test_user,
 	suspend_chart_of_account_fixtures,
 )
 
@@ -28,7 +29,11 @@ class TestHelixHRDashboard(IntegrationTestCase):
 		self.assertEqual(result["employee"]["manager_name"], frappe.db.get_value("Employee", self.manager_name, "employee_name"))
 
 	def test_leave_balances_matches_hrms_api_with_no_allocation(self):
-		frappe.set_user(EMPLOYEE_USER)
+		# Its own employee: the leave suites allocate to EMPLOYEE_USER's, and
+		# CI's class order decides whether they ran first.
+		user = "dashboard-no-allocation@helixhr.test"
+		make_test_user(user, ensure_test_company())
+		frappe.set_user(user)
 		result = get_dashboard()
 
 		self.assertEqual(result["leave_balances"], get_leave_balance_map())
