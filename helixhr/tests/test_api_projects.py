@@ -1424,10 +1424,10 @@ class TestAddProjectMembersDepartmentsAndCovered(IntegrationTestCase):
 		frappe.db.delete("HelixHR Project Company", {"parent": project, "parenttype": "Project"})
 		frappe.db.set_value("Project", project, {"helixhr_open_to_all": 0, "status": status})
 		if open_to is not None:
-			doc = frappe.get_doc("Project", project)
-			doc.helixhr_open_to_all = 1
-			doc.set("helixhr_open_companies", [{"company": company} for company in open_to])
-			doc.save(ignore_permissions=True)
+			from helixhr.api import set_project_open_to_all
+
+			# The rows' only writer; a document save is refused (project_validate).
+			set_project_open_to_all(project, 1, list(open_to))
 		return project
 
 	def _add(self, project, user=None, **kwargs):

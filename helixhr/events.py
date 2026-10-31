@@ -2406,10 +2406,22 @@ def project_validate(doc, method=None):
 	"Open to everyone", on any save path -- the portal refuses first, this is
 	the Desk backstop. Only the transition is refused (a new doc counts as one
 	from off), so a legacy project that is already both still saves and
-	still books; turning either flag off is always allowed."""
+	still books; turning either flag off is always allowed.
+
+	The extra open companies are written only by `set_project_open_to_all`,
+	which never saves the document, so any save that changes them (Desk's
+	read-only field is a UI hint; REST is not) is refused. A save turning
+	the flag off clears them, as the portal does, so turning it back on
+	never revives a grant nobody chose."""
+	before = doc.get_doc_before_save()
+	field = "helixhr_open_companies"
+	rows = [row.company for row in doc.get(field) or []]
+	if rows != [row.company for row in (before.get(field) or [] if before else [])]:
+		frappe.throw(_("Set the companies a project is open to from the HelixHR portal."))
+	if not cint(doc.get("helixhr_open_to_all")) and rows:
+		doc.set(field, [])
 	if not (cint(doc.get("helixhr_is_billable")) and cint(doc.get("helixhr_open_to_all"))):
 		return
-	before = doc.get_doc_before_save()
 	if not cint(before and before.get("helixhr_open_to_all")):
 		frappe.throw(_("A billable project can't be opened to everyone."))
 	if not cint(before.get("helixhr_is_billable")):

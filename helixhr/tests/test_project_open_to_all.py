@@ -417,13 +417,40 @@ class TestProjectOpenToCompanies(IntegrationTestCase):
 
 	# --- U1: the child table and the validate hook ---------------------------
 
-	def test_a_project_saved_with_two_open_company_rows_reads_both_back(self):
-		doc = frappe.get_doc("Project", self.project)
-		doc.helixhr_open_to_all = 1
-		doc.set("helixhr_open_companies", [{"company": self.b}, {"company": self.c}])
-		doc.save(ignore_permissions=True)
+	def test_two_open_company_rows_read_back_on_the_document(self):
+		self._set("Administrator", 1, [self.b, self.c])
 		doc = frappe.get_doc("Project", self.project)
 		self.assertEqual([row.company for row in doc.helixhr_open_companies], [self.b, self.c])
+
+	def test_a_document_save_changing_the_open_companies_is_refused(self):
+		"""Desk's read-only field is a UI hint; REST saves go through validate."""
+		frappe.db.set_value("Project", self.project, "helixhr_open_to_all", 1)
+		doc = frappe.get_doc("Project", self.project)
+		doc.set("helixhr_open_companies", [{"company": self.b}])
+		with self.assertRaises(frappe.ValidationError) as caught:
+			doc.save(ignore_permissions=True)
+		self.assertIn("from the HelixHR portal", str(caught.exception))
+		self.assertEqual(self._stored(self.project), [])
+
+	def test_a_document_save_turning_the_flag_off_clears_the_rows(self):
+		"""Review finding: Desk off-then-on must not revive an old grant."""
+		self._set(AB_EDITOR, 1, [self.b])
+		doc = frappe.get_doc("Project", self.project)
+		doc.helixhr_open_to_all = 0
+		doc.save(ignore_permissions=True)
+		self.assertEqual(self._stored(self.project), [])
+		doc = frappe.get_doc("Project", self.project)
+		doc.helixhr_open_to_all = 1
+		doc.save(ignore_permissions=True)
+		self.assertEqual(self._stored(self.project), [])
+		self.assertNotIn(self.project, self._bookable(B_WORKER))
+
+	def test_an_unrelated_document_save_keeps_the_rows(self):
+		self._set(AB_EDITOR, 1, [self.b])
+		doc = frappe.get_doc("Project", self.project)
+		doc.priority = "High" if doc.priority != "High" else "Low"
+		doc.save(ignore_permissions=True)
+		self.assertEqual(self._stored(self.project), [self.b])
 
 	def test_a_desk_save_turning_the_flag_on_for_a_billable_project_is_refused(self):
 		frappe.db.set_value("Project", self.project, "helixhr_is_billable", 1)
@@ -577,6 +604,26 @@ class TestProjectOpenToCompanies(IntegrationTestCase):
 			self._set(WORKER, 1, [self.b])
 		self.assertEqual(str(caught.exception), _PROJECT_NOT_FOUND)
 		self.assertEqual(self._stored(self.project), [])
+
+	def test_companies_sent_with_a_turn_off_are_ignored(self):
+		self._set(AB_EDITOR, 1, [self.b])
+		result = self._set(AB_EDITOR, 0, [self.b])
+		self.assertFalse(result["open_to_all"])
+		self.assertEqual(self._stored(self.project), [])
+
+	def test_the_switch_skips_erpnexts_project_validate(self):
+		"""Review finding: a full save re-checked legacy dates (and copied
+		template tasks, recomputed status, mailed invitations). Dates out of
+		order would refuse a document save; the switch still works."""
+		frappe.db.set_value(
+			"Project",
+			self.project,
+			{"expected_start_date": "2026-10-10", "expected_end_date": "2026-10-01"},
+		)
+		self._set(AB_EDITOR, 1, [self.b])
+		self.assertTrue(frappe.db.get_value("Project", self.project, "helixhr_open_to_all"))
+		self.assertEqual(frappe.db.get_value("Project", self.project, "status"), "Open")
+		self.assertEqual(self._stored(self.project), [self.b])
 
 	# --- U2: integration with the week save --------------------------------------
 

@@ -2499,12 +2499,15 @@ with no login by name, and reports out-of-scope ids as "not available" with no n
 `Project.helixhr_open_companies`. This is a Table MultiSelect of the `HelixHR Project Company`
 child table. The project's own company is always covered and never stored.
 - `_my_project_names` adds Open, flagged projects whose table holds the user's company.
-- Only `set_project_open_to_all` writes the table. Desk shows it read-only.
+- Only `set_project_open_to_all` writes the table. It writes the flag and the rows directly under
+  a row lock, never as a document save, so ERPNext's Project validate (template tasks, status from
+  progress, invitation mail, date checks) does not run on a toggle. Desk shows the table read-only,
+  and `events.project_validate` refuses any document save (Desk or REST) that changes it.
 - Each company must be inside the editor's project write scope.
 - While on, an edit replaces only the rows the editor's scope covers. Rows outside it are kept, and
   `get_project` reports them as `fixed_open_companies`.
 - Turning the switch off clears every row, so a later turn-on never brings back a grant nobody
-  chose.
+  chose. A Desk save that turns the flag off clears them too.
 - Hours from other companies land on the project. ERPNext's `total_costing_amount` then sums each
   timesheet's base currency, so mixed-currency costing totals are an accepted limitation. Named
   members from other companies already behave the same way.

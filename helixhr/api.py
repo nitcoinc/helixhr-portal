@@ -15388,9 +15388,8 @@ def set_project_open_to_all(project, value, companies=None):
 	later turn-on starts from exactly what that editor picks: with
 	``companies`` left out, own company only. Left out while already on,
 	the rows stay as they are. A billable project is refused any turn-on
-	or edit, and may only be turned off. Saved as a document, so the
-	`project_validate` doc event and ERPNext's own validate both run;
-	``users`` is untouched, so no DocShare is added.
+	or edit, and may only be turned off. Written field-and-rows under a row
+	lock, not as a document save (see the comment below).
 
 	Returns ``open_to_all``, ``open_companies`` (`_covered_companies`),
 	``stored_open_companies`` (the saved rows) and ``fixed_open_companies``
@@ -15400,9 +15399,20 @@ def set_project_open_to_all(project, value, companies=None):
 	open_to_all = cint(value) == 1
 	picked = None if companies is None else _string_list(companies, _("Companies"))
 
-	doc = frappe.get_doc("Project", project, for_update=True)
+	# Not a document save: ERPNext's Project.validate would copy template
+	# tasks, recompute status from task progress, mail pending invitations
+	# and re-check legacy dates -- none of it this switch's business. The
+	# row lock serialises two editors; `project_validate` keeps any other
+	# save path off the table.
+	doc = frappe.db.get_value(
+		"Project",
+		project,
+		["company", "status", "helixhr_is_billable", "helixhr_open_to_all"],
+		as_dict=True,
+		for_update=True,
+	)
 	was_open = bool(cint(doc.helixhr_open_to_all))
-	stored = [row.company for row in doc.get(_OPEN_COMPANIES_FIELD)]
+	stored = _project_open_rows(project)
 	if not open_to_all:
 		rows = []
 	else:
@@ -15418,9 +15428,24 @@ def set_project_open_to_all(project, value, companies=None):
 			rows = [*kept, *picked]
 		rows = [company for company in dict.fromkeys(rows) if company != doc.company]
 
+	frappe.db.delete(
+		_OPEN_COMPANY_DOCTYPE,
+		{"parent": project, "parenttype": "Project", "parentfield": _OPEN_COMPANIES_FIELD},
+	)
+	for idx, company in enumerate(rows, start=1):
+		frappe.get_doc(
+			{
+				"doctype": _OPEN_COMPANY_DOCTYPE,
+				"parent": project,
+				"parenttype": "Project",
+				"parentfield": _OPEN_COMPANIES_FIELD,
+				"idx": idx,
+				"company": company,
+			}
+		).db_insert()
+	frappe.db.set_value("Project", project, "helixhr_open_to_all", int(open_to_all))
+	frappe.clear_document_cache("Project", project)
 	doc.helixhr_open_to_all = int(open_to_all)
-	doc.set(_OPEN_COMPANIES_FIELD, [{"company": company} for company in rows])
-	doc.save(ignore_permissions=True)
 	return {
 		"open_to_all": open_to_all,
 		"open_companies": _covered_companies(doc, rows),
