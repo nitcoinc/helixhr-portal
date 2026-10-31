@@ -155,6 +155,24 @@ class TestHelixHRDashboardWeek(IntegrationTestCase):
 		self.assertEqual(row["action"], "View")
 		self.assertEqual(row["id"], f"leave_waiting:{name}")
 
+	def test_waiting_leave_names_the_manager_and_says_hr_only_in_the_hr_stage(self):
+		"""Plan 2026-10-31-001 R26: "waiting for HR" is the HR stage's words
+		alone; a manager-stage leave names the manager it waits on."""
+		monday, _ = get_week_bounds(today())
+		with_manager = self._make_leave(add_days(monday, 1), add_days(monday, 1), status="Open", submit=False)
+		with_hr = self._make_leave(add_days(monday, 2), add_days(monday, 2), status="Open", submit=False)
+		frappe.set_user("Administrator")
+		frappe.db.set_value("Leave Application", with_hr, "helixhr_stage", "HR", update_modified=False)
+		manager = frappe.db.get_value("Employee", self.manager_name, "employee_name")
+		frappe.set_user(EMPLOYEE_USER)
+
+		rows = {row["reference_name"]: row for row in get_dashboard()["needs_you"]["waiting"]}
+
+		self.assertEqual(rows[with_manager]["title"], f"Casual Leave waiting for {manager}")
+		self.assertEqual(rows[with_manager]["owner"], "manager")
+		self.assertEqual(rows[with_hr]["title"], "Casual Leave waiting for HR")
+		self.assertEqual(rows[with_hr]["owner"], "hr")
+
 	def test_a_sent_back_timesheet_leads_the_queue_and_carries_the_reason(self):
 		monday, _ = get_week_bounds(today())
 		self._make_leave(add_days(monday, 1), add_days(monday, 1), status="Open", submit=False)

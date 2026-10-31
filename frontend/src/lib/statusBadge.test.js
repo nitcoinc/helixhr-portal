@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { KINDS, TONE, resolveStatus } from './statusBadge'
+import { KINDS, TONE, decidedByLine, resolveStatus } from './statusBadge'
 
 // P3-U1 scenario 5: the first unit test for StatusBadge. The component is a
 // one-line renderer over `resolveStatus`, so the mapping is what is held.
@@ -121,6 +121,17 @@ describe('resolveStatus', () => {
     })
   })
 
+  it('words a roster request: Returned is a send-back, Declined is final', () => {
+    expect(KINDS).toContain('roster')
+    expect(resolveStatus({ kind: 'roster', status: 'Pending' })).toEqual({
+      label: 'Waiting for HR',
+      toneClass: TONE.waiting,
+    })
+    expect(resolveStatus({ kind: 'roster', status: 'Returned' }).label).toBe('Sent back')
+    expect(resolveStatus({ kind: 'roster', status: 'Declined' }).label).toBe('Declined')
+    expect(resolveStatus({ kind: 'roster', status: 'Approved' }).toneClass).toBe(TONE.done)
+  })
+
   it('words request statuses by audience', () => {
     // Waiting on employee
     expect(
@@ -159,5 +170,28 @@ describe('resolveStatus', () => {
     expect(
       resolveStatus({ kind: 'request', status: 'In Progress', audience: 'employee' }).label,
     ).toBe('In progress')
+  })
+})
+
+// Plan 2026-10-31-001 U13 (R25): the decider, from the stamp alone.
+describe('decidedByLine', () => {
+  it('names the decider of an approved or rejected leave', () => {
+    expect(decidedByLine({ state: 'approved', decided_by_name: 'Arjun Mehta', decided_by_hr: false })).toBe(
+      'Approved by Arjun Mehta',
+    )
+    expect(decidedByLine({ state: 'rejected', decided_by_name: 'Ananya Rao', decided_by_hr: true })).toBe(
+      'Rejected by Ananya Rao (HR)',
+    )
+  })
+
+  it('says nothing for an unstamped decision, never the approver', () => {
+    expect(decidedByLine({ state: 'approved', decided_by_name: null, approver_name: 'Arjun Mehta' })).toBe('')
+  })
+
+  it('says nothing for a leave still open, sent back or cancelled', () => {
+    for (const state of ['open', 'sent_back', 'cancelled', 'waiting_for_hr']) {
+      expect(decidedByLine({ state, decided_by_name: 'Arjun Mehta' })).toBe('')
+    }
+    expect(decidedByLine(null)).toBe('')
   })
 })

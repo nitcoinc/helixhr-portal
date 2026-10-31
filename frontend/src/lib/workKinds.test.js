@@ -34,6 +34,15 @@ describe('workKinds', () => {
       expect(getKindTag('change')).toEqual({ label: 'Timesheet change', icon: 'timesheetChange' })
       expect(getKindTag('leave')).toEqual({ label: 'Leave', icon: 'leave' })
       expect(getKindTag('attendance')).toEqual({ label: 'Attendance', icon: 'attendance' })
+      expect(getKindTag({ kind: 'roster' })).toEqual({ label: 'Roster change', icon: 'calendarClock' })
+    })
+
+    it('offers HR the three roster decisions in order', () => {
+      expect(getActionButtons('roster', ['Decline', 'Send Back', 'Approve']).map((b) => b.label)).toEqual([
+        'Approve',
+        'Send back',
+        'Decline',
+      ])
     })
   })
 
@@ -71,6 +80,11 @@ describe('workKinds', () => {
       expect(getReasonCopy('Decline').heading).toBe('Decline with a reason')
       expect(getReasonCopy('Need info').heading).toBe('Ask a question')
       expect(getReasonCopy('Reject').heading).toBe('Reject with a reason')
+    })
+
+    it('words a roster Decline about shifts, not a week', () => {
+      expect(getReasonCopy('Decline', 'roster').placeholder).toBe('Why are the shifts staying as they are?')
+      expect(getReasonCopy('Send Back', 'roster')).toEqual(getReasonCopy('Send Back'))
     })
 
     it('falls back to Send Back copy for unknown action', () => {

@@ -7,11 +7,13 @@ from frappe.utils import add_days, formatdate, getdate, today
 from helixhr.api import (
 	_act_on_leave_application,
 	_assert_may_act_on,
+	_leave_approver_names,
 	act_on_approval,
 	apply_for_leave,
 	get_approval_detail,
 	get_leave_day_count,
 	get_leave_form_context,
+	get_my_approvals,
 	get_my_leave,
 	get_my_leave_detail,
 	withdraw_my_leave,
@@ -27,6 +29,7 @@ from helixhr.tests.utils import (
 	ensure_leave_approver_role,
 	leave_rules,
 	make_test_employee_and_manager,
+	make_test_hr_manager_employee,
 )
 
 
@@ -970,6 +973,184 @@ class TestLeaveStageAndOutcomes(IntegrationTestCase):
 
 		withdraw_my_leave(mine["name"])
 		self.assertFalse(frappe.db.exists("Leave Application", mine["name"]))
+
+
+class TestLeaveDecider(IntegrationTestCase):
+	"""Plan 2026-10-31-001 U11 (R24, R25, R27, KTD14). Every final decision
+	stamps `helixhr_decided_by` -- portal or Desk -- and the receipt and the
+	employee's view read the stamp, never the approver.
+
+	Dates: offsets 196-206, clear of the other leave classes in this module.
+	"""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		frappe.db.set_value("Employee", self.employee_name, "reports_to", self.manager_name)
+		frappe.db.set_value("Employee", self.employee_name, "leave_approver", MANAGER_USER)
+		ensure_leave_approver_role(MANAGER_USER)
+		self.company = frappe.db.get_value("Employee", self.employee_name, "company")
+		ensure_holiday_list_assignment(self.company)
+		ensure_leave_allocation(self.employee_name, "Casual Leave", 30)
+		self.hr_employee, self.hr_user = make_test_hr_manager_employee()
+		clear_open_leave(self.employee_name)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _open_leave(self, offset):
+		frappe.set_user("Administrator")
+		date = add_days(today(), offset)
+		for name in frappe.get_all(
+			"Leave Application",
+			filters={
+				"employee": self.employee_name,
+				"from_date": ["<=", str(date)],
+				"to_date": [">=", str(date)],
+			},
+			pluck="name",
+		):
+			self._remove(name)
+		frappe.set_user(EMPLOYEE_USER)
+		name = apply_for_leave(leave_type="Casual Leave", from_date=date, to_date=date)["name"]
+		frappe.set_user("Administrator")
+		# Tests own their rows: nothing rolls back between methods here.
+		self.addCleanup(self._remove, name)
+		return name
+
+	def _remove(self, name):
+		frappe.set_user("Administrator")
+		if not frappe.db.exists("Leave Application", name):
+			return
+		if frappe.db.get_value("Leave Application", name, "docstatus") == 1:
+			frappe.get_doc("Leave Application", name).cancel()
+		frappe.delete_doc("Leave Application", name, force=True, ignore_permissions=True)
+
+	def _act(self, user, name, action, **extra):
+		frappe.set_user(user)
+		try:
+			return act_on_approval("Leave Application", name, action, **extra, **_token(name))
+		finally:
+			frappe.set_user("Administrator")
+
+	def _stamp(self, name):
+		return frappe.db.get_value(
+			"Leave Application", name, ["helixhr_decided_by", "helixhr_decided_as_hr"], as_dict=True
+		)
+
+	def _decided(self, user):
+		frappe.set_user(user)
+		try:
+			return {row["name"] for row in get_my_approvals()["decided"]}
+		finally:
+			frappe.set_user("Administrator")
+
+	def _detail(self, name):
+		frappe.set_user(EMPLOYEE_USER)
+		try:
+			return get_my_leave_detail(name)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_a_manager_approval_in_the_portal_stamps_the_manager(self):
+		leave = self._open_leave(196)
+
+		self._act(MANAGER_USER, leave, "Approve")
+
+		self.assertEqual(self._stamp(leave), {"helixhr_decided_by": MANAGER_USER, "helixhr_decided_as_hr": 0})
+		row = self._detail(leave)
+		# The same resolver as `approver_name` (Employee name first), so the
+		# decider and the approver read alike for one person.
+		self.assertEqual(row["decided_by_name"], _leave_approver_names([MANAGER_USER])[MANAGER_USER])
+		self.assertEqual(row["decided_by_name"], row["approver_name"])
+		self.assertFalse(row["decided_by_hr"])
+		self.assertIn(leave, self._decided(MANAGER_USER))
+
+	def test_hr_approves_a_manager_stage_leave_in_one_step_and_is_the_decider(self):
+		"""Not as Administrator: the portal submits as the caller, so the
+		stamp is the HR user who clicked."""
+		leave = self._open_leave(198)
+
+		frappe.set_user(self.hr_user)
+		self.assertIn("Approve", get_approval_detail("leave", leave)["actions"])
+		self._act(self.hr_user, leave, "Approve")
+
+		stored = frappe.db.get_value("Leave Application", leave, ["status", "docstatus"], as_dict=True)
+		self.assertEqual((stored.status, stored.docstatus), ("Approved", 1))
+		self.assertEqual(self._stamp(leave), {"helixhr_decided_by": self.hr_user, "helixhr_decided_as_hr": 1})
+		row = self._detail(leave)
+		self.assertEqual(row["decided_by_name"], _leave_approver_names([self.hr_user])[self.hr_user])
+		self.assertTrue(row["decided_by_hr"])
+		# The approver is still the manager; only the decider moved.
+		self.assertEqual(row["approver"], MANAGER_USER)
+
+	def test_a_decided_manager_stage_leave_is_waiting_on_nobody(self):
+		"""Review B6: the detail serves decided records too, and a leave HR
+		decided in its approver's place is no longer waiting on them."""
+		leave = self._open_leave(197)
+		frappe.set_user(self.hr_user)
+		self.assertTrue(get_approval_detail("leave", leave)["waiting_on"])
+		self._act(self.hr_user, leave, "Approve")
+
+		frappe.set_user(self.hr_user)
+		self.assertIsNone(get_approval_detail("leave", leave)["waiting_on"])
+
+	def test_a_desk_reject_by_an_hr_manager_stamps_the_hr_manager(self):
+		leave = self._open_leave(200)
+		hr_desk_user = ensure_hr_manager_user()
+
+		frappe.set_user(hr_desk_user)
+		doc = frappe.get_doc("Leave Application", leave)
+		doc.status = "Rejected"
+		doc.submit()
+		frappe.set_user("Administrator")
+
+		self.assertEqual(self._stamp(leave), {"helixhr_decided_by": hr_desk_user, "helixhr_decided_as_hr": 1})
+
+	def test_a_historical_leave_with_no_stamp_names_no_decider(self):
+		leave = self._open_leave(202)
+		self._act(MANAGER_USER, leave, "Approve")
+		frappe.db.set_value(
+			"Leave Application",
+			leave,
+			{"helixhr_decided_by": None, "helixhr_decided_as_hr": 0},
+			update_modified=False,
+		)
+
+		row = self._detail(leave)
+		self.assertIsNone(row["decided_by_name"])
+		self.assertFalse(row["decided_by_hr"])
+		# The approver still has a name; it is just not offered as the decider.
+		self.assertTrue(row["approver_name"])
+		frappe.set_user(EMPLOYEE_USER)
+		self.assertIn(leave, {app["name"] for app in get_my_leave(limit=200)["applications"]})
+		# With no stamp the receipt falls back to the approver, as before.
+		self.assertIn(leave, self._decided(MANAGER_USER))
+
+	def test_an_hr_decision_is_hrs_receipt_and_not_the_managers(self):
+		leave = self._open_leave(204)
+
+		self._act(self.hr_user, leave, "Approve")
+
+		self.assertNotIn(leave, self._decided(MANAGER_USER))
+		self.assertIn(leave, self._decided(self.hr_user))
+
+	def test_send_back_then_a_new_request_then_approve_stamps_only_the_final_decider(self):
+		"""A resend is a new application (Leave.vue's "Edit and resend"), so
+		the sent-back one stays unstamped and the manager's receipt."""
+		sent_back = self._open_leave(206)
+		self._act(MANAGER_USER, sent_back, "Send Back", comment="Pick another week")
+		self.assertEqual(self._stamp(sent_back), {"helixhr_decided_by": None, "helixhr_decided_as_hr": 0})
+
+		resent = self._open_leave(205)
+		self._act(self.hr_user, resent, "Approve")
+
+		self.assertEqual(self._stamp(sent_back)["helixhr_decided_by"], None)
+		self.assertEqual(
+			self._stamp(resent), {"helixhr_decided_by": self.hr_user, "helixhr_decided_as_hr": 1}
+		)
+		self.assertIn(sent_back, self._decided(MANAGER_USER))
+		self.assertNotIn(resent, self._decided(MANAGER_USER))
 
 
 class TestPendingAwareBalance(IntegrationTestCase):

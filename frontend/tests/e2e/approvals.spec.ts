@@ -332,20 +332,103 @@ test('HR decides a manager-stage leave the approver has sat on, tagged with why'
     },
   })
 
+  const managerName = await getValue(admin, 'Employee', { user_id: 'manager@helixhr.test' }, 'employee_name')
+
   try {
     await page.goto('/helixhr/approvals')
     const row = page.getByTestId('approvals-queue').locator(`[data-approval-name="${name}"]`)
     await expect(row).toBeVisible({ timeout: 15000 })
-    await expect(row.getByTestId('hr-chip')).toBeVisible()
-    await expect(row).toContainText('Overdue with approver')
+    // Plan 2026-10-31-001 R22: still the manager's, so it names them and is
+    // neither under the HR heading nor wearing the HR chip.
+    await expect(row.getByTestId('hr-chip')).toHaveCount(0)
+    await expect(row.getByTestId('hr-line')).toHaveText(`Overdue with ${managerName}`)
+    await expect(page.getByTestId('lane-stalled').locator(`[data-approval-name="${name}"]`)).toBeVisible()
+    await expect(page.getByTestId('lane-hr').locator(`[data-approval-name="${name}"]`)).toHaveCount(0)
 
     await row.click()
     const panel = page.getByTestId('approval-detail')
+    await expect(panel.getByTestId('decides-for')).toHaveText(`Approving here decides for ${managerName}.`, {
+      timeout: 10000,
+    })
     await panel.getByRole('button', { name: /^Approve/ }).click()
     await expect
       .poll(async () => getValue(admin, 'Leave Application', { name }, 'docstatus'), { timeout: 15000 })
       .toBe(1)
   } finally {
+    if ((await getValue(admin, 'Leave Application', { name }, 'docstatus')) === 1) {
+      await admin.post('/api/method/frappe.client.cancel', { form: { doctype: 'Leave Application', name } })
+    }
+    await admin.post('/api/method/frappe.client.delete', { form: { doctype: 'Leave Application', name } })
+    await admin.dispose()
+  }
+})
+
+/**
+ * Plan 2026-10-31-001 U13 (R22, R23, R25): a fresh manager-stage leave sits in
+ * HR's collapsed "With managers" group, naming the manager. HR approves it in
+ * one step, it leaves the group, and the employee reads that HR decided.
+ */
+test('HR approves a leave still with its manager from With managers, and the employee sees HR decided', async ({
+  page,
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'this is the HR capability shape')
+  test.setTimeout(90000)
+
+  const baseURL = process.env.BASE_URL || 'http://localhost:8080'
+  const admin = await adminContext(baseURL)
+  const managerName = await getValue(admin, 'Employee', { user_id: 'manager@helixhr.test' }, 'employee_name')
+  const hrName = await getValue(admin, 'User', { name: 'hr-manager-employee@helixhr.test' }, 'full_name')
+  // As the employee, through the portal's own method: the record is theirs
+  // to read on the Leave page, and its approver is their manager. Two weeks
+  // past the overdue test's day, so the two never overlap.
+  const employeeApi = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+  await employeeApi.post('/api/method/login', { form: { usr: EMPLOYEE, pwd: PASSWORD } })
+  const date = addDays(futureWeekday(), 14)
+  const applied = await employeeApi.post('/api/method/helixhr.api.apply_for_leave', {
+    data: { leave_type: 'Casual Leave', from_date: date, to_date: date, description: 'u13 with managers' },
+  })
+  expect(applied.ok(), await applied.text()).toBeTruthy()
+  const name = (await applied.json()).message.name
+  await employeeApi.dispose()
+
+  const employeeContext = await browser.newContext({ storageState: 'tests/.auth/employee.json' })
+  try {
+    // Counted nowhere, so it never picks the landing tab: open Leave &
+    // attendance by name.
+    await page.goto('/helixhr/approvals?view=queue')
+    const toggle = page.getByTestId('with-managers-toggle')
+    await expect(toggle).toBeVisible({ timeout: 15000 })
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+    const group = page.getByTestId('lane-with-managers')
+    const row = group.locator(`[data-approval-name="${name}"]`)
+    await expect(row).toHaveCount(0)
+
+    await toggle.click()
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+    await expect(page.locator('#approvals-with-managers')).toBeVisible()
+    await expect(row).toBeVisible()
+    await expect(row.getByTestId('hr-line')).toHaveText(`Waiting on ${managerName}`)
+    await expect(row.getByTestId('hr-chip')).toHaveCount(0)
+
+    await row.click()
+    const panel = page.getByTestId('approval-detail')
+    await expect(panel).toContainText(`Waiting on ${managerName}`, { timeout: 10000 })
+    await expect(panel.getByTestId('decides-for')).toHaveText(`Approving here decides for ${managerName}.`)
+    await panel.getByRole('button', { name: /^Approve/ }).click()
+    await expect
+      .poll(async () => getValue(admin, 'Leave Application', { name }, 'docstatus'), { timeout: 15000 })
+      .toBe(1)
+    await expect(row).toHaveCount(0, { timeout: 15000 })
+
+    // R25: the employee's own view names HR as the decider.
+    const employeePage = await employeeContext.newPage()
+    await employeePage.goto(`/helixhr/leave/${name}`)
+    await expect(
+      employeePage.locator('[data-async-state^="leave-detail"]').getByTestId('leave-decided-by'),
+    ).toHaveText(`Approved by ${hrName} (HR)`, { timeout: 15000 })
+  } finally {
+    await employeeContext.close()
     if ((await getValue(admin, 'Leave Application', { name }, 'docstatus')) === 1) {
       await admin.post('/api/method/frappe.client.cancel', { form: { doctype: 'Leave Application', name } })
     }
@@ -1175,5 +1258,112 @@ test('Approvals search finds a decision older than the receipt and leaves the ba
   } finally {
     await removeRecord(baseURL, 'Leave Application', waiting)
     await removeRecord(baseURL, 'Leave Application', old)
+  }
+})
+
+// ── Plan 2026-10-31-001 U10 ───────────────────────────────────────────────
+// A manager's roster request in HR's queue. HR changes one of its people's
+// shifts directly after it was sent; Approve then applies nothing, says so
+// (never a success), and the manager reopens and resends it.
+
+/** The Monday `weeks` after this one, as the server's weeks run. */
+function mondayAhead(weeks: number): string {
+  return seedMonday(-weeks)
+}
+
+async function seedRosterFixtures(baseURL: string) {
+  const admin = await adminContext(baseURL)
+  const seeded = await admin.post('/api/method/helixhr.tests.utils.seed_roster_fixtures')
+  expect(seeded.ok(), await seeded.text()).toBeTruthy()
+  await admin.dispose()
+}
+
+test('a roster request whose shifts moved is sent back, reopened, resent and approved', async ({
+  page,
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'hr', 'HR decides roster requests')
+  test.setTimeout(120000)
+  const baseURL = process.env.BASE_URL || 'http://localhost:8080'
+  await seedRosterFixtures(baseURL)
+  try {
+    const admin = await adminContext(baseURL)
+    const employee = await getValue(admin, 'Employee', { user_id: EMPLOYEE }, 'name')
+    const managerName = await getValue(admin, 'Employee', { user_id: MANAGER }, 'employee_name')
+    const monday = mondayAhead(1)
+    const thursday = addDays(monday, 3)
+    const saturday = addDays(monday, 5)
+
+    // The manager ends the employee's open shift next Thursday and sends it.
+    const manager = await loginAs(baseURL, MANAGER)
+    const week = await manager.get(`/api/method/helixhr.api.get_roster_week?mode=team&week_start=${monday}`)
+    const rows = (await week.json()).message.rows as { employee: string; cells: { assignment: string }[] }[]
+    const assignment = rows.find((item) => item.employee === employee)!.cells[3].assignment
+    expect(assignment).toBeTruthy()
+    const saved = await manager.post('/api/method/helixhr.api.save_roster_draft', {
+      form: { rows: JSON.stringify([{ employee, action: 'End', to_date: thursday, assignment }]) },
+    })
+    expect(saved.ok(), await saved.text()).toBeTruthy()
+    const submitted = await manager.post('/api/method/helixhr.api.submit_roster_change', { form: {} })
+    expect(submitted.ok(), await submitted.text()).toBeTruthy()
+    const name = (await submitted.json()).message.names[0] as string
+    await manager.dispose()
+
+    // HR edits that person's shift directly while the request waits.
+    const hrApi = await loginAs(baseURL, 'hr-manager-employee@helixhr.test')
+    const ended = await hrApi.post('/api/method/helixhr.api.end_shift_assignment', {
+      form: { assignment, end_date: saturday },
+    })
+    expect(ended.ok(), await ended.text()).toBeTruthy()
+    await hrApi.dispose()
+
+    await page.goto(`/helixhr/approvals/roster/${name}`)
+    const panel = page.getByTestId('approval-detail')
+    await expect(panel.getByTestId('roster-conflicts')).toContainText('changed after this request was sent', {
+      timeout: 15000,
+    })
+    // Approve is out of reach while a reason is being written.
+    await panel.getByTestId('send-back').click()
+    await expect(panel.getByTestId('approve')).toHaveCount(0)
+    await panel.getByTestId('reason-cancel').click()
+
+    await panel.getByTestId('approve').click()
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByTestId('roster-confirm-conflicts')).toBeVisible()
+    await dialog.getByTestId('accept-confirm').click()
+    await expect(page.getByTestId('toast').getByText(`Not approved — sent back to ${managerName}`)).toBeVisible({ timeout: 15000 })
+    await expect(page.getByTestId('approvals-queue').locator(`[data-approval-name="${name}"]`)).toHaveCount(0)
+    expect(await getValue(admin, 'HelixHR Roster Change', { name }, 'status')).toBe('Returned')
+
+    // The manager sees why, reopens it as their draft and sends it again.
+    const managerContext = await browser.newContext({ storageState: 'tests/.auth/manager.json' })
+    const managerPage = await managerContext.newPage()
+    await managerPage.goto('/helixhr/roster')
+    await managerPage.getByRole('button', { name: 'My team' }).click()
+    const returned = managerPage.getByTestId('roster-requests').locator('[data-testid="roster-request"][data-status="Returned"]')
+    await expect(returned.getByTestId('roster-request-reasons')).toContainText(
+      'changed after this request was sent',
+      { timeout: 15000 },
+    )
+    await returned.getByRole('button', { name: 'Reopen as draft' }).click()
+    await expect(managerPage.getByTestId('roster-draft-summary')).toHaveText('1 change for 1 person')
+    await managerPage.getByTestId('roster-submit').click()
+    await expect(managerPage.getByTestId('toast').getByText('Sent to HR for approval')).toBeVisible()
+    await expect(managerPage.getByTestId('roster-requests').locator('[data-testid="roster-request"][data-status="Pending"]')).toBeVisible()
+    await managerContext.close()
+
+    // A fresh snapshot: this time Approve applies it.
+    await page.goto(`/helixhr/approvals/roster/${name}`)
+    await expect(panel.getByTestId('roster-review')).toBeVisible({ timeout: 15000 })
+    await expect(panel.getByTestId('roster-conflicts')).toHaveCount(0)
+    await panel.getByTestId('approve').click()
+    await page.getByRole('dialog').getByTestId('accept-confirm').click()
+    await expect
+      .poll(async () => getValue(admin, 'HelixHR Roster Change', { name }, 'status'), { timeout: 15000 })
+      .toBe('Approved')
+    expect(await getValue(admin, 'Shift Assignment', { name: assignment }, 'end_date')).toBe(thursday)
+    await admin.dispose()
+  } finally {
+    await seedRosterFixtures(baseURL)
   }
 })

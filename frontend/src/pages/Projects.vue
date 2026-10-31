@@ -1,16 +1,30 @@
 <script setup>
-import Avatar from '@/components/Avatar.vue'
-import { computed, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
-import { createResource, Button, FormControl } from 'frappe-ui'
+import { computed, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import { createResource, Button, Dialog, FormControl } from 'frappe-ui'
 import PageHeader from '@/components/PageHeader.vue'
 import AsyncState from '@/components/AsyncState.vue'
 import Icon from '@/components/Icon.vue'
+import ProjectPeoplePane from '@/components/projects/ProjectPeoplePane.vue'
+import ProjectTasksPane from '@/components/projects/ProjectTasksPane.vue'
 import SearchField from '@/components/SearchField.vue'
 import SegmentedChips from '@/components/SegmentedChips.vue'
+import TabBar from '@/components/TabBar.vue'
 import { formatDate } from '@/lib/dates'
-import { fieldOptions, filterByField, sortRows } from '@/lib/lists'
-import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
+import { fieldOptions } from '@/lib/lists'
+import {
+  NO_FILTERS,
+  PROJECT_SORTS,
+  distinctValues,
+  filterProjects,
+  filtersFromQuery,
+  filtersToQuery,
+  isFiltered,
+  membersLabel,
+  showCompanyFilter,
+  sortProjects,
+} from '@/lib/projects'
+import { useIsDesktop } from '@/lib/useIsDesktop'
 
 // P7-U5 / P7-R1-R3. Administer the projects a caller can reach, per
 // `resolve_project_scope` -- a HelixHR Delivery Manager sees exactly the
@@ -25,73 +39,122 @@ import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
 const props = defineProps({
   project: { type: String, default: '' },
 })
+const route = useRoute()
 const router = useRouter()
+const isDesktop = useIsDesktop()
 
 // --- the project list ------------------------------------------------------
 //
-// `search_projects` takes no query/paging parameters (a caller's scope is
-// already small -- a company, or one person's memberships), so narrowing by
-// name is a client-side filter over the one response, not a second request
-// per keystroke.
+// Plan 2026-10-31-001 U2 (R1, R2; KTD1, KTD2). `search_projects` returns the
+// caller's whole list, so filtering and sorting run on the one response. A
+// table on desktop (People.vue's plain markup with `aria-sort`), cards on a
+// phone. The filters live in the route query, so a reload or a shared link
+// keeps them.
 const projects = createResource({
   url: 'helixhr.api.search_projects',
   auto: true,
 })
 
-const query = ref('')
 const rows = computed(() => projects.data?.projects || [])
 // Plan 2026-10-14-001 KTD4: a company access grant reads projects but never
 // changes them. Both flags mirror the gates `create_project`, `save_task`
 // and `set_project_members` enforce; hiding is only to not offer a refusal.
 const canCreate = computed(() => !!projects.data?.can_create)
 
-// Plan 2026-10-17-001 U17 (HR-15): a status filter built from the statuses
-// the list holds, a sort, and each project's member and open-task counts
-// (`search_projects` counts both). All of it client-side over the one
-// response, like the name search. The chips count the whole list, so a chip
-// does not move while the search is being typed.
-const status = ref(null)
-const statusOptions = computed(() => fieldOptions(rows.value, 'status'))
-const SORTS = [
-  { value: 'name', label: 'Name', field: 'project_name', order: 'asc' },
-  { value: 'tasks', label: 'Most open tasks', field: 'open_task_count', order: 'desc' },
-  { value: 'members', label: 'Most people', field: 'member_count', order: 'desc' },
-]
-const sortBy = ref('name')
-const manyCompanies = computed(
-  () => new Set(rows.value.map((row) => row.company).filter(Boolean)).size > 1,
-)
+const filters = reactive({ ...NO_FILTERS })
+const sameQuery = (a, b) => JSON.stringify(a) === JSON.stringify(b)
 
-const filteredRows = computed(() => {
-  const needle = query.value.trim().toLowerCase()
-  const named = needle
-    ? rows.value.filter((row) => (row.project_name || '').toLowerCase().includes(needle))
-    : rows.value
-  const picked = SORTS.find((option) => option.value === sortBy.value) || SORTS[0]
-  return sortRows(filterByField(named, 'status', status.value), picked.field, picked.order)
+// The URL is the source: a reload, Back, or the nav link to a bare
+// /projects all land here. Skipped when the two already agree, so the
+// trailing space of a half-typed search is not trimmed out of the field.
+watch(
+  () => [props.project, route.query],
+  () => {
+    if (props.project) return
+    const fromRoute = filtersFromQuery(route.query)
+    if (!sameQuery(filtersToQuery(filters), filtersToQuery(fromRoute))) Object.assign(filters, fromRoute)
+  },
+  { immediate: true },
+)
+watch(filters, () => {
+  if (props.project) return
+  const next = filtersToQuery(filters)
+  if (!sameQuery(next, filtersToQuery(filtersFromQuery(route.query)))) router.replace({ query: next })
 })
-const narrowed = computed(() => !!query.value.trim() || status.value !== null)
+
+const statusOptions = computed(() => fieldOptions(rows.value, 'status'))
+const typeOptions = computed(() => distinctValues(rows.value, 'project_type'))
+const companyOptions = computed(() => distinctValues(rows.value, 'company'))
+const manyCompanies = computed(() => showCompanyFilter(rows.value))
+const BILLABLE_OPTIONS = [
+  { value: null, label: 'All' },
+  { value: 'yes', label: 'Billable' },
+  { value: 'no', label: 'Non-billable' },
+]
+
+const sort = ref({ key: 'name', order: 'asc' })
+const SORT_LABELS = {
+  name: 'Name',
+  status: 'Status',
+  members: 'Most people',
+  tasks: 'Most open tasks',
+  end: 'Latest end date',
+}
+
+function ariaSort(key) {
+  if (sort.value.key !== key) return 'none'
+  return sort.value.order === 'desc' ? 'descending' : 'ascending'
+}
+
+function sortArrow(key) {
+  return { ascending: '↑', descending: '↓' }[ariaSort(key)] || ''
+}
+
+function toggleSort(key) {
+  const current = sort.value.key === key ? sort.value.order : null
+  sort.value = { key, order: current ? (current === 'asc' ? 'desc' : 'asc') : PROJECT_SORTS[key].first }
+}
+
+function pickSort(key) {
+  sort.value = { key, order: PROJECT_SORTS[key].first }
+}
+
+const filteredRows = computed(() => sortProjects(filterProjects(rows.value, filters), sort.value))
+const narrowed = computed(() => isFiltered({ ...filters, company: manyCompanies.value ? filters.company : null }))
+
+function clearFilters() {
+  Object.assign(filters, NO_FILTERS)
+}
 
 function projectCount(count) {
   return `${count} ${count === 1 ? 'project' : 'projects'}`
 }
 
-/** "Open · 3 people · 5 open tasks". A row just created here has no counts
- * yet, so it shows none rather than a wrong zero. */
+/** The phone card's second line: "Open · 3 people · 5 open tasks · …". */
 function projectLine(row) {
-  const parts = [row.status, manyCompanies.value ? row.company : null]
-  if (row.member_count != null) parts.push(`${row.member_count} ${row.member_count === 1 ? 'person' : 'people'}`)
-  if (row.open_task_count != null) {
-    parts.push(`${row.open_task_count} open ${row.open_task_count === 1 ? 'task' : 'tasks'}`)
-  }
-  return parts.filter(Boolean).join(' · ')
+  const members = row.open_to_all
+    ? 'Everyone'
+    : row.member_count != null
+      ? `${row.member_count} ${row.member_count === 1 ? 'person' : 'people'}`
+      : null
+  const tasks =
+    row.open_task_count != null ? `${row.open_task_count} open ${row.open_task_count === 1 ? 'task' : 'tasks'}` : null
+  return [
+    row.status,
+    manyCompanies.value ? row.company : null,
+    members,
+    tasks,
+    row.project_type,
+    row.billable ? 'Billable' : null,
+    row.expected_end_date ? `Ends ${formatDate(row.expected_end_date)}` : null,
+  ]
+    .filter(Boolean)
+    .join(' · ')
 }
-const emptyTitle = computed(() =>
-  narrowed.value ? 'Nothing matches that search' : 'No projects yet',
-)
+const emptyTitle = computed(() => (narrowed.value ? 'No projects match.' : 'No projects yet'))
 const emptyBody = computed(() =>
   narrowed.value
-    ? 'Try a different name or status.'
+    ? ''
     : canCreate.value
       ? 'Create a project to start assigning tasks and people.'
       : 'There are no projects for you to see yet.',
@@ -136,11 +199,6 @@ function startCreate() {
   createError.value = ''
 }
 
-function cancelCreate() {
-  showCreateForm.value = false
-  createError.value = ''
-}
-
 async function submitCreate() {
   createError.value = ''
   const project_name = newProjectName.value.trim()
@@ -155,16 +213,10 @@ async function submitCreate() {
       priority: newProjectPriority.value || undefined,
       project_type: newProjectType.value || undefined,
     })
-    // Shows in the list without a reload of `search_projects` -- the write's
-    // own response already carries everything the row needs to render.
-    projects.data = {
-      ...projects.data,
-      projects: [
-        { name: created.name, project_name: created.project_name, status: created.status },
-        ...rows.value,
-      ],
-    }
     showCreateForm.value = false
+    // The list's row (and its company, which the detail's "Open to
+    // everyone in <company>" names) comes from the server, not a guess.
+    projects.reload()
     router.push(`/projects/${created.name}`)
   } catch (error) {
     createError.value = error?.messages?.[0] || 'Could not create that project. Please try again.'
@@ -172,6 +224,12 @@ async function submitCreate() {
 }
 
 // --- the project view --------------------------------------------------------
+//
+// Plan 2026-10-31-001 U3 (R3, R4). Facts on one line; Tasks and People as
+// two panes -- side by side on desktop, a TabBar on a phone -- each with its
+// own search, revealing 25 rows at a time (KTD3: `get_project` already
+// returns every open task and member). Each pane owns its writes and hands
+// the changed list back here, into `detail`.
 
 const detail = createResource({
   url: 'helixhr.api.get_project',
@@ -182,175 +240,58 @@ const canEdit = computed(() => !!detail.data?.can_edit)
 
 const tasks = computed(() => detail.data?.tasks || [])
 const members = computed(() => detail.data?.members || [])
-const memberEmployeeIds = computed(() => members.value.map((m) => m.employee).filter(Boolean))
+// `get_project` carries no company; the list row this page already loaded
+// does.
+const projectCompany = computed(() => rows.value.find((row) => row.name === props.project)?.company || '')
+const companyName = computed(() => projectCompany.value || 'this company')
 
-// --- tasks -------------------------------------------------------------------
-
-const newTaskSubject = ref('')
-const taskError = ref('')
-const editingTask = ref(null)
-const editingSubject = ref('')
-const saveTask = createResource({ url: 'helixhr.api.save_task', method: 'POST' })
-
-async function addTask() {
-  taskError.value = ''
-  const subject = newTaskSubject.value.trim()
-  if (!subject) return
-  try {
-    const task = await saveTask.submit({ project: props.project, subject })
-    detail.data.tasks = [...(detail.data.tasks || []), task]
-    newTaskSubject.value = ''
-  } catch (error) {
-    taskError.value = error?.messages?.[0] || 'Could not add that task. Please try again.'
-  }
-}
-
-function startRename(task) {
-  editingTask.value = task.name
-  editingSubject.value = task.subject
-}
-
-function cancelRename() {
-  editingTask.value = null
-}
-
-async function saveRename(task) {
-  const subject = editingSubject.value.trim()
-  editingTask.value = null
-  if (!subject || subject === task.subject) return
-  taskError.value = ''
-  try {
-    const updated = await saveTask.submit({ project: props.project, task: task.name, subject })
-    Object.assign(task, updated)
-  } catch (error) {
-    taskError.value = error?.messages?.[0] || 'Could not rename that task. Please try again.'
-  }
-}
-
-async function closeTask(task) {
-  taskError.value = ''
-  try {
-    await saveTask.submit({ project: props.project, task: task.name, status: 'Completed' })
-    // `get_project` only ever returns open tasks (_project_open_tasks), so a
-    // closed task's row is removed locally rather than updated in place.
-    detail.data.tasks = tasks.value.filter((row) => row.name !== task.name)
-  } catch (error) {
-    taskError.value = error?.messages?.[0] || 'Could not close that task. Please try again.'
-  }
-}
-
-// --- members -------------------------------------------------------------------
-//
-// No dedicated people-picker component exists in the portal today. The
-// employee-facing `get_directory` read (Directory.vue's own search) is
-// reused here rather than `search_people`: the latter is gated by
-// `resolve_admin_scope`, which a HelixHR Delivery Manager -- an
-// "assigned"-scope caller, never an admin one -- would be refused by. The
-// plan's own note for the Delivery Manager role (P7-U1) is that the picker
-// "resolves names through existing scoped reads", and `get_directory` is
-// exactly that: every employee's own company, no admin permission required.
-// P8-U3: `_DIRECTORY_QUERY_MIN` on the server (helixhr/api.py) -- below this,
-// `get_directory` ignores the search entirely and returns an *unfiltered*
-// page, which this picker must never show as if it were a set of matches.
-// The limit is raised well past the old `8`: at eight or more people
-// already on the project, `memberMatches` filtering assigned people out
-// *after* the server's page could leave nothing to show even though real
-// matches exist further down the company.
-const MEMBER_QUERY_MIN = 2
-const MEMBER_RESULTS_LIMIT = 20
-
-const memberQuery = ref('')
-const memberSearch = ref('')
-const memberResults = createResource({
-  url: 'helixhr.api.get_directory',
-  makeParams: () => ({ query: memberSearch.value, limit: MEMBER_RESULTS_LIMIT }),
-  auto: false,
+const facts = computed(() => {
+  const data = detail.data || {}
+  return [
+    { label: 'Status', value: data.status || '—' },
+    { label: 'Priority', value: data.priority || '—' },
+    { label: 'Type', value: data.project_type || '—' },
+    { label: 'Billable', value: data.billable ? 'Yes' : 'No', testid: 'project-billable' },
+    { label: 'Start', value: data.expected_start_date ? formatDate(data.expected_start_date) : '—' },
+    { label: 'End', value: data.expected_end_date ? formatDate(data.expected_end_date) : '—' },
+  ]
 })
-const memberError = ref('')
-const setMembers = createResource({ url: 'helixhr.api.set_project_members', method: 'POST' })
+
+const paneTab = ref('tasks')
+const paneTabs = computed(() => [
+  { key: 'tasks', label: 'Tasks', count: tasks.value.length },
+  { key: 'people', label: 'People', count: members.value.length },
+])
+
+/** A pane's attributes: shown side by side on desktop, a tabpanel on a phone. */
+function paneAttrs(key, headingId) {
+  const desktop = isDesktop.value
+  return {
+    id: !desktop && paneTab.value === key ? 'project-pane' : undefined,
+    role: desktop ? undefined : 'tabpanel',
+    'aria-labelledby': desktop ? headingId : `project-pane-tab-${key}`,
+  }
+}
+
+function setDetail(field, value) {
+  if (detail.data) detail.data[field] = value
+}
 
 // Declared after every ref it resets: `immediate` runs it during setup, and a
 // ref still in its temporal dead zone throws there, skipping the first mount's
-// resets (HR-01).
+// resets (HR-01). The panes reset their own state on a project change.
 watch(
   () => props.project,
   (project) => {
     if (project) detail.reload()
-    memberQuery.value = ''
-    taskError.value = ''
-    memberError.value = ''
+    // Back on the list after working on a project: its counts and flags
+    // may have changed.
+    else if (projects.data) projects.reload()
+    paneTab.value = 'tasks'
     showCreateForm.value = false
   },
   { immediate: true },
 )
-
-const memberDebounced = useDebouncedSearch((trimmed) => {
-  memberSearch.value = trimmed
-  memberResults.reload()
-})
-watch(memberQuery, (value) => {
-  const trimmed = value.trim()
-  if (trimmed.length < MEMBER_QUERY_MIN) {
-    // Below the server's own minimum, `get_directory` would return everyone
-    // in the company unfiltered -- clear the panel instead of showing that
-    // as a set of "matches" for a query the server never actually ran.
-    memberDebounced.cancel()
-    memberSearch.value = ''
-    memberResults.data = null
-    return
-  }
-  memberDebounced.search(trimmed)
-})
-
-const memberMatches = computed(() =>
-  (memberResults.data?.people || []).filter((person) => !memberEmployeeIds.value.includes(person.name)),
-)
-// Distinguishes "haven't searched enough yet" from "searched and found
-// nobody" -- both look like an empty `memberMatches`, but only the second
-// should render "Nobody matches that".
-const memberSearchActive = computed(() => memberQuery.value.trim().length >= MEMBER_QUERY_MIN)
-
-function focusMemberSearch() {
-  // Re-running the *previous* search's stale results on focus (P8-U3) --
-  // e.g. right after `addMember` clears `memberQuery` -- showed a panel that
-  // did not match anything currently typed. Only reload when there is an
-  // actual query in the box to reload.
-  if (memberSearchActive.value) memberResults.reload()
-}
-
-async function addMember(person) {
-  memberError.value = ''
-  const employees = [...memberEmployeeIds.value, person.name]
-  try {
-    await setMembers.submit({ project: props.project, employees })
-    detail.data.members = [
-      ...members.value,
-      {
-        employee: person.name,
-        employee_name: person.employee_name,
-        initials: person.initials,
-        photo_url: person.photo_url,
-      },
-    ]
-    memberQuery.value = ''
-    memberSearch.value = ''
-    memberResults.data = null
-  } catch (error) {
-    memberError.value = error?.messages?.[0] || 'Could not assign that person. Please try again.'
-  }
-}
-
-async function removeMember(member) {
-  if (!member.employee) return
-  memberError.value = ''
-  const employees = memberEmployeeIds.value.filter((id) => id !== member.employee)
-  try {
-    await setMembers.submit({ project: props.project, employees })
-    detail.data.members = members.value.filter((row) => row.employee !== member.employee)
-  } catch (error) {
-    memberError.value = error?.messages?.[0] || 'Could not remove that person. Please try again.'
-  }
-}
 </script>
 
 <template>
@@ -364,7 +305,7 @@ async function removeMember(member) {
         <template #actions>
           <Button
             variant="ghost"
-            @click="router.push('/projects')"
+            @click="router.push({ path: '/projects', query: filtersToQuery(filters) })"
           >
             Back to projects
           </Button>
@@ -380,7 +321,7 @@ async function removeMember(member) {
       >
         <div
           v-if="detail.data"
-          class="space-y-6"
+          class="space-y-4"
         >
           <p
             v-if="!canEdit"
@@ -389,278 +330,58 @@ async function removeMember(member) {
           >
             View only. This project is outside the ones you manage, so it can't be changed here.
           </p>
-          <section class="surface-card elev-1 grid grid-cols-1 gap-4 p-4 sm:grid-cols-2 lg:grid-cols-6">
-            <div>
-              <p class="text-sm text-ink-gray-6">
-                Status
-              </p>
-              <p class="font-medium text-ink-gray-9">
-                {{ detail.data.status }}
-              </p>
-            </div>
-            <div>
-              <p class="text-sm text-ink-gray-6">
-                Priority
-              </p>
-              <p class="font-medium text-ink-gray-9">
-                {{ detail.data.priority || '—' }}
-              </p>
-            </div>
-            <div>
-              <p class="text-sm text-ink-gray-6">
-                Type
-              </p>
-              <p class="font-medium text-ink-gray-9">
-                {{ detail.data.project_type || '—' }}
-              </p>
-            </div>
-            <div>
-              <p class="text-sm text-ink-gray-6">
-                Billable
-              </p>
-              <p
+
+          <dl
+            class="flex flex-wrap gap-x-5 gap-y-1 text-sm"
+            data-testid="project-facts"
+          >
+            <div
+              v-for="fact in facts"
+              :key="fact.label"
+              class="flex gap-1.5"
+            >
+              <dt class="text-ink-gray-6">
+                {{ fact.label }}
+              </dt>
+              <dd
                 class="font-medium text-ink-gray-9"
-                data-testid="project-billable"
+                :data-testid="fact.testid"
               >
-                {{ detail.data.billable ? 'Yes' : 'No' }}
-              </p>
+                {{ fact.value }}
+              </dd>
             </div>
-            <div>
-              <p class="text-sm text-ink-gray-6">
-                Start
-              </p>
-              <p class="font-medium text-ink-gray-9">
-                {{ detail.data.expected_start_date ? formatDate(detail.data.expected_start_date) : '—' }}
-              </p>
-            </div>
-            <div>
-              <p class="text-sm text-ink-gray-6">
-                End
-              </p>
-              <p class="font-medium text-ink-gray-9">
-                {{ detail.data.expected_end_date ? formatDate(detail.data.expected_end_date) : '—' }}
-              </p>
-            </div>
-          </section>
+          </dl>
 
-          <section
-            class="surface-card elev-1 p-4"
-            aria-labelledby="project-tasks-heading"
-          >
-            <h2
-              id="project-tasks-heading"
-              class="font-heading text-base font-semibold text-ink-gray-9"
-            >
-              Tasks
-            </h2>
+          <TabBar
+            v-if="!isDesktop"
+            v-model="paneTab"
+            :tabs="paneTabs"
+            label="Project sections"
+            panel-id="project-pane"
+          />
 
-            <ul
-              v-if="tasks.length"
-              class="mt-2 divide-y divide-outline-gray-1"
-            >
-              <li
-                v-for="task in tasks"
-                :key="task.name"
-                class="flex items-center gap-3 py-2"
-              >
-                <template v-if="editingTask === task.name">
-                  <input
-                    v-model="editingSubject"
-                    type="text"
-                    maxlength="140"
-                    class="min-w-0 flex-1 rounded-md border border-outline-gray-2 px-2.5 py-1.5 text-sm text-ink-gray-8"
-                    @keyup.enter="saveRename(task)"
-                    @keyup.esc="cancelRename"
-                  >
-                  <Button
-                    variant="solid"
-                    theme="blue"
-                    @click="saveRename(task)"
-                  >
-                    Save
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    @click="cancelRename"
-                  >
-                    Cancel
-                  </Button>
-                </template>
-                <template v-else>
-                  <button
-                    v-if="canEdit"
-                    type="button"
-                    class="min-w-0 flex-1 truncate text-left text-sm font-medium text-ink-gray-9"
-                    @click="startRename(task)"
-                  >
-                    {{ task.subject }}
-                  </button>
-                  <span
-                    v-else
-                    class="min-w-0 flex-1 truncate text-sm font-medium text-ink-gray-9"
-                  >
-                    {{ task.subject }}
-                  </span>
-                  <span class="shrink-0 text-sm text-ink-gray-5">{{ task.status }}</span>
-                  <Button
-                    v-if="canEdit"
-                    variant="ghost"
-                    @click="closeTask(task)"
-                  >
-                    Close
-                  </Button>
-                </template>
-              </li>
-            </ul>
-            <p
-              v-else
-              class="mt-2 text-sm text-ink-gray-6"
-            >
-              No open tasks.
-            </p>
-
-            <p
-              v-if="taskError"
-              class="surface-alert mt-3 p-3 text-sm"
-              role="alert"
-            >
-              {{ taskError }}
-            </p>
-
-            <div
-              v-if="canEdit"
-              class="mt-4 flex flex-wrap items-center gap-2"
-            >
-              <input
-                v-model="newTaskSubject"
-                type="text"
-                maxlength="140"
-                placeholder="New task"
-                class="min-w-0 flex-1 rounded-md border border-outline-gray-2 px-2.5 py-1.5 text-sm text-ink-gray-8"
-                @keyup.enter="addTask"
-              >
-              <Button
-                variant="outline"
-                :loading="saveTask.loading"
-                @click="addTask"
-              >
-                Add task
-              </Button>
-            </div>
-          </section>
-
-          <section
-            class="surface-card elev-1 p-4"
-            aria-labelledby="project-members-heading"
-          >
-            <h2
-              id="project-members-heading"
-              class="font-heading text-base font-semibold text-ink-gray-9"
-            >
-              Members
-            </h2>
-
-            <ul
-              v-if="members.length"
-              class="mt-2 divide-y divide-outline-gray-1"
-            >
-              <li
-                v-for="member in members"
-                :key="member.employee || member.employee_name"
-                class="flex items-center gap-3 py-2"
-              >
-                <Avatar
-                  class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-green-2 text-xs font-bold text-ink-green-3"
-                  :photo-url="member.photo_url"
-                  :initials="member.initials"
-                  :size="32"
-                />
-                <span class="min-w-0 flex-1 truncate text-sm font-medium text-ink-gray-9">
-                  {{ member.employee_name }}
-                </span>
-                <Button
-                  v-if="member.employee && canEdit"
-                  variant="ghost"
-                  @click="removeMember(member)"
-                >
-                  Remove
-                </Button>
-              </li>
-            </ul>
-            <p
-              v-else
-              class="mt-2 text-sm text-ink-gray-6"
-            >
-              Nobody is assigned to this project yet.
-            </p>
-
-            <p
-              v-if="memberError"
-              class="surface-alert mt-3 p-3 text-sm"
-              role="alert"
-            >
-              {{ memberError }}
-            </p>
-
-            <div
-              v-if="canEdit"
-              class="mt-4"
-            >
-              <FormControl
-                v-model="memberQuery"
-                type="text"
-                label="Add a person"
-                placeholder="Name, employee ID or work email"
-                maxlength="60"
-                data-testid="project-member-search"
-                @focus="focusMemberSearch"
-              />
-              <div
-                v-if="memberSearchActive"
-                class="surface-card elev-1 mt-2 divide-y divide-outline-gray-1"
-                data-testid="project-member-results"
-              >
-                <p
-                  v-if="memberResults.loading"
-                  class="p-2.5 text-sm text-ink-gray-6"
-                >
-                  Searching…
-                </p>
-                <ul
-                  v-else-if="memberMatches.length"
-                  class="divide-y divide-outline-gray-1"
-                >
-                  <li
-                    v-for="person in memberMatches"
-                    :key="person.name"
-                  >
-                    <button
-                      type="button"
-                      class="flex w-full min-w-0 items-center gap-3 p-2.5 text-left"
-                      :disabled="setMembers.loading"
-                      @click="addMember(person)"
-                    >
-                      <Avatar
-                        class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-surface-gray-2 text-xs font-bold text-ink-gray-7"
-                        :photo-url="person.photo_url"
-                        :initials="person.initials"
-                        :size="32"
-                      />
-                      <span class="min-w-0 flex-1 truncate text-sm text-ink-gray-8">
-                        {{ person.employee_name }}
-                      </span>
-                    </button>
-                  </li>
-                </ul>
-                <p
-                  v-else
-                  class="p-2.5 text-sm text-ink-gray-6"
-                >
-                  Nobody matches that.
-                </p>
-              </div>
-            </div>
-          </section>
+          <div :class="isDesktop ? 'grid grid-cols-2 items-start gap-4' : ''">
+            <ProjectTasksPane
+              v-show="isDesktop || paneTab === 'tasks'"
+              v-bind="paneAttrs('tasks', 'project-tasks-heading')"
+              :project="project"
+              :tasks="tasks"
+              :can-edit="canEdit"
+              @update:tasks="(list) => setDetail('tasks', list)"
+            />
+            <ProjectPeoplePane
+              v-show="isDesktop || paneTab === 'people'"
+              v-bind="paneAttrs('people', 'project-members-heading')"
+              :project="project"
+              :members="members"
+              :departments="detail.data.departments || []"
+              :open-to-all="!!detail.data.open_to_all"
+              :can-edit="canEdit"
+              :company-name="companyName"
+              @update:members="(list) => setDetail('members', list)"
+              @update:open-to-all="(value) => setDetail('open_to_all', value)"
+            />
+          </div>
         </div>
       </AsyncState>
     </template>
@@ -673,7 +394,7 @@ async function removeMember(member) {
       >
         <template #actions>
           <Button
-            v-if="!showCreateForm && canCreate"
+            v-if="canCreate"
             variant="solid"
             theme="blue"
             @click="startCreate"
@@ -683,119 +404,202 @@ async function removeMember(member) {
         </template>
       </PageHeader>
 
-      <div
-        v-if="showCreateForm"
-        class="surface-card elev-1 mb-4 space-y-3 p-4"
-        data-testid="project-create-form"
+      <Dialog
+        v-model="showCreateForm"
+        :options="{ title: 'New project', size: 'md' }"
       >
-        <!-- P8-U2: `company` is server-derived, never asked for (KTD2 --
-             the create endpoint refuses a company named in the request
-             body). A caller with no company at all -- the Desk-only
-             persona `create_project` itself refuses -- sees why instead
-             of a form that would only fail on submit. -->
-        <p
-          v-if="creatorCompany"
-          class="text-sm text-ink-gray-6"
-        >
-          This project will be created in <span class="font-medium text-ink-gray-8">{{ creatorCompany }}</span>.
-        </p>
-        <p
-          v-else
-          class="surface-alert p-3 text-sm"
-          role="alert"
-        >
-          Your account has no linked employee record, so a project can't be created from here.
-          Use Desk instead.
-        </p>
-        <FormControl
-          v-model="newProjectName"
-          type="text"
-          label="Project name"
-          maxlength="140"
-        />
-        <div>
-          <label
-            for="project-create-priority"
-            class="text-sm text-ink-gray-7"
+        <template #body-content>
+          <form
+            class="space-y-3"
+            data-testid="project-create-form"
+            @submit.prevent="submitCreate"
           >
-            Priority
-          </label>
-          <select
-            id="project-create-priority"
-            v-model="newProjectPriority"
-            class="mt-1 block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
-          >
-            <option
-              v-for="option in priorityOptions"
-              :key="option.value"
-              :value="option.value"
+            <!-- P8-U2: `company` is server-derived, never asked for (KTD2 --
+                 the create endpoint refuses a company named in the request
+                 body). A caller with no company at all -- the Desk-only
+                 persona `create_project` itself refuses -- sees why instead
+                 of a form that would only fail on submit. -->
+            <p
+              v-if="creatorCompany"
+              class="text-sm text-ink-gray-6"
             >
-              {{ option.label }}
-            </option>
-          </select>
-        </div>
-        <div>
-          <label
-            for="project-create-type"
-            class="text-sm text-ink-gray-7"
-          >
-            Project type
-          </label>
-          <select
-            id="project-create-type"
-            v-model="newProjectType"
-            class="mt-1 block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
-          >
-            <option
-              v-for="option in projectTypeOptions"
-              :key="option.value"
-              :value="option.value"
+              This project will be created in <span class="font-medium text-ink-gray-8">{{ creatorCompany }}</span>.
+            </p>
+            <p
+              v-else
+              class="surface-alert p-3 text-sm"
+              role="alert"
             >
-              {{ option.label }}
-            </option>
-          </select>
-        </div>
-        <FormControl
-          v-model="newProjectBillable"
-          type="checkbox"
-          label="Billable"
-        />
-        <p
-          v-if="createError"
-          class="surface-alert p-3 text-sm"
-          role="alert"
-        >
-          {{ createError }}
-        </p>
-        <div class="flex items-center gap-2">
-          <Button
-            variant="solid"
-            theme="blue"
-            :disabled="!creatorCompany"
-            :loading="createProject.loading"
-            @click="submitCreate"
-          >
-            Create
-          </Button>
-          <Button
-            variant="ghost"
-            @click="cancelCreate"
-          >
-            Cancel
-          </Button>
-        </div>
-      </div>
+              Your account has no linked employee record, so a project can't be created from here.
+              Use Desk instead.
+            </p>
+            <FormControl
+              v-model="newProjectName"
+              type="text"
+              label="Project name"
+              maxlength="140"
+            />
+            <div>
+              <label
+                for="project-create-priority"
+                class="text-sm text-ink-gray-7"
+              >
+                Priority
+              </label>
+              <select
+                id="project-create-priority"
+                v-model="newProjectPriority"
+                class="mt-1 block min-h-11 w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
+              >
+                <option
+                  v-for="option in priorityOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+            </div>
+            <div>
+              <label
+                for="project-create-type"
+                class="text-sm text-ink-gray-7"
+              >
+                Project type
+              </label>
+              <select
+                id="project-create-type"
+                v-model="newProjectType"
+                class="mt-1 block min-h-11 w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
+              >
+                <option
+                  v-for="option in projectTypeOptions"
+                  :key="option.value"
+                  :value="option.value"
+                >
+                  {{ option.label }}
+                </option>
+              </select>
+            </div>
+            <FormControl
+              v-model="newProjectBillable"
+              type="checkbox"
+              label="Billable"
+            />
+            <p
+              v-if="createError"
+              class="surface-alert p-3 text-sm"
+              role="alert"
+            >
+              {{ createError }}
+            </p>
+            <div class="flex items-center gap-2 pt-1">
+              <Button
+                type="submit"
+                variant="solid"
+                theme="blue"
+                :disabled="!creatorCompany"
+                :loading="createProject.loading"
+              >
+                Create
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                @click="showCreateForm = false"
+              >
+                Cancel
+              </Button>
+            </div>
+          </form>
+        </template>
+      </Dialog>
 
-      <div class="mb-4 flex flex-wrap items-end gap-3">
-        <div class="w-full lg:w-80">
+      <div
+        v-if="rows.length"
+        class="mb-3 flex flex-wrap items-end gap-3"
+        data-testid="projects-filters"
+      >
+        <div class="w-full lg:w-72">
           <SearchField
-            v-model="query"
+            v-model="filters.q"
             label="Search"
-            placeholder="Project name"
+            placeholder="Project name or code"
             maxlength="140"
           />
         </div>
-        <div v-if="rows.length > 1">
+        <div v-if="typeOptions.length">
+          <label
+            for="projects-filter-type"
+            class="text-sm text-ink-gray-7"
+          >
+            Type
+          </label>
+          <select
+            id="projects-filter-type"
+            v-model="filters.type"
+            class="mt-1 block min-h-11 rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
+          >
+            <option :value="null">
+              All types
+            </option>
+            <option
+              v-for="type in typeOptions"
+              :key="type"
+              :value="type"
+            >
+              {{ type }}
+            </option>
+          </select>
+        </div>
+        <div>
+          <label
+            for="projects-filter-billable"
+            class="text-sm text-ink-gray-7"
+          >
+            Billable
+          </label>
+          <select
+            id="projects-filter-billable"
+            v-model="filters.billable"
+            class="mt-1 block min-h-11 rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
+            data-testid="projects-filter-billable"
+          >
+            <option
+              v-for="option in BILLABLE_OPTIONS"
+              :key="String(option.value)"
+              :value="option.value"
+            >
+              {{ option.label }}
+            </option>
+          </select>
+        </div>
+        <div v-if="manyCompanies">
+          <label
+            for="projects-filter-company"
+            class="text-sm text-ink-gray-7"
+          >
+            Company
+          </label>
+          <select
+            id="projects-filter-company"
+            v-model="filters.company"
+            class="mt-1 block min-h-11 rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
+          >
+            <option :value="null">
+              All companies
+            </option>
+            <option
+              v-for="company in companyOptions"
+              :key="company"
+              :value="company"
+            >
+              {{ company }}
+            </option>
+          </select>
+        </div>
+        <!-- The table sorts from its headers; a phone has no headers. -->
+        <div v-if="!isDesktop && rows.length > 1">
           <label
             for="projects-sort"
             class="text-sm text-ink-gray-7"
@@ -804,16 +608,17 @@ async function removeMember(member) {
           </label>
           <select
             id="projects-sort"
-            v-model="sortBy"
+            :value="sort.key"
             class="mt-1 block min-h-11 rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
             data-testid="projects-sort"
+            @change="pickSort($event.target.value)"
           >
             <option
-              v-for="option in SORTS"
-              :key="option.value"
-              :value="option.value"
+              v-for="(label, key) in SORT_LABELS"
+              :key="key"
+              :value="key"
             >
-              {{ option.label }}
+              {{ label }}
             </option>
           </select>
         </div>
@@ -825,7 +630,7 @@ async function removeMember(member) {
       <template v-if="rows.length">
         <SegmentedChips
           v-if="statusOptions.length > 2"
-          v-model="status"
+          v-model="filters.status"
           class="mb-3"
           label="Filter projects by status"
           :options="statusOptions"
@@ -848,7 +653,196 @@ async function removeMember(member) {
         skeleton="row"
         :skeleton-rows="6"
       >
-        <ul class="space-y-2">
+        <template
+          v-if="narrowed"
+          #empty-action
+        >
+          <Button
+            variant="outline"
+            @click="clearFilters"
+          >
+            Clear filters
+          </Button>
+        </template>
+
+        <!-- Desktop: plain table markup with `aria-sort` headers, the
+             People.vue / ReportTable pattern (KTD1). -->
+        <div
+          v-if="isDesktop"
+          class="surface-card elev-1 overflow-x-auto"
+        >
+          <table
+            class="w-full border-separate border-spacing-0 text-sm"
+            data-testid="projects-table"
+          >
+            <caption class="sr-only">
+              Projects
+            </caption>
+            <thead>
+              <tr>
+                <th
+                  scope="col"
+                  :aria-sort="ariaSort('name')"
+                  class="label border-b border-outline-gray-2 px-3 py-2 text-left"
+                >
+                  <button
+                    type="button"
+                    class="inline-flex min-h-9 cursor-pointer items-center gap-1 uppercase"
+                    @click="toggleSort('name')"
+                  >
+                    Name
+                    <span
+                      aria-hidden="true"
+                      class="w-3"
+                    >{{ sortArrow('name') }}</span>
+                  </button>
+                </th>
+                <th
+                  scope="col"
+                  :aria-sort="ariaSort('status')"
+                  class="label border-b border-outline-gray-2 px-3 py-2 text-left"
+                >
+                  <button
+                    type="button"
+                    class="inline-flex min-h-9 cursor-pointer items-center gap-1 uppercase"
+                    @click="toggleSort('status')"
+                  >
+                    Status
+                    <span
+                      aria-hidden="true"
+                      class="w-3"
+                    >{{ sortArrow('status') }}</span>
+                  </button>
+                </th>
+                <th
+                  v-if="manyCompanies"
+                  scope="col"
+                  class="label border-b border-outline-gray-2 px-3 py-2 text-left"
+                >
+                  Company
+                </th>
+                <th
+                  scope="col"
+                  :aria-sort="ariaSort('members')"
+                  class="label border-b border-outline-gray-2 px-3 py-2 text-right"
+                >
+                  <button
+                    type="button"
+                    class="inline-flex min-h-9 cursor-pointer items-center gap-1 uppercase"
+                    @click="toggleSort('members')"
+                  >
+                    Members
+                    <span
+                      aria-hidden="true"
+                      class="w-3"
+                    >{{ sortArrow('members') }}</span>
+                  </button>
+                </th>
+                <th
+                  scope="col"
+                  :aria-sort="ariaSort('tasks')"
+                  class="label border-b border-outline-gray-2 px-3 py-2 text-right"
+                >
+                  <button
+                    type="button"
+                    class="inline-flex min-h-9 cursor-pointer items-center gap-1 uppercase"
+                    @click="toggleSort('tasks')"
+                  >
+                    Open tasks
+                    <span
+                      aria-hidden="true"
+                      class="w-3"
+                    >{{ sortArrow('tasks') }}</span>
+                  </button>
+                </th>
+                <th
+                  scope="col"
+                  class="label border-b border-outline-gray-2 px-3 py-2 text-left"
+                >
+                  Type
+                </th>
+                <th
+                  scope="col"
+                  class="label border-b border-outline-gray-2 px-3 py-2 text-left"
+                >
+                  Billable
+                </th>
+                <th
+                  scope="col"
+                  :aria-sort="ariaSort('end')"
+                  class="label border-b border-outline-gray-2 px-3 py-2 text-left"
+                >
+                  <button
+                    type="button"
+                    class="inline-flex min-h-9 cursor-pointer items-center gap-1 uppercase"
+                    @click="toggleSort('end')"
+                  >
+                    End
+                    <span
+                      aria-hidden="true"
+                      class="w-3"
+                    >{{ sortArrow('end') }}</span>
+                  </button>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="row in filteredRows"
+                :key="row.name"
+                class="text-ink-gray-7 hover:bg-surface-gray-2"
+                data-testid="project-row"
+              >
+                <td class="border-b border-outline-gray-2 px-3 py-0.5">
+                  <button
+                    type="button"
+                    class="flex min-h-11 w-full min-w-0 cursor-pointer flex-col justify-center text-left"
+                    @click="openProject(row)"
+                  >
+                    <span class="break-words font-medium text-ink-gray-9">{{ row.project_name }}</span>
+                    <span
+                      v-if="row.name !== row.project_name"
+                      class="break-words text-xs text-ink-gray-5"
+                    >{{ row.name }}</span>
+                  </button>
+                </td>
+                <td class="border-b border-outline-gray-2 px-3 py-2">
+                  {{ row.status }}
+                </td>
+                <td
+                  v-if="manyCompanies"
+                  class="border-b border-outline-gray-2 px-3 py-2"
+                >
+                  {{ row.company }}
+                </td>
+                <td
+                  class="tabular border-b border-outline-gray-2 px-3 py-2 text-right"
+                  data-testid="project-members-cell"
+                >
+                  {{ membersLabel(row) }}
+                </td>
+                <td class="tabular border-b border-outline-gray-2 px-3 py-2 text-right">
+                  {{ row.open_task_count ?? '' }}
+                </td>
+                <td class="border-b border-outline-gray-2 px-3 py-2">
+                  {{ row.project_type || '—' }}
+                </td>
+                <td class="border-b border-outline-gray-2 px-3 py-2">
+                  {{ row.billable ? 'Yes' : 'No' }}
+                </td>
+                <td class="tabular whitespace-nowrap border-b border-outline-gray-2 px-3 py-2">
+                  {{ row.expected_end_date ? formatDate(row.expected_end_date) : '—' }}
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <!-- Phone: one compact card per row, in the table's order. -->
+        <ul
+          v-else
+          class="space-y-2"
+        >
           <li
             v-for="row in filteredRows"
             :key="row.name"
@@ -856,11 +850,12 @@ async function removeMember(member) {
             <button
               type="button"
               class="surface-card elev-1 flex w-full min-w-0 items-center gap-3 p-3 text-left"
+              data-testid="project-card"
               @click="openProject(row)"
             >
               <span class="min-w-0 flex-1">
                 <span class="block break-words font-medium text-ink-gray-9">{{ row.project_name }}</span>
-                <span class="block truncate text-sm text-ink-gray-6">
+                <span class="block break-words text-sm text-ink-gray-6">
                   {{ projectLine(row) }}
                 </span>
               </span>

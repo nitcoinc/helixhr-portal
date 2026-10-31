@@ -2470,3 +2470,54 @@ by hand. "Copy last week" (`lib/copyWeek.js`) skips those days and any row
 whose project or task is no longer in `get_my_projects`, and says what it
 skipped. The marker is opt-in (`include_non_working=1`): only the copy asks,
 for both weeks, so an ordinary week load skips its reads.
+
+## Projects workspace, roster requests and leave deciders (plan 2026-10-31-001)
+
+### Open-to-everyone projects (U4, KTD6)
+
+`Project.helixhr_open_to_all` lets every Active employee of the project's company book time on it
+while it is Open, with no `Project User` row. The rule lives in one place: `_my_project_names`
+adds flagged Open projects in the company of the user's *current* Active Employee, and every
+booking caller (task picker, My projects, week reads, copy-last-week, `_validate_rows`) already
+goes through it. Nothing else is widened: no DocShare, no User Permission, no DocPerm, and
+`project_permissions.py` is untouched, so REST access to Project and Task is unchanged.
+
+Frappe link validation would still refuse an open project for anyone holding a User Permission on
+Project (strict mode or not), so `Timesheet Detail.project` and `.task` carry
+`ignore_user_permissions` property setters, beside the existing `Timesheet.parent_project` one.
+`_validate_rows` stays the booking allow-list. The "Missing timesheets" report filter and the
+access-migration counts still read `Project User` rows only; open projects are excluded there by
+design.
+
+Bulk membership (`add_project_members`) appends through `_write_project_users`, sets
+`welcome_email_sent = 1` so ERPNext sends no invitation mail, skips existing members and people
+with no login by name, and reports out-of-scope ids as "not available" with no name.
+
+### Roster change requests (U7-U10, KTD7-KTD13)
+
+A manager drafts shift operations (assign / change from / end on) for Active direct reports and
+submits them as one `HelixHR Roster Change`, split into one request per company. HR Managers whose
+scope covers the request's `company` decide it in Approvals (kind `roster`, HR lane); the
+submitter never can. The record has no Employee DocPerm and HR Manager holds read only: every
+write goes through the API with `flags.helixhr_roster_api`, and the controller refuses any status
+change or decision-field edit without it.
+
+The conflict token is a per-employee **coverage snapshot**: the `(shift_type, start_date,
+end_date)` of submitted Shift Assignments overlapping the stored window, ignoring `status`,
+`modified` and names (see the runbook roster section for why). Approval locks the request and the
+Employee rows, re-derives the snapshot over the stored window and re-checks dates (tomorrow or
+later in the company's time zone), the reporting line and the company. Any mismatch returns the
+request to the manager with reasons and writes nothing. A clean request applies every operation in
+order inside one savepoint through savepoint-free helpers the HR roster endpoints share; an HRMS
+refusal rolls the whole batch back and returns the request. `helixhr/roster_ops.py` holds the pure
+simulator; `frontend/src/lib/rosterDraft.js` mirrors it for the draft preview, and one duplicated
+literal case table in both test suites keeps them equal.
+
+### Who decided a leave (U11-U13, KTD14-KTD15)
+
+`Leave Application.helixhr_decided_by` and `helixhr_decided_as_hr` (permlevel 1) are stamped in
+`events.leave_application_before_submit` on Approve or Reject, so Desk decisions are covered.
+"As HR" is fixed at decision time, never re-derived from today's scope. Historical rows carry no
+stamp and show no decider; `leave_approver` is never shown as the decider. HR sees every in-scope
+manager-stage leave as `hr_reason: with_manager` with the approver's name; those rows never count
+toward HR's badge.

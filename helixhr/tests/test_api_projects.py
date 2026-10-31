@@ -352,6 +352,10 @@ class TestSearchAndGetProject(IntegrationTestCase):
 			"members",
 			# Plan 2026-10-14-001 KTD4: whether the caller may change it.
 			"can_edit",
+			# Plan 2026-10-31-001 U4/U5: the flag, and the bulk-add picker's
+			# departments (empty for a caller who cannot edit).
+			"open_to_all",
+			"departments",
 		}
 		self.assertEqual(set(result.keys()), expected_keys)
 		for forbidden in (
@@ -930,6 +934,23 @@ class TestWriteProjectUsersSessionSafety(IntegrationTestCase):
 		self.assertEqual(frappe.session.user, self.dm_user)
 		self.assertEqual(frappe.session.data.get("user"), self.dm_user)
 
+	def test_add_project_members_leaves_the_caller_signed_in(self):
+		"""Plan 2026-10-31-001 U5: the bulk add writes through the same
+		`_write_project_users` escalation."""
+		from helixhr.api import add_project_members, create_project
+
+		session = self._sign_in(self.dm_user)
+		project = create_project(project_name="_Test U5 Session Safety Bulk Add")["name"]
+		original_sid = session.sid
+		worker = make_test_user("u5-session-worker@helixhr.test", self.company)
+
+		result = add_project_members(project, employees=[worker])
+
+		self.assertEqual([row["employee"] for row in result["added"]], [worker])
+		self.assertEqual(frappe.session.sid, original_sid)
+		self.assertEqual(frappe.session.user, self.dm_user)
+		self.assertEqual(frappe.session.data.get("user"), self.dm_user)
+
 	def test_the_caller_is_restored_even_when_the_write_raises(self):
 		from unittest.mock import patch
 
@@ -972,6 +993,378 @@ class TestWriteProjectUsersSessionSafety(IntegrationTestCase):
 		self.assertEqual(cached["data"]["user"], self.dm_user)
 		self.assertEqual(cached["sid"], session.sid)
 		frappe.cache.hdel("session", session.sid)
+
+
+# --- plan 2026-10-31-001 U1: list fields, bulk task add ------------------------
+
+_COSTING_FIELDS = (
+	"estimated_costing",
+	"total_costing_amount",
+	"total_billable_amount",
+	"total_billed_amount",
+	"total_sales_amount",
+	"gross_margin",
+	"customer",
+	"sales_order",
+)
+
+
+class TestProjectListFieldsAndAddTasks(IntegrationTestCase):
+	"""`search_projects`' table fields and `add_tasks` (R1, R2, R4). Each
+	test starts its project with no open task, so a rerun on a long-lived
+	site sees the same state."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		self.other_company = ensure_baseline_company()
+		_, self.dm_user = make_test_delivery_manager()
+		_, self.hr_user = make_test_hr_manager_employee()
+		frappe.cache.delete(f"helixhr:rate-limit:add_tasks:{self.dm_user}")
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _fresh_project(self, name, status="Open", company=None):
+		project = make_test_project(company or self.company, name)
+		frappe.db.set_value("Project", project, "status", status)
+		frappe.db.set_value(
+			"Task",
+			{"project": project, "status": ["not in", ("Completed", "Cancelled")]},
+			"status",
+			"Cancelled",
+		)
+		return project
+
+	def _open_subjects(self, project):
+		return sorted(
+			frappe.get_all(
+				"Task",
+				filters={"project": project, "status": ["not in", ("Completed", "Cancelled")]},
+				pluck="subject",
+			)
+		)
+
+	def test_hr_gets_the_table_fields_on_every_row_and_no_costing(self):
+		from helixhr.api import search_projects
+
+		project = self._fresh_project("_Test U1 Table Fields")
+		frappe.db.set_value("Project", project, {"helixhr_is_billable": 1, "priority": "High"})
+
+		frappe.set_user(self.hr_user)
+		rows = search_projects()["projects"]
+		self.assertTrue(rows)
+		for row in rows:
+			for key in ("project_type", "priority", "billable", "expected_end_date", "open_to_all"):
+				self.assertIn(key, row)
+			for forbidden in (*_COSTING_FIELDS, "helixhr_is_billable", "helixhr_open_to_all"):
+				self.assertNotIn(forbidden, row)
+		mine = next(row for row in rows if row["name"] == project)
+		self.assertIs(mine["billable"], True)
+		self.assertIs(mine["open_to_all"], False)
+		self.assertEqual(mine["priority"], "High")
+
+	def test_blanks_and_a_duplicate_of_an_open_task_are_dropped(self):
+		from helixhr.api import add_tasks, save_task
+
+		project = self._fresh_project("_Test U1 Paste Project")
+		frappe.set_user(self.dm_user)
+		save_task(project, subject="_Test U1 Existing")
+
+		result = add_tasks(project, ["  _Test U1 Alpha ", "", "_test u1 existing", "_Test U1 Beta", "   "])
+
+		self.assertEqual([task["subject"] for task in result["tasks"]], ["_Test U1 Alpha", "_Test U1 Beta"])
+		self.assertEqual(result["duplicates"], ["_test u1 existing"])
+		self.assertTrue(all(task["status"] == "Open" for task in result["tasks"]))
+		self.assertEqual(
+			self._open_subjects(project), ["_Test U1 Alpha", "_Test U1 Beta", "_Test U1 Existing"]
+		)
+
+	def test_a_line_repeated_within_the_paste_is_added_once(self):
+		from helixhr.api import add_tasks
+
+		project = self._fresh_project("_Test U1 Paste Repeat Project")
+		frappe.set_user(self.dm_user)
+		result = add_tasks(project, frappe.as_json(["_Test U1 Gamma", "_TEST U1 GAMMA"]))
+		self.assertEqual([task["subject"] for task in result["tasks"]], ["_Test U1 Gamma"])
+		self.assertEqual(result["duplicates"], ["_TEST U1 GAMMA"])
+
+	def test_101_lines_are_refused_and_nothing_is_created(self):
+		from helixhr.api import add_tasks
+
+		project = self._fresh_project("_Test U1 Too Many Project")
+		frappe.set_user(self.dm_user)
+		with self.assertRaises(frappe.ValidationError) as caught:
+			add_tasks(project, [f"_Test U1 Task {n}" for n in range(101)])
+		self.assertIn("at most 100", str(caught.exception))
+		self.assertEqual(self._open_subjects(project), [])
+
+	def test_a_141_character_line_refuses_the_whole_call_naming_the_line(self):
+		from helixhr.api import add_tasks
+
+		project = self._fresh_project("_Test U1 Long Line Project")
+		frappe.set_user(self.dm_user)
+		with self.assertRaises(frappe.ValidationError) as caught:
+			add_tasks(project, ["_Test U1 Fine", "", "x" * 141])
+		self.assertIn("Line 3", str(caught.exception))
+		self.assertEqual(self._open_subjects(project), [])
+
+	def test_a_failing_insert_leaves_no_task_behind(self):
+		from unittest.mock import patch
+
+		from frappe.model.document import Document
+
+		from helixhr.api import add_tasks
+
+		project = self._fresh_project("_Test U1 Rollback Project")
+		original = Document.insert
+		calls = []
+
+		def insert_then_fail(doc, *args, **kwargs):
+			calls.append(doc.doctype)
+			if doc.doctype == "Task" and calls.count("Task") == 2:
+				raise frappe.ValidationError("boom")
+			return original(doc, *args, **kwargs)
+
+		frappe.set_user(self.dm_user)
+		with patch.object(Document, "insert", insert_then_fail), self.assertRaises(frappe.ValidationError):
+			add_tasks(project, ["_Test U1 First", "_Test U1 Second"])
+		self.assertEqual(self._open_subjects(project), [])
+
+	def test_out_of_scope_and_missing_projects_get_the_same_refusal(self):
+		from helixhr.api import _PROJECT_NOT_FOUND, add_tasks
+
+		elsewhere = self._fresh_project("_Test U1 Elsewhere", company=self.other_company)
+		frappe.set_user(self.dm_user)
+		with self.assertRaises(frappe.PermissionError) as outside:
+			add_tasks(elsewhere, ["_Test U1 Sneaky"])
+		with self.assertRaises(frappe.PermissionError) as missing:
+			add_tasks("_Test U1 No Such Project", ["_Test U1 Sneaky"])
+		self.assertEqual(str(outside.exception), _PROJECT_NOT_FOUND)
+		self.assertEqual(str(missing.exception), _PROJECT_NOT_FOUND)
+		frappe.set_user("Administrator")
+		self.assertEqual(self._open_subjects(elsewhere), [])
+
+	def test_a_completed_project_is_refused(self):
+		from helixhr.api import add_tasks
+
+		project = self._fresh_project("_Test U1 Completed Project", status="Completed")
+		frappe.set_user(self.dm_user)
+		with self.assertRaises(frappe.ValidationError) as caught:
+			add_tasks(project, ["_Test U1 Late Task"])
+		self.assertIn("Open project", str(caught.exception))
+		self.assertEqual(self._open_subjects(project), [])
+
+	def test_post_only_and_in_the_rate_limit_policy(self):
+		from helixhr import api
+
+		self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[api.add_tasks], ["POST"])
+		self.assertIn("add_tasks", RATE_LIMIT_POLICY)
+
+
+# --- plan 2026-10-31-001 U5: bulk member add ----------------------------------
+
+
+def _ensure_department(name, company, parent=None, is_group=0):
+	existing = frappe.db.get_value("Department", {"department_name": name, "company": company})
+	if existing:
+		return existing
+	return (
+		frappe.get_doc(
+			{
+				"doctype": "Department",
+				"department_name": name,
+				"company": company,
+				"parent_department": parent or "All Departments",
+				"is_group": is_group,
+			}
+		)
+		.insert(ignore_permissions=True)
+		.name
+	)
+
+
+class TestAddProjectMembers(IntegrationTestCase):
+	"""`add_project_members` (R5-R7, KTD4, KTD5). Every identity here is this
+	class's own; each test resets its project to the Delivery Manager alone."""
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		self.other_company = ensure_baseline_company()
+		self.dm_employee, self.dm_user = make_test_delivery_manager()
+		frappe.cache.delete(f"helixhr:rate-limit:add_project_members:{self.dm_user}")
+
+		self.dept = _ensure_department("_Test U5 Dept", self.company, is_group=1)
+		self.sub_dept = _ensure_department("_Test U5 Sub Dept", self.company, parent=self.dept)
+		self.foreign_dept = _ensure_department("_Test U5 Foreign Dept", self.other_company)
+
+		self.alice = make_test_user("u5-alice@helixhr.test", self.company)
+		self.member = make_test_user("u5-member@helixhr.test", self.company)
+		self.no_login = _make_employee_without_user(self.company, "_Test U5 No Login")
+		self.foreign = make_test_user("u5-foreign@helixhr.test", self.other_company)
+		self.in_dept = make_test_user("u5-dept@helixhr.test", self.company, department=self.dept)
+		self.in_sub = make_test_user("u5-sub@helixhr.test", self.company, department=self.sub_dept)
+		self.left_in_sub = make_test_user(
+			"u5-sub-left@helixhr.test",
+			self.company,
+			department=self.sub_dept,
+			status="Left",
+			relieving_date="2021-01-01",
+		)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _fresh_project(self, name, members=("u5-member@helixhr.test",)):
+		"""``name`` with exactly the Delivery Manager and ``members``."""
+		project = make_test_project(self.company, name)
+		frappe.db.delete("Project User", {"parent": project})
+		frappe.db.delete("DocShare", {"share_doctype": "Project", "share_name": project})
+		for idx, user in enumerate((self.dm_user, *members), start=1):
+			frappe.get_doc(
+				{
+					"doctype": "Project User",
+					"parent": project,
+					"parenttype": "Project",
+					"parentfield": "users",
+					"idx": idx,
+					"user": user,
+					"welcome_email_sent": 1,
+				}
+			).db_insert()
+		return project
+
+	def _member_users(self, project):
+		return set(frappe.get_all("Project User", filters={"parent": project}, pluck="user"))
+
+	def _add(self, project, **kwargs):
+		from helixhr.api import add_project_members
+
+		frappe.set_user(self.dm_user)
+		try:
+			return add_project_members(project, **kwargs)
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_adds_one_and_skips_an_existing_member_and_a_no_login_employee(self):
+		project = self._fresh_project("_Test U5 Three Project")
+		result = self._add(project, employees=frappe.as_json([self.alice, self.member, self.no_login]))
+
+		self.assertEqual([row["employee"] for row in result["added"]], [self.alice])
+		self.assertTrue(result["added"][0]["employee_name"])
+		skipped = {row["employee"]: row for row in result["skipped"]}
+		self.assertEqual(skipped[self.member]["reason"], "already a member")
+		self.assertEqual(skipped[self.no_login]["reason"], "no portal login")
+		self.assertEqual(
+			skipped[self.no_login]["employee_name"],
+			frappe.db.get_value("Employee", self.no_login, "employee_name"),
+		)
+		self.assertIn("u5-alice@helixhr.test", self._member_users(project))
+		self.assertEqual(len(result["members"]), 3)
+
+	def test_a_department_add_reaches_sub_departments_and_leaves_out_the_left(self):
+		project = self._fresh_project("_Test U5 Department Project")
+		result = self._add(project, department=self.dept)
+
+		added = {row["employee"] for row in result["added"]}
+		self.assertEqual(added, {self.in_dept, self.in_sub})
+		self.assertNotIn(self.left_in_sub, added)
+		self.assertNotIn(self.left_in_sub, {row["employee"] for row in result["skipped"]})
+		self.assertNotIn("u5-sub-left@helixhr.test", self._member_users(project))
+
+	def test_an_out_of_scope_or_unknown_id_is_skipped_without_a_name(self):
+		project = self._fresh_project("_Test U5 Foreign Project")
+		result = self._add(project, employees=[self.foreign, "HR-EMP-NO-SUCH", self.left_in_sub])
+
+		self.assertEqual(result["added"], [])
+		self.assertEqual(
+			result["skipped"],
+			[
+				{"employee": self.foreign, "employee_name": None, "reason": "not available"},
+				{"employee": "HR-EMP-NO-SUCH", "employee_name": None, "reason": "not available"},
+				{"employee": self.left_in_sub, "employee_name": None, "reason": "not available"},
+			],
+		)
+		foreign_name = frappe.db.get_value("Employee", self.foreign, "employee_name")
+		self.assertNotIn(foreign_name, frappe.as_json(result))
+		self.assertNotIn("u5-foreign@helixhr.test", self._member_users(project))
+
+	def test_a_department_outside_scope_is_refused(self):
+		project = self._fresh_project("_Test U5 Foreign Department Project")
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self._add(project, department=self.foreign_dept)
+		self.assertIn("department isn't here", str(caught.exception))
+
+	def test_a_department_over_the_cap_is_refused_whole(self):
+		from unittest.mock import patch
+
+		from helixhr import api
+
+		project = self._fresh_project("_Test U5 Cap Project")
+		with patch.object(api, "_BULK_MEMBER_LIMIT", 1), self.assertRaises(frappe.ValidationError) as caught:
+			self._add(project, department=self.dept)
+		self.assertIn("more than 1 people", str(caught.exception))
+		self.assertEqual(self._member_users(project), {self.dm_user, "u5-member@helixhr.test"})
+
+	def test_a_bulk_add_mails_nobody_and_leaves_no_share(self):
+		project = self._fresh_project("_Test U5 Quiet Project")
+		queued = frappe.db.count("Email Queue")
+		result = self._add(project, employees=[self.alice, self.in_dept])
+
+		self.assertEqual(len(result["added"]), 2)
+		self.assertEqual(frappe.db.count("Email Queue"), queued)
+		self.assertEqual(
+			frappe.get_all("DocShare", filters={"share_doctype": "Project", "share_name": project}), []
+		)
+		flags = frappe.get_all(
+			"Project User", filters={"parent": project}, fields=["user", "welcome_email_sent"]
+		)
+		self.assertTrue(all(row.welcome_email_sent for row in flags))
+
+	def test_the_same_call_twice_is_a_no_op_the_second_time(self):
+		project = self._fresh_project("_Test U5 Twice Project")
+		first = self._add(project, employees=[self.alice])
+		after_first = self._member_users(project)
+		second = self._add(project, employees=[self.alice])
+
+		self.assertEqual(len(first["added"]), 1)
+		self.assertEqual(second["added"], [])
+		self.assertEqual([row["reason"] for row in second["skipped"]], ["already a member"])
+		self.assertEqual(self._member_users(project), after_first)
+
+	def test_an_out_of_scope_project_is_refused(self):
+		from helixhr.api import _PROJECT_NOT_FOUND
+
+		elsewhere = make_test_project(self.other_company, "_Test U5 Elsewhere Project")
+		with self.assertRaises(frappe.PermissionError) as caught:
+			self._add(elsewhere, employees=[self.alice])
+		self.assertEqual(str(caught.exception), _PROJECT_NOT_FOUND)
+
+	def test_nothing_to_add_is_refused(self):
+		project = self._fresh_project("_Test U5 Empty Call Project")
+		with self.assertRaises(frappe.ValidationError):
+			self._add(project, employees=[])
+
+	def test_get_project_lists_departments_the_editor_may_add(self):
+		from helixhr.api import get_project
+
+		project = self._fresh_project("_Test U5 Picker Project")
+		frappe.set_user(self.dm_user)
+		departments = {row["name"]: row for row in get_project(project)["departments"]}
+		self.assertEqual(
+			departments[self.sub_dept],
+			{"name": self.sub_dept, "department_name": "_Test U5 Sub Dept", "company": self.company},
+		)
+		self.assertIn(self.dept, departments)
+		self.assertNotIn(self.foreign_dept, departments)
+		self.assertNotIn("All Departments", departments)
+
+	def test_post_only_and_in_the_rate_limit_policy(self):
+		from helixhr import api
+
+		self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[api.add_project_members], ["POST"])
+		self.assertIn("add_project_members", RATE_LIMIT_POLICY)
 
 
 # --- plan 2026-10-05-001 U6: get_my_project_overview -------------------------

@@ -13,7 +13,7 @@ export const TONE = {
   resting: 'bg-surface-gray-2 text-ink-gray-7',
 }
 
-export const KINDS = ['leave', 'timesheet', 'request', 'attendance', 'change']
+export const KINDS = ['leave', 'timesheet', 'request', 'attendance', 'change', 'roster']
 
 // `waiting: true` marks the one state per kind that names a person when the
 // portal knows who: "Waiting for Priya".
@@ -94,6 +94,16 @@ const MAP = {
     Declined: { label: 'Declined', tone: 'sentBack' },
     Withdrawn: { label: 'Withdrawn', tone: 'resting' },
   },
+  // Plan 2026-10-31-001 U10 / R15, R17: a manager's roster request. Returned
+  // is the recoverable no (it reopens as the draft); Declined is final.
+  roster: {
+    Draft: { label: 'Draft', tone: 'resting' },
+    Pending: { label: 'Waiting for HR', tone: 'waiting' },
+    Approved: { label: 'Approved', tone: 'done' },
+    Returned: { label: 'Sent back', tone: 'sentBack' },
+    Declined: { label: 'Declined', tone: 'sentBack' },
+    Withdrawn: { label: 'Withdrawn', tone: 'resting' },
+  },
 }
 
 const WAITING_FALLBACK = { timesheet: 'Waiting for manager', attendance: 'Waiting for manager' }
@@ -167,4 +177,17 @@ export function resolveStatus({
   }
 
   return { label, toneClass: TONE[tone] || TONE.resting }
+}
+
+/**
+ * Plan 2026-10-31-001 R25: who made a leave's final decision, beside the
+ * badge -- "Approved by Priya Shah", or "Rejected by Ananya Rao (HR)" when HR
+ * decided in the approver's place. Only the server's stamp names anyone: a
+ * leave decided before the stamp existed reads nothing rather than guessing
+ * the approver. `app` is `get_my_leave`'s projection.
+ */
+export function decidedByLine(app) {
+  const verb = { approved: 'Approved', rejected: 'Rejected' }[app?.state]
+  if (!verb || !app.decided_by_name) return ''
+  return `${verb} by ${app.decided_by_name}${app.decided_by_hr ? ' (HR)' : ''}`
 }

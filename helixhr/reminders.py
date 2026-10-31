@@ -983,7 +983,11 @@ _KIND_LABELS = {
 	"attendance": "Attendance",
 	"request": "HR request",
 	"change": "Timesheet change",
+	"roster": "Roster change",
 }
+# Plan 2026-10-31-001 U9: a manager's roster request, scoped by its own
+# company (KTD12) rather than by its employee, who is the submitting manager.
+ROSTER_CHANGE = "HelixHR Roster Change"
 
 
 def overdue_guard_key(company, day):
@@ -1078,7 +1082,7 @@ def send_overdue_digests():
 # timesheet oversight list share the digest's collector.
 ALL_PENDING = "all"
 # The kinds `collect_overdue` reads, by their `route_kind`.
-PENDING_KINDS = ("leave", "timesheet", "attendance", "request", "change")
+PENDING_KINDS = ("leave", "timesheet", "attendance", "request", "change", "roster")
 
 
 def collect_overdue(today=None, cutoff=None, companies=None, kinds=None, resolve_owners=True, stats=None):
@@ -1294,6 +1298,40 @@ def collect_overdue(today=None, cutoff=None, companies=None, kinds=None, resolve
 			add("change", "HelixHR Timesheet Change", row, title, row.get(PENDING_SINCE), owners, owner_name,
 				threshold, "change", approver, row.week_start)
 
+	# Plan 2026-10-31-001 U9 (R14): a Pending roster request waits on the HR
+	# Managers of the request's company, never on the manager who sent it.
+	if "roster" in kinds:
+		roster_rows = read(
+			ROSTER_CHANGE,
+			filters={
+				"status": "Pending",
+				**since_filter,
+				**({"company": ["in", list(companies)]} if companies is not None else {}),
+			},
+			fields=["name", "employee", "employee_name", "company", "manager_user", PENDING_SINCE],
+			order_by=f"{PENDING_SINCE} asc",
+		)
+		first_dates = {}
+		if roster_rows:
+			for op in frappe.get_all(
+				"HelixHR Roster Change Row",
+				filters={"parenttype": ROSTER_CHANGE, "parent": ["in", [row.name for row in roster_rows]]},
+				fields=["parent", "action", "from_date", "to_date"],
+			):
+				day = op.to_date if op.action == "End" else op.from_date
+				if day and (op.parent not in first_dates or getdate(day) < first_dates[op.parent]):
+					first_dates[op.parent] = getdate(day)
+		for row in roster_rows:
+			if late_only and not is_overdue(row.get(PENDING_SINCE), today, threshold):
+				continue
+			owners, owner_name = owned(hr_owned, row.company)
+			# R21: the manager never owes their own request, HR Manager or not.
+			owners = [user for user in owners if user != row.manager_user]
+			first = first_dates.get(row.name)
+			title = f"Roster change, {format_date(first, _date_format())}" if first else "Roster change"
+			add("roster", ROSTER_CHANGE, row, title, row.get(PENDING_SINCE), owners, owner_name, threshold,
+				"roster", {"role": _HR_ROLE}, first)
+
 	# Oldest first; an item whose wait is unknown sorts last.
 	items.sort(key=lambda item: -(item["age_days"] if item["age_days"] is not None else -1))
 	return items
@@ -1310,7 +1348,7 @@ def _summary_owners(items, hr_user, project=None):
 	(row fields), so the tab's counts and the summary's always agree. Items with nobody active to act go under their owner's name,
 	flagged `inactive` (R24). The HR user's own group is marked "(you)" in
 	its name rather than by a new key, so saved templates keep rendering."""
-	from helixhr.utils import admin_scope_employee_filters, resolve_admin_scope
+	from helixhr.utils import admin_scope_employee_filters, read_companies, resolve_admin_scope
 
 	filters = admin_scope_employee_filters(resolve_admin_scope(hr_user))
 	if filters is None:
@@ -1322,9 +1360,14 @@ def _summary_owners(items, hr_user, project=None):
 			frappe.get_all("Employee", filters={**filters, "name": ["in", list(employees)]}, pluck="name")
 		) if employees else set()
 
+	companies = read_companies(resolve_admin_scope(hr_user)) if filters else None
 	groups = {}
 	for item in items:
-		if in_scope is not None and item["employee"] not in in_scope:
+		if item.get("doctype") == ROSTER_CHANGE:
+			# Its company is the scope; its employee is the submitting manager.
+			if companies is not None and item["company"] not in companies:
+				continue
+		elif in_scope is not None and item["employee"] not in in_scope:
 			continue
 		inactive = not item["owners"]
 		group = groups.setdefault(

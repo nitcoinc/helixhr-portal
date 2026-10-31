@@ -14,6 +14,7 @@ import { Button, FormControl } from 'frappe-ui'
 import Avatar from '@/components/Avatar.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import DecisionActions from '@/components/approvals/DecisionActions.vue'
+import RosterChangeReview from '@/components/approvals/RosterChangeReview.vue'
 import { getReasonCopy } from '@/lib/workKinds'
 import { formatDate, formatDateRange } from '@/lib/dates'
 import { trimNumber } from '@/lib/hours'
@@ -78,7 +79,7 @@ function requestedDayLabel(day) {
 const firstName = computed(() => (props.selected?.employee_name || '').split(/\s+/)[0])
 
 // What the reason field is called, per outcome: the one kind map's copy (KTD6).
-const reasonCopy = computed(() => getReasonCopy(props.reasonFor))
+const reasonCopy = computed(() => getReasonCopy(props.reasonFor, props.selected?.kind))
 
 /** The action row's props, the same on both layouts. */
 const decisionProps = computed(() => ({
@@ -311,6 +312,10 @@ const reasonPlaceholder = computed(() =>
               Change request ·
               {{ formatDateRange(selected.week_start, selected.week_end) }}
             </template>
+            <template v-else-if="selected.kind === 'roster'">
+              Roster change ·
+              {{ formatDateRange(selected.from_date, selected.to_date) }}
+            </template>
             <template v-else>
               {{ selected.leave_type }} ·
               {{ formatDateRange(selected.from_date, selected.to_date) }}
@@ -539,6 +544,14 @@ const reasonPlaceholder = computed(() =>
       </dl>
     </template>
 
+    <!-- Plan 2026-10-31-001 U10: one block for both layouts -- the people,
+         their operations and the days before and after. -->
+    <RosterChangeReview
+      v-if="selected.kind === 'roster'"
+      :class="gap"
+      :selected="selected"
+    />
+
     <p
       v-if="quote"
       class="surface-inset p-3 text-sm text-ink-gray-7"
@@ -636,6 +649,16 @@ const reasonPlaceholder = computed(() =>
       data-testid="view-only-note"
     >
       View only: {{ selected.read_only_reason || "you can't approve timesheets." }}
+    </p>
+    <!-- Plan 2026-10-31-001 R22/R23: HR deciding a leave still with its
+         manager steps in for them; the action row says so before it is used. -->
+    <p
+      v-if="selected.waiting_on && actions.includes('Approve') && !armed"
+      class="text-sm text-ink-gray-6"
+      :class="gap"
+      data-testid="decides-for"
+    >
+      Approving here decides for {{ selected.waiting_on }}.
     </p>
     <!-- P4-R1. Exactly the outcomes the server allows, in one order on every
          kind: the decision, the recoverable no, the final no, the hand-over.

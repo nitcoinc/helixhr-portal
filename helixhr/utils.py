@@ -375,6 +375,52 @@ NOTIFICATION_EVENTS = {
 			"{% endif %}"
 		),
 	},
+	# Plan 2026-10-31-001 U8 / R20: a manager's roster request reaches the HR
+	# Managers of its company, and its outcome reaches the manager.
+	"roster_change_submitted": {
+		"label": "Roster change request",
+		"audience": "HR",
+		"variables": {
+			"manager_name": ("The manager who asked", "Meera Shah"),
+			"people": ("Who the changes are for", "Arjun Rao, Priya Nair"),
+			"change_count": ("How many shift changes", 3),
+			"note": ("The manager's note (may be empty)", "Cover for the holiday week"),
+			"action_url": _LEAVE_VARIABLES["action_url"],
+		},
+		"subject": "Roster change request from {{ manager_name }}",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"<p>{{ manager_name }} asked for {{ change_count }} shift change(s) for {{ people }}."
+			" It is waiting for HR.</p>"
+			"{% if note %}<p>Note: {{ note }}</p>{% endif %}"
+		),
+		"action_label": "Review request",
+	},
+	"roster_change_decided": {
+		"label": "Roster change request decided",
+		"audience": "Manager",
+		"variables": {
+			"people": ("Who the changes are for", "Arjun Rao, Priya Nair"),
+			"state": ("What happened to it", "approved"),
+			"approver_name": ("Who decided (empty when it was withdrawn automatically)", "Meera Shah"),
+			"decision_note": ("HR's note, or why it came back (may be empty)", "Arjun's shift changed first"),
+			"action_url": ("Link to the roster", "https://hr.example.com/helixhr/roster"),
+		},
+		"subject": "Your roster change request was {{ state }}",
+		"body": (
+			"<p>Hi {{ recipient_first_name }},</p>"
+			"{% if approver_name %}"
+			"<p>{{ approver_name }} {{ state }} your roster change request for {{ people }}.</p>"
+			"{% else %}"
+			"<p>Your roster change request for {{ people }} was {{ state }}.</p>"
+			"{% endif %}"
+			"{% if state == 'sent back' %}"
+			"<p>Reopen it as a draft on the roster, fix it and send it again.</p>"
+			"{% endif %}"
+			"{% if decision_note %}<p>Note: {{ decision_note }}</p>{% endif %}"
+		),
+		"action_label": "Open roster",
+	},
 	"attendance_for_hr": {
 		"label": "Attendance request waiting for HR",
 		"audience": "HR",
@@ -2573,6 +2619,11 @@ RATE_LIMIT_POLICY = {
 	"create_project": (20, 3600),
 	"save_task": (30, 3600),
 	"set_project_members": (20, 3600),
+	# Plan 2026-10-31-001 U1/U4/U5: one call stands in for up to 100 tasks
+	# or 500 people, so each is bounded like the single writes above.
+	"add_tasks": (30, 3600),
+	"set_project_open_to_all": (30, 3600),
+	"add_project_members": (20, 3600),
 	# Plan 2026-10-04-001 U2: one runner for every catalog report. Wrapped
 	# HRMS reports are the heaviest read the portal makes, so it keeps
 	# `run_portal_report`'s tighter bound.
@@ -2698,6 +2749,13 @@ RATE_LIMIT_POLICY = {
 	"end_shift_assignment": (30, 3600),
 	"change_shift_assignment": (30, 3600),
 	"cancel_shift_assignment": (30, 3600),
+	# Plan 2026-10-31-001 U8: a draft save follows each edit like a week
+	# save; a submit mails HR, and withdraw and reopen are rare.
+	"get_roster_draft": (60, 60),
+	"save_roster_draft": (30, 60),
+	"submit_roster_change": (10, 3600),
+	"withdraw_roster_change": (10, 3600),
+	"reopen_roster_change": (10, 3600),
 	# Plan 2026-10-02-001 U13: shows a full bank detail and writes an audit
 	# comment each time, so it is bounded tightly.
 	"reveal_correction_value": (20, 3600),

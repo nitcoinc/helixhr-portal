@@ -216,6 +216,14 @@ doc_events = {
 		"after_insert": "helixhr.events.timesheet_change_after_insert",
 		"on_change": "helixhr.events.stamp_pending_since",
 	},
+	# Plan 2026-10-31-001 U8: HR hears a roster request arrive and the
+	# manager hears how it ended; pending-since like every approval kind.
+	"HelixHR Roster Change": {
+		"on_change": [
+			"helixhr.events.stamp_pending_since",
+			"helixhr.events.roster_change_on_change",
+		],
+	},
 	"File": {
 		"before_insert": "helixhr.events.file_before_insert",
 	},

@@ -9,6 +9,7 @@ import StatusBadge from '@/components/StatusBadge.vue'
 import Icon from '@/components/Icon.vue'
 import { dateTileParts, formatDate, formatDateRange, today } from '@/lib/dates'
 import { toPlainLeaveError } from '@/lib/errorMap'
+import { decidedByLine } from '@/lib/statusBadge'
 import { useIsDesktop } from '@/lib/useIsDesktop'
 
 // P2-U5 / KTD5. `/leave` and `/leave/:name` are the same component: the
@@ -126,6 +127,13 @@ function badgeStatus(app) {
  * button row below, not this block (P4-R3, P4-R4). */
 function decidedAgainst(app) {
   return app.state === 'sent_back' || app.state === 'rejected'
+}
+
+/** Who wrote the reason quoted under a decision: the stamped decider of a
+ * final rejection (HR, when HR decided it -- plan 2026-10-31-001 R25), else
+ * the approver, who is who sends back. */
+function reasonAuthor(app) {
+  return (app.state === 'rejected' && app.decided_by_name) || app.approver_name || ''
 }
 
 function durationLabel(app) {
@@ -414,6 +422,14 @@ async function doWithdraw() {
                       · sent {{ formatDate(app.creation) }}
                     </template>
                   </p>
+                  <!-- Plan 2026-10-31-001 R25: who decided, from the stamp. -->
+                  <p
+                    v-if="decidedByLine(app)"
+                    class="mt-0.5 text-sm text-ink-gray-6"
+                    data-testid="leave-decided-by"
+                  >
+                    {{ decidedByLine(app) }}
+                  </p>
 
                   <!-- The manager's reason, quoted where the decision is,
                        rather than a status word that sends the employee
@@ -423,7 +439,7 @@ async function doWithdraw() {
                     v-if="decidedAgainst(app) && app.reason"
                     class="surface-inset mt-2 p-3 text-sm text-ink-gray-7"
                   >
-                    <span v-if="app.approver_name">{{ app.approver_name }}: </span>“{{ app.reason }}”
+                    <span v-if="reasonAuthor(app)">{{ reasonAuthor(app) }}: </span>“{{ app.reason }}”
                   </div>
 
                   <!-- Only a send-back can be edited and resent. A rejected
@@ -549,6 +565,13 @@ async function doWithdraw() {
                 :approver="approverFirstName(selected)"
               />
             </div>
+            <p
+              v-if="decidedByLine(selected)"
+              class="mt-1 text-sm text-ink-gray-6"
+              data-testid="leave-decided-by"
+            >
+              {{ decidedByLine(selected) }}
+            </p>
 
             <dl class="mt-4 grid grid-cols-2 gap-4">
               <div>
@@ -605,7 +628,7 @@ async function doWithdraw() {
               v-if="decidedAgainst(selected) && selected.reason"
               class="surface-inset mt-4 p-3 text-sm text-ink-gray-7"
             >
-              <span v-if="selected.approver_name">{{ selected.approver_name }}: </span>“{{
+              <span v-if="reasonAuthor(selected)">{{ reasonAuthor(selected) }}: </span>“{{
                 selected.reason
               }}”
             </div>

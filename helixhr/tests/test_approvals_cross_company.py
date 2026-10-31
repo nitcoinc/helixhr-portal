@@ -327,6 +327,24 @@ class TestCrossCompanyLineManager(_CrossCompanyCase):
 			get_approval_detail("leave", leave)
 		self.assertIn("isn't here", str(refused.exception))
 
+	def test_only_hr_in_scope_sees_a_leave_waiting_on_its_manager(self):
+		"""Plan 2026-10-31-001 R23: the "With managers" row follows HR scope.
+		Company B's HR sees the stranger's leave, named after the approver;
+		the HR Manager anchored in A does not see it at all."""
+		frappe.db.set_value("Employee", self.stranger, "leave_approver", STRANGER_MANAGER_USER)
+		leave = self._open_leave(STRANGER_USER, self.stranger)
+
+		frappe.set_user(B_HR_USER)
+		rows = {row["name"]: row for row in get_my_approvals()["pending"]}
+		self.assertEqual(rows[leave]["hr_reason"], "with_manager")
+		self.assertEqual(
+			rows[leave]["approver_name"],
+			frappe.db.get_value("Employee", self.stranger_manager, "employee_name"),
+		)
+
+		frappe.set_user(self.hr_user)
+		self.assertNotIn(leave, {row["name"] for row in get_my_approvals()["pending"]})
+
 	def test_hr_manager_is_refused_a_routed_request_in_another_company(self):
 		frappe.set_user(HR_REPORT_USER)
 		request = create_my_request(

@@ -345,6 +345,10 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"create_project": (20, 3600),
 			"save_task": (30, 3600),
 			"set_project_members": (20, 3600),
+			# Plan 2026-10-31-001 U1/U4/U5.
+			"add_tasks": (30, 3600),
+			"set_project_open_to_all": (30, 3600),
+			"add_project_members": (20, 3600),
 			"run_report": (30, 60),
 			# Plan 2026-10-04-001 U3-U13: catalog, export, access matrix, views.
 			"search_report_options": (60, 60),
@@ -422,6 +426,12 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"end_shift_assignment": (30, 3600),
 			"change_shift_assignment": (30, 3600),
 			"cancel_shift_assignment": (30, 3600),
+			# Plan 2026-10-31-001 U8.
+			"get_roster_draft": (60, 60),
+			"save_roster_draft": (30, 60),
+			"submit_roster_change": (10, 3600),
+			"withdraw_roster_change": (10, 3600),
+			"reopen_roster_change": (10, 3600),
 			# Plan 2026-10-04-004 U4: the Email Templates page's celebrations
 			# group -- the setup read fans out per (event, company), the
 			# preview renders per keystroke pause, a test send is real mail

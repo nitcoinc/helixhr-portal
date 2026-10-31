@@ -77,6 +77,15 @@ from helixhr.events import (
 )
 from helixhr.helixhr.doctype.helixhr_leaving.helixhr_leaving import OPEN_STATUSES as OPEN_LEAVING_STATUSES
 from helixhr.helixhr.doctype.helixhr_report_export.helixhr_report_export import expire_unreachable_exports
+from helixhr.helixhr.doctype.helixhr_roster_change.helixhr_roster_change import (
+	ROSTER_APPROVED,
+	ROSTER_DECLINED,
+	ROSTER_DRAFT,
+	ROSTER_PENDING,
+	ROSTER_RETURNED,
+	ROSTER_WITHDRAWN,
+	pending_requests,
+)
 from helixhr.helixhr.doctype.helixhr_timesheet_change.helixhr_timesheet_change import (
 	comment_problem,
 )
@@ -85,6 +94,17 @@ from helixhr.helixhr.doctype.helixhr_timesheet_change.helixhr_timesheet_change i
 # permission scope), reused here rather than re-listed so this gate and
 # `hr_request.get_permission_query_conditions` cannot drift apart.
 from helixhr.helixhr.doctype.hr_request.hr_request import _WORKER_ROLES as _ROUTED_WORKER_ROLES
+from helixhr.roster_ops import AFTER_END as _ROSTER_CHANGE_AFTER_END
+from helixhr.roster_ops import ASSIGN as ROSTER_OP_ASSIGN
+from helixhr.roster_ops import BAD_DATE as _ROSTER_BAD_DATE
+from helixhr.roster_ops import CHANGE as ROSTER_OP_CHANGE
+from helixhr.roster_ops import CHANGE_ON_START as _ROSTER_CHANGE_ON_START
+from helixhr.roster_ops import END as ROSTER_OP_END
+from helixhr.roster_ops import END_BEFORE_START as _ROSTER_END_BEFORE_START
+from helixhr.roster_ops import NO_SHIFT_ON_DATE as _ROSTER_NO_SHIFT_ON_DATE
+from helixhr.roster_ops import NO_SHIFT_TYPE as _ROSTER_NO_SHIFT_TYPE
+from helixhr.roster_ops import OVERLAP as _ROSTER_OVERLAP
+from helixhr.roster_ops import affected_window, op_date, read_coverage, simulate, snapshot_key
 from helixhr.tasks import (
 	LEAVING_DOCTYPE,
 	apply_leaving,
@@ -1013,18 +1033,23 @@ def _ordered_celebrations(entries):
 
 
 def _open_leave(employee):
-	"""This employee's leave that is still with their manager -- the rows
-	the queue's "Waiting on others" list is drawn from.
+	"""This employee's leave still waiting on somebody -- the rows the
+	queue's "Waiting on others" list is drawn from -- with the stage and the
+	approver's display name (plan 2026-10-31-001 R26).
 
 	Bounded by _QUEUE_FETCH like every other queue source.
 	"""
-	return frappe.get_all(
+	rows = frappe.get_all(
 		"Leave Application",
 		filters={"employee": employee, "status": "Open"},
-		fields=["name", "leave_type", "from_date", "to_date"],
+		fields=["name", "leave_type", "from_date", "to_date", "helixhr_stage", "leave_approver"],
 		order_by="from_date asc",
 		limit=_QUEUE_FETCH,
 	)
+	names = _leave_approver_names(row.leave_approver for row in rows)
+	for row in rows:
+		row.approver_name = names.get(row.leave_approver)
+	return rows
 
 
 def _get_week_spine(employee, once):
@@ -1427,18 +1452,22 @@ def _get_needs_you(employee, once):
 		)
 
 	for row in once("open_leave", lambda: _open_leave(employee)):
+		# Plan 2026-10-31-001 R26: "waiting for HR" only for the HR stage;
+		# otherwise the manager by name, and the old words with nobody to name.
+		with_hr = row.helixhr_stage == LEAVE_STAGE_HR
+		waiting_for = "HR" if with_hr else row.approver_name or "your manager"
 		waiting.append(
 			_queue_item(
 				kind="leave_waiting",
 				name=row.name,
 				doctype="Leave Application",
-				title=f"{row.leave_type} waiting for your manager",
+				title=f"{row.leave_type} waiting for {waiting_for}",
 				detail=None,
 				date=str(row.from_date),
 				day=day_for(row.from_date),
 				age_days=age_days(row.from_date),
 				action="View",
-				owner="manager",
+				owner="hr" if with_hr else "manager",
 				urgency="waiting",
 				to={"name": "LeaveDetail", "params": {"name": row.name}},
 			)
@@ -1760,9 +1789,13 @@ def _summary_row(
 		"for_hr": False,
 		"sent_to_hr_by": None,
 		"hr_note": None,
-		# U4 / R10: why HR sees a manager-stage leave -- "approver_away" or
-		# "overdue" -- and None for everything else.
+		# U4 / R10: why HR sees a manager-stage leave -- "approver_away",
+		# "overdue" or, plan 2026-10-31-001 KTD15, "with_manager" -- and None
+		# for everything else.
 		"hr_reason": None,
+		# Plan 2026-10-31-001 R22: who a manager-stage leave HR sees is
+		# waiting on. None on every other row, and on a leave with no approver.
+		"approver_name": None,
 		# Plan 2026-10-04-003 KTD7: the "Needs a look" flags, computed on the
 		# server and shipped on the row, so the display and the batch
 		# endpoint's re-check can never disagree. None for the kinds that
@@ -2616,72 +2649,119 @@ def _approvers_away(users, today):
 	return {employees[name] for name in on_leave}
 
 
+# Plan 2026-10-31-001 KTD15 (R23): a manager-stage leave HR may see but does
+# not owe -- the "With managers" group. Never in a count: not the badge, not
+# `total`, not Home's decisions.
+HR_REASON_WITH_MANAGER = "with_manager"
+
+
+def _owed(row):
+	"""Whether a queue row is work the caller owes (KTD15): everything except
+	the "With managers" rows, which HR may decide but is not waiting on."""
+	return row.get("hr_reason") != HR_REASON_WITH_MANAGER
+
+
+def _leave_approver_names(users):
+	"""The display name of each leave approver login, through the overdue
+	digest's own resolver -- one Employee read and one User read whatever the
+	count. An approver who has left or lost their login keeps a name; only
+	"nobody" has none."""
+	items = [{"approver": {"user": user}} for user in {user for user in users if user}]
+	return {item["approver_user"]: item["approver_name"] for item in reminders.resolve_approvers(items)}
+
+
 def _hr_stalled_leave_summaries(employee, today, employee_filter, count_only=False):
-	"""Manager-stage leave HR may decide because the approver is away or the
-	request is overdue (R10, KTD4). Admin-scoped by `employee_filter`, never
-	narrowed by `_line_manager_filter`: these are other managers' reports.
-	The caller's own approvals are already in their line-manager half."""
+	"""Manager-stage leave HR sees (R10, KTD4; plan 2026-10-31-001 KTD15).
+	Admin-scoped by `employee_filter`, never narrowed by
+	`_line_manager_filter`: these are other managers' reports. The caller's
+	own approvals are already in their line-manager half.
+
+	Two kinds of row. `approver_away` and `overdue` are HR's to decide and
+	count; `with_manager` is everything else, shown so HR can see who it is
+	waiting on, and counted nowhere (`count_only` leaves it out).
+
+	The stalled rows are read first, by their own filter, so a backlog of
+	fresh requests can never push one past `_QUEUE_FETCH`: who is away comes
+	from the distinct approvers in scope (one small read), and overdue is the
+	same strict `is_overdue` test as a date bound on `helixhr_pending_since`.
+	The "With managers" read is a second, separately bounded one.
+	"""
+	scope = {
+		"status": "Open",
+		"docstatus": 0,
+		"helixhr_stage": ["in", ["", None, _LEAVE_STAGE_MANAGER]],
+		"employee": employee_filter,
+		# Not "not in ['', user]": a request with no approver is still waiting
+		# on somebody, and HR is the one who can see that.
+		"leave_approver": ["!=", frappe.session.user],
+	}
+	approvers = frappe.get_all("Leave Application", filters=scope, pluck="leave_approver", distinct=True)
+	away = _approvers_away({user for user in approvers if user}, today)
+	threshold = approval_overdue_days()
+	stalled_or = {PENDING_SINCE_FIELD: ["<", str(add_days(today, -threshold))]}
+	if away:
+		stalled_or["leave_approver"] = ["in", list(away)]
+	fields = [
+		"name",
+		"employee",
+		"employee_name",
+		"leave_type",
+		"from_date",
+		"to_date",
+		"total_leave_days",
+		"status",
+		"creation",
+		"leave_approver",
+		PENDING_SINCE_FIELD,
+	]
 	rows = frappe.get_all(
 		"Leave Application",
-		filters={
-			"status": "Open",
-			"docstatus": 0,
-			"helixhr_stage": ["in", ["", None, _LEAVE_STAGE_MANAGER]],
-			"employee": employee_filter,
-			"leave_approver": ["not in", ["", frappe.session.user]],
-		},
-		fields=["name", "leave_approver", PENDING_SINCE_FIELD]
-		if count_only
-		else [
-			"name",
-			"employee",
-			"employee_name",
-			"leave_type",
-			"from_date",
-			"to_date",
-			"total_leave_days",
-			"status",
-			"creation",
-			"leave_approver",
-			PENDING_SINCE_FIELD,
-		],
+		filters=scope,
+		or_filters=stalled_or,
+		fields=["name", "leave_approver", PENDING_SINCE_FIELD] if count_only else fields,
 		order_by="creation asc",
 		limit=_QUEUE_FETCH,
 	)
-	away = _approvers_away({row.leave_approver for row in rows}, today)
-	threshold = approval_overdue_days()
-	stalled = []
+	reasons = {}
 	for row in rows:
 		if row.leave_approver in away:
-			reason = "approver_away"
+			reasons[row.name] = "approver_away"
 		elif is_overdue(row.get(PENDING_SINCE_FIELD), today, threshold):
-			reason = "overdue"
-		else:
-			continue
-		if count_only:
-			# The away/overdue test above is the subtraction, so `count_only`
-			# keeps it, and appends only what `_count_rows` would keep.
-			stalled.append({"kind": "leave", "name": row.name})
-			continue
-		stalled.append(
-			_summary_row(
-				"leave",
-				"Leave Application",
-				row.name,
-				row.employee,
-				row.employee_name,
-				row.from_date,
-				row.to_date,
-				row.creation,
-				row.status,
-				today,
-				leave_type=row.leave_type,
-				total_days=flt(row.total_leave_days),
-				for_hr=True,
-				hr_reason=reason,
-			)
+			reasons[row.name] = "overdue"
+	if count_only:
+		# The away/overdue test is the subtraction, so `count_only` keeps it,
+		# and appends only what `_count_rows` would keep.
+		return [{"kind": "leave", "name": row.name} for row in rows if row.name in reasons]
+
+	rows = [row for row in rows if row.name in reasons]
+	rows += frappe.get_all(
+		"Leave Application",
+		filters={**scope, "name": ["not in", [row.name for row in rows] or [""]]},
+		fields=fields,
+		order_by="creation asc",
+		limit=_QUEUE_FETCH,
+	)
+	names = _leave_approver_names(row.leave_approver for row in rows)
+	return [
+		_summary_row(
+			"leave",
+			"Leave Application",
+			row.name,
+			row.employee,
+			row.employee_name,
+			row.from_date,
+			row.to_date,
+			row.creation,
+			row.status,
+			today,
+			leave_type=row.leave_type,
+			total_days=flt(row.total_leave_days),
+			for_hr=True,
+			hr_reason=reasons.get(row.name, HR_REASON_WITH_MANAGER),
+			approver_name=names.get(row.leave_approver),
 		)
-	return stalled
+		for row in rows
+	]
 
 
 def _hr_timesheet_summaries(employee, today, count_only=False):
@@ -3380,7 +3460,10 @@ def _collect_approval_summaries(employee, include_requests, count_only, today):
 				row["lane"] = "it" if row.get("routed_to_role") == _IT_ROLE else "hr"
 			else:
 				row["lane"] = lane
-			lane_counts[row["lane"]] += 1
+			# Plan 2026-10-31-001 KTD15: "With managers" rows ride in the HR
+			# lane but count nowhere, so the full read's counts are the badge's.
+			if _owed(row):
+				lane_counts[row["lane"]] += 1
 		rows.extend(collected)
 
 	# A routed-role holder who is not also an Employee (P5-U2 ships IT Team
@@ -3408,7 +3491,7 @@ def _collect_approval_summaries(employee, include_requests, count_only, today):
 			if doctype == "HR Request" and not include_requests:
 				continue
 			collected = kind["hr_queue"](employee, today, count_only=count_only)
-			capped = capped or len(collected) >= _QUEUE_FETCH
+			capped = capped or sum(1 for row in collected if _owed(row)) >= _QUEUE_FETCH
 			_extend(collected, "hr")
 	elif include_requests and _holds_routed_role():
 		# P5-R11: a routed-role holder (IT Team today) has no line-manager
@@ -3487,8 +3570,18 @@ def _pending_approvals(employee):
 	decisions = []
 	rows, _capped, _lane_counts = _approval_summaries(employee)
 	for row in rows:
+		# Plan 2026-10-31-001 KTD15: "With managers" is not a decision owed.
+		if not _owed(row):
+			continue
 		title = _QUEUE_TITLE[row["kind"]](row)
-		if row["for_hr"]:
+		if row.get("hr_reason"):
+			# Plan 2026-10-31-001 R22: a manager-stage leave HR may decide
+			# (approver away, or overdue) is still waiting on its approver,
+			# not on HR -- it used to read "waiting for HR" here.
+			approver = row.get("approver_name")
+			waiting = f"waiting for {approver}" if approver else "no approver set"
+			title = f"{title} · {waiting}"
+		elif row["for_hr"]:
 			# P4-R11: Home's queue says which hat this decision is under.
 			# Without it an HR Manager who is also a line manager reads five
 			# identical lines and cannot tell which are theirs as a manager.
@@ -3517,7 +3610,13 @@ _QUEUE_TITLE = {
 	# the possessive drops the "a IT" article. Fields already on the row.
 	"request": lambda row: f"{row['employee_name']}'s {row['category']} request: {row['subject']}",
 	"change": lambda row: f"{row['employee_name']} asked to change an approved week",
+	# Plan 2026-10-31-001 U9: the submitting manager, and how many people.
+	"roster": lambda row: f"{row['employee_name']} asked to change shifts for {_people_count(row['people_count'])}",
 }
+
+
+def _people_count(count):
+	return f"{count} {'person' if count == 1 else 'people'}"
 
 
 # ---------------------------------------------------------------------------
@@ -3653,6 +3752,7 @@ def _leave_reason(names, owners):
 def _leave_projection(row, approver_names, reasons):
 	state = _leave_state(row.get("status"), row.get("docstatus"))
 	approver = row.get("leave_approver")
+	decided_by = row.get("helixhr_decided_by")
 	return {
 		"name": row.get("name"),
 		"leave_type": row.get("leave_type"),
@@ -3675,6 +3775,11 @@ def _leave_projection(row, approver_names, reasons):
 		# `frappe.client.get_list` against User -- a generic read of an
 		# unrelated DocType, issued once per page load, to render one word.
 		"approver_name": approver_names.get(approver),
+		# Plan 2026-10-31-001 U11 (R25): who made the final decision, from the
+		# stamp alone. A record decided before the stamp existed names nobody
+		# rather than guessing the approver.
+		"decided_by_name": approver_names.get(decided_by) if decided_by else None,
+		"decided_by_hr": bool(cint(row.get("helixhr_decided_as_hr"))),
 		# Only ever populated for a sent-back record; see _leave_reason.
 		"reason": reasons.get(row.get("name")),
 		"posting_date": str(row.get("posting_date")) if row.get("posting_date") else None,
@@ -3696,6 +3801,8 @@ _LEAVE_FIELDS = [
 	"docstatus",
 	"leave_approver",
 	"helixhr_stage",
+	"helixhr_decided_by",
+	"helixhr_decided_as_hr",
 	"posting_date",
 	"owner",
 	"creation",
@@ -3704,7 +3811,11 @@ _LEAVE_FIELDS = [
 
 
 def _approver_names(rows):
-	ids = {row.get("leave_approver") for row in rows if row.get("leave_approver")}
+	"""Display names for the approver and the decider of each row, in one
+	User read."""
+	ids = {
+		row.get(field) for row in rows for field in ("leave_approver", "helixhr_decided_by") if row.get(field)
+	}
 	if not ids:
 		return {}
 	return {
@@ -5653,18 +5764,32 @@ def get_timesheet_week_start(name):
 
 
 def _my_project_names(user):
-	"""Projects `user` belongs to: a Project Users row or a User Permission
-	on Project. The one membership rule `get_my_projects` and
-	`get_my_project_overview` share."""
-	return set(frappe.get_all("Project User", filters={"user": user}, pluck="parent")) | set(
+	"""Projects `user` may book on: a Project Users row, a User Permission
+	on Project, or (plan 2026-10-31-001 KTD6) an Open project marked "Open
+	to everyone" in the company of `user`'s current Active Employee. The one
+	booking rule the task picker, week reads and save/submit validation
+	share (R9). The open branch writes no row anywhere, so it widens booking
+	only, never access to the project."""
+	names = set(frappe.get_all("Project User", filters={"user": user}, pluck="parent")) | set(
 		frappe.get_all("User Permission", filters={"user": user, "allow": "Project"}, pluck="for_value")
 	)
+	company = active_employee_for_user(user).company
+	if company:
+		names |= set(
+			frappe.get_all(
+				"Project",
+				filters={"company": company, "status": "Open", "helixhr_open_to_all": 1},
+				pluck="name",
+			)
+		)
+	return names
 
 
 @frappe.whitelist()
 def get_my_projects():
-	"""Open Projects the session user may book time on -- Project Users
-	or a User Permission on Project, each with its own open Tasks
+	"""Open Projects the session user may book time on (`_my_project_names`:
+	Project Users, a User Permission on Project, or an "Open to everyone"
+	project in their company), each with its own open Tasks
 	(KTD11: no "bookable projects" API exists upstream).
 
 	Tasks come back in **one** query for the whole allowed project set
@@ -6557,7 +6682,8 @@ _LEAVE_PENDING_HR = "Pending HR"
 
 # U6 / R13. The kinds a queue row can be, in the order the chips render.
 # Plan 2026-10-16-001 KTD1: requests leave Approvals.
-_APPROVAL_FILTER_KINDS = ("leave", "timesheet", "attendance", "change")
+# Plan 2026-10-31-001 U9: roster requests are HR's, in the HR lane.
+_APPROVAL_FILTER_KINDS = ("leave", "timesheet", "attendance", "change", "roster")
 
 
 def _valid_request_category(category):
@@ -6611,12 +6737,16 @@ def get_my_approvals(kind=None, category=None, q=None):
 	# Plan 2026-10-16-001 KTD1: requests leave Approvals rows, lanes, counts,
 	# categories and Decided list.
 	pending, capped, _lane_counts = _approval_summaries(employee, include_requests=False)
-	lanes = {"team": sum(1 for row in pending if row.get("lane") == "team")}
+	# Plan 2026-10-31-001 KTD15: the counts and `total` are owed work only, so
+	# the badge `total` sets is the bootstrap's; "With managers" rows are
+	# still in `pending`, for the screen to group.
+	owed = [row for row in pending if _owed(row)]
+	lanes = {"team": sum(1 for row in owed if row.get("lane") == "team")}
 	if _is_hr():
-		lanes["hr"] = sum(1 for row in pending if row.get("lane") == "hr")
+		lanes["hr"] = sum(1 for row in owed if row.get("lane") == "hr")
 	counts = {
 		"kinds": [
-			{"name": name, "count": sum(1 for row in pending if row["kind"] == name)}
+			{"name": name, "count": sum(1 for row in owed if row["kind"] == name)}
 			for name in _APPROVAL_FILTER_KINDS
 		],
 		"categories": [],
@@ -6659,7 +6789,7 @@ def get_my_approvals(kind=None, category=None, q=None):
 	return {
 		"today": user_today(),
 		"pending": shown,
-		"total": len(pending),
+		"total": sum(1 for row in pending if _owed(row)),
 		"counts": counts,
 		"people": people,
 		# `total` is what came back, and every kind's read is bounded, so on a
@@ -6771,22 +6901,16 @@ def _decided_leave(employee, since, pattern=None):
 			)
 		]
 
-	return handed_over + [
-		_decided_row(
-			"leave",
-			row.name,
-			row.employee_name,
-			row.leave_type,
-			row.from_date,
-			row.to_date,
-			row.status,
-			row.modified,
-			row.docstatus,
-		)
-		for row in frappe.get_list(
+	# Plan 2026-10-31-001 U11 (R27): a final decision belongs to whoever the
+	# stamp names, so HR deciding a manager-stage leave lands in HR's list and
+	# not the manager's. `leave_approver` answers only for a row with no stamp:
+	# a send-back (a save, never stamped) and anything decided before the
+	# stamp existed. Two reads because `or_filters` already carries the search.
+	def decided(filters):
+		return frappe.get_list(
 			"Leave Application",
 			filters={
-				"leave_approver": frappe.session.user,
+				**filters,
 				"employee": ["!=", employee],
 				"status": ["in", ["Approved", "Rejected"]],
 				**window,
@@ -6805,6 +6929,25 @@ def _decided_leave(employee, since, pattern=None):
 			order_by="modified desc",
 			limit=limit,
 		)
+
+	user = frappe.session.user
+	rows = decided({"helixhr_decided_by": user}) + decided(
+		{"helixhr_decided_by": ["is", "not set"], "leave_approver": user}
+	)
+	rows.sort(key=lambda row: row.modified, reverse=True)
+	return handed_over + [
+		_decided_row(
+			"leave",
+			row.name,
+			row.employee_name,
+			row.leave_type,
+			row.from_date,
+			row.to_date,
+			row.status,
+			row.modified,
+			row.docstatus,
+		)
+		for row in rows[:limit]
 	]
 
 
@@ -7178,7 +7321,10 @@ def _pending_groups(scope, kinds, overdue_only):
 				"doctype": _APPROVAL_DOCTYPES[item["route_kind"]],
 				"name": item["name"],
 				"is_own": item["employee"] == own_employee,
-				"can_decide": bool(scope["hr_manager"]) and item["employee"] != own_employee,
+				"can_decide": bool(scope["hr_manager"])
+				and item["employee"] != own_employee
+				# A roster request is the HR Manager role's of its own company.
+				and (item["route_kind"] != "roster" or _may_decide_roster_for(frappe.session.user, item["company"])),
 				"title": item["title"],
 				"employee": item["employee"],
 				"employee_name": item["employee_name"],
@@ -7216,7 +7362,9 @@ def _pending_groups(scope, kinds, overdue_only):
 
 
 # Plan 2026-10-16-001 KTD1: requests leave All pending oversight.
-_OVERSIGHT_KINDS = ("leave", "attendance", "change")
+# Plan 2026-10-31-001 U9: a Pending roster request waits on HR, grouped under
+# the HR Manager role -- the shared queue, never one named approver.
+_OVERSIGHT_KINDS = ("leave", "attendance", "change", "roster")
 
 
 @frappe.whitelist()
@@ -7549,6 +7697,8 @@ _APPROVAL_DOCTYPES = {
 	"request": "HR Request",
 	# Plan 2026-10-04-003 U3: the change request is a queue kind of its own.
 	"change": "HelixHR Timesheet Change",
+	# Plan 2026-10-31-001 U9 / KTD13: a manager's roster request, HR's alone.
+	"roster": "HelixHR Roster Change",
 }
 
 # One refusal for "missing", "not yours to decide" and "outside your company"
@@ -7631,6 +7781,8 @@ def _allowed_actions(doc, user):
 		actions = _leave_allowed_actions(doc, user)
 	elif doc.doctype == "HelixHR Timesheet Change":
 		actions = _change_allowed_actions(doc, user)
+	elif doc.doctype == _ROSTER_CHANGE:
+		actions = _roster_allowed_actions(doc, user)
 	else:
 		# Plan 2026-10-18-001 KTD6 / R8: outside their HR scope an HR user is
 		# this record's line manager and nothing more, so the HR-role
@@ -7755,9 +7907,23 @@ def _leave_decision_detail(doc):
 	"""Reason, dates, day count and current status -- everything the
 	approver needs before the balance is consumed (P2-U7 scenario 2)."""
 	detail = _decision_head(doc, doc.employee_name)
+	# Plan 2026-10-31-001 R22: a manager-stage leave opened by anyone but its
+	# approver (HR, in practice) names who it is waiting on. None when there
+	# is no approver, when it is with HR, when the caller is the approver, or
+	# once it is decided -- the detail also serves decided records.
+	waiting_on = None
+	if (
+		doc.status == "Open"
+		and cint(doc.docstatus) == 0
+		and (doc.get("helixhr_stage") or _LEAVE_STAGE_MANAGER) != LEAVE_STAGE_HR
+		and doc.leave_approver
+		and doc.leave_approver != frappe.session.user
+	):
+		waiting_on = _leave_approver_names([doc.leave_approver]).get(doc.leave_approver)
 	detail.update(
 		{
 			"kind": "leave",
+			"waiting_on": waiting_on,
 			"state": doc.status,
 			"status": doc.status,
 			"docstatus": cint(doc.docstatus),
@@ -8033,12 +8199,15 @@ def _decide_one(doctype, name, action, reason, expected_modified, expected_state
 	# U9: leave keeps its reason as a Comment, so the decision email reads it
 	# from here (`events.leave_application_on_submit` / `_on_update`).
 	doc.flags.helixhr_decision_note = reason
-	_APPROVAL_KINDS[doctype]["act"](doc, action)
+	outcome = _APPROVAL_KINDS[doctype]["act"](doc, action)
 	_record_hr_acting_for_approver(doc, action)
 	return {
 		"name": doc.name,
 		"action": action,
 		"state": doc.get(_APPROVAL_KINDS[doctype]["state_field"]),
+		# A kind whose decision can end other than as asked says so here: a
+		# roster approval that came back Returned (`returned`, `reasons`).
+		**(outcome if isinstance(outcome, dict) else {}),
 	}
 
 
@@ -8277,6 +8446,12 @@ def _assert_may_act_on(doc):
 			_("You can't decide your own request. Ask your manager or HR."),
 			frappe.PermissionError,
 		)
+	if doc.doctype == _ROSTER_CHANGE:
+		# Plan 2026-10-31-001 U9: scoped by the request's own company (KTD12),
+		# not by the submitting manager's -- HR's general reach below would
+		# read `doc.employee`, who is that manager.
+		_may_act_on_roster_change(doc, user)
+		return
 	if doc.doctype == "HR Request" and doc.routed_to_role != "HR Manager":
 		# Plan 2026-10-19-001 U3 (R3): a request routed to a worker role (IT
 		# Team) is that role's, for HR and non-HR callers alike -- the Frappe
@@ -14507,7 +14682,18 @@ def retry_leaving(employee, expected_modified=None):
 
 _PROJECT_NOT_FOUND = "That project isn't here."
 
-_PROJECT_SEARCH_FIELDS = ("name", "project_name", "status", "company")
+_PROJECT_SEARCH_FIELDS = (
+	"name",
+	"project_name",
+	"status",
+	"company",
+	# Plan 2026-10-31-001 U1: the list table's columns and filters.
+	"project_type",
+	"priority",
+	"helixhr_is_billable",
+	"expected_end_date",
+	"helixhr_open_to_all",
+)
 
 _PROJECT_FIELDS = (
 	"name",
@@ -14516,6 +14702,7 @@ _PROJECT_FIELDS = (
 	"expected_start_date",
 	"expected_end_date",
 	"helixhr_is_billable",
+	"helixhr_open_to_all",
 	"priority",
 	"project_type",
 )
@@ -14541,6 +14728,11 @@ def _project_search_projection(row):
 		"project_name": row.project_name,
 		"status": row.status,
 		"company": row.company,
+		"project_type": row.project_type,
+		"priority": row.priority,
+		"billable": bool(row.helixhr_is_billable),
+		"expected_end_date": row.expected_end_date,
+		"open_to_all": bool(row.helixhr_open_to_all),
 	}
 
 
@@ -14709,20 +14901,42 @@ def get_project(project):
 		frappe.throw(_(_PROJECT_NOT_FOUND), frappe.PermissionError)
 
 	data = frappe.db.get_value("Project", project, list(_PROJECT_FIELDS), as_dict=True)
+	write = resolve_project_scope(frappe.session.user)
+	can_edit = project_in_scope(project, write)
 
 	return {
 		"name": data.name,
 		"project_name": data.project_name,
 		"status": data.status,
 		"billable": bool(data.helixhr_is_billable),
+		"open_to_all": bool(data.helixhr_open_to_all),
 		"priority": data.priority,
 		"project_type": data.project_type,
 		"expected_start_date": data.expected_start_date,
 		"expected_end_date": data.expected_end_date,
 		"tasks": _project_open_tasks(project),
 		"members": _project_members(project),
-		"can_edit": project_in_scope(project, resolve_project_scope(frappe.session.user)),
+		"can_edit": can_edit,
+		# Plan 2026-10-31-001 U5: the bulk-add picker's department choices,
+		# only for a caller who may add people.
+		"departments": _project_departments(write) if can_edit else [],
 	}
+
+
+def _project_departments(scope):
+	"""Departments of the companies ``scope`` (`resolve_project_scope`)
+	covers, for the "add a whole department" picker. The company-less tree
+	root is left out: it would mean every company's people."""
+	companies = read_companies(scope)
+	if companies == []:
+		return []
+	return frappe.get_all(
+		"Department",
+		filters={"company": ["in", companies] if companies is not None else ["is", "set"]},
+		fields=["name", "department_name", "company"],
+		order_by="department_name asc",
+		ignore_permissions=True,
+	)
 
 
 # ---------------------------------------------------------------------------
@@ -14990,6 +15204,208 @@ def set_project_members(project, employees):
 	_write_project_users(doc, insert=False)
 
 	return {"members": _project_members(project)}
+
+
+# ---------------------------------------------------------------------------
+# Plan 2026-10-31-001 U1/U4/U5: bulk task add, "Open to everyone", bulk
+# member add. Gated by the same `resolve_project_scope` / `project_in_scope`
+# pair as the writes above.
+# ---------------------------------------------------------------------------
+
+_BULK_TASK_LIMIT = 100
+# `Task.subject` is a Data field.
+_TASK_SUBJECT_MAX = 140
+_BULK_MEMBER_LIMIT = 500
+
+
+def _project_write_gate(project):
+	"""Refuse ``project`` unless the caller's write scope covers it, with the
+	one not-found wording (no oracle for which ids exist)."""
+	scope = resolve_project_scope(frappe.session.user)
+	if scope["kind"] == "none" or not project_in_scope(project, scope):
+		frappe.throw(_(_PROJECT_NOT_FOUND), frappe.PermissionError)
+	return scope
+
+
+def _string_list(value, label):
+	"""A JSON list of strings from the request, or a plain refusal."""
+	if isinstance(value, str):
+		value = frappe.parse_json(value)
+	if value is None:
+		return []
+	if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+		frappe.throw(_("{0} must be a list of text lines.").format(label))
+	return value
+
+
+@frappe.whitelist(methods=["POST"])
+def add_tasks(project, subjects):
+	"""Add one Open task per non-blank line of ``subjects`` to ``project``
+	(plan 2026-10-31-001 U1, R4), all or nothing.
+
+	Lines are trimmed; blanks are dropped; a line that repeats an earlier
+	line or an existing open task (case-insensitive) is dropped and reported
+	in ``duplicates``. More than 100 lines, or one longer than 140
+	characters (named by its line number), refuses the whole call. Refused
+	on a project that is not Open. Every insert runs in one savepoint, so a
+	failure leaves no task behind. Subjects go through the same
+	`Task.insert` as `save_task`, so Frappe's own HTML sanitising applies.
+	"""
+	rate_limit_per_user("add_tasks")
+	_project_write_gate(project)
+	lines = _string_list(subjects, _("Tasks"))
+
+	if frappe.db.get_value("Project", project, "status") != "Open":
+		frappe.throw(_("Tasks can only be added to an Open project."))
+
+	numbered = [(number, line.strip()) for number, line in enumerate(lines, start=1) if line.strip()]
+	if not numbered:
+		frappe.throw(_("Give at least one task a subject."))
+	if len(numbered) > _BULK_TASK_LIMIT:
+		frappe.throw(_("Add at most {0} tasks at a time.").format(_BULK_TASK_LIMIT))
+	for number, subject in numbered:
+		if len(subject) > _TASK_SUBJECT_MAX:
+			frappe.throw(_("Line {0} is longer than {1} characters.").format(number, _TASK_SUBJECT_MAX))
+
+	existing = frappe.get_all(
+		"Task",
+		filters={"project": project, "status": ["not in", _CLOSED_TASK_STATUSES]},
+		pluck="subject",
+		ignore_permissions=True,
+	)
+	seen = {subject.casefold() for subject in existing if subject}
+	fresh, duplicates = [], []
+	for _number, subject in numbered:
+		if subject.casefold() in seen:
+			duplicates.append(subject)
+			continue
+		seen.add(subject.casefold())
+		fresh.append(subject)
+
+	savepoint = "helixhr_add_tasks"
+	frappe.db.savepoint(savepoint)
+	try:
+		created = [
+			frappe.get_doc(
+				{"doctype": "Task", "project": project, "subject": subject, "status": "Open"}
+			).insert(ignore_permissions=True)
+			for subject in fresh
+		]
+	except Exception:
+		frappe.db.rollback(save_point=savepoint)
+		raise
+	frappe.db.release_savepoint(savepoint)
+
+	return {"tasks": [_task_projection(doc) for doc in created], "duplicates": duplicates}
+
+
+@frappe.whitelist(methods=["POST"])
+def set_project_open_to_all(project, value):
+	"""Mark ``project`` "Open to everyone" or not (plan 2026-10-31-001 U4,
+	R8). Booking reads the flag in `_my_project_names`; nothing else is
+	written -- no Project User row, User Permission or DocShare -- so it
+	never widens access to the project itself. Turning it off follows the
+	member-removal rule: a draft week still naming the project is refused
+	on its next save."""
+	rate_limit_per_user("set_project_open_to_all")
+	_project_write_gate(project)
+	open_to_all = cint(value) == 1
+	frappe.db.set_value("Project", project, "helixhr_open_to_all", int(open_to_all))
+	return {"open_to_all": open_to_all}
+
+
+def _department_candidates(department, scope):
+	"""Active employees in ``department`` and its sub-departments, in a
+	company ``scope`` covers. Refuses a department outside scope, or one
+	resolving to more than `_BULK_MEMBER_LIMIT` people."""
+	if not isinstance(department, str):
+		frappe.throw(_("That department isn't here."))
+	dept = frappe.db.get_value(
+		"Department", department, ["lft", "rgt", "company", "department_name"], as_dict=True
+	)
+	if not dept or (dept.company and not scope_covers(scope, dept.company)):
+		frappe.throw(_("That department isn't here."))
+	subtree = frappe.get_all(
+		"Department", filters={"lft": [">=", dept.lft], "rgt": ["<=", dept.rgt]}, pluck="name"
+	)
+	filters = {"department": ["in", subtree], "status": "Active"}
+	companies = read_companies(scope)
+	if companies is not None:
+		filters["company"] = ["in", companies]
+	if frappe.db.count("Employee", filters) > _BULK_MEMBER_LIMIT:
+		frappe.throw(
+			_("{0} has more than {1} people. Add a smaller department.").format(
+				dept.department_name or department, _BULK_MEMBER_LIMIT
+			)
+		)
+	return frappe.get_all("Employee", filters=filters, pluck="name", order_by="employee_name asc")
+
+
+@frappe.whitelist(methods=["POST"])
+def add_project_members(project, employees=None, department=None):
+	"""Append people to ``project``'s members (plan 2026-10-31-001 U5, R5-R7,
+	KTD4, KTD5): the named ``employees``, and/or every Active employee in
+	``department`` and its sub-departments. Never removes anyone.
+
+	Only Active employees in a company the caller's project write scope
+	covers are added. Existing members and people with no portal login are
+	skipped and named. An id that is not one of those (missing, not Active,
+	another company) comes back as ``"not available"`` with no name, so the
+	response cannot be used to read names across companies.
+
+	Appended rows carry ``welcome_email_sent = 1`` (ERPNext's
+	`Project.validate` would otherwise mail each one a "Project
+	Collaboration Invitation"), and the write goes through
+	`_write_project_users`, which strips ERPNext's auto-share."""
+	rate_limit_per_user("add_project_members")
+	scope = _project_write_gate(project)
+
+	ids = _string_list(employees, _("People"))
+	if department:
+		ids += _department_candidates(department, scope)
+	ids = list(dict.fromkeys(ids))
+	if not ids:
+		frappe.throw(_("Choose people or a department to add."))
+	if len(ids) > _BULK_MEMBER_LIMIT:
+		frappe.throw(_("Add at most {0} people at a time.").format(_BULK_MEMBER_LIMIT))
+
+	doc = frappe.get_doc("Project", project, for_update=True)
+	rows = frappe.get_all(
+		"Employee",
+		filters={"name": ["in", ids]},
+		fields=["name", "employee_name", "user_id", "company", "status"],
+	)
+	by_name = {row.name: row for row in rows}
+	members = {row.user for row in doc.users}
+
+	added, skipped = [], []
+	for employee in ids:
+		row = by_name.get(employee)
+		if not row or row.status != "Active" or not scope_covers(scope, row.company):
+			skipped.append({"employee": employee, "employee_name": None, "reason": _("not available")})
+		elif not row.user_id:
+			skipped.append(
+				{"employee": row.name, "employee_name": row.employee_name, "reason": _("no portal login")}
+			)
+		elif row.user_id in members:
+			skipped.append(
+				{"employee": row.name, "employee_name": row.employee_name, "reason": _("already a member")}
+			)
+		else:
+			members.add(row.user_id)
+			doc.append("users", {"user": row.user_id, "welcome_email_sent": 1})
+			added.append(
+				{
+					"employee": row.name,
+					"employee_name": row.employee_name,
+					"initials": _initials(row.employee_name),
+				}
+			)
+
+	if added:
+		_write_project_users(doc, insert=False)
+
+	return {"added": _with_photo_urls(added), "skipped": skipped, "members": _project_members(project)}
 
 
 # ---------------------------------------------------------------------------
@@ -15492,17 +15908,11 @@ _ROSTER_REFUSED = "You don't have permission to do that."
 _ROSTER_NO_TEAM = "Only a manager with people reporting to them has a team roster to show."
 _ROSTER_NOT_HR = "Only HR can see everyone's shifts."
 _ROSTER_NOT_FOUND = "That shift assignment could not be found."
-_ROSTER_OVERLAP = "This person already has a shift on some of those dates. End or change that one first."
 _ROSTER_CANCEL_BLOCKED = (
 	"This shift can't be cancelled because check-ins or attendance are already recorded against it. "
 	"End it on a date instead."
 )
-_ROSTER_END_BEFORE_START = "The end date can't be before the shift starts."
-_ROSTER_CHANGE_ON_START = "That is the day this shift starts. Cancel it and assign the new shift instead."
-_ROSTER_CHANGE_AFTER_END = "That date is after this shift ends."
 _ROSTER_INACTIVE_EMPLOYEE = "Shifts can only be assigned to someone who is currently employed."
-_ROSTER_NO_SHIFT_TYPE = "Choose a shift."
-_ROSTER_BAD_DATE = "Give a valid date."
 _ROSTER_SAVE_FAILED = "The shift couldn't be saved."
 
 
@@ -15549,9 +15959,12 @@ def _roster_employee_scope(mode):
 	return {"name": ["in", [me, *reports]]}
 
 
-def _roster_cells(rows, monday, sunday, can_edit):
+def _roster_cells(rows, monday, sunday, can_edit, exposed=()):
 	"""`{employee: [cell x 7]}` from one Shift Assignment read and one Shift
-	Type read for the whole page, whatever the row count."""
+	Type read for the whole page, whatever the row count. A cell names its
+	assignment for HR (`can_edit`) and for the `exposed` employees -- a
+	manager's direct reports, whose roster request rows point at one (plan
+	2026-10-31-001 U8)."""
 	ids = [row.name for row in rows]
 	if not ids:
 		return {}, {}
@@ -15602,8 +16015,9 @@ def _roster_cells(rows, monday, sunday, can_edit):
 				"start_time": _hh_mm(shift.start_time) if shift else None,
 				"end_time": _hh_mm(shift.end_time) if shift else None,
 			}
-			if can_edit:
-				# Only HR acts on a cell, so only HR's payload names the record.
+			if can_edit or employee in exposed:
+				# Only HR acts on a cell, and a manager proposes on a report's,
+				# so only those payloads name the record.
 				cell["assignment"] = found.name if found else None
 				cell["assignment_start"] = str(getdate(found.start_date)) if found else None
 				cell["assignment_end"] = str(getdate(found.end_date)) if found and found.end_date else None
@@ -15644,7 +16058,15 @@ def get_roster_week(week_start=None, mode="mine", search=None, start=0):
 	total = _aggregate_count(frappe.get_all("Employee", fields=[{"COUNT": "*"}], **scope)[0])
 
 	can_edit = mode == "hr" and bool(frappe.has_permission("Shift Assignment", "create"))
-	cells, times = _roster_cells(employees, monday, sunday, can_edit)
+	# Plan 2026-10-31-001 U8 / R10: team mode is only reachable with Active
+	# direct reports (`_roster_employee_scope`), so it always may propose.
+	can_request = mode == "team"
+	me = _my_employee() if can_request else None
+	exposed = {row.name for row in employees if row.name != me} if can_request else ()
+	cells, times = _roster_cells(employees, monday, sunday, can_edit, exposed)
+	# R19: who is already in a Pending request, for HR's pill and the
+	# manager's "already asked" state.
+	pending = pending_requests([row.name for row in employees]) if mode in ("team", "hr") else {}
 	leaves = _team_leaves([row.name for row in employees], monday, sunday)[0]
 	holiday_cache = {}
 	rows = []
@@ -15669,13 +16091,16 @@ def get_roster_week(week_start=None, mode="mine", search=None, start=0):
 				"cells": cells[row.name],
 				"leaves": leaves.get(row.name, []),
 				"holidays": sorted(_team_holiday_dates(row.name, monday, sunday, holiday_cache)),
+				"pending_request": pending.get(row.name),
 			}
 		)
 	_with_photo_urls(rows)
 
 	shift_types = []
-	if can_edit:
-		# One past the cap, so a full list is told apart from a cut one.
+	if can_edit or can_request:
+		# One past the cap, so a full list is told apart from a cut one. A
+		# proposing manager picks from the same list HR does; Shift Type
+		# names and times are not personal data.
 		shift_types = [
 			{"name": shift.name, "start_time": _hh_mm(shift.start_time), "end_time": _hh_mm(shift.end_time)}
 			for shift in frappe.get_all(
@@ -15683,6 +16108,7 @@ def get_roster_week(week_start=None, mode="mine", search=None, start=0):
 				fields=["name", "start_time", "end_time"],
 				order_by="name asc",
 				limit=_ROSTER_SHIFT_TYPE_LIMIT + 1,
+				ignore_permissions=can_request,
 			)
 		]
 	shift_types_truncated = len(shift_types) > _ROSTER_SHIFT_TYPE_LIMIT
@@ -15703,6 +16129,8 @@ def get_roster_week(week_start=None, mode="mine", search=None, start=0):
 		"start": start,
 		"limit": _ROSTER_ROW_LIMIT,
 		"can_edit": can_edit,
+		"can_request": can_request,
+		"draft": _roster_draft_payload(me) if can_request else None,
 		"shift_types": shift_types,
 		"shift_types_truncated": shift_types_truncated,
 	}
@@ -15719,7 +16147,9 @@ def _assert_roster_employee(employee):
 def _roster_assignment(name):
 	"""The submitted Shift Assignment `name`, once the caller is known to
 	administer its employee. A draft or a cancelled one is "not found": the
-	roster never shows either, so neither is anything to act on."""
+	roster never shows either, so neither is anything to act on. Loaded under
+	the employee's row lock, which roster request approval also takes, so an
+	HR write and an approval for the same person serialise."""
 	if resolve_admin_scope(frappe.session.user)["kind"] == "none":
 		frappe.throw(_(_ROSTER_REFUSED), frappe.PermissionError)
 	row = (
@@ -15730,6 +16160,7 @@ def _roster_assignment(name):
 	if not row or cint(row.docstatus) != 1:
 		frappe.throw(_(_ROSTER_NOT_FOUND), frappe.DoesNotExistError)
 	_assert_roster_employee(row.employee)
+	_lock_employee(row.employee)
 	return frappe.get_doc("Shift Assignment", name)
 
 
@@ -15771,6 +16202,29 @@ def _new_roster_assignment(employee, shift_type, start_date, end_date):
 	return doc
 
 
+def _end_roster_assignment(doc, end):
+	"""End the submitted assignment `doc` on `end` (`end_date` is
+	`allow_on_submit`). No savepoint and no date rules of its own: the HR
+	endpoint wraps it in `_run_roster_write` after its own checks, and a
+	roster request's approval runs it inside its one savepoint after the
+	simulator (plan 2026-10-31-001 KTD10). Raises on refusal."""
+	_assert_config_write(doc)
+	doc.end_date = end
+	doc.save()
+	return doc
+
+
+def _change_roster_assignment(doc, start, shift_type):
+	"""Change `doc`'s shift from `start`: it ends the day before and a new
+	assignment of `shift_type` starts on `start`, keeping the old end.
+	Savepoint-free, like `_end_roster_assignment`; returns `(ended, new)`."""
+	old_end = getdate(doc.end_date) if doc.end_date else None
+	_assert_config_write(doc)
+	doc.end_date = add_days(start, -1)
+	doc.save()
+	return doc, _new_roster_assignment(doc.employee, shift_type, start, old_end)
+
+
 def _run_roster_write(write, refused=None):
 	"""Run `write` inside a savepoint. A refusal rolls back to it -- so a
 	change whose new half fails leaves the old `end_date` as it was
@@ -15806,9 +16260,11 @@ def _run_roster_write(write, refused=None):
 def assign_shift(employee, shift_type, start_date, end_date=None, **kwargs):
 	"""HR assigns `shift_type` to `employee` from `start_date`, open-ended
 	or to `end_date` (U8, R9). HRMS refuses an overlap; anything else in
-	the payload, `company` included, is ignored."""
+	the payload, `company` included, is ignored. Takes the employee's row
+	lock, as roster request approval does, so the two serialise."""
 	rate_limit_per_user("assign_shift")
 	_assert_roster_employee(employee)
+	_lock_employee(employee)
 	start = _roster_date(start_date)
 	if not start:
 		frappe.throw(_(_ROSTER_BAD_DATE))
@@ -15828,14 +16284,7 @@ def end_shift_assignment(assignment, end_date, **kwargs):
 		frappe.throw(_(_ROSTER_BAD_DATE))
 	if end < getdate(doc.start_date):
 		frappe.throw(_(_ROSTER_END_BEFORE_START))
-
-	def write():
-		_assert_config_write(doc)
-		doc.end_date = end
-		doc.save()
-		return doc
-
-	return _roster_assignment_projection(_run_roster_write(write))
+	return _roster_assignment_projection(_run_roster_write(lambda: _end_roster_assignment(doc, end)))
 
 
 @frappe.whitelist(methods=["POST"])
@@ -15856,14 +16305,7 @@ def change_shift_assignment(assignment, from_date, shift_type, **kwargs):
 	old_end = getdate(doc.end_date) if doc.end_date else None
 	if old_end and start > old_end:
 		frappe.throw(_(_ROSTER_CHANGE_AFTER_END))
-
-	def write():
-		_assert_config_write(doc)
-		doc.end_date = add_days(start, -1)
-		doc.save()
-		return doc, _new_roster_assignment(doc.employee, shift_type, start, old_end)
-
-	ended, assigned = _run_roster_write(write)
+	ended, assigned = _run_roster_write(lambda: _change_roster_assignment(doc, start, shift_type))
 	return {
 		"ended": _roster_assignment_projection(ended),
 		"assigned": _roster_assignment_projection(assigned),
@@ -15881,6 +16323,861 @@ def cancel_shift_assignment(assignment, **kwargs):
 		frappe.throw(_(_ROSTER_REFUSED), frappe.PermissionError)
 	_run_roster_write(doc.cancel, refused=_(_ROSTER_CANCEL_BLOCKED))
 	return {"name": doc.name, "cancelled": True}
+
+
+# Manager roster requests (plan 2026-10-31-001 U8 / R10-R13, R17, R20)
+#
+# A manager drafts shift operations for their Active direct reports and
+# submits them to HR as `HelixHR Roster Change` requests (KTD7). The DocType
+# has no Employee DocPerm: every read and write here is a projection that
+# authorizes first, and every status move sets `flags.helixhr_roster_api`,
+# which the controller's lifecycle guard requires. The rules each operation
+# must pass are `roster_ops.simulate` (KTD9), run at save, submit and (U9)
+# approval against live coverage. U9 adds HR's decision through Approvals.
+
+_ROSTER_CHANGE = "HelixHR Roster Change"
+_ROSTER_DRAFT_MAX_ROWS = 200
+_ROSTER_NOTE_MAX = 1000
+_ROSTER_RECENT_LIMIT = 10
+# Fields an operation keeps per action; the rest are blanked, so a stray
+# `to_date` on a Change never reaches a Date column unvalidated.
+_ROSTER_OP_FIELDS = {
+	ROSTER_OP_ASSIGN: ("shift_type", "from_date", "to_date"),
+	ROSTER_OP_CHANGE: ("shift_type", "from_date", "assignment"),
+	ROSTER_OP_END: ("to_date", "assignment"),
+}
+_ROSTER_ALL_OP_FIELDS = ("shift_type", "from_date", "to_date", "assignment")
+_ROSTER_REQUEST_NOT_FOUND = "That roster request could not be found."
+_ROSTER_REQUEST_NOT_YOURS = "That roster request isn't yours."
+
+
+def _roster_draft_ops(rows):
+	"""The draft payload as plain operation dicts, refused whole when it is
+	not a list of objects or is longer than the cap. The simulator, not
+	this, judges each operation."""
+	rows = _parse_json_arg(rows)
+	if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+		frappe.throw(_("Invalid shift changes."))
+	if len(rows) > _ROSTER_DRAFT_MAX_ROWS:
+		frappe.throw(_("A request can hold at most {0} shift changes.").format(_ROSTER_DRAFT_MAX_ROWS))
+	ops = []
+	for row in rows:
+		action = str(row.get("action") or "").strip()
+		keep = _ROSTER_OP_FIELDS.get(action, _ROSTER_ALL_OP_FIELDS)
+		op = {"employee": str(row.get("employee") or "").strip(), "action": action}
+		for field in _ROSTER_ALL_OP_FIELDS:
+			value = str(row.get(field) or "").strip() if field in keep else ""
+			op[field] = value or None
+		ops.append(op)
+	return ops
+
+
+def _roster_note(note):
+	text = (note or "").strip()
+	if len(text) > _ROSTER_NOTE_MAX:
+		frappe.throw(_("Keep the note under {0} characters.").format(_ROSTER_NOTE_MAX))
+	return text
+
+
+def _request_ops(doc):
+	return [
+		{
+			"employee": row.employee,
+			"action": row.action,
+			"shift_type": row.shift_type,
+			"from_date": str(getdate(row.from_date)) if row.from_date else None,
+			"to_date": str(getdate(row.to_date)) if row.to_date else None,
+			"assignment": row.assignment,
+		}
+		for row in doc.rows
+	]
+
+
+def _review_roster_ops(me, ops):
+	"""R10, R13, KTD9 for `ops` as `me` would submit them. Returns
+	`_dict(team, before, after, problems)`: `team` the direct reports the
+	ops name (`{employee: row}`), `before`/`after` their live and simulated
+	coverage, and `problems` every refusal as `{index, employee, message}`,
+	each a plain sentence naming the person, in operation order.
+
+	Only Active direct reports (`_direct_report_filters`) -- never the
+	manager -- and only from tomorrow on that employee's company clock. An
+	operation that fails those is left out of the simulation."""
+	ids = list(dict.fromkeys(op["employee"] for op in ops if op["employee"]))
+	team = {}
+	if ids:
+		team = {
+			row.name: row
+			for row in frappe.get_all(
+				"Employee",
+				filters={**_direct_report_filters(me), "name": ["in", ids]},
+				fields=["name", "employee_name", "company"],
+				ignore_permissions=True,
+			)
+		}
+		team.pop(me, None)
+	shift_types = {op["shift_type"] for op in ops if op["shift_type"]}
+	known_types = (
+		set(
+			frappe.get_all(
+				"Shift Type",
+				filters={"name": ["in", list(shift_types)]},
+				pluck="name",
+				ignore_permissions=True,
+			)
+		)
+		if shift_types
+		else set()
+	)
+	todays = {}
+	problems = []
+	runnable = []
+	for index, op in enumerate(ops):
+		employee = op["employee"]
+		person = team.get(employee)
+
+		def refuse(message, index=index, employee=employee):
+			problems.append({"index": index, "employee": employee, "message": message})
+
+		if employee and employee == me:
+			refuse(_("You can't request changes to your own shifts."))
+			continue
+		if not person:
+			# Named only when they are the caller's own report: an arbitrary
+			# id gets no name back.
+			name = (
+				frappe.db.get_value("Employee", {"name": employee, "reports_to": me}, "employee_name")
+				if employee
+				else None
+			)
+			if name:
+				refuse(_("{0} is no longer active, so their shifts can't be changed.").format(name))
+			else:
+				refuse(_("{0} doesn't report to you.").format(employee or _("That person")))
+			continue
+		day = op_date(op)
+		if day:
+			if person.company not in todays:
+				todays[person.company] = company_today(person.company)
+			if day <= todays[person.company]:
+				refuse(_("{0}: a change can start tomorrow at the earliest.").format(person.employee_name))
+				continue
+		if op["shift_type"] and op["shift_type"] not in known_types:
+			refuse(_("{0}: that shift doesn't exist.").format(person.employee_name))
+			continue
+		runnable.append((index, op))
+
+	before, after = {}, {}
+	dates = [op_date(op) for _index, op in runnable if op_date(op)]
+	if runnable:
+		employees = {op["employee"] for _index, op in runnable}
+		before = read_coverage(employees, min(dates) if dates else user_today())
+		after, simulated = simulate(before, [op for _index, op in runnable])
+		for problem in simulated:
+			index, op = runnable[problem["index"]]
+			problems.append(
+				{
+					"index": index,
+					"employee": op["employee"],
+					"message": _("{0}: {1}").format(
+						team[op["employee"]].employee_name, _(problem["message"])
+					),
+				}
+			)
+	problems.sort(key=lambda problem: problem["index"])
+	return frappe._dict(team=team, before=before, after=after, problems=problems)
+
+
+def _refuse_roster_problems(review):
+	if review.problems:
+		frappe.throw(review.problems[0]["message"])
+
+
+def _coverage_payload(coverage):
+	"""The simulator's coverage as JSON-ready `{employee: [assignment]}`."""
+	return {
+		employee: [
+			{
+				"key": item["key"],
+				"shift_type": item["shift_type"],
+				"start_date": str(item["start_date"]),
+				"end_date": str(item["end_date"]) if item["end_date"] else None,
+			}
+			for item in rows
+		]
+		for employee, rows in coverage.items()
+	}
+
+
+def _roster_request_payload(doc, merged=False):
+	"""`merged`: already reopened into a Draft (`_roster_merged`), so the
+	strip offers no Reopen that would only refuse."""
+	return {
+		"name": doc.name,
+		"status": doc.status,
+		"merged": merged,
+		"company": doc.company,
+		"note": doc.note or "",
+		"return_reasons": doc.return_reasons or "",
+		"decision_note": doc.decision_note or "",
+		"decided_on": str(doc.decided_on) if doc.decided_on else None,
+		"modified": str(doc.modified),
+		"rows": [
+			{"employee_name": row.employee_name, **op}
+			for row, op in zip(doc.rows, _request_ops(doc), strict=True)
+		],
+	}
+
+
+def _my_roster_draft(me, for_update=False):
+	"""The manager's one Draft (R11), or None."""
+	name = frappe.db.get_value(
+		_ROSTER_CHANGE,
+		{"employee": me, "status": ROSTER_DRAFT},
+		"name",
+		order_by="creation asc",
+		for_update=for_update,
+	)
+	return frappe.get_doc(_ROSTER_CHANGE, name) if name else None
+
+
+def _roster_draft_payload(me, doc=None):
+	"""The Draft with its preview: `preview` is the simulated coverage of
+	every employee it names (the server's answer the browser mirror of
+	`roster_ops` must agree with), `problems` what would refuse it now --
+	coverage moves under a saved draft. None when there is no draft."""
+	doc = doc or _my_roster_draft(me)
+	if not doc:
+		return None
+	review = _review_roster_ops(me, _request_ops(doc))
+	return {
+		**_roster_request_payload(doc),
+		"preview": _coverage_payload(review.after),
+		"problems": review.problems,
+	}
+
+
+@frappe.whitelist()
+def get_roster_draft():
+	"""The caller's Draft (rows plus simulated preview) and their latest
+	non-draft requests with status and HR's words (R11, R17)."""
+	rate_limit_per_user("get_roster_draft")
+	me = _my_employee()
+	recent = frappe.get_all(
+		_ROSTER_CHANGE,
+		filters={"employee": me, "status": ["!=", ROSTER_DRAFT]},
+		pluck="name",
+		order_by="modified desc",
+		limit=_ROSTER_RECENT_LIMIT,
+		ignore_permissions=True,
+	)
+	merged = _roster_merged(recent)
+	return {
+		"draft": _roster_draft_payload(me),
+		"recent": [
+			_roster_request_payload(frappe.get_doc(_ROSTER_CHANGE, name), merged=name in merged)
+			for name in recent
+		],
+	}
+
+
+def _save_draft_rows(doc, me, ops, note=None):
+	doc.set("rows", ops)
+	if note is not None:
+		doc.note = note
+	doc.employee = me
+	doc.manager_user = frappe.session.user
+	doc.flags.helixhr_roster_api = True
+	doc.save(ignore_permissions=True)
+	return doc
+
+
+@frappe.whitelist(methods=["POST"])
+def save_roster_draft(rows, note=None):
+	"""Replace the caller's one Draft with `rows` (R10, R11, R13), creating
+	it on first save. Refused whole, naming the person, when any operation
+	is not one the caller may ask for. An empty list keeps an empty Draft
+	rather than deleting it: a reopened request keeps its history."""
+	rate_limit_per_user("save_roster_draft")
+	me = _my_employee()
+	ops = _roster_draft_ops(rows)
+	note = _roster_note(note) if note is not None else None
+	# The manager's own row serialises their saves, submits and reopens, so
+	# two tabs cannot each create "the" Draft.
+	_lock_employee(me)
+	review = _review_roster_ops(me, ops)
+	_refuse_roster_problems(review)
+	doc = _my_roster_draft(me, for_update=True)
+	if not doc:
+		if not ops:
+			return {"draft": None}
+		doc = frappe.new_doc(_ROSTER_CHANGE)
+		doc.status = ROSTER_DRAFT
+	_save_draft_rows(doc, me, ops, note)
+	return {"draft": _roster_draft_payload(me, doc)}
+
+
+@frappe.whitelist(methods=["POST"])
+def submit_roster_change(note=None):
+	"""Send the caller's Draft to HR (R12, R13): one Pending request per
+	company in the batch (KTD12), each carrying its KTD8 coverage snapshot.
+	The Draft itself becomes the first company's request. Refused when any
+	person in it is already in another Pending request."""
+	rate_limit_per_user("submit_roster_change")
+	me = _my_employee()
+	note = _roster_note(note) if note is not None else None
+	_lock_employee(me)
+	draft = _my_roster_draft(me, for_update=True)
+	if not draft or not draft.rows:
+		frappe.throw(_("There is nothing in your draft to send."))
+	ops = _request_ops(draft)
+	# Every person's row, in one order, so a concurrent submit naming the
+	# same people waits here and then sees this one's Pending request.
+	for employee in sorted({op["employee"] for op in ops}):
+		_lock_employee(employee)
+	review = _review_roster_ops(me, ops)
+	_refuse_roster_problems(review)
+	taken = pending_requests(list(review.team))
+	if taken:
+		names = ", ".join(
+			review.team[employee].employee_name for employee in review.team if employee in taken
+		)
+		frappe.throw(
+			_(
+				"Already waiting for HR in another request: {0}. Wait for HR's decision or withdraw it."
+			).format(names)
+		)
+
+	by_company = {}
+	for op in ops:
+		by_company.setdefault(review.team[op["employee"]].company, []).append(op)
+	if note is not None:
+		draft.note = note
+	created = []
+	for position, (company, company_ops) in enumerate(by_company.items()):
+		doc = draft if position == 0 else frappe.new_doc(_ROSTER_CHANGE)
+		if position:
+			doc.update({"employee": me, "manager_user": frappe.session.user, "note": draft.note})
+		doc.set("rows", company_ops)
+		doc.company = company
+		doc.snapshot = json.dumps(_roster_snapshot(review.before, company_ops), sort_keys=True)
+		# A reopened request is resent as itself: last round's decision is
+		# not this round's, so HR and the strip start from a clean slate.
+		doc.update({"decided_by": None, "decided_on": None, "decision_note": None, "return_reasons": None})
+		doc.status = ROSTER_PENDING
+		doc.flags.helixhr_roster_api = True
+		if position:
+			doc.insert(ignore_permissions=True)
+		else:
+			doc.save(ignore_permissions=True)
+		created.append(doc.name)
+	return {"names": created}
+
+
+def _roster_snapshot(coverage, ops):
+	"""KTD8: per employee, the affected window and the coverage key over it.
+	The window is stored so approval re-derives over exactly the same days."""
+	snapshot = {}
+	for employee, (start, end) in affected_window(ops).items():
+		snapshot[employee] = {
+			"window": [str(start), str(end) if end else None],
+			"coverage": snapshot_key(coverage.get(employee, []), (start, end)),
+		}
+	return snapshot
+
+
+def _my_roster_request(name, me):
+	"""The caller's own request `name`, locked; refused for anybody else's
+	(R21's other half: only the submitting manager withdraws or reopens)."""
+	owner = frappe.db.get_value(_ROSTER_CHANGE, name, "employee", for_update=True) if name else None
+	if not owner:
+		frappe.throw(_(_ROSTER_REQUEST_NOT_FOUND), frappe.DoesNotExistError)
+	if owner != me:
+		frappe.throw(_(_ROSTER_REQUEST_NOT_YOURS), frappe.PermissionError)
+	return frappe.get_doc(_ROSTER_CHANGE, name)
+
+
+@frappe.whitelist(methods=["POST"])
+def withdraw_roster_change(name):
+	"""Take back the caller's own Pending request (R15)."""
+	rate_limit_per_user("withdraw_roster_change")
+	me = _my_employee()
+	doc = _my_roster_request(name, me)
+	if doc.status != ROSTER_PENDING:
+		frappe.throw(_("Only a request waiting for HR can be withdrawn."))
+	doc.status = ROSTER_WITHDRAWN
+	doc.flags.helixhr_roster_api = True
+	doc.save(ignore_permissions=True)
+	return {"name": doc.name, "status": doc.status}
+
+
+# The marker a merged request carries, so it is not reopened twice. English
+# on purpose: it is matched, not shown in the portal.
+_ROSTER_MERGED_INTO = "Reopened into draft {0}"
+
+
+def _roster_merged(names):
+	"""Which of the requests `names` were merged into a Draft, in one read."""
+	if not names:
+		return set()
+	return set(
+		frappe.get_all(
+			"Comment",
+			filters={
+				"reference_doctype": _ROSTER_CHANGE,
+				"reference_name": ["in", list(names)],
+				"comment_type": "Info",
+				"content": ["like", _ROSTER_MERGED_INTO.format("%")],
+			},
+			pluck="reference_name",
+		)
+	)
+
+
+@frappe.whitelist(methods=["POST"])
+def reopen_roster_change(name):
+	"""Bring the caller's Returned or Withdrawn request back as their Draft
+	(R17). With no Draft, the request itself becomes it. With one, its rows
+	are appended to that Draft -- refused, naming the person, when somebody
+	is in both or the merged draft would not pass -- and the reopened
+	request keeps its status and history, marked as merged, so there is
+	still exactly one Draft (R11)."""
+	rate_limit_per_user("reopen_roster_change")
+	me = _my_employee()
+	_lock_employee(me)
+	doc = _my_roster_request(name, me)
+	if doc.status not in (ROSTER_RETURNED, ROSTER_WITHDRAWN):
+		frappe.throw(_("Only a returned or withdrawn request can be reopened."))
+	if _roster_merged([doc.name]):
+		frappe.throw(_("This request is already in your draft."))
+
+	draft = _my_roster_draft(me, for_update=True)
+	if not draft:
+		doc.status = ROSTER_DRAFT
+		doc.flags.helixhr_roster_api = True
+		doc.save(ignore_permissions=True)
+		return {"draft": _roster_draft_payload(me, doc), "merged": False}
+
+	drafted = {row.employee for row in draft.rows}
+	for row in doc.rows:
+		if row.employee in drafted:
+			frappe.throw(
+				_(
+					"{0} is already in your draft. Send or clear that draft before reopening this request."
+				).format(row.employee_name or row.employee)
+			)
+	ops = _request_ops(draft) + _request_ops(doc)
+	if len(ops) > _ROSTER_DRAFT_MAX_ROWS:
+		frappe.throw(_("A request can hold at most {0} shift changes.").format(_ROSTER_DRAFT_MAX_ROWS))
+	_refuse_roster_problems(_review_roster_ops(me, ops))
+	_save_draft_rows(draft, me, ops)
+	doc.add_comment("Info", _ROSTER_MERGED_INTO.format(draft.name))
+	return {"draft": _roster_draft_payload(me, draft), "merged": True}
+
+
+# Roster requests in Approvals (plan 2026-10-31-001 U9 / R14-R16, R18, R21)
+#
+# The sixth approval kind (KTD13). `act_on_approval` -> `_decide_one` lock the
+# request row, authorize (`_may_act_on_roster_change`) and check the
+# `expected_modified` token before `_act_on_roster_change` runs. Approve
+# re-checks every employee under the Employee row locks (KTD8, R16) and then
+# applies every operation in one savepoint, as the HR Manager's own session
+# (KTD10), so HRMS's validation runs and the assignments are HR's. A failed
+# re-check or a refusal mid-apply leaves no shift written and the request
+# Returned with the reasons (KTD11).
+
+_ROSTER_DECIDER_ROLE = "HR Manager"
+# Its own name: an HR endpoint's `helixhr_roster_write` savepoint never nests
+# in it, but a shared name would make the two indistinguishable in a trace.
+_ROSTER_APPROVE_SAVEPOINT = "helixhr_roster_approve"
+_ROSTER_DECISIONS = ["Approve", "Send Back", "Decline"]
+
+
+def _may_decide_roster_for(user, company):
+	"""Whether `user` decides roster requests for `company` (R14): the HR
+	Manager Frappe role -- the one that holds create, submit and write on
+	Shift Assignment, so a System Manager without it is not offered a
+	decision its apply could not make -- and an HR scope covering the
+	request's company, never the submitting manager's (KTD12)."""
+	if _ROSTER_DECIDER_ROLE not in frappe.get_roles(user):
+		return False
+	return scope_covers(resolve_admin_scope(user), company)
+
+
+def _may_act_on_roster_change(doc, user):
+	"""R14, R21. `_assert_may_act_on` has already refused the submitter by
+	their Employee login; `manager_user` is the login that submitted, kept
+	in case the Employee's login has changed since."""
+	if user == doc.manager_user:
+		frappe.throw(_("You can't decide your own request. Ask your manager or HR."), frappe.PermissionError)
+	if not _may_decide_roster_for(user, doc.company):
+		frappe.throw(_(_APPROVAL_NOT_FOUND), frappe.PermissionError)
+
+
+def _roster_allowed_actions(doc, user):
+	"""R15: Approve, Send back or Decline, each final for this round. The
+	change request's "Decline" (reason required) is the vocabulary, so the
+	screen's existing reason dialog serves it."""
+	if user == doc.manager_user or not _may_decide_roster_for(user, doc.company):
+		return []
+	return list(_ROSTER_DECISIONS)
+
+
+def _roster_change_summaries(employee, today, count_only=False):
+	"""Pending roster requests in the HR Manager's scope (R14), by the
+	request's company, oldest wait first. Never the caller's own (R21): a
+	manager who is also HR does not see their request in their queue."""
+	user = frappe.session.user
+	if _ROSTER_DECIDER_ROLE not in frappe.get_roles(user):
+		return []
+	companies = read_companies(resolve_admin_scope(user))
+	if companies is not None and not companies:
+		return []
+	filters = {"status": ROSTER_PENDING, "manager_user": ["!=", user]}
+	if employee:
+		filters["employee"] = ["!=", employee]
+	if companies is not None:
+		filters["company"] = ["in", companies]
+	rows = frappe.get_all(
+		_ROSTER_CHANGE,
+		filters=filters,
+		fields=["name"]
+		if count_only
+		else ["name", "employee", "employee_name", "company", "note", "helixhr_pending_since", "modified"],
+		order_by="helixhr_pending_since asc, creation asc",
+		limit=_QUEUE_FETCH,
+	)
+	if count_only:
+		return _count_rows("roster", rows)
+	ops = {}
+	if rows:
+		for op in frappe.get_all(
+			"HelixHR Roster Change Row",
+			filters={"parenttype": _ROSTER_CHANGE, "parent": ["in", [row.name for row in rows]]},
+			fields=["parent", "employee", "action", "from_date", "to_date"],
+			order_by="idx asc",
+		):
+			ops.setdefault(op.parent, []).append(op)
+	summaries = []
+	for row in rows:
+		mine = ops.get(row.name, [])
+		dates = [day for day in map(op_date, mine) if day]
+		summaries.append(
+			_summary_row(
+				"roster",
+				_ROSTER_CHANGE,
+				row.name,
+				row.employee,
+				row.employee_name,
+				min(dates) if dates else None,
+				max(dates) if dates else None,
+				row.helixhr_pending_since or row.modified,
+				ROSTER_PENDING,
+				today,
+				for_hr=True,
+				company=row.company,
+				change_count=len(mine),
+				people_count=len({op.employee for op in mine}),
+				note=(row.note or "").strip() or None,
+			)
+		)
+	return summaries
+
+
+def _roster_request_review(doc, ops, for_update=False):
+	"""R16, read now: each employee's stored window (KTD8), live coverage
+	over it (`before`), the simulated result (`after`), and every reason the
+	request cannot be applied as it stands -- `conflicts`, one per employee,
+	`{employee, employee_name, message}`, the message naming them. The
+	detail shows these before HR clicks; approval re-runs it under the
+	Employee locks with `for_update` (a locking coverage read, so an HR
+	roster edit committed while it waited is seen) and returns the request
+	on any of them."""
+	employees = list(dict.fromkeys(op["employee"] for op in ops))
+	stored = json.loads(doc.snapshot) if doc.snapshot else {}
+	computed = affected_window(ops)
+	windows = {}
+	for employee in employees:
+		window = (stored.get(employee) or {}).get("window")
+		windows[employee] = (
+			(getdate(window[0]), getdate(window[1]) if window[1] else None) if window else computed.get(employee)
+		)
+	people = {
+		row.name: row
+		for row in frappe.get_all(
+			"Employee",
+			filters={"name": ["in", employees or [""]]},
+			fields=["name", "employee_name", "status", "reports_to", "company"],
+		)
+	}
+	names = {row.employee: row.employee_name or row.employee for row in doc.rows}
+	starts = [window[0] for window in windows.values() if window]
+	before = read_coverage(employees, min(starts) if starts else user_today(), for_update=for_update)
+	after, simulated = simulate(before, ops)
+	manager_name = doc.employee_name or doc.employee
+	todays = {}
+	conflicts = []
+	for employee in employees:
+		person = people.get(employee)
+		name = (person and person.employee_name) or names.get(employee) or employee
+		days = [op_date(op) for op in ops if op["employee"] == employee]
+		message = None
+		if not person or person.status != "Active":
+			message = _("{0} is no longer active.").format(name)
+		elif person.reports_to != doc.employee:
+			message = _("{0} no longer reports to {1}.").format(name, manager_name)
+		elif person.company != doc.company:
+			message = _("{0} has moved to another company.").format(name)
+		else:
+			if person.company not in todays:
+				todays[person.company] = company_today(person.company)
+			if any(day is None or day <= todays[person.company] for day in days):
+				message = _("{0}: a change date has passed. Changes can start tomorrow at the earliest.").format(
+					name
+				)
+			elif employee not in stored or snapshot_key(before.get(employee, []), windows[employee]) != stored[
+				employee
+			].get("coverage"):
+				message = _("{0}'s shifts changed after this request was sent.").format(name)
+			else:
+				problem = next((item for item in simulated if item["employee"] == employee), None)
+				if problem:
+					message = _("{0}: {1}").format(name, _(problem["message"]))
+		if message:
+			conflicts.append({"employee": employee, "employee_name": name, "message": message})
+	return frappe._dict(windows=windows, before=before, after=after, conflicts=conflicts)
+
+
+def _roster_window_rows(rows, window):
+	"""Coverage `rows` that touch `window`, for the detail's before and after."""
+	if not window:
+		return []
+	start, end = window
+	return [
+		{
+			"shift_type": row["shift_type"],
+			"start_date": str(row["start_date"]),
+			"end_date": str(row["end_date"]) if row["end_date"] else None,
+			# Made by one of this request's operations (`roster_ops` keys).
+			"new": str(row["key"]).startswith("new-"),
+		}
+		for row in rows
+		if (end is None or row["start_date"] <= end) and (row["end_date"] is None or row["end_date"] >= start)
+	]
+
+
+def _roster_change_decision_detail(doc):
+	"""The request as HR decides it: who asked, for which company, their
+	note, and per employee the operations with the affected days before and
+	after (U9). `conflicts` is R16's re-check run now, so the screen can warn
+	before Approve; a request no longer Pending has no before/after or
+	conflicts -- its coverage has moved on."""
+	ops = _request_ops(doc)
+	review = _roster_request_review(doc, ops) if doc.status == ROSTER_PENDING else None
+	names = {row.employee: row.employee_name or row.employee for row in doc.rows}
+	employees = []
+	for employee in dict.fromkeys(op["employee"] for op in ops):
+		window = review.windows.get(employee) if review else None
+		employees.append(
+			{
+				"employee": employee,
+				"employee_name": names.get(employee),
+				"window_start": str(window[0]) if window else None,
+				"window_end": str(window[1]) if window and window[1] else None,
+				"operations": [
+					{"index": index, **op} for index, op in enumerate(ops) if op["employee"] == employee
+				],
+				"before": _roster_window_rows(review.before.get(employee, []), window) if review else None,
+				"after": _roster_window_rows(review.after.get(employee, []), window) if review else None,
+			}
+		)
+	dates = [day for day in map(op_date, ops) if day]
+	manager_name = doc.employee_name or doc.employee
+	sent_on = doc.helixhr_pending_since or doc.modified
+	detail = _decision_head(doc, manager_name)
+	detail.update(
+		{
+			"kind": "roster",
+			"state": doc.status,
+			"status": doc.status,
+			"manager": doc.employee,
+			"manager_name": manager_name,
+			"company": doc.company,
+			"note": (doc.note or "").strip() or None,
+			"from_date": str(min(dates)) if dates else None,
+			"to_date": str(max(dates)) if dates else None,
+			"change_count": len(ops),
+			"employees": employees,
+			"conflicts": review.conflicts if review else [],
+			"decision_note": doc.decision_note or None,
+			"return_reasons": doc.return_reasons or None,
+			"submitted_on": str(sent_on) if sent_on else None,
+			"sent_on": str(sent_on) if sent_on else None,
+			"age_days": _age_in_days(sent_on, _as_date(user_today())),
+		}
+	)
+	return detail
+
+
+def _close_roster_change(doc, status, note=None, return_reasons=None):
+	"""Record HR's outcome. A flagged `save`, so the lifecycle guard allows it
+	and `events.roster_change_on_change` tells the manager (R20)."""
+	doc.status = status
+	doc.decided_by = frappe.session.user
+	doc.decided_on = now_datetime()
+	doc.decision_note = note or None
+	doc.return_reasons = return_reasons or None
+	doc.flags.helixhr_roster_api = True
+	doc.save(ignore_permissions=True)
+
+
+def _return_roster_change(doc, reasons):
+	_close_roster_change(doc, ROSTER_RETURNED, return_reasons="\n".join(item["message"] for item in reasons))
+	return {"returned": True, "reasons": reasons}
+
+
+def _roster_op_target(employee, assignment, day):
+	"""The submitted assignment a Change or End acts on, read now -- after
+	the earlier operations of the same approval. The row's stored
+	`assignment` only while it still exists and covers `day`; otherwise the
+	one covering `day` (a chained operation on what an earlier one made)."""
+	filters = {"employee": employee, "docstatus": 1, "start_date": ["<=", str(day)]}
+	or_filters = [["end_date", "is", "not set"], ["end_date", ">=", str(day)]]
+	for extra in ([{"name": assignment}] if assignment else []) + [{}]:
+		found = frappe.get_all(
+			"Shift Assignment",
+			filters={**filters, **extra},
+			or_filters=or_filters,
+			pluck="name",
+			order_by="start_date asc, name asc",
+			limit=1,
+		)
+		if found:
+			return frappe.get_doc("Shift Assignment", found[0])
+	return None
+
+
+def _apply_roster_op(op):
+	"""One operation through the HR roster's own writers (KTD10). Raises on
+	any refusal; the caller owns the savepoint."""
+	day = op_date(op)
+	if op["action"] == ROSTER_OP_ASSIGN:
+		end = getdate(op["to_date"]) if op["to_date"] else None
+		return _new_roster_assignment(op["employee"], op["shift_type"], day, end)
+	target = _roster_op_target(op["employee"], op["assignment"], day)
+	if not target:
+		frappe.throw(_(_ROSTER_NO_SHIFT_ON_DATE))
+	if op["action"] == ROSTER_OP_CHANGE:
+		return _change_roster_assignment(target, day, op["shift_type"])
+	return _end_roster_assignment(target, day)
+
+
+def _approve_roster_change(doc):
+	"""R16 then R18. The request row is already locked (`_decide_one`); the
+	Employee rows are locked here in one order, then re-checked. Any
+	conflict returns the request with nothing written. Clean, every
+	operation runs in order inside one savepoint; a refusal rolls all of
+	them back, its stray messages are cleared, and the request is returned
+	with HRMS's sentence. Either way the response says `returned`."""
+	from frappe.utils.messages import clear_messages
+	from hrms.hr.doctype.shift_assignment.shift_assignment import MultipleShiftError, OverlappingShiftError
+
+	ops = _request_ops(doc)
+	for employee in sorted({op["employee"] for op in ops}):
+		_lock_employee(employee)
+	conflicts = _roster_request_review(doc, ops, for_update=True).conflicts
+	if conflicts:
+		return _return_roster_change(doc, conflicts)
+
+	names = {row.employee: row.employee_name or row.employee for row in doc.rows}
+	frappe.db.savepoint(_ROSTER_APPROVE_SAVEPOINT)
+	current = None
+	try:
+		for current in ops:
+			_apply_roster_op(current)
+	except frappe.PermissionError:
+		# HR's own access, not the request: it stays Pending.
+		frappe.db.rollback(save_point=_ROSTER_APPROVE_SAVEPOINT)
+		clear_messages()
+		frappe.throw(_(_ROSTER_REFUSED), frappe.PermissionError)
+	except frappe.ValidationError as error:
+		frappe.db.rollback(save_point=_ROSTER_APPROVE_SAVEPOINT)
+		clear_messages()
+		if isinstance(error, OverlappingShiftError | MultipleShiftError):
+			sentence = _(_ROSTER_OVERLAP)
+		else:
+			sentence = frappe.utils.strip_html(str(error)).strip() or _(_ROSTER_SAVE_FAILED)
+		name = names.get(current["employee"]) or current["employee"]
+		return _return_roster_change(
+			doc,
+			[{"employee": current["employee"], "employee_name": name, "message": _("{0}: {1}").format(name, sentence)}],
+		)
+	frappe.db.release_savepoint(_ROSTER_APPROVE_SAVEPOINT)
+	_close_roster_change(doc, ROSTER_APPROVED)
+	return {"returned": False, "reasons": []}
+
+
+def _act_on_roster_change(doc, action):
+	"""R15. Send back returns it to the manager with HR's reason; Decline is
+	final. Both reasons are required by `act_on_approval`."""
+	reason = (doc.flags.helixhr_decision_note or "").strip()
+	if action == "Approve":
+		return _approve_roster_change(doc)
+	if action == "Send Back":
+		_close_roster_change(doc, ROSTER_RETURNED, note=reason, return_reasons=reason)
+	elif action == "Decline":
+		_close_roster_change(doc, ROSTER_DECLINED, note=reason)
+	else:
+		frappe.throw(_("Not a valid action."))
+	return None
+
+
+def _decided_roster_changes(employee, since, pattern=None):
+	"""Roster requests this caller approved, declined or sent back --
+	`decided_by` is the scope, as for change requests. An automatic
+	withdrawal stamps no decider, so it is nobody's receipt."""
+	window, or_filters, limit = _decided_window(since, pattern, date_field="decided_on")
+	return [
+		_decided_row(
+			"roster",
+			row.name,
+			row.employee_name,
+			"Roster change",
+			None,
+			None,
+			row.status,
+			row.decided_on,
+		)
+		for row in frappe.get_all(
+			_ROSTER_CHANGE,
+			filters={
+				"decided_by": frappe.session.user,
+				"employee": ["!=", employee],
+				"status": ["in", [ROSTER_APPROVED, ROSTER_DECLINED, ROSTER_RETURNED]],
+				**window,
+			},
+			or_filters=or_filters,
+			fields=["name", "employee_name", "status", "decided_on"],
+			order_by="decided_on desc",
+			limit=limit,
+		)
+	]
+
+
+# The kind joins the approval tables here, beside its functions, the way the
+# change kind joins `_APPROVAL_SUMMARY_COLLECTORS`. It has no line-manager
+# half: like HR Request, its whole queue is its `hr_queue`.
+_APPROVAL_KINDS[_ROSTER_CHANGE] = {
+	"state_field": "status",
+	"detail": _roster_change_decision_detail,
+	"may_act": _may_act_on_roster_change,
+	"is_open": lambda doc: doc.status == ROSTER_PENDING,
+	"open_message": "This roster request is no longer waiting for HR. Reload to see where it is.",
+	"hr_state": lambda doc: True,
+	"hr_queue": _roster_change_summaries,
+	"act": _act_on_roster_change,
+}
+_DECIDED_STAMPED_COLLECTORS = (*_DECIDED_STAMPED_COLLECTORS, _decided_roster_changes)
 
 
 # Organisation view (P5-U15 / P5-R20, P5-R23)

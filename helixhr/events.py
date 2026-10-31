@@ -4,6 +4,13 @@ from frappe.model import no_value_fields
 from frappe.permissions import AUTOMATIC_ROLES
 from frappe.utils import add_days, cint, flt, formatdate, getdate
 
+from helixhr.helixhr.doctype.helixhr_roster_change.helixhr_roster_change import (
+	ROSTER_APPROVED,
+	ROSTER_DECLINED,
+	ROSTER_PENDING,
+	ROSTER_RETURNED,
+	ROSTER_WITHDRAWN,
+)
 from helixhr.helixhr.doctype.hr_request.hr_request import request_belongs_to_session
 from helixhr.utils import (
 	CORRECTION_EMAIL_HOLD_HOURS,
@@ -448,6 +455,131 @@ def _hr_mail_change(doc):
 	)
 
 
+# Plan 2026-10-31-001 U8 / R20: a manager's roster request. HR hears it
+# arrive, the manager hears how it ended. Both ride `on_change`, so every
+# status move the API makes (always a flagged `save`) is seen exactly once.
+
+ROSTER_CHANGE = "HelixHR Roster Change"
+_ROSTER_PEOPLE_SHOWN = 3
+_ROSTER_STATE_WORDS = {
+	ROSTER_APPROVED: "approved",
+	ROSTER_DECLINED: "declined",
+	ROSTER_RETURNED: "sent back",
+	ROSTER_WITHDRAWN: "withdrawn",
+}
+
+
+def _roster_people(doc):
+	"""Who a request is for, in words: three names, then "and N more"."""
+	names = list(dict.fromkeys(row.employee_name or row.employee for row in doc.rows))
+	if len(names) <= _ROSTER_PEOPLE_SHOWN:
+		return ", ".join(names)
+	return _("{0} and {1} more").format(
+		", ".join(names[:_ROSTER_PEOPLE_SHOWN]), len(names) - _ROSTER_PEOPLE_SHOWN
+	)
+
+
+def roster_change_on_change(doc, method=None):
+	"""Into Pending: a bell and the `roster_change_submitted` email for the
+	HR Managers whose assignments cover the request's own company -- the
+	split is per company (KTD12), so never the manager's. Into a decision,
+	or an automatic withdrawal: the manager. A withdrawal the manager made
+	themselves tells nobody."""
+	before = doc.get_doc_before_save()
+	if before and before.status == doc.status:
+		return
+	if doc.status == ROSTER_PENDING:
+		_tell_hr_of_roster_change(doc)
+	elif doc.status in (ROSTER_APPROVED, ROSTER_DECLINED, ROSTER_RETURNED) or (
+		doc.status == ROSTER_WITHDRAWN and doc.flags.helixhr_auto_withdrawn
+	):
+		_tell_manager_of_roster_outcome(doc)
+
+
+def _tell_hr_of_roster_change(doc):
+	# R21: the submitter is never one of the deciders, HR Manager or not.
+	recipients = [
+		user for user in _company_role_holders("HR Manager", doc.company) if user != doc.manager_user
+	]
+	manager_name = doc.employee_name or doc.employee
+	people = _roster_people(doc)
+	for user in recipients:
+		_notify_manager_of_arrival(
+			ROSTER_CHANGE, doc, user, _("{0} asked for shift changes for {1}").format(manager_name, people)
+		)
+	_mail(
+		doc,
+		"roster_change_submitted",
+		recipients,
+		lambda: {
+			"manager_name": manager_name,
+			"people": people,
+			"change_count": len(doc.rows),
+			"note": (doc.note or "").strip(),
+			"action_url": _portal_url(f"approvals/roster/{doc.name}"),
+		},
+	)
+
+
+def _tell_manager_of_roster_outcome(doc):
+	state = _ROSTER_STATE_WORDS[doc.status]
+	people = _roster_people(doc)
+	automatic = doc.status == ROSTER_WITHDRAWN
+	note = doc.return_reasons if doc.status == ROSTER_RETURNED else doc.decision_note
+	_notify_manager_of_arrival(
+		ROSTER_CHANGE,
+		doc,
+		doc.manager_user,
+		_("Your roster change request for {0} was {1}").format(people, _(state)),
+	)
+	_mail(
+		doc,
+		"roster_change_decided",
+		[doc.manager_user],
+		lambda: {
+			"people": people,
+			"state": state,
+			"approver_name": "" if automatic else _decider_name(),
+			"decision_note": (note or "").strip(),
+			"action_url": _portal_url("roster"),
+		},
+	)
+
+
+def _withdraw_roster_requests(employee, reason, keep_manager=None):
+	"""Plan 2026-10-31-001 U8: close every Pending roster request naming
+	`employee` as Withdrawn, with `reason` as its note, and tell its manager
+	-- except one submitted by `keep_manager`. Nobody could approve it any
+	more: U9's pre-check would only send it back later."""
+	parents = frappe.get_all(
+		"HelixHR Roster Change Row",
+		filters={"parenttype": ROSTER_CHANGE, "employee": employee},
+		pluck="parent",
+		distinct=True,
+	)
+	if not parents:
+		return
+	for row in frappe.get_all(
+		ROSTER_CHANGE,
+		filters={"name": ["in", parents], "status": ROSTER_PENDING},
+		fields=["name", "employee"],
+	):
+		if keep_manager and row.employee == keep_manager:
+			continue
+		# Re-read under the row lock an approval also takes: one that decided
+		# it while this save waited leaves it alone, rather than this save
+		# failing on a stale `modified`.
+		doc = frappe.get_doc(ROSTER_CHANGE, row.name, for_update=True)
+		if doc.status != ROSTER_PENDING:
+			continue
+		doc.status = ROSTER_WITHDRAWN
+		doc.decision_note = reason
+		doc.decided_on = frappe.utils.now_datetime()
+		doc.flags.helixhr_roster_api = True
+		doc.flags.helixhr_auto_withdrawn = True
+		doc.save(ignore_permissions=True)
+
+
 def timesheet_on_update(doc, method=None):
 	manager_user = _approver_user(doc.employee)
 	before = doc.get_doc_before_save()
@@ -526,6 +658,19 @@ def employee_on_update(doc, method=None):
 		# decision that is no longer theirs.
 		_repoint_change_requests(doc.name)
 
+	# Plan 2026-10-31-001 U8: a roster request is the submitting manager's
+	# ask for their own report. Once the report answers to somebody else,
+	# it is not theirs to ask, and the new manager could not submit one
+	# while it waits (R12).
+	if before.reports_to != doc.reports_to:
+		_withdraw_roster_requests(
+			doc.name,
+			_("{0} no longer reports to you, so this request was withdrawn.").format(
+				doc.employee_name or doc.name
+			),
+			keep_manager=doc.reports_to,
+		)
+
 	# Plan 2026-10-07-001 R3. A report is re-derived when this manager's
 	# login or status changed, and also whenever its stored approvers do not
 	# match this manager's login -- ERPNext's "Create User" writes `user_id`
@@ -556,6 +701,10 @@ def employee_on_update(doc, method=None):
 			pluck="name",
 		):
 			frappe.db.set_value("HelixHR Timesheet Change", name, "status", "Withdrawn")
+		_withdraw_roster_requests(
+			doc.name,
+			_("{0} has left, so this request was withdrawn.").format(doc.employee_name or doc.name),
+		)
 
 	# Plan 2026-10-19-001 KTD2: assignments name their orgs, so nothing here
 	# moves or switches off access -- a company move leaves the rows as they
@@ -829,6 +978,23 @@ def leave_application_before_submit(doc, method=None):
 		frappe.throw(
 			_("This leave request is with HR now, so only HR can decide it."),
 			frappe.PermissionError,
+		)
+
+	# Plan 2026-10-31-001 U11 (R24, KTD14): every final decision names its
+	# decider, from the portal and from Desk alike. Set on the document, not
+	# with `db_set`: `validate_higher_perm_levels` has already run by
+	# `before_submit`, so the permlevel-1 values reach `db_update` as written.
+	# The session user is the real decider -- the portal submits as the
+	# caller with `ignore_permissions`, never under `as_administrator`.
+	# "As HR" means HR in scope deciding in the approver's place, so an HR
+	# user who is also this leave's own manager approving it at the manager
+	# stage decided as the manager.
+	if doc.status in ("Approved", "Rejected"):
+		from helixhr.api import _decides_as_hr
+
+		doc.helixhr_decided_by = user
+		doc.helixhr_decided_as_hr = int(
+			_decides_as_hr(doc, user) and (stored_stage == LEAVE_STAGE_HR or user != doc.leave_approver)
 		)
 
 
@@ -2313,6 +2479,9 @@ def _pending_key(doc):
 	# the same way, so the overdue predicate counts from the same stamp.
 	if doc.doctype == "HelixHR Timesheet Change":
 		return "Open" if doc.status == "Open" else None
+	# Plan 2026-10-31-001 U8 / R14: a roster request waits on HR while Pending.
+	if doc.doctype == ROSTER_CHANGE:
+		return ROSTER_PENDING if doc.status == ROSTER_PENDING else None
 	if doc.workflow_state in (REQUEST_PENDING_MANAGER, REQUEST_PENDING_HR):
 		return doc.workflow_state
 	return None

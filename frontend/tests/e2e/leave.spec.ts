@@ -12,6 +12,7 @@ import { test, expect, request, APIRequestContext } from '@playwright/test'
 const SITE_HOST = process.env.SITE_HOST || 'test_site'
 const PASSWORD = process.env.TEST_USER_PASSWORD || 'Helixhr-Test-Fixture-2026!'
 const EMPLOYEE = 'employee@helixhr.test'
+const MANAGER = 'manager@helixhr.test'
 
 async function admin(baseURL: string): Promise<APIRequestContext> {
   const api = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
@@ -47,6 +48,16 @@ function seedDate(offset: number) {
       : new Date(now.getFullYear(), now.getMonth(), now.getDate() - offset)
   const pad = (n: number) => String(n).padStart(2, '0')
   return `${chosen.getFullYear()}-${pad(chosen.getMonth() + 1)}-${pad(chosen.getDate())}`
+}
+
+/** `seedDate`, moved on to the next Monday-Friday day: a decision that
+ * submits the leave needs a working day to count. */
+function seedWeekday(offset: number) {
+  for (let extra = 0; ; extra++) {
+    const date = seedDate(offset + extra)
+    const day = new Date(`${date}T00:00:00Z`).getUTCDay()
+    if (day !== 0 && day !== 6) return date
+  }
 }
 
 /** Remove anything a previous run left on this date, then create one Leave
@@ -362,6 +373,54 @@ test.describe('employee', () => {
     } finally {
       await removeLeave(api, again)
       await removeLeave(api, name)
+      await employeeApi.dispose()
+      await api.dispose()
+    }
+  })
+
+  // ── Plan 2026-10-31-001 U13 (R25): who decided, by name ───────────────
+  test('a leave the manager approved names the manager as the decider', async ({ page, baseURL }) => {
+    const api = await admin(baseURL!)
+    const employeeApi = await asEmployee(baseURL!)
+    const managerApi = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+    await managerApi.post('/api/method/login', { form: { usr: MANAGER, pwd: PASSWORD } })
+    const employee = await getValue(api, 'Employee', { user_id: EMPLOYEE }, 'name')
+    const managerName = await getValue(api, 'User', { name: MANAGER }, 'full_name')
+    const name = await seedLeave(api, employeeApi, employee, seedWeekday(51))
+
+    try {
+      // The manager's own Approve, through the method the screen calls, so
+      // the stamp is the real one.
+      const detail = await managerApi.get(
+        '/api/method/helixhr.api.get_approval_detail?kind=leave&name=' + encodeURIComponent(name),
+      )
+      const evidence = (await detail.json())?.message
+      const approved = await managerApi.post('/api/method/helixhr.api.act_on_approval', {
+        data: {
+          doctype: 'Leave Application',
+          name,
+          action: 'Approve',
+          expected_modified: evidence?.modified,
+          expected_state: evidence?.state,
+        },
+      })
+      expect(approved.ok(), await approved.text()).toBeTruthy()
+
+      await page.goto(`/helixhr/leave/${name}`)
+      await expect(
+        page.locator('[data-async-state^="leave-detail"]').getByTestId('leave-decided-by'),
+      ).toHaveText(`Approved by ${managerName}`)
+      // The list says the same on the record's own card.
+      await page.goto('/helixhr/leave')
+      await expect(
+        page.locator('li', { has: page.locator(`a[href$="/leave/${name}"]`) }).getByTestId('leave-decided-by'),
+      ).toHaveText(`Approved by ${managerName}`)
+    } finally {
+      if ((await getValue(api, 'Leave Application', { name }, 'docstatus')) === 1) {
+        await api.post('/api/method/frappe.client.cancel', { data: { doctype: 'Leave Application', name } })
+      }
+      await removeLeave(api, name)
+      await managerApi.dispose()
       await employeeApi.dispose()
       await api.dispose()
     }

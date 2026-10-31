@@ -10,6 +10,8 @@ const LANE_TITLES = {
   team: 'My team',
   decided: 'Decided by me',
   hr: 'HR',
+  stalled: 'Stalled with managers',
+  'with-managers': 'With managers',
 }
 
 /** R8/R11: why an approver group cannot be reminded, in words. Keys are the
@@ -21,30 +23,84 @@ export const APPROVER_REASON_TEXT = {
   no_approver: 'No approver set; set Reports to',
 }
 
-const PENDING_LANES = ['team', 'hr']
+const PENDING_LANES = ['team', 'hr', 'stalled', 'with-managers']
+
+// Plan 2026-10-31-001 KTD15: why HR sees a manager-stage leave. `approver_away`
+// and `overdue` are HR's to step in on (and counted); `with_manager` is
+// everything else, which HR may decide but is not waiting on.
+const STALLED_REASONS = ['approver_away', 'overdue']
+export const HR_REASON_WITH_MANAGER = 'with_manager'
+
+/** R23: a row in the "With managers" group -- never HR's own work, never in a
+ * count, never a reason to say the queue holds HR work. */
+export function isWithManager(row) {
+  return row?.hr_reason === HR_REASON_WITH_MANAGER
+}
+
+/** R22: a manager-stage leave HR sees names the approver it is waiting on,
+ * never HR. '' for every other row. */
+export function hrReasonLabel(row) {
+  const name = row?.approver_name
+  if (row?.hr_reason === HR_REASON_WITH_MANAGER) return name ? `Waiting on ${name}` : 'No approver set'
+  if (row?.hr_reason === 'approver_away') return name ? `Approver on leave · ${name}` : 'Approver on leave'
+  if (row?.hr_reason === 'overdue') return name ? `Overdue with ${name}` : 'Overdue · No approver set'
+  return ''
+}
+
+/** P4-R11: the one line under an HR row (and on its detail head) -- why HR
+ * sees it, who handed it over and what they said. A manager-stage leave's
+ * detail opened by someone other than its approver carries `waiting_on`
+ * instead (R22). */
+export function hrLine(row) {
+  if (!row) return ''
+  if (!row.for_hr) return row.waiting_on ? `Waiting on ${row.waiting_on}` : ''
+  const parts = []
+  const reason = hrReasonLabel(row)
+  if (reason) parts.push(reason)
+  if (row.sent_to_hr_by) parts.push(`Sent by ${row.sent_to_hr_by}`)
+  if (row.hr_note) parts.push(`“${row.hr_note}”`)
+  return parts.join(' · ')
+}
+
+/** P4-R11: the "HR" chip marks work waiting on HR. A manager-stage leave HR
+ * can see is still waiting on its manager, so it never wears the chip (R22). */
+export function showsHrChip(row) {
+  return !!row?.for_hr && !row.hr_reason
+}
+
+/** The lane a row is drawn in: the server's `lane` tag, except that a
+ * manager-stage leave HR sees leaves the HR lane for its own group. */
+function laneOf(row) {
+  if (isWithManager(row)) return 'with-managers'
+  if (STALLED_REASONS.includes(row.hr_reason)) return 'stalled'
+  return row.lane === 'hr' ? 'hr' : 'team'
+}
 
 /** Plan 2026-10-04-003 U7 (R13, R19): inside a lane, change requests (never
  * batchable) first, then the rows the server flagged, then everything else.
- * Empty sub-sections are dropped. */
+ * Empty sub-sections are dropped. Plan 2026-10-31-001 U10: a roster request
+ * is a change request too -- one decision at a time. */
+const CHANGE_KINDS = ['change', 'roster']
+
 export function laneSubsections(rows) {
   return [
     {
       key: 'change',
       title: 'Change requests',
       note: 'One decision at a time, never in bulk.',
-      rows: rows.filter((row) => row.kind === 'change'),
+      rows: rows.filter((row) => CHANGE_KINDS.includes(row.kind)),
     },
     {
       key: 'flagged',
       title: 'Needs a look',
       note: 'Something on these rows is unusual. Decide each one on its own evidence.',
-      rows: rows.filter((row) => row.kind !== 'change' && row.needs_look),
+      rows: rows.filter((row) => !CHANGE_KINDS.includes(row.kind) && row.needs_look),
     },
     {
       key: 'normal',
       title: 'Looks normal',
       note: '',
-      rows: rows.filter((row) => row.kind !== 'change' && !row.needs_look),
+      rows: rows.filter((row) => !CHANGE_KINDS.includes(row.kind) && !row.needs_look),
     },
   ].filter((section) => section.rows.length)
 }
@@ -54,14 +110,23 @@ export function laneSubsections(rows) {
  * A pending lane with no rows is dropped; Decided appears whenever
  * `decidedCount` is non-zero, so with My team empty it comes first. A row
  * with no lane tag counts as the caller's own team.
+ *
+ * Plan 2026-10-31-001 (R22, R23): after HR come the manager-stage leave HR
+ * may step in on ("Stalled with managers") and, last, the "With managers"
+ * group -- one undivided section, because nothing in it is batchable.
  */
 export function laneSections(rows, decidedCount = 0) {
-  const byLane = { team: [], hr: [] }
-  for (const row of rows || []) (byLane[row.lane] || byLane.team).push(row)
+  const byLane = Object.fromEntries(PENDING_LANES.map((key) => [key, []]))
+  for (const row of rows || []) byLane[laneOf(row)].push(row)
   const lanes = []
   for (const key of PENDING_LANES) {
-    if (byLane[key].length) {
-      lanes.push({ key, title: LANE_TITLES[key], rows: byLane[key], sections: laneSubsections(byLane[key]) })
+    const laneRows = byLane[key]
+    if (laneRows.length) {
+      const sections =
+        key === 'with-managers'
+          ? [{ key, title: '', note: '', rows: laneRows }]
+          : laneSubsections(laneRows)
+      lanes.push({ key, title: LANE_TITLES[key], rows: laneRows, sections })
     }
     if (key === 'team' && decidedCount) lanes.push({ key: 'decided', title: LANE_TITLES.decided, rows: [], sections: [] })
   }
