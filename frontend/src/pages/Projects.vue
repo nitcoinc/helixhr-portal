@@ -240,9 +240,11 @@ const canEdit = computed(() => !!detail.data?.can_edit)
 
 const tasks = computed(() => detail.data?.tasks || [])
 const members = computed(() => detail.data?.members || [])
-// `get_project` carries no company; the list row this page already loaded
-// does.
-const projectCompany = computed(() => rows.value.find((row) => row.name === props.project)?.company || '')
+// Plan 2026-11-01-001 U2: `get_project` carries the company; the list row
+// this page already loaded is the fallback.
+const projectCompany = computed(
+  () => detail.data?.company || rows.value.find((row) => row.name === props.project)?.company || '',
+)
 const companyName = computed(() => projectCompany.value || 'this company')
 
 const facts = computed(() => {
@@ -275,6 +277,11 @@ function paneAttrs(key, headingId) {
 
 function setDetail(field, value) {
   if (detail.data) detail.data[field] = value
+}
+
+/** `set_project_open_to_all`'s answer: the flag and both company lists. */
+function setOpen(state) {
+  if (detail.data) Object.assign(detail.data, state)
 }
 
 // Declared after every ref it resets: `immediate` runs it during setup, and a
@@ -378,8 +385,15 @@ watch(
               :open-to-all="!!detail.data.open_to_all"
               :can-edit="canEdit"
               :company-name="companyName"
+              :billable="!!detail.data.billable"
+              :status="detail.data.status || ''"
+              :open-companies="detail.data.open_companies || []"
+              :open-company-choices="detail.data.open_company_choices || []"
+              :stored-open-companies="detail.data.stored_open_companies || []"
+              :fixed-open-companies="detail.data.fixed_open_companies || []"
+              :caller-company="creatorCompany || ''"
               @update:members="(list) => setDetail('members', list)"
-              @update:open-to-all="(value) => setDetail('open_to_all', value)"
+              @update:open="setOpen"
             />
           </div>
         </div>

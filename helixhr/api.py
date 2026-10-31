@@ -5769,7 +5769,11 @@ def _my_project_names(user):
 	to everyone" in the company of `user`'s current Active Employee. The one
 	booking rule the task picker, week reads and save/submit validation
 	share (R9). The open branch writes no row anywhere, so it widens booking
-	only, never access to the project."""
+	only, never access to the project.
+
+	Plan 2026-11-01-001 U2 (R3): an Open, flagged project also counts when
+	`user`'s company is one of its extra open companies
+	(`helixhr_open_companies`), in one more indexed query."""
 	names = set(frappe.get_all("Project User", filters={"user": user}, pluck="parent")) | set(
 		frappe.get_all("User Permission", filters={"user": user, "allow": "Project"}, pluck="for_value")
 	)
@@ -5781,6 +5785,21 @@ def _my_project_names(user):
 				filters={"company": company, "status": "Open", "helixhr_open_to_all": 1},
 				pluck="name",
 			)
+		)
+		project, row = frappe.qb.DocType("Project"), frappe.qb.DocType(_OPEN_COMPANY_DOCTYPE)
+		names |= set(
+			frappe.qb.from_(row)
+			.join(project)
+			.on(project.name == row.parent)
+			.select(project.name)
+			.where(
+				(row.parenttype == "Project")
+				& (row.parentfield == _OPEN_COMPANIES_FIELD)
+				& (row.company == company)
+				& (project.status == "Open")
+				& (project.helixhr_open_to_all == 1)
+			)
+			.run(pluck=True)
 		)
 	return names
 
@@ -14682,6 +14701,11 @@ def retry_leaving(employee, expected_modified=None):
 
 _PROJECT_NOT_FOUND = "That project isn't here."
 
+# Plan 2026-11-01-001 U1/U2: the companies besides its own a project is
+# "Open to everyone" for. Only `set_project_open_to_all` writes the table.
+_OPEN_COMPANY_DOCTYPE = "HelixHR Project Company"
+_OPEN_COMPANIES_FIELD = "helixhr_open_companies"
+
 _PROJECT_SEARCH_FIELDS = (
 	"name",
 	"project_name",
@@ -14699,6 +14723,7 @@ _PROJECT_FIELDS = (
 	"name",
 	"project_name",
 	"status",
+	"company",
 	"expected_start_date",
 	"expected_end_date",
 	"helixhr_is_billable",
@@ -14894,6 +14919,14 @@ def get_project(project):
 	the same message a nonexistent project id gets, so this can never become
 	an oracle for which project ids exist. ``can_edit`` is the write scope's
 	answer (plan 2026-10-14-001 KTD4).
+
+	Plan 2026-11-01-001 U2: ``company``, and for a caller who may edit,
+	``open_companies`` (`_covered_companies`: who can already book without
+	being a member), ``open_company_choices`` (the other companies the
+	caller may open it to), ``stored_open_companies`` (every stored extra
+	company, whatever the project's status, so the dialog starts from what
+	is saved) and ``fixed_open_companies`` (those outside the caller's write
+	scope, which their edits keep).
 	"""
 	rate_limit_per_user("get_project")
 	scope = resolve_project_read_scope(frappe.session.user)
@@ -14903,11 +14936,13 @@ def get_project(project):
 	data = frappe.db.get_value("Project", project, list(_PROJECT_FIELDS), as_dict=True)
 	write = resolve_project_scope(frappe.session.user)
 	can_edit = project_in_scope(project, write)
+	stored = _project_open_rows(project) if can_edit else []
 
 	return {
 		"name": data.name,
 		"project_name": data.project_name,
 		"status": data.status,
+		"company": data.company,
 		"billable": bool(data.helixhr_is_billable),
 		"open_to_all": bool(data.helixhr_open_to_all),
 		"priority": data.priority,
@@ -14920,7 +14955,44 @@ def get_project(project):
 		# Plan 2026-10-31-001 U5: the bulk-add picker's department choices,
 		# only for a caller who may add people.
 		"departments": _project_departments(write) if can_edit else [],
+		"open_companies": _covered_companies(data, stored) if can_edit else [],
+		"open_company_choices": _open_company_choices(write, data.company) if can_edit else [],
+		"stored_open_companies": stored,
+		"fixed_open_companies": [company for company in stored if not scope_covers(write, company)],
 	}
+
+
+def _project_open_rows(project):
+	"""``project``'s stored extra open companies, in row order."""
+	return frappe.get_all(
+		_OPEN_COMPANY_DOCTYPE,
+		filters={"parent": project, "parenttype": "Project", "parentfield": _OPEN_COMPANIES_FIELD},
+		pluck="company",
+		order_by="idx asc",
+		ignore_permissions=True,
+	)
+
+
+def _covered_companies(project, stored):
+	"""Plan 2026-11-01-001 KTD "covered": the companies whose Active employees
+	can already book ``project`` without being members -- its own company
+	plus the ``stored`` extra ones, own first -- while it is Open and "Open
+	to everyone"; otherwise none. ``project`` needs ``company``, ``status``
+	and ``helixhr_open_to_all``. `add_project_members` skips by it and
+	`get_project` reports it, so the picker and the server agree."""
+	if project.status != "Open" or not cint(project.helixhr_open_to_all):
+		return []
+	return list(dict.fromkeys([project.company, *stored]))
+
+
+def _open_company_choices(scope, own):
+	"""The companies an editor may add to a project's open list: every one
+	``scope`` (`resolve_project_scope`) covers, or every Company when
+	unscoped, minus the project's own company ``own``."""
+	companies = read_companies(scope)
+	if companies is None:
+		companies = frappe.get_all("Company", pluck="name", order_by="name asc")
+	return sorted(company for company in companies if company != own)
 
 
 def _project_departments(scope):
@@ -14933,7 +15005,7 @@ def _project_departments(scope):
 	return frappe.get_all(
 		"Department",
 		filters={"company": ["in", companies] if companies is not None else ["is", "set"]},
-		fields=["name", "department_name", "company"],
+		fields=["name", "department_name", "company", "parent_department"],
 		order_by="department_name asc",
 		ignore_permissions=True,
 	)
@@ -15300,18 +15372,86 @@ def add_tasks(project, subjects):
 
 
 @frappe.whitelist(methods=["POST"])
-def set_project_open_to_all(project, value):
+def set_project_open_to_all(project, value, companies=None):
 	"""Mark ``project`` "Open to everyone" or not (plan 2026-10-31-001 U4,
 	R8). Booking reads the flag in `_my_project_names`; nothing else is
 	written -- no Project User row, User Permission or DocShare -- so it
 	never widens access to the project itself. Turning it off follows the
 	member-removal rule: a draft week still naming the project is refused
-	on its next save."""
+	on its next save.
+
+	Plan 2026-11-01-001 U2 (R1, R2): ``companies`` names the extra companies
+	besides the project's own, each inside the caller's write scope (else
+	the not-here refusal and nothing is written); the project's own company
+	is dropped from it. While on, the list replaces only the rows the
+	caller's scope covers and keeps the rest. Off clears every row, so a
+	later turn-on starts from exactly what that editor picks: with
+	``companies`` left out, own company only. Left out while already on,
+	the rows stay as they are. A billable project is refused any turn-on
+	or edit, and may only be turned off. Written field-and-rows under a row
+	lock, not as a document save (see the comment below).
+
+	Returns ``open_to_all``, ``open_companies`` (`_covered_companies`),
+	``stored_open_companies`` (the saved rows) and ``fixed_open_companies``
+	(rows outside the caller's scope)."""
 	rate_limit_per_user("set_project_open_to_all")
-	_project_write_gate(project)
+	scope = _project_write_gate(project)
 	open_to_all = cint(value) == 1
+	picked = None if companies is None else _string_list(companies, _("Companies"))
+
+	# Not a document save: ERPNext's Project.validate would copy template
+	# tasks, recompute status from task progress, mail pending invitations
+	# and re-check legacy dates -- none of it this switch's business. The
+	# row lock serialises two editors; `project_validate` keeps any other
+	# save path off the table.
+	doc = frappe.db.get_value(
+		"Project",
+		project,
+		["company", "status", "helixhr_is_billable", "helixhr_open_to_all"],
+		as_dict=True,
+		for_update=True,
+	)
+	was_open = bool(cint(doc.helixhr_open_to_all))
+	stored = _project_open_rows(project)
+	if not open_to_all:
+		rows = []
+	else:
+		if cint(doc.helixhr_is_billable):
+			frappe.throw(_("A billable project can't be opened to everyone."))
+		for company in picked or []:
+			if not scope_covers(scope, company) or not frappe.db.exists("Company", company):
+				frappe.throw(_("That company isn't here."))
+		if picked is None:
+			rows = stored if was_open else []
+		else:
+			kept = [company for company in stored if not scope_covers(scope, company)] if was_open else []
+			rows = [*kept, *picked]
+		rows = [company for company in dict.fromkeys(rows) if company != doc.company]
+
+	frappe.db.delete(
+		_OPEN_COMPANY_DOCTYPE,
+		{"parent": project, "parenttype": "Project", "parentfield": _OPEN_COMPANIES_FIELD},
+	)
+	for idx, company in enumerate(rows, start=1):
+		frappe.get_doc(
+			{
+				"doctype": _OPEN_COMPANY_DOCTYPE,
+				"parent": project,
+				"parenttype": "Project",
+				"parentfield": _OPEN_COMPANIES_FIELD,
+				"idx": idx,
+				"company": company,
+			}
+		).db_insert()
 	frappe.db.set_value("Project", project, "helixhr_open_to_all", int(open_to_all))
-	return {"open_to_all": open_to_all}
+	frappe.clear_document_cache("Project", project)
+	doc.helixhr_open_to_all = int(open_to_all)
+	return {
+		"open_to_all": open_to_all,
+		"open_companies": _covered_companies(doc, rows),
+		"stored_open_companies": rows,
+		"fixed_open_companies": [company for company in rows if not scope_covers(scope, company)],
+	}
 
 
 def _department_candidates(department, scope):
@@ -15341,8 +15481,11 @@ def _department_candidates(department, scope):
 	return frappe.get_all("Employee", filters=filters, pluck="name", order_by="employee_name asc")
 
 
+_BULK_DEPARTMENT_LIMIT = 50
+
+
 @frappe.whitelist(methods=["POST"])
-def add_project_members(project, employees=None, department=None):
+def add_project_members(project, employees=None, department=None, departments=None):
 	"""Append people to ``project``'s members (plan 2026-10-31-001 U5, R5-R7,
 	KTD4, KTD5): the named ``employees``, and/or every Active employee in
 	``department`` and its sub-departments. Never removes anyone.
@@ -15356,20 +15499,32 @@ def add_project_members(project, employees=None, department=None):
 	Appended rows carry ``welcome_email_sent = 1`` (ERPNext's
 	`Project.validate` would otherwise mail each one a "Project
 	Collaboration Invitation"), and the write goes through
-	`_write_project_users`, which strips ERPNext's auto-share."""
+	`_write_project_users`, which strips ERPNext's auto-share.
+
+	Plan 2026-11-01-001 U3 (R4, R6): ``departments`` takes up to 50
+	departments in one call, beside the single ``department``; their people
+	are unioned and deduplicated, and one department outside scope refuses
+	the whole call. Someone who can already book here without being a
+	member (`_covered_companies`) is skipped as ``"can already book"``, after
+	the not-available check so an out-of-scope id still gets no name.
+	`_BULK_MEMBER_LIMIT` counts the people who would actually be added."""
 	rate_limit_per_user("add_project_members")
 	scope = _project_write_gate(project)
 
 	ids = _string_list(employees, _("People"))
-	if department:
-		ids += _department_candidates(department, scope)
+	if len(ids) > _BULK_MEMBER_LIMIT:
+		frappe.throw(_("Add at most {0} people at a time.").format(_BULK_MEMBER_LIMIT))
+	chosen = _string_list(departments, _("Departments"))
+	if len(chosen) > _BULK_DEPARTMENT_LIMIT:
+		frappe.throw(_("Add at most {0} departments at a time.").format(_BULK_DEPARTMENT_LIMIT))
+	for name in dict.fromkeys([department, *chosen] if department else chosen):
+		ids += _department_candidates(name, scope)
 	ids = list(dict.fromkeys(ids))
 	if not ids:
 		frappe.throw(_("Choose people or a department to add."))
-	if len(ids) > _BULK_MEMBER_LIMIT:
-		frappe.throw(_("Add at most {0} people at a time.").format(_BULK_MEMBER_LIMIT))
 
 	doc = frappe.get_doc("Project", project, for_update=True)
+	covered = set(_covered_companies(doc, [row.company for row in doc.get(_OPEN_COMPANIES_FIELD)]))
 	rows = frappe.get_all(
 		"Employee",
 		filters={"name": ["in", ids]},
@@ -15378,7 +15533,7 @@ def add_project_members(project, employees=None, department=None):
 	by_name = {row.name: row for row in rows}
 	members = {row.user for row in doc.users}
 
-	added, skipped = [], []
+	adding, skipped = [], []
 	for employee in ids:
 		row = by_name.get(employee)
 		if not row or row.status != "Active" or not scope_covers(scope, row.company):
@@ -15391,16 +15546,24 @@ def add_project_members(project, employees=None, department=None):
 			skipped.append(
 				{"employee": row.name, "employee_name": row.employee_name, "reason": _("already a member")}
 			)
+		elif row.company in covered:
+			skipped.append(
+				{"employee": row.name, "employee_name": row.employee_name, "reason": _("can already book")}
+			)
 		else:
 			members.add(row.user_id)
-			doc.append("users", {"user": row.user_id, "welcome_email_sent": 1})
-			added.append(
-				{
-					"employee": row.name,
-					"employee_name": row.employee_name,
-					"initials": _initials(row.employee_name),
-				}
-			)
+			adding.append(row)
+
+	if len(adding) > _BULK_MEMBER_LIMIT:
+		frappe.throw(
+			_("That would add {0} people. Add at most {1} at a time.").format(len(adding), _BULK_MEMBER_LIMIT)
+		)
+	added = []
+	for row in adding:
+		doc.append("users", {"user": row.user_id, "welcome_email_sent": 1})
+		added.append(
+			{"employee": row.name, "employee_name": row.employee_name, "initials": _initials(row.employee_name)}
+		)
 
 	if added:
 		_write_project_users(doc, insert=False)

@@ -137,3 +137,63 @@ export function matchRows(rows, needle, field) {
   if (!text) return rows || []
   return (rows || []).filter((row) => String(row?.[field] || '').toLowerCase().includes(text))
 }
+
+// Plan 2026-11-01-001 U4 (R5). What the member picker offers. "Covered" is
+// the server's own rule (`_covered_companies`): `get_project.open_companies`
+// is non-empty only while the project is Open and "Open to everyone", and
+// `add_project_members` skips the same people as "can already book".
+
+/** The picker's people page, before members are dropped on the client. */
+export const PICKER_PAGE = 20
+/** `get_directory`'s own cap (`_DIRECTORY_MAX_PAGE`). */
+export const DIRECTORY_MAX_PAGE = 200
+
+/** How many `get_directory` rows to ask for so that, once members are
+ * dropped, a page of `PICKER_PAGE` can still be left: `min(200, 20 + n)`. */
+export function pickerSearchLimit(memberCount) {
+  return Math.min(DIRECTORY_MAX_PAGE, PICKER_PAGE + Math.max(0, Number(memberCount) || 0))
+}
+
+/** "A", "A and B", "A, B and C". */
+export function listWords(items) {
+  const list = items || []
+  if (list.length < 2) return list.join('')
+  return `${list.slice(0, -1).join(', ')} and ${list.at(-1)}`
+}
+
+/** What to offer, and what was hidden and why. Departments whose company is
+ * covered are left out (`hiddenCompanies` names those companies, A-Z).
+ * People already on the project are left out and counted in
+ * `hiddenMembers`. People results come from `get_directory`, the caller's
+ * own company, so when `callerCompany` is covered every one of them can
+ * already book: `peopleCovered`, and none is offered. `moreMatches` is true
+ * when the server filled the page (`limit`), so a narrower search may find
+ * people this one did not. */
+export function pickerOffer({
+  departments = [],
+  people = [],
+  memberIds = [],
+  openCompanies = [],
+  callerCompany = null,
+  limit = 0,
+} = {}) {
+  const covered = new Set(openCompanies || [])
+  const offeredDepartments = []
+  const hidden = new Set()
+  for (const row of departments || []) {
+    if (row?.company && covered.has(row.company)) hidden.add(row.company)
+    else offeredDepartments.push(row)
+  }
+  const peopleCovered = !!callerCompany && covered.has(callerCompany)
+  const members = new Set(memberIds || [])
+  const notMembers = (people || []).filter((person) => !members.has(person?.name))
+  return {
+    departments: offeredDepartments,
+    hiddenDepartments: (departments || []).length - offeredDepartments.length,
+    hiddenCompanies: [...hidden].sort((a, b) => String(a).localeCompare(String(b))),
+    people: peopleCovered ? [] : notMembers,
+    hiddenMembers: (people || []).length - notMembers.length,
+    peopleCovered,
+    moreMatches: limit > 0 && (people || []).length >= limit,
+  }
+}

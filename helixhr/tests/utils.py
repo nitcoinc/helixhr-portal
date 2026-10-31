@@ -1172,6 +1172,8 @@ def setup_playwright_fixtures():
 
 	# Plan 2026-10-31-001 U2/U3/U6: projects.spec.ts.
 	ensure_projects_workspace_fixtures()
+	# Plan 2026-11-01-001 U6: projects.spec.ts, across two companies.
+	ensure_projects_open_companies_fixtures()
 
 	frappe.db.commit()  # nosemgrep
 
@@ -1215,6 +1217,39 @@ def ensure_projects_workspace_fixtures():
 		update_modified=False,
 	)
 	return project
+
+
+# Plan 2026-11-01-001 U6: projects.spec.ts's two-company flows. A Delivery
+# Manager in the test company and the baseline second company, so
+# `resolve_project_scope` covers both, and a department in the second company
+# whose one person has a login. A dedicated identity rather than a second org
+# on the `hr` login: a Delivery Manager row also widens the project-scoped
+# report tier, which would give that HR Manager "All my companies" and break
+# reports-company.spec.ts's single-company assertion.
+PROJECTS_MULTI_COMPANY_USER = "projects-dm@helixhr.test"
+PROJECTS_B_DEPARTMENT = "_Test Projects B Department"
+PROJECTS_B_USER = "projb-dana@helixhr.test"
+
+
+def ensure_projects_open_companies_fixtures():
+	"""Idempotent. Projects are created by the spec itself, one per run."""
+	company = ensure_test_company()
+	other = ensure_baseline_company()
+	department = frappe.db.get_value(
+		"Department", {"department_name": PROJECTS_B_DEPARTMENT, "company": other}, "name"
+	)
+	if not department:
+		department = (
+			frappe.get_doc(
+				{"doctype": "Department", "department_name": PROJECTS_B_DEPARTMENT, "company": other}
+			)
+			.insert(ignore_permissions=True)
+			.name
+		)
+	make_test_user(PROJECTS_B_USER, other, first_name="Projb", last_name="Dana", department=department)
+	make_test_user(PROJECTS_MULTI_COMPANY_USER, company, first_name="Projdm", last_name="Lead")
+	make_assignment(PROJECTS_MULTI_COMPANY_USER, "HelixHR Delivery Manager", [company, other])
+	return frappe._dict(company=company, other=other, department=department)
 
 
 OVERSIGHT_MANAGER_USER = "oversight-manager@helixhr.test"

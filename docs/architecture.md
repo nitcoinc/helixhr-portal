@@ -2493,6 +2493,36 @@ Bulk membership (`add_project_members`) appends through `_write_project_users`, 
 `welcome_email_sent = 1` so ERPNext sends no invitation mail, skips existing members and people
 with no login by name, and reports out-of-scope ids as "not available" with no name.
 
+### Open to more companies, multi-department add (plan 2026-11-01-001)
+
+**Extra companies.** An open project can also cover other companies, stored in
+`Project.helixhr_open_companies`. This is a Table MultiSelect of the `HelixHR Project Company`
+child table. The project's own company is always covered and never stored.
+- `_my_project_names` adds Open, flagged projects whose table holds the user's company.
+- Only `set_project_open_to_all` writes the table. It writes the flag and the rows directly under
+  a row lock, never as a document save, so ERPNext's Project validate (template tasks, status from
+  progress, invitation mail, date checks) does not run on a toggle. Desk shows the table read-only,
+  and `events.project_validate` refuses any document save (Desk or REST) that changes it.
+- Each company must be inside the editor's project write scope.
+- While on, an edit replaces only the rows the editor's scope covers. Rows outside it are kept, and
+  `get_project` reports them as `fixed_open_companies`.
+- Turning the switch off clears every row, so a later turn-on never brings back a grant nobody
+  chose. A Desk save that turns the flag off clears them too.
+- Hours from other companies land on the project. ERPNext's `total_costing_amount` then sums each
+  timesheet's base currency, so mixed-currency costing totals are an accepted limitation. Named
+  members from other companies already behave the same way.
+
+**Billable and open.** A project is never made both billable and open. `events.project_validate`
+refuses the transition on every save path: the portal refuses first, and this hook backs up Desk.
+A legacy project that is already both still saves and still books, and can only be turned off.
+
+**Covered people.** `_covered_companies` defines who is "covered": the project is Open, the flag
+is on, and the employee's company is the project's own or a stored one.
+- `add_project_members` skips covered people as "can already book".
+- The picker hides covered people, departments and existing members, and says how many it hid.
+- `add_project_members` also takes up to 50 `departments`, unioned and deduplicated.
+  `_BULK_MEMBER_LIMIT` counts the people who would actually be added.
+
 ### Roster change requests (U7-U10, KTD7-KTD13)
 
 A manager drafts shift operations (assign / change from / end on) for Active direct reports and

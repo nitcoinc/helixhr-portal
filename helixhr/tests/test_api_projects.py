@@ -22,7 +22,7 @@ from helixhr.tests.utils import (
 	make_test_project,
 	make_test_user,
 )
-from helixhr.utils import RATE_LIMIT_POLICY, project_scope_filters, resolve_project_scope
+from helixhr.utils import RATE_LIMIT_POLICY, project_scope_filters, reset_rate_limit, resolve_project_scope
 
 # --- U2: resolve_project_scope -----------------------------------------------
 
@@ -356,6 +356,12 @@ class TestSearchAndGetProject(IntegrationTestCase):
 			# departments (empty for a caller who cannot edit).
 			"open_to_all",
 			"departments",
+			# Plan 2026-11-01-001 U2: the company and the open-company lists.
+			"company",
+			"open_companies",
+			"open_company_choices",
+			"stored_open_companies",
+			"fixed_open_companies",
 		}
 		self.assertEqual(set(result.keys()), expected_keys)
 		for forbidden in (
@@ -1354,7 +1360,13 @@ class TestAddProjectMembers(IntegrationTestCase):
 		departments = {row["name"]: row for row in get_project(project)["departments"]}
 		self.assertEqual(
 			departments[self.sub_dept],
-			{"name": self.sub_dept, "department_name": "_Test U5 Sub Dept", "company": self.company},
+			{
+				"name": self.sub_dept,
+				"department_name": "_Test U5 Sub Dept",
+				"company": self.company,
+				# Plan 2026-11-01-001 U4: the checklist labels a row with its parent.
+				"parent_department": self.dept,
+			},
 		)
 		self.assertIn(self.dept, departments)
 		self.assertNotIn(self.foreign_dept, departments)
@@ -1365,6 +1377,157 @@ class TestAddProjectMembers(IntegrationTestCase):
 
 		self.assertEqual(frappe.allowed_http_methods_for_whitelisted_func[api.add_project_members], ["POST"])
 		self.assertIn("add_project_members", RATE_LIMIT_POLICY)
+
+
+# --- plan 2026-11-01-001 U3: several departments, covered people skipped -----
+
+
+class TestAddProjectMembersDepartmentsAndCovered(IntegrationTestCase):
+	"""`add_project_members`'s ``departments`` list and its "can already book"
+	skip (plan 2026-11-01-001 U3, R4-R6). Departments and people are this
+	class's own; every project is reset to the Delivery Manager alone, not
+	open, Open, in setUp and tearDown."""
+
+	_member_users = TestAddProjectMembers._member_users
+
+	def setUp(self):
+		frappe.set_user("Administrator")
+		self.company = ensure_test_company()
+		self.other_company = ensure_baseline_company()
+		_, self.dm_user = make_test_delivery_manager()
+		for user in (self.dm_user, "Administrator"):
+			reset_rate_limit("add_project_members", user)
+
+		self.parent = _ensure_department("_Test U3M Parent", self.company, is_group=1)
+		self.sub = _ensure_department("_Test U3M Sub", self.company, parent=self.parent)
+		self.other = _ensure_department("_Test U3M Other", self.company)
+		self.foreign_dept = _ensure_department("_Test U3M Foreign", self.other_company)
+		self.in_parent = make_test_user("u3m-parent@helixhr.test", self.company, department=self.parent)
+		self.in_sub = make_test_user("u3m-sub@helixhr.test", self.company, department=self.sub)
+		self.in_other = make_test_user("u3m-other@helixhr.test", self.company, department=self.other)
+		self.in_foreign = make_test_user(
+			"u3m-foreign@helixhr.test", self.other_company, department=self.foreign_dept
+		)
+		self.projects = []
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		for project in self.projects:
+			frappe.db.delete("HelixHR Project Company", {"parent": project, "parenttype": "Project"})
+			frappe.db.set_value("Project", project, {"helixhr_open_to_all": 0, "status": "Open"})
+
+	def _fresh_project(self, name, open_to=None, status="Open"):
+		"""``name`` with only the Delivery Manager as member; ``open_to`` is
+		None (not open) or the extra open companies (own company implied)."""
+		project = TestAddProjectMembers._fresh_project(self, name, members=())
+		self.projects.append(project)
+		frappe.db.delete("HelixHR Project Company", {"parent": project, "parenttype": "Project"})
+		frappe.db.set_value("Project", project, {"helixhr_open_to_all": 0, "status": status})
+		if open_to is not None:
+			from helixhr.api import set_project_open_to_all
+
+			# The rows' only writer; a document save is refused (project_validate).
+			set_project_open_to_all(project, 1, list(open_to))
+		return project
+
+	def _add(self, project, user=None, **kwargs):
+		from helixhr.api import add_project_members
+
+		frappe.set_user(user or self.dm_user)
+		try:
+			return add_project_members(project, **kwargs)
+		finally:
+			frappe.set_user("Administrator")
+
+	def _added(self, result):
+		return [row["employee"] for row in result["added"]]
+
+	def test_two_departments_sharing_a_person_add_everyone_once(self):
+		project = self._fresh_project("_Test U3M Union Project")
+		result = self._add(project, departments=[self.parent, self.sub])
+		added = self._added(result)
+		self.assertEqual(sorted(added), sorted([self.in_parent, self.in_sub]))
+		self.assertEqual(len(added), len(set(added)))
+		self.assertEqual(result["skipped"], [])
+
+	def test_real_additions_over_the_cap_are_refused_with_that_count(self):
+		from unittest.mock import patch
+
+		from helixhr import api
+
+		project = self._fresh_project("_Test U3M Cap Project")
+		with patch.object(api, "_BULK_MEMBER_LIMIT", 1):
+			with self.assertRaises(frappe.ValidationError) as caught:
+				self._add(project, departments=[self.sub, self.other])
+			self.assertIn("would add 2 people", str(caught.exception))
+			self.assertEqual(self._member_users(project), {self.dm_user})
+
+			# Members are left out before the cap: one real addition fits.
+			self._add(project, employees=[self.in_sub])
+			result = self._add(project, departments=[self.sub, self.other])
+		self.assertEqual(self._added(result), [self.in_other])
+
+	def test_the_single_department_still_works_beside_the_list(self):
+		project = self._fresh_project("_Test U3M Legacy Project")
+		result = self._add(project, department=self.other, departments=frappe.as_json([self.sub]))
+		self.assertEqual(sorted(self._added(result)), sorted([self.in_other, self.in_sub]))
+
+	def test_more_than_fifty_departments_are_refused(self):
+		project = self._fresh_project("_Test U3M Fifty One Project")
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self._add(project, departments=[self.sub] * 51)
+		self.assertIn("at most 50 departments", str(caught.exception))
+		self.assertEqual(self._member_users(project), {self.dm_user})
+
+	# --- covered: the project is Open and open to the person's company -------
+
+	def test_people_in_an_open_company_are_skipped_as_able_to_book(self):
+		project = self._fresh_project("_Test U3M Covered Project", open_to=[])
+		result = self._add(project, departments=[self.parent], employees=[self.in_other])
+		self.assertEqual(result["added"], [])
+		skipped = {row["employee"]: row for row in result["skipped"]}
+		self.assertEqual(set(skipped), {self.in_parent, self.in_sub, self.in_other})
+		for employee, row in skipped.items():
+			self.assertEqual(row["reason"], "can already book")
+			self.assertEqual(row["employee_name"], frappe.db.get_value("Employee", employee, "employee_name"))
+		self.assertEqual(self._member_users(project), {self.dm_user})
+
+	def test_on_a_project_that_is_not_open_people_are_added(self):
+		project = self._fresh_project("_Test U3M Completed Project", open_to=[], status="Completed")
+		result = self._add(project, departments=[self.parent])
+		self.assertEqual(sorted(self._added(result)), sorted([self.in_parent, self.in_sub]))
+
+	def test_a_department_in_a_company_that_is_not_open_is_added(self):
+		project = self._fresh_project("_Test U3M Not Open Company Project", open_to=[])
+		result = self._add(project, user="Administrator", departments=[self.foreign_dept])
+		self.assertEqual(self._added(result), [self.in_foreign])
+
+	# --- refusals --------------------------------------------------------------
+
+	def test_a_department_outside_scope_in_the_list_refuses_the_whole_call(self):
+		project = self._fresh_project("_Test U3M Foreign List Project")
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self._add(project, departments=[self.sub, self.foreign_dept])
+		self.assertIn("department isn't here", str(caught.exception))
+		self.assertEqual(self._member_users(project), {self.dm_user})
+
+	def test_a_non_string_department_is_refused(self):
+		project = self._fresh_project("_Test U3M Non String Project")
+		for departments in ([self.sub, 5], frappe.as_json([self.sub, {"name": self.other}])):
+			with self.assertRaises(frappe.ValidationError) as caught:
+				self._add(project, departments=departments)
+			self.assertIn("must be a list", str(caught.exception))
+		self.assertEqual(self._member_users(project), {self.dm_user})
+
+	def test_an_out_of_scope_id_in_a_covered_company_is_still_not_available(self):
+		project = self._fresh_project("_Test U3M Covered Foreign Project", open_to=[self.other_company])
+		result = self._add(project, employees=[self.in_foreign])
+		self.assertEqual(
+			result["skipped"],
+			[{"employee": self.in_foreign, "employee_name": None, "reason": "not available"}],
+		)
+		foreign_name = frappe.db.get_value("Employee", self.in_foreign, "employee_name")
+		self.assertNotIn(foreign_name, frappe.as_json(result))
 
 
 # --- plan 2026-10-05-001 U6: get_my_project_overview -------------------------

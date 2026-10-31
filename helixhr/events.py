@@ -2401,6 +2401,33 @@ def company_after_rename(doc, method=None, old=None, new=None, merge=False):
 		clear_role_scope_cache()
 
 
+def project_validate(doc, method=None):
+	"""Plan 2026-11-01-001 U1 (R2): a project is never made both billable and
+	"Open to everyone", on any save path -- the portal refuses first, this is
+	the Desk backstop. Only the transition is refused (a new doc counts as one
+	from off), so a legacy project that is already both still saves and
+	still books; turning either flag off is always allowed.
+
+	The extra open companies are written only by `set_project_open_to_all`,
+	which never saves the document, so any save that changes them (Desk's
+	read-only field is a UI hint; REST is not) is refused. A save turning
+	the flag off clears them, as the portal does, so turning it back on
+	never revives a grant nobody chose."""
+	before = doc.get_doc_before_save()
+	field = "helixhr_open_companies"
+	rows = [row.company for row in doc.get(field) or []]
+	if rows != [row.company for row in (before.get(field) or [] if before else [])]:
+		frappe.throw(_("Set the companies a project is open to from the HelixHR portal."))
+	if not cint(doc.get("helixhr_open_to_all")) and rows:
+		doc.set(field, [])
+	if not (cint(doc.get("helixhr_is_billable")) and cint(doc.get("helixhr_open_to_all"))):
+		return
+	if not cint(before and before.get("helixhr_open_to_all")):
+		frappe.throw(_("A billable project can't be opened to everyone."))
+	if not cint(before.get("helixhr_is_billable")):
+		frappe.throw(_("A project open to everyone can't be made billable. Turn Open to Everyone off first."))
+
+
 def hr_settings_validate(doc, method=None):
 	"""Refuse the save that would leave a site sending two emails for the
 	same event.
