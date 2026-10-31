@@ -274,7 +274,7 @@ count installs. It never reads an Employee, User or Company record. The
 payload is exactly:
 
 ```json
-{ "install_id": "<random, generated once per site>", "app_version": "0.0.1", "frappe_version": "16.33.0" }
+{ "install_id": "<random, generated once per site>", "app_version": "1.0.0", "frappe_version": "16.33.0" }
 ```
 
 It is a no-op on every site until **both** keys are set:
@@ -389,7 +389,10 @@ procedure and current result: [docs/runbook.md](docs/runbook.md).
 <details>
 <summary><b>Release checklist</b></summary>
 
-1. Merge to `main`; CI must be green.
+1. Merge to `main`; CI must be green. Bump `helixhr/__init__.py` and
+   `frontend/package.json` together (semver: patch = fixes only, minor =
+   features or new patches, major = a breaking change or a one-way
+   migration), then tag the merge `vX.Y.Z` and push the tag.
 2. On the server: `bench get-app`/`git pull` in `apps/helixhr`, then
    `cd apps/helixhr/frontend && yarn install --frozen-lockfile && yarn build`.
 3. **Before the first migrate that ships the attendance workflow**, count the
