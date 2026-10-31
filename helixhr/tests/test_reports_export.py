@@ -321,9 +321,11 @@ class TestRequestExport(IntegrationTestCase):
 			_as("Administrator", request_export, KEY, "docx")
 
 	def test_above_both_caps_says_narrow_the_filters(self):
+		# -1, not 0: Administrator's directory can be empty depending on which
+		# suites ran first, and zero rows sit inside a zero cap.
 		with (
-			patch.dict(reports.INLINE_EXPORT_CAP, {"csv": 0}),
-			patch.dict(reports.BACKGROUND_EXPORT_CAP, {"csv": 0}),
+			patch.dict(reports.INLINE_EXPORT_CAP, {"csv": -1}),
+			patch.dict(reports.BACKGROUND_EXPORT_CAP, {"csv": -1}),
 		):
 			with self.assertRaises(frappe.ValidationError) as caught:
 				_as("Administrator", request_export, KEY, "csv")
