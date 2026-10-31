@@ -227,6 +227,11 @@ doc_events = {
 	"File": {
 		"before_insert": "helixhr.events.file_before_insert",
 	},
+	# Plan 2026-11-01-001 U1 (R2): billable and "Open to everyone" never
+	# become true together, Desk included.
+	"Project": {
+		"validate": "helixhr.events.project_validate",
+	},
 	# P2-U7 step 6. A pending Timesheet is reachable by its approver through
 	# a DocShare, and `reports_to` is what decides who the approver is -- so
 	# a reassignment that does not move the share leaves the old manager

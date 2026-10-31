@@ -2401,6 +2401,21 @@ def company_after_rename(doc, method=None, old=None, new=None, merge=False):
 		clear_role_scope_cache()
 
 
+def project_validate(doc, method=None):
+	"""Plan 2026-11-01-001 U1 (R2): a project is never made both billable and
+	"Open to everyone", on any save path -- the portal refuses first, this is
+	the Desk backstop. Only the transition is refused (a new doc counts as one
+	from off), so a legacy project that is already both still saves and
+	still books; turning either flag off is always allowed."""
+	if not (cint(doc.get("helixhr_is_billable")) and cint(doc.get("helixhr_open_to_all"))):
+		return
+	before = doc.get_doc_before_save()
+	if not cint(before and before.get("helixhr_open_to_all")):
+		frappe.throw(_("A billable project can't be opened to everyone."))
+	if not cint(before.get("helixhr_is_billable")):
+		frappe.throw(_("A project open to everyone can't be made billable. Turn Open to Everyone off first."))
+
+
 def hr_settings_validate(doc, method=None):
 	"""Refuse the save that would leave a site sending two emails for the
 	same event.
