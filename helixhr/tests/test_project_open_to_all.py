@@ -282,14 +282,24 @@ class TestProjectOpenToAll(IntegrationTestCase):
 		# Plan 2026-11-01-001 U2: the reply also carries the company lists.
 		self.assertEqual(
 			set_project_open_to_all(project, 1),
-			{"open_to_all": True, "open_companies": [self.company], "fixed_open_companies": []},
+			{
+				"open_to_all": True,
+				"open_companies": [self.company],
+				"stored_open_companies": [],
+				"fixed_open_companies": [],
+			},
 		)
 		self.assertTrue(get_project(project)["open_to_all"])
 		rows = {row["name"]: row for row in search_projects()["projects"]}
 		self.assertTrue(rows[project]["open_to_all"])
 		self.assertEqual(
 			set_project_open_to_all(project, 0),
-			{"open_to_all": False, "open_companies": [], "fixed_open_companies": []},
+			{
+				"open_to_all": False,
+				"open_companies": [],
+				"stored_open_companies": [],
+				"fixed_open_companies": [],
+			},
 		)
 		self.assertFalse(get_project(project)["open_to_all"])
 
@@ -460,7 +470,13 @@ class TestProjectOpenToCompanies(IntegrationTestCase):
 	def test_opened_to_b_a_b_employee_sees_and_books_it(self):
 		result = self._set(AB_EDITOR, 1, [self.b])
 		self.assertEqual(
-			result, {"open_to_all": True, "open_companies": [self.a, self.b], "fixed_open_companies": []}
+			result,
+			{
+				"open_to_all": True,
+				"open_companies": [self.a, self.b],
+				"stored_open_companies": [self.b],
+				"fixed_open_companies": [],
+			},
 		)
 		bookable = self._bookable(B_WORKER)
 		self.assertIn(self.project, bookable)
@@ -486,7 +502,10 @@ class TestProjectOpenToCompanies(IntegrationTestCase):
 		self._set(AB_EDITOR, 1, [self.b])
 		frappe.db.set_value("Project", self.project, "status", "Completed")
 		self.assertNotIn(self.project, self._bookable(B_WORKER))
-		self.assertEqual(self._get(AB_EDITOR)["open_companies"], [])
+		read = self._get(AB_EDITOR)
+		self.assertEqual(read["open_companies"], [])
+		# The dialog still starts from what is saved.
+		self.assertEqual(read["stored_open_companies"], [self.b])
 
 	def test_the_projects_own_company_is_dropped_with_no_duplicate_row(self):
 		result = self._set(AB_EDITOR, 1, [self.a, self.b, self.b])

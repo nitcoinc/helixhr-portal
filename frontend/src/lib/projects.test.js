@@ -5,9 +5,12 @@ import {
   filtersFromQuery,
   filtersToQuery,
   isFiltered,
+  listWords,
   matchRows,
   membersLabel,
   parseTaskLines,
+  pickerOffer,
+  pickerSearchLimit,
   showCompanyFilter,
   sortProjects,
 } from './projects'
@@ -108,5 +111,73 @@ describe('matchRows', () => {
     const tasks = [{ subject: 'Write spec' }, { subject: 'Review' }]
     expect(matchRows(tasks, 'SPEC', 'subject')).toEqual([{ subject: 'Write spec' }])
     expect(matchRows(tasks, ' ', 'subject')).toHaveLength(2)
+  })
+})
+
+describe('pickerOffer', () => {
+  const departments = [
+    { name: 'Eng - A', department_name: 'Eng', company: 'A' },
+    { name: 'Ops - A', department_name: 'Ops', company: 'A' },
+    { name: 'Eng - B', department_name: 'Eng', company: 'B' },
+    { name: 'Eng - C', department_name: 'Eng', company: 'C' },
+  ]
+  const people = [{ name: 'E1' }, { name: 'E2' }, { name: 'E3' }]
+
+  it('leaves out and counts departments in an open company', () => {
+    const offer = pickerOffer({ departments, openCompanies: ['C', 'A'] })
+    expect(offer.departments.map((row) => row.name)).toEqual(['Eng - B'])
+    expect(offer.hiddenDepartments).toBe(3)
+    expect(offer.hiddenCompanies).toEqual(['A', 'C'])
+  })
+  it('leaves nothing out while the switch is off', () => {
+    const offer = pickerOffer({ departments, people, openCompanies: [], callerCompany: 'A' })
+    expect(offer.departments).toHaveLength(4)
+    expect(offer.hiddenDepartments).toBe(0)
+    expect(offer.hiddenCompanies).toEqual([])
+    expect(offer.people).toHaveLength(3)
+    expect(offer.peopleCovered).toBe(false)
+  })
+  it('leaves out and counts people already on the project', () => {
+    const offer = pickerOffer({ people, memberIds: ['E2'] })
+    expect(offer.people.map((row) => row.name)).toEqual(['E1', 'E3'])
+    expect(offer.hiddenMembers).toBe(1)
+    expect(offer.moreMatches).toBe(false)
+  })
+  it('flags more matches when a full page was all members', () => {
+    const offer = pickerOffer({ people, memberIds: ['E1', 'E2', 'E3'], limit: 3 })
+    expect(offer.people).toEqual([])
+    expect(offer.hiddenMembers).toBe(3)
+    expect(offer.moreMatches).toBe(true)
+  })
+  it('offers no people when the caller\'s own company can already book', () => {
+    const offer = pickerOffer({ people, openCompanies: ['A'], callerCompany: 'A' })
+    expect(offer.peopleCovered).toBe(true)
+    expect(offer.people).toEqual([])
+  })
+  it('returns empty output for empty input', () => {
+    expect(pickerOffer()).toEqual({
+      departments: [],
+      hiddenDepartments: 0,
+      hiddenCompanies: [],
+      people: [],
+      hiddenMembers: 0,
+      peopleCovered: false,
+      moreMatches: false,
+    })
+  })
+  it('asks for enough rows to fill a page after members are dropped, up to 200', () => {
+    expect(pickerSearchLimit(0)).toBe(20)
+    expect(pickerSearchLimit(15)).toBe(35)
+    expect(pickerSearchLimit(500)).toBe(200)
+    expect(pickerSearchLimit(undefined)).toBe(20)
+  })
+})
+
+describe('listWords', () => {
+  it('joins company names for a sentence', () => {
+    expect(listWords([])).toBe('')
+    expect(listWords(['A'])).toBe('A')
+    expect(listWords(['A', 'B'])).toBe('A and B')
+    expect(listWords(['A', 'B', 'C'])).toBe('A, B and C')
   })
 })

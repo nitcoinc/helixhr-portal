@@ -4,7 +4,12 @@
 // The parent owns `get_project`; this pane hands back the changed list as
 // `update:tasks`. A write that lands after the route moved to another
 // project is dropped, so it never lands on the wrong one.
-import { computed, ref, toRef, watch } from 'vue'
+//
+// Plan 2026-11-01-001 U5 (R7). "New task" sits in the header and reveals the
+// same multi-line form under it, so a long list never has to be scrolled
+// past to add one. Escape closes the form and keeps the draft; a successful
+// add clears and closes it; either way focus goes back to the button.
+import { computed, nextTick, ref, toRef, watch } from 'vue'
 import { createResource, Button } from 'frappe-ui'
 import SearchField from '@/components/SearchField.vue'
 import { TASK_PASTE_LIMIT, parseTaskLines } from '@/lib/projects'
@@ -22,6 +27,10 @@ const pane = useProjectPane(toRef(props, 'tasks'), 'subject')
 const { query, shown, more, showMore } = pane
 
 const newTasks = ref('')
+const formOpen = ref(false)
+const addError = ref('')
+const newTaskButton = ref(null)
+const taskInput = ref(null)
 const taskError = ref('')
 const taskNotice = ref('')
 const editingTask = ref(null)
@@ -36,9 +45,28 @@ const addTaskLabel = computed(() => {
   return count > 1 ? `Add ${count} tasks` : 'Add task'
 })
 
+async function openForm() {
+  formOpen.value = true
+  await nextTick()
+  taskInput.value?.focus()
+}
+
+/** Closes the form, keeping any draft, and hands focus back to "New task". */
+async function closeForm() {
+  formOpen.value = false
+  await nextTick()
+  // frappe-ui's Button exposes its <button> as `rootRef`.
+  newTaskButton.value?.rootRef?.focus()
+}
+
+function toggleForm() {
+  if (formOpen.value) closeForm()
+  else openForm()
+}
+
 /** One `add_tasks` call for every line (R4): all of them land, or none. */
 async function submitTasks() {
-  taskError.value = ''
+  addError.value = ''
   taskNotice.value = ''
   const { subjects, duplicates } = parsedTasks.value
   if (!subjects.length || tooManyTasks.value) return
@@ -60,9 +88,11 @@ async function submitTasks() {
     }
     if (duplicates) notes.push(`${duplicates} repeated ${duplicates === 1 ? 'line was' : 'lines were'} left out.`)
     taskNotice.value = notes.join(' ')
+    closeForm()
   } catch (error) {
     if (props.project !== project) return
-    taskError.value = error?.messages?.[0] || 'Could not add those tasks. Please try again.'
+    // The form stays open with the text, so it can be fixed and sent again.
+    addError.value = error?.messages?.[0] || 'Could not add those tasks. Please try again.'
   }
 }
 
@@ -117,6 +147,8 @@ watch(
   () => {
     pane.reset()
     newTasks.value = ''
+    formOpen.value = false
+    addError.value = ''
     taskError.value = ''
     taskNotice.value = ''
     editingTask.value = null
@@ -129,12 +161,101 @@ watch(
     class="surface-card elev-1 min-w-0 p-4"
     data-testid="project-tasks-pane"
   >
-    <h2
-      id="project-tasks-heading"
-      class="font-heading text-base font-semibold text-ink-gray-9"
+    <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+      <h2
+        id="project-tasks-heading"
+        class="mr-auto font-heading text-base font-semibold text-ink-gray-9"
+      >
+        Tasks <span class="tabular text-sm font-normal text-ink-gray-5">{{ tasks.length }}</span>
+      </h2>
+      <Button
+        v-if="canEdit"
+        ref="newTaskButton"
+        class="min-h-11 max-sm:w-full"
+        variant="outline"
+        aria-controls="project-new-task-form"
+        :aria-expanded="formOpen ? 'true' : 'false'"
+        data-testid="project-new-task"
+        @click="toggleForm"
+      >
+        New task
+      </Button>
+    </div>
+
+    <form
+      v-if="canEdit"
+      v-show="formOpen"
+      id="project-new-task-form"
+      class="mt-3 space-y-2"
+      @submit.prevent="submitTasks"
+      @keydown.esc.prevent="closeForm"
     >
-      Tasks <span class="tabular text-sm font-normal text-ink-gray-5">{{ tasks.length }}</span>
-    </h2>
+      <label
+        for="project-new-tasks"
+        class="block text-sm text-ink-gray-7"
+      >
+        Add tasks
+      </label>
+      <textarea
+        id="project-new-tasks"
+        ref="taskInput"
+        v-model="newTasks"
+        rows="3"
+        placeholder="New task"
+        aria-describedby="project-new-tasks-hint"
+        class="block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
+        @keydown.enter.exact.prevent="submitTasks"
+      />
+      <p
+        id="project-new-tasks-hint"
+        class="text-xs text-ink-gray-5"
+      >
+        One task per line; paste up to {{ TASK_PASTE_LIMIT }} at once. Shift+Enter starts a new line.
+      </p>
+      <p
+        v-if="tooManyTasks"
+        class="text-sm text-ink-red-4"
+        role="alert"
+      >
+        That is {{ parsedTasks.total }} lines. Add at most {{ TASK_PASTE_LIMIT }} at a time.
+      </p>
+      <p
+        v-if="addError"
+        class="surface-alert p-3 text-sm"
+        role="alert"
+      >
+        {{ addError }}
+      </p>
+      <div class="flex flex-wrap items-center gap-2">
+        <Button
+          type="submit"
+          variant="solid"
+          theme="blue"
+          class="min-h-11"
+          :loading="addTasks.loading"
+          :disabled="!parsedTasks.subjects.length || tooManyTasks"
+        >
+          {{ addTaskLabel }}
+        </Button>
+        <Button
+          type="button"
+          variant="subtle"
+          class="min-h-11"
+          @click="closeForm"
+        >
+          Cancel
+        </Button>
+      </div>
+    </form>
+
+    <p
+      v-if="taskNotice"
+      class="mt-3 text-sm text-ink-gray-7"
+      role="status"
+      data-testid="project-task-notice"
+    >
+      {{ taskNotice }}
+    </p>
 
     <div
       v-if="tasks.length"
@@ -216,12 +337,20 @@ watch(
         </template>
       </li>
     </ul>
-    <p
+    <div
       v-else
-      class="text-sm text-ink-gray-6"
+      class="flex flex-wrap items-center gap-x-2 text-sm text-ink-gray-6"
     >
-      {{ tasks.length ? `No tasks match “${query.trim()}”.` : 'No open tasks yet.' }}
-    </p>
+      <p>{{ tasks.length ? `No tasks match “${query.trim()}”.` : 'No open tasks yet.' }}</p>
+      <Button
+        v-if="canEdit && !tasks.length && !formOpen"
+        class="min-h-11"
+        variant="ghost"
+        @click="openForm"
+      >
+        Add a task
+      </Button>
+    </div>
 
     <div
       v-if="more > 0"
@@ -242,56 +371,5 @@ watch(
     >
       {{ taskError }}
     </p>
-    <p
-      v-if="taskNotice"
-      class="mt-3 text-sm text-ink-gray-7"
-      role="status"
-      data-testid="project-task-notice"
-    >
-      {{ taskNotice }}
-    </p>
-
-    <form
-      v-if="canEdit"
-      class="mt-4 space-y-2"
-      @submit.prevent="submitTasks"
-    >
-      <label
-        for="project-new-tasks"
-        class="block text-sm text-ink-gray-7"
-      >
-        Add tasks
-      </label>
-      <textarea
-        id="project-new-tasks"
-        v-model="newTasks"
-        rows="3"
-        placeholder="New task"
-        aria-describedby="project-new-tasks-hint"
-        class="block w-full rounded-md border border-outline-gray-2 bg-surface-white px-2.5 py-1.5 text-sm text-ink-gray-8"
-        @keydown.enter.exact.prevent="submitTasks"
-      />
-      <p
-        id="project-new-tasks-hint"
-        class="text-xs text-ink-gray-5"
-      >
-        One task per line; paste up to {{ TASK_PASTE_LIMIT }} at once. Shift+Enter starts a new line.
-      </p>
-      <p
-        v-if="tooManyTasks"
-        class="text-sm text-ink-red-4"
-        role="alert"
-      >
-        That is {{ parsedTasks.total }} lines. Add at most {{ TASK_PASTE_LIMIT }} at a time.
-      </p>
-      <Button
-        type="submit"
-        variant="outline"
-        :loading="addTasks.loading"
-        :disabled="!parsedTasks.subjects.length || tooManyTasks"
-      >
-        {{ addTaskLabel }}
-      </Button>
-    </form>
   </section>
 </template>

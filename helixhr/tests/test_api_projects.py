@@ -360,6 +360,7 @@ class TestSearchAndGetProject(IntegrationTestCase):
 			"company",
 			"open_companies",
 			"open_company_choices",
+			"stored_open_companies",
 			"fixed_open_companies",
 		}
 		self.assertEqual(set(result.keys()), expected_keys)
@@ -1359,7 +1360,13 @@ class TestAddProjectMembers(IntegrationTestCase):
 		departments = {row["name"]: row for row in get_project(project)["departments"]}
 		self.assertEqual(
 			departments[self.sub_dept],
-			{"name": self.sub_dept, "department_name": "_Test U5 Sub Dept", "company": self.company},
+			{
+				"name": self.sub_dept,
+				"department_name": "_Test U5 Sub Dept",
+				"company": self.company,
+				# Plan 2026-11-01-001 U4: the checklist labels a row with its parent.
+				"parent_department": self.dept,
+			},
 		)
 		self.assertIn(self.dept, departments)
 		self.assertNotIn(self.foreign_dept, departments)

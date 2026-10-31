@@ -14923,8 +14923,10 @@ def get_project(project):
 	Plan 2026-11-01-001 U2: ``company``, and for a caller who may edit,
 	``open_companies`` (`_covered_companies`: who can already book without
 	being a member), ``open_company_choices`` (the other companies the
-	caller may open it to) and ``fixed_open_companies`` (stored extra
-	companies outside the caller's write scope, which their edits keep).
+	caller may open it to), ``stored_open_companies`` (every stored extra
+	company, whatever the project's status, so the dialog starts from what
+	is saved) and ``fixed_open_companies`` (those outside the caller's write
+	scope, which their edits keep).
 	"""
 	rate_limit_per_user("get_project")
 	scope = resolve_project_read_scope(frappe.session.user)
@@ -14955,6 +14957,7 @@ def get_project(project):
 		"departments": _project_departments(write) if can_edit else [],
 		"open_companies": _covered_companies(data, stored) if can_edit else [],
 		"open_company_choices": _open_company_choices(write, data.company) if can_edit else [],
+		"stored_open_companies": stored,
 		"fixed_open_companies": [company for company in stored if not scope_covers(write, company)],
 	}
 
@@ -15002,7 +15005,7 @@ def _project_departments(scope):
 	return frappe.get_all(
 		"Department",
 		filters={"company": ["in", companies] if companies is not None else ["is", "set"]},
-		fields=["name", "department_name", "company"],
+		fields=["name", "department_name", "company", "parent_department"],
 		order_by="department_name asc",
 		ignore_permissions=True,
 	)
@@ -15389,8 +15392,9 @@ def set_project_open_to_all(project, value, companies=None):
 	`project_validate` doc event and ERPNext's own validate both run;
 	``users`` is untouched, so no DocShare is added.
 
-	Returns ``open_to_all``, ``open_companies`` (`_covered_companies`) and
-	``fixed_open_companies`` (rows outside the caller's scope)."""
+	Returns ``open_to_all``, ``open_companies`` (`_covered_companies`),
+	``stored_open_companies`` (the saved rows) and ``fixed_open_companies``
+	(rows outside the caller's scope)."""
 	rate_limit_per_user("set_project_open_to_all")
 	scope = _project_write_gate(project)
 	open_to_all = cint(value) == 1
@@ -15420,6 +15424,7 @@ def set_project_open_to_all(project, value, companies=None):
 	return {
 		"open_to_all": open_to_all,
 		"open_companies": _covered_companies(doc, rows),
+		"stored_open_companies": rows,
 		"fixed_open_companies": [company for company in rows if not scope_covers(scope, company)],
 	}
 
