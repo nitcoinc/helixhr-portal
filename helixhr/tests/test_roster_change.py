@@ -18,6 +18,7 @@ from frappe.tests import IntegrationTestCase
 from helixhr import api, reminders
 from helixhr.api import (
 	act_on_approval,
+	add_roster_ops_bulk,
 	get_approval_detail,
 	get_my_approvals,
 	get_pending_by_approver,
@@ -1096,3 +1097,117 @@ class TestDraftToken(RosterChangeTestCase):
 		emptied = save_roster_draft([])["draft"]
 		self.assertEqual((emptied["name"], emptied["rows"]), (saved["name"], []))
 		self.assertEqual(frappe.db.count(DOCTYPE, {"employee": self.manager, "status": "Draft"}), 1)
+
+
+# --- Plan 2026-11-03-001 U3: one operation for the whole team or a pick ------
+
+BULK_MANAGER_USER = "roster-bulk-manager@helixhr.test"
+
+
+class TestBulk(RosterChangeTestCase):
+	"""A manager of their own whose team is exactly what each test makes:
+	setUp detaches every earlier report (tests own their rows)."""
+
+	def setUp(self):
+		super().setUp()
+		self.bulk_manager = make_test_user(BULK_MANAGER_USER, TEST_COMPANY)
+		clear_requests(self.bulk_manager)
+		frappe.db.set_value(
+			"Employee", {"reports_to": self.bulk_manager}, "reports_to", None, update_modified=False
+		)
+
+	def team(self, *keys):
+		names = []
+		for key in keys:
+			name = roster_employee(f"bulk-{key}", reports_to=self.bulk_manager, relieving_date=None)
+			frappe.db.delete("Shift Assignment", {"employee": name})
+			names.append(name)
+		return names
+
+	def bulk(self, op, **kwargs):
+		frappe.set_user(BULK_MANAGER_USER)
+		try:
+			return add_roster_ops_bulk(op, **kwargs)
+		finally:
+			frappe.set_user("Administrator")
+
+	def template(self, from_date=TOMORROW, to_date="2031-03-12", **fields):
+		return {"action": "Assign", "shift_type": PORTAL_SHIFT_TYPE, "from_date": from_date, "to_date": to_date, **fields}
+
+	def test_the_whole_team_gets_the_op_and_an_overlap_is_skipped_by_name(self):
+		people = self.team("a", "b", "c", "d", "e")
+		seed_assignment(people[2], "2031-01-01")
+		result = self.bulk(self.template(), whole_team=1)
+
+		self.assertEqual(result["added"], 4)
+		self.assertEqual(
+			sorted(row["employee"] for row in result["draft"]["rows"]), sorted(people[:2] + people[3:])
+		)
+		(skip,) = result["skipped"]
+		self.assertEqual((skip["employee"], skip["name"]), (people[2], frappe.db.get_value("Employee", people[2], "employee_name")))
+		self.assertIn("already has a shift", skip["reason"])
+
+	def test_someone_waiting_in_another_pending_request_is_skipped(self):
+		waiting, free = self.team("wait", "free")
+		frappe.set_user(BULK_MANAGER_USER)
+		save_roster_draft([assign(waiting, "2031-04-01")])
+		submit_roster_change("Earlier")
+		frappe.set_user("Administrator")
+
+		result = self.bulk(self.template(), whole_team=1)
+		self.assertEqual([row["employee"] for row in result["draft"]["rows"]], [free])
+		self.assertEqual([item["employee"] for item in result["skipped"]], [waiting])
+		self.assertIn("waiting for HR", result["skipped"][0]["reason"])
+
+	def test_ids_outside_the_team_are_not_available_and_get_no_name(self):
+		(mine,) = self.team("own")
+		(inactive,) = self.team("gone")
+		frappe.db.set_value("Employee", inactive, "status", "Inactive")
+		stranger = roster_employee("bulk-stranger", reports_to=None)
+
+		result = self.bulk(self.template(), employees=[mine, stranger, inactive, self.bulk_manager])
+		self.assertEqual([row["employee"] for row in result["draft"]["rows"]], [mine])
+		self.assertEqual(
+			[(item["employee"], item["name"], item["reason"]) for item in result["skipped"]],
+			[(other, None, "Not available.") for other in (stranger, inactive, self.bulk_manager)],
+		)
+
+	def test_skip_with_unknown_off_days_skips_only_that_person(self):
+		known, unknown = self.team("known", "unknown")
+		ensure_skip_list(known)
+		real = api._holiday_list_spans
+		with patch.object(
+			api, "_holiday_list_spans", side_effect=lambda e, *a: [] if e == unknown else real(e, *a)
+		):
+			result = self.bulk(self.template("2031-03-10", "2031-03-28", skip_off_days=1), whole_team=1)
+		(row,) = result["draft"]["rows"]
+		self.assertEqual((row["employee"], len(row["blocks"])), (known, 3))
+		self.assertEqual([item["employee"] for item in result["skipped"]], [unknown])
+		self.assertIn("can't be worked out", result["skipped"][0]["reason"])
+
+	def test_a_batch_over_the_cap_is_refused_whole(self):
+		people = self.team("cap-1", "cap-2", "cap-3", "cap-4", "cap-5")
+		frappe.set_user(BULK_MANAGER_USER)
+		save_roster_draft([assign(people[0], day, day) for day in ("2031-04-01", "2031-04-02", "2031-04-03")])
+		frappe.set_user("Administrator")
+		with patch.object(api, "_ROSTER_DRAFT_MAX_ROWS", 5), self.assertRaises(frappe.ValidationError) as caught:
+			self.bulk(self.template(), employees=people[1:])
+		self.assertIn("Room for 2 more; 4 selected", str(caught.exception))
+		frappe.set_user(BULK_MANAGER_USER)
+		self.assertEqual(len(get_roster_draft()["draft"]["rows"]), 3)
+		frappe.set_user("Administrator")
+
+	def test_a_stale_token_is_refused(self):
+		self.team("token")
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self.bulk(self.template(), whole_team=1, expected_modified="2000-01-01 00:00:00")
+		self.assertIn("another tab", str(caught.exception))
+		self.assertFalse(frappe.db.exists(DOCTYPE, {"employee": self.bulk_manager, "status": "Draft"}))
+
+	def test_today_on_the_company_clock_skips_everyone_with_the_date_sentence(self):
+		people = self.team("today-1", "today-2")
+		result = self.bulk(self.template("2031-03-05", "2031-03-12"), whole_team=1)
+		self.assertEqual(result["added"], 0)
+		self.assertIsNone(result["draft"])
+		self.assertEqual(sorted(item["employee"] for item in result["skipped"]), sorted(people))
+		self.assertTrue(all("tomorrow at the earliest" in item["reason"] for item in result["skipped"]))

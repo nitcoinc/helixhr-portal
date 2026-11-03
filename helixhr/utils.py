@@ -2756,6 +2756,8 @@ RATE_LIMIT_POLICY = {
 	"submit_roster_change": (10, 3600),
 	"withdraw_roster_change": (10, 3600),
 	"reopen_roster_change": (10, 3600),
+	# Plan 2026-11-03-001 U3: one op for a whole team, a few times a session.
+	"add_roster_ops_bulk": (20, 60),
 	# Plan 2026-10-02-001 U13: shows a full bank detail and writes an audit
 	# comment each time, so it is bounded tightly.
 	"reveal_correction_value": (20, 3600),

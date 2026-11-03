@@ -432,6 +432,8 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"submit_roster_change": (10, 3600),
 			"withdraw_roster_change": (10, 3600),
 			"reopen_roster_change": (10, 3600),
+			# Plan 2026-11-03-001 U3.
+			"add_roster_ops_bulk": (20, 60),
 			# Plan 2026-10-04-004 U4: the Email Templates page's celebrations
 			# group -- the setup read fans out per (event, company), the
 			# preview renders per keystroke pause, a test send is real mail

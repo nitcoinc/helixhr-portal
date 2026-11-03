@@ -16736,7 +16736,11 @@ def _roster_step_count(steps):
 def _refuse_roster_problems(review):
 	if review.problems:
 		frappe.throw(review.problems[0]["message"])
-	if _roster_step_count(review.steps) > _ROSTER_MAX_STEPS:
+	_refuse_roster_steps(review.steps)
+
+
+def _refuse_roster_steps(steps):
+	if _roster_step_count(steps) > _ROSTER_MAX_STEPS:
 		frappe.throw(
 			_(
 				"This would make more than {0} changes to HR's shift records. Split it into smaller requests."
@@ -16896,6 +16900,113 @@ def save_roster_draft(rows, note=None, expected_modified=None):
 		doc.status = ROSTER_DRAFT
 	_save_draft_rows(doc, me, ops, note)
 	return {"draft": _roster_draft_payload(me, doc)}
+
+
+@frappe.whitelist(methods=["POST"])
+def add_roster_ops_bulk(op, employees=None, whole_team=0, expected_modified=None):
+	"""Append one operation for each of several Active direct reports to the
+	caller's Draft (plan 2026-11-03-001 U3 / R8, KTD7). `whole_team` is
+	resolved here -- the roster pages at 50, so the browser's rows are not
+	the team -- otherwise `employees` lists the ids. A person whose
+	operation would fail, who is already waiting in another Pending request,
+	or who is not the caller's report is skipped and named with the reason
+	(`add_project_members`' pattern); the rest are added. Refused whole when
+	what is left does not fit the draft cap. `expected_modified` as for
+	`save_roster_draft`."""
+	rate_limit_per_user("add_roster_ops_bulk")
+	me = _my_employee()
+	raw = _parse_json_arg(op)
+	if not isinstance(raw, dict):
+		frappe.throw(_("Invalid shift changes."))
+	ids = None
+	if not cint(whole_team):
+		ids = _parse_json_arg(employees)
+		if (
+			not isinstance(ids, list)
+			or not ids
+			or len(ids) > _ROSTER_DRAFT_MAX_ROWS
+			or not all(isinstance(item, str) for item in ids)
+		):
+			frappe.throw(_("Choose who to apply this to."))
+		ids = list(dict.fromkeys(item.strip() for item in ids if item.strip()))
+	template = _roster_draft_ops([{**raw, "employee": ""}])[0]
+
+	_lock_employee(me)
+	doc = _my_roster_draft(me, for_update=True)
+	_check_roster_draft_token(doc, expected_modified)
+	team = {
+		row.name: row.employee_name
+		for row in frappe.get_all(
+			"Employee",
+			filters=_direct_report_filters(me),
+			fields=["name", "employee_name"],
+			order_by="employee_name asc, name asc",
+			ignore_permissions=True,
+		)
+		if row.name != me
+	}
+	if ids is None and not team:
+		frappe.throw(_(_ROSTER_NO_TEAM), frappe.PermissionError)
+	skipped = []
+	if ids is None:
+		targets = list(team)
+	else:
+		targets = [employee for employee in ids if employee in team]
+		# No name back for an id that is not the caller's report.
+		skipped += [
+			{"employee": employee, "name": None, "reason": _("Not available.")}
+			for employee in ids
+			if employee not in team
+		]
+	taken = pending_requests(targets)
+	for employee in targets:
+		if employee in taken:
+			skipped.append(
+				{
+					"employee": employee,
+					"name": team[employee],
+					"reason": _("{0}: already waiting for HR in another request.").format(team[employee]),
+				}
+			)
+	candidates = [{**template, "employee": employee} for employee in targets if employee not in taken]
+
+	existing = _request_ops(doc) if doc else []
+	review = _review_roster_ops(me, existing + candidates)
+	# Rows already in the draft must still pass, as at any save.
+	stale = [problem for problem in review.problems if problem["index"] < len(existing)]
+	if stale:
+		frappe.throw(stale[0]["message"])
+	refused = {
+		problem["index"] - len(existing): problem
+		for problem in review.problems
+		if problem["index"] >= len(existing)
+	}
+	for position, candidate in enumerate(candidates):
+		if position in refused:
+			employee = candidate["employee"]
+			skipped.append(
+				{"employee": employee, "name": team[employee], "reason": refused[position]["message"]}
+			)
+	accepted = [candidate for position, candidate in enumerate(candidates) if position not in refused]
+	room = _ROSTER_DRAFT_MAX_ROWS - len(existing)
+	if len(accepted) > room:
+		frappe.throw(_("Room for {0} more; {1} selected.").format(max(room, 0), len(accepted)))
+	kept_steps = review.steps[: len(existing)] + [
+		review.steps[len(existing) + position]
+		for position in range(len(candidates))
+		if position not in refused
+	]
+	_refuse_roster_steps(kept_steps)
+	if accepted:
+		if not doc:
+			doc = frappe.new_doc(_ROSTER_CHANGE)
+			doc.status = ROSTER_DRAFT
+		_save_draft_rows(doc, me, existing + accepted)
+	return {
+		"draft": _roster_draft_payload(me, doc) if doc else None,
+		"added": len(accepted),
+		"skipped": skipped,
+	}
 
 
 @frappe.whitelist(methods=["POST"])
