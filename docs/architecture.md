@@ -112,6 +112,18 @@ There is no app-level auth code. Three Frappe mechanisms carry it:
      `_handler_comment_refusal` (routed role, Active Employee in the
      employee's company for non-HR handlers, open state) for handlers; the
      session-resolved ownership check for the employee.
+   - `submit_my_profile_changes` (plan 2026-11-03-001 KTD12) saves the
+     caller's own Employee with `ignore_permissions` for a first-time fill
+     of a Bank & IDs group that is blank on file. The gate runs first, under
+     the Employee row lock: fields narrowed to `PROFILE_SELF_SERVICE_FIELDS`
+     (no permlevel lowered, `PROFILE_EDITABLE_FIELDS` not widened), the
+     client's seen state re-checked, Select/Link/date values validated, core
+     fields present, Active employee, no personal-email change in 72h, a
+     non-login notice address, and a password re-check. Errors from the save
+     are replaced with one sentence (`events.save_employee_values`). It also
+     writes the "self-filled, unverified" Info Comment and HR's Notification
+     Log alerts. The same call inserts the row HR Request with
+     `ignore_permissions`, as `create_my_request` does.
 
 7. **People administration writes (documented `ignore_permissions`
    exceptions, plan 2026-10-22-001).** Each runs after `resolve_admin_scope`

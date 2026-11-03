@@ -64,15 +64,23 @@ from helixhr.events import (
 	TIMESHEET_PENDING_HR,
 	TIMESHEET_SENT_BACK,
 	_approver_user,
+	_correction_recipients,
+	_enabled_users_with_role,
 	_is_hr,
+	_personal_email_changed_recently,
+	_profile_value_text,
 	approver_drift,
 	approver_problem,
 	backdated_grace_days,
 	backdated_leave_earliest,
 	backdated_leave_reason,
 	escape_request_comment,
+	has_profile_correction,
 	leave_overdraw,
+	previous_personal_email,
+	profile_change_notice_context,
 	rederive_approvers,
+	save_employee_values,
 	strip_request_comment_marker,
 )
 from helixhr.helixhr.doctype.helixhr_leaving.helixhr_leaving import OPEN_STATUSES as OPEN_LEAVING_STATUSES
@@ -116,6 +124,7 @@ from helixhr.utils import (
 	ALL_ORGS_ONLY_ROLES,
 	ALL_ORGS_SCOPE_KEY,
 	ASSIGNABLE_ROLES,
+	CORRECTION_EMAIL_HOLD_HOURS,
 	EMAIL_THEME,
 	EXPORT_ROLES,
 	HOLIDAY_LIST_EDITABLE_FIELDS,
@@ -126,17 +135,23 @@ from helixhr.utils import (
 	NOTIFICATION_EVENTS,
 	ORG_VIEWER_ROLE,
 	PERSON_EDITABLE_FIELDS,
+	PROFILE_CHANGE_GROUP_LABELS,
+	PROFILE_CHANGE_GROUPS,
+	PROFILE_CHANGE_VALUE_MAX,
 	PROFILE_CORRECTABLE_FIELDS,
 	PROFILE_CORRECTION_CATEGORY,
 	PROFILE_EDITABLE_FIELDS,
+	PROFILE_FILL_CORE_FIELDS,
 	PROFILE_LABELS,
 	PROFILE_MASKED_FIELDS,
 	PROFILE_SECTION_FIELDS,
 	PROFILE_SECTION_TABLES,
+	PROFILE_SELF_SERVICE_FIELDS,
 	PROFILE_USER_LINK_FIELDS,
 	REPORT_MANAGER_ROLE,
 	ROLE_LABELS,
 	SELF_EDIT_REFUSAL,
+	SELF_FILLED_MARK,
 	SHIFT_TYPE_EDITABLE_FIELDS,
 	THEME_PLACEHOLDERS,
 	UPLOAD_MAX_BYTES,
@@ -174,6 +189,8 @@ from helixhr.utils import (
 	portal_home_page,
 	portal_role_scope,
 	prepare_profile_photo,
+	profile_display_value,
+	profile_field_label,
 	project_in_scope,
 	project_scope_filters,
 	rate_limit_per_user,
@@ -2984,6 +3001,7 @@ def _hr_request_summaries(
 	)
 	if not rows:
 		return []
+	_fill_profile_change_summary(rows)
 
 	employees = {
 		row.name: row
@@ -3058,6 +3076,7 @@ def _hr_request_summaries(
 				hr_note=row.hr_note,
 				correction_field=row.correction_field,
 				correction_proposed_masked=row.correction_proposed_masked,
+				profile_change_count=row.profile_change_count,
 				waiting_on=waiting_on,
 				waiting_since=waiting_since,
 				waiting_days=_age_in_days(waiting_since, today) if waiting_since else None,
@@ -8816,7 +8835,7 @@ _BANK_NUMBER_HANDLER_REFUSAL = (
 def _refuse_bank_number(doc, text, refusal):
 	"""KTD7: refuse ``text`` on a correction request when it holds an
 	account-number-shaped value. Every other request passes untouched."""
-	if doc.get("correction_field") and has_bank_number(text):
+	if has_profile_correction(doc) and has_bank_number(text):
 		frappe.throw(_(refusal))
 
 
@@ -8850,7 +8869,7 @@ def _notify_request_comment(doc, recipients, author_name, message, bell_subject,
 	recipients = [user for user in dict.fromkeys(recipients) if user and user != frappe.session.user]
 	if not recipients:
 		return
-	excerpt = "" if doc.get("correction_field") else message[:300]
+	excerpt = "" if has_profile_correction(doc) else message[:300]
 	send_notification(
 		event_key,
 		recipients,
@@ -8884,7 +8903,29 @@ def _notify_request_comment(doc, recipients, author_name, message, bell_subject,
 def _correction_summary(doc):
 	"""What a correction proposes, masked only (plan 2026-10-02-001 U14, R28).
 	None for an ordinary request. The full value is `reveal_correction_value`'s
-	alone, so neither Password field is read here."""
+	alone, so neither Password field is read here.
+
+	Plan 2026-11-03-001 U7: a row correction lists every row under `rows`;
+	the top-level keys describe the first row, so a screen that knows only
+	one field keeps rendering."""
+	rows = doc.get("profile_changes") or []
+	if rows:
+		listed = [
+			{
+				"row": row.name,
+				"field": row.field,
+				"label": row.label or row.field,
+				"current_masked": row.current_masked,
+				"proposed_masked": row.proposed_masked,
+				"masked": row.field in PROFILE_MASKED_FIELDS,
+			}
+			for row in rows
+		]
+		return {
+			**{key: listed[0][key] for key in ("field", "current_masked", "proposed_masked")},
+			"label": ", ".join(row["label"] for row in listed),
+			"rows": listed,
+		}
 	if not doc.get("correction_field"):
 		return None
 	return {
@@ -8893,6 +8934,28 @@ def _correction_summary(doc):
 		"current_masked": doc.correction_current_masked,
 		"proposed_masked": doc.correction_proposed_masked,
 	}
+
+
+def _fill_profile_change_summary(rows):
+	"""Give each row correction in a list the legacy pair the list shows
+	(`correction_field`, `correction_proposed_masked`) from its first row,
+	plus `profile_change_count`, in one query. Masked copies only."""
+	names = [row.name for row in rows if not row.get("correction_field")]
+	firsts = {}
+	if names:
+		for change in frappe.get_all(
+			"HelixHR Profile Change Row",
+			filters={"parenttype": "HR Request", "parent": ["in", names]},
+			fields=["parent", "field", "proposed_masked"],
+			order_by="idx asc",
+		):
+			firsts.setdefault(change.parent, [change, 0])[1] += 1
+	for row in rows:
+		first, count = firsts.get(row.name, (None, 1 if row.get("correction_field") else 0))
+		if first:
+			row["correction_field"] = first.field
+			row["correction_proposed_masked"] = first.proposed_masked
+		row["profile_change_count"] = count
 
 
 def _hr_request_queue(employee, today, count_only=False):
@@ -9601,6 +9664,7 @@ def _request_detail(name, employee):
 	)
 	if not row:
 		frappe.throw(_("That request no longer exists."), frappe.DoesNotExistError)
+	_fill_profile_change_summary([row])
 	if row.employee != employee:
 		# Not "not found": the caller is authenticated and this is a refusal,
 		# which the portal renders as its own state with no Retry (P2-R2).
@@ -9912,8 +9976,364 @@ def create_my_request(
 	return {**_request_detail(doc.name, employee), "created": True}
 
 
+_PROFILE_SUBMIT_SUBJECT = "Update my bank and ID details"
+
+
 @frappe.whitelist(methods=["POST"])
-def reveal_correction_value(name):
+def submit_my_profile_changes(changes, seen=None, operation_key=None, password=None):
+	"""Every staged Bank & IDs change in one call (plan 2026-11-03-001 U6).
+
+	`changes` is `[{field, value, confirm}]` (`confirm` is the second entry,
+	required for masked identifiers). `seen` is `{group: "blank" | "filled"}`,
+	the state the page showed for each touched group (KTD11). `password` is
+	the step-up for a first-time fill (review B5). The proof is the multipart
+	`file`, needed only when a row goes to HR.
+
+	Per group, under the Employee row lock: a group with nothing on file
+	fills now, elevated and allow-listed (KTD12); any other goes whole into
+	one Profile correction request with one row per field (KTD9). Fills and
+	filing commit together. A refusal writes nothing and returns
+	`{"status": "refused", "errors": [{field, group, message}]}`; success
+	returns `{"status", "applied", "request", "created"}`. No full masked
+	identifier is ever returned.
+	"""
+	rate_limit_per_user("submit_my_profile_changes")
+	employee = get_current_employee()
+	key = (operation_key or "").strip()
+	if not _OPERATION_KEY_PATTERN.match(key):
+		frappe.throw(_("That change couldn't be started. Try sending it again."))
+
+	errors = []
+
+	def refuse(message, field=None, group=None):
+		errors.append({"field": field, "group": group, "message": message})
+
+	staged = _parse_profile_changes(changes, refuse)
+	if errors:
+		return {"status": "refused", "errors": errors}
+
+	meta = frappe.get_meta("Employee")
+	group_fields = {
+		group: [field for field in fields if meta.has_field(field)]
+		for group, fields in PROFILE_CHANGE_GROUPS.items()
+	}
+	on_site = [field for fields in group_fields.values() for field in fields]
+	live = frappe.db.get_value(
+		"Employee", employee, ["status", *on_site], as_dict=True, for_update=True
+	)
+	live_text = {field: _profile_value_text(live.get(field)) for field in on_site}
+
+	existing = _request_for_key(key, employee)
+	if existing:
+		# A retry whose first response was lost: nothing is filled or filed
+		# twice, and the answer is rebuilt from the record.
+		filed = set(
+			frappe.get_all(
+				"HelixHR Profile Change Row", filters={"parent": existing, "parenttype": "HR Request"}, pluck="field"
+			)
+		)
+		applied = [f for f in staged if f not in filed and live_text.get(f) == staged[f]]
+		return _profile_submit_result(applied, staged, existing, created=False)
+
+	seen = frappe.parse_json(seen) if isinstance(seen, str) and seen else (seen or {})
+	if not isinstance(seen, dict):
+		seen = {}
+	touched = [group for group, fields in group_fields.items() if any(f in staged for f in fields)]
+	fill_groups, hr_groups, already = [], [], []
+	for group in touched:
+		label = _(PROFILE_CHANGE_GROUP_LABELS[group])
+		state = "filled" if any(live_text[f] for f in group_fields[group]) else "blank"
+		if seen.get(group) != state:
+			mine = all(live_text[f] == staged[f] for f in group_fields[group] if f in staged)
+			if seen.get(group) == "blank" and mine:
+				already.append(group)  # Review B4: a fill retried after it landed.
+			else:
+				refuse(
+					_("{0} was updated since you opened this. Reload the page to see it.").format(label),
+					group=group,
+				)
+			continue
+		(fill_groups if state == "blank" else hr_groups).append(group)
+
+	busy = _fields_in_open_corrections(employee)
+	for field in staged:
+		if field in busy:
+			refuse(
+				_("{0} is already in a request HR hasn't closed. You can change it once that closes.").format(
+					profile_field_label(field)
+				),
+				field=field,
+			)
+	for group in hr_groups:
+		for field in group_fields[group]:
+			if field in staged and staged[field] == live_text[field]:
+				refuse(_("That is already the value on your record."), field=field)
+	for group in fill_groups:
+		missing = [
+			field
+			for field in PROFILE_FILL_CORE_FIELDS.get(group, ())
+			if field in group_fields[group] and field not in staged
+		]
+		if missing:
+			refuse(
+				_("To fill in {0} for the first time, also give {1}.").format(
+					_(PROFILE_CHANGE_GROUP_LABELS[group]).lower(),
+					", ".join(profile_field_label(field) for field in missing),
+				),
+				group=group,
+			)
+	issued = staged.get("date_of_issue", live_text.get("date_of_issue"))
+	valid = staged.get("valid_upto", live_text.get("valid_upto"))
+	if issued and valid and ("date_of_issue" in staged or "valid_upto" in staged) and valid <= issued:
+		refuse(_("The passport's valid-until date has to be after its date of issue."), field="valid_upto")
+
+	recipients = _correction_recipients(employee)
+	if fill_groups:
+		if live.status != "Active":
+			refuse(_("Your record isn't active, so details can't be filled in here. Contact HR."))
+		if _personal_email_changed_recently(employee):
+			refuse(
+				_("Your personal email changed in the last {0} hours, so new bank and ID details are on hold until that passes.").format(
+					CORRECTION_EMAIL_HOLD_HOURS
+				)
+			)
+		prior = previous_personal_email(employee)
+		addresses = frappe.db.get_value("Employee", employee, ["company_email", "personal_email"], as_dict=True)
+		recipients = list(dict.fromkeys(a for a in (*recipients, prior) if a))
+		if not (addresses.company_email or addresses.personal_email or prior):
+			# The login alone is not an out-of-band address (review B3).
+			refuse(_("Add a personal email first, so you get a security notice when details change."))
+		_check_step_up(password, refuse)
+
+	proof = None
+	if hr_groups:
+		if PROFILE_CORRECTION_CATEGORY not in _request_categories():
+			refuse(_("Changes to existing bank and ID details aren't being taken right now. Contact HR."))
+		upload = (getattr(frappe.request, "files", None) or {}).get("file")
+		if upload is None:
+			refuse(_("Attach proof of the new details, such as a bank letter or cancelled cheque."), field="file")
+		else:
+			proof = (os.path.basename(upload.filename or "").strip(), upload.stream.read())
+			try:
+				validate_portal_upload(*proof)
+			except frappe.ValidationError as error:
+				frappe.clear_last_message()
+				refuse(str(error), field="file")
+
+	if errors:
+		return {"status": "refused", "errors": errors}
+
+	fills = {f: staged[f] for group in fill_groups for f in group_fields[group] if f in staged}
+	rows = [{"field": f, "proposed": staged[f]} for group in hr_groups for f in group_fields[group] if f in staged]
+	request = None
+	savepoint = "helixhr_profile_submit"
+	frappe.db.savepoint(savepoint)
+	try:
+		if fills:
+			save_employee_values(
+				employee,
+				fills,
+				f"Profile fill by {frappe.session.user}",
+				_("Those details couldn't be saved on your record. Check them and try again."),
+				elevated=True,
+			)
+			_mark_self_filled(employee, fills, fill_groups)
+		if rows:
+			doc = frappe.get_doc(
+				{
+					"doctype": "HR Request",
+					"employee": employee,
+					"category": PROFILE_CORRECTION_CATEGORY,
+					"subject": _(_PROFILE_SUBMIT_SUBJECT),
+					"client_operation_key": key,
+					"profile_changes": rows,
+				}
+			)
+			doc.flags.helixhr_profile_changes = True
+			doc.flags.correction_proof = proof
+			doc.insert(ignore_permissions=True)
+			request = doc.name
+	except Exception:
+		frappe.db.rollback(save_point=savepoint)
+		raise
+
+	# A retried fill (`already`) is reported applied but not announced twice.
+	_send_profile_submit_notice(employee, staged, list(fills), [row["field"] for row in rows], request, recipients)
+	applied = [*fills, *(f for group in already for f in group_fields[group] if f in staged)]
+	return _profile_submit_result(applied, staged, request, created=bool(request))
+
+
+def _parse_profile_changes(changes, refuse):
+	"""`{field: normalised value}` from the client's list, refusing per field:
+	unknown or missing on this site, blank (clearing is not self-service),
+	too long, a double-entry mismatch, or a value the field can't hold."""
+	try:
+		items = frappe.parse_json(changes) if isinstance(changes, str) else changes
+	except Exception:
+		items = None
+	if not isinstance(items, list) or not items or not all(isinstance(item, dict) for item in items):
+		refuse(_("There is nothing to send. Change a detail first."))
+		return {}
+	meta = frappe.get_meta("Employee")
+	staged = {}
+	for item in items:
+		field = item.get("field")
+		if field not in PROFILE_SELF_SERVICE_FIELDS or not meta.has_field(field):
+			refuse(_("That detail isn't available here."), field=field if isinstance(field, str) else None)
+			continue
+		if field in staged:
+			refuse(_("Each detail can be sent once."), field=field)
+			continue
+		label = profile_field_label(field)
+		value = str(item.get("value") or "").strip()
+		if not value:
+			refuse(_("Type the new {0}. To remove a detail, ask HR.").format(label), field=field)
+			continue
+		if len(value) > PROFILE_CHANGE_VALUE_MAX:
+			refuse(_("That value is too long."), field=field)
+			continue
+		if field in PROFILE_MASKED_FIELDS and value != str(item.get("confirm") or "").strip():
+			refuse(_("The two entries don't match. Type the new value again in both boxes."), field=field)
+			continue
+		df = meta.get_field(field)
+		if df.fieldtype == "Date":
+			try:
+				value = str(getdate(value))
+			except Exception:
+				refuse(_("That isn't a date."), field=field)
+				continue
+		elif df.fieldtype == "Select" and value not in (df.options or "").split("\n"):
+			refuse(_("Pick one of the listed options."), field=field)
+			continue
+		elif df.fieldtype == "Link" and not frappe.db.exists(df.options, value):
+			refuse(_("Pick one of the listed options."), field=field)
+			continue
+		staged[field] = value
+	return staged
+
+
+def _fields_in_open_corrections(employee):
+	"""Fields already waiting in an open correction of this employee's, rows
+	and legacy single-field requests alike (R17)."""
+	open_requests = frappe.get_all(
+		"HR Request",
+		filters={"employee": employee, "status": ["not in", (HR_REQUEST_DONE, HR_REQUEST_REJECTED)]},
+		fields=["name", "correction_field"],
+	)
+	busy = {row.correction_field for row in open_requests if row.correction_field}
+	names = [row.name for row in open_requests]
+	if names:
+		busy.update(
+			frappe.get_all(
+				"HelixHR Profile Change Row",
+				filters={"parenttype": "HR Request", "parent": ["in", names]},
+				pluck="field",
+			)
+		)
+	return busy
+
+
+def _check_step_up(password, refuse):
+	"""Review B5: a first-time fill re-checks the caller's password. A site on
+	Microsoft sign-in only has no password to check, so a fill is refused
+	there rather than let a hijacked session through unchecked."""
+	from frappe.utils.password import check_password
+
+	if cint(frappe.db.get_single_value("System Settings", "disable_user_pass_login")):
+		refuse(
+			_("Filling in bank and ID details yourself needs a password check, which this site doesn't use. Contact HR."),
+			field="password",
+		)
+		return
+	if not password:
+		refuse(_("Enter your password to confirm."), field="password")
+		return
+	try:
+		check_password(frappe.session.user, password)
+	except frappe.AuthenticationError:
+		frappe.clear_last_message()
+		refuse(_("That password isn't right."), field="password")
+
+
+def _mark_self_filled(employee, fills, groups):
+	"""Review B5: the unverified mark on the Employee timeline, and an in-app
+	alert to HR for every bank fill. Labels and masked values only."""
+	labels = ", ".join(profile_field_label(field) for field in fills)
+	_employee_note(
+		employee,
+		SELF_FILLED_MARK,
+		_("Self-filled by the employee, not verified by HR: {0}").format(frappe.utils.escape_html(labels)),
+	)
+	if "bank" not in groups:
+		return
+	name = frappe.db.get_value("Employee", employee, "employee_name") or employee
+	for user in _enabled_users_with_role("HR Manager", employee):
+		if user == frappe.session.user:
+			continue
+		frappe.get_doc(
+			{
+				"doctype": "Notification Log",
+				"for_user": user,
+				"from_user": frappe.session.user,
+				"type": "Alert",
+				"document_type": "Employee",
+				"document_name": employee,
+				"subject": _("{0} filled in their own bank details. Not verified yet.").format(
+					frappe.utils.escape_html(name)
+				),
+			}
+		).insert(ignore_permissions=True)
+
+
+def _send_profile_submit_notice(employee, staged, applied, filed, request, recipients):
+	"""Review B1: one notice per submit -- "requested" when anything went to
+	HR, else "applied" -- listing every detail with what happened to it."""
+	changes = [
+		{
+			"label": profile_field_label(field),
+			"masked_new_value": profile_display_value(field, staged[field]) or "",
+			"state": "changed" if field in applied else "sent to HR",
+		}
+		for field in staged
+		if field in applied or field in filed
+	]
+	if not changes:
+		return
+	now = frappe.utils.format_datetime(frappe.utils.now_datetime())
+	if filed:
+		event, extra = "bank_change_requested", {"requested_on": now}
+	else:
+		event, extra = "bank_change_applied", {"applied_by": frappe.utils.get_fullname(frappe.session.user), "applied_on": now}
+	send_notification(
+		event,
+		[address for address in recipients if address],
+		{**profile_change_notice_context(changes), **extra},
+		reference_doctype="HR Request" if request else "Employee",
+		reference_name=request or employee,
+	)
+
+
+def _profile_submit_result(applied, staged, request, created):
+	status = "applied_and_requested" if applied and request else ("requested" if request else "applied")
+	return {
+		"status": status,
+		"applied": [
+			{
+				"field": field,
+				"label": profile_field_label(field),
+				"value": profile_display_value(field, staged[field]),
+			}
+			for field in applied
+		],
+		"request": {"name": request, "status": frappe.db.get_value("HR Request", request, "status")}
+		if request
+		else None,
+		"created": created,
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+def reveal_correction_value(name, row=None):
 	"""The full proposed value of an open correction, for the HR user handling
 	it (plan 2026-10-02-001 R28, KTD15).
 
@@ -9933,8 +10353,23 @@ def reveal_correction_value(name):
 	_assert_may_act_on(doc)
 	if doc.picked_up_by and doc.picked_up_by != frappe.session.user:
 		frappe.throw(_("Only the person handling this request can see the full value."), frappe.PermissionError)
-	if not doc.correction_field or doc.status in ("Done", "Rejected"):
+	if not has_profile_correction(doc) or doc.status in ("Done", "Rejected"):
 		frappe.throw(_("There is no value to show on this request."))
+	if doc.get("profile_changes"):
+		# Plan 2026-11-03-001 U7: one row at a time, one comment each.
+		change = next((change for change in doc.profile_changes if change.name == row), None)
+		if not change:
+			frappe.throw(_("Pick which detail to show."))
+		value = get_decrypted_password(
+			"HelixHR Profile Change Row", change.name, "proposed", raise_exception=False
+		)
+		if not value:
+			frappe.throw(_("There is no value to show on this request."))
+		doc.add_comment(
+			"Info",
+			_("Proposed {0} revealed by {1}").format(change.label, frappe.utils.get_fullname(frappe.session.user)),
+		)
+		return {"name": name, "row": change.name, "field": change.field, "value": value}
 	value = get_decrypted_password("HR Request", name, "correction_proposed", raise_exception=False)
 	if not value:
 		frappe.throw(_("There is no value to show on this request."))

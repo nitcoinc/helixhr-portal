@@ -1,8 +1,11 @@
+import uuid
+from typing import ClassVar
+
 import frappe
 from frappe.tests import IntegrationTestCase
 
 from helixhr.api import update_my_profile
-from helixhr.tests.utils import EMPLOYEE_USER, MANAGER_USER, make_test_employee_and_manager
+from helixhr.tests.utils import EMPLOYEE_USER, MANAGER_USER, TEST_PASSWORD, make_test_employee_and_manager
 
 
 class TestUpdateMyProfile(IntegrationTestCase):
@@ -716,3 +719,290 @@ class TestPhotoInProjections(_PhotoTestCase):
 		row = next(row for row in pending if row["name"] == name)
 		self.assertEqual(row["photo_url"], uploaded)
 		self.assertIn("v=", row["photo_url"])
+
+
+class TestSubmitMyProfileChanges(IntegrationTestCase):
+	"""Plan 2026-11-03-001 U6: one call fills blank Bank & IDs groups now and
+	files the rest to HR as one row request, in one transaction."""
+
+	ACCOUNT = "987654321098"
+	BLANK: ClassVar[dict] = {
+		"salary_mode": None,
+		"bank_name": None,
+		"bank_ac_no": None,
+		"iban": None,
+		"passport_number": None,
+		"date_of_issue": None,
+		"valid_upto": None,
+		"place_of_issue": None,
+		"health_insurance_provider": None,
+		"health_insurance_no": None,
+	}
+
+	def setUp(self):
+		from helixhr.patches.v1_0 import seed_profile_correction_category
+		from helixhr.tests.utils import ensure_test_email_account
+		from helixhr.utils import PROFILE_CORRECTION_CATEGORY
+
+		self.employee_name, _, self.manager_name, _ = make_test_employee_and_manager()
+		ensure_test_email_account()
+		seed_profile_correction_category.execute()
+		frappe.db.set_value(
+			"HelixHR Request Category",
+			PROFILE_CORRECTION_CATEGORY,
+			{"is_active": 1, "route_to_role": "HR Manager"},
+		)
+		frappe.db.set_single_value("System Settings", "disable_user_pass_login", 0)
+		frappe.db.set_value(
+			"Employee",
+			self.employee_name,
+			{
+				**self.BLANK,
+				"status": "Active",
+				"company_email": "employee-company@helixhr.test",
+				"personal_email": "employee-personal@helixhr.test",
+			},
+		)
+		# Close anything an earlier test left open, so R17 starts clean.
+		for name in frappe.get_all(
+			"HR Request", filters={"employee": self.employee_name, "status": ["not in", ("Done", "Rejected")]}, pluck="name"
+		):
+			frappe.db.set_value("HR Request", name, "status", "Rejected")
+		frappe.db.delete("Version", {"ref_doctype": "Employee", "docname": self.employee_name})
+		self.addCleanup(setattr, frappe.local, "request", None)
+		self._mail_before = set(frappe.get_all("Email Queue", pluck="name"))
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+
+	def _submit(self, changes, seen, proof=False, password=TEST_PASSWORD, key=None, confirm=None):
+		from helixhr.api import submit_my_profile_changes
+		from helixhr.tests.test_hr_request import _Request, with_uploaded_file
+
+		frappe.local.request = with_uploaded_file("bank-letter.pdf") if proof else _Request({})
+		frappe.set_user(EMPLOYEE_USER)
+		try:
+			return submit_my_profile_changes(
+				changes=frappe.as_json(
+					[{"field": f, "value": v, "confirm": (confirm or {}).get(f, v)} for f, v in changes.items()]
+				),
+				seen=frappe.as_json(seen),
+				operation_key=key or str(uuid.uuid4()),
+				password=password,
+			)
+		finally:
+			frappe.set_user("Administrator")
+
+	def _live(self, *fields):
+		return frappe.db.get_value("Employee", self.employee_name, list(fields), as_dict=True)
+
+	def _mails_to(self, address):
+		new = set(frappe.get_all("Email Queue", pluck="name")) - self._mail_before
+		return frappe.get_all(
+			"Email Queue Recipient", filters={"parent": ["in", list(new) or [""]], "recipient": address}, pluck="parent"
+		)
+
+	def _requests(self):
+		return frappe.get_all("HR Request", filters={"employee": self.employee_name, "status": "Open"}, pluck="name")
+
+	def _errors(self, result):
+		self.assertEqual(result["status"], "refused", result)
+		return result["errors"]
+
+	BANK: ClassVar[dict] = {"bank_name": "New Bank", "bank_ac_no": ACCOUNT}
+
+	# --- first-time fill ---------------------------------------------------
+
+	def test_a_blank_bank_group_fills_now_with_one_notice_mark_and_hr_alert(self):
+		result = self._submit(self.BANK, {"bank": "blank"})
+		self.assertEqual(result["status"], "applied")
+		self.assertIsNone(result["request"])
+		self.assertEqual(self._live("bank_ac_no").bank_ac_no, self.ACCOUNT)
+		self.assertFalse(self._requests())
+		self.assertNotIn(self.ACCOUNT, frappe.as_json(result))
+		self.assertEqual(len(self._mails_to("employee-company@helixhr.test")), 1)
+		self.assertEqual(len(self._mails_to("employee-personal@helixhr.test")), 1)
+		self.assertTrue(
+			frappe.db.exists(
+				"Comment",
+				{"reference_doctype": "Employee", "reference_name": self.employee_name, "subject": "helixhr:self_filled_unverified"},
+			)
+		)
+		self.assertTrue(
+			frappe.db.exists("Notification Log", {"document_type": "Employee", "document_name": self.employee_name})
+		)
+
+	def test_a_fill_retried_after_it_landed_reports_applied(self):
+		self._submit(self.BANK, {"bank": "blank"})
+		again = self._submit(self.BANK, {"bank": "blank"})
+		self.assertEqual(again["status"], "applied")
+		self.assertEqual({row["field"] for row in again["applied"]}, set(self.BANK))
+
+	def test_a_partial_fill_must_carry_the_core_fields(self):
+		errors = self._errors(self._submit({"bank_name": "New Bank"}, {"bank": "blank"}))
+		self.assertEqual(errors[0]["group"], "bank")
+		self.assertIsNone(self._live("bank_name").bank_name)
+		errors = self._errors(self._submit({"passport_number": "Z7654321"}, {"passport": "blank"}))
+		self.assertEqual(errors[0]["group"], "passport")
+
+	def test_a_fill_needs_the_password(self):
+		for password in (None, "wrong-password"):
+			errors = self._errors(self._submit(self.BANK, {"bank": "blank"}, password=password))
+			self.assertEqual(errors[0]["field"], "password")
+		self.assertIsNone(self._live("bank_ac_no").bank_ac_no)
+
+	def test_a_fill_is_refused_for_an_inactive_employee(self):
+		frappe.db.set_value("Employee", self.employee_name, "status", "Suspended")
+		# An inactive record has no current employee at all, so the call
+		# never reaches the fill; the endpoint's own Active check backs it.
+		with self.assertRaises(Exception):
+			self._submit(self.BANK, {"bank": "blank"})
+		self.assertIsNone(self._live("bank_ac_no").bank_ac_no)
+
+	def test_a_fill_needs_an_out_of_band_address(self):
+		frappe.db.set_value("Employee", self.employee_name, {"company_email": None, "personal_email": None})
+		self._errors(self._submit(self.BANK, {"bank": "blank"}))
+
+	def test_a_recent_personal_email_change_holds_fills_but_not_filing(self):
+		frappe.db.set_value("Employee", self.employee_name, "iban", "DE89370400440532013000")
+		doc = frappe.get_doc("Employee", self.employee_name)
+		doc.personal_email = "new-personal@helixhr.test"
+		doc.save(ignore_permissions=True, ignore_version=False)
+		errors = self._errors(self._submit({"passport_number": "Z7654321", "date_of_issue": "2020-01-01", "valid_upto": "2030-01-01", "place_of_issue": "Pune"}, {"passport": "blank"}))
+		self.assertIn("72 hours", errors[0]["message"])
+		result = self._submit({"bank_ac_no": self.ACCOUNT}, {"bank": "filled"}, proof=True)
+		self.assertEqual(result["status"], "requested")
+
+	def test_fill_notice_also_reaches_the_previous_personal_email(self):
+		doc = frappe.get_doc("Employee", self.employee_name)
+		doc.personal_email = "new-personal@helixhr.test"
+		doc.save(ignore_permissions=True, ignore_version=False)
+		frappe.db.delete("Version", {"ref_doctype": "Employee", "docname": self.employee_name, "creation": [">", frappe.utils.add_to_date(None, days=-30)]})
+		frappe.get_doc(
+			{
+				"doctype": "Version",
+				"ref_doctype": "Employee",
+				"docname": self.employee_name,
+				"data": frappe.as_json({"changed": [["personal_email", "employee-personal@helixhr.test", "new-personal@helixhr.test"]]}),
+			}
+		).db_insert()
+		frappe.db.set_value("Version", {"ref_doctype": "Employee", "docname": self.employee_name}, "creation", frappe.utils.add_to_date(None, days=-5))
+		self._submit(self.BANK, {"bank": "blank"})
+		self.assertTrue(self._mails_to("employee-personal@helixhr.test"))
+		self.assertTrue(self._mails_to("new-personal@helixhr.test"))
+
+	# --- routing to HR -----------------------------------------------------
+
+	def test_a_group_with_any_value_on_file_goes_to_hr_whole(self):
+		frappe.db.set_value("Employee", self.employee_name, "bank_ac_no", "111122223333")
+		result = self._submit(self.BANK, {"bank": "filled"}, proof=True)
+		self.assertEqual(result["status"], "requested")
+		self.assertEqual(self._live("bank_ac_no").bank_ac_no, "111122223333")
+		rows = frappe.get_all("HelixHR Profile Change Row", filters={"parent": result["request"]["name"]}, pluck="field")
+		self.assertEqual(set(rows), set(self.BANK))
+		self.assertEqual(len(self._mails_to("employee-personal@helixhr.test")), 1)
+
+	def test_mixed_fills_and_files_in_one_call(self):
+		frappe.db.set_value("Employee", self.employee_name, "bank_ac_no", "111122223333")
+		passport = {"passport_number": "Z7654321", "date_of_issue": "2020-01-01", "valid_upto": "2030-01-01", "place_of_issue": "Pune"}
+		result = self._submit({**passport, "bank_ac_no": self.ACCOUNT}, {"bank": "filled", "passport": "blank"}, proof=True)
+		self.assertEqual(result["status"], "applied_and_requested")
+		self.assertEqual(self._live("passport_number").passport_number, "Z7654321")
+		self.assertEqual(len(self._requests()), 1)
+		self.assertEqual(len(self._mails_to("employee-company@helixhr.test")), 1)
+
+	def test_hr_bound_rows_without_proof_refuse_the_fill_too(self):
+		frappe.db.set_value("Employee", self.employee_name, "bank_ac_no", "111122223333")
+		passport = {"passport_number": "Z7654321", "date_of_issue": "2020-01-01", "valid_upto": "2030-01-01", "place_of_issue": "Pune"}
+		errors = self._errors(self._submit({**passport, "bank_ac_no": self.ACCOUNT}, {"bank": "filled", "passport": "blank"}))
+		self.assertEqual(errors[0]["field"], "file")
+		self.assertIsNone(self._live("passport_number").passport_number)
+
+	def test_a_failed_request_insert_rolls_the_fill_back(self):
+		from unittest.mock import patch
+
+		frappe.db.set_value("Employee", self.employee_name, "bank_ac_no", "111122223333")
+		passport = {"passport_number": "Z7654321", "date_of_issue": "2020-01-01", "valid_upto": "2030-01-01", "place_of_issue": "Pune"}
+		with patch("helixhr.events._validate_new_profile_rows", side_effect=frappe.ValidationError("boom")):
+			with self.assertRaises(frappe.ValidationError):
+				self._submit({**passport, "bank_ac_no": self.ACCOUNT}, {"bank": "filled", "passport": "blank"}, proof=True)
+		self.assertIsNone(self._live("passport_number").passport_number)
+
+	def test_double_entry_mismatch_is_refused_without_echo(self):
+		frappe.db.set_value("Employee", self.employee_name, "iban", "DE89370400440532013000")
+		result = self._submit({"iban": "GB82WEST12345698765432"}, {"bank": "filled"}, proof=True, confirm={"iban": "GB82WEST12345698765433"})
+		self.assertEqual(self._errors(result)[0]["field"], "iban")
+		self.assertNotIn("GB82WEST12345698765432", frappe.as_json(result))
+
+	def test_seen_blank_but_hr_filled_it_is_refused(self):
+		frappe.db.set_value("Employee", self.employee_name, "bank_name", "HR Bank")
+		errors = self._errors(self._submit(self.BANK, {"bank": "blank"}))
+		self.assertIn("updated since you opened this", errors[0]["message"])
+
+	def test_a_field_in_an_open_request_is_refused_others_pass(self):
+		frappe.db.set_value("Employee", self.employee_name, {"bank_ac_no": "111122223333", "health_insurance_no": "H-1"})
+		self._submit({"bank_ac_no": self.ACCOUNT}, {"bank": "filled"}, proof=True)
+		errors = self._errors(self._submit({"bank_ac_no": "555566667777"}, {"bank": "filled"}, proof=True))
+		self.assertEqual(errors[0]["field"], "bank_ac_no")
+		result = self._submit({"health_insurance_no": "H-2"}, {"insurance": "filled"}, proof=True)
+		self.assertEqual(result["status"], "requested")
+
+	def test_a_legacy_open_correction_counts_as_open(self):
+		frappe.db.set_value("Employee", self.employee_name, "bank_ac_no", "111122223333")
+		frappe.local.request = None
+		from helixhr.tests.test_hr_request import with_uploaded_file
+
+		frappe.local.request = with_uploaded_file("bank-letter.pdf")
+		frappe.set_user(EMPLOYEE_USER)
+		try:
+			from helixhr.api import create_my_request
+
+			create_my_request(
+				category="Profile correction",
+				subject="Old style",
+				operation_key=str(uuid.uuid4()),
+				correction_field="bank_ac_no",
+				correction_value=self.ACCOUNT,
+				correction_confirm=self.ACCOUNT,
+			)
+		finally:
+			frappe.set_user("Administrator")
+		errors = self._errors(self._submit({"bank_ac_no": "555566667777"}, {"bank": "filled"}, proof=True))
+		self.assertEqual(errors[0]["field"], "bank_ac_no")
+
+	def test_the_same_key_twice_files_once(self):
+		frappe.db.set_value("Employee", self.employee_name, "bank_ac_no", "111122223333")
+		key = str(uuid.uuid4())
+		first = self._submit({"bank_ac_no": self.ACCOUNT}, {"bank": "filled"}, proof=True, key=key)
+		second = self._submit({"bank_ac_no": self.ACCOUNT}, {"bank": "filled"}, proof=True, key=key)
+		self.assertEqual(first["request"]["name"], second["request"]["name"])
+		self.assertFalse(second["created"])
+		self.assertEqual(len(self._requests()), 1)
+
+	def test_bad_values_are_refused_before_any_write(self):
+		cases = (
+			({"salary_mode": "Crypto", "bank_name": "B", "bank_ac_no": self.ACCOUNT}, {"bank": "blank"}, "salary_mode"),
+			({"health_insurance_provider": "No Such Insurer", "health_insurance_no": "H-1"}, {"insurance": "blank"}, "health_insurance_provider"),
+		)
+		for changes, seen, field in cases:
+			self.assertEqual(self._errors(self._submit(changes, seen))[0]["field"], field)
+		passport = {"passport_number": "Z7654321", "date_of_issue": "2030-01-01", "valid_upto": "2020-01-01", "place_of_issue": "Pune"}
+		self.assertEqual(self._errors(self._submit(passport, {"passport": "blank"}))[0]["field"], "valid_upto")
+		self.assertIsNone(self._live("passport_number").passport_number)
+
+	def test_a_field_missing_on_the_site_or_off_the_list_is_refused(self):
+		for field in ("pan_number", "date_of_birth") if not frappe.get_meta("Employee").has_field("pan_number") else ("date_of_birth", "ctc"):
+			self.assertEqual(self._errors(self._submit({field: "X"}, {}))[0]["field"], field)
+
+	def test_blank_value_is_refused(self):
+		self._errors(self._submit({"bank_name": ""}, {"bank": "blank"}))
+
+	def test_update_my_profile_still_cannot_write_bank_fields(self):
+		frappe.set_user(EMPLOYEE_USER)
+		try:
+			update_my_profile(bank_ac_no=self.ACCOUNT)
+		except Exception:
+			pass
+		finally:
+			frappe.set_user("Administrator")
+		self.assertIsNone(self._live("bank_ac_no").bank_ac_no)

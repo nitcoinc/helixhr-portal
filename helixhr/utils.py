@@ -106,6 +106,36 @@ PROFILE_SECTION_FIELDS = {
 	),
 }
 
+# Plan 2026-11-03-001 KTD11/KTD12: every Bank & IDs field an employee may
+# change from the Profile page, as one batch. A first-time fill writes them
+# elevated, so this is the whole allow-list -- `PROFILE_EDITABLE_FIELDS` is not
+# widened and no permlevel is lowered.
+PROFILE_SELF_SERVICE_FIELDS = PROFILE_SECTION_FIELDS["bank"]
+
+# KTD11: routing is per group. A group with any field on file goes to HR
+# whole, so a new bank name is never paired with an old account number.
+PROFILE_CHANGE_GROUPS = {
+	"bank": ("salary_mode", "bank_name", "bank_ac_no", "ifsc_code", "micr_code", "iban"),
+	"pan": ("pan_number",),
+	"pf": ("provident_fund_account",),
+	"passport": ("passport_number", "date_of_issue", "valid_upto", "place_of_issue"),
+	"insurance": ("health_insurance_provider", "health_insurance_no"),
+}
+PROFILE_CHANGE_GROUP_LABELS = {
+	"bank": "Bank details",
+	"pan": "PAN",
+	"pf": "PF account",
+	"passport": "Passport",
+	"insurance": "Health insurance",
+}
+# Review B6: a partial first-time fill must carry these (those the site has).
+PROFILE_FILL_CORE_FIELDS = {
+	"bank": ("bank_name", "bank_ac_no", "ifsc_code"),
+	"passport": PROFILE_CHANGE_GROUPS["passport"],
+}
+PROFILE_CHANGE_VALUE_MAX = 140
+
+
 # Child tables, by the tab they render on, with the columns that may leave
 # the server. External Work History's `salary` and `contact` are deliberately
 # absent.
@@ -154,6 +184,20 @@ def mask_identifier(value):
 	return "••••" if len(text) <= 4 else f"••••{text[-4:]}"
 
 
+def profile_display_value(field, value):
+	"""What a screen, notice or response may show of a Bank & IDs value:
+	masked for an identifier, the value itself for the rest (KTD9)."""
+	if field in PROFILE_MASKED_FIELDS:
+		return mask_identifier(value)
+	text = "" if value is None else str(value).strip()
+	return text or None
+
+
+def profile_field_label(field):
+	"""The label a profile change row, notice and refusal use for `field`."""
+	return PROFILE_LABELS.get(field) or frappe.get_meta("Employee").get_label(field) or field
+
+
 # --- Portal email events and the HelixHR template sandbox (plan 2026-10-02-001 U8) ---
 #
 # KTD6: `frappe.render_template(restrict_globals=True)` is not a sandbox -- its
@@ -193,6 +237,14 @@ _DECISION = {
 	"decision_note": ("The approver's note (may be empty)", "Enjoy the break"),
 }
 _DATES = {key: _LEAVE_VARIABLES[key] for key in ("leave_type", "from_date", "to_date")}
+# Plan 2026-11-03-001 KTD14: the bank notices list every detail of a
+# multi-field change; one detail keeps the original single sentence.
+_SAMPLE_PROFILE_CHANGES = [{"label": "Bank account number", "masked_new_value": "••••1234", "state": "sent to HR"}]
+_PROFILE_CHANGES_CORE = (
+	"{% if changes|length > 1 %}:</p><ul>{% for change in changes %}"
+	"<li>{{ change.label }}: {{ change.masked_new_value }} ({{ change.state }})</li>"
+	"{% endfor %}</ul><p>{% else %} to {{ masked_new_value }}.{% endif %}"
+)
 _SAMPLE_ITEMS = [
 	{
 		"kind": "Leave",
@@ -605,15 +657,17 @@ NOTIFICATION_EVENTS = {
 		"audience": "Security",
 		"locked": True,
 		"variables": {
-			"field_label": ("Which detail", "Bank account number"),
-			"masked_new_value": ("The new value, masked", "••••1234"),
+			"field_label": ("Which details, joined", "Bank account number"),
+			"masked_new_value": ("The first new value, masked", "••••1234"),
+			"changes": ("Each detail: label, masked_new_value, state", _SAMPLE_PROFILE_CHANGES),
 			"requested_on": ("When it was requested", "12-10-2026 10:30"),
 		},
 		"subject": "Security notice: a change to your {{ field_label }} was requested",
 		"core": (
 			"<p>Hi {{ recipient_first_name }},</p>"
-			"<p>On {{ requested_on }} someone asked to change your {{ field_label }} to {{ masked_new_value }}."
-			" If this was not you, contact HR immediately.</p>"
+			"<p>On {{ requested_on }} someone asked to change your {{ field_label }}"
+			+ _PROFILE_CHANGES_CORE
+			+ " If this was not you, contact HR immediately.</p>"
 		),
 		"body": "",
 	},
@@ -622,16 +676,18 @@ NOTIFICATION_EVENTS = {
 		"audience": "Security",
 		"locked": True,
 		"variables": {
-			"field_label": ("Which detail", "Bank account number"),
-			"masked_new_value": ("The new value, masked", "••••1234"),
+			"field_label": ("Which details, joined", "Bank account number"),
+			"masked_new_value": ("The first new value, masked", "••••1234"),
+			"changes": ("Each detail: label, masked_new_value, state", _SAMPLE_PROFILE_CHANGES),
 			"applied_by": ("Who applied it", "Meera Shah"),
 			"applied_on": ("When it was applied", "13-10-2026 09:00"),
 		},
 		"subject": "Security notice: your {{ field_label }} was changed",
 		"core": (
 			"<p>Hi {{ recipient_first_name }},</p>"
-			"<p>On {{ applied_on }} {{ applied_by }} changed your {{ field_label }} to {{ masked_new_value }}."
-			" If you did not ask for this, contact HR immediately.</p>"
+			"<p>On {{ applied_on }} {{ applied_by }} changed your {{ field_label }}"
+			+ _PROFILE_CHANGES_CORE
+			+ " If you did not ask for this, contact HR immediately.</p>"
 		),
 		"body": "",
 	},
@@ -1291,6 +1347,9 @@ def microsoft_sign_in_enabled():
 # held" is read from the audit trail itself, never from translated wording.
 LOGIN_CREATED_MARK = "helixhr:login_created"
 WELCOME_SENT_MARK = "helixhr:welcome_sent"
+# Plan 2026-11-03-001 review B5: an employee filled a blank Bank & IDs group
+# themselves; HR sees the mark on the Employee timeline until it verifies.
+SELF_FILLED_MARK = "helixhr:self_filled_unverified"
 
 
 def _employee_note(employee, mark, content):
@@ -2758,6 +2817,9 @@ RATE_LIMIT_POLICY = {
 	"reopen_roster_change": (10, 3600),
 	# Plan 2026-11-03-001 U3: one op for a whole team, a few times a session.
 	"add_roster_ops_bulk": (20, 60),
+	# Plan 2026-11-03-001 U6: a whole Bank & IDs batch per call; mails twice
+	# and may write Employee, so bounded like a request filing.
+	"submit_my_profile_changes": (10, 3600),
 	# Plan 2026-10-02-001 U13: shows a full bank detail and writes an audit
 	# comment each time, so it is bounded tightly.
 	"reveal_correction_value": (20, 3600),

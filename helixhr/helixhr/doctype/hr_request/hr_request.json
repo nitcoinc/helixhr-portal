@@ -30,7 +30,8 @@
   "correction_current_masked",
   "correction_proposed_masked",
   "correction_current",
-  "correction_proposed"
+  "correction_proposed",
+  "profile_changes"
  ],
  "fields": [
   {
@@ -163,7 +164,7 @@
    "unique": 1
   },
   {
-   "depends_on": "correction_field",
+   "depends_on": "eval:doc.correction_field || (doc.profile_changes || []).length",
    "fieldname": "section_break_correction",
    "fieldtype": "Section Break",
    "label": "Correction"
@@ -210,12 +211,20 @@
    "no_copy": 1,
    "read_only": 1,
    "set_only_once": 1
+  },
+  {
+   "fieldname": "profile_changes",
+   "fieldtype": "Table",
+   "label": "Profile changes",
+   "no_copy": 1,
+   "options": "HelixHR Profile Change Row",
+   "read_only": 1
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-10-03 12:00:00.000000",
+ "modified": "2026-11-03 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "HelixHR",
  "name": "HR Request",

@@ -227,6 +227,11 @@ doc_events = {
 	"File": {
 		"before_insert": "helixhr.events.file_before_insert",
 	},
+	# Plan 2026-11-03-001 R19 / review B2: an Employee's history never holds
+	# a full bank or ID value. Fails closed.
+	"Version": {
+		"before_insert": "helixhr.events.version_before_insert",
+	},
 	# Plan 2026-11-01-001 U1 (R2): billable and "Open to everyone" never
 	# become true together, Desk included.
 	"Project": {

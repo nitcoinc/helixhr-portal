@@ -1,0 +1,76 @@
+{
+ "actions": [],
+ "creation": "2026-11-03 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 0,
+ "engine": "InnoDB",
+ "field_order": [
+  "field",
+  "label",
+  "current_masked",
+  "proposed_masked",
+  "current",
+  "proposed"
+ ],
+ "fields": [
+  {
+   "fieldname": "field",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Field",
+   "reqd": 1,
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "label",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Detail",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "current_masked",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Current value",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "proposed_masked",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Proposed value",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "current",
+   "fieldtype": "Password",
+   "hidden": 1,
+   "label": "Current value (encrypted)",
+   "read_only": 1,
+   "no_copy": 1
+  },
+  {
+   "fieldname": "proposed",
+   "fieldtype": "Password",
+   "hidden": 1,
+   "label": "Proposed value (encrypted)",
+   "read_only": 1,
+   "no_copy": 1
+  }
+ ],
+ "istable": 1,
+ "modified": "2026-11-03 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "HelixHR",
+ "name": "HelixHR Profile Change Row",
+ "owner": "Administrator",
+ "permissions": [],
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
