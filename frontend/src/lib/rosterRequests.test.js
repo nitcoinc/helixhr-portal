@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import { formatDate } from './dates'
 import { OVERLAP } from './rosterDraft'
 import {
+  blocksLabel,
   cellProposal,
+  changeAndBlockCount,
   checkProposal,
   coverageFromRows,
   draftOps,
@@ -11,6 +13,7 @@ import {
   opLabel,
   reasonLines,
   returnedNotice,
+  skipsOffDays,
   submittedMessage,
   toOp,
 } from './rosterRequests'
@@ -41,7 +44,7 @@ const change = (employee, from, assignment = 'SA-1', shift = 'Late') => ({
 })
 
 describe('toOp / draftOps', () => {
-  it('keeps the six operation fields, blanks as null', () => {
+  it('keeps the six operation fields, blanks as null, and the skip flag as 0 / 1', () => {
     expect(toOp({ employee: 'E1', action: 'End', to_date: '2026-11-05', employee_name: 'Asha', extra: 1 })).toEqual({
       employee: 'E1',
       action: 'End',
@@ -49,7 +52,10 @@ describe('toOp / draftOps', () => {
       from_date: null,
       to_date: '2026-11-05',
       assignment: null,
+      skip_off_days: 0,
     })
+    expect(toOp({ ...assign('E1', '2026-11-02', '2026-11-27'), skip_off_days: 1 }).skip_off_days).toBe(1)
+    expect(toOp({ ...assign('E1', '2026-11-02', '2026-11-27'), skip_off_days: true }).skip_off_days).toBe(1)
   })
   it('is empty with no draft', () => {
     expect(draftOps(null)).toEqual([])
@@ -175,5 +181,50 @@ describe('words around a request', () => {
       "Not approved — sent back to Meera Nair: Asha's shifts changed after this request was sent.",
     )
     expect(returnedNotice('', [])).toBe('Not approved — sent back to the manager.')
+  })
+})
+
+// Plan 2026-11-03-001 U4: a skip row and the blocks the server expanded.
+describe('skip rows', () => {
+  const skip = (from, to) => ({ ...assign('E1', from, to), skip_off_days: 1 })
+
+  it('only an Assign with an end date skips', () => {
+    expect(skipsOffDays(skip('2026-11-02', '2026-11-13'))).toBe(true)
+    expect(skipsOffDays({ ...skip('2026-11-02', null) })).toBe(false)
+    expect(skipsOffDays({ ...change('E1', '2026-11-05'), skip_off_days: 1 })).toBe(false)
+    expect(skipsOffDays(assign('E1', '2026-11-02', '2026-11-13'))).toBe(false)
+  })
+
+  it('words one block and several', () => {
+    expect(blocksLabel([])).toBe('')
+    expect(blocksLabel(null)).toBe('')
+    const one = [{ shift_type: 'Night', start_date: '2026-11-02', end_date: '2026-11-06' }]
+    expect(blocksLabel(one)).toMatch(/^1 shift: /)
+    const two = [...one, { shift_type: 'Night', start_date: '2026-11-09', end_date: '2026-11-13' }]
+    const label = blocksLabel(two)
+    expect(label).toMatch(/^2 shifts: /)
+    expect(label.split('; ')).toHaveLength(2)
+    expect(blocksLabel([{ shift_type: 'Night', start_date: '2026-11-02', end_date: null }])).toBe(
+      `1 shift: from ${formatDate('2026-11-02')}`,
+    )
+  })
+
+  it('counts changes and shifts', () => {
+    expect(changeAndBlockCount(1, 1)).toBe('1 change → 1 shift')
+    expect(changeAndBlockCount(3, 7)).toBe('3 changes → 7 shifts')
+  })
+
+  it('resolves every block of a skip row to its stored index', () => {
+    const ops = [assign('E2', '2026-11-03', null), skip('2026-11-02', '2026-11-13')]
+    for (const date of ['2026-11-02', '2026-11-06', '2026-11-09', '2026-11-13']) {
+      expect(opIndexForCell(ops, 'E1', { date, assignment: null })).toBe(1)
+    }
+  })
+
+  it('leaves the local check of a skip row to the server', () => {
+    const coverage = { E1: [{ key: 'SA-1', shift_type: 'Day', start_date: '2026-11-07', end_date: '2026-11-08' }] }
+    const ops = [skip('2026-11-02', '2026-11-13')]
+    expect(checkProposal({ ops, index: 0, coverage, today: '2026-11-01', name: 'Asha' })).toBe('')
+    expect(checkProposal({ ops, index: 0, coverage, today: '2026-11-02', name: 'Asha' })).toMatch(/tomorrow/)
   })
 })

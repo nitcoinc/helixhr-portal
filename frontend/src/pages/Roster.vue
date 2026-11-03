@@ -15,6 +15,7 @@ import { addCalendarDays, dateTileParts, formatDateRange, mondayOf, today } from
 import { offFirst } from '@/lib/lists'
 import { isEmptyWeek, leaveLabel, rosterModes, shiftHours } from '@/lib/roster'
 import { cellProposal, checkProposal, coverageFromRows, draftOps, submittedMessage } from '@/lib/rosterRequests'
+import { opDate } from '@/lib/rosterDraft'
 import { FALLBACK_ERROR, toPlainMessage } from '@/lib/errorMap'
 import { notify } from '@/lib/notify'
 import { useDebouncedSearch } from '@/lib/useDebouncedSearch'
@@ -130,13 +131,20 @@ function nextPage() {
 
 // --- one cell -----------------------------------------------------------
 
+// Plan 2026-11-03-001 R10: `off_days` is the person's own holidays and
+// weekly offs, so a day a skip left free reads "Off".
+function offDay(row, date) {
+  return !!row.off_days?.includes(date)
+}
+
 function isOff(day, row) {
-  return day.is_weekend || row.holidays.includes(day.date)
+  return day.is_weekend || row.holidays.includes(day.date) || offDay(row, day.date)
 }
 
 function offLabel(day, row) {
   if (row.holidays.includes(day.date)) return 'Holiday'
-  return day.is_weekend ? 'Weekend' : ''
+  if (day.is_weekend) return 'Weekend'
+  return offDay(row, day.date) ? 'Weekly off' : ''
 }
 
 /** HR-21: the phone card's one badge, after the day name -- Weekend, or
@@ -157,6 +165,7 @@ function rowOffLabel(day, row) {
 function cellLabel(row, cell, index) {
   const parts = [`${row.employee_name}, ${WEEKDAYS[index]} ${tile(cell.date).day}`]
   if (cell.shift_type) parts.push(`${cell.shift_type} ${shiftHours(cell)}`.trim())
+  else if (offDay(row, cell.date)) parts.push('off')
   else if (row.default_shift) parts.push(`no shift assigned, default ${row.default_shift.shift_type}`)
   else parts.push('no shift')
   const leave = leaveLabel(row, cell.date)
@@ -262,24 +271,31 @@ function plainError(e) {
  * Throws an Error carrying the server's sentence, which names the person, so
  * the caller shows it where it was asked for: the sheet, or the bar. */
 let saveChain = Promise.resolve()
-function saveOps(build) {
+/** Queue one draft write. `prepare()` runs in turn and returns the call to
+ * send (or throws to refuse it); its answer becomes the draft. Every write
+ * carries the draft's `modified` it was built on, so a save from another
+ * tab in between is refused rather than overwritten (plan 2026-11-03-001
+ * KTD8). Resolves to the server's answer. */
+function queueDraftWrite(prepare) {
   pendingSaves.value += 1
   const run = saveChain
     .then(async () => {
-      const next = build(ops.value)
+      const send = prepare()
       const token = ++draftEpoch
       let result
       try {
-        result = await saveCall.submit({ rows: JSON.stringify(next), note: note.value })
+        result = await send(draft.value?.modified || '')
       } catch (e) {
         throw new Error(plainError(e))
       }
       // Only the newest write's answer is the draft.
-      if (token !== draftEpoch) return
-      draftEpoch += 1
-      draft.value = result?.draft || null
-      saveError.value = ''
-      submitError.value = ''
+      if (token === draftEpoch) {
+        draftEpoch += 1
+        draft.value = result?.draft || null
+        saveError.value = ''
+        submitError.value = ''
+      }
+      return result
     })
     .finally(() => {
       pendingSaves.value -= 1
@@ -287,6 +303,36 @@ function saveOps(build) {
   saveChain = run.catch(() => {})
   return run
 }
+
+function saveOps(build) {
+  return queueDraftWrite(() => {
+    const next = build(ops.value)
+    return (token) => saveCall.submit({ rows: JSON.stringify(next), note: note.value, expected_modified: token })
+  })
+}
+
+// Plan 2026-11-03-001 U4 / R8: one operation for the whole team or a pick.
+// Who was skipped, and why, stays on screen until dismissed.
+const bulkCall = createResource({ url: 'helixhr.api.add_roster_ops_bulk', method: 'POST' })
+const bulkResult = ref(null)
+async function proposeBulk(op, target) {
+  const result = await queueDraftWrite(() => (token) =>
+    bulkCall.submit({
+      op: JSON.stringify(op),
+      whole_team: target.whole_team ? 1 : 0,
+      employees: target.employees ? JSON.stringify(target.employees) : undefined,
+      expected_modified: token,
+    }),
+  )
+  bulkResult.value = { added: result?.added || 0, skipped: result?.skipped || [] }
+}
+const bulkHeadline = computed(() => {
+  if (!bulkResult.value) return ''
+  const { added, skipped } = bulkResult.value
+  const parts = [added === 1 ? '1 change added' : `${added} changes added`]
+  if (skipped.length) parts.push(skipped.length === 1 ? '1 person skipped' : `${skipped.length} people skipped`)
+  return `${parts.join('; ')}.`
+})
 
 /** The sheet's Add / Save: the simulator first, against what this week shows,
  * so an obvious refusal costs no round trip; then the server's own check. */
@@ -386,7 +432,25 @@ function openCell(row, cell, layout) {
   selected.value = {
     person: { employee: row.employee, employee_name: row.employee_name },
     cell,
-    proposal: proposal ? { ...proposal, op: ops.value[proposal.index] || null } : null,
+    proposal: proposal
+      ? { ...proposal, op: ops.value[proposal.index] || null, blocks: draftRows.value[proposal.index]?.blocks || [] }
+      : null,
+    edit: false,
+  }
+  sheetOpen.value = true
+}
+
+/** The draft bar's Edit: the sheet opens straight on that change's form. */
+function editFromBar(index) {
+  const op = ops.value[index]
+  const row = draftRows.value[index]
+  if (!op || !row) return
+  returnKey = `draft-edit|${index}`
+  selected.value = {
+    person: { employee: op.employee, employee_name: row.employee_name || op.employee },
+    cell: { date: opDate(op) || '' },
+    proposal: { index, op, label: 'Proposed change', blocks: row.blocks || [] },
+    edit: true,
   }
   sheetOpen.value = true
 }
@@ -702,6 +766,11 @@ const scopeLine = computed(() => {
                     <span class="tabular truncate text-xs text-ink-gray-6">{{ shiftHours(cell) }}</span>
                   </template>
                   <span
+                    v-else-if="offDay(row, cell.date)"
+                    class="text-xs font-medium text-ink-gray-6"
+                    data-testid="roster-off"
+                  >Off</span>
+                  <span
                     v-else-if="row.default_shift"
                     class="truncate text-xs text-ink-gray-5"
                     :title="`Default shift: ${row.default_shift.shift_type}`"
@@ -783,6 +852,7 @@ const scopeLine = computed(() => {
                     {{ cell.shift_type }}
                     <span class="tabular font-normal text-ink-gray-6">{{ shiftHours(cell) }}</span>
                   </template>
+                  <template v-else-if="offDay(row, day.date)">Off</template>
                   <template v-else-if="row.default_shift">{{ row.default_shift.shift_type }} (default)</template>
                   <template v-else>No shift</template>
                 </span>
@@ -910,8 +980,46 @@ const scopeLine = computed(() => {
       :today="roster.data?.today || ''"
       :propose-change="proposeChange"
       :remove-change="removeChange"
+      :propose-bulk="proposeBulk"
+      :start-editing="!!selected?.edit"
       @changed="onChanged"
     />
+
+    <!-- Plan 2026-11-03-001 R8 / B9: who a bulk add skipped, and why. -->
+    <div
+      v-if="bulkResult"
+      class="surface-alert mt-4 p-3 text-sm"
+      role="status"
+      data-testid="roster-bulk-notice"
+    >
+      <div class="flex items-start gap-2">
+        <div class="min-w-0 flex-1">
+          <p class="font-medium text-ink-gray-9">
+            {{ bulkHeadline }}
+          </p>
+          <ul
+            v-if="bulkResult.skipped.length"
+            class="mt-1 list-disc space-y-0.5 pl-5 text-ink-gray-7"
+          >
+            <li
+              v-for="item in bulkResult.skipped"
+              :key="item.employee"
+            >
+              <template v-if="item.name && !item.reason.startsWith(item.name)">
+                {{ item.name }}:
+              </template>{{ item.name ? item.reason : `${item.employee}: ${item.reason}` }}
+            </li>
+          </ul>
+        </div>
+        <button
+          type="button"
+          class="-my-2 inline-flex min-h-11 shrink-0 cursor-pointer items-center text-sm font-medium text-ink-blue-link underline underline-offset-2"
+          @click="bulkResult = null"
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>
 
     <RosterDraftBar
       v-if="canRequest && draftRows.length"
@@ -922,6 +1030,7 @@ const scopeLine = computed(() => {
       :save-error="saveError"
       :submitting="submitting"
       :submit-error="submitError"
+      @edit="editFromBar"
       @remove="(index) => fromBar(() => removeChange(index))"
       @discard="fromBar(() => saveOps(() => []))"
       @submit="submitDraft"

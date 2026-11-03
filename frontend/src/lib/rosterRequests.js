@@ -4,15 +4,44 @@
 // `save_roster_draft`. The server re-runs every rule at save, submit and
 // approval (`helixhr.api._review_roster_ops`); nothing here decides.
 
-import { formatDate } from './dates'
+import { formatDate, formatDateRange } from './dates'
 import { ASSIGN, CHANGE, END, opDate, simulate } from './rosterDraft'
 
 const OP_FIELDS = ['employee', 'action', 'shift_type', 'from_date', 'to_date', 'assignment']
 
+const isSkip = (value) => value === 1 || value === true || value === '1'
+
 /** One draft row as `save_roster_draft` takes it: the six operation fields,
- * blanks as null. */
+ * blanks as null, plus `skip_off_days` as 0 / 1 (plan 2026-11-03-001 R6:
+ * an edit keeps it). */
 export function toOp(row) {
-  return Object.fromEntries(OP_FIELDS.map((field) => [field, row?.[field] || null]))
+  return {
+    ...Object.fromEntries(OP_FIELDS.map((field) => [field, row?.[field] || null])),
+    skip_off_days: isSkip(row?.skip_off_days) ? 1 : 0,
+  }
+}
+
+/** Whether an operation skips weekly offs and holidays: only an Assign with
+ * an end date can (the server clears the flag elsewhere). */
+export function skipsOffDays(op) {
+  return op?.action === ASSIGN && !!op.to_date && isSkip(op.skip_off_days)
+}
+
+/** The shifts the server says one draft row creates, in words: "2 shifts:
+ * 3 – 7 Nov 2026; 10 – 14 Nov 2026"; '' with none. The browser never
+ * expands a skip itself (plan 2026-11-03-001 A11): `blocks` is the payload's. */
+export function blocksLabel(blocks) {
+  const list = blocks || []
+  if (!list.length) return ''
+  const ranges = list.map((block) =>
+    block.end_date ? formatDateRange(block.start_date, block.end_date) : `from ${formatDate(block.start_date)}`,
+  )
+  return `${plural(list.length, 'shift', 'shifts')}: ${ranges.join('; ')}`
+}
+
+/** "3 changes → 7 shifts", HR's count of what a request writes (R10). */
+export function changeAndBlockCount(changes, blocks) {
+  return `${plural(changes || 0, 'change', 'changes')} → ${plural(blocks || 0, 'shift', 'shifts')}`
 }
 
 /** The draft's operations, in order; [] with no draft. */
@@ -79,6 +108,9 @@ export function checkProposal({ ops, index, coverage, today, name }) {
   const who = name || op.employee
   const day = opDate(op)
   if (day && today && day <= today) return `${who}: a change can start tomorrow at the earliest.`
+  // A skip is expanded by the server alone (A11): checked as one block here
+  // it could refuse an overlap that falls only on an off day.
+  if (skipsOffDays(op)) return ''
   const positions = []
   const mine = []
   ops.forEach((candidate, position) => {

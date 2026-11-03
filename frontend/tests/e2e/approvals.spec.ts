@@ -1297,11 +1297,15 @@ test('a roster request whose shifts moved is sent back, reopened, resent and app
     // The manager ends the employee's open shift next Thursday and sends it.
     const manager = await loginAs(baseURL, MANAGER)
     const week = await manager.get(`/api/method/helixhr.api.get_roster_week?mode=team&week_start=${monday}`)
-    const rows = (await week.json()).message.rows as { employee: string; cells: { assignment: string }[] }[]
+    const weekData = (await week.json()).message
+    const rows = weekData.rows as { employee: string; cells: { assignment: string }[] }[]
     const assignment = rows.find((item) => item.employee === employee)!.cells[3].assignment
     expect(assignment).toBeTruthy()
     const saved = await manager.post('/api/method/helixhr.api.save_roster_draft', {
-      form: { rows: JSON.stringify([{ employee, action: 'End', to_date: thursday, assignment }]) },
+      form: {
+        rows: JSON.stringify([{ employee, action: 'End', to_date: thursday, assignment }]),
+        expected_modified: weekData.draft?.modified ?? '',
+      },
     })
     expect(saved.ok(), await saved.text()).toBeTruthy()
     const submitted = await manager.post('/api/method/helixhr.api.submit_roster_change', { form: {} })

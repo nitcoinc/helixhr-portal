@@ -4,9 +4,13 @@
 // changes themselves (expandable, each removable), a note to HR, Submit and
 // Discard. The page owns every write; this only renders the state it is
 // handed and says which button was pressed.
+//
+// Plan 2026-11-03-001 U4 / R6, R7: each change has Edit (the page opens the
+// sheet on it); Discard is "Clear all", still asking once; a change that
+// skips days off lists the shifts the server split it into.
 import { ref, computed, watch, useId } from 'vue'
 import { Button } from 'frappe-ui'
-import { draftSummary, opLabel } from '@/lib/rosterRequests'
+import { blocksLabel, draftSummary, opLabel, skipsOffDays } from '@/lib/rosterRequests'
 
 const props = defineProps({
   /** The draft's rows, in order (`employee_name` plus the operation). */
@@ -23,7 +27,7 @@ const props = defineProps({
 })
 
 const note = defineModel('note', { type: String, default: '' })
-const emit = defineEmits(['remove', 'submit', 'discard', 'save-note'])
+const emit = defineEmits(['edit', 'remove', 'submit', 'discard', 'save-note'])
 
 const listId = useId()
 const noteId = useId()
@@ -101,7 +105,26 @@ function discard() {
           <span class="min-w-0 flex-1 break-words text-ink-gray-7">
             <span class="font-medium text-ink-gray-9">{{ row.employee_name || row.employee }}</span>
             · {{ opLabel(row) }}
+            <span
+              v-if="skipsOffDays(row)"
+              class="ml-1 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-medium text-ink-gray-7"
+            >Skips days off</span>
+            <span
+              v-if="skipsOffDays(row) && row.blocks?.length"
+              class="block text-xs text-ink-gray-6"
+              data-testid="roster-draft-blocks"
+            >{{ blocksLabel(row.blocks) }}</span>
           </span>
+          <button
+            type="button"
+            class="inline-flex min-h-11 shrink-0 cursor-pointer items-center rounded px-2 text-sm font-medium text-ink-blue-link hover:bg-surface-gray-2 disabled:cursor-not-allowed disabled:opacity-50"
+            :aria-label="`Edit change ${index + 1}: ${row.employee_name || row.employee}, ${opLabel(row)}`"
+            :data-cell-key="`draft-edit|${index}`"
+            :disabled="busy"
+            @click="emit('edit', index)"
+          >
+            Edit
+          </button>
           <button
             type="button"
             class="inline-flex min-h-11 shrink-0 cursor-pointer items-center rounded px-2 text-sm font-medium text-ink-red-4 hover:bg-surface-gray-2 disabled:cursor-not-allowed disabled:opacity-50"
@@ -168,7 +191,7 @@ function discard() {
       class="mt-2 text-sm font-medium text-ink-gray-9"
       role="alert"
     >
-      Discard all {{ summary }}? This can't be undone.
+      Clear all {{ summary }}? This can't be undone.
     </p>
 
     <div class="mt-2 flex flex-wrap items-center gap-2">
@@ -189,7 +212,7 @@ function discard() {
         data-testid="roster-discard"
         @click="discard"
       >
-        {{ confirmDiscard ? 'Yes, discard' : 'Discard' }}
+        {{ confirmDiscard ? 'Yes, clear all' : 'Clear all' }}
       </Button>
       <Button
         v-if="confirmDiscard"

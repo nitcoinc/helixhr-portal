@@ -16864,11 +16864,10 @@ def _save_draft_rows(doc, me, ops, note=None):
 
 def _check_roster_draft_token(doc, expected_modified):
 	"""Plan 2026-11-03-001 KTD8 / R9: refuse a save built on a draft another
-	tab has since changed, created or sent. None skips the check -- the
-	pre-token client still saves (upgrade path: make it required once every
-	caller sends it)."""
+	tab has since changed, created or sent. Required: a save without it
+	cannot tell, so it is refused the same way ("" means "no draft yet")."""
 	if expected_modified is None:
-		return
+		frappe.throw(_(_ROSTER_DRAFT_MOVED))
 	current = str(doc.modified) if doc else ""
 	if str(expected_modified or "").strip() != current:
 		frappe.throw(_(_ROSTER_DRAFT_MOVED))
@@ -16880,8 +16879,9 @@ def save_roster_draft(rows, note=None, expected_modified=None):
 	it on first save. Refused whole, naming the person, when any operation
 	is not one the caller may ask for. An empty list keeps an empty Draft
 	rather than deleting it: a reopened request keeps its history.
-	`expected_modified` is the draft's `modified` the caller last saw (""
-	for no draft); a mismatch is refused (plan 2026-11-03-001 KTD8)."""
+	`expected_modified` (required) is the draft's `modified` the caller
+	last saw ("" for no draft); a mismatch or a missing one is refused (plan
+	2026-11-03-001 KTD8)."""
 	rate_limit_per_user("save_roster_draft")
 	me = _my_employee()
 	ops = _roster_draft_ops(rows)

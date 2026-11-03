@@ -18,7 +18,6 @@ from frappe.tests import IntegrationTestCase
 from helixhr import api, reminders
 from helixhr.api import (
 	act_on_approval,
-	add_roster_ops_bulk,
 	get_approval_detail,
 	get_my_approvals,
 	get_pending_by_approver,
@@ -26,9 +25,14 @@ from helixhr.api import (
 	get_roster_draft,
 	get_roster_week,
 	reopen_roster_change,
-	save_roster_draft,
 	submit_roster_change,
 	withdraw_roster_change,
+)
+from helixhr.api import (
+	add_roster_ops_bulk as _add_roster_ops_bulk,
+)
+from helixhr.api import (
+	save_roster_draft as _save_roster_draft,
 )
 from helixhr.tests.test_api_people import _ensure_other_company
 from helixhr.tests.test_api_roster import roster_employee, row_for, seed_assignment
@@ -54,6 +58,29 @@ WEEK = "2031-03-03"
 TOMORROW = "2031-03-06"
 HR_IN_SCOPE = "roster-hr-a@helixhr.test"
 HR_OUT_OF_SCOPE = "roster-hr-b@helixhr.test"
+
+
+_CURRENT = object()
+
+
+def _draft_token():
+	"""The caller's Draft `modified` as the browser holds it ("" for none)."""
+	doc = api._my_roster_draft(api._my_employee())
+	return str(doc.modified) if doc else ""
+
+
+def save_roster_draft(rows, note=None, expected_modified=_CURRENT):
+	"""`api.save_roster_draft` with the current token unless a test passes
+	its own (KTD8: the token is required)."""
+	if expected_modified is _CURRENT:
+		expected_modified = _draft_token()
+	return _save_roster_draft(rows, note, expected_modified)
+
+
+def add_roster_ops_bulk(op, expected_modified=_CURRENT, **kwargs):
+	if expected_modified is _CURRENT:
+		expected_modified = _draft_token()
+	return _add_roster_ops_bulk(op, expected_modified=expected_modified, **kwargs)
 
 
 def assign(employee, from_date, to_date=None, shift_type=PORTAL_SHIFT_TYPE):
@@ -1089,6 +1116,18 @@ class TestDraftToken(RosterChangeTestCase):
 		self.assertIn("another tab", self.refused([assign(report, "2031-03-07")], expected_modified=""))
 		again = save_roster_draft([assign(report, "2031-03-07")], expected_modified=first["modified"])["draft"]
 		self.assertEqual(again["rows"][0]["from_date"], "2031-03-07")
+
+	def test_a_save_without_a_token_is_refused(self):
+		report = self.report("no-token")
+		self.as_manager()
+		with self.assertRaises(frappe.ValidationError) as caught:
+			_save_roster_draft([assign(report, TOMORROW)])
+		self.assertIn("another tab", str(caught.exception))
+		with self.assertRaises(frappe.ValidationError):
+			_add_roster_ops_bulk(
+				{"action": "Assign", "shift_type": PORTAL_SHIFT_TYPE, "from_date": TOMORROW}, whole_team=1
+			)
+		self.assertFalse(frappe.db.exists(DOCTYPE, {"employee": self.manager, "status": "Draft"}))
 
 	def test_an_empty_save_on_an_existing_draft_keeps_an_empty_draft(self):
 		report = self.report("empty")
