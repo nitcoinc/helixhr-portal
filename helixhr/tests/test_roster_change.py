@@ -153,7 +153,7 @@ class TestDraft(RosterChangeTestCase):
 			saved["preview"][first],
 			[
 				{
-					"key": "new-0",
+					"key": "new-0-0",
 					"shift_type": PORTAL_SHIFT_TYPE,
 					"start_date": TOMORROW,
 					"end_date": "2031-03-20",

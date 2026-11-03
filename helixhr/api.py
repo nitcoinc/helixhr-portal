@@ -16635,7 +16635,7 @@ def _review_roster_ops(me, ops):
 	if runnable:
 		employees = {op["employee"] for _index, op in runnable}
 		before = read_coverage(employees, min(dates) if dates else user_today())
-		after, simulated = simulate(before, [op for _index, op in runnable])
+		after, simulated, _steps = simulate(before, [op for _index, op in runnable])
 		for problem in simulated:
 			index, op = runnable[problem["index"]]
 			problems.append(
@@ -17076,7 +17076,7 @@ def _roster_request_review(doc, ops, for_update=False):
 	names = {row.employee: row.employee_name or row.employee for row in doc.rows}
 	starts = [window[0] for window in windows.values() if window]
 	before = read_coverage(employees, min(starts) if starts else user_today(), for_update=for_update)
-	after, simulated = simulate(before, ops)
+	after, simulated, _steps = simulate(before, ops)
 	manager_name = doc.employee_name or doc.employee
 	todays = {}
 	conflicts = []
