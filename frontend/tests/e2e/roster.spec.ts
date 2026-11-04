@@ -470,6 +470,11 @@ test.describe('manager roster requests', () => {
     await expect(hint).toHaveCount(0)
     await search.fill('')
     await expect(hint).toContainText('of 120. To change everyone, choose Whole team above.')
+    // Typing a query hides the shown hint; clearing it brings it back.
+    await search.fill(COLLEAGUE.slice(0, 3))
+    await expect(hint).toHaveCount(0)
+    await search.fill('')
+    await expect(hint).toContainText('of 120. To change everyone, choose Whole team above.')
     await page.unroute('**/api/method/helixhr.api.get_roster_week*')
     await search.fill('zz')
     await expect(hint).toHaveCount(0)

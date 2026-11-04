@@ -1529,6 +1529,9 @@ single-field requests (`correction_field`) still display and decide as before.
   to HR". All fill gates (password unless SSO, Active, recipient) still
   apply, and a retry with the same `operation_key` gives one notice and one
   alert.
+  The same-value answer is value-based idempotency (review C3): a fill
+  stores no operation key, so a new key re-sending the value HR set also
+  reports applied; upgrade path is storing the key with the self-filled mark.
 - **After a fill:** an Info Comment "Self-filled by the employee, not
   verified by HR: <labels>" on the Employee, and for a bank fill a
   Notification Log alert to every HR Manager in scope (not the caller):
@@ -2661,7 +2664,7 @@ literal case table in both test suites keeps them equal.
   simulator adds a note: "Later shifts were left as they are: their weekly
   offs and holidays can't be worked out past the last shift changed. Check
   the rest of the run." With no holiday list at all and a later same-shift
-  block, it reads "Only the shift on that date was changed: ...". A break at
+  block, it reads "Only the shift on that date was updated: ...". A break at
   a working day or a different shift gets none. Notes come through an
   optional `notes` list argument to `simulate` (`{index, employee,
   message}`, named and re-indexed like problems), never refuse, are not

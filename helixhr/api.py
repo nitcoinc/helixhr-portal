@@ -10118,6 +10118,12 @@ def submit_my_profile_changes(changes, seen=None, operation_key=None, password=N
 	# Review C2: in a blank group a non-identity field (salary mode) fills
 	# only when nothing is on file for it; a different value on file goes to
 	# HR as its own row, and the same value is already applied.
+	# Review C3: that same-value case is value-based idempotency. A fill
+	# stores no operation key (only a request does), so a retried
+	# salary-mode-only fill can't be told from a new submit of the value HR
+	# already set; both answer `applied` and write nothing. Upgrade path:
+	# store the key with the self-filled mark, then refuse a new key here
+	# with "That is already the value on your record."
 	to_hr, unchanged = [], []
 	for group in fill_groups:
 		for field in group_fields[group]:

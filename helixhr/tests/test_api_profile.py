@@ -1009,6 +1009,17 @@ class TestSubmitMyProfileChanges(IntegrationTestCase):
 		self.assertEqual(len(self._mails_to("employee-personal@helixhr.test")), mails)
 		self.assertEqual(len(self._alerts()), len(alerts))
 
+	def test_a_salary_mode_hr_already_set_answers_applied_without_writing(self):
+		# Review C3: value-based idempotency; a fill keeps no operation key,
+		# so a new key can't be told from a lost-response retry.
+		frappe.db.set_value("Employee", self.employee_name, "salary_mode", "Cash")
+		mails = len(self._mails_to("employee-personal@helixhr.test"))
+		result = self._submit({"salary_mode": "Cash"}, {"bank": "blank"}, key=str(uuid.uuid4()))
+		self.assertEqual(result["status"], "applied", result)
+		self.assertEqual([row["field"] for row in result["applied"]], ["salary_mode"])
+		self.assertIsNone(result["request"])
+		self.assertEqual(len(self._mails_to("employee-personal@helixhr.test")), mails)
+
 	def test_a_salary_mode_only_fill_still_passes_every_gate(self):
 		for password in (None, "wrong-password"):
 			errors = self._errors(self._submit({"salary_mode": "Cash"}, {"bank": "blank"}, password=password))

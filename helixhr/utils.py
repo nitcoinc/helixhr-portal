@@ -121,6 +121,10 @@ PROFILE_CHANGE_GROUPS = {
 	"passport": ("passport_number", "date_of_issue", "valid_upto", "place_of_issue"),
 	"insurance": ("health_insurance_provider", "health_insurance_no"),
 }
+# Fix plan 2026-11-04-001 KTD6: India-only Employee fields a site may not
+# have. Preflight only WARNs on a missing one -- the Bank & IDs first-fill
+# core-field rule already skips fields the site lacks.
+PROFILE_REGIONAL_FIELDS = frozenset({"ifsc_code", "micr_code", "pan_number", "provident_fund_account"})
 # Fix plan 2026-11-04-001 KTD1: a payroll preference, not an identifier. HR
 # pre-setting it says nothing about whether the group's details exist, so it
 # never makes a group "filled".

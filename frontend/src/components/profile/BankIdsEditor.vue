@@ -76,7 +76,8 @@ const routeValues = computed(() => Object.values(route.value))
 const needsPassword = computed(
   () => props.fillNeedsPassword && routeValues.value.some((to) => to !== 'hr'),
 )
-const needsProof = computed(() => routeValues.value.some((to) => to !== 'fill'))
+const ROUTE_LABEL = { fill: 'Fills in now', hr: 'Goes to HR', both: 'Part goes to HR' }
+const needsProof = computed(() => routeValues.value.some((to) => to === 'hr' || to === 'both'))
 const labelOf = (name) => props.fields.find((field) => field.fieldname === name)?.label || name
 const canSend = computed(
   () =>
@@ -202,7 +203,7 @@ onMounted(() => {
           :class="route[run.group] === 'fill' ? 'bg-surface-green-2 text-ink-green-3' : 'bg-surface-amber-1 text-ink-amber-3'"
           :data-testid="`bank-edit-route-${run.group}`"
         >
-          {{ { fill: 'Fills in now', hr: 'Goes to HR', both: 'Part goes to HR' }[route[run.group]] }}
+          {{ ROUTE_LABEL[route[run.group]] }}
         </span>
       </div>
       <p

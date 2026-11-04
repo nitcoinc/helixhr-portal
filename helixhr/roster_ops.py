@@ -58,7 +58,7 @@ RUN_STOPPED_UNKNOWN = (
 	"past the last shift changed. Check the rest of the run."
 )
 RUN_OFF_DAYS_UNKNOWN = (
-	"Only the shift on that date was changed: their weekly offs and holidays can't be worked out, "
+	"Only the shift on that date was updated: their weekly offs and holidays can't be worked out, "
 	"so later shifts were left as they are. Check the rest of the run."
 )
 
