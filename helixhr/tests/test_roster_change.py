@@ -1002,6 +1002,18 @@ class TestSkipOffDays(RosterApprovalTestCase):
 		rows = frappe.get_doc(DOCTYPE, draft["draft"]["name"]).rows
 		self.assertEqual([row.skip_off_days for row in rows], [0, 0])
 
+	def test_skip_flag_is_read_by_flag_and_garbage_counts_as_off(self):
+		# `api._flag` (frappe `sbool`): 1 / "1" / "true" / True on; 0 / "false"
+		# off; anything else, "yes" included, is neither and counts as off.
+		def kept(value):
+			row = {**assign("E1", "2031-03-10", "2031-03-28"), "skip_off_days": value}
+			return api._roster_draft_ops([row])[0]["skip_off_days"]
+
+		for value in (1, "1", "true", "True", True):
+			self.assertEqual(kept(value), 1, value)
+		for value in (0, "0", "false", False, "yes", None, "junk", " 1 "):
+			self.assertEqual(kept(value), 0, value)
+
 	def test_unknown_off_days_refuse_the_skip_naming_the_person(self):
 		report = self.report("skip-nolist")
 		real = api._holiday_list_spans

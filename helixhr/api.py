@@ -17063,16 +17063,13 @@ def _roster_draft_ops(rows):
 		for field in _ROSTER_ALL_OP_FIELDS:
 			value = str(row.get(field) or "").strip() if field in keep else ""
 			op[field] = value or None
-		# Plan 2026-11-03-001 KTD1: kept only on an Assign with an end date.
+		# Plan 2026-11-03-001 KTD1: kept only on an Assign with an end date;
+		# a garbage value (`_flag` -> None) counts as off.
 		op["skip_off_days"] = int(
-			action == ROSTER_OP_ASSIGN and bool(op["to_date"]) and _truthy(row.get("skip_off_days"))
+			action == ROSTER_OP_ASSIGN and bool(op["to_date"]) and bool(_flag(row.get("skip_off_days")))
 		)
 		ops.append(op)
 	return ops
-
-
-def _truthy(value):
-	return value in (1, True) or str(value).strip().lower() in ("1", "true")
 
 
 def _roster_note(note):

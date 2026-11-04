@@ -95,8 +95,6 @@ function isOff(off, day) {
   return off.dates.has(day)
 }
 
-const flag = (value) => value === 1 || value === true || value === '1'
-
 // The block right after `block` in its run: the next one by date, same
 // shift type, only known off days between (`roster_ops._next_in_run`).
 function nextInRun(rows, block, off) {
@@ -189,7 +187,8 @@ function apply(rows, op, index, off, runAware, notes) {
     if (op.to_date && !end) return fail(BAD_DATE)
     if (end && end < day) return fail(END_BEFORE_START)
     let spans = [[day, end]]
-    if (runAware && end && flag(op.skip_off_days)) {
+    // 0 / 1 from the server or `rosterRequests.toOp`; not parsed again here.
+    if (runAware && end && op.skip_off_days) {
       if (daysBetween(day, end) + 1 > SKIP_MAX_DAYS) return fail(SKIP_SPAN)
       if (!off || day < off.from || end > off.to) return fail(OFF_DAYS_UNKNOWN)
       spans = workingSpans(day, end, off)

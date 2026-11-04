@@ -62,6 +62,10 @@ async function more() {
   }
 }
 
+// A12: "Select all shown" stops at the loaded page; point a bigger team to
+// "Whole team" instead. Not while searching -- the matches are the point then.
+const partial = computed(() => !query.value.trim() && total.value > people.value.length)
+
 const offered = computed(() => people.value.filter((row) => row.employee !== props.me && !row.pending_request))
 const pickedSet = computed(() => new Set(picked.value))
 const allPicked = computed(
@@ -116,6 +120,13 @@ function toggleAll(on) {
         data-testid="roster-pick-count"
       >{{ picked.length }} selected</span>
     </div>
+    <p
+      v-if="partial"
+      class="text-sm text-ink-gray-6"
+      data-testid="roster-pick-whole-team-hint"
+    >
+      Showing {{ people.length }} of {{ total }}. To change everyone, choose Whole team above.
+    </p>
     <p
       v-if="loading && !people.length"
       class="text-sm text-ink-gray-6"

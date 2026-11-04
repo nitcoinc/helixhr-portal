@@ -88,6 +88,15 @@ function discard() {
         {{ expanded ? 'Hide changes' : 'Show changes' }}
       </button>
     </div>
+    <!-- R4: the notes live in the list; say they exist while it is closed. -->
+    <p
+      v-if="notes.length && !expanded"
+      class="mt-1 text-xs text-ink-blue-3"
+      role="status"
+      data-testid="roster-draft-notes-hint"
+    >
+      {{ notes.length === 1 ? '1 note' : `${notes.length} notes` }} on these changes. Show changes to read {{ notes.length === 1 ? 'it' : 'them' }}.
+    </p>
 
     <div
       v-show="expanded"

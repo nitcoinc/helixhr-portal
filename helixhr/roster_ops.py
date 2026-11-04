@@ -119,10 +119,6 @@ def _is_off(off, day):
 	return day in off["dates"]
 
 
-def _flag(value):
-	return value in (1, True, "1")
-
-
 def _next_in_run(rows, block, off):
 	"""The block right after `block` in its run (KTD3): the next one by date,
 	same shift type, with only known off days between. None at a break."""
@@ -246,7 +242,8 @@ def _apply(rows, op, index, off, run_aware, notes):
 		if end and end < day:
 			return END_BEFORE_START, []
 		spans = [(day, end)]
-		if run_aware and end and _flag(op.get("skip_off_days")):
+		# `skip_off_days` arrives as 0 / 1 (`api._roster_draft_ops`, `cint` on rows).
+		if run_aware and end and op.get("skip_off_days"):
 			if (end - day).days + 1 > SKIP_MAX_DAYS:
 				return SKIP_SPAN, []
 			if off is None or not (off["from"] <= day and end <= off["to"]):
