@@ -76,8 +76,10 @@ export function call(method, params) {
  */
 async function uploadFile(method, file, params) {
   const formData = new FormData()
-  formData.append('file', file)
-  for (const [key, value] of Object.entries(params)) formData.append(key, value)
+  if (file) formData.append('file', file)
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null) formData.append(key, value)
+  }
 
   const url = `/api/method/${method}`
   const response = await fetch(url, {
@@ -130,10 +132,16 @@ export function attachToRequestReply(file, { name }) {
   return uploadFile('helixhr.api.attach_to_request_reply', file, { name })
 }
 
-/** Plan 2026-10-02-001 U14: file a profile correction with its proof in one
- * multipart call, so the request and the proof commit together (U13). */
-export function createCorrectionRequest(file, params) {
-  return uploadFile('helixhr.api.create_my_request', file, params)
+/** Plan 2026-11-03-001 U9: every staged Bank & IDs change in one multipart
+ * call; `file` is the proof, sent only when a change goes to HR. Resolves to
+ * the server's result, a refusal included (`{status: "refused", errors}`). */
+export function submitProfileChanges(file, { changes, seen, operationKey, password }) {
+  return uploadFile('helixhr.api.submit_my_profile_changes', file, {
+    changes: JSON.stringify(changes),
+    seen: JSON.stringify(seen),
+    operation_key: operationKey,
+    password: password || undefined,
+  })
 }
 
 /** Plan 2026-09-30-001 U5: set or replace the signed-in employee's own

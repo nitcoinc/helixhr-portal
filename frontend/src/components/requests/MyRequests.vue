@@ -635,6 +635,9 @@ defineExpose({ newRequest })
                   class="tabular text-ink-gray-9"
                   :aria-label="spokenValue(selected.correction_proposed_masked || '')"
                 >{{ selected.correction_proposed_masked }}</span>
+                <template v-if="selected.profile_change_count > 1">
+                  and <span class="tabular">{{ selected.profile_change_count - 1 }}</span> more
+                </template>
               </p>
 
               <ul
@@ -786,6 +789,7 @@ defineExpose({ newRequest })
         <RequestForm
           :initial-category="route.query.category"
           :initial-subject="route.query.subject"
+          :initial-details="route.query.details"
           @created="onCreated"
           @cancel="showForm = false"
         />

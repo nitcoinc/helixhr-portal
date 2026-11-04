@@ -1085,6 +1085,22 @@ def setup_playwright_fixtures():
 	# profile-tabs.spec.ts: a known account number to prove it reaches the
 	# page masked to its last four, never whole.
 	frappe.db.set_value("Employee", employee_name, {"bank_ac_no": "004512345678", "date_of_birth": "1990-01-01"})
+	# profile-bank-edit.spec.ts: passport starts blank so its first-time fill
+	# runs on every seed, and a personal email gives the fill's security
+	# notice an out-of-band address (review B3) -- not company_email, which
+	# the Directory tests need unset. `set_value` writes no Version, so no
+	# personal-email hold starts.
+	frappe.db.set_value(
+		"Employee",
+		employee_name,
+		{
+			"passport_number": None,
+			"date_of_issue": None,
+			"valid_upto": None,
+			"place_of_issue": None,
+			"personal_email": "employee-personal@helixhr.test",
+		},
+	)
 	from helixhr.patches.v1_0.seed_profile_correction_category import execute as seed_profile_correction
 
 	seed_profile_correction()

@@ -350,6 +350,8 @@ def get_my_profile(**kwargs):
 		"sections": {name: section(name) for name in PROFILE_SECTION_FIELDS},
 		"failed_sections": failed,
 		"correction_category": PROFILE_CORRECTION_CATEGORY if cint(category_active) else None,
+		# Plan 2026-11-03-001 U9 (R17): fields in an open request are locked.
+		"pending_fields": sorted(_safe(lambda: _fields_in_open_corrections(employee), default=set()) or ()),
 		# HR and administrators only (KTD6): every employee is a System
 		# User, and the portal host 404s Desk for them.
 		"desk_url": get_url_to_form("Employee", employee) if _portal_desk_url(frappe.session.user) else None,
@@ -369,6 +371,7 @@ def _profile_section(employee, name, meta):
 			"value": _profile_value(field, values.get(field)),
 			"masked": field in PROFILE_MASKED_FIELDS,
 			"editable": field in PROFILE_EDITABLE_FIELDS,
+			**({"change": _profile_change_input(field, meta)} if field in PROFILE_SELF_SERVICE_FIELDS else {}),
 		}
 		for field in fieldnames
 	]
@@ -378,6 +381,26 @@ def _profile_section(employee, name, meta):
 		if meta.has_field(table)
 	]
 	return {"fields": fields, "tables": tables}
+
+
+_PROFILE_LINK_OPTIONS_MAX = 200
+
+
+def _profile_change_input(field, meta):
+	"""How the Bank & IDs edit mode takes a field (plan 2026-11-03-001 U9):
+	its group, the input kind, and the allowed values of a Select or Link,
+	which `_parse_profile_changes` re-checks."""
+	df = meta.get_field(field)
+	options = None
+	if df.fieldtype == "Select":
+		options = [option for option in (df.options or "").split("\n") if option]
+	elif df.fieldtype == "Link":
+		options = frappe.get_all(df.options, pluck="name", order_by="name asc", limit=_PROFILE_LINK_OPTIONS_MAX)
+	return {
+		"group": next(group for group, fields in PROFILE_CHANGE_GROUPS.items() if field in fields),
+		"type": df.fieldtype if df.fieldtype in ("Date", "Select", "Link") else "Data",
+		"options": options,
+	}
 
 
 def _sentence_case(label):

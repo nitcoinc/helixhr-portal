@@ -811,6 +811,30 @@ class TestSubmitMyProfileChanges(IntegrationTestCase):
 
 	BANK: ClassVar[dict] = {"bank_name": "New Bank", "bank_ac_no": ACCOUNT}
 
+	# --- what the edit mode reads (U9) -------------------------------------
+
+	def test_get_my_profile_describes_each_editable_field_and_the_locked_ones(self):
+		from helixhr.api import get_my_profile
+
+		frappe.db.set_value("Employee", self.employee_name, {"bank_name": "Old Bank", "bank_ac_no": "111122223333"})
+		result = self._submit({"bank_ac_no": self.ACCOUNT}, {"bank": "filled"}, proof=True)
+		self.assertEqual(result["status"], "requested", result)
+		frappe.set_user(EMPLOYEE_USER)
+		try:
+			profile = get_my_profile()
+		finally:
+			frappe.set_user("Administrator")
+		fields = {f["fieldname"]: f for f in profile["sections"]["bank"]["fields"]}
+		self.assertEqual(fields["bank_ac_no"]["change"], {"group": "bank", "type": "Data", "options": None})
+		self.assertEqual(fields["salary_mode"]["change"]["type"], "Select")
+		self.assertIn("Bank", fields["salary_mode"]["change"]["options"])
+		self.assertEqual(fields["date_of_issue"]["change"]["group"], "passport")
+		self.assertEqual(fields["date_of_issue"]["change"]["type"], "Date")
+		self.assertIn("bank_ac_no", profile["pending_fields"])
+		self.assertNotIn(self.ACCOUNT, frappe.as_json(profile))
+		job = profile["sections"]["job"]["fields"]
+		self.assertFalse(any("change" in f for f in job))
+
 	# --- first-time fill ---------------------------------------------------
 
 	def test_a_blank_bank_group_fills_now_with_one_notice_mark_and_hr_alert(self):

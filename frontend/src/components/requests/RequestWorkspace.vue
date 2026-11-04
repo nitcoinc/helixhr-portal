@@ -679,6 +679,9 @@ const workTimeline = computed(() => {
               class="tabular text-ink-gray-9"
               :aria-label="spokenValue(workSelected.correction_proposed_masked || '')"
             >{{ workSelected.correction_proposed_masked }}</span>
+            <template v-if="workSelected.profile_change_count > 1">
+              and <span class="tabular">{{ workSelected.profile_change_count - 1 }}</span> more
+            </template>
           </p>
 
           <ul
