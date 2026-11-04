@@ -17224,30 +17224,34 @@ def _review_roster_ops(me, ops):
 			continue
 		runnable.append((index, op))
 
-	before, after, off_days = {}, {}, {}
+	before, after, off_days, notes = {}, {}, {}, []
 	steps = [[] for _op in ops]
 	dates = [op_date(op) for _index, op in runnable if op_date(op)]
 	if runnable:
 		employees = {op["employee"] for _index, op in runnable}
 		before = read_coverage(employees, min(dates) if dates else user_today())
 		off_days = _roster_off_days(employees, [op for _index, op in runnable], before)
-		after, simulated, taken = simulate(before, [op for _index, op in runnable], off_days)
+		simulated_notes = []
+		after, simulated, taken = simulate(before, [op for _index, op in runnable], off_days, simulated_notes)
 		for position, (index, _op) in enumerate(runnable):
 			steps[index] = taken[position]
-		for problem in simulated:
-			index, op = runnable[problem["index"]]
-			problems.append(
-				{
-					"index": index,
-					"employee": op["employee"],
-					"message": _("{0}: {1}").format(
-						team[op["employee"]].employee_name, _(problem["message"])
-					),
-				}
-			)
+		# Plan 2026-11-04-001 U2: notes are named and re-indexed like problems,
+		# but never refuse.
+		for found, into in ((simulated, problems), (simulated_notes, notes)):
+			for item in found:
+				index, op = runnable[item["index"]]
+				into.append(
+					{
+						"index": index,
+						"employee": op["employee"],
+						"message": _("{0}: {1}").format(
+							team[op["employee"]].employee_name, _(item["message"])
+						),
+					}
+				)
 	problems.sort(key=lambda problem: problem["index"])
 	return frappe._dict(
-		team=team, before=before, after=after, problems=problems, steps=steps, off_days=off_days
+		team=team, before=before, after=after, problems=problems, steps=steps, off_days=off_days, notes=notes
 	)
 
 
@@ -17331,7 +17335,8 @@ def _roster_draft_payload(me, doc=None):
 	"""The Draft with its preview: `preview` is the simulated coverage of
 	every employee it names (the server's answer the browser mirror of
 	`roster_ops` must agree with), `problems` what would refuse it now --
-	coverage moves under a saved draft. None when there is no draft."""
+	coverage moves under a saved draft -- and `notes` the non-blocking run
+	notes (plan 2026-11-04-001 U2). None when there is no draft."""
 	doc = doc or _my_roster_draft(me)
 	if not doc:
 		return None
@@ -17345,6 +17350,7 @@ def _roster_draft_payload(me, doc=None):
 		**payload,
 		"preview": _coverage_payload(review.after),
 		"problems": review.problems,
+		"notes": review.notes,
 		"block_count": sum(len(row["blocks"]) for row in payload["rows"]),
 	}
 

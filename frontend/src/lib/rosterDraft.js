@@ -30,6 +30,13 @@ export const OFF_DAYS_UNKNOWN =
   "Their weekly offs and holidays can't be worked out for those dates. " +
   'Turn off skipping weekly offs and holidays, or ask HR to set up their holiday list.'
 export const SKIP_SPAN = 'Skipping weekly offs and holidays works on at most 92 days at a time.'
+// Plan 2026-11-04-001 U2 / KTD5: non-blocking notes on a run-aware Change / End.
+export const RUN_STOPPED_UNKNOWN =
+  "Later shifts were left as they are: their weekly offs and holidays can't be worked out " +
+  'past the last shift changed. Check the rest of the run.'
+export const RUN_OFF_DAYS_UNKNOWN =
+  "Only the shift on that date was changed: their weekly offs and holidays can't be worked out, " +
+  'so later shifts were left as they are. Check the rest of the run.'
 
 /** `value` when it is a real ISO calendar date, otherwise null. */
 function isoDate(value) {
@@ -104,6 +111,22 @@ function nextInRun(rows, block, off) {
   return following
 }
 
+// Why the run ending at `block` may stop short, or null; a working day or
+// another shift type is a normal break (`roster_ops._run_note`).
+function runNote(rows, block, off) {
+  if (block.end_date === null) return null
+  const later = rows.filter((a) => a.start_date > block.end_date)
+  if (!later.length) return null
+  const following = later.reduce((min, a) => (a.start_date < min.start_date ? a : min))
+  if (following.shift_type !== block.shift_type) return null
+  if (!off) return RUN_OFF_DAYS_UNKNOWN
+  for (let day = addDays(block.end_date, 1); day < following.start_date; day = addDays(day, 1)) {
+    const state = isOff(off, day)
+    if (state !== true) return state === null ? RUN_STOPPED_UNKNOWN : null
+  }
+  return null
+}
+
 const hasPreviousInRun = (rows, block, off) =>
   rows.some((a) => a !== block && nextInRun(rows, a, off) === block)
 
@@ -147,7 +170,7 @@ function step(action, employee, block, endDate = null) {
 
 const fail = (message) => [message, []]
 
-function apply(rows, op, index, off, runAware) {
+function apply(rows, op, index, off, runAware, notes) {
   const employee = op.employee
   if (!ACTIONS.includes(op.action)) return fail(BAD_ACTION)
   if (op.action !== END && !op.shift_type) return fail(NO_SHIFT_TYPE)
@@ -182,6 +205,9 @@ function apply(rows, op, index, off, runAware) {
   if (!target) return fail(NO_SHIFT_ON_DATE)
   const later = []
   for (let next = nextInRun(rows, target, off); next; next = nextInRun(rows, next, off)) later.push(next)
+  const note = runAware ? runNote(rows, later.at(-1) ?? target, off) : null
+  // Pushed before a refusal check; `simulate` drops it if refused.
+  if (note) notes.push(note)
 
   const steps = []
   if (op.action === CHANGE) {
@@ -228,8 +254,10 @@ function apply(rows, op, index, off, runAware) {
  * refused operation changes nothing and the rest still run. `offDays`
  * (`{ employee: { from, to, dates } | null }`) turns on skip expansion and
  * run-aware Change / End; omitted, the legacy single-block rules apply
- * (`roster_ops.simulate`). */
-export function simulate(coverage, ops, offDays = null) {
+ * (`roster_ops.simulate`). `notes`, when an array, collects `{ index,
+ * employee, message }` for a run-aware Change / End that may have stopped
+ * short on unknown off days; notes never refuse and are not steps. */
+export function simulate(coverage, ops, offDays = null, notes = null) {
   const result = {}
   for (const [employee, rows] of Object.entries(coverage ?? {})) {
     result[employee] = rows.map((a) => ({
@@ -246,9 +274,11 @@ export function simulate(coverage, ops, offDays = null) {
   ops.forEach((op, index) => {
     result[op.employee] ??= []
     if (!(op.employee in offs)) offs[op.employee] = runAware ? normalizeOff(offDays[op.employee]) : null
-    const [message, taken] = apply(result[op.employee], op, index, offs[op.employee], runAware)
+    const found = []
+    const [message, taken] = apply(result[op.employee], op, index, offs[op.employee], runAware, found)
     steps.push(taken)
     if (message) problems.push({ index, employee: op.employee, message })
+    else if (notes) notes.push(...found.map((note) => ({ index, employee: op.employee, message: note })))
   })
   return { coverage: result, problems, steps }
 }

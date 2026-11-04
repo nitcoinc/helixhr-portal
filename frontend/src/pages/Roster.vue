@@ -1026,6 +1026,7 @@ const scopeLine = computed(() => {
       v-model:note="note"
       :rows="draftRows"
       :problems="draft?.problems || []"
+      :notes="draft?.notes || []"
       :saving="saving"
       :save-error="saveError"
       :submitting="submitting"

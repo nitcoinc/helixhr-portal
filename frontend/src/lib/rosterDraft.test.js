@@ -8,6 +8,8 @@ import {
   NO_WORKING_DAYS,
   OFF_DAYS_UNKNOWN,
   OVERLAP,
+  RUN_OFF_DAYS_UNKNOWN,
+  RUN_STOPPED_UNKNOWN,
   SKIP_SPAN,
   opDate,
   simulate,
@@ -17,6 +19,7 @@ import {
 // coverage / expect: { employee: [[key, shift_type, start_date, end_date]] }
 // problems: [[op index, message]]
 // off_days (optional, default {} = every day unknown): { employee: { from, to, dates } | null }
+// notes (optional, default []): [[op index, message]] -- non-blocking
 // steps (optional): per op, [[action, key, shift_type, start_date, end_date]]
 const WEEKENDS = [
   '2026-11-01',
@@ -588,7 +591,10 @@ const CASES = [
         ['SA-4', 'Day', '2026-11-23', '2026-11-27']
       ]
     },
-    problems: []
+    problems: [],
+    notes: [
+      [0, RUN_OFF_DAYS_UNKNOWN]
+    ]
   },
   {
     name: 'run: a gap day outside the known range breaks the run',
@@ -613,7 +619,59 @@ const CASES = [
         ['SA-4', 'Day', '2026-11-23', '2026-11-27']
       ]
     },
-    problems: []
+    problems: [],
+    notes: [
+      [0, RUN_STOPPED_UNKNOWN]
+    ]
+  },
+  {
+    name: 'run: a change stops where the off days run out',
+    coverage: {
+      E1: [
+        ['SA-1', 'Day', '2026-11-02', '2026-11-06'],
+        ['SA-2', 'Day', '2026-11-09', '2026-11-13'],
+        ['SA-3', 'Day', '2026-11-16', '2026-11-20']
+      ]
+    },
+    off_days: {
+      E1: { from: '2026-11-01', to: '2026-11-13', dates: WEEKENDS }
+    },
+    ops: [
+      { employee: 'E1', action: 'Change', shift_type: 'Night', from_date: '2026-11-04', assignment: 'SA-1' }
+    ],
+    expect: {
+      E1: [
+        ['SA-1', 'Day', '2026-11-02', '2026-11-03'],
+        ['SA-3', 'Day', '2026-11-16', '2026-11-20'],
+        ['new-0-0', 'Night', '2026-11-04', '2026-11-06'],
+        ['new-0-1', 'Night', '2026-11-09', '2026-11-13']
+      ]
+    },
+    problems: [],
+    notes: [
+      [0, RUN_STOPPED_UNKNOWN]
+    ]
+  },
+  {
+    name: 'run: unknown off days and no later block, no note',
+    coverage: {
+      E1: [
+        ['SA-1', 'Day', '2026-11-02', '2026-11-06']
+      ]
+    },
+    off_days: {
+      E1: null
+    },
+    ops: [
+      { employee: 'E1', action: 'End', to_date: '2026-11-04', assignment: 'SA-1' }
+    ],
+    expect: {
+      E1: [
+        ['SA-1', 'Day', '2026-11-02', '2026-11-04']
+      ]
+    },
+    problems: [],
+    notes: []
   },
 ]
 
@@ -637,9 +695,11 @@ const coverageOut = (coverage) =>
 
 describe('simulate (shared cases)', () => {
   it.each(CASES.map((c) => [c.name, c]))('%s', (_name, c) => {
-    const { coverage, problems, steps } = simulate(coverageIn(c.coverage), c.ops, c.off_days ?? {})
+    const notes = []
+    const { coverage, problems, steps } = simulate(coverageIn(c.coverage), c.ops, c.off_days ?? {}, notes)
     expect(coverageOut(coverage)).toEqual(c.expect)
     expect(problems.map((p) => [p.index, p.message])).toEqual(c.problems)
+    expect(notes.map((n) => [n.index, n.message])).toEqual(c.notes ?? [])
     if (c.steps) {
       expect(
         steps.map((opSteps) =>
