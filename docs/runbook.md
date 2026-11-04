@@ -1004,6 +1004,32 @@ that is the expected outcome when HR edited the same person directly, not a bug.
 accept dates from tomorrow in the employee's company time zone, which also keeps them clear of the
 "editing today's shift" problem above.
 
+**Skipped off days have no assignment, so punches fall back to `default_shift`** (plan
+2026-11-03-001). A request with "Skip weekly offs and holidays" creates one Shift Assignment per
+working run and none on the off days. A check-in on such a day attaches to the Employee's
+`default_shift` (or is `offshift` if there is none). That is expected; fix a real off-day shift
+with an Assign on that day.
+
+**Run-aware edits are a portal behaviour, not a Desk one.** Change or End in a request acts on the
+whole run of blocks separated by off days (later blocks are cancelled or recreated). Desk edits one
+Shift Assignment. If HR edits a run in Desk, end or cancel each block by hand. Requests sent before
+the skip feature (snapshot without `v: 2`) keep the single-block rules. A request returned as
+"shifts changed after this request was sent" may now mean the recomputed create / end / cancel
+steps differ from the stored ones (holiday list edited, for example), not only coverage.
+
+## Bank and ID history is masked, and fills need a password
+
+`events.version_before_insert` masks bank and ID values in every new Employee Version; patch
+`v1_0.mask_employee_identifier_history` masked older rows (idempotent, re-run with
+`bench --site <site> execute helixhr.patches.v1_0.mask_employee_identifier_history.execute`).
+If an Employee save fails with an error from that hook, the mask failed and the save was blocked on
+purpose: fix the cause, never bypass the hook. `personal_email` stays unmasked.
+
+A first-time fill of Bank & IDs asks for the employee's password. On a site with
+`disable_user_pass_login` (Microsoft sign-in only) fills are refused with "Contact HR"; HR enters
+the details in Desk. Self-filled details carry an Info Comment "Self-filled by the employee, not
+verified by HR" on the Employee timeline, and HR Managers get an alert for bank fills.
+
 ## Punch coordinates are erased on a schedule, and the period is unset by default (P3-R28)
 
 `helixhr.tasks.null_stale_checkin_coordinates` runs daily and does nothing at all until an operator
