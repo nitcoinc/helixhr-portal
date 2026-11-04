@@ -147,6 +147,7 @@ from helixhr.utils import (
 	PROFILE_SECTION_FIELDS,
 	PROFILE_SECTION_TABLES,
 	PROFILE_SELF_SERVICE_FIELDS,
+	PROFILE_STATE_EXCLUDED_FIELDS,
 	PROFILE_USER_LINK_FIELDS,
 	REPORT_MANAGER_ROLE,
 	ROLE_LABELS,
@@ -342,6 +343,14 @@ def get_my_profile(**kwargs):
 			return None
 		return value
 
+	groups = _safe(
+		lambda: _profile_group_facts(meta, employee=employee),
+		title="HelixHR profile section failed: groups",
+		default=missing,
+	)
+	if groups is missing:
+		failed.append("groups")
+		groups = None
 	category_active = frappe.db.get_value("HelixHR Request Category", PROFILE_CORRECTION_CATEGORY, "is_active")
 	return {
 		"employee": employee,
@@ -349,6 +358,9 @@ def get_my_profile(**kwargs):
 		"photo_url": _employee_photo_url(employee),
 		"sections": {name: section(name) for name in PROFILE_SECTION_FIELDS},
 		"failed_sections": failed,
+		# Fix plan 2026-11-04-001 KTD3: the Bank & IDs editor's group facts,
+		# the same ones `submit_my_profile_changes` decides by.
+		"groups": groups,
 		"correction_category": PROFILE_CORRECTION_CATEGORY if cint(category_active) else None,
 		# Plan 2026-11-03-001 U9 (R17): fields in an open request are locked.
 		# No password to re-check on SSO-only sites; the editor hides the box.
@@ -386,6 +398,28 @@ def _profile_section(employee, name, meta):
 
 
 _PROFILE_LINK_OPTIONS_MAX = 200
+
+
+def _profile_group_facts(meta, live_text=None, employee=None):
+	"""`{group: {state, core, identity}}` for the Bank & IDs groups (fix plan
+	2026-11-04-001 KTD1-3). `identity` is the group's fields this site has,
+	less `PROFILE_STATE_EXCLUDED_FIELDS`; the group is "filled" iff one of
+	them has a value. `core` is what a first fill must carry, again only
+	fields this site has. `live_text` is `{field: text}`, read from
+	`employee` when not given."""
+	if live_text is None:
+		on_site = [f for fields in PROFILE_CHANGE_GROUPS.values() for f in fields if meta.has_field(f)]
+		values = frappe.db.get_value("Employee", employee, on_site, as_dict=True) or {}
+		live_text = {field: _profile_value_text(values.get(field)) for field in on_site}
+	facts = {}
+	for group, fields in PROFILE_CHANGE_GROUPS.items():
+		identity = [f for f in fields if f not in PROFILE_STATE_EXCLUDED_FIELDS and meta.has_field(f)]
+		facts[group] = {
+			"state": "filled" if any(live_text.get(f) for f in identity) else "blank",
+			"core": [f for f in PROFILE_FILL_CORE_FIELDS.get(group, ()) if meta.has_field(f)],
+			"identity": identity,
+		}
+	return facts
 
 
 def _profile_change_input(field, meta):
@@ -10047,6 +10081,7 @@ def submit_my_profile_changes(changes, seen=None, operation_key=None, password=N
 		"Employee", employee, ["status", *on_site], as_dict=True, for_update=True
 	)
 	live_text = {field: _profile_value_text(live.get(field)) for field in on_site}
+	facts = _profile_group_facts(meta, live_text)
 
 	existing = _request_for_key(key, employee)
 	if existing:
@@ -10067,7 +10102,7 @@ def submit_my_profile_changes(changes, seen=None, operation_key=None, password=N
 	fill_groups, hr_groups, already = [], [], []
 	for group in touched:
 		label = _(PROFILE_CHANGE_GROUP_LABELS[group])
-		state = "filled" if any(live_text[f] for f in group_fields[group]) else "blank"
+		state = facts[group]["state"]
 		if seen.get(group) != state:
 			mine = all(live_text[f] == staged[f] for f in group_fields[group] if f in staged)
 			if seen.get(group) == "blank" and mine:
@@ -10079,6 +10114,25 @@ def submit_my_profile_changes(changes, seen=None, operation_key=None, password=N
 				)
 			continue
 		(fill_groups if state == "blank" else hr_groups).append(group)
+
+	# Review C2: in a blank group a non-identity field (salary mode) fills
+	# only when nothing is on file for it; a different value on file goes to
+	# HR as its own row, and the same value is already applied.
+	to_hr, unchanged = [], []
+	for group in fill_groups:
+		for field in group_fields[group]:
+			if field in staged and field not in facts[group]["identity"] and live_text[field]:
+				(unchanged if live_text[field] == staged[field] else to_hr).append(field)
+	fills = {
+		f: staged[f]
+		for group in fill_groups
+		for f in group_fields[group]
+		if f in staged and f not in to_hr and f not in unchanged
+	}
+	rows = [
+		{"field": f, "proposed": staged[f]}
+		for f in (*(f for group in hr_groups for f in group_fields[group] if f in staged), *to_hr)
+	]
 
 	busy = _fields_in_open_corrections(employee)
 	for field in staged:
@@ -10094,10 +10148,13 @@ def submit_my_profile_changes(changes, seen=None, operation_key=None, password=N
 			if field in staged and staged[field] == live_text[field]:
 				refuse(_("That is already the value on your record."), field=field)
 	for group in fill_groups:
+		# KTD2: only an identifier calls for the core set.
+		if not any(f in staged for f in facts[group]["identity"]):
+			continue
 		missing = [
 			field
-			for field in PROFILE_FILL_CORE_FIELDS.get(group, ())
-			if field in group_fields[group] and field not in staged
+			for field in facts[group]["core"]
+			if field not in staged
 		]
 		if missing:
 			refuse(
@@ -10113,7 +10170,7 @@ def submit_my_profile_changes(changes, seen=None, operation_key=None, password=N
 		refuse(_("The passport's valid-until date has to be after its date of issue."), field="valid_upto")
 
 	recipients = _correction_recipients(employee)
-	if fill_groups:
+	if fills:
 		if live.status != "Active":
 			refuse(_("Your record isn't active, so details can't be filled in here. Contact HR."))
 		if _personal_email_changed_recently(employee):
@@ -10131,7 +10188,7 @@ def submit_my_profile_changes(changes, seen=None, operation_key=None, password=N
 		_check_step_up(password, refuse)
 
 	proof = None
-	if hr_groups:
+	if rows:
 		if PROFILE_CORRECTION_CATEGORY not in _request_categories():
 			refuse(_("Changes to existing bank and ID details aren't being taken right now. Contact HR."))
 		upload = (getattr(frappe.request, "files", None) or {}).get("file")
@@ -10148,8 +10205,6 @@ def submit_my_profile_changes(changes, seen=None, operation_key=None, password=N
 	if errors:
 		return {"status": "refused", "errors": errors}
 
-	fills = {f: staged[f] for group in fill_groups for f in group_fields[group] if f in staged}
-	rows = [{"field": f, "proposed": staged[f]} for group in hr_groups for f in group_fields[group] if f in staged]
 	request = None
 	savepoint = "helixhr_profile_submit"
 	frappe.db.savepoint(savepoint)
@@ -10162,7 +10217,7 @@ def submit_my_profile_changes(changes, seen=None, operation_key=None, password=N
 				_("Those details couldn't be saved on your record. Check them and try again."),
 				elevated=True,
 			)
-			_mark_self_filled(employee, fills, fill_groups)
+			_mark_self_filled(employee, fills)
 		if rows:
 			doc = frappe.get_doc(
 				{
@@ -10184,7 +10239,7 @@ def submit_my_profile_changes(changes, seen=None, operation_key=None, password=N
 
 	# A retried fill (`already`) is reported applied but not announced twice.
 	_send_profile_submit_notice(employee, staged, list(fills), [row["field"] for row in rows], request, recipients)
-	applied = [*fills, *(f for group in already for f in group_fields[group] if f in staged)]
+	applied = [*fills, *unchanged, *(f for group in already for f in group_fields[group] if f in staged)]
 	return _profile_submit_result(applied, staged, request, created=bool(request))
 
 
@@ -10281,18 +10336,26 @@ def _check_step_up(password, refuse):
 		refuse(_("That password isn't right."), field="password")
 
 
-def _mark_self_filled(employee, fills, groups):
+def _mark_self_filled(employee, fills):
 	"""Review B5: the unverified mark on the Employee timeline, and an in-app
-	alert to HR for every bank fill. Labels and masked values only."""
+	alert to HR for every bank fill, worded by what was filled (review C2).
+	Labels and masked values only."""
 	labels = ", ".join(profile_field_label(field) for field in fills)
 	_employee_note(
 		employee,
 		SELF_FILLED_MARK,
 		_("Self-filled by the employee, not verified by HR: {0}").format(frappe.utils.escape_html(labels)),
 	)
-	if "bank" not in groups:
+	bank = [field for field in fills if field in PROFILE_CHANGE_GROUPS["bank"]]
+	if not bank:
 		return
-	name = frappe.db.get_value("Employee", employee, "employee_name") or employee
+	name = frappe.utils.escape_html(frappe.db.get_value("Employee", employee, "employee_name") or employee)
+	if any(field not in PROFILE_STATE_EXCLUDED_FIELDS for field in bank):
+		subject = _("{0} filled in their own bank details. Not verified yet.").format(name)
+	else:
+		subject = _("{0} set their own {1}. Not verified yet.").format(
+			name, frappe.utils.escape_html(", ".join(profile_field_label(f) for f in bank).lower())
+		)
 	for user in _enabled_users_with_role("HR Manager", employee):
 		if user == frappe.session.user:
 			continue
@@ -10304,9 +10367,7 @@ def _mark_self_filled(employee, fills, groups):
 				"type": "Alert",
 				"document_type": "Employee",
 				"document_name": employee,
-				"subject": _("{0} filled in their own bank details. Not verified yet.").format(
-					frappe.utils.escape_html(name)
-				),
+				"subject": subject,
 			}
 		).insert(ignore_permissions=True)
 

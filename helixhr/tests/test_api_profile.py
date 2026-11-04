@@ -924,6 +924,138 @@ class TestSubmitMyProfileChanges(IntegrationTestCase):
 		self.assertTrue(self._mails_to("employee-personal@helixhr.test"))
 		self.assertTrue(self._mails_to("new-personal@helixhr.test"))
 
+	# --- salary mode is not an identifier (fix plan 2026-11-04-001 U1) -------
+
+	def _alerts(self):
+		return frappe.get_all(
+			"Notification Log",
+			filters={"document_type": "Employee", "document_name": self.employee_name, "name": ["not in", self._alerts_before or [""]]},
+			pluck="subject",
+		)
+
+	def _mark_alerts(self):
+		self._alerts_before = frappe.get_all(
+			"Notification Log", filters={"document_type": "Employee", "document_name": self.employee_name}, pluck="name"
+		)
+
+	def _groups(self):
+		from helixhr.api import get_my_profile
+
+		frappe.set_user(EMPLOYEE_USER)
+		try:
+			return get_my_profile()["groups"]
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_a_preset_salary_mode_does_not_block_the_first_bank_fill(self):
+		frappe.db.set_value("Employee", self.employee_name, "salary_mode", "Bank")
+		self.assertEqual(self._groups()["bank"]["state"], "blank")
+		result = self._submit(self.BANK, {"bank": "blank"})
+		self.assertEqual(result["status"], "applied", result)
+		self.assertIsNone(result["request"])
+		self.assertFalse(self._requests())
+		self.assertEqual(self._live("bank_ac_no").bank_ac_no, self.ACCOUNT)
+		self.assertTrue(
+			frappe.db.exists(
+				"Comment",
+				{"reference_doctype": "Employee", "reference_name": self.employee_name, "subject": "helixhr:self_filled_unverified"},
+			)
+		)
+		again = self._submit(self.BANK, {"bank": "blank"})
+		self.assertEqual(again["status"], "applied", again)
+
+	def test_get_my_profile_groups_carry_state_core_and_identity_for_this_site(self):
+		meta = frappe.get_meta("Employee")
+		bank = self._groups()["bank"]
+		self.assertNotIn("salary_mode", bank["identity"])
+		self.assertIn("bank_ac_no", bank["identity"])
+		self.assertIn("bank_ac_no", bank["core"])
+		self.assertEqual("ifsc_code" in bank["core"], meta.has_field("ifsc_code"))
+		self.assertEqual("ifsc_code" in bank["identity"], meta.has_field("ifsc_code"))
+		frappe.db.set_value("Employee", self.employee_name, "bank_name", "HR Bank")
+		self.assertEqual(self._groups()["bank"]["state"], "filled")
+
+	def test_a_failing_groups_read_is_named_and_the_rest_still_answer(self):
+		from unittest.mock import patch
+
+		from helixhr.api import get_my_profile
+
+		frappe.set_user(EMPLOYEE_USER)
+		try:
+			with patch("helixhr.api._profile_group_facts", side_effect=Exception("boom")):
+				profile = get_my_profile()
+		finally:
+			frappe.set_user("Administrator")
+		self.assertIsNone(profile["groups"])
+		self.assertIn("groups", profile["failed_sections"])
+		self.assertIsNotNone(profile["sections"]["bank"])
+
+	def test_salary_mode_alone_fills_a_blank_group_without_core_fields(self):
+		self._mark_alerts()
+		key = str(uuid.uuid4())
+		result = self._submit({"salary_mode": "Cash"}, {"bank": "blank"}, key=key)
+		self.assertEqual(result["status"], "applied", result)
+		self.assertEqual(self._live("salary_mode").salary_mode, "Cash")
+		self.assertEqual(self._groups()["bank"]["state"], "blank")
+		alerts = self._alerts()
+		self.assertTrue(alerts)
+		self.assertFalse(any("bank details" in subject for subject in alerts), alerts)
+		mails = len(self._mails_to("employee-personal@helixhr.test"))
+		self.assertEqual(mails, 1)
+		# Review C3: the retry is answered, not announced again.
+		again = self._submit({"salary_mode": "Cash"}, {"bank": "blank"}, key=key)
+		self.assertEqual(again["status"], "applied", again)
+		self.assertEqual([row["field"] for row in again["applied"]], ["salary_mode"])
+		self.assertEqual(len(self._mails_to("employee-personal@helixhr.test")), mails)
+		self.assertEqual(len(self._alerts()), len(alerts))
+
+	def test_a_salary_mode_only_fill_still_passes_every_gate(self):
+		for password in (None, "wrong-password"):
+			errors = self._errors(self._submit({"salary_mode": "Cash"}, {"bank": "blank"}, password=password))
+			self.assertEqual(errors[0]["field"], "password")
+		frappe.db.set_value("Employee", self.employee_name, {"company_email": None, "personal_email": None})
+		self._errors(self._submit({"salary_mode": "Cash"}, {"bank": "blank"}))
+		self.assertIsNone(self._live("salary_mode").salary_mode)
+		frappe.db.set_value("Employee", self.employee_name, "personal_email", "employee-personal@helixhr.test")
+		frappe.db.set_single_value("System Settings", "disable_user_pass_login", 1)
+		self.addCleanup(frappe.db.set_single_value, "System Settings", "disable_user_pass_login", 0)
+		self.assertEqual(self._submit({"salary_mode": "Cash"}, {"bank": "blank"}, password=None)["status"], "applied")
+		frappe.db.set_value("Employee", self.employee_name, {"salary_mode": None, "status": "Suspended"})
+		with self.assertRaises(Exception):
+			self._submit({"salary_mode": "Cash"}, {"bank": "blank"}, password=None)
+		self.assertIsNone(self._live("salary_mode").salary_mode)
+
+	def test_bank_name_alone_in_a_blank_group_asks_for_the_account(self):
+		from helixhr.utils import profile_field_label
+
+		errors = self._errors(self._submit({"bank_name": "New Bank"}, {"bank": "blank"}))
+		self.assertIn(profile_field_label("bank_ac_no"), errors[0]["message"])
+
+	def test_a_different_salary_mode_on_file_goes_to_hr_while_bank_fills(self):
+		frappe.db.set_value("Employee", self.employee_name, "salary_mode", "Bank")
+		changes = {**self.BANK, "salary_mode": "Cash"}
+		self.assertEqual(self._errors(self._submit(changes, {"bank": "blank"}))[0]["field"], "file")
+		self.assertIsNone(self._live("bank_ac_no").bank_ac_no)
+		result = self._submit(changes, {"bank": "blank"}, proof=True)
+		self.assertEqual(result["status"], "applied_and_requested", result)
+		self.assertEqual({row["field"] for row in result["applied"]}, set(self.BANK))
+		live = self._live("bank_ac_no", "salary_mode")
+		self.assertEqual((live.bank_ac_no, live.salary_mode), (self.ACCOUNT, "Bank"))
+		rows = frappe.get_all("HelixHR Profile Change Row", filters={"parent": result["request"]["name"]}, pluck="field")
+		self.assertEqual(rows, ["salary_mode"])
+
+	def test_salary_mode_change_with_an_account_on_file_goes_to_hr(self):
+		frappe.db.set_value("Employee", self.employee_name, "bank_ac_no", "111122223333")
+		self.assertEqual(self._errors(self._submit({"salary_mode": "Cash"}, {"bank": "filled"}))[0]["field"], "file")
+		result = self._submit({"salary_mode": "Cash"}, {"bank": "filled"}, proof=True)
+		self.assertEqual(result["status"], "requested", result)
+		self.assertIsNone(self._live("salary_mode").salary_mode)
+
+	def test_seen_filled_but_the_group_is_blank_is_refused(self):
+		frappe.db.set_value("Employee", self.employee_name, "salary_mode", "Bank")
+		errors = self._errors(self._submit({"bank_name": "X"}, {"bank": "filled"}, proof=True))
+		self.assertIn("updated since you opened this", errors[0]["message"])
+
 	# --- routing to HR -----------------------------------------------------
 
 	def test_a_group_with_any_value_on_file_goes_to_hr_whole(self):
