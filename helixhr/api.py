@@ -351,6 +351,8 @@ def get_my_profile(**kwargs):
 		"failed_sections": failed,
 		"correction_category": PROFILE_CORRECTION_CATEGORY if cint(category_active) else None,
 		# Plan 2026-11-03-001 U9 (R17): fields in an open request are locked.
+		# No password to re-check on SSO-only sites; the editor hides the box.
+		"fill_needs_password": not _password_login_disabled(),
 		"pending_fields": sorted(_safe(lambda: _fields_in_open_corrections(employee), default=set()) or ()),
 		# HR and administrators only (KTD6): every employee is a System
 		# User, and the portal host 404s Desk for them.
@@ -10256,17 +10258,18 @@ def _fields_in_open_corrections(employee):
 	return busy
 
 
+def _password_login_disabled():
+	return bool(cint(frappe.db.get_single_value("System Settings", "disable_user_pass_login")))
+
+
 def _check_step_up(password, refuse):
 	"""Review B5: a first-time fill re-checks the caller's password. A site on
-	Microsoft sign-in only has no password to check, so a fill is refused
-	there rather than let a hijacked session through unchecked."""
+	Microsoft sign-in only has no password to check; there the fill goes
+	through on the HR alert and the self-filled mark alone (user decision
+	2026-11-04: onboarding must not stall on SSO sites)."""
 	from frappe.utils.password import check_password
 
-	if cint(frappe.db.get_single_value("System Settings", "disable_user_pass_login")):
-		refuse(
-			_("Filling in bank and ID details yourself needs a password check, which this site doesn't use. Contact HR."),
-			field="password",
-		)
+	if _password_login_disabled():
 		return
 	if not password:
 		refuse(_("Enter your password to confirm."), field="password")

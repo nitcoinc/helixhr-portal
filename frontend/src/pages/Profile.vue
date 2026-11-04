@@ -472,6 +472,7 @@ async function saveChanges() {
               v-if="editingBank"
               :fields="sectionData.fields"
               :pending="pendingFields"
+              :fill-needs-password="profile.data?.fill_needs_password !== false"
               @done="endBankEdit"
               @cancel="endBankEdit()"
             />

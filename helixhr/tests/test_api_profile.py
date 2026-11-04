@@ -875,6 +875,15 @@ class TestSubmitMyProfileChanges(IntegrationTestCase):
 			self.assertEqual(errors[0]["field"], "password")
 		self.assertIsNone(self._live("bank_ac_no").bank_ac_no)
 
+	def test_a_fill_skips_the_password_on_an_sso_only_site(self):
+		frappe.db.set_single_value("System Settings", "disable_user_pass_login", 1)
+		self.addCleanup(frappe.db.set_single_value, "System Settings", "disable_user_pass_login", 0)
+		from helixhr.api import _password_login_disabled
+
+		self.assertTrue(_password_login_disabled())
+		result = self._submit(self.BANK, {"bank": "blank"}, password=None)
+		self.assertEqual(result["status"], "applied")
+
 	def test_a_fill_is_refused_for_an_inactive_employee(self):
 		frappe.db.set_value("Employee", self.employee_name, "status", "Suspended")
 		# An inactive record has no current employee at all, so the call

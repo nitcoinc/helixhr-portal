@@ -1506,11 +1506,12 @@ single-field requests (`correction_field`) still display and decide as before.
   change in 72 h, a recipient for the notice (company, personal, or the
   personal email before the most recent change), and a **password
   re-entry** (`_check_step_up`).
-- **Password-login-disabled sites refuse every fill** (System Settings
+- **Password-login-disabled sites skip the re-entry** (System Settings
   `disable_user_pass_login`, e.g. Microsoft sign-in only): there is no
-  password to check, so the employee is told to contact HR. Changes to
-  filled groups still go to HR. **Open decision:** whether such sites get
-  another step-up or keep HR-only filling.
+  password to check, so the fill goes through on the self-filled mark and
+  HR alert alone (decision 2026-11-04: onboarding must not stall on SSO
+  sites). `get_my_profile` returns `fill_needs_password: false` and the
+  editor hides the box.
 - **After a fill:** an Info Comment "Self-filled by the employee, not
   verified by HR: <labels>" on the Employee, and for a bank fill a
   Notification Log alert to every HR Manager in scope (not the caller).

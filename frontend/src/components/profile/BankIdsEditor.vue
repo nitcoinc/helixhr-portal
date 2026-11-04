@@ -25,6 +25,8 @@ import {
 const props = defineProps({
   fields: { type: Array, required: true },
   pending: { type: Array, default: () => [] },
+  // False on SSO-only sites: no password to re-check, the fill goes through.
+  fillNeedsPassword: { type: Boolean, default: true },
 })
 const emit = defineEmits(['done', 'cancel'])
 
@@ -68,7 +70,9 @@ const staged = computed(() =>
 const route = computed(() => routes(staged.value, props.fields))
 const mismatches = computed(() => entryErrors(staged.value))
 const missing = computed(() => missingCore(staged.value, props.fields))
-const needsPassword = computed(() => Object.values(route.value).includes('fill'))
+const needsPassword = computed(
+  () => props.fillNeedsPassword && Object.values(route.value).includes('fill'),
+)
 const needsProof = computed(() => Object.values(route.value).includes('hr'))
 const labelOf = (name) => props.fields.find((field) => field.fieldname === name)?.label || name
 const canSend = computed(

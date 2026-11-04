@@ -1026,8 +1026,8 @@ If an Employee save fails with an error from that hook, the mask failed and the 
 purpose: fix the cause, never bypass the hook. `personal_email` stays unmasked.
 
 A first-time fill of Bank & IDs asks for the employee's password. On a site with
-`disable_user_pass_login` (Microsoft sign-in only) fills are refused with "Contact HR"; HR enters
-the details in Desk. Self-filled details carry an Info Comment "Self-filled by the employee, not
+`disable_user_pass_login` (Microsoft sign-in only) there is no password to re-check, so the fill
+goes through without it; the timeline comment and HR alert below are the only controls there. Self-filled details carry an Info Comment "Self-filled by the employee, not
 verified by HR" on the Employee timeline, and HR Managers get an alert for bank fills.
 
 ## Punch coordinates are erased on a schedule, and the period is unset by default (P3-R28)
