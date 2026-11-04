@@ -1644,6 +1644,35 @@ def check_configuration_field_sets():
 	return _result("Configuration field sets", PASS, f"{len(field_sets)} doctypes checked")
 
 
+# Fix plan 2026-11-04-001 KTD6: India-only Employee fields a site may not
+# have. Missing one only WARNs -- the Bank & IDs first-fill core-field rule
+# already skips fields the site lacks.
+_PROFILE_REGIONAL_FIELDS = frozenset({"ifsc_code", "micr_code", "pan_number", "provident_fund_account"})
+
+
+def check_profile_change_fields():
+	"""Fix plan 2026-11-04-001 U4 / R6: every Employee field behind the Bank &
+	IDs self-edit (`PROFILE_CHANGE_GROUPS`) still exists. A missing standard
+	field means the portal silently drops that value; a missing regional one
+	(KTD6) is expected outside India."""
+	from helixhr.utils import PROFILE_CHANGE_GROUPS
+
+	meta = frappe.get_meta("Employee")
+	fields = [field for group in PROFILE_CHANGE_GROUPS.values() for field in group]
+	missing = [field for field in fields if not meta.has_field(field)]
+	standard = [field for field in missing if field not in _PROFILE_REGIONAL_FIELDS]
+	name = "Bank & IDs fields"
+	if standard:
+		return _result(name, FAIL, f"Employee: {', '.join(standard)} no longer exist")
+	if missing:
+		return _result(
+			name,
+			WARN,
+			f"Employee lacks regional {', '.join(missing)}; the first-fill core-field rule relaxes for them",
+		)
+	return _result(name, PASS, f"{len(fields)} fields checked")
+
+
 def check_pdf_generator():
 	"""P3-R2: the payslip PDF is rendered by a binary on the host, not by this
 	app, so a site without one answers 500 on a download that looks fine in
@@ -2069,6 +2098,7 @@ CHECKS = [
 	check_document_link_urls,
 	check_portal_landing,
 	check_employee_open_fields,
+	check_profile_change_fields,
 	check_it_team_role,
 	check_delivery_manager_role,
 	check_notification_manager_role,
