@@ -18,6 +18,8 @@ from helixhr.roster_ops import (
 	NO_WORKING_DAYS,
 	OFF_DAYS_UNKNOWN,
 	OVERLAP,
+	RUN_OFF_DAYS_UNKNOWN,
+	RUN_STOPPED_UNKNOWN,
 	SKIP_SPAN,
 	affected_window,
 	op_date,
@@ -29,6 +31,7 @@ from helixhr.roster_ops import (
 # coverage / expect: {employee: [[key, shift_type, start_date, end_date]]}
 # problems: [[op index, message]]
 # off_days (optional, default {} = every day unknown): {employee: {from, to, dates} | None}
+# notes (optional, default []): [[op index, message]] -- non-blocking
 # steps (optional): per op, [[action, key, shift_type, start_date, end_date]]
 WEEKENDS = [
 	"2026-11-01",
@@ -667,6 +670,7 @@ CASES = [
 			]
 		},
 		"problems": [],
+		"notes": [[0, RUN_OFF_DAYS_UNKNOWN]],
 	},
 	{
 		"name": "run: a gap day outside the known range breaks the run",
@@ -688,6 +692,46 @@ CASES = [
 			]
 		},
 		"problems": [],
+		"notes": [[0, RUN_STOPPED_UNKNOWN]],
+	},
+	{
+		"name": "run: a change stops where the off days run out",
+		"coverage": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-13"],
+				["SA-3", "Day", "2026-11-16", "2026-11-20"],
+			]
+		},
+		"off_days": {"E1": {"from": "2026-11-01", "to": "2026-11-13", "dates": WEEKENDS}},
+		"ops": [
+			{
+				"employee": "E1",
+				"action": "Change",
+				"shift_type": "Night",
+				"from_date": "2026-11-04",
+				"assignment": "SA-1",
+			}
+		],
+		"expect": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-03"],
+				["SA-3", "Day", "2026-11-16", "2026-11-20"],
+				["new-0-0", "Night", "2026-11-04", "2026-11-06"],
+				["new-0-1", "Night", "2026-11-09", "2026-11-13"],
+			]
+		},
+		"problems": [],
+		"notes": [[0, RUN_STOPPED_UNKNOWN]],
+	},
+	{
+		"name": "run: unknown off days and no later block, no note",
+		"coverage": {"E1": [["SA-1", "Day", "2026-11-02", "2026-11-06"]]},
+		"off_days": {"E1": None},
+		"ops": [{"employee": "E1", "action": "End", "to_date": "2026-11-04", "assignment": "SA-1"}],
+		"expect": {"E1": [["SA-1", "Day", "2026-11-02", "2026-11-04"]]},
+		"problems": [],
+		"notes": [],
 	},
 ]
 
@@ -725,11 +769,13 @@ class TestSimulateSharedCases(UnitTestCase):
 	def test_every_shared_case(self):
 		for case in CASES:
 			with self.subTest(case["name"]):
+				notes = []
 				coverage, problems, steps = simulate(
-					_coverage_in(case["coverage"]), case["ops"], case.get("off_days", {})
+					_coverage_in(case["coverage"]), case["ops"], case.get("off_days", {}), notes
 				)
 				self.assertEqual(_coverage_out(coverage), case["expect"])
 				self.assertEqual([[p["index"], p["message"]] for p in problems], case["problems"])
+				self.assertEqual([[n["index"], n["message"]] for n in notes], case.get("notes", []))
 				if "steps" in case:
 					self.assertEqual(_steps_out(steps), case["steps"])
 

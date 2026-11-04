@@ -1002,6 +1002,18 @@ class TestSkipOffDays(RosterApprovalTestCase):
 		rows = frappe.get_doc(DOCTYPE, draft["draft"]["name"]).rows
 		self.assertEqual([row.skip_off_days for row in rows], [0, 0])
 
+	def test_skip_flag_is_read_by_flag_and_garbage_counts_as_off(self):
+		# `api._flag` (frappe `sbool`): 1 / "1" / "true" / True on; 0 / "false"
+		# off; anything else, "yes" included, is neither and counts as off.
+		def kept(value):
+			row = {**assign("E1", "2031-03-10", "2031-03-28"), "skip_off_days": value}
+			return api._roster_draft_ops([row])[0]["skip_off_days"]
+
+		for value in (1, "1", "true", "True", True):
+			self.assertEqual(kept(value), 1, value)
+		for value in (0, "0", "false", False, "yes", None, "junk", " 1 "):
+			self.assertEqual(kept(value), 0, value)
+
 	def test_unknown_off_days_refuse_the_skip_naming_the_person(self):
 		report = self.report("skip-nolist")
 		real = api._holiday_list_spans
@@ -1076,6 +1088,29 @@ class TestSkipOffDays(RosterApprovalTestCase):
 		)
 		self.assertTrue(all(str(day) > "2031-03-05" for day in created))
 		self.assertEqual(frappe.db.count("Shift Assignment", {"employee": report, "docstatus": 2}), 1)
+
+	def test_a_change_with_unknown_off_days_saves_with_a_note_naming_the_person(self):
+		# Plan 2026-11-04-001 U2 / R4, R5: one block changed, a note, no refusal.
+		report = self.report("skip-note")
+		for start, end in SKIP_BLOCKS:
+			seed_assignment(report, start, end)
+		real = api._holiday_list_spans
+		self.as_manager()
+		with patch.object(
+			api, "_holiday_list_spans", side_effect=lambda e, *a: [] if e == report else real(e, *a)
+		):
+			draft = save_roster_draft([change_op(report, "2031-03-12")])["draft"]
+		self.assertEqual(draft["problems"], [])
+		(note,) = draft["notes"]
+		self.assertEqual((note["index"], note["employee"]), (0, report))
+		self.assertIn(self.employee_name(report), note["message"])
+		self.assertIn("can't be worked out", note["message"])
+		self.assertEqual(draft["block_count"], 1)
+
+		# Known off days follow the whole run: no note.
+		ensure_skip_list(report)
+		draft = save_roster_draft([change_op(report, "2031-03-12")])["draft"]
+		self.assertEqual((draft["notes"], draft["block_count"]), ([], 3))
 
 	def test_a_request_sent_before_version_two_approves_as_one_block(self):
 		"""A1: no `v` in the snapshot keeps the single-block rules, even with

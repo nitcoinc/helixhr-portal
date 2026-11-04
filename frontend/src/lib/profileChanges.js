@@ -4,13 +4,10 @@
 // The server (`helixhr.api.submit_my_profile_changes`) is the rule for all of
 // it; this only previews it so the employee knows before they press Send.
 // Each field the page can edit carries `change: {group, type, options}` from
-// `get_my_profile`, so the groups and inputs follow what the site has.
-
-/** Review B6: a first fill of these groups must include these fields. */
-export const FILL_CORE_FIELDS = {
-  bank: ['bank_name', 'bank_ac_no', 'ifsc_code'],
-  passport: ['passport_number', 'date_of_issue', 'valid_upto', 'place_of_issue'],
-}
+// `get_my_profile`, so the groups and inputs follow what the site has. The
+// group facts -- `groups: {group: {state, core, identity}}` -- come from the
+// server too (fix plan 2026-11-04-001 KTD3): state and core fields are never
+// worked out here.
 
 /** `{group: [field, ...]}` for the editable fields this site has. */
 export function groupFields(fields) {
@@ -20,19 +17,6 @@ export function groupFields(fields) {
     ;(groups[field.change.group] ||= []).push(field.fieldname)
   }
   return groups
-}
-
-/** `{group: "blank" | "filled"}`: blank only when nothing in it is on file.
- * A masked value arrives as its last four, which still counts as on file. */
-export function groupStates(fields) {
-  const states = {}
-  for (const field of fields || []) {
-    if (!field.change) continue
-    const { group } = field.change
-    const filled = field.value !== null && field.value !== undefined && field.value !== ''
-    states[group] = states[group] === 'filled' || filled ? 'filled' : 'blank'
-  }
-  return states
 }
 
 /** The editable form's starting values. A masked field starts empty: the
@@ -64,22 +48,27 @@ export function stagedChanges(fields, form) {
   return out
 }
 
-/** `{group: "fill" | "hr"}` for every group with a staged change. */
-export function routes(staged, fields) {
-  const byField = Object.fromEntries((fields || []).filter((f) => f.change).map((f) => [f.fieldname, f.change.group]))
-  const states = groupStates(fields)
+/** `{group: "fill" | "hr" | "both"}` for every group with a staged change.
+ * A blank group fills now, except a non-identity field (salary mode) already
+ * on file, which goes to HR on its own (review C2). */
+export function routes(staged, fields, groups) {
+  const byName = Object.fromEntries((fields || []).filter((f) => f.change).map((f) => [f.fieldname, f]))
   const out = {}
   for (const { field } of staged) {
-    const group = byField[field]
-    if (group) out[group] = states[group] === 'blank' ? 'fill' : 'hr'
+    const meta = byName[field]
+    const facts = meta && groups?.[meta.change.group]
+    if (!facts) continue
+    const onFile = meta.value !== null && meta.value !== undefined && meta.value !== ''
+    const to = facts.state === 'blank' && (facts.identity.includes(field) || !onFile) ? 'fill' : 'hr'
+    const group = meta.change.group
+    out[group] = !out[group] || out[group] === to ? to : 'both'
   }
   return out
 }
 
 /** `{group: state}` for the touched groups, as the server's `seen`. */
-export function seenStates(staged, fields) {
-  const states = groupStates(fields)
-  return Object.fromEntries(Object.keys(routes(staged, fields)).map((group) => [group, states[group]]))
+export function seenStates(staged, fields, groups) {
+  return Object.fromEntries(Object.keys(routes(staged, fields, groups)).map((group) => [group, groups[group].state]))
 }
 
 /** `{field: message}` for double entries that don't match yet. Nothing is
@@ -96,16 +85,15 @@ export function entryErrors(staged) {
   return out
 }
 
-/** `{group: [fieldname, ...]}` core fields a first fill still lacks. */
-export function missingCore(staged, fields) {
-  const present = groupFields(fields)
+/** `{group: [fieldname, ...]}` core fields a first fill still lacks. Asked
+ * only once an identity field is staged (KTD2): salary mode alone needs none. */
+export function missingCore(staged, fields, groups) {
   const stagedNames = new Set(staged.map((change) => change.field))
   const out = {}
-  for (const [group, route] of Object.entries(routes(staged, fields))) {
-    if (route !== 'fill') continue
-    const missing = (FILL_CORE_FIELDS[group] || []).filter(
-      (name) => present[group]?.includes(name) && !stagedNames.has(name),
-    )
+  for (const group of Object.keys(routes(staged, fields, groups))) {
+    const { state, core, identity } = groups[group]
+    if (state !== 'blank' || !identity.some((name) => stagedNames.has(name))) continue
+    const missing = core.filter((name) => !stagedNames.has(name))
     if (missing.length) out[group] = missing
   }
   return out

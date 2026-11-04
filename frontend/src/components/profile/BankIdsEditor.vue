@@ -24,6 +24,8 @@ import {
 // employee typed stays. Fields already waiting in an open request are locked.
 const props = defineProps({
   fields: { type: Array, required: true },
+  // `get_my_profile().groups`: each group's state, core and identity fields.
+  groups: { type: Object, required: true },
   pending: { type: Array, default: () => [] },
   // False on SSO-only sites: no password to re-check, the fill goes through.
   fillNeedsPassword: { type: Boolean, default: true },
@@ -67,13 +69,15 @@ const staged = computed(() =>
     form,
   ),
 )
-const route = computed(() => routes(staged.value, props.fields))
+const route = computed(() => routes(staged.value, props.fields, props.groups))
 const mismatches = computed(() => entryErrors(staged.value))
-const missing = computed(() => missingCore(staged.value, props.fields))
+const missing = computed(() => missingCore(staged.value, props.fields, props.groups))
+const routeValues = computed(() => Object.values(route.value))
 const needsPassword = computed(
-  () => props.fillNeedsPassword && Object.values(route.value).includes('fill'),
+  () => props.fillNeedsPassword && routeValues.value.some((to) => to !== 'hr'),
 )
-const needsProof = computed(() => Object.values(route.value).includes('hr'))
+const ROUTE_LABEL = { fill: 'Fills in now', hr: 'Goes to HR', both: 'Part goes to HR' }
+const needsProof = computed(() => routeValues.value.some((to) => to === 'hr' || to === 'both'))
 const labelOf = (name) => props.fields.find((field) => field.fieldname === name)?.label || name
 const canSend = computed(
   () =>
@@ -111,7 +115,7 @@ async function send() {
   try {
     const result = await submitProfileChanges(needsProof.value ? proof.value : null, {
       changes: staged.value,
-      seen: seenStates(staged.value, props.fields),
+      seen: seenStates(staged.value, props.fields, props.groups),
       operationKey: operationKey.value,
       password: needsPassword.value ? password.value : undefined,
     })
@@ -199,14 +203,19 @@ onMounted(() => {
           :class="route[run.group] === 'fill' ? 'bg-surface-green-2 text-ink-green-3' : 'bg-surface-amber-1 text-ink-amber-3'"
           :data-testid="`bank-edit-route-${run.group}`"
         >
-          {{ route[run.group] === 'fill' ? 'Fills in now' : 'Goes to HR' }}
+          {{ ROUTE_LABEL[route[run.group]] }}
         </span>
       </div>
       <p
-        v-if="route[run.group] === 'hr'"
+        v-if="route[run.group] && route[run.group] !== 'fill'"
         class="mb-2 text-sm text-ink-gray-6"
       >
-        You already have {{ run.label.toLowerCase() }} details on file, so HR checks these changes against your proof.
+        <template v-if="groups[run.group].state === 'filled'">
+          You already have {{ run.label.toLowerCase() }} details on file, so HR checks these changes against your proof.
+        </template>
+        <template v-else>
+          A detail already on your record goes to HR, which checks the change against your proof.
+        </template>
       </p>
       <div
         v-for="message in [

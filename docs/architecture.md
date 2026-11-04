@@ -1480,6 +1480,14 @@ single-field requests (`correction_field`) still display and decide as before.
   section). Routing is per group (`PROFILE_CHANGE_GROUPS`: bank, pan, pf,
   passport, insurance), so a new bank name is never paired with an old
   account number.
+- **Blank or filled: identity fields only (fix plan 2026-11-04-001 KTD1-3).**
+  A group is filled iff one of its identity fields has a value; identity is
+  the group's fields the site has, less `PROFILE_STATE_EXCLUDED_FIELDS`
+  (`salary_mode`: a payroll preference HR may pre-set, not an identifier).
+  `get_my_profile` returns `groups` = `{group: {state, core, identity}}` from
+  `_profile_group_facts`, the same facts the submit decides by, so the
+  browser never re-derives them. It is computed under `_safe`; on failure
+  `groups` is null, listed in `failed_sections`, and the editor hides Edit.
 - **Contract.** `changes` is `[{field, value, confirm}]`; `confirm` must
   equal `value` for masked fields (double entry). `seen` is
   `{group: "blank" | "filled"}`, what the page showed; a mismatch refuses the
@@ -1491,7 +1499,7 @@ single-field requests (`correction_field`) still display and decide as before.
   (masked values only), `request`, `created`. `operation_key` makes a retry
   idempotent: the existing request is rebuilt, and a fill whose live values
   already equal the proposed ones reports as applied (review B4).
-- **Group with anything on file → HR.** The whole group's touched fields
+- **Filled group → HR.** The whole group's touched fields
   become one `HR Request` (Profile correction) with one `HelixHR Profile
   Change Row` per field (encrypted `current`/`proposed`, masked copies, frozen
   after insert). Proof is required. A field already in an open correction,
@@ -1502,7 +1510,9 @@ single-field requests (`correction_field`) still display and decide as before.
 - **Blank group → first-time fill**, saved elevated (see the
   `ignore_permissions` exceptions above). Gates: core fields present
   (`PROFILE_FILL_CORE_FIELDS`: bank = `bank_name`, `bank_ac_no`,
-  `ifsc_code`; passport = all four), Active employee, no `personal_email`
+  `ifsc_code`; passport = all four; only fields the site has), required only
+  when an identity field is staged, so a `salary_mode`-only fill needs no
+  core set; Active employee, no `personal_email`
   change in 72 h, a recipient for the notice (company, personal, or the
   personal email before the most recent change), and a **password
   re-entry** (`_check_step_up`).
@@ -1512,9 +1522,23 @@ single-field requests (`correction_field`) still display and decide as before.
   HR alert alone (decision 2026-11-04: onboarding must not stall on SSO
   sites). `get_my_profile` returns `fill_needs_password: false` and the
   editor hides the box.
+- **`salary_mode` in a blank bank group** fills instantly only when it is
+  empty on file. A different value on file goes to HR as its own row (proof
+  required, as for a filled group) while the identity fields still fill; the
+  same value reports as applied. The editor labels such a group "Part goes
+  to HR". All fill gates (password unless SSO, Active, recipient) still
+  apply, and a retry with the same `operation_key` gives one notice and one
+  alert.
+  The same-value answer is value-based idempotency (review C3): a fill
+  stores no operation key, so a new key re-sending the value HR set also
+  reports applied; upgrade path is storing the key with the self-filled mark.
 - **After a fill:** an Info Comment "Self-filled by the employee, not
   verified by HR: <labels>" on the Employee, and for a bank fill a
-  Notification Log alert to every HR Manager in scope (not the caller).
+  Notification Log alert to every HR Manager in scope (not the caller):
+  "{name} filled in their own bank details", or "{name} set their own salary
+  mode" when only `salary_mode` filled. An HR Manager filling their own
+  group alerts the other in-scope HR Managers; only a sole in-scope HR
+  Manager's fill alerts nobody (they can already edit these in Desk).
 - **Notices (review B1, B3).** One per submit: `bank_change_requested` when
   any row went to HR, else `bank_change_applied`, each carrying a `changes`
   list (label, masked new value, "changed" / "sent to HR"). Fill notices also
@@ -2635,6 +2659,22 @@ literal case table in both test suites keeps them equal.
   block's start date recreates that block instead of refusing with
   `CHANGE_ON_START`. An unknown day breaks the run; with no holiday list,
   Change / End act on the covering block only.
+- **Run notes (fix plan 2026-11-04-001 U2, KTD4-5).** When a run-aware
+  Change / End stops at an unknown day before a later same-shift block, the
+  simulator adds a note: "Later shifts were left as they are: their weekly
+  offs and holidays can't be worked out past the last shift changed. Check
+  the rest of the run." With no holiday list at all and a later same-shift
+  block, it reads "Only the shift on that date was updated: ...". A break at
+  a working day or a different shift gets none. Notes come through an
+  optional `notes` list argument to `simulate` (`{index, employee,
+  message}`, named and re-indexed like problems), never refuse, are not
+  steps, and legacy (v1) mode emits none. `get_roster_draft` returns them;
+  the draft bar shows each under its change, and a "N notes" line while
+  collapsed.
+- **One flag parser.** `skip_off_days` is read once, in
+  `api._roster_draft_ops`, through `api._flag` (`frappe.utils.sbool`: 1/0,
+  "true"/"false", bools; anything else is None, treated as off) and stored
+  as 0/1. `roster_ops` and `rosterDraft.js` read that 0/1 and parse nothing.
 - **Steps.** `simulate(coverage, ops, off_days)` returns
   `(coverage, problems, steps)`; `steps[i]` is the ordered `create` / `end` /
   `cancel` list for op `i`. New blocks are keyed `new-<op index>-<n>`.
@@ -2653,7 +2693,10 @@ literal case table in both test suites keeps them equal.
   the server, since the roster pages at 50). People whose op would fail, who
   are in another Pending request, or who are not the caller's report are
   skipped with a reason (no name for a non-report); the rest are added, or the
-  call is refused whole if they do not fit the 200-row draft cap.
+  call is refused whole if they do not fit the 200-row draft cap. The
+  picker's "Select all shown" stops at the loaded page; when the team is
+  larger and no search is typed, it says "Showing N of M. To change
+  everyone, choose Whole team above."
 
 ### Who decided a leave (U11-U13, KTD14-KTD15)
 

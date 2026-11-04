@@ -52,6 +52,15 @@ OFF_DAYS_UNKNOWN = (
 	"Turn off skipping weekly offs and holidays, or ask HR to set up their holiday list."
 )
 SKIP_SPAN = "Skipping weekly offs and holidays works on at most 92 days at a time."
+# Plan 2026-11-04-001 U2 / KTD5: non-blocking notes on a run-aware Change / End.
+RUN_STOPPED_UNKNOWN = (
+	"Later shifts were left as they are: their weekly offs and holidays can't be worked out "
+	"past the last shift changed. Check the rest of the run."
+)
+RUN_OFF_DAYS_UNKNOWN = (
+	"Only the shift on that date was updated: their weekly offs and holidays can't be worked out, "
+	"so later shifts were left as they are. Check the rest of the run."
+)
 
 
 def _date(value):
@@ -110,10 +119,6 @@ def _is_off(off, day):
 	return day in off["dates"]
 
 
-def _flag(value):
-	return value in (1, True, "1")
-
-
 def _next_in_run(rows, block, off):
 	"""The block right after `block` in its run (KTD3): the next one by date,
 	same shift type, with only known off days between. None at a break."""
@@ -131,6 +136,28 @@ def _next_in_run(rows, block, off):
 			return None
 		day += timedelta(days=1)
 	return following
+
+
+def _run_note(rows, block, off):
+	"""KTD5: why the run ending at `block` may stop short, or None. A break
+	at a working day or another shift type is normal and gets no note."""
+	if block["end_date"] is None:
+		return None
+	later = [a for a in rows if a["start_date"] > block["end_date"]]
+	if not later:
+		return None
+	following = min(later, key=lambda a: a["start_date"])
+	if following["shift_type"] != block["shift_type"]:
+		return None
+	if off is None:
+		return RUN_OFF_DAYS_UNKNOWN
+	day = block["end_date"] + timedelta(days=1)
+	while day < following["start_date"]:
+		state = _is_off(off, day)
+		if state is not True:
+			return RUN_STOPPED_UNKNOWN if state is None else None
+		day += timedelta(days=1)
+	return None
 
 
 def _has_previous_in_run(rows, block, off):
@@ -182,9 +209,11 @@ def _step(action, employee, block, end_date=None):
 	}
 
 
-def _apply(rows, op, index, off, run_aware):
+def _apply(rows, op, index, off, run_aware, notes):
 	"""Apply `op` to one employee's `rows` in place. Returns `(message,
-	steps)`: why not (rows untouched), or the primitive steps it took."""
+	steps)`: why not (rows untouched), or the primitive steps it took.
+	A run-aware Change / End that may stop short appends its KTD5 note
+	sentence to `notes`."""
 	action = op.get("action")
 	employee = op.get("employee")
 	if action not in ACTIONS:
@@ -213,7 +242,8 @@ def _apply(rows, op, index, off, run_aware):
 		if end and end < day:
 			return END_BEFORE_START, []
 		spans = [(day, end)]
-		if run_aware and end and _flag(op.get("skip_off_days")):
+		# `skip_off_days` arrives as 0 / 1 (`api._roster_draft_ops`, `cint` on rows).
+		if run_aware and end and op.get("skip_off_days"):
 			if (end - day).days + 1 > SKIP_MAX_DAYS:
 				return SKIP_SPAN, []
 			if off is None or not (off["from"] <= day and end <= off["to"]):
@@ -236,6 +266,10 @@ def _apply(rows, op, index, off, run_aware):
 	while following:
 		later.append(following)
 		following = _next_in_run(rows, following, off)
+	note = _run_note(rows, later[-1] if later else target, off) if run_aware else None
+	if note:
+		# Appended before a refusal check; `simulate` drops it if refused.
+		notes.append(note)
 
 	steps = []
 	if action == CHANGE:
@@ -275,7 +309,7 @@ def _apply(rows, op, index, off, run_aware):
 	return None, steps
 
 
-def simulate(coverage, ops, off_days=None):
+def simulate(coverage, ops, off_days=None, notes=None):
 	"""Apply `ops` in order to a copy of `coverage`. Returns
 	`(new_coverage, problems, steps)`; each problem is `{index, employee,
 	message}` with an untranslated plain sentence (callers wrap it in `_()`),
@@ -289,7 +323,12 @@ def simulate(coverage, ops, off_days=None):
 	missing or None entry, or a day outside `from`..`to`, is "cannot tell":
 	a skip is refused and a run stops there. `off_days=None` is the legacy
 	mode a request sent before the skip feature keeps (A1): skip ignored,
-	Change / End on the one covering block."""
+	Change / End on the one covering block.
+
+	`notes`, when a list, collects `{index, employee, message}` for a
+	run-aware Change / End that may have stopped short because off days are
+	unknown (plan 2026-11-04-001 KTD4, KTD5). Notes never refuse and are not
+	steps; legacy mode emits none."""
 	result = {
 		employee: [
 			{
@@ -309,10 +348,13 @@ def simulate(coverage, ops, off_days=None):
 		employee = op.get("employee")
 		if employee not in offs:
 			offs[employee] = _off_days((off_days or {}).get(employee)) if run_aware else None
-		message, taken = _apply(result.setdefault(employee, []), op, index, offs[employee], run_aware)
+		found = []
+		message, taken = _apply(result.setdefault(employee, []), op, index, offs[employee], run_aware, found)
 		steps.append(taken)
 		if message:
 			problems.append({"index": index, "employee": employee, "message": message})
+		elif notes is not None:
+			notes.extend({"index": index, "employee": employee, "message": note} for note in found)
 	return result, problems, steps
 
 

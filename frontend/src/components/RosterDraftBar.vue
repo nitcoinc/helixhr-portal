@@ -18,6 +18,9 @@ const props = defineProps({
   /** What would refuse the saved draft now -- coverage can move under it --
    * as the server words it, `{ index, employee, message }`. */
   problems: { type: Array, default: () => [] },
+  /** Plan 2026-11-04-001 U2: non-blocking run notes, same shape, already
+   * naming the person. Shown under their change; they never block Submit. */
+  notes: { type: Array, default: () => [] },
   saving: { type: Boolean, default: false },
   /** The last save's refusal, naming the person (the server's sentence). */
   saveError: { type: String, default: '' },
@@ -85,6 +88,15 @@ function discard() {
         {{ expanded ? 'Hide changes' : 'Show changes' }}
       </button>
     </div>
+    <!-- R4: the notes live in the list; say they exist while it is closed. -->
+    <p
+      v-if="notes.length && !expanded"
+      class="mt-1 text-xs text-ink-blue-3"
+      role="status"
+      data-testid="roster-draft-notes-hint"
+    >
+      {{ notes.length === 1 ? '1 note' : `${notes.length} notes` }} on these changes. Show changes to read {{ notes.length === 1 ? 'it' : 'them' }}.
+    </p>
 
     <div
       v-show="expanded"
@@ -114,6 +126,13 @@ function discard() {
               class="block text-xs text-ink-gray-6"
               data-testid="roster-draft-blocks"
             >{{ blocksLabel(row.blocks) }}</span>
+            <span
+              v-for="item in notes.filter((n) => n.index === index)"
+              :key="item.message"
+              class="mt-0.5 block text-xs text-ink-blue-3"
+              role="status"
+              data-testid="roster-draft-note"
+            >{{ item.message }}</span>
           </span>
           <button
             type="button"

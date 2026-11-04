@@ -172,7 +172,10 @@ function requestCorrection(field) {
 
 // ── Bank & IDs edit mode (plan 2026-11-03-001 U9) ──────────────────────
 const pendingFields = computed(() => profile.data?.pending_fields || [])
-const bankEditable = computed(() => (sectionData.value?.fields || []).some((field) => field.change))
+// Without the server's group facts the editor can't preview routes: no Edit.
+const bankEditable = computed(
+  () => !!profile.data?.groups && (sectionData.value?.fields || []).some((field) => field.change),
+)
 const editingBank = ref(false)
 const bankResult = ref(null)
 const bankEditButton = ref(null)
@@ -471,6 +474,7 @@ async function saveChanges() {
             <BankIdsEditor
               v-if="editingBank"
               :fields="sectionData.fields"
+              :groups="profile.data.groups"
               :pending="pendingFields"
               :fill-needs-password="profile.data?.fill_needs_password !== false"
               @done="endBankEdit"

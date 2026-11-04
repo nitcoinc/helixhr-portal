@@ -1118,6 +1118,31 @@ class TestPreflightHolidayCoverage(IntegrationTestCase):
 				names.append(row)
 		return names
 
+class TestPreflightProfileChangeFields(IntegrationTestCase):
+	"""Fix plan 2026-11-04-001 U4: the Bank & IDs allow-list against the
+	Employee meta. `has_field` is patched so the verdict does not depend on
+	which regional fields this site happens to carry."""
+
+	def check(self, missing=()):
+		with patch.object(type(frappe.get_meta("Employee")), "has_field", lambda _meta, field: field not in missing):
+			return preflight.check_profile_change_fields()
+
+	def test_it_passes_when_every_field_exists(self):
+		self.assertEqual(self.check()["status"], preflight.PASS)
+
+	def test_a_missing_regional_field_warns_naming_it(self):
+		for field in ("ifsc_code", "pan_number"):
+			result = self.check({field})
+			self.assertEqual(result["status"], preflight.WARN, field)
+			self.assertIn(field, result["detail"])
+			self.assertIn("first-fill", result["detail"])
+
+	def test_a_missing_standard_field_fails_naming_it(self):
+		result = self.check({"bank_ac_no", "ifsc_code"})
+		self.assertEqual(result["status"], preflight.FAIL)
+		self.assertIn("bank_ac_no", result["detail"])
+
+
 class TestPreflightPdfGenerator(IntegrationTestCase):
 	"""P3-R2: a payslip download is only as available as the binary that
 	renders it, and its absence looks like a server fault rather than a

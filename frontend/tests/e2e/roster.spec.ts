@@ -453,6 +453,33 @@ test.describe('manager roster requests', () => {
     await picker.getByLabel(COLLEAGUE, { exact: true }).check()
     await picker.getByLabel(reportName, { exact: true }).check()
     await expect(picker.getByTestId('roster-pick-count')).toHaveText('2 selected')
+
+    // A12: a team bigger than the loaded page points to "Whole team" -- not
+    // for this small team, and not while searching. Stubbed: seeding 51
+    // reports is heavy.
+    const hint = picker.getByTestId('roster-pick-whole-team-hint')
+    await expect(hint).toHaveCount(0)
+    await page.route('**/api/method/helixhr.api.get_roster_week*', async (route) => {
+      const response = await route.fetch()
+      const body = await response.json()
+      await route.fulfill({ response, json: { ...body, message: { ...body.message, total: 120 } } })
+    })
+    const search = picker.getByLabel('Find a report')
+    await search.fill('zz')
+    await expect(picker.getByText('Nobody matches that search.')).toBeVisible()
+    await expect(hint).toHaveCount(0)
+    await search.fill('')
+    await expect(hint).toContainText('of 120. To change everyone, choose Whole team above.')
+    // Typing a query hides the shown hint; clearing it brings it back.
+    await search.fill(COLLEAGUE.slice(0, 3))
+    await expect(hint).toHaveCount(0)
+    await search.fill('')
+    await expect(hint).toContainText('of 120. To change everyone, choose Whole team above.')
+    await page.unroute('**/api/method/helixhr.api.get_roster_week*')
+    await search.fill('zz')
+    await expect(hint).toHaveCount(0)
+    await search.fill('')
+    await expect(hint).toHaveCount(0)
     await sheet.getByRole('button', { name: 'Add for 2 people' }).click()
     await expect(sheet).toBeHidden()
 

@@ -65,6 +65,35 @@ test.describe('employee', () => {
     await expect(page.getByRole('button', { name: 'Edit bank and ID details' })).toBeFocused()
   })
 
+  test('salary mode on file still lets a blank bank group fill in now', async ({ page }) => {
+    // Fix plan 2026-11-04-001 U1 (review C5): the seed has bank on file, so
+    // the blank group is a stubbed read; the server side is in Python tests.
+    await page.route('**/api/method/helixhr.api.get_my_profile*', async (route) => {
+      const response = await route.fetch()
+      const body = await response.json()
+      for (const field of body.message.sections.bank.fields) {
+        if (field.change?.group === 'bank') field.value = field.fieldname === 'salary_mode' ? 'Bank' : null
+      }
+      body.message.groups.bank.state = 'blank'
+      body.message.pending_fields = []
+      await route.fulfill({ response, json: body })
+    })
+    await page.goto('/helixhr/profile/bank')
+    await page.getByRole('button', { name: 'Edit bank and ID details' }).click()
+    const editor = page.getByTestId('bank-edit')
+    await editor.getByTestId('bank-edit-bank_name').locator('input').first().fill('HDFC Bank')
+    await expect(editor.getByTestId('bank-edit-route-bank')).toHaveText('Fills in now')
+    await expect(editor.getByTestId('bank-edit-group-error-bank')).toContainText('also give')
+    await editor.getByTestId('bank-edit-bank_ac_no').locator('input').first().fill('123456789012')
+    await editor.getByTestId('bank-edit-bank_ac_no-confirm').fill('123456789012')
+    const ifsc = editor.getByTestId('bank-edit-ifsc_code').locator('input').first()
+    if (await ifsc.count()) await ifsc.fill('HDFC0000001')
+    await expect(editor.getByTestId('bank-edit-group-error-bank')).toHaveCount(0)
+    await expect(editor.getByTestId('bank-edit-route-bank')).toHaveText('Fills in now')
+    await expect(editor.getByTestId('bank-edit-proof')).toHaveCount(0)
+    await expect(editor.getByLabel('Your password')).toBeVisible()
+  })
+
   test('an IBAN change with bank on file goes to HR with proof, locks, and HR applies it', async ({ page, browser }) => {
     // IBAN rather than the account number, which profile-tabs.spec.ts pins
     // to the seed. Unique per run with a real ISO 13616 check (ERPNext

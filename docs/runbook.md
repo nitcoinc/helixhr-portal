@@ -1030,6 +1030,19 @@ A first-time fill of Bank & IDs asks for the employee's password. On a site with
 goes through without it; the timeline comment and HR alert below are the only controls there. Self-filled details carry an Info Comment "Self-filled by the employee, not
 verified by HR" on the Employee timeline, and HR Managers get an alert for bank fills.
 
+A group counts as blank (fills instantly) or filled (goes to HR) by its identity fields only;
+`salary_mode` never decides it, so HR pre-setting salary mode does not block a first fill. A
+`salary_mode` already on file and different from the one submitted goes to HR as its own row. An HR
+Manager's own fill alerts the other in-scope HR Managers; a sole in-scope HR Manager alerts nobody.
+If Bank & IDs shows no Edit button, `get_my_profile` listed `groups` in `failed_sections`: check the
+Error Log for "HelixHR profile section failed: groups".
+
+Preflight "Bank & IDs fields" (`check_profile_change_fields`) confirms every Employee field behind
+the self-edit exists. A missing standard field (`salary_mode`, `bank_name`, `bank_ac_no`, `iban`,
+the passport and health-insurance fields) FAILs: the portal would silently drop that value. A
+missing India regional field (`ifsc_code`, `micr_code`, `pan_number`, `provident_fund_account`) only
+WARNs, and the first-fill core-field rule skips it; `test_site` WARNs on those by design.
+
 ## Punch coordinates are erased on a schedule, and the period is unset by default (P3-R28)
 
 `helixhr.tasks.null_stale_checkin_coordinates` runs daily and does nothing at all until an operator
