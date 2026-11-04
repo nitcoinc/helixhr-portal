@@ -1,5 +1,6 @@
 <script setup>
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import { createResource, FormControl, Button, Dialog } from 'frappe-ui'
 import Avatar from '@/components/Avatar.vue'
 import PageHeader from '@/components/PageHeader.vue'
@@ -7,8 +8,9 @@ import AsyncState from '@/components/AsyncState.vue'
 import TabBar from '@/components/TabBar.vue'
 import ProfileFields from '@/components/profile/ProfileFields.vue'
 import ProfileTable from '@/components/profile/ProfileTable.vue'
-import CorrectionDialog from '@/components/profile/CorrectionDialog.vue'
+import BankIdsEditor from '@/components/profile/BankIdsEditor.vue'
 import { uploadMyPhoto } from '@/lib/api'
+import { correctionDraft, spokenValue } from '@/lib/profileCorrection'
 import { PHOTO_ACCEPT, PHOTO_MAX_MB, photoRefusal } from '@/lib/profilePhoto'
 import { setMyPhoto } from '@/lib/session'
 
@@ -160,12 +162,35 @@ async function doRemovePhoto() {
 }
 
 // ── Corrections ────────────────────────────────────────────────────────
-const correcting = ref(null)
-const showCorrection = ref(false)
+// Plan 2026-11-03-001 R18: the correction dialog is gone. Everything but
+// Bank & IDs opens the Requests form with the correction drafted.
+const router = useRouter()
 function requestCorrection(field) {
-  correcting.value = field
-  showCorrection.value = true
+  const { subject, details } = correctionDraft(field)
+  router.push({ path: '/requests', query: { category: correctionCategory.value, subject, details } })
 }
+
+// ── Bank & IDs edit mode (plan 2026-11-03-001 U9) ──────────────────────
+const pendingFields = computed(() => profile.data?.pending_fields || [])
+const bankEditable = computed(() => (sectionData.value?.fields || []).some((field) => field.change))
+const editingBank = ref(false)
+const bankResult = ref(null)
+const bankEditButton = ref(null)
+
+function startBankEdit() {
+  bankResult.value = null
+  editingBank.value = true
+}
+
+async function endBankEdit(result = null) {
+  editingBank.value = false
+  bankResult.value = result
+  if (result) profile.reload()
+  await nextTick()
+  // Review B9: focus returns to where the edit started.
+  bankEditButton.value?.focus()
+}
+watch(() => active.value.key, () => (editingBank.value = false))
 
 // ── Editable contact fields, one Save bar ──────────────────────────────
 // `update_my_profile` takes several fields at once, so one bar saves
@@ -386,12 +411,72 @@ async function saveChanges() {
         </div>
 
         <template v-else>
-          <p
-            v-if="active.key === 'bank'"
-            class="text-sm text-ink-gray-6"
-          >
-            Account and ID numbers show only their last four characters.
-          </p>
+          <template v-if="active.key === 'bank'">
+            <div class="flex flex-wrap items-center justify-between gap-3">
+              <p class="text-sm text-ink-gray-6">
+                Account and ID numbers show only their last four characters.
+              </p>
+              <!-- A native button: frappe-ui's Button overwrites aria-label
+                   (review B9 wants the label) and hides its root from refs. -->
+              <button
+                v-if="bankEditable && !editingBank"
+                ref="bankEditButton"
+                type="button"
+                class="inline-flex min-h-11 cursor-pointer items-center rounded-md bg-surface-gray-2 px-3 text-sm font-medium text-ink-gray-8 hover:bg-surface-gray-3"
+                aria-label="Edit bank and ID details"
+                data-testid="bank-edit-start"
+                @click="startBankEdit"
+              >
+                Edit
+              </button>
+            </div>
+            <div
+              v-if="bankResult"
+              class="surface-card elev-1 space-y-2 p-4 text-sm"
+              role="status"
+              data-testid="bank-edit-result"
+            >
+              <template v-if="bankResult.applied?.length">
+                <p class="font-medium text-ink-gray-9">
+                  Saved on your record
+                </p>
+                <ul class="space-y-1">
+                  <li
+                    v-for="row in bankResult.applied"
+                    :key="row.field"
+                    class="flex flex-wrap justify-between gap-2"
+                  >
+                    <span class="text-ink-gray-6">{{ row.label }}</span>
+                    <span
+                      class="text-ink-gray-9"
+                      :aria-label="spokenValue(row.value || '')"
+                    >{{ row.value }}</span>
+                  </li>
+                </ul>
+                <p class="text-ink-gray-6">
+                  HR is told and checks these later.
+                </p>
+              </template>
+              <p v-if="bankResult.request">
+                <span class="text-ink-gray-7">Changes to details on file went to HR.</span>
+                <router-link
+                  :to="{ name: 'RequestDetail', params: { name: bankResult.request.name } }"
+                  class="ml-1 inline-flex min-h-11 cursor-pointer items-center font-medium text-blue-700 hover:underline"
+                  data-testid="bank-edit-request-link"
+                >
+                  View your request
+                </router-link>
+              </p>
+            </div>
+            <BankIdsEditor
+              v-if="editingBank"
+              :fields="sectionData.fields"
+              :pending="pendingFields"
+              :fill-needs-password="profile.data?.fill_needs_password !== false"
+              @done="endBankEdit"
+              @cancel="endBankEdit()"
+            />
+          </template>
 
           <!-- ED-18: what the employee can fix themselves, said where they
                are looking rather than only on another tab. -->
@@ -409,10 +494,12 @@ async function saveChanges() {
           </p>
 
           <ProfileFields
+            v-if="!(active.key === 'bank' && editingBank)"
             :fields="sectionData.fields"
             :groups="GROUPS[active.key] || []"
             :section-label="active.label"
-            :can-correct="!!correctionCategory"
+            :can-correct="!!correctionCategory && !(active.key === 'bank' && bankEditable)"
+            :pending="pendingFields"
             @correct="requestCorrection"
           />
 
@@ -499,12 +586,6 @@ async function saveChanges() {
       </div>
     </AsyncState>
 
-    <CorrectionDialog
-      v-if="correctionCategory"
-      v-model="showCorrection"
-      :field="correcting"
-      :category="correctionCategory"
-    />
     <!-- Removing is confirmed, never a single tap (the withdraw pattern). -->
     <Dialog
       v-model="confirmingRemove"

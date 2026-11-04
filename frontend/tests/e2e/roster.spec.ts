@@ -360,6 +360,8 @@ test.describe('manager roster requests', () => {
     await expect(panel.getByTestId('roster-review')).toBeVisible({ timeout: 15000 })
     await expect(panel.getByTestId('roster-review-person')).toHaveCount(2)
     await expect(panel).toContainText('Stocktake cover')
+    // R10: the change count and the shifts it writes (the End creates none).
+    await expect(panel.getByTestId('roster-review-count')).toHaveText('2 changes → 1 shift')
     await panel.getByTestId('approve').click()
     const dialog = hr.getByRole('dialog')
     await expect(dialog).toContainText('Approve 2 changes')
@@ -376,6 +378,92 @@ test.describe('manager roster requests', () => {
     for (const index of [4, 5, 6]) await expect(cell(report, index)).not.toContainText(SHIFT)
     await expect(page.getByTestId('roster-requests').locator('[data-testid="roster-request"][data-status="Approved"]')).toBeVisible()
     await expect(page.locator('[data-proposed]')).toHaveCount(0)
+  })
+
+  // Plan 2026-11-03-001 U4. The colleague's holiday list has Saturday and
+  // Sunday as weekly offs (`ensure_roster_fixtures`).
+  function addDays(iso: string, days: number) {
+    const date = new Date(`${iso}T00:00:00Z`)
+    date.setUTCDate(date.getUTCDate() + days)
+    return date.toISOString().slice(0, 10)
+  }
+
+  test('a two-week assign skips the weekend, edits from the bar keeping the skip, and clears', async ({
+    page,
+  }) => {
+    await teamNextWeek(page)
+    const colleague = row(page, COLLEAGUE)
+
+    await cell(colleague, 0).getByRole('button').click()
+    const sheet = page.getByTestId('roster-sheet')
+    // The sheet's own Monday: the grid's dates may still be last week's.
+    const monday = await sheet.getByLabel('From').inputValue()
+    await page.locator('#roster-shift-type').selectOption(SHIFT)
+    await sheet.getByLabel('To (optional)').fill(addDays(monday, 13))
+    const skip = sheet.getByTestId('roster-skip-off-days')
+    await expect(skip).toBeChecked()
+    await expect(sheet.getByTestId('roster-skip-summary')).toContainText('run of working days')
+    await sheet.getByRole('button', { name: 'Add to request' }).click()
+    await expect(sheet).toBeHidden()
+
+    const bar = page.getByTestId('roster-draft-bar')
+    await expect(page.getByTestId('roster-draft-summary')).toHaveText('1 change for 1 person')
+    await bar.getByRole('button', { name: 'Show changes' }).click()
+    await expect(bar.getByTestId('roster-draft-blocks')).toContainText('2 shifts')
+    for (const index of [0, 1, 2, 3, 4]) await expect(cell(colleague, index)).toContainText(`Proposed: ${SHIFT}`)
+    for (const index of [5, 6]) {
+      await expect(cell(colleague, index).getByTestId('roster-off')).toHaveText('Off')
+      await expect(cell(colleague, index)).not.toContainText('Proposed')
+    }
+
+    // Edit from the bar: no "Apply to", the skip is kept, focus comes back.
+    const edit = bar.getByRole('button', { name: new RegExp(`^Edit change 1: ${COLLEAGUE}`) })
+    await edit.click()
+    await expect(sheet).toBeVisible()
+    await expect(sheet.getByRole('group', { name: 'Apply to' })).toHaveCount(0)
+    await expect(skip).toBeChecked()
+    await expect(sheet.getByTestId('roster-skip-summary')).toContainText('Saved as 2 shifts')
+    await sheet.getByLabel('To (optional)').fill(addDays(monday, 8))
+    await sheet.getByRole('button', { name: 'Save change' }).click()
+    await expect(sheet).toBeHidden()
+    await expect(edit).toBeFocused()
+    await expect(page.getByTestId('roster-draft-item')).toHaveCount(1)
+    await expect(bar.getByTestId('roster-draft-blocks')).toContainText('2 shifts')
+    await expect(page.getByTestId('roster-draft-item')).toContainText('Skips days off')
+
+    // Clear all asks once, then empties the draft.
+    await page.getByTestId('roster-discard').click()
+    await expect(bar).toContainText("Clear all 1 change for 1 person? This can't be undone.")
+    await page.getByTestId('roster-discard').click()
+    await expect(bar).toHaveCount(0)
+  })
+
+  test('applies one change to picked people and names who was skipped', async ({ page, baseURL }) => {
+    const reportName = await employeeName(baseURL!)
+    await teamNextWeek(page)
+    const colleague = row(page, COLLEAGUE)
+
+    await cell(colleague, 0).getByRole('button').click()
+    const sheet = page.getByTestId('roster-sheet')
+    const wednesday = addDays(await sheet.getByLabel('From').inputValue(), 2)
+    await page.locator('#roster-shift-type').selectOption(SHIFT)
+    await sheet.getByLabel('To (optional)').fill(wednesday)
+    await sheet.getByTestId('roster-apply-pick').click()
+    const picker = sheet.getByTestId('roster-people-picker')
+    await picker.getByLabel(COLLEAGUE, { exact: true }).check()
+    await picker.getByLabel(reportName, { exact: true }).check()
+    await expect(picker.getByTestId('roster-pick-count')).toHaveText('2 selected')
+    await sheet.getByRole('button', { name: 'Add for 2 people' }).click()
+    await expect(sheet).toBeHidden()
+
+    // The report already has an open-ended shift, so the assign overlaps.
+    const notice = page.getByTestId('roster-bulk-notice')
+    await expect(notice).toHaveAttribute('role', 'status')
+    await expect(notice).toContainText('1 change added; 1 person skipped')
+    await expect(notice).toContainText(reportName)
+    await expect(page.getByTestId('roster-draft-summary')).toHaveText('1 change for 1 person')
+    await notice.getByRole('button', { name: 'Dismiss' }).click()
+    await expect(notice).toHaveCount(0)
   })
 
   test('at phone width the sheet and the draft bar fit with no sideways scroll', async ({ page }) => {
@@ -399,7 +487,7 @@ test.describe('manager roster requests', () => {
     await bar.getByRole('button', { name: 'Show changes' }).click()
     expect(await overflow()).toBeLessThanOrEqual(0)
 
-    // Discard asks once, then empties the draft.
+    // Clear all asks once, then empties the draft.
     await page.getByTestId('roster-discard').click()
     await expect(bar).toContainText("This can't be undone")
     await page.getByTestId('roster-discard').click()

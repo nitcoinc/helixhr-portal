@@ -21,8 +21,11 @@ from helixhr.utils import (
 	PHOTO_KIND_MESSAGE,
 	PHOTO_MAX_BYTES,
 	PHOTO_POLICY,
+	PROFILE_CHANGE_VALUE_MAX,
 	PROFILE_CORRECTABLE_FIELDS,
 	PROFILE_CORRECTION_CATEGORY,
+	PROFILE_MASKED_FIELDS,
+	PROFILE_SELF_SERVICE_FIELDS,
 	UPLOAD_POLICY,
 	_company_role_holders,
 	clear_role_scope_cache,
@@ -30,6 +33,8 @@ from helixhr.utils import (
 	get_manager_user,
 	mask_identifier,
 	photo_file_filters,
+	profile_display_value,
+	profile_field_label,
 	render_message,
 	resolve_admin_scope,
 	send_notification,
@@ -1386,7 +1391,9 @@ def hr_request_validate(doc, method=None):
 
 	# KTD15a: write-once for everyone, HR and Administrator included, on
 	# every route -- before the HR short-circuit below.
-	if any((doc.get(field) or None) != (before.get(field) or None) for field in CORRECTION_FIELDS):
+	if any(
+		(doc.get(field) or None) != (before.get(field) or None) for field in CORRECTION_FIELDS
+	) or _profile_rows_snapshot(doc) != _profile_rows_snapshot(before):
 		frappe.throw(
 			_("The correction details can't be changed after the request is filed."),
 			frappe.PermissionError,
@@ -1403,7 +1410,7 @@ def hr_request_validate(doc, method=None):
 			_("You can't decide your own request. Ask another worker."), frappe.PermissionError
 		)
 
-	if status_changed and doc.status == HR_REQUEST_DONE and doc.correction_field:
+	if status_changed and doc.status == HR_REQUEST_DONE and has_profile_correction(doc):
 		_apply_correction(doc)
 
 	# HR may correct a filing (a wrong category, a typo in the subject); a
@@ -1444,7 +1451,73 @@ CORRECTION_FIELDS = (
 	"correction_proposed_masked",
 )
 CORRECTION_SECRET_FIELDS = ("correction_current", "correction_proposed")
-_CORRECTION_VALUE_MAX = 140
+_CORRECTION_VALUE_MAX = PROFILE_CHANGE_VALUE_MAX
+
+# Plan 2026-11-03-001 KTD9/KTD10: a multi-field correction is one child row
+# per field, each with the same encrypted pair and masked copies. Rows exist
+# only when `api.submit_my_profile_changes` sets `flags.helixhr_profile_changes`,
+# and are frozen after insert like the legacy fields.
+PROFILE_ROW_DOCTYPE = "HelixHR Profile Change Row"
+PROFILE_ROW_SECRET_FIELDS = ("current", "proposed")
+
+
+def has_profile_correction(doc):
+	"""Whether `doc` is a correction request: legacy single field or rows."""
+	return bool(doc.get("correction_field") or doc.get("profile_changes"))
+
+
+def _profile_rows_snapshot(doc):
+	return [
+		(row.name, row.field, row.label, row.current, row.proposed, row.current_masked, row.proposed_masked)
+		for row in doc.get("profile_changes") or []
+	]
+
+
+def _profile_value_text(value):
+	"""An Employee value as the text a row stores and compares (dates ISO)."""
+	return "" if value is None else str(value).strip()
+
+
+def _validate_new_profile_rows(doc):
+	"""Insert-time rules for row corrections. A generic insert (Desk,
+	`/api/resource`) cannot set the flag, so it is refused."""
+	if not doc.flags.helixhr_profile_changes:
+		frappe.throw(
+			_("Bank and ID changes can only be sent from the Profile page."), frappe.PermissionError
+		)
+	if doc.correction_field:
+		frappe.throw(_("A request carries one correction or a set of profile changes, not both."))
+	if doc.category != PROFILE_CORRECTION_CATEGORY or doc.routed_to_role != "HR Manager":
+		frappe.throw(_("A detail correction has to be filed as a profile correction for HR."))
+
+	meta = frappe.get_meta("Employee")
+	fields = [row.field for row in doc.profile_changes]
+	if len(set(fields)) != len(fields):
+		frappe.throw(_("Each detail can appear once in a request."))
+	for field in fields:
+		if field not in PROFILE_SELF_SERVICE_FIELDS or not meta.has_field(field):
+			frappe.throw(_("That detail can't be changed through a request. Ask HR directly."))
+	live = frappe.db.get_value("Employee", doc.employee, fields, as_dict=True) or {}
+	for row in doc.profile_changes:
+		label = profile_field_label(row.field)
+		proposed = _profile_value_text(row.proposed)
+		if not proposed:
+			frappe.throw(_("Type the new {0}.").format(label))
+		if len(proposed) > PROFILE_CHANGE_VALUE_MAX:
+			frappe.throw(_("The {0} is too long.").format(label))
+		current = _profile_value_text(live.get(row.field))
+		if proposed == current:
+			frappe.throw(_("{0}: that is already the value on your record.").format(label))
+		row.label = label
+		row.proposed = proposed
+		row.current = current or None
+		row.proposed_masked = profile_display_value(row.field, proposed)
+		row.current_masked = profile_display_value(row.field, current)
+
+	if not doc.flags.correction_proof:
+		frappe.throw(_("Attach proof of the new details, such as a bank letter or cancelled cheque."))
+	file_name, content = doc.flags.correction_proof
+	validate_portal_upload(file_name, content)
 
 
 def _validate_new_correction(doc):
@@ -1454,6 +1527,9 @@ def _validate_new_correction(doc):
 	`api.create_my_request`, not as fields: a generic insert (Desk,
 	`/api/resource`, `frappe.client`) cannot supply them and is refused.
 	"""
+	if doc.get("profile_changes"):
+		_validate_new_profile_rows(doc)
+		return
 	if not doc.correction_field:
 		if any(doc.get(field) for field in CORRECTION_FIELDS):
 			frappe.throw(_("Pick which detail you want corrected."))
@@ -1517,6 +1593,56 @@ def _personal_email_changed_recently(employee):
 	return False
 
 
+def mask_employee_version_data(raw):
+	"""Version `data` with every self-service identifier in `changed` masked
+	(plan 2026-11-03-001 R19, KTD13). Returns the new JSON, or None when
+	nothing needed masking. Idempotent: a masked value masks to itself.
+	`personal_email` is never touched -- the 72h hold reads it."""
+	data = frappe.parse_json(raw or "{}")
+	changed = False
+	for entry in data.get("changed") or []:
+		if not entry or entry[0] not in PROFILE_MASKED_FIELDS:
+			continue
+		masked = [entry[0], *(mask_identifier(value) for value in entry[1:])]
+		if masked != list(entry):
+			entry[:] = masked
+			changed = True
+	return frappe.as_json(data) if changed else None
+
+
+def version_before_insert(doc, method=None):
+	"""Review B2: Frappe writes an Employee's Version after `on_update`, so
+	the mask runs on the Version itself. Any error propagates and blocks the
+	insert -- and with it the Employee save -- rather than store a full
+	account number."""
+	if doc.ref_doctype != "Employee":
+		return
+	masked = mask_employee_version_data(doc.data)
+	if masked is not None:
+		doc.data = masked
+
+
+def previous_personal_email(employee):
+	"""The personal email on file before the most recent change to it, from
+	Version history (review B3), so a fill notice also reaches the address a
+	hijacker may have just replaced. None when it never changed."""
+	for data in frappe.get_all(
+		"Version",
+		filters={"ref_doctype": "Employee", "docname": employee},
+		pluck="data",
+		order_by="creation desc",
+		limit=50,
+	):
+		try:
+			changed = frappe.parse_json(data or "{}").get("changed") or []
+		except Exception:
+			continue
+		for row in changed:
+			if row and row[0] == "personal_email":
+				return row[1] or None
+	return None
+
+
 def _apply_correction(doc):
 	"""Write the proposed value to Employee inside the Done save (KTD16).
 
@@ -1529,6 +1655,9 @@ def _apply_correction(doc):
 
 	if doc.routed_to_role != "HR Manager" or not _is_hr():
 		frappe.throw(_("Only HR can complete a detail correction."), frappe.PermissionError)
+	if doc.get("profile_changes"):
+		_apply_profile_rows(doc)
+		return
 
 	proposed = get_decrypted_password("HR Request", doc.name, "correction_proposed", raise_exception=False)
 	if not proposed:
@@ -1549,21 +1678,77 @@ def _apply_correction(doc):
 			)
 		)
 
+	save_employee_values(
+		doc.employee,
+		{field: proposed},
+		f"HR Request {doc.name}",
+		_("The new value couldn't be saved on the employee record, so the request stays open."),
+	)
+
+
+def save_employee_values(employee, values, log_ref, failure_message, elevated=False):
+	"""Write `values` to Employee behind a savepoint (KTD16, KTD12).
+
+	Whatever the save raised is replaced by `failure_message`: an Employee
+	validation message may quote the value, so it is dropped from
+	`message_log` too. `elevated` is the first-time fill only -- the caller has
+	already narrowed `values` to `PROFILE_SELF_SERVICE_FIELDS`.
+	"""
 	messages = len(frappe.local.message_log or [])
 	savepoint = "helixhr_apply_correction"
 	frappe.db.savepoint(savepoint)
 	try:
-		employee = frappe.get_doc("Employee", doc.employee)
-		employee.set(field, proposed)
-		employee.save()
+		doc = frappe.get_doc("Employee", employee)
+		doc.update(values)
+		doc.save(ignore_permissions=elevated)
 	except Exception as error:
 		frappe.db.rollback(save_point=savepoint)
 		del frappe.local.message_log[messages:]
 		frappe.log_error(
-			f"HR Request {doc.name}: Employee save raised {type(error).__name__}.",
+			f"{log_ref}: Employee save raised {type(error).__name__}.",
 			"HelixHR correction apply failed",
 		)
-		frappe.throw(_("The new value couldn't be saved on the employee record, so the request stays open."))
+		frappe.throw(failure_message)
+
+
+def _apply_profile_rows(doc):
+	"""Done on a row correction (R16): every row applies in one savepoint, or
+	none does. The Employee row is locked first; a stale row is named."""
+	from frappe.utils.password import get_decrypted_password
+
+	fields = [row.field for row in doc.profile_changes]
+	live = frappe.db.get_value(
+		"Employee", doc.employee, ["status", *fields], as_dict=True, for_update=True
+	)
+	if not live or live.status != "Active":
+		frappe.throw(_("This employee isn't active, so the change can't be applied. Reject it instead."))
+	values, stale = {}, []
+	for row in doc.profile_changes:
+		proposed = get_decrypted_password(PROFILE_ROW_DOCTYPE, row.name, "proposed", raise_exception=False)
+		if not proposed:
+			frappe.throw(_("This correction has already been closed, so there is nothing to apply."))
+		current = get_decrypted_password(PROFILE_ROW_DOCTYPE, row.name, "current", raise_exception=False) or ""
+		if _profile_value_text(live.get(row.field)) != current:
+			stale.append(row.label or row.field)
+		values[row.field] = proposed
+	if stale:
+		frappe.throw(
+			_("{0} changed since this was requested, so it can't be applied. Reject it and ask for a new request.").format(
+				", ".join(stale)
+			)
+		)
+	if _personal_email_changed_recently(doc.employee):
+		frappe.throw(
+			_("The employee's personal email changed in the last {0} hours, so bank changes are on hold until that passes.").format(
+				CORRECTION_EMAIL_HOLD_HOURS
+			)
+		)
+	save_employee_values(
+		doc.employee,
+		values,
+		f"HR Request {doc.name}",
+		_("The new values couldn't be saved on the employee record, so the request stays open."),
+	)
 
 
 def _purge_correction_secrets(doc):
@@ -1572,17 +1757,42 @@ def _purge_correction_secrets(doc):
 
 	for field in CORRECTION_SECRET_FIELDS:
 		remove_encrypted_password("HR Request", doc.name, field)
+	for row in doc.get("profile_changes") or []:
+		for field in PROFILE_ROW_SECRET_FIELDS:
+			remove_encrypted_password(PROFILE_ROW_DOCTYPE, row.name, field)
+
+
+def profile_change_notice_context(changes):
+	"""KTD14: `changes` is `[{label, masked_new_value, state}]`. `field_label`
+	(labels joined) and `masked_new_value` (the first) stay for templates HR
+	customised before the list existed."""
+	return {
+		"field_label": ", ".join(change["label"] for change in changes),
+		"masked_new_value": changes[0]["masked_new_value"] if changes else "",
+		"changes": changes,
+	}
 
 
 def _send_correction_notice(doc, event_key, extra):
+	state = "sent to HR" if event_key == "bank_change_requested" else "changed"
+	rows = doc.get("profile_changes") or []
+	if rows:
+		changes = [
+			{"label": row.label or row.field, "masked_new_value": row.proposed_masked or "", "state": state}
+			for row in rows
+		]
+	else:
+		changes = [
+			{
+				"label": PROFILE_CORRECTABLE_FIELDS.get(doc.correction_field, doc.correction_field),
+				"masked_new_value": doc.correction_proposed_masked or "",
+				"state": state,
+			}
+		]
 	send_notification(
 		event_key,
 		_correction_recipients(doc.employee),
-		{
-			"field_label": PROFILE_CORRECTABLE_FIELDS.get(doc.correction_field, doc.correction_field),
-			"masked_new_value": doc.correction_proposed_masked,
-			**extra,
-		},
+		{**profile_change_notice_context(changes), **extra},
 		reference_doctype="HR Request",
 		reference_name=doc.name,
 	)
@@ -1619,6 +1829,10 @@ def hr_request_after_insert(doc, method=None):
 			"bank_change_requested",
 			{"requested_on": frappe.utils.format_datetime(doc.creation or frappe.utils.now_datetime())},
 		)
+	elif doc.get("profile_changes"):
+		# Review B1: `api.submit_my_profile_changes` sends the one notice for
+		# the whole submit, fills included.
+		_attach_correction_proof(doc)
 	role = doc.routed_to_role
 	users = _enabled_users_with_role(role, doc.employee)
 	if not users and role != "HR Manager":
@@ -1685,7 +1899,7 @@ def hr_request_on_update(doc, method=None):
 		# an employee's own new request has nothing to reply to yet.
 		return
 
-	if before.status != doc.status and doc.correction_field and doc.status in (
+	if before.status != doc.status and has_profile_correction(doc) and doc.status in (
 		HR_REQUEST_DONE,
 		HR_REQUEST_REJECTED,
 	):

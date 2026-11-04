@@ -1591,6 +1591,208 @@ def _delete_request(name):
 		frappe.delete_doc("HR Request", name, force=True, ignore_permissions=True)
 
 
+_PROFILE_ROWS = {"bank_name": "New Bank", "bank_ac_no": "987654321098", "iban": "GB82WEST12345698765432"}
+
+
+class TestProfileChangeRows(IntegrationTestCase):
+	"""Plan 2026-11-03-001 U5/U7: a multi-field correction is one child row
+	per field, encrypted, write-once, applied together on Done and purged."""
+
+	tearDown = TestProfileCorrection.tearDown
+	_move = TestProfileCorrection._move
+	_mails_to = TestProfileCorrection._mails_to
+
+	ROWS = _PROFILE_ROWS
+
+	def setUp(self):
+		TestProfileCorrection.setUp(self)
+		# The class shares one transaction, so an earlier Done would leave
+		# these values behind.
+		frappe.db.set_value("Employee", self.employee_name, {"bank_name": "Old Bank", "iban": None, "status": "Active"})
+
+	def _insert(self, rows=None, flag=True, proof=True, employee=None):
+		doc = frappe.get_doc(
+			{
+				"doctype": "HR Request",
+				"employee": employee or self.employee_name,
+				"category": self.category,
+				"subject": "Update my bank and ID details",
+				"client_operation_key": str(uuid.uuid4()),
+				"profile_changes": [
+					{"field": field, "proposed": value} for field, value in (rows or self.ROWS).items()
+				],
+			}
+		)
+		doc.flags.helixhr_profile_changes = flag
+		if proof:
+			doc.flags.correction_proof = ("bank-letter.pdf", SAFE_PDF)
+		frappe.set_user(frappe.db.get_value("Employee", doc.employee, "user_id"))
+		try:
+			doc.insert(ignore_permissions=True)
+		finally:
+			frappe.set_user("Administrator")
+		return doc
+
+	def _secret(self, row, field="proposed"):
+		from frappe.utils.password import get_decrypted_password
+
+		return get_decrypted_password("HelixHR Profile Change Row", row, field, raise_exception=False)
+
+	def _rows(self, name):
+		return frappe.get_all(
+			"HelixHR Profile Change Row",
+			filters={"parent": name, "parenttype": "HR Request"},
+			fields=["name", "field", "current", "proposed", "current_masked", "proposed_masked"],
+			order_by="idx asc",
+		)
+
+	def test_rows_are_stored_encrypted_with_masked_copies(self):
+		doc = self._insert()
+		rows = {row.field: row for row in self._rows(doc.name)}
+		self.assertEqual(set(rows), set(self.ROWS))
+		account = rows["bank_ac_no"]
+		self.assertEqual(account.proposed, "*" * len(self.ROWS["bank_ac_no"]))
+		self.assertEqual(account.proposed_masked, "••••1098")
+		self.assertEqual(account.current_masked, "••••3333")
+		self.assertEqual(self._secret(account.name), self.ROWS["bank_ac_no"])
+		self.assertEqual(self._secret(account.name, "current"), "111122223333")
+		# An unmasked field keeps its value in the display copy.
+		self.assertEqual(rows["bank_name"].proposed_masked, "New Bank")
+		self.assertNotIn("987654321098", frappe.as_json(self._rows(doc.name)))
+
+	def test_a_generic_insert_with_rows_is_refused(self):
+		with self.assertRaises(frappe.PermissionError):
+			self._insert(flag=False)
+
+	def test_rows_need_proof(self):
+		with self.assertRaises(frappe.ValidationError):
+			self._insert(proof=False)
+
+	def test_a_field_outside_the_allowlist_or_meta_is_refused(self):
+		for field in ("date_of_birth", "ctc", "not_a_field"):
+			with self.assertRaises(frappe.ValidationError):
+				self._insert({field: "x"})
+
+	def test_rows_are_frozen_for_everyone_after_insert(self):
+		doc = self._insert()
+		for user in ("Administrator", self.hr_user):
+			frappe.set_user(user)
+			try:
+				fresh = frappe.get_doc("HR Request", doc.name)
+				fresh.profile_changes[0].proposed_masked = "••••0000"
+				with self.assertRaises(frappe.PermissionError):
+					fresh.save(ignore_permissions=True)
+				fresh = frappe.get_doc("HR Request", doc.name)
+				fresh.append("profile_changes", {"field": "pan_number", "proposed": "ABCDE1234F"})
+				with self.assertRaises(frappe.PermissionError):
+					fresh.save(ignore_permissions=True)
+			finally:
+				frappe.set_user("Administrator")
+
+	def test_done_applies_every_row_purges_and_sends_one_notice(self):
+		doc = self._insert()
+		self._move(doc.name, "Pick up")
+		self._mail_before = set(frappe.get_all("Email Queue", pluck="name"))
+		self._move(doc.name, "Done")
+		values = frappe.db.get_value("Employee", self.employee_name, list(self.ROWS), as_dict=True)
+		self.assertEqual(dict(values), self.ROWS)
+		for row in self._rows(doc.name):
+			self.assertIsNone(self._secret(row.name))
+			self.assertIsNone(self._secret(row.name, "current"))
+			self.assertTrue(row.proposed_masked)
+		self.assertEqual(len(self._mails_to("employee-company@helixhr.test")), 1)
+		self.assertEqual(len(self._mails_to("employee-personal@helixhr.test")), 1)
+
+	def test_rejected_purges_and_applies_nothing(self):
+		doc = self._insert()
+		self._move(doc.name, "Reject")
+		for row in self._rows(doc.name):
+			self.assertIsNone(self._secret(row.name))
+		self.assertEqual(frappe.db.get_value("Employee", self.employee_name, "bank_ac_no"), "111122223333")
+
+	def test_one_stale_row_refuses_done_naming_it(self):
+		doc = self._insert()
+		self._move(doc.name, "Pick up")
+		frappe.db.set_value("Employee", self.employee_name, "iban", "DE89370400440532013000")
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self._move(doc.name, "Done")
+		self.assertIn("IBAN", str(caught.exception))
+		self.assertNotIn("Bank account", str(caught.exception))
+		self.assertEqual(frappe.db.get_value("Employee", self.employee_name, "bank_ac_no"), "111122223333")
+		self.assertEqual(frappe.db.get_value("HR Request", doc.name, "status"), "In Progress")
+
+	def test_done_is_refused_for_an_employee_who_left(self):
+		doc = self._insert()
+		self._move(doc.name, "Pick up")
+		frappe.db.set_value("Employee", self.employee_name, {"status": "Left", "relieving_date": frappe.utils.today()})
+		self.addCleanup(frappe.db.set_value, "Employee", self.employee_name, "status", "Active")
+		with self.assertRaisesRegex(frappe.ValidationError, "isn't active"):
+			self._move(doc.name, "Done")
+
+	def test_hr_cannot_done_their_own_change(self):
+		hr_employee = frappe.db.get_value("Employee", {"user_id": self.hr_user}, "name")
+		frappe.db.set_value("Employee", hr_employee, "bank_ac_no", "444455556666")
+		doc = self._insert({"bank_ac_no": "777788889999"}, employee=hr_employee)
+		frappe.db.set_value("HR Request", doc.name, "status", "In Progress")
+		frappe.set_user(self.hr_user)
+		try:
+			fresh = frappe.get_doc("HR Request", doc.name)
+			fresh.status = "Done"
+			with self.assertRaises(frappe.PermissionError):
+				fresh.save(ignore_permissions=True)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(frappe.db.get_value("Employee", hr_employee, "bank_ac_no"), "444455556666")
+
+	def test_reveal_is_per_row_by_the_picker_with_a_comment(self):
+		from helixhr.api import reveal_correction_value
+
+		doc = self._insert()
+		rows = self._rows(doc.name)
+		self._move(doc.name, "Pick up")
+		frappe.set_user(self.hr_user)
+		try:
+			revealed = reveal_correction_value(doc.name, row=rows[1].name)
+			self.assertEqual(revealed["value"], self.ROWS[rows[1].field])
+			with self.assertRaises(frappe.ValidationError):
+				reveal_correction_value(doc.name)
+		finally:
+			frappe.set_user("Administrator")
+		other_hr = ensure_hr_manager_user()
+		frappe.set_user(other_hr)
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				reveal_correction_value(doc.name, row=rows[1].name)
+		finally:
+			frappe.set_user("Administrator")
+		comments = frappe.get_all(
+			"Comment",
+			filters={"reference_doctype": "HR Request", "reference_name": doc.name, "comment_type": "Info"},
+			pluck="content",
+		)
+		self.assertEqual(sum("revealed by" in c for c in comments), 1)
+
+	def test_a_bank_number_in_a_reply_on_a_row_request_is_refused(self):
+		from helixhr.api import reply_to_my_request
+
+		doc = self._insert()
+		frappe.set_user(EMPLOYEE_USER)
+		try:
+			with self.assertRaisesRegex(frappe.ValidationError, "account numbers"):
+				reply_to_my_request(doc.name, "My account is 123456789012")
+		finally:
+			frappe.set_user("Administrator")
+
+	def test_summaries_carry_the_rows_masked(self):
+		from helixhr.api import _correction_summary
+
+		doc = self._insert()
+		summary = _correction_summary(frappe.get_doc("HR Request", doc.name))
+		self.assertEqual(len(summary["rows"]), 3)
+		self.assertEqual(summary["proposed_masked"], summary["rows"][0]["proposed_masked"])
+		self.assertNotIn("987654321098", frappe.as_json(summary))
+
+
 class TestRequestNaming(IntegrationTestCase):
 	"""Plan 2026-10-04-002 U1: each category carries its own ID prefix, new
 	requests are numbered from it, and existing names never change."""

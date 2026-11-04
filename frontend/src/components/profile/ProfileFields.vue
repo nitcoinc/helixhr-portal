@@ -22,6 +22,8 @@ const props = defineProps({
   sectionLabel: { type: String, default: '' },
   /** False when the correction category is retired: no correction entry. */
   canCorrect: { type: Boolean, default: true },
+  /** Fields in an open request (plan 2026-11-03-001 U9, R17). */
+  pending: { type: Array, default: () => [] },
 })
 const emit = defineEmits(['correct'])
 
@@ -110,6 +112,11 @@ function correct(run) {
               v-if="isExpired(field)"
               class="rounded-full bg-surface-red-2 px-2 py-0.5 text-xs font-medium text-ink-red-4"
             >Expired</span>
+            <span
+              v-if="pending.includes(field.fieldname)"
+              class="rounded-full bg-surface-amber-1 px-2 py-0.5 text-xs font-medium text-ink-amber-3"
+              :data-testid="`profile-pending-${field.fieldname}`"
+            >Waiting for HR</span>
           </span>
         </div>
       </div>

@@ -15,7 +15,10 @@ from helixhr.roster_ops import (
 	END_BEFORE_START,
 	NO_SHIFT_ON_DATE,
 	NO_SHIFT_TYPE,
+	NO_WORKING_DAYS,
+	OFF_DAYS_UNKNOWN,
 	OVERLAP,
+	SKIP_SPAN,
 	affected_window,
 	op_date,
 	simulate,
@@ -25,6 +28,27 @@ from helixhr.roster_ops import (
 # --- Shared literal case table (keep identical to rosterDraft.test.js) -----
 # coverage / expect: {employee: [[key, shift_type, start_date, end_date]]}
 # problems: [[op index, message]]
+# off_days (optional, default {} = every day unknown): {employee: {from, to, dates} | None}
+# steps (optional): per op, [[action, key, shift_type, start_date, end_date]]
+WEEKENDS = [
+	"2026-11-01",
+	"2026-11-07",
+	"2026-11-08",
+	"2026-11-14",
+	"2026-11-15",
+	"2026-11-21",
+	"2026-11-22",
+	"2026-11-28",
+	"2026-11-29",
+	"2026-12-05",
+	"2026-12-06",
+	"2026-12-12",
+	"2026-12-13",
+	"2026-12-19",
+	"2026-12-20",
+	"2026-12-26",
+	"2026-12-27",
+]
 CASES = [
 	{
 		"name": "assign on an empty range succeeds",
@@ -38,7 +62,7 @@ CASES = [
 				"to_date": "2026-11-08",
 			}
 		],
-		"expect": {"E1": [["new-0", "Day", "2026-11-02", "2026-11-08"]]},
+		"expect": {"E1": [["new-0-0", "Day", "2026-11-02", "2026-11-08"]]},
 		"problems": [],
 	},
 	{
@@ -71,7 +95,7 @@ CASES = [
 		"expect": {
 			"E1": [
 				["SA-1", "Day", "2026-11-01", "2026-11-09"],
-				["new-0", "Night", "2026-11-10", "2026-11-30"],
+				["new-0-0", "Night", "2026-11-10", "2026-11-30"],
 			]
 		},
 		"problems": [],
@@ -135,8 +159,8 @@ CASES = [
 		],
 		"expect": {
 			"E1": [
-				["new-0", "Day", "2026-11-02", "2026-11-09"],
-				["new-1", "Night", "2026-11-10", "2026-11-20"],
+				["new-0-0", "Day", "2026-11-02", "2026-11-09"],
+				["new-1-0", "Night", "2026-11-10", "2026-11-20"],
 			]
 		},
 		"problems": [],
@@ -148,7 +172,7 @@ CASES = [
 			{"employee": "E1", "action": "Assign", "shift_type": "Day", "from_date": "2026-11-02"},
 			{"employee": "E1", "action": "End", "to_date": "2026-11-30"},
 		],
-		"expect": {"E1": [["new-0", "Day", "2026-11-02", "2026-11-30"]]},
+		"expect": {"E1": [["new-0-0", "Day", "2026-11-02", "2026-11-30"]]},
 		"problems": [],
 	},
 	{
@@ -164,7 +188,7 @@ CASES = [
 			}
 		],
 		"expect": {
-			"E1": [["SA-1", "Day", "2026-11-01", "2026-11-09"], ["new-0", "Night", "2026-11-10", None]]
+			"E1": [["SA-1", "Day", "2026-11-01", "2026-11-09"], ["new-0-0", "Night", "2026-11-10", None]]
 		},
 		"problems": [],
 	},
@@ -179,12 +203,18 @@ CASES = [
 		"name": "a change whose assignment is gone falls back to the one covering the date",
 		"coverage": {"E1": [["SA-2", "Day", "2026-11-01", "2026-11-30"]]},
 		"ops": [
-			{"employee": "E1", "action": "Change", "shift_type": "Night", "from_date": "2026-11-10", "assignment": "SA-1"}
+			{
+				"employee": "E1",
+				"action": "Change",
+				"shift_type": "Night",
+				"from_date": "2026-11-10",
+				"assignment": "SA-1",
+			}
 		],
 		"expect": {
 			"E1": [
 				["SA-2", "Day", "2026-11-01", "2026-11-09"],
-				["new-0", "Night", "2026-11-10", "2026-11-30"],
+				["new-0-0", "Night", "2026-11-10", "2026-11-30"],
 			]
 		},
 		"problems": [],
@@ -211,9 +241,453 @@ CASES = [
 		],
 		"expect": {
 			"E1": [["SA-1", "Day", "2026-11-01", None]],
-			"E2": [["new-1", "Night", "2026-11-05", "2026-11-05"]],
+			"E2": [["new-1-0", "Night", "2026-11-05", "2026-11-05"]],
 		},
 		"problems": [[0, OVERLAP]],
+	},
+	{
+		"name": "skip: a four-week assign with weekends off becomes four blocks",
+		"coverage": {},
+		"off_days": {"E1": {"from": "2026-11-01", "to": "2026-12-31", "dates": WEEKENDS}},
+		"ops": [
+			{
+				"employee": "E1",
+				"action": "Assign",
+				"shift_type": "Day",
+				"from_date": "2026-11-02",
+				"to_date": "2026-11-27",
+				"skip_off_days": 1,
+			}
+		],
+		"expect": {
+			"E1": [
+				["new-0-0", "Day", "2026-11-02", "2026-11-06"],
+				["new-0-1", "Day", "2026-11-09", "2026-11-13"],
+				["new-0-2", "Day", "2026-11-16", "2026-11-20"],
+				["new-0-3", "Day", "2026-11-23", "2026-11-27"],
+			]
+		},
+		"problems": [],
+		"steps": [
+			[
+				["create", "new-0-0", "Day", "2026-11-02", "2026-11-06"],
+				["create", "new-0-1", "Day", "2026-11-09", "2026-11-13"],
+				["create", "new-0-2", "Day", "2026-11-16", "2026-11-20"],
+				["create", "new-0-3", "Day", "2026-11-23", "2026-11-27"],
+			]
+		],
+	},
+	{
+		"name": "skip: a holiday splits the block around it",
+		"coverage": {},
+		"off_days": {"E1": {"from": "2026-11-01", "to": "2026-12-31", "dates": [*WEEKENDS, "2026-11-12"]}},
+		"ops": [
+			{
+				"employee": "E1",
+				"action": "Assign",
+				"shift_type": "Day",
+				"from_date": "2026-11-02",
+				"to_date": "2026-11-27",
+				"skip_off_days": 1,
+			}
+		],
+		"expect": {
+			"E1": [
+				["new-0-0", "Day", "2026-11-02", "2026-11-06"],
+				["new-0-1", "Day", "2026-11-09", "2026-11-11"],
+				["new-0-2", "Day", "2026-11-13", "2026-11-13"],
+				["new-0-3", "Day", "2026-11-16", "2026-11-20"],
+				["new-0-4", "Day", "2026-11-23", "2026-11-27"],
+			]
+		},
+		"problems": [],
+	},
+	{
+		"name": "skip: a range starting and ending on off days is trimmed",
+		"coverage": {},
+		"off_days": {"E1": {"from": "2026-11-01", "to": "2026-12-31", "dates": WEEKENDS}},
+		"ops": [
+			{
+				"employee": "E1",
+				"action": "Assign",
+				"shift_type": "Day",
+				"from_date": "2026-11-01",
+				"to_date": "2026-11-08",
+				"skip_off_days": 1,
+			}
+		],
+		"expect": {"E1": [["new-0-0", "Day", "2026-11-02", "2026-11-06"]]},
+		"problems": [],
+	},
+	{
+		"name": "skip: only off days is refused",
+		"coverage": {},
+		"off_days": {"E1": {"from": "2026-11-01", "to": "2026-12-31", "dates": WEEKENDS}},
+		"ops": [
+			{
+				"employee": "E1",
+				"action": "Assign",
+				"shift_type": "Day",
+				"from_date": "2026-11-07",
+				"to_date": "2026-11-08",
+				"skip_off_days": 1,
+			}
+		],
+		"expect": {},
+		"problems": [[0, NO_WORKING_DAYS]],
+	},
+	{
+		"name": "skip: unknown off days is refused, without skip one block",
+		"coverage": {},
+		"off_days": {"E1": None},
+		"ops": [
+			{
+				"employee": "E1",
+				"action": "Assign",
+				"shift_type": "Day",
+				"from_date": "2026-11-02",
+				"to_date": "2026-11-27",
+				"skip_off_days": 1,
+			},
+			{
+				"employee": "E1",
+				"action": "Assign",
+				"shift_type": "Day",
+				"from_date": "2026-11-02",
+				"to_date": "2026-11-27",
+			},
+		],
+		"expect": {"E1": [["new-1-0", "Day", "2026-11-02", "2026-11-27"]]},
+		"problems": [[0, OFF_DAYS_UNKNOWN]],
+	},
+	{
+		"name": "skip: a holiday list ending inside the range is unknown",
+		"coverage": {},
+		"off_days": {"E1": {"from": "2026-11-01", "to": "2026-11-20", "dates": WEEKENDS}},
+		"ops": [
+			{
+				"employee": "E1",
+				"action": "Assign",
+				"shift_type": "Day",
+				"from_date": "2026-11-02",
+				"to_date": "2026-11-27",
+				"skip_off_days": 1,
+			}
+		],
+		"expect": {},
+		"problems": [[0, OFF_DAYS_UNKNOWN]],
+	},
+	{
+		"name": "skip: more than 92 days is refused",
+		"coverage": {},
+		"off_days": {"E1": {"from": "2026-11-01", "to": "2027-12-31", "dates": WEEKENDS}},
+		"ops": [
+			{
+				"employee": "E1",
+				"action": "Assign",
+				"shift_type": "Day",
+				"from_date": "2026-11-02",
+				"to_date": "2027-02-02",
+				"skip_off_days": 1,
+			}
+		],
+		"expect": {},
+		"problems": [[0, SKIP_SPAN]],
+	},
+	{
+		"name": "skip is ignored on an open-ended assign, a change and an end",
+		"coverage": {"E2": [["SA-9", "Day", "2026-11-02", "2026-11-27"]]},
+		"off_days": {
+			"E1": {"from": "2026-11-01", "to": "2026-12-31", "dates": WEEKENDS},
+			"E2": {"from": "2026-11-01", "to": "2026-12-31", "dates": WEEKENDS},
+		},
+		"ops": [
+			{
+				"employee": "E1",
+				"action": "Assign",
+				"shift_type": "Day",
+				"from_date": "2026-11-02",
+				"skip_off_days": 1,
+			},
+			{
+				"employee": "E2",
+				"action": "Change",
+				"shift_type": "Night",
+				"from_date": "2026-11-10",
+				"skip_off_days": 1,
+			},
+			{"employee": "E2", "action": "End", "to_date": "2026-11-20", "skip_off_days": 1},
+		],
+		"expect": {
+			"E1": [["new-0-0", "Day", "2026-11-02", None]],
+			"E2": [
+				["SA-9", "Day", "2026-11-02", "2026-11-09"],
+				["new-1-0", "Night", "2026-11-10", "2026-11-20"],
+			],
+		},
+		"problems": [],
+	},
+	{
+		"name": "run: change from mid-block splits it and swaps every later block",
+		"coverage": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-13"],
+				["SA-3", "Day", "2026-11-16", "2026-11-20"],
+				["SA-4", "Day", "2026-11-23", "2026-11-27"],
+			]
+		},
+		"off_days": {"E1": {"from": "2026-11-01", "to": "2026-12-31", "dates": WEEKENDS}},
+		"ops": [
+			{
+				"employee": "E1",
+				"action": "Change",
+				"shift_type": "Night",
+				"from_date": "2026-11-18",
+				"assignment": "SA-3",
+			}
+		],
+		"expect": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-13"],
+				["SA-3", "Day", "2026-11-16", "2026-11-17"],
+				["new-0-0", "Night", "2026-11-18", "2026-11-20"],
+				["new-0-1", "Night", "2026-11-23", "2026-11-27"],
+			]
+		},
+		"problems": [],
+		"steps": [
+			[
+				["end", "SA-3", "Day", "2026-11-16", "2026-11-17"],
+				["cancel", "SA-4", "Day", "2026-11-23", "2026-11-27"],
+				["create", "new-0-0", "Night", "2026-11-18", "2026-11-20"],
+				["create", "new-0-1", "Night", "2026-11-23", "2026-11-27"],
+			]
+		],
+	},
+	{
+		"name": "run: change dated on an off-day gap acts on the next block on",
+		"coverage": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-13"],
+				["SA-3", "Day", "2026-11-16", "2026-11-20"],
+				["SA-4", "Day", "2026-11-23", "2026-11-27"],
+			]
+		},
+		"off_days": {"E1": {"from": "2026-11-01", "to": "2026-12-31", "dates": WEEKENDS}},
+		"ops": [{"employee": "E1", "action": "Change", "shift_type": "Night", "from_date": "2026-11-22"}],
+		"expect": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-13"],
+				["SA-3", "Day", "2026-11-16", "2026-11-20"],
+				["new-0-0", "Night", "2026-11-23", "2026-11-27"],
+			]
+		},
+		"problems": [],
+		"steps": [
+			[
+				["cancel", "SA-4", "Day", "2026-11-23", "2026-11-27"],
+				["create", "new-0-0", "Night", "2026-11-23", "2026-11-27"],
+			]
+		],
+	},
+	{
+		"name": "run: change on a later block's first day recreates it",
+		"coverage": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-13"],
+				["SA-3", "Day", "2026-11-16", "2026-11-20"],
+				["SA-4", "Day", "2026-11-23", "2026-11-27"],
+			]
+		},
+		"off_days": {"E1": {"from": "2026-11-01", "to": "2026-12-31", "dates": WEEKENDS}},
+		"ops": [
+			{
+				"employee": "E1",
+				"action": "Change",
+				"shift_type": "Night",
+				"from_date": "2026-11-16",
+				"assignment": "SA-3",
+			}
+		],
+		"expect": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-13"],
+				["new-0-0", "Night", "2026-11-16", "2026-11-20"],
+				["new-0-1", "Night", "2026-11-23", "2026-11-27"],
+			]
+		},
+		"problems": [],
+	},
+	{
+		"name": "run: change on the run's first day is still refused",
+		"coverage": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-13"],
+				["SA-3", "Day", "2026-11-16", "2026-11-20"],
+				["SA-4", "Day", "2026-11-23", "2026-11-27"],
+			]
+		},
+		"off_days": {"E1": {"from": "2026-11-01", "to": "2026-12-31", "dates": WEEKENDS}},
+		"ops": [
+			{
+				"employee": "E1",
+				"action": "Change",
+				"shift_type": "Night",
+				"from_date": "2026-11-02",
+				"assignment": "SA-1",
+			}
+		],
+		"expect": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-13"],
+				["SA-3", "Day", "2026-11-16", "2026-11-20"],
+				["SA-4", "Day", "2026-11-23", "2026-11-27"],
+			]
+		},
+		"problems": [[0, CHANGE_ON_START]],
+	},
+	{
+		"name": "run: end mid-block ends it and cancels every later block",
+		"coverage": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-13"],
+				["SA-3", "Day", "2026-11-16", "2026-11-20"],
+				["SA-4", "Day", "2026-11-23", "2026-11-27"],
+			]
+		},
+		"off_days": {"E1": {"from": "2026-11-01", "to": "2026-12-31", "dates": WEEKENDS}},
+		"ops": [{"employee": "E1", "action": "End", "to_date": "2026-11-18", "assignment": "SA-3"}],
+		"expect": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-13"],
+				["SA-3", "Day", "2026-11-16", "2026-11-18"],
+			]
+		},
+		"problems": [],
+		"steps": [
+			[
+				["end", "SA-3", "Day", "2026-11-16", "2026-11-18"],
+				["cancel", "SA-4", "Day", "2026-11-23", "2026-11-27"],
+			]
+		],
+	},
+	{
+		"name": "run: end dated on a gap cancels the later blocks",
+		"coverage": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-13"],
+				["SA-3", "Day", "2026-11-16", "2026-11-20"],
+				["SA-4", "Day", "2026-11-23", "2026-11-27"],
+			]
+		},
+		"off_days": {"E1": {"from": "2026-11-01", "to": "2026-12-31", "dates": WEEKENDS}},
+		"ops": [{"employee": "E1", "action": "End", "to_date": "2026-11-22"}],
+		"expect": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-13"],
+				["SA-3", "Day", "2026-11-16", "2026-11-20"],
+			]
+		},
+		"problems": [],
+		"steps": [[["cancel", "SA-4", "Day", "2026-11-23", "2026-11-27"]]],
+	},
+	{
+		"name": "run: another shift type breaks the run",
+		"coverage": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-13"],
+				["SA-3", "Late", "2026-11-16", "2026-11-20"],
+				["SA-4", "Day", "2026-11-23", "2026-11-27"],
+			]
+		},
+		"off_days": {"E1": {"from": "2026-11-01", "to": "2026-12-31", "dates": WEEKENDS}},
+		"ops": [
+			{
+				"employee": "E1",
+				"action": "Change",
+				"shift_type": "Night",
+				"from_date": "2026-11-11",
+				"assignment": "SA-2",
+			}
+		],
+		"expect": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-10"],
+				["SA-3", "Late", "2026-11-16", "2026-11-20"],
+				["SA-4", "Day", "2026-11-23", "2026-11-27"],
+				["new-0-0", "Night", "2026-11-11", "2026-11-13"],
+			]
+		},
+		"problems": [],
+	},
+	{
+		"name": "run: a working-day gap breaks the run",
+		"coverage": {
+			"E1": [["SA-1", "Day", "2026-11-02", "2026-11-06"], ["SA-3", "Day", "2026-11-16", "2026-11-20"]]
+		},
+		"off_days": {"E1": {"from": "2026-11-01", "to": "2026-12-31", "dates": WEEKENDS}},
+		"ops": [{"employee": "E1", "action": "End", "to_date": "2026-11-04", "assignment": "SA-1"}],
+		"expect": {
+			"E1": [["SA-1", "Day", "2026-11-02", "2026-11-04"], ["SA-3", "Day", "2026-11-16", "2026-11-20"]]
+		},
+		"problems": [],
+	},
+	{
+		"name": "run: unknown off days act on the covering block only",
+		"coverage": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-13"],
+				["SA-3", "Day", "2026-11-16", "2026-11-20"],
+				["SA-4", "Day", "2026-11-23", "2026-11-27"],
+			]
+		},
+		"off_days": {"E1": None},
+		"ops": [{"employee": "E1", "action": "End", "to_date": "2026-11-18", "assignment": "SA-3"}],
+		"expect": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-13"],
+				["SA-3", "Day", "2026-11-16", "2026-11-18"],
+				["SA-4", "Day", "2026-11-23", "2026-11-27"],
+			]
+		},
+		"problems": [],
+	},
+	{
+		"name": "run: a gap day outside the known range breaks the run",
+		"coverage": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-13"],
+				["SA-3", "Day", "2026-11-16", "2026-11-20"],
+				["SA-4", "Day", "2026-11-23", "2026-11-27"],
+			]
+		},
+		"off_days": {"E1": {"from": "2026-11-01", "to": "2026-11-20", "dates": WEEKENDS}},
+		"ops": [{"employee": "E1", "action": "End", "to_date": "2026-11-11", "assignment": "SA-2"}],
+		"expect": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-06"],
+				["SA-2", "Day", "2026-11-09", "2026-11-11"],
+				["SA-4", "Day", "2026-11-23", "2026-11-27"],
+			]
+		},
+		"problems": [],
 	},
 ]
 
@@ -232,6 +706,13 @@ def _coverage_in(table):
 	}
 
 
+def _steps_out(steps):
+	return [
+		[[s["action"], s["key"], s["shift_type"], s["start_date"], s["end_date"]] for s in op_steps]
+		for op_steps in steps
+	]
+
+
 def _coverage_out(coverage):
 	return {
 		employee: [[a["key"], a["shift_type"], _iso(a["start_date"]), _iso(a["end_date"])] for a in rows]
@@ -244,9 +725,31 @@ class TestSimulateSharedCases(UnitTestCase):
 	def test_every_shared_case(self):
 		for case in CASES:
 			with self.subTest(case["name"]):
-				coverage, problems = simulate(_coverage_in(case["coverage"]), case["ops"])
+				coverage, problems, steps = simulate(
+					_coverage_in(case["coverage"]), case["ops"], case.get("off_days", {})
+				)
 				self.assertEqual(_coverage_out(coverage), case["expect"])
 				self.assertEqual([[p["index"], p["message"]] for p in problems], case["problems"])
+				if "steps" in case:
+					self.assertEqual(_steps_out(steps), case["steps"])
+
+	def test_without_off_days_skip_is_ignored_and_runs_are_not_followed(self):
+		# Plan 2026-11-03-001 A1: a legacy request simulates as before.
+		coverage, problems, _ = simulate(
+			{},
+			[
+				{
+					"employee": "E1",
+					"action": "Assign",
+					"shift_type": "Day",
+					"from_date": "2026-11-02",
+					"to_date": "2026-11-27",
+					"skip_off_days": 1,
+				}
+			],
+		)
+		self.assertEqual(problems, [])
+		self.assertEqual(_coverage_out(coverage), {"E1": [["new-0-0", "Day", "2026-11-02", "2026-11-27"]]})
 
 	def test_input_coverage_is_not_mutated(self):
 		original = _coverage_in({"E1": [["SA-1", "Day", "2026-11-01", None]]})
@@ -257,13 +760,13 @@ class TestSimulateSharedCases(UnitTestCase):
 		self.assertIsNone(original["E1"][0]["end_date"])
 
 	def test_problems_name_the_employee(self):
-		_, problems = simulate(
+		_, problems, _ = simulate(
 			{}, [{"employee": "E9", "action": "Change", "from_date": "2026-11-10", "shift_type": "Day"}]
 		)
 		self.assertEqual(problems[0]["employee"], "E9")
 
 	def test_accepts_date_objects(self):
-		coverage, problems = simulate(
+		coverage, problems, _ = simulate(
 			{"E1": [{"key": "SA-1", "shift_type": "Day", "start_date": date(2026, 11, 1), "end_date": None}]},
 			[{"employee": "E1", "action": "End", "to_date": date(2026, 11, 3), "assignment": "SA-1"}],
 		)
@@ -306,6 +809,17 @@ class TestAffectedWindow(UnitTestCase):
 			]
 		)
 		self.assertEqual(window, {"E1": (date(2026, 11, 10), None), "E2": (date(2026, 11, 15), None)})
+
+	def test_steps_widen_the_window_to_the_end_of_the_run(self):
+		ops = [{"employee": "E1", "action": "End", "to_date": "2026-11-18", "assignment": "SA-3"}]
+		coverage = _coverage_in(
+			{"E1": [["SA-3", "Day", "2026-11-16", "2026-11-20"], ["SA-4", "Day", "2026-11-23", "2026-11-27"]]}
+		)
+		_, _, steps = simulate(
+			coverage, ops, {"E1": {"from": "2026-11-01", "to": "2026-12-31", "dates": WEEKENDS}}
+		)
+		self.assertEqual(affected_window(ops), {"E1": (date(2026, 11, 18), date(2026, 11, 18))})
+		self.assertEqual(affected_window(ops, steps), {"E1": (date(2026, 11, 18), date(2026, 11, 27))})
 
 	def test_op_date_is_the_end_date_for_end(self):
 		self.assertEqual(

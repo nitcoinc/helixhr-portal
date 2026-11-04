@@ -1085,6 +1085,22 @@ def setup_playwright_fixtures():
 	# profile-tabs.spec.ts: a known account number to prove it reaches the
 	# page masked to its last four, never whole.
 	frappe.db.set_value("Employee", employee_name, {"bank_ac_no": "004512345678", "date_of_birth": "1990-01-01"})
+	# profile-bank-edit.spec.ts: passport starts blank so its first-time fill
+	# runs on every seed, and a personal email gives the fill's security
+	# notice an out-of-band address (review B3) -- not company_email, which
+	# the Directory tests need unset. `set_value` writes no Version, so no
+	# personal-email hold starts.
+	frappe.db.set_value(
+		"Employee",
+		employee_name,
+		{
+			"passport_number": None,
+			"date_of_issue": None,
+			"valid_upto": None,
+			"place_of_issue": None,
+			"personal_email": "employee-personal@helixhr.test",
+		},
+	)
 	from helixhr.patches.v1_0.seed_profile_correction_category import execute as seed_profile_correction
 
 	seed_profile_correction()
@@ -2371,6 +2387,7 @@ def ensure_roster_fixtures():
 		assign_test_shift(employee_name)
 
 	colleague = ensure_directory_fixtures()["colleague"]
+	_ensure_roster_weekly_offs(colleague)
 	frappe.db.delete("Shift Assignment", {"employee": colleague})
 	doc = frappe.get_doc(
 		{
@@ -2387,6 +2404,57 @@ def ensure_roster_fixtures():
 	doc.submit()
 	hr_employee, _ = make_test_hr_manager_employee()
 	return {"employee": employee_name, "colleague": colleague, "hr": hr_employee}
+
+
+ROSTER_WEEKLY_OFF_LIST = "_Test Roster Weekly Off"
+
+
+def _ensure_roster_weekly_offs(employee):
+	"""Plan 2026-11-03-001 U4: Saturday and Sunday weekly offs from this
+	year's start to next year's end, assigned to `employee` alone, so the
+	skip spec has off days to skip and "Off" cells to read on any site.
+	Rebuilt when an older run's list no longer reaches 120 days ahead."""
+	from frappe.utils import add_days, get_year_ending, get_year_start, getdate, today
+
+	start = getdate(get_year_start(today()))
+	end = getdate(get_year_ending(add_days(today(), 366)))
+	current = frappe.db.get_value("Holiday List", ROSTER_WEEKLY_OFF_LIST, "to_date")
+	if current and getdate(current) < getdate(add_days(today(), 120)):
+		frappe.db.delete("Holiday List Assignment", {"holiday_list": ROSTER_WEEKLY_OFF_LIST})
+		frappe.delete_doc("Holiday List", ROSTER_WEEKLY_OFF_LIST, force=True, ignore_permissions=True)
+		current = None
+	if not current:
+		holiday_list = frappe.get_doc(
+			{
+				"doctype": "Holiday List",
+				"holiday_list_name": ROSTER_WEEKLY_OFF_LIST,
+				"from_date": start,
+				"to_date": end,
+			}
+		)
+		day = start
+		while day <= end:
+			if day.weekday() >= 5:
+				holiday_list.append(
+					"holidays", {"holiday_date": day, "description": day.strftime("%A"), "weekly_off": 1}
+				)
+			day = add_days(day, 1)
+		holiday_list.insert(ignore_permissions=True)
+	if not frappe.db.exists(
+		"Holiday List Assignment",
+		{"assigned_to": employee, "holiday_list": ROSTER_WEEKLY_OFF_LIST, "docstatus": 1},
+	):
+		assignment = frappe.get_doc(
+			{
+				"doctype": "Holiday List Assignment",
+				"applicable_for": "Employee",
+				"assigned_to": employee,
+				"holiday_list": ROSTER_WEEKLY_OFF_LIST,
+				"from_date": start,
+			}
+		)
+		assignment.insert(ignore_permissions=True)
+		assignment.submit()
 
 
 @frappe.whitelist()

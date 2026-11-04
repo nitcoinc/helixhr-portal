@@ -23,6 +23,13 @@ export const NO_SHIFT_TYPE = 'Choose a shift.'
 export const BAD_DATE = 'Give a valid date.'
 export const NO_SHIFT_ON_DATE = 'This person has no shift on that date to change or end.'
 export const BAD_ACTION = 'Choose assign, change or end.'
+// Plan 2026-11-03-001 U1: skipping a person's weekly offs and holidays.
+export const SKIP_MAX_DAYS = 92
+export const NO_WORKING_DAYS = 'No working days in that range.'
+export const OFF_DAYS_UNKNOWN =
+  "Their weekly offs and holidays can't be worked out for those dates. " +
+  'Turn off skipping weekly offs and holidays, or ask HR to set up their holiday list.'
+export const SKIP_SPAN = 'Skipping weekly offs and holidays works on at most 92 days at a time.'
 
 /** `value` when it is a real ISO calendar date, otherwise null. */
 function isoDate(value) {
@@ -33,10 +40,16 @@ function isoDate(value) {
     : null
 }
 
-function dayBefore(iso) {
+function addDays(iso, days) {
   const parsed = new Date(`${iso}T00:00:00Z`)
-  parsed.setUTCDate(parsed.getUTCDate() - 1)
+  parsed.setUTCDate(parsed.getUTCDate() + days)
   return parsed.toISOString().slice(0, 10)
+}
+
+const dayBefore = (iso) => addDays(iso, -1)
+
+function daysBetween(start, end) {
+  return Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86400000)
 }
 
 /** The date an operation acts on: `to_date` for End, `from_date` otherwise. */
@@ -59,41 +72,164 @@ function findTarget(rows, key, day) {
   return named ?? rows.find((a) => overlaps(a, day, day)) ?? null
 }
 
-function apply(rows, op, index) {
-  if (!ACTIONS.includes(op.action)) return BAD_ACTION
-  if (op.action !== END && !op.shift_type) return NO_SHIFT_TYPE
+// `{ from, to, dates: Set }`, or null (cannot tell). A day outside
+// `from`..`to` is unknown too (`roster_ops._off_days`).
+function normalizeOff(value) {
+  if (!value) return null
+  const from = isoDate(value.from)
+  const to = isoDate(value.to)
+  if (!from || !to) return null
+  return { from, to, dates: new Set((value.dates ?? []).map(isoDate).filter(Boolean)) }
+}
+
+/** true / false, or null when `off` cannot tell for `day`. */
+function isOff(off, day) {
+  if (!off || day < off.from || day > off.to) return null
+  return off.dates.has(day)
+}
+
+const flag = (value) => value === 1 || value === true || value === '1'
+
+// The block right after `block` in its run: the next one by date, same
+// shift type, only known off days between (`roster_ops._next_in_run`).
+function nextInRun(rows, block, off) {
+  if (!off || block.end_date === null) return null
+  const later = rows.filter((a) => a.start_date > block.end_date)
+  if (!later.length) return null
+  const following = later.reduce((min, a) => (a.start_date < min.start_date ? a : min))
+  if (following.shift_type !== block.shift_type) return null
+  for (let day = addDays(block.end_date, 1); day < following.start_date; day = addDays(day, 1)) {
+    if (isOff(off, day) !== true) return null
+  }
+  return following
+}
+
+const hasPreviousInRun = (rows, block, off) =>
+  rows.some((a) => a !== block && nextInRun(rows, a, off) === block)
+
+function resolve(rows, key, day, off) {
+  const named = key ? (rows.find((a) => a.key === key) ?? null) : null
+  if (named && overlaps(named, day, day)) return [named, false]
+  const covering = rows.find((a) => overlaps(a, day, day))
+  if (covering) return [covering, false]
+  for (const block of rows) {
+    if (block.end_date !== null && block.end_date < day) {
+      const following = nextInRun(rows, block, off)
+      if (following && following.start_date > day) return [following, true]
+    }
+  }
+  return [named, false]
+}
+
+function workingSpans(day, end, off) {
+  const spans = []
+  let start = null
+  for (; day <= end; day = addDays(day, 1)) {
+    if (off.dates.has(day)) {
+      if (start) spans.push([start, dayBefore(day)])
+      start = null
+    } else if (!start) start = day
+  }
+  if (start) spans.push([start, end])
+  return spans
+}
+
+function step(action, employee, block, endDate = null) {
+  return {
+    action,
+    employee,
+    key: block.key,
+    shift_type: block.shift_type,
+    start_date: block.start_date,
+    end_date: action === 'end' ? endDate : block.end_date,
+  }
+}
+
+const fail = (message) => [message, []]
+
+function apply(rows, op, index, off, runAware) {
+  const employee = op.employee
+  if (!ACTIONS.includes(op.action)) return fail(BAD_ACTION)
+  if (op.action !== END && !op.shift_type) return fail(NO_SHIFT_TYPE)
   const day = opDate(op)
-  if (!day) return BAD_DATE
+  if (!day) return fail(BAD_DATE)
+  let counter = 0
+  const newBlock = (shiftType, start, end) => {
+    const block = { key: `new-${index}-${counter++}`, shift_type: shiftType, start_date: start, end_date: end }
+    rows.push(block)
+    return step('create', employee, block)
+  }
+  const remove = (block) => rows.splice(rows.indexOf(block), 1)
 
   if (op.action === ASSIGN) {
     const end = op.to_date ? isoDate(op.to_date) : null
-    if (op.to_date && !end) return BAD_DATE
-    if (end && end < day) return END_BEFORE_START
-    if (rows.some((a) => overlaps(a, day, end))) return OVERLAP
-    rows.push({ key: `new-${index}`, shift_type: op.shift_type, start_date: day, end_date: end })
-    return null
+    if (op.to_date && !end) return fail(BAD_DATE)
+    if (end && end < day) return fail(END_BEFORE_START)
+    let spans = [[day, end]]
+    if (runAware && end && flag(op.skip_off_days)) {
+      if (daysBetween(day, end) + 1 > SKIP_MAX_DAYS) return fail(SKIP_SPAN)
+      if (!off || day < off.from || end > off.to) return fail(OFF_DAYS_UNKNOWN)
+      spans = workingSpans(day, end, off)
+      if (!spans.length) return fail(NO_WORKING_DAYS)
+    }
+    if (rows.some((a) => spans.some(([start, last]) => overlaps(a, start, last)))) return fail(OVERLAP)
+    return [null, spans.map(([start, last]) => newBlock(op.shift_type, start, last))]
   }
 
-  const target = findTarget(rows, op.assignment, day)
-  if (!target) return NO_SHIFT_ON_DATE
+  const [target, viaGap] = off
+    ? resolve(rows, op.assignment, day, off)
+    : [findTarget(rows, op.assignment, day), false]
+  if (!target) return fail(NO_SHIFT_ON_DATE)
+  const later = []
+  for (let next = nextInRun(rows, target, off); next; next = nextInRun(rows, next, off)) later.push(next)
+
+  const steps = []
   if (op.action === CHANGE) {
-    if (day <= target.start_date) return CHANGE_ON_START
-    if (target.end_date && day > target.end_date) return AFTER_END
-    const oldEnd = target.end_date
-    target.end_date = dayBefore(day)
-    rows.push({ key: `new-${index}`, shift_type: op.shift_type, start_date: day, end_date: oldEnd })
-    return null
+    const recreate = [...later]
+    let oldEnd = null
+    if (viaGap || (day === target.start_date && hasPreviousInRun(rows, target, off))) {
+      recreate.unshift(target)
+    } else if (day <= target.start_date) {
+      return fail(CHANGE_ON_START)
+    } else if (target.end_date && day > target.end_date) {
+      return fail(AFTER_END)
+    } else {
+      oldEnd = target.end_date
+      target.end_date = dayBefore(day)
+      steps.push(step('end', employee, target, target.end_date))
+    }
+    for (const block of recreate) {
+      remove(block)
+      steps.push(step('cancel', employee, block))
+    }
+    if (!recreate.includes(target)) steps.push(newBlock(op.shift_type, day, oldEnd))
+    for (const block of recreate) steps.push(newBlock(op.shift_type, block.start_date, block.end_date))
+    return [null, steps]
   }
-  if (day < target.start_date) return END_BEFORE_START
-  if (target.end_date && day > target.end_date) return AFTER_END
-  target.end_date = day
-  return null
+
+  if (viaGap) {
+    later.unshift(target)
+  } else {
+    if (day < target.start_date) return fail(END_BEFORE_START)
+    if (target.end_date && day > target.end_date) return fail(AFTER_END)
+    target.end_date = day
+    steps.push(step('end', employee, target, day))
+  }
+  for (const block of later) {
+    remove(block)
+    steps.push(step('cancel', employee, block))
+  }
+  return [null, steps]
 }
 
 /** Apply `ops` in order to a copy of `coverage`. Returns `{ coverage,
- * problems }`, each problem `{ index, employee, message }`. A refused
- * operation changes nothing and the rest still run. */
-export function simulate(coverage, ops) {
+ * problems, steps }`, each problem `{ index, employee, message }` and
+ * `steps[index]` the create / end / cancel steps that operation took. A
+ * refused operation changes nothing and the rest still run. `offDays`
+ * (`{ employee: { from, to, dates } | null }`) turns on skip expansion and
+ * run-aware Change / End; omitted, the legacy single-block rules apply
+ * (`roster_ops.simulate`). */
+export function simulate(coverage, ops, offDays = null) {
   const result = {}
   for (const [employee, rows] of Object.entries(coverage ?? {})) {
     result[employee] = rows.map((a) => ({
@@ -103,11 +239,16 @@ export function simulate(coverage, ops) {
       end_date: a.end_date ?? null,
     }))
   }
+  const runAware = offDays !== null && offDays !== undefined
+  const offs = {}
   const problems = []
+  const steps = []
   ops.forEach((op, index) => {
     result[op.employee] ??= []
-    const message = apply(result[op.employee], op, index)
+    if (!(op.employee in offs)) offs[op.employee] = runAware ? normalizeOff(offDays[op.employee]) : null
+    const [message, taken] = apply(result[op.employee], op, index, offs[op.employee], runAware)
+    steps.push(taken)
     if (message) problems.push({ index, employee: op.employee, message })
   })
-  return { coverage: result, problems }
+  return { coverage: result, problems, steps }
 }

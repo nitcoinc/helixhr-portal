@@ -393,6 +393,8 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"preview_message_template": (60, 60),
 			"reset_message_template": (30, 3600),
 			"send_test_message": (5, 600),
+			# Plan 2026-11-03-001 U6.
+			"submit_my_profile_changes": (10, 3600),
 			# Plan 2026-10-02-001 U13.
 			"reveal_correction_value": (20, 3600),
 			"save_leave_type": (30, 3600),
@@ -432,6 +434,8 @@ class TestPerUserRateLimits(IntegrationTestCase):
 			"submit_roster_change": (10, 3600),
 			"withdraw_roster_change": (10, 3600),
 			"reopen_roster_change": (10, 3600),
+			# Plan 2026-11-03-001 U3.
+			"add_roster_ops_bulk": (20, 60),
 			# Plan 2026-10-04-004 U4: the Email Templates page's celebrations
 			# group -- the setup read fans out per (event, company), the
 			# preview renders per keystroke pause, a test send is real mail

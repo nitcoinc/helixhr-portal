@@ -112,6 +112,18 @@ There is no app-level auth code. Three Frappe mechanisms carry it:
      `_handler_comment_refusal` (routed role, Active Employee in the
      employee's company for non-HR handlers, open state) for handlers; the
      session-resolved ownership check for the employee.
+   - `submit_my_profile_changes` (plan 2026-11-03-001 KTD12) saves the
+     caller's own Employee with `ignore_permissions` for a first-time fill
+     of a Bank & IDs group that is blank on file. The gate runs first, under
+     the Employee row lock: fields narrowed to `PROFILE_SELF_SERVICE_FIELDS`
+     (no permlevel lowered, `PROFILE_EDITABLE_FIELDS` not widened), the
+     client's seen state re-checked, Select/Link/date values validated, core
+     fields present, Active employee, no personal-email change in 72h, a
+     non-login notice address, and a password re-check. Errors from the save
+     are replaced with one sentence (`events.save_employee_values`). It also
+     writes the "self-filled, unverified" Info Comment and HR's Notification
+     Log alerts. The same call inserts the row HR Request with
+     `ignore_permissions`, as `create_my_request` does.
 
 7. **People administration writes (documented `ignore_permissions`
    exceptions, plan 2026-10-22-001).** Each runs after `resolve_admin_scope`
@@ -1445,9 +1457,69 @@ behind a stale check and a 72 h hold after a `personal_email` change, then
 purges both secrets (also purged on Rejected). The locked
 `bank_change_requested` / `bank_change_applied` notices go to the employee.
 
-**Open decision:** the Employee's own Version log records the bank-field
-change when Done applies it (the request's Version log holds only `*`
-padding). Whether to suppress or accept that is not settled.
+**Version log: resolved (plan 2026-11-03-001 KTD13, R19, review B2).** An
+Employee's change history never holds a full bank or ID value.
+`events.version_before_insert` (hooked on Version, not Employee: Frappe
+writes the Version after `on_update`) masks every `PROFILE_MASKED_FIELDS`
+entry in `changed` for `ref_doctype == "Employee"`. It fails closed: an
+error blocks the Version insert and with it the Employee save.
+`personal_email` is never masked, because the 72 h hold and
+`previous_personal_email` read it. Patch
+`v1_0.mask_employee_identifier_history` masks rows written before the hook;
+it is idempotent (a masked value masks to itself) and deletes nothing.
+
+### Bank & IDs self-edit (plan 2026-11-03-001 U5-U9, KTD9-KTD13)
+
+The Profile page's Bank & IDs section has one Edit mode
+(`components/profile/BankIdsEditor.vue`, `lib/profileChanges.js`) and one
+submit: `submit_my_profile_changes(changes, seen, operation_key, password)`
+plus an optional multipart `file`. `CorrectionDialog.vue` is gone; legacy
+single-field requests (`correction_field`) still display and decide as before.
+
+- **Fields and groups.** Only `PROFILE_SELF_SERVICE_FIELDS` (the bank
+  section). Routing is per group (`PROFILE_CHANGE_GROUPS`: bank, pan, pf,
+  passport, insurance), so a new bank name is never paired with an old
+  account number.
+- **Contract.** `changes` is `[{field, value, confirm}]`; `confirm` must
+  equal `value` for masked fields (double entry). `seen` is
+  `{group: "blank" | "filled"}`, what the page showed; a mismatch refuses the
+  group ("updated since you opened this"). Blank values (clearing),
+  over-long values, bad dates and unlisted Select/Link options are refused
+  per field. A refusal writes nothing and returns
+  `{status: "refused", errors: [{field, group, message}]}`; success returns
+  `status` (`applied`, `requested` or `applied_and_requested`), `applied`
+  (masked values only), `request`, `created`. `operation_key` makes a retry
+  idempotent: the existing request is rebuilt, and a fill whose live values
+  already equal the proposed ones reports as applied (review B4).
+- **Group with anything on file → HR.** The whole group's touched fields
+  become one `HR Request` (Profile correction) with one `HelixHR Profile
+  Change Row` per field (encrypted `current`/`proposed`, masked copies, frozen
+  after insert). Proof is required. A field already in an open correction,
+  or equal to the value on file, is refused. HR's Done applies every row as
+  HR behind a per-row stale check (`events._apply_profile_rows`), then purges
+  the secrets; Rejected purges too. A generic insert without
+  `flags.helixhr_profile_changes` is refused, so Desk cannot file rows.
+- **Blank group → first-time fill**, saved elevated (see the
+  `ignore_permissions` exceptions above). Gates: core fields present
+  (`PROFILE_FILL_CORE_FIELDS`: bank = `bank_name`, `bank_ac_no`,
+  `ifsc_code`; passport = all four), Active employee, no `personal_email`
+  change in 72 h, a recipient for the notice (company, personal, or the
+  personal email before the most recent change), and a **password
+  re-entry** (`_check_step_up`).
+- **Password-login-disabled sites skip the re-entry** (System Settings
+  `disable_user_pass_login`, e.g. Microsoft sign-in only): there is no
+  password to check, so the fill goes through on the self-filled mark and
+  HR alert alone (decision 2026-11-04: onboarding must not stall on SSO
+  sites). `get_my_profile` returns `fill_needs_password: false` and the
+  editor hides the box.
+- **After a fill:** an Info Comment "Self-filled by the employee, not
+  verified by HR: <labels>" on the Employee, and for a bank fill a
+  Notification Log alert to every HR Manager in scope (not the caller).
+- **Notices (review B1, B3).** One per submit: `bank_change_requested` when
+  any row went to HR, else `bank_change_applied`, each carrying a `changes`
+  list (label, masked new value, "changed" / "sent to HR"). Fill notices also
+  go to the previous personal email. HR's Done sends one more
+  `bank_change_applied`.
 
 ### Navigation and filters
 
@@ -2542,6 +2614,46 @@ order inside one savepoint through savepoint-free helpers the HR roster endpoint
 refusal rolls the whole batch back and returns the request. `helixhr/roster_ops.py` holds the pure
 simulator; `frontend/src/lib/rosterDraft.js` mirrors it for the draft preview, and one duplicated
 literal case table in both test suites keeps them equal.
+
+### Roster draft controls: skip off days, runs, bulk (plan 2026-11-03-001 U1-U4, KTD1-KTD8)
+
+- **Skip weekly offs and holidays.** A bounded Assign row may set
+  `skip_off_days` (stored only for Assign with a `to_date`). The server
+  expands it into one block per contiguous run of working days; the browser
+  never expands, it shows the blocks the server preview returns. Refused when
+  the span exceeds 92 days, when off days are unknown for any date in it
+  (no holiday list, or past the list's end), or when no working day is left.
+- **Off days** come from `_roster_off_days`: per employee, from the earliest
+  operation date to the last date their operations or bounded shifts reach,
+  never open-ended; days past the holiday list in force are unknown.
+  `get_roster_week` returns `off_days` (holidays plus weekly offs) beside
+  `holidays` (named only), so a skipped day reads "Off", not "no shift".
+- **Run-aware Change / End.** Blocks of the same shift type separated only by
+  known off days form a run. End cancels every later block of the run; Change
+  ends the target and cancels and recreates later blocks on the new shift. A
+  date on an off-day gap acts on the block after the gap; Change on a later
+  block's start date recreates that block instead of refusing with
+  `CHANGE_ON_START`. An unknown day breaks the run; with no holiday list,
+  Change / End act on the covering block only.
+- **Steps.** `simulate(coverage, ops, off_days)` returns
+  `(coverage, problems, steps)`; `steps[i]` is the ordered `create` / `end` /
+  `cancel` list for op `i`. New blocks are keyed `new-<op index>-<n>`.
+  A request may take at most 1,000 steps (`_ROSTER_MAX_STEPS`).
+- **Snapshot v2.** At submit the snapshot is `{v: 2, coverage, steps}`.
+  Approval re-simulates and compares the steps as well as coverage; any
+  difference returns the request as stale. Approval runs cancels before
+  creates, through `_cancel_roster_assignment` and a simulator-key to Shift
+  Assignment map. A snapshot without `v` is **v1 (legacy)**: skip is ignored
+  and Change / End act on one block, at preview and approval alike.
+- **Draft token.** `save_roster_draft` and `add_roster_ops_bulk` require
+  `expected_modified` (the draft's `modified`, `""` for none); missing or
+  different is refused, so two tabs cannot overwrite each other.
+- **`add_roster_ops_bulk(op, employees, whole_team, expected_modified)`**
+  appends one operation per Active direct report (`whole_team` is resolved on
+  the server, since the roster pages at 50). People whose op would fail, who
+  are in another Pending request, or who are not the caller's report are
+  skipped with a reason (no name for a non-report); the rest are added, or the
+  call is refused whole if they do not fit the 200-row draft cap.
 
 ### Who decided a leave (U11-U13, KTD14-KTD15)
 

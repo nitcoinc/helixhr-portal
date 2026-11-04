@@ -25,9 +25,14 @@ from helixhr.api import (
 	get_roster_draft,
 	get_roster_week,
 	reopen_roster_change,
-	save_roster_draft,
 	submit_roster_change,
 	withdraw_roster_change,
+)
+from helixhr.api import (
+	add_roster_ops_bulk as _add_roster_ops_bulk,
+)
+from helixhr.api import (
+	save_roster_draft as _save_roster_draft,
 )
 from helixhr.tests.test_api_people import _ensure_other_company
 from helixhr.tests.test_api_roster import roster_employee, row_for, seed_assignment
@@ -53,6 +58,29 @@ WEEK = "2031-03-03"
 TOMORROW = "2031-03-06"
 HR_IN_SCOPE = "roster-hr-a@helixhr.test"
 HR_OUT_OF_SCOPE = "roster-hr-b@helixhr.test"
+
+
+_CURRENT = object()
+
+
+def _draft_token():
+	"""The caller's Draft `modified` as the browser holds it ("" for none)."""
+	doc = api._my_roster_draft(api._my_employee())
+	return str(doc.modified) if doc else ""
+
+
+def save_roster_draft(rows, note=None, expected_modified=_CURRENT):
+	"""`api.save_roster_draft` with the current token unless a test passes
+	its own (KTD8: the token is required)."""
+	if expected_modified is _CURRENT:
+		expected_modified = _draft_token()
+	return _save_roster_draft(rows, note, expected_modified)
+
+
+def add_roster_ops_bulk(op, expected_modified=_CURRENT, **kwargs):
+	if expected_modified is _CURRENT:
+		expected_modified = _draft_token()
+	return _add_roster_ops_bulk(op, expected_modified=expected_modified, **kwargs)
 
 
 def assign(employee, from_date, to_date=None, shift_type=PORTAL_SHIFT_TYPE):
@@ -118,9 +146,9 @@ class RosterChangeTestCase(IntegrationTestCase):
 		frappe.set_user("Administrator")
 		return names
 
-	def refused(self, ops, exception=frappe.ValidationError):
+	def refused(self, ops, exception=frappe.ValidationError, **kwargs):
 		with self.assertRaises(exception) as caught:
-			save_roster_draft(ops)
+			save_roster_draft(ops, **kwargs)
 		return str(caught.exception)
 
 
@@ -153,7 +181,7 @@ class TestDraft(RosterChangeTestCase):
 			saved["preview"][first],
 			[
 				{
-					"key": "new-0",
+					"key": "new-0-0",
 					"shift_type": PORTAL_SHIFT_TYPE,
 					"start_date": TOMORROW,
 					"end_date": "2031-03-20",
@@ -250,12 +278,18 @@ class TestSubmit(RosterChangeTestCase):
 		self.assertEqual(second.employee, self.manager)
 		self.assertEqual(second.manager_user, MANAGER_USER)
 		self.assertTrue(first.helixhr_pending_since and second.helixhr_pending_since)
+		first_snapshot, second_snapshot = json.loads(first.snapshot), json.loads(second.snapshot)
+		# Plan 2026-11-03-001 A1, A2: version 2 carries the steps approval must repeat.
+		self.assertEqual(first_snapshot["v"], 2)
 		self.assertEqual(
-			json.loads(first.snapshot),
-			{home: {"window": [TOMORROW, "2031-03-12"], "coverage": []}},
+			first_snapshot["coverage"], {home: {"window": [TOMORROW, "2031-03-12"], "coverage": []}}
 		)
 		self.assertEqual(
-			json.loads(second.snapshot),
+			[[step["action"], step["start_date"], step["end_date"]] for step in first_snapshot["steps"][0]],
+			[["create", TOMORROW, "2031-03-12"]],
+		)
+		self.assertEqual(
+			second_snapshot["coverage"],
 			{
 				away: {
 					"window": ["2031-03-15", "2031-03-15"],
@@ -874,3 +908,345 @@ class TestQueueAndOversight(RosterApprovalTestCase):
 		self.assertEqual((group["key"], group["approver_role"]), ("role:HR Manager", "HR Manager"))
 		entry = next(entry for entry in group["items"] if entry["name"] == name)
 		self.assertEqual((entry["doctype"], entry["can_decide"], entry["is_own"]), (DOCTYPE, True, False))
+
+
+# --- Plan 2026-11-03-001 U2: skip off days, run-aware approval, caps, token --
+
+SKIP_LIST = "_Test Roster Skip List 2031"
+
+
+def ensure_skip_list(employee):
+	"""A 2031 holiday list with every Saturday and Sunday a weekly off,
+	assigned to `employee` alone. Idempotent: the list and the assignment
+	persist across runs; tests add and remove their own extra holidays."""
+	if not frappe.db.exists("Holiday List", SKIP_LIST):
+		holiday_list = frappe.get_doc(
+			{
+				"doctype": "Holiday List",
+				"holiday_list_name": SKIP_LIST,
+				"from_date": "2031-01-01",
+				"to_date": "2031-12-31",
+			}
+		)
+		day = frappe.utils.getdate("2031-01-01")
+		while day.year == 2031:
+			if day.weekday() >= 5:
+				holiday_list.append(
+					"holidays", {"holiday_date": day, "description": day.strftime("%A"), "weekly_off": 1}
+				)
+			day += timedelta(days=1)
+		holiday_list.insert(ignore_permissions=True)
+	if not frappe.db.exists(
+		"Holiday List Assignment", {"assigned_to": employee, "holiday_list": SKIP_LIST, "docstatus": 1}
+	):
+		assignment = frappe.get_doc(
+			{
+				"doctype": "Holiday List Assignment",
+				"applicable_for": "Employee",
+				"assigned_to": employee,
+				"holiday_list": SKIP_LIST,
+				"from_date": "2031-01-01",
+			}
+		)
+		assignment.insert(ignore_permissions=True)
+		assignment.submit()
+
+
+def add_holiday(test, holiday_date):
+	holiday_list = frappe.get_doc("Holiday List", SKIP_LIST)
+	holiday_list.append("holidays", {"holiday_date": holiday_date, "description": "Test holiday"})
+	holiday_list.save(ignore_permissions=True)
+	test.addCleanup(
+		frappe.db.delete,
+		"Holiday",
+		{"parent": SKIP_LIST, "holiday_date": holiday_date, "description": "Test holiday"},
+	)
+
+
+def skip_assign(employee, from_date, to_date, shift_type=PORTAL_SHIFT_TYPE):
+	return {**assign(employee, from_date, to_date, shift_type), "skip_off_days": 1}
+
+
+# Mon 10 - Fri 28 March 2031: three working weeks.
+SKIP_BLOCKS = [("2031-03-10", "2031-03-14"), ("2031-03-17", "2031-03-21"), ("2031-03-24", "2031-03-28")]
+
+
+class TestSkipOffDays(RosterApprovalTestCase):
+	def skipper(self, key):
+		report = self.report(key)
+		ensure_skip_list(report)
+		return report
+
+	def test_an_assign_with_skip_is_one_row_with_a_block_per_working_week(self):
+		report = self.skipper("skip-draft")
+		self.as_manager()
+		draft = save_roster_draft([skip_assign(report, "2031-03-10", "2031-03-28")])["draft"]
+		(row,) = draft["rows"]
+		self.assertEqual(row["skip_off_days"], 1)
+		self.assertEqual([(b["start_date"], b["end_date"]) for b in row["blocks"]], SKIP_BLOCKS)
+		self.assertEqual(draft["block_count"], 3)
+		self.assertEqual(
+			[(item["start_date"], item["end_date"]) for item in draft["preview"][report]], SKIP_BLOCKS
+		)
+
+	def test_skip_is_kept_only_on_an_assign_with_an_end_date(self):
+		report = self.skipper("skip-open")
+		seed_assignment(report, "2031-03-10", "2031-03-31")
+		self.as_manager()
+		draft = save_roster_draft(
+			[
+				{**assign(report, "2031-04-01"), "skip_off_days": 1},
+				{**end_op(report, "2031-03-20"), "skip_off_days": 1},
+			]
+		)
+		rows = frappe.get_doc(DOCTYPE, draft["draft"]["name"]).rows
+		self.assertEqual([row.skip_off_days for row in rows], [0, 0])
+
+	def test_unknown_off_days_refuse_the_skip_naming_the_person(self):
+		report = self.report("skip-nolist")
+		real = api._holiday_list_spans
+		self.as_manager()
+		with patch.object(
+			api, "_holiday_list_spans", side_effect=lambda e, *a: [] if e == report else real(e, *a)
+		):
+			message = self.refused([skip_assign(report, "2031-03-10", "2031-03-28")])
+		self.assertIn(self.employee_name(report), message)
+		self.assertIn("can't be worked out", message)
+		# Without the skip it is one ordinary block.
+		draft = save_roster_draft([assign(report, "2031-03-10", "2031-03-28")])["draft"]
+		self.assertEqual(draft["block_count"], 1)
+
+	def test_a_holiday_list_ending_inside_the_range_refuses_the_skip(self):
+		report = self.skipper("skip-yearend")
+		self.as_manager()
+		message = self.refused([skip_assign(report, "2031-12-29", "2032-01-09")])
+		self.assertIn("can't be worked out", message)
+
+	def test_approve_applies_one_shift_assignment_per_block(self):
+		report = self.skipper("skip-apply")
+		self.as_manager()
+		preview = save_roster_draft([skip_assign(report, "2031-03-10", "2031-03-28")])["draft"]["preview"]
+		frappe.set_user("Administrator")
+		(name,) = self.submit([skip_assign(report, "2031-03-10", "2031-03-28")])
+
+		detail = self.detail(HR_IN_SCOPE, name)
+		self.assertEqual((detail["change_count"], detail["block_count"]), (1, 3))
+		self.assertEqual(len(detail["employees"][0]["operations"][0]["blocks"]), 3)
+		row = next(row for row in self.queue(HR_IN_SCOPE)["pending"] if row["name"] == name)
+		self.assertEqual((row["change_count"], row["block_count"]), (1, 3))
+
+		self.assertEqual(self.decide(HR_IN_SCOPE, name, detail=detail)["state"], "Approved")
+		self.assertEqual(coverage(report), [(PORTAL_SHIFT_TYPE, start, end) for start, end in SKIP_BLOCKS])
+		self.assertEqual(
+			coverage(report),
+			[(item["shift_type"], item["start_date"], item["end_date"]) for item in preview[report]],
+		)
+
+	def test_a_holiday_added_after_submit_returns_the_request_and_writes_nothing(self):
+		report = self.skipper("skip-moved")
+		(name,) = self.submit([skip_assign(report, "2031-03-10", "2031-03-28")])
+		add_holiday(self, "2031-03-19")
+
+		result = self.decide(HR_IN_SCOPE, name)
+		self.assertTrue(result["returned"])
+		self.assertIn("days off", result["reasons"][0]["message"])
+		self.assertIn(self.employee_name(report), result["reasons"][0]["message"])
+		self.assertEqual(coverage(report), [])
+
+	def test_a_run_aware_change_cancels_and_recreates_the_later_blocks(self):
+		report = self.skipper("skip-change")
+		for start, end in SKIP_BLOCKS:
+			seed_assignment(report, start, end)
+		(name,) = self.submit([change_op(report, "2031-03-19")])
+
+		self.assertEqual(self.decide(HR_IN_SCOPE, name)["state"], "Approved")
+		self.assertEqual(
+			coverage(report),
+			[
+				(PORTAL_SHIFT_TYPE, "2031-03-10", "2031-03-14"),
+				(PORTAL_SHIFT_TYPE, "2031-03-17", "2031-03-18"),
+				(LATE_SHIFT, "2031-03-19", "2031-03-21"),
+				(LATE_SHIFT, "2031-03-24", "2031-03-28"),
+			],
+		)
+		created = frappe.get_all(
+			"Shift Assignment",
+			filters={"employee": report, "docstatus": 1, "shift_type": LATE_SHIFT},
+			pluck="start_date",
+		)
+		self.assertTrue(all(str(day) > "2031-03-05" for day in created))
+		self.assertEqual(frappe.db.count("Shift Assignment", {"employee": report, "docstatus": 2}), 1)
+
+	def test_a_request_sent_before_version_two_approves_as_one_block(self):
+		"""A1: no `v` in the snapshot keeps the single-block rules, even with
+		the flag set on the row."""
+		report = self.skipper("skip-legacy")
+		(name,) = self.submit([assign(report, "2031-03-10", "2031-03-28")])
+		snapshot = json.loads(frappe.db.get_value(DOCTYPE, name, "snapshot"))
+		frappe.db.set_value(DOCTYPE, name, "snapshot", json.dumps(snapshot["coverage"]), update_modified=False)
+		frappe.db.set_value(
+			"HelixHR Roster Change Row", {"parent": name}, "skip_off_days", 1, update_modified=False
+		)
+
+		self.assertEqual(self.decide(HR_IN_SCOPE, name)["state"], "Approved")
+		self.assertEqual(coverage(report), [(PORTAL_SHIFT_TYPE, "2031-03-10", "2031-03-28")])
+
+	def test_more_steps_than_the_cap_are_refused_at_save(self):
+		report = self.skipper("skip-cap")
+		self.as_manager()
+		with patch.object(api, "_ROSTER_MAX_STEPS", 2):
+			message = self.refused([skip_assign(report, "2031-03-10", "2031-03-28")])
+		self.assertIn("more than 2 changes", message)
+
+	def test_the_week_payload_carries_off_days(self):
+		report = self.skipper("skip-week")
+		self.as_manager()
+		row = row_for(get_roster_week("2031-03-10", mode="team"), report)
+		self.assertEqual(row["off_days"], ["2031-03-15", "2031-03-16"])
+		self.assertEqual(row["holidays"], [])
+
+
+class TestDraftToken(RosterChangeTestCase):
+	def test_a_stale_token_is_refused_and_a_matching_one_saves(self):
+		report = self.report("token")
+		self.as_manager()
+		first = save_roster_draft([assign(report, TOMORROW)], expected_modified="")["draft"]
+		message = self.refused([assign(report, "2031-03-07")], expected_modified="2000-01-01 00:00:00")
+		self.assertIn("another tab", message)
+		self.assertIn("another tab", self.refused([assign(report, "2031-03-07")], expected_modified=""))
+		again = save_roster_draft([assign(report, "2031-03-07")], expected_modified=first["modified"])["draft"]
+		self.assertEqual(again["rows"][0]["from_date"], "2031-03-07")
+
+	def test_a_save_without_a_token_is_refused(self):
+		report = self.report("no-token")
+		self.as_manager()
+		with self.assertRaises(frappe.ValidationError) as caught:
+			_save_roster_draft([assign(report, TOMORROW)])
+		self.assertIn("another tab", str(caught.exception))
+		with self.assertRaises(frappe.ValidationError):
+			_add_roster_ops_bulk(
+				{"action": "Assign", "shift_type": PORTAL_SHIFT_TYPE, "from_date": TOMORROW}, whole_team=1
+			)
+		self.assertFalse(frappe.db.exists(DOCTYPE, {"employee": self.manager, "status": "Draft"}))
+
+	def test_an_empty_save_on_an_existing_draft_keeps_an_empty_draft(self):
+		report = self.report("empty")
+		self.as_manager()
+		saved = save_roster_draft([assign(report, TOMORROW)])["draft"]
+		emptied = save_roster_draft([])["draft"]
+		self.assertEqual((emptied["name"], emptied["rows"]), (saved["name"], []))
+		self.assertEqual(frappe.db.count(DOCTYPE, {"employee": self.manager, "status": "Draft"}), 1)
+
+
+# --- Plan 2026-11-03-001 U3: one operation for the whole team or a pick ------
+
+BULK_MANAGER_USER = "roster-bulk-manager@helixhr.test"
+
+
+class TestBulk(RosterChangeTestCase):
+	"""A manager of their own whose team is exactly what each test makes:
+	setUp detaches every earlier report (tests own their rows)."""
+
+	def setUp(self):
+		super().setUp()
+		self.bulk_manager = make_test_user(BULK_MANAGER_USER, TEST_COMPANY)
+		clear_requests(self.bulk_manager)
+		frappe.db.set_value(
+			"Employee", {"reports_to": self.bulk_manager}, "reports_to", None, update_modified=False
+		)
+
+	def team(self, *keys):
+		names = []
+		for key in keys:
+			name = roster_employee(f"bulk-{key}", reports_to=self.bulk_manager, relieving_date=None)
+			frappe.db.delete("Shift Assignment", {"employee": name})
+			names.append(name)
+		return names
+
+	def bulk(self, op, **kwargs):
+		frappe.set_user(BULK_MANAGER_USER)
+		try:
+			return add_roster_ops_bulk(op, **kwargs)
+		finally:
+			frappe.set_user("Administrator")
+
+	def template(self, from_date=TOMORROW, to_date="2031-03-12", **fields):
+		return {"action": "Assign", "shift_type": PORTAL_SHIFT_TYPE, "from_date": from_date, "to_date": to_date, **fields}
+
+	def test_the_whole_team_gets_the_op_and_an_overlap_is_skipped_by_name(self):
+		people = self.team("a", "b", "c", "d", "e")
+		seed_assignment(people[2], "2031-01-01")
+		result = self.bulk(self.template(), whole_team=1)
+
+		self.assertEqual(result["added"], 4)
+		self.assertEqual(
+			sorted(row["employee"] for row in result["draft"]["rows"]), sorted(people[:2] + people[3:])
+		)
+		(skip,) = result["skipped"]
+		self.assertEqual((skip["employee"], skip["name"]), (people[2], frappe.db.get_value("Employee", people[2], "employee_name")))
+		self.assertIn("already has a shift", skip["reason"])
+
+	def test_someone_waiting_in_another_pending_request_is_skipped(self):
+		waiting, free = self.team("wait", "free")
+		frappe.set_user(BULK_MANAGER_USER)
+		save_roster_draft([assign(waiting, "2031-04-01")])
+		submit_roster_change("Earlier")
+		frappe.set_user("Administrator")
+
+		result = self.bulk(self.template(), whole_team=1)
+		self.assertEqual([row["employee"] for row in result["draft"]["rows"]], [free])
+		self.assertEqual([item["employee"] for item in result["skipped"]], [waiting])
+		self.assertIn("waiting for HR", result["skipped"][0]["reason"])
+
+	def test_ids_outside_the_team_are_not_available_and_get_no_name(self):
+		(mine,) = self.team("own")
+		(inactive,) = self.team("gone")
+		frappe.db.set_value("Employee", inactive, "status", "Inactive")
+		stranger = roster_employee("bulk-stranger", reports_to=None)
+
+		result = self.bulk(self.template(), employees=[mine, stranger, inactive, self.bulk_manager])
+		self.assertEqual([row["employee"] for row in result["draft"]["rows"]], [mine])
+		self.assertEqual(
+			[(item["employee"], item["name"], item["reason"]) for item in result["skipped"]],
+			[(other, None, "Not available.") for other in (stranger, inactive, self.bulk_manager)],
+		)
+
+	def test_skip_with_unknown_off_days_skips_only_that_person(self):
+		known, unknown = self.team("known", "unknown")
+		ensure_skip_list(known)
+		real = api._holiday_list_spans
+		with patch.object(
+			api, "_holiday_list_spans", side_effect=lambda e, *a: [] if e == unknown else real(e, *a)
+		):
+			result = self.bulk(self.template("2031-03-10", "2031-03-28", skip_off_days=1), whole_team=1)
+		(row,) = result["draft"]["rows"]
+		self.assertEqual((row["employee"], len(row["blocks"])), (known, 3))
+		self.assertEqual([item["employee"] for item in result["skipped"]], [unknown])
+		self.assertIn("can't be worked out", result["skipped"][0]["reason"])
+
+	def test_a_batch_over_the_cap_is_refused_whole(self):
+		people = self.team("cap-1", "cap-2", "cap-3", "cap-4", "cap-5")
+		frappe.set_user(BULK_MANAGER_USER)
+		save_roster_draft([assign(people[0], day, day) for day in ("2031-04-01", "2031-04-02", "2031-04-03")])
+		frappe.set_user("Administrator")
+		with patch.object(api, "_ROSTER_DRAFT_MAX_ROWS", 5), self.assertRaises(frappe.ValidationError) as caught:
+			self.bulk(self.template(), employees=people[1:])
+		self.assertIn("Room for 2 more; 4 selected", str(caught.exception))
+		frappe.set_user(BULK_MANAGER_USER)
+		self.assertEqual(len(get_roster_draft()["draft"]["rows"]), 3)
+		frappe.set_user("Administrator")
+
+	def test_a_stale_token_is_refused(self):
+		self.team("token")
+		with self.assertRaises(frappe.ValidationError) as caught:
+			self.bulk(self.template(), whole_team=1, expected_modified="2000-01-01 00:00:00")
+		self.assertIn("another tab", str(caught.exception))
+		self.assertFalse(frappe.db.exists(DOCTYPE, {"employee": self.bulk_manager, "status": "Draft"}))
+
+	def test_today_on_the_company_clock_skips_everyone_with_the_date_sentence(self):
+		people = self.team("today-1", "today-2")
+		result = self.bulk(self.template("2031-03-05", "2031-03-12"), whole_team=1)
+		self.assertEqual(result["added"], 0)
+		self.assertIsNone(result["draft"])
+		self.assertEqual(sorted(item["employee"] for item in result["skipped"]), sorted(people))
+		self.assertTrue(all("tomorrow at the earliest" in item["reason"] for item in result["skipped"]))

@@ -13,17 +13,26 @@ const MASK = '••••'
 // HR Request's subject field (helixhr/doctype/hr_request).
 export const SUBJECT_MAX = 140
 
-// Plan 2026-10-02-001 U14. The fields a correction carries a typed new value
-// for, with the words the sentences use -- a mirror of
-// `helixhr.utils.PROFILE_CORRECTABLE_FIELDS`, which is the rule; this only
-// decides which dialog opens. Every other field keeps the free-text draft.
+// The Bank & IDs fields a correction can carry a new value for, with the
+// words a request's summary uses -- a mirror of `helixhr.utils.
+// PROFILE_CHANGE_GROUPS` (plan 2026-11-03-001). Legacy single-field
+// requests used the first three.
 export const CORRECTABLE_FIELDS = {
+  salary_mode: 'salary mode',
   bank_name: 'bank name',
   bank_ac_no: 'bank account number',
+  ifsc_code: 'IFSC code',
+  micr_code: 'MICR code',
   iban: 'IBAN',
+  pan_number: 'PAN',
+  provident_fund_account: 'PF account',
+  passport_number: 'passport number',
+  date_of_issue: 'passport issue date',
+  valid_upto: 'passport valid-until date',
+  place_of_issue: 'passport place of issue',
+  health_insurance_provider: 'health insurance provider',
+  health_insurance_no: 'health insurance number',
 }
-// `events._CORRECTION_VALUE_MAX` on the server.
-export const CORRECTION_VALUE_MAX = 140
 
 /** "Date of Birth" -> "date of birth", but "PAN Number" -> "PAN number":
  * mid-sentence case, word by word, leaving acronyms alone. */
@@ -71,7 +80,6 @@ export function correctionDraft({
   masked = false,
   table = false,
   section = false,
-  fieldname = '',
 }) {
   if (section) {
     return {
@@ -84,16 +92,6 @@ export function correctionDraft({
   }
 
   const subject = `Correct my ${inSentence(label)}`.slice(0, SUBJECT_MAX)
-
-  if (Object.hasOwn(CORRECTABLE_FIELDS, fieldname)) {
-    // Structured: the value travels in its own encrypted field, never in
-    // the prose HR's whole queue reads.
-    return {
-      subject,
-      details: `Please change my ${CORRECTABLE_FIELDS[fieldname]} to the new value I entered. Proof is attached.`,
-      correction_field: fieldname,
-    }
-  }
 
   if (table) {
     return {
@@ -127,32 +125,5 @@ export function correctionDraft({
   return {
     subject,
     details: `My ${inSentence(label)} is shown as “${display}”. It should be:\n`,
-  }
-}
-
-/** The inline sentence for the "Type it again" box, or '' when there is
- * nothing to say yet. Compared trimmed, as the server compares. */
-export function correctionEntryError(value, confirm) {
-  const a = String(value || '').trim()
-  const b = String(confirm || '').trim()
-  if (a.length > CORRECTION_VALUE_MAX) return 'That value is too long.'
-  if (a && b && a !== b) return 'The two entries don’t match. Type the new value again in both boxes.'
-  return ''
-}
-
-/** The `create_my_request` params for a structured correction, or null
- * while the entries are incomplete or mismatched. */
-export function correctionParams(draft, { value, confirm, category, operationKey }) {
-  const a = String(value || '').trim()
-  if (!draft?.correction_field || !a || correctionEntryError(value, confirm)) return null
-  if (a !== String(confirm || '').trim()) return null
-  return {
-    category,
-    subject: draft.subject,
-    details: draft.details,
-    operation_key: operationKey,
-    correction_field: draft.correction_field,
-    correction_value: a,
-    correction_confirm: String(confirm).trim(),
   }
 }

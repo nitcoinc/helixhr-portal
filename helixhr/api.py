@@ -64,15 +64,23 @@ from helixhr.events import (
 	TIMESHEET_PENDING_HR,
 	TIMESHEET_SENT_BACK,
 	_approver_user,
+	_correction_recipients,
+	_enabled_users_with_role,
 	_is_hr,
+	_personal_email_changed_recently,
+	_profile_value_text,
 	approver_drift,
 	approver_problem,
 	backdated_grace_days,
 	backdated_leave_earliest,
 	backdated_leave_reason,
 	escape_request_comment,
+	has_profile_correction,
 	leave_overdraw,
+	previous_personal_email,
+	profile_change_notice_context,
 	rederive_approvers,
+	save_employee_values,
 	strip_request_comment_marker,
 )
 from helixhr.helixhr.doctype.helixhr_leaving.helixhr_leaving import OPEN_STATUSES as OPEN_LEAVING_STATUSES
@@ -116,6 +124,7 @@ from helixhr.utils import (
 	ALL_ORGS_ONLY_ROLES,
 	ALL_ORGS_SCOPE_KEY,
 	ASSIGNABLE_ROLES,
+	CORRECTION_EMAIL_HOLD_HOURS,
 	EMAIL_THEME,
 	EXPORT_ROLES,
 	HOLIDAY_LIST_EDITABLE_FIELDS,
@@ -126,17 +135,23 @@ from helixhr.utils import (
 	NOTIFICATION_EVENTS,
 	ORG_VIEWER_ROLE,
 	PERSON_EDITABLE_FIELDS,
+	PROFILE_CHANGE_GROUP_LABELS,
+	PROFILE_CHANGE_GROUPS,
+	PROFILE_CHANGE_VALUE_MAX,
 	PROFILE_CORRECTABLE_FIELDS,
 	PROFILE_CORRECTION_CATEGORY,
 	PROFILE_EDITABLE_FIELDS,
+	PROFILE_FILL_CORE_FIELDS,
 	PROFILE_LABELS,
 	PROFILE_MASKED_FIELDS,
 	PROFILE_SECTION_FIELDS,
 	PROFILE_SECTION_TABLES,
+	PROFILE_SELF_SERVICE_FIELDS,
 	PROFILE_USER_LINK_FIELDS,
 	REPORT_MANAGER_ROLE,
 	ROLE_LABELS,
 	SELF_EDIT_REFUSAL,
+	SELF_FILLED_MARK,
 	SHIFT_TYPE_EDITABLE_FIELDS,
 	THEME_PLACEHOLDERS,
 	UPLOAD_MAX_BYTES,
@@ -174,6 +189,8 @@ from helixhr.utils import (
 	portal_home_page,
 	portal_role_scope,
 	prepare_profile_photo,
+	profile_display_value,
+	profile_field_label,
 	project_in_scope,
 	project_scope_filters,
 	rate_limit_per_user,
@@ -333,6 +350,10 @@ def get_my_profile(**kwargs):
 		"sections": {name: section(name) for name in PROFILE_SECTION_FIELDS},
 		"failed_sections": failed,
 		"correction_category": PROFILE_CORRECTION_CATEGORY if cint(category_active) else None,
+		# Plan 2026-11-03-001 U9 (R17): fields in an open request are locked.
+		# No password to re-check on SSO-only sites; the editor hides the box.
+		"fill_needs_password": not _password_login_disabled(),
+		"pending_fields": sorted(_safe(lambda: _fields_in_open_corrections(employee), default=set()) or ()),
 		# HR and administrators only (KTD6): every employee is a System
 		# User, and the portal host 404s Desk for them.
 		"desk_url": get_url_to_form("Employee", employee) if _portal_desk_url(frappe.session.user) else None,
@@ -352,6 +373,7 @@ def _profile_section(employee, name, meta):
 			"value": _profile_value(field, values.get(field)),
 			"masked": field in PROFILE_MASKED_FIELDS,
 			"editable": field in PROFILE_EDITABLE_FIELDS,
+			**({"change": _profile_change_input(field, meta)} if field in PROFILE_SELF_SERVICE_FIELDS else {}),
 		}
 		for field in fieldnames
 	]
@@ -361,6 +383,26 @@ def _profile_section(employee, name, meta):
 		if meta.has_field(table)
 	]
 	return {"fields": fields, "tables": tables}
+
+
+_PROFILE_LINK_OPTIONS_MAX = 200
+
+
+def _profile_change_input(field, meta):
+	"""How the Bank & IDs edit mode takes a field (plan 2026-11-03-001 U9):
+	its group, the input kind, and the allowed values of a Select or Link,
+	which `_parse_profile_changes` re-checks."""
+	df = meta.get_field(field)
+	options = None
+	if df.fieldtype == "Select":
+		options = [option for option in (df.options or "").split("\n") if option]
+	elif df.fieldtype == "Link":
+		options = frappe.get_all(df.options, pluck="name", order_by="name asc", limit=_PROFILE_LINK_OPTIONS_MAX)
+	return {
+		"group": next(group for group, fields in PROFILE_CHANGE_GROUPS.items() if field in fields),
+		"type": df.fieldtype if df.fieldtype in ("Date", "Select", "Link") else "Data",
+		"options": options,
+	}
 
 
 def _sentence_case(label):
@@ -2984,6 +3026,7 @@ def _hr_request_summaries(
 	)
 	if not rows:
 		return []
+	_fill_profile_change_summary(rows)
 
 	employees = {
 		row.name: row
@@ -3058,6 +3101,7 @@ def _hr_request_summaries(
 				hr_note=row.hr_note,
 				correction_field=row.correction_field,
 				correction_proposed_masked=row.correction_proposed_masked,
+				profile_change_count=row.profile_change_count,
 				waiting_on=waiting_on,
 				waiting_since=waiting_since,
 				waiting_days=_age_in_days(waiting_since, today) if waiting_since else None,
@@ -8816,7 +8860,7 @@ _BANK_NUMBER_HANDLER_REFUSAL = (
 def _refuse_bank_number(doc, text, refusal):
 	"""KTD7: refuse ``text`` on a correction request when it holds an
 	account-number-shaped value. Every other request passes untouched."""
-	if doc.get("correction_field") and has_bank_number(text):
+	if has_profile_correction(doc) and has_bank_number(text):
 		frappe.throw(_(refusal))
 
 
@@ -8850,7 +8894,7 @@ def _notify_request_comment(doc, recipients, author_name, message, bell_subject,
 	recipients = [user for user in dict.fromkeys(recipients) if user and user != frappe.session.user]
 	if not recipients:
 		return
-	excerpt = "" if doc.get("correction_field") else message[:300]
+	excerpt = "" if has_profile_correction(doc) else message[:300]
 	send_notification(
 		event_key,
 		recipients,
@@ -8884,7 +8928,29 @@ def _notify_request_comment(doc, recipients, author_name, message, bell_subject,
 def _correction_summary(doc):
 	"""What a correction proposes, masked only (plan 2026-10-02-001 U14, R28).
 	None for an ordinary request. The full value is `reveal_correction_value`'s
-	alone, so neither Password field is read here."""
+	alone, so neither Password field is read here.
+
+	Plan 2026-11-03-001 U7: a row correction lists every row under `rows`;
+	the top-level keys describe the first row, so a screen that knows only
+	one field keeps rendering."""
+	rows = doc.get("profile_changes") or []
+	if rows:
+		listed = [
+			{
+				"row": row.name,
+				"field": row.field,
+				"label": row.label or row.field,
+				"current_masked": row.current_masked,
+				"proposed_masked": row.proposed_masked,
+				"masked": row.field in PROFILE_MASKED_FIELDS,
+			}
+			for row in rows
+		]
+		return {
+			**{key: listed[0][key] for key in ("field", "current_masked", "proposed_masked")},
+			"label": ", ".join(row["label"] for row in listed),
+			"rows": listed,
+		}
 	if not doc.get("correction_field"):
 		return None
 	return {
@@ -8893,6 +8959,28 @@ def _correction_summary(doc):
 		"current_masked": doc.correction_current_masked,
 		"proposed_masked": doc.correction_proposed_masked,
 	}
+
+
+def _fill_profile_change_summary(rows):
+	"""Give each row correction in a list the legacy pair the list shows
+	(`correction_field`, `correction_proposed_masked`) from its first row,
+	plus `profile_change_count`, in one query. Masked copies only."""
+	names = [row.name for row in rows if not row.get("correction_field")]
+	firsts = {}
+	if names:
+		for change in frappe.get_all(
+			"HelixHR Profile Change Row",
+			filters={"parenttype": "HR Request", "parent": ["in", names]},
+			fields=["parent", "field", "proposed_masked"],
+			order_by="idx asc",
+		):
+			firsts.setdefault(change.parent, [change, 0])[1] += 1
+	for row in rows:
+		first, count = firsts.get(row.name, (None, 1 if row.get("correction_field") else 0))
+		if first:
+			row["correction_field"] = first.field
+			row["correction_proposed_masked"] = first.proposed_masked
+		row["profile_change_count"] = count
 
 
 def _hr_request_queue(employee, today, count_only=False):
@@ -9601,6 +9689,7 @@ def _request_detail(name, employee):
 	)
 	if not row:
 		frappe.throw(_("That request no longer exists."), frappe.DoesNotExistError)
+	_fill_profile_change_summary([row])
 	if row.employee != employee:
 		# Not "not found": the caller is authenticated and this is a refusal,
 		# which the portal renders as its own state with no Retry (P2-R2).
@@ -9912,8 +10001,365 @@ def create_my_request(
 	return {**_request_detail(doc.name, employee), "created": True}
 
 
+_PROFILE_SUBMIT_SUBJECT = "Update my bank and ID details"
+
+
 @frappe.whitelist(methods=["POST"])
-def reveal_correction_value(name):
+def submit_my_profile_changes(changes, seen=None, operation_key=None, password=None):
+	"""Every staged Bank & IDs change in one call (plan 2026-11-03-001 U6).
+
+	`changes` is `[{field, value, confirm}]` (`confirm` is the second entry,
+	required for masked identifiers). `seen` is `{group: "blank" | "filled"}`,
+	the state the page showed for each touched group (KTD11). `password` is
+	the step-up for a first-time fill (review B5). The proof is the multipart
+	`file`, needed only when a row goes to HR.
+
+	Per group, under the Employee row lock: a group with nothing on file
+	fills now, elevated and allow-listed (KTD12); any other goes whole into
+	one Profile correction request with one row per field (KTD9). Fills and
+	filing commit together. A refusal writes nothing and returns
+	`{"status": "refused", "errors": [{field, group, message}]}`; success
+	returns `{"status", "applied", "request", "created"}`. No full masked
+	identifier is ever returned.
+	"""
+	rate_limit_per_user("submit_my_profile_changes")
+	employee = get_current_employee()
+	key = (operation_key or "").strip()
+	if not _OPERATION_KEY_PATTERN.match(key):
+		frappe.throw(_("That change couldn't be started. Try sending it again."))
+
+	errors = []
+
+	def refuse(message, field=None, group=None):
+		errors.append({"field": field, "group": group, "message": message})
+
+	staged = _parse_profile_changes(changes, refuse)
+	if errors:
+		return {"status": "refused", "errors": errors}
+
+	meta = frappe.get_meta("Employee")
+	group_fields = {
+		group: [field for field in fields if meta.has_field(field)]
+		for group, fields in PROFILE_CHANGE_GROUPS.items()
+	}
+	on_site = [field for fields in group_fields.values() for field in fields]
+	live = frappe.db.get_value(
+		"Employee", employee, ["status", *on_site], as_dict=True, for_update=True
+	)
+	live_text = {field: _profile_value_text(live.get(field)) for field in on_site}
+
+	existing = _request_for_key(key, employee)
+	if existing:
+		# A retry whose first response was lost: nothing is filled or filed
+		# twice, and the answer is rebuilt from the record.
+		filed = set(
+			frappe.get_all(
+				"HelixHR Profile Change Row", filters={"parent": existing, "parenttype": "HR Request"}, pluck="field"
+			)
+		)
+		applied = [f for f in staged if f not in filed and live_text.get(f) == staged[f]]
+		return _profile_submit_result(applied, staged, existing, created=False)
+
+	seen = frappe.parse_json(seen) if isinstance(seen, str) and seen else (seen or {})
+	if not isinstance(seen, dict):
+		seen = {}
+	touched = [group for group, fields in group_fields.items() if any(f in staged for f in fields)]
+	fill_groups, hr_groups, already = [], [], []
+	for group in touched:
+		label = _(PROFILE_CHANGE_GROUP_LABELS[group])
+		state = "filled" if any(live_text[f] for f in group_fields[group]) else "blank"
+		if seen.get(group) != state:
+			mine = all(live_text[f] == staged[f] for f in group_fields[group] if f in staged)
+			if seen.get(group) == "blank" and mine:
+				already.append(group)  # Review B4: a fill retried after it landed.
+			else:
+				refuse(
+					_("{0} was updated since you opened this. Reload the page to see it.").format(label),
+					group=group,
+				)
+			continue
+		(fill_groups if state == "blank" else hr_groups).append(group)
+
+	busy = _fields_in_open_corrections(employee)
+	for field in staged:
+		if field in busy:
+			refuse(
+				_("{0} is already in a request HR hasn't closed. You can change it once that closes.").format(
+					profile_field_label(field)
+				),
+				field=field,
+			)
+	for group in hr_groups:
+		for field in group_fields[group]:
+			if field in staged and staged[field] == live_text[field]:
+				refuse(_("That is already the value on your record."), field=field)
+	for group in fill_groups:
+		missing = [
+			field
+			for field in PROFILE_FILL_CORE_FIELDS.get(group, ())
+			if field in group_fields[group] and field not in staged
+		]
+		if missing:
+			refuse(
+				_("To fill in {0} for the first time, also give {1}.").format(
+					_(PROFILE_CHANGE_GROUP_LABELS[group]).lower(),
+					", ".join(profile_field_label(field) for field in missing),
+				),
+				group=group,
+			)
+	issued = staged.get("date_of_issue", live_text.get("date_of_issue"))
+	valid = staged.get("valid_upto", live_text.get("valid_upto"))
+	if issued and valid and ("date_of_issue" in staged or "valid_upto" in staged) and valid <= issued:
+		refuse(_("The passport's valid-until date has to be after its date of issue."), field="valid_upto")
+
+	recipients = _correction_recipients(employee)
+	if fill_groups:
+		if live.status != "Active":
+			refuse(_("Your record isn't active, so details can't be filled in here. Contact HR."))
+		if _personal_email_changed_recently(employee):
+			refuse(
+				_("Your personal email changed in the last {0} hours, so new bank and ID details are on hold until that passes.").format(
+					CORRECTION_EMAIL_HOLD_HOURS
+				)
+			)
+		prior = previous_personal_email(employee)
+		addresses = frappe.db.get_value("Employee", employee, ["company_email", "personal_email"], as_dict=True)
+		recipients = list(dict.fromkeys(a for a in (*recipients, prior) if a))
+		if not (addresses.company_email or addresses.personal_email or prior):
+			# The login alone is not an out-of-band address (review B3).
+			refuse(_("Add a personal email first, so you get a security notice when details change."))
+		_check_step_up(password, refuse)
+
+	proof = None
+	if hr_groups:
+		if PROFILE_CORRECTION_CATEGORY not in _request_categories():
+			refuse(_("Changes to existing bank and ID details aren't being taken right now. Contact HR."))
+		upload = (getattr(frappe.request, "files", None) or {}).get("file")
+		if upload is None:
+			refuse(_("Attach proof of the new details, such as a bank letter or cancelled cheque."), field="file")
+		else:
+			proof = (os.path.basename(upload.filename or "").strip(), upload.stream.read())
+			try:
+				validate_portal_upload(*proof)
+			except frappe.ValidationError as error:
+				frappe.clear_last_message()
+				refuse(str(error), field="file")
+
+	if errors:
+		return {"status": "refused", "errors": errors}
+
+	fills = {f: staged[f] for group in fill_groups for f in group_fields[group] if f in staged}
+	rows = [{"field": f, "proposed": staged[f]} for group in hr_groups for f in group_fields[group] if f in staged]
+	request = None
+	savepoint = "helixhr_profile_submit"
+	frappe.db.savepoint(savepoint)
+	try:
+		if fills:
+			save_employee_values(
+				employee,
+				fills,
+				f"Profile fill by {frappe.session.user}",
+				_("Those details couldn't be saved on your record. Check them and try again."),
+				elevated=True,
+			)
+			_mark_self_filled(employee, fills, fill_groups)
+		if rows:
+			doc = frappe.get_doc(
+				{
+					"doctype": "HR Request",
+					"employee": employee,
+					"category": PROFILE_CORRECTION_CATEGORY,
+					"subject": _(_PROFILE_SUBMIT_SUBJECT),
+					"client_operation_key": key,
+					"profile_changes": rows,
+				}
+			)
+			doc.flags.helixhr_profile_changes = True
+			doc.flags.correction_proof = proof
+			doc.insert(ignore_permissions=True)
+			request = doc.name
+	except Exception:
+		frappe.db.rollback(save_point=savepoint)
+		raise
+
+	# A retried fill (`already`) is reported applied but not announced twice.
+	_send_profile_submit_notice(employee, staged, list(fills), [row["field"] for row in rows], request, recipients)
+	applied = [*fills, *(f for group in already for f in group_fields[group] if f in staged)]
+	return _profile_submit_result(applied, staged, request, created=bool(request))
+
+
+def _parse_profile_changes(changes, refuse):
+	"""`{field: normalised value}` from the client's list, refusing per field:
+	unknown or missing on this site, blank (clearing is not self-service),
+	too long, a double-entry mismatch, or a value the field can't hold."""
+	try:
+		items = frappe.parse_json(changes) if isinstance(changes, str) else changes
+	except Exception:
+		items = None
+	if not isinstance(items, list) or not items or not all(isinstance(item, dict) for item in items):
+		refuse(_("There is nothing to send. Change a detail first."))
+		return {}
+	meta = frappe.get_meta("Employee")
+	staged = {}
+	for item in items:
+		field = item.get("field")
+		if field not in PROFILE_SELF_SERVICE_FIELDS or not meta.has_field(field):
+			refuse(_("That detail isn't available here."), field=field if isinstance(field, str) else None)
+			continue
+		if field in staged:
+			refuse(_("Each detail can be sent once."), field=field)
+			continue
+		label = profile_field_label(field)
+		value = str(item.get("value") or "").strip()
+		if not value:
+			refuse(_("Type the new {0}. To remove a detail, ask HR.").format(label), field=field)
+			continue
+		if len(value) > PROFILE_CHANGE_VALUE_MAX:
+			refuse(_("That value is too long."), field=field)
+			continue
+		if field in PROFILE_MASKED_FIELDS and value != str(item.get("confirm") or "").strip():
+			refuse(_("The two entries don't match. Type the new value again in both boxes."), field=field)
+			continue
+		df = meta.get_field(field)
+		if df.fieldtype == "Date":
+			try:
+				value = str(getdate(value))
+			except Exception:
+				refuse(_("That isn't a date."), field=field)
+				continue
+		elif df.fieldtype == "Select" and value not in (df.options or "").split("\n"):
+			refuse(_("Pick one of the listed options."), field=field)
+			continue
+		elif df.fieldtype == "Link" and not frappe.db.exists(df.options, value):
+			refuse(_("Pick one of the listed options."), field=field)
+			continue
+		staged[field] = value
+	return staged
+
+
+def _fields_in_open_corrections(employee):
+	"""Fields already waiting in an open correction of this employee's, rows
+	and legacy single-field requests alike (R17)."""
+	open_requests = frappe.get_all(
+		"HR Request",
+		filters={"employee": employee, "status": ["not in", (HR_REQUEST_DONE, HR_REQUEST_REJECTED)]},
+		fields=["name", "correction_field"],
+	)
+	busy = {row.correction_field for row in open_requests if row.correction_field}
+	names = [row.name for row in open_requests]
+	if names:
+		busy.update(
+			frappe.get_all(
+				"HelixHR Profile Change Row",
+				filters={"parenttype": "HR Request", "parent": ["in", names]},
+				pluck="field",
+			)
+		)
+	return busy
+
+
+def _password_login_disabled():
+	return bool(cint(frappe.db.get_single_value("System Settings", "disable_user_pass_login")))
+
+
+def _check_step_up(password, refuse):
+	"""Review B5: a first-time fill re-checks the caller's password. A site on
+	Microsoft sign-in only has no password to check; there the fill goes
+	through on the HR alert and the self-filled mark alone (user decision
+	2026-11-04: onboarding must not stall on SSO sites)."""
+	from frappe.utils.password import check_password
+
+	if _password_login_disabled():
+		return
+	if not password:
+		refuse(_("Enter your password to confirm."), field="password")
+		return
+	try:
+		check_password(frappe.session.user, password)
+	except frappe.AuthenticationError:
+		frappe.clear_last_message()
+		refuse(_("That password isn't right."), field="password")
+
+
+def _mark_self_filled(employee, fills, groups):
+	"""Review B5: the unverified mark on the Employee timeline, and an in-app
+	alert to HR for every bank fill. Labels and masked values only."""
+	labels = ", ".join(profile_field_label(field) for field in fills)
+	_employee_note(
+		employee,
+		SELF_FILLED_MARK,
+		_("Self-filled by the employee, not verified by HR: {0}").format(frappe.utils.escape_html(labels)),
+	)
+	if "bank" not in groups:
+		return
+	name = frappe.db.get_value("Employee", employee, "employee_name") or employee
+	for user in _enabled_users_with_role("HR Manager", employee):
+		if user == frappe.session.user:
+			continue
+		frappe.get_doc(
+			{
+				"doctype": "Notification Log",
+				"for_user": user,
+				"from_user": frappe.session.user,
+				"type": "Alert",
+				"document_type": "Employee",
+				"document_name": employee,
+				"subject": _("{0} filled in their own bank details. Not verified yet.").format(
+					frappe.utils.escape_html(name)
+				),
+			}
+		).insert(ignore_permissions=True)
+
+
+def _send_profile_submit_notice(employee, staged, applied, filed, request, recipients):
+	"""Review B1: one notice per submit -- "requested" when anything went to
+	HR, else "applied" -- listing every detail with what happened to it."""
+	changes = [
+		{
+			"label": profile_field_label(field),
+			"masked_new_value": profile_display_value(field, staged[field]) or "",
+			"state": "changed" if field in applied else "sent to HR",
+		}
+		for field in staged
+		if field in applied or field in filed
+	]
+	if not changes:
+		return
+	now = frappe.utils.format_datetime(frappe.utils.now_datetime())
+	if filed:
+		event, extra = "bank_change_requested", {"requested_on": now}
+	else:
+		event, extra = "bank_change_applied", {"applied_by": frappe.utils.get_fullname(frappe.session.user), "applied_on": now}
+	send_notification(
+		event,
+		[address for address in recipients if address],
+		{**profile_change_notice_context(changes), **extra},
+		reference_doctype="HR Request" if request else "Employee",
+		reference_name=request or employee,
+	)
+
+
+def _profile_submit_result(applied, staged, request, created):
+	status = "applied_and_requested" if applied and request else ("requested" if request else "applied")
+	return {
+		"status": status,
+		"applied": [
+			{
+				"field": field,
+				"label": profile_field_label(field),
+				"value": profile_display_value(field, staged[field]),
+			}
+			for field in applied
+		],
+		"request": {"name": request, "status": frappe.db.get_value("HR Request", request, "status")}
+		if request
+		else None,
+		"created": created,
+	}
+
+
+@frappe.whitelist(methods=["POST"])
+def reveal_correction_value(name, row=None):
 	"""The full proposed value of an open correction, for the HR user handling
 	it (plan 2026-10-02-001 R28, KTD15).
 
@@ -9933,8 +10379,23 @@ def reveal_correction_value(name):
 	_assert_may_act_on(doc)
 	if doc.picked_up_by and doc.picked_up_by != frappe.session.user:
 		frappe.throw(_("Only the person handling this request can see the full value."), frappe.PermissionError)
-	if not doc.correction_field or doc.status in ("Done", "Rejected"):
+	if not has_profile_correction(doc) or doc.status in ("Done", "Rejected"):
 		frappe.throw(_("There is no value to show on this request."))
+	if doc.get("profile_changes"):
+		# Plan 2026-11-03-001 U7: one row at a time, one comment each.
+		change = next((change for change in doc.profile_changes if change.name == row), None)
+		if not change:
+			frappe.throw(_("Pick which detail to show."))
+		value = get_decrypted_password(
+			"HelixHR Profile Change Row", change.name, "proposed", raise_exception=False
+		)
+		if not value:
+			frappe.throw(_("There is no value to show on this request."))
+		doc.add_comment(
+			"Info",
+			_("Proposed {0} revealed by {1}").format(change.label, frappe.utils.get_fullname(frappe.session.user)),
+		)
+		return {"name": name, "row": change.name, "field": change.field, "value": value}
 	value = get_decrypted_password("HR Request", name, "correction_proposed", raise_exception=False)
 	if not value:
 		frappe.throw(_("There is no value to show on this request."))
@@ -16235,6 +16696,7 @@ def get_roster_week(week_start=None, mode="mine", search=None, start=0):
 	rows = []
 	for row in employees:
 		default = times.get(row.default_shift) if row.default_shift else None
+		kinds = _holiday_kinds(row.name, monday, sunday, holiday_cache)[1] or {}
 		rows.append(
 			{
 				"employee": row.name,
@@ -16253,7 +16715,10 @@ def get_roster_week(week_start=None, mode="mine", search=None, start=0):
 				),
 				"cells": cells[row.name],
 				"leaves": leaves.get(row.name, []),
-				"holidays": sorted(_team_holiday_dates(row.name, monday, sunday, holiday_cache)),
+				# Named holidays only; `off_days` adds weekly offs, so a day a
+				# skip left free reads "Off", not "no shift" (plan 2026-11-03-001 R10).
+				"holidays": sorted(day for day, kind in kinds.items() if kind != "weekly_off"),
+				"off_days": sorted(kinds),
 				"pending_request": pending.get(row.name),
 			}
 		)
@@ -16510,6 +16975,12 @@ _ROSTER_OP_FIELDS = {
 	ROSTER_OP_END: ("to_date", "assignment"),
 }
 _ROSTER_ALL_OP_FIELDS = ("shift_type", "from_date", "to_date", "assignment")
+# Plan 2026-11-03-001 KTD6 / A6: HRMS writes (create / end / cancel steps)
+# one approval may run, so its one savepoint stays bounded.
+_ROSTER_MAX_STEPS = 1000
+# A1: the snapshot shape that carries stored steps and run-aware rules.
+_ROSTER_SNAPSHOT_VERSION = 2
+_ROSTER_DRAFT_MOVED = "Your draft changed in another tab. Reload it."
 _ROSTER_REQUEST_NOT_FOUND = "That roster request could not be found."
 _ROSTER_REQUEST_NOT_YOURS = "That roster request isn't yours."
 
@@ -16531,8 +17002,16 @@ def _roster_draft_ops(rows):
 		for field in _ROSTER_ALL_OP_FIELDS:
 			value = str(row.get(field) or "").strip() if field in keep else ""
 			op[field] = value or None
+		# Plan 2026-11-03-001 KTD1: kept only on an Assign with an end date.
+		op["skip_off_days"] = int(
+			action == ROSTER_OP_ASSIGN and bool(op["to_date"]) and _truthy(row.get("skip_off_days"))
+		)
 		ops.append(op)
 	return ops
+
+
+def _truthy(value):
+	return value in (1, True) or str(value).strip().lower() in ("1", "true")
 
 
 def _roster_note(note):
@@ -16551,9 +17030,63 @@ def _request_ops(doc):
 			"from_date": str(getdate(row.from_date)) if row.from_date else None,
 			"to_date": str(getdate(row.to_date)) if row.to_date else None,
 			"assignment": row.assignment,
+			"skip_off_days": cint(row.skip_off_days),
 		}
 		for row in doc.rows
 	]
+
+
+def _roster_off_days(employees, ops, coverage, cache=None):
+	"""`{employee: {from, to, dates} | None}` for `roster_ops.simulate`
+	(plan 2026-11-03-001 KTD4, A3). Each person's lookup runs from their
+	earliest operation date to the last date their operations or their
+	bounded shifts reach -- never open-ended. Days past the end of the
+	holiday list in force are left unknown, so a skip over them is refused
+	and a run stops there. None: no list resolves at all."""
+	cache = {} if cache is None else cache
+	result = {}
+	for employee in employees:
+		mine = [op for op in ops if op["employee"] == employee]
+		days = [day for day in map(op_date, mine) if day]
+		if not days:
+			result[employee] = None
+			continue
+		start = min(days)
+		ends = [*days, *(getdate(op["to_date"]) for op in mine if op.get("to_date"))]
+		ends += [
+			a["end_date"] for a in coverage.get(employee, []) if a["end_date"] and a["end_date"] >= start
+		]
+		result[employee] = _known_off_days(employee, start, max(ends), cache)
+	return result
+
+
+def _known_off_days(employee, start, end, cache):
+	spans = _holiday_list_spans(employee, start, end)
+	if not spans:
+		return None
+	known_end = end
+	for span in spans:
+		key = ("list", span["holiday_list"])
+		if key not in cache:
+			cache[key] = frappe.db.get_value(
+				"Holiday List", span["holiday_list"], ["from_date", "to_date"], as_dict=True
+			)
+		bounds = cache[key]
+		if not bounds or getdate(bounds.from_date) > getdate(span["from_date"]):
+			known_end = add_days(span["from_date"], -1)
+			break
+		if getdate(bounds.to_date) < getdate(span["to_date"]):
+			known_end = getdate(bounds.to_date)
+			break
+	known_end = getdate(known_end)
+	if known_end < start:
+		return None
+	clipped = [
+		{**span, "to_date": min(getdate(span["to_date"]), known_end)}
+		for span in spans
+		if getdate(span["from_date"]) <= known_end
+	]
+	return {"from": str(start), "to": str(known_end), "dates": sorted(_holiday_dates_by_span(clipped, cache))}
 
 
 def _review_roster_ops(me, ops):
@@ -16630,12 +17163,16 @@ def _review_roster_ops(me, ops):
 			continue
 		runnable.append((index, op))
 
-	before, after = {}, {}
+	before, after, off_days = {}, {}, {}
+	steps = [[] for _op in ops]
 	dates = [op_date(op) for _index, op in runnable if op_date(op)]
 	if runnable:
 		employees = {op["employee"] for _index, op in runnable}
 		before = read_coverage(employees, min(dates) if dates else user_today())
-		after, simulated = simulate(before, [op for _index, op in runnable])
+		off_days = _roster_off_days(employees, [op for _index, op in runnable], before)
+		after, simulated, taken = simulate(before, [op for _index, op in runnable], off_days)
+		for position, (index, _op) in enumerate(runnable):
+			steps[index] = taken[position]
 		for problem in simulated:
 			index, op = runnable[problem["index"]]
 			problems.append(
@@ -16648,12 +17185,37 @@ def _review_roster_ops(me, ops):
 				}
 			)
 	problems.sort(key=lambda problem: problem["index"])
-	return frappe._dict(team=team, before=before, after=after, problems=problems)
+	return frappe._dict(
+		team=team, before=before, after=after, problems=problems, steps=steps, off_days=off_days
+	)
+
+
+def _roster_step_count(steps):
+	return sum(len(op_steps) for op_steps in steps)
 
 
 def _refuse_roster_problems(review):
 	if review.problems:
 		frappe.throw(review.problems[0]["message"])
+	_refuse_roster_steps(review.steps)
+
+
+def _refuse_roster_steps(steps):
+	if _roster_step_count(steps) > _ROSTER_MAX_STEPS:
+		frappe.throw(
+			_(
+				"This would make more than {0} changes to HR's shift records. Split it into smaller requests."
+			).format(_ROSTER_MAX_STEPS)
+		)
+
+
+def _roster_blocks(op_steps):
+	"""The shifts one operation creates, for the draft and the detail."""
+	return [
+		{"shift_type": step["shift_type"], "start_date": step["start_date"], "end_date": step["end_date"]}
+		for step in op_steps
+		if step["action"] == "create"
+	]
 
 
 def _coverage_payload(coverage):
@@ -16713,10 +17275,16 @@ def _roster_draft_payload(me, doc=None):
 	if not doc:
 		return None
 	review = _review_roster_ops(me, _request_ops(doc))
+	payload = _roster_request_payload(doc)
+	# Plan 2026-11-03-001 KTD4 / A11: the server's expansion is the answer;
+	# the browser shows these blocks rather than expanding a skip itself.
+	for row, op_steps in zip(payload["rows"], review.steps, strict=True):
+		row["blocks"] = _roster_blocks(op_steps)
 	return {
-		**_roster_request_payload(doc),
+		**payload,
 		"preview": _coverage_payload(review.after),
 		"problems": review.problems,
+		"block_count": sum(len(row["blocks"]) for row in payload["rows"]),
 	}
 
 
@@ -16755,12 +17323,26 @@ def _save_draft_rows(doc, me, ops, note=None):
 	return doc
 
 
+def _check_roster_draft_token(doc, expected_modified):
+	"""Plan 2026-11-03-001 KTD8 / R9: refuse a save built on a draft another
+	tab has since changed, created or sent. Required: a save without it
+	cannot tell, so it is refused the same way ("" means "no draft yet")."""
+	if expected_modified is None:
+		frappe.throw(_(_ROSTER_DRAFT_MOVED))
+	current = str(doc.modified) if doc else ""
+	if str(expected_modified or "").strip() != current:
+		frappe.throw(_(_ROSTER_DRAFT_MOVED))
+
+
 @frappe.whitelist(methods=["POST"])
-def save_roster_draft(rows, note=None):
+def save_roster_draft(rows, note=None, expected_modified=None):
 	"""Replace the caller's one Draft with `rows` (R10, R11, R13), creating
 	it on first save. Refused whole, naming the person, when any operation
 	is not one the caller may ask for. An empty list keeps an empty Draft
-	rather than deleting it: a reopened request keeps its history."""
+	rather than deleting it: a reopened request keeps its history.
+	`expected_modified` (required) is the draft's `modified` the caller
+	last saw ("" for no draft); a mismatch or a missing one is refused (plan
+	2026-11-03-001 KTD8)."""
 	rate_limit_per_user("save_roster_draft")
 	me = _my_employee()
 	ops = _roster_draft_ops(rows)
@@ -16768,9 +17350,10 @@ def save_roster_draft(rows, note=None):
 	# The manager's own row serialises their saves, submits and reopens, so
 	# two tabs cannot each create "the" Draft.
 	_lock_employee(me)
+	doc = _my_roster_draft(me, for_update=True)
+	_check_roster_draft_token(doc, expected_modified)
 	review = _review_roster_ops(me, ops)
 	_refuse_roster_problems(review)
-	doc = _my_roster_draft(me, for_update=True)
 	if not doc:
 		if not ops:
 			return {"draft": None}
@@ -16778,6 +17361,113 @@ def save_roster_draft(rows, note=None):
 		doc.status = ROSTER_DRAFT
 	_save_draft_rows(doc, me, ops, note)
 	return {"draft": _roster_draft_payload(me, doc)}
+
+
+@frappe.whitelist(methods=["POST"])
+def add_roster_ops_bulk(op, employees=None, whole_team=0, expected_modified=None):
+	"""Append one operation for each of several Active direct reports to the
+	caller's Draft (plan 2026-11-03-001 U3 / R8, KTD7). `whole_team` is
+	resolved here -- the roster pages at 50, so the browser's rows are not
+	the team -- otherwise `employees` lists the ids. A person whose
+	operation would fail, who is already waiting in another Pending request,
+	or who is not the caller's report is skipped and named with the reason
+	(`add_project_members`' pattern); the rest are added. Refused whole when
+	what is left does not fit the draft cap. `expected_modified` as for
+	`save_roster_draft`."""
+	rate_limit_per_user("add_roster_ops_bulk")
+	me = _my_employee()
+	raw = _parse_json_arg(op)
+	if not isinstance(raw, dict):
+		frappe.throw(_("Invalid shift changes."))
+	ids = None
+	if not cint(whole_team):
+		ids = _parse_json_arg(employees)
+		if (
+			not isinstance(ids, list)
+			or not ids
+			or len(ids) > _ROSTER_DRAFT_MAX_ROWS
+			or not all(isinstance(item, str) for item in ids)
+		):
+			frappe.throw(_("Choose who to apply this to."))
+		ids = list(dict.fromkeys(item.strip() for item in ids if item.strip()))
+	template = _roster_draft_ops([{**raw, "employee": ""}])[0]
+
+	_lock_employee(me)
+	doc = _my_roster_draft(me, for_update=True)
+	_check_roster_draft_token(doc, expected_modified)
+	team = {
+		row.name: row.employee_name
+		for row in frappe.get_all(
+			"Employee",
+			filters=_direct_report_filters(me),
+			fields=["name", "employee_name"],
+			order_by="employee_name asc, name asc",
+			ignore_permissions=True,
+		)
+		if row.name != me
+	}
+	if ids is None and not team:
+		frappe.throw(_(_ROSTER_NO_TEAM), frappe.PermissionError)
+	skipped = []
+	if ids is None:
+		targets = list(team)
+	else:
+		targets = [employee for employee in ids if employee in team]
+		# No name back for an id that is not the caller's report.
+		skipped += [
+			{"employee": employee, "name": None, "reason": _("Not available.")}
+			for employee in ids
+			if employee not in team
+		]
+	taken = pending_requests(targets)
+	for employee in targets:
+		if employee in taken:
+			skipped.append(
+				{
+					"employee": employee,
+					"name": team[employee],
+					"reason": _("{0}: already waiting for HR in another request.").format(team[employee]),
+				}
+			)
+	candidates = [{**template, "employee": employee} for employee in targets if employee not in taken]
+
+	existing = _request_ops(doc) if doc else []
+	review = _review_roster_ops(me, existing + candidates)
+	# Rows already in the draft must still pass, as at any save.
+	stale = [problem for problem in review.problems if problem["index"] < len(existing)]
+	if stale:
+		frappe.throw(stale[0]["message"])
+	refused = {
+		problem["index"] - len(existing): problem
+		for problem in review.problems
+		if problem["index"] >= len(existing)
+	}
+	for position, candidate in enumerate(candidates):
+		if position in refused:
+			employee = candidate["employee"]
+			skipped.append(
+				{"employee": employee, "name": team[employee], "reason": refused[position]["message"]}
+			)
+	accepted = [candidate for position, candidate in enumerate(candidates) if position not in refused]
+	room = _ROSTER_DRAFT_MAX_ROWS - len(existing)
+	if len(accepted) > room:
+		frappe.throw(_("Room for {0} more; {1} selected.").format(max(room, 0), len(accepted)))
+	kept_steps = review.steps[: len(existing)] + [
+		review.steps[len(existing) + position]
+		for position in range(len(candidates))
+		if position not in refused
+	]
+	_refuse_roster_steps(kept_steps)
+	if accepted:
+		if not doc:
+			doc = frappe.new_doc(_ROSTER_CHANGE)
+			doc.status = ROSTER_DRAFT
+		_save_draft_rows(doc, me, existing + accepted)
+	return {
+		"draft": _roster_draft_payload(me, doc) if doc else None,
+		"added": len(accepted),
+		"skipped": skipped,
+	}
 
 
 @frappe.whitelist(methods=["POST"])
@@ -16823,7 +17513,9 @@ def submit_roster_change(note=None):
 			doc.update({"employee": me, "manager_user": frappe.session.user, "note": draft.note})
 		doc.set("rows", company_ops)
 		doc.company = company
-		doc.snapshot = json.dumps(_roster_snapshot(review.before, company_ops), sort_keys=True)
+		doc.snapshot = json.dumps(
+			_roster_snapshot(review.before, company_ops, review.off_days), sort_keys=True
+		)
 		# A reopened request is resent as itself: last round's decision is
 		# not this round's, so HR and the strip start from a clean slate.
 		doc.update({"decided_by": None, "decided_on": None, "decision_note": None, "return_reasons": None})
@@ -16837,16 +17529,21 @@ def submit_roster_change(note=None):
 	return {"names": created}
 
 
-def _roster_snapshot(coverage, ops):
+def _roster_snapshot(coverage, ops, off_days):
 	"""KTD8: per employee, the affected window and the coverage key over it.
-	The window is stored so approval re-derives over exactly the same days."""
-	snapshot = {}
-	for employee, (start, end) in affected_window(ops).items():
-		snapshot[employee] = {
+	The window is stored so approval re-derives over exactly the same days.
+	Plan 2026-11-03-001 A1, A2: version 2 also stores the simulator's steps
+	for these operations (indexed as stored); approval recomputes and must
+	get the same steps, so a holiday added after submit returns the request
+	rather than applying a split nobody previewed."""
+	_after, _problems, steps = simulate(coverage, ops, off_days)
+	by_employee = {}
+	for employee, (start, end) in affected_window(ops, steps).items():
+		by_employee[employee] = {
 			"window": [str(start), str(end) if end else None],
 			"coverage": snapshot_key(coverage.get(employee, []), (start, end)),
 		}
-	return snapshot
+	return {"v": _ROSTER_SNAPSHOT_VERSION, "coverage": by_employee, "steps": steps}
 
 
 def _my_roster_request(name, me):
@@ -17006,7 +17703,16 @@ def _roster_change_summaries(employee, today, count_only=False):
 		filters=filters,
 		fields=["name"]
 		if count_only
-		else ["name", "employee", "employee_name", "company", "note", "helixhr_pending_since", "modified"],
+		else [
+			"name",
+			"employee",
+			"employee_name",
+			"company",
+			"note",
+			"helixhr_pending_since",
+			"modified",
+			"snapshot",
+		],
 		order_by="helixhr_pending_since asc, creation asc",
 		limit=_QUEUE_FETCH,
 	)
@@ -17040,11 +17746,26 @@ def _roster_change_summaries(employee, today, count_only=False):
 				for_hr=True,
 				company=row.company,
 				change_count=len(mine),
+				block_count=_roster_block_count(row.snapshot, mine),
 				people_count=len({op.employee for op in mine}),
 				note=(row.note or "").strip() or None,
 			)
 		)
 	return summaries
+
+
+def _roster_block_count(snapshot, ops):
+	"""Shifts the request creates: the stored steps' creates for a version 2
+	snapshot, else one per Assign or Change (the legacy single-block rule)."""
+	try:
+		stored = json.loads(snapshot) if snapshot else {}
+	except ValueError:
+		stored = {}
+	if isinstance(stored, dict) and stored.get("v") == _ROSTER_SNAPSHOT_VERSION:
+		return sum(
+			1 for op_steps in stored.get("steps") or [] for step in op_steps if step.get("action") == "create"
+		)
+	return sum(1 for op in ops if op["action"] in (ROSTER_OP_ASSIGN, ROSTER_OP_CHANGE))
 
 
 def _roster_request_review(doc, ops, for_update=False):
@@ -17057,7 +17778,11 @@ def _roster_request_review(doc, ops, for_update=False):
 	roster edit committed while it waited is seen) and returns the request
 	on any of them."""
 	employees = list(dict.fromkeys(op["employee"] for op in ops))
-	stored = json.loads(doc.snapshot) if doc.snapshot else {}
+	snapshot = json.loads(doc.snapshot) if doc.snapshot else {}
+	# Plan 2026-11-03-001 A1: a request sent before version 2 keeps the
+	# single-block rules at preview and approval.
+	version = snapshot.get("v") if isinstance(snapshot.get("v"), int) else 1
+	stored = snapshot.get("coverage", {}) if version >= 2 else snapshot
 	computed = affected_window(ops)
 	windows = {}
 	for employee in employees:
@@ -17076,7 +17801,11 @@ def _roster_request_review(doc, ops, for_update=False):
 	names = {row.employee: row.employee_name or row.employee for row in doc.rows}
 	starts = [window[0] for window in windows.values() if window]
 	before = read_coverage(employees, min(starts) if starts else user_today(), for_update=for_update)
-	after, simulated = simulate(before, ops)
+	off_days = _roster_off_days(employees, ops, before) if version >= 2 else None
+	after, simulated, steps = simulate(before, ops, off_days)
+	# Steps as JSON would store them, to compare with the snapshot's (A2).
+	steps = json.loads(json.dumps(steps))
+	stored_steps = snapshot.get("steps") if version >= 2 else None
 	manager_name = doc.employee_name or doc.employee
 	todays = {}
 	conflicts = []
@@ -17106,9 +17835,23 @@ def _roster_request_review(doc, ops, for_update=False):
 				problem = next((item for item in simulated if item["employee"] == employee), None)
 				if problem:
 					message = _("{0}: {1}").format(name, _(problem["message"]))
+				elif version >= 2 and _steps_for(steps, ops, employee) != _steps_for(
+					stored_steps, ops, employee
+				):
+					message = _("{0}'s days off or shifts changed after this request was sent.").format(name)
 		if message:
 			conflicts.append({"employee": employee, "employee_name": name, "message": message})
-	return frappe._dict(windows=windows, before=before, after=after, conflicts=conflicts)
+	return frappe._dict(
+		windows=windows, before=before, after=after, conflicts=conflicts, steps=steps, version=version
+	)
+
+
+def _steps_for(steps, ops, employee):
+	"""One employee's slice of a per-operation step list; None when the
+	stored list does not line up with the operations."""
+	if not isinstance(steps, list) or len(steps) != len(ops):
+		return None
+	return [op_steps for op, op_steps in zip(ops, steps, strict=True) if op["employee"] == employee]
 
 
 def _roster_window_rows(rows, window):
@@ -17148,7 +17891,9 @@ def _roster_change_decision_detail(doc):
 				"window_start": str(window[0]) if window else None,
 				"window_end": str(window[1]) if window and window[1] else None,
 				"operations": [
-					{"index": index, **op} for index, op in enumerate(ops) if op["employee"] == employee
+					{"index": index, **op, "blocks": _roster_blocks(review.steps[index]) if review else None}
+					for index, op in enumerate(ops)
+					if op["employee"] == employee
 				],
 				"before": _roster_window_rows(review.before.get(employee, []), window) if review else None,
 				"after": _roster_window_rows(review.after.get(employee, []), window) if review else None,
@@ -17170,6 +17915,8 @@ def _roster_change_decision_detail(doc):
 			"from_date": str(min(dates)) if dates else None,
 			"to_date": str(max(dates)) if dates else None,
 			"change_count": len(ops),
+			# Plan 2026-11-03-001 R10: shifts HR's records will gain.
+			"block_count": _roster_block_count(doc.snapshot, ops),
 			"employees": employees,
 			"conflicts": review.conflicts if review else [],
 			"decision_note": doc.decision_note or None,
@@ -17235,6 +17982,37 @@ def _apply_roster_op(op):
 	return _end_roster_assignment(target, day)
 
 
+def _cancel_roster_assignment(doc):
+	"""Cancel the submitted assignment `doc`. Savepoint-free, like
+	`_end_roster_assignment`: approval owns the savepoint. Raises on
+	refusal (HRMS blocks a cancel with check-ins or attendance against it)."""
+	_assert_config_write(doc)
+	doc.cancel()
+	return doc
+
+
+def _apply_roster_step(step, made):
+	"""One simulator step through the HR roster's writers. `made` maps a
+	`new-...` key to the Shift Assignment an earlier step created; returns
+	the mapping this step adds."""
+	if step["action"] == "create":
+		doc = _new_roster_assignment(
+			step["employee"],
+			step["shift_type"],
+			getdate(step["start_date"]),
+			getdate(step["end_date"]) if step["end_date"] else None,
+		)
+		return {step["key"]: doc.name}
+	doc = frappe.get_doc("Shift Assignment", made.get(step["key"], step["key"]))
+	if doc.employee != step["employee"] or doc.docstatus != 1:
+		frappe.throw(_(_ROSTER_NO_SHIFT_ON_DATE))
+	if step["action"] == "end":
+		_end_roster_assignment(doc, getdate(step["end_date"]))
+	else:
+		_cancel_roster_assignment(doc)
+	return {}
+
+
 def _approve_roster_change(doc):
 	"""R16 then R18. The request row is already locked (`_decide_one`); the
 	Employee rows are locked here in one order, then re-checked. Any
@@ -17248,16 +18026,23 @@ def _approve_roster_change(doc):
 	ops = _request_ops(doc)
 	for employee in sorted({op["employee"] for op in ops}):
 		_lock_employee(employee)
-	conflicts = _roster_request_review(doc, ops, for_update=True).conflicts
-	if conflicts:
-		return _return_roster_change(doc, conflicts)
+	review = _roster_request_review(doc, ops, for_update=True)
+	if review.conflicts:
+		return _return_roster_change(doc, review.conflicts)
 
 	names = {row.employee: row.employee_name or row.employee for row in doc.rows}
 	frappe.db.savepoint(_ROSTER_APPROVE_SAVEPOINT)
 	current = None
 	try:
-		for current in ops:
-			_apply_roster_op(current)
+		if review.version >= 2:
+			# Plan 2026-11-03-001 KTD2, A5: exactly the previewed steps, in
+			# order (each operation's cancels before its creates).
+			made = {}
+			for current in (step for op_steps in review.steps for step in op_steps):
+				made.update(_apply_roster_step(current, made))
+		else:
+			for current in ops:
+				_apply_roster_op(current)
 	except frappe.PermissionError:
 		# HR's own access, not the request: it stays Pending.
 		frappe.db.rollback(save_point=_ROSTER_APPROVE_SAVEPOINT)

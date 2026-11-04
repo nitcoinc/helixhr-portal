@@ -6,7 +6,7 @@
 // the detail was read, so HR knows before pressing Approve that it would come
 // back. Every word about a rule is the server's.
 import { formatDate, formatDateRange } from '@/lib/dates'
-import { opLabel, reasonLines } from '@/lib/rosterRequests'
+import { changeAndBlockCount, opLabel, reasonLines, skipsOffDays } from '@/lib/rosterRequests'
 
 defineProps({
   /** `get_approval_detail` for kind `roster`. */
@@ -52,8 +52,12 @@ function rangeLabel(row) {
         <dt class="label">
           Changes
         </dt>
-        <dd class="tabular mt-0.5 text-ink-gray-9">
-          {{ selected.change_count }}
+        <!-- Plan 2026-11-03-001 R10: a skip makes one change several shifts. -->
+        <dd
+          class="tabular mt-0.5 text-ink-gray-9"
+          data-testid="roster-review-count"
+        >
+          {{ selected.block_count != null ? changeAndBlockCount(selected.change_count, selected.block_count) : selected.change_count }}
         </dd>
       </div>
     </dl>
@@ -92,6 +96,10 @@ function rangeLabel(row) {
           :key="op.index"
         >
           {{ opLabel(op) }}
+          <span
+            v-if="skipsOffDays(op)"
+            class="ml-1 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-medium text-ink-gray-7"
+          >Skips days off<template v-if="op.blocks?.length"> · {{ op.blocks.length === 1 ? '1 shift' : `${op.blocks.length} shifts` }}</template></span>
         </li>
       </ol>
       <!-- Before and after only while it is waiting: once decided, the
