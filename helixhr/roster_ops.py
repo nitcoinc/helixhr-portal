@@ -17,9 +17,14 @@ An operation is a dict shaped like a `HelixHR Roster Change Row`:
 - Change: `shift_type` from `from_date`; the covering assignment ends the
   day before and the new one keeps its end (`change_shift_assignment`).
 - End: the covering assignment ends on `to_date` (`end_shift_assignment`).
+- Swap Day: `shift_type` on `from_date` only; the usual shift resumes the
+  next day (plan 2026-11-05-001 KTD4).
+- Clear Day: no shift on `from_date`; the usual shift resumes the next day.
 Change and End act on `assignment` when it names one in the coverage,
 otherwise on the assignment covering the date as earlier operations left
-it -- so "assign a range, then change inside it" works.
+it -- so "assign a range, then change inside it" works. Swap Day and Clear
+Day act only on a block covering the date (A2): the named one if it does,
+else whichever does.
 """
 
 import re
@@ -32,7 +37,10 @@ from frappe.utils import getdate
 ASSIGN = "Assign"
 CHANGE = "Change"
 END = "End"
-ACTIONS = (ASSIGN, CHANGE, END)
+# Plan 2026-11-05-001 KTD4: one-day operations, built from the same steps.
+SWAP_DAY = "Swap Day"
+CLEAR_DAY = "Clear Day"
+ACTIONS = (ASSIGN, CHANGE, END, SWAP_DAY, CLEAR_DAY)
 
 # The HR endpoints' sentences, single source: `helixhr.api` imports them.
 OVERLAP = "This person already has a shift on some of those dates. End or change that one first."
@@ -43,7 +51,9 @@ NO_SHIFT_TYPE = "Choose a shift."
 BAD_DATE = "Give a valid date."
 # New to roster requests: an HR cell always names its assignment.
 NO_SHIFT_ON_DATE = "This person has no shift on that date to change or end."
-BAD_ACTION = "Choose assign, change or end."
+BAD_ACTION = "Choose assign, change, end, swap day or clear day."
+# Plan 2026-11-05-001 A2: a Swap Day to the shift the day already has.
+SAME_SHIFT = "They already have that shift on that day."
 # Plan 2026-11-03-001 U1: skipping a person's weekly offs and holidays.
 SKIP_MAX_DAYS = 92
 NO_WORKING_DAYS = "No working days in that range."
@@ -66,6 +76,11 @@ WEEKLY_OFFS_NOT_SET = (
 	"Only holidays were skipped: their holiday list has no weekly offs, so weekends were kept. "
 	"If they don't work weekends, ask HR to add weekly offs to their holiday list."
 )
+# Plan 2026-11-05-001 A2: a run-aware Change / End stopping at a one-day gap.
+RUN_SPLIT = (
+	"Later shifts were left as they are: the same shift starts again after a one-day change. "
+	"Check the rest of the run."
+)
 
 
 def _date(value):
@@ -87,7 +102,7 @@ def _date(value):
 
 def op_date(op):
 	"""The date an operation acts on: `to_date` for End, `from_date` for
-	Assign and Change. None when missing or invalid. R13's "tomorrow or
+	the rest. None when missing or invalid. R13's "tomorrow or
 	later" applies to this date."""
 	return _date(op.get("to_date") if op.get("action") == END else op.get("from_date"))
 
@@ -152,26 +167,44 @@ def _next_in_run(rows, block, off):
 	return following
 
 
+def _following(rows, day):
+	"""The first block starting after `day`, or None."""
+	later = [a for a in rows if a["start_date"] > day]
+	return min(later, key=lambda a: a["start_date"]) if later else None
+
+
 def _run_note(rows, block, off):
 	"""KTD5: why the run ending at `block` may stop short, or None. A break
-	at a working day or another shift type is normal and gets no note."""
+	at a working day or another shift type is normal and gets no note --
+	except the one-day split (plan 2026-11-05-001 A2): the same shift
+	resumes after exactly one working day that is empty, or is one one-day
+	block of another shift, with only known off days besides."""
 	if block["end_date"] is None:
 		return None
-	later = [a for a in rows if a["start_date"] > block["end_date"]]
-	if not later:
-		return None
-	following = min(later, key=lambda a: a["start_date"])
-	if following["shift_type"] != block["shift_type"]:
+	following = _following(rows, block["end_date"])
+	swapped = None
+	if following and following["shift_type"] != block["shift_type"]:
+		swapped = following["start_date"]
+		if swapped != following["end_date"] or swapped != block["end_date"] + timedelta(days=1):
+			return None
+		following = _following(rows, swapped)
+	if not following or following["shift_type"] != block["shift_type"]:
 		return None
 	if off is None:
 		return RUN_OFF_DAYS_UNKNOWN
+	working = False
 	day = block["end_date"] + timedelta(days=1)
 	while day < following["start_date"]:
-		state = _is_off(off, day)
+		state = False if day == swapped else _is_off(off, day)
+		if state is None and not working:
+			return RUN_STOPPED_UNKNOWN
 		if state is not True:
-			return RUN_STOPPED_UNKNOWN if state is None else None
+			# A second working (or unknown) day is a normal break.
+			if working:
+				return None
+			working = True
 		day += timedelta(days=1)
-	return None
+	return RUN_SPLIT if working else None
 
 
 def _has_previous_in_run(rows, block, off):
@@ -232,7 +265,7 @@ def _apply(rows, op, index, off, run_aware, notes):
 	employee = op.get("employee")
 	if action not in ACTIONS:
 		return BAD_ACTION, []
-	if action != END and not op.get("shift_type"):
+	if action not in (END, CLEAR_DAY) and not op.get("shift_type"):
 		return NO_SHIFT_TYPE, []
 	day = op_date(op)
 	if not day:
@@ -272,6 +305,29 @@ def _apply(rows, op, index, off, run_aware, notes):
 		if any(_overlaps(a, start, last) for a in rows for start, last in spans):
 			return OVERLAP, []
 		return None, [new_block(op["shift_type"], start, last) for start, last in spans]
+
+	if action in (SWAP_DAY, CLEAR_DAY):
+		# Plan 2026-11-05-001 KTD4 / A2: the block covering `day` only, never
+		# a run; cancel / end first, then the creates.
+		named = next((a for a in rows if a["key"] == op.get("assignment")), None)
+		target = named if named and _overlaps(named, day, day) else None
+		target = target or next((a for a in rows if _overlaps(a, day, day)), None)
+		if not target:
+			return NO_SHIFT_ON_DATE, []
+		if action == SWAP_DAY and op["shift_type"] == target["shift_type"]:
+			return SAME_SHIFT, []
+		old_end = target["end_date"]
+		if day == target["start_date"]:
+			rows.remove(target)
+			steps = [_step("cancel", employee, target)]
+		else:
+			target["end_date"] = day - timedelta(days=1)
+			steps = [_step("end", employee, target, target["end_date"])]
+		if action == SWAP_DAY:
+			steps.append(new_block(op["shift_type"], day, day))
+		if old_end is None or old_end > day:
+			steps.append(new_block(target["shift_type"], day + timedelta(days=1), old_end))
+		return None, steps
 
 	if off is None:
 		target, via_gap = _target(rows, op.get("assignment"), day), False
@@ -349,8 +405,8 @@ def simulate(coverage, ops, off_days=None, notes=None):
 
 	`notes`, when a list, collects `{index, employee, message}` for a
 	run-aware Change / End that may have stopped short because off days are
-	unknown (plan 2026-11-04-001 KTD4, KTD5), or a skip that kept weekends
-	(plan 2026-11-05-001 A1). Notes never refuse and are not steps; legacy
+	unknown (plan 2026-11-04-001 KTD4, KTD5) or at a one-day change (plan
+	2026-11-05-001 A2), or a skip that kept weekends (A1). Notes never refuse and are not steps; legacy
 	mode emits none."""
 	result = {
 		employee: [
@@ -385,9 +441,11 @@ def affected_window(ops, steps=None):
 	"""`{employee: (start, end)}`: the earliest operation date through the
 	latest date any operation writes, `end` None when one may leave an open
 	end. A Change counts as open: its new half keeps the old assignment's
-	end, which the operation alone does not carry. `steps` (from `simulate`)
-	widen `end` to the last block a run-aware Change or End reaches (plan
-	2026-11-03-001 U1). Wider is safe -- a false conflict costs a resubmit, a
+	end, which the operation alone does not carry; so does a Swap Day or
+	Clear Day without `steps` (plan 2026-11-05-001 U3), which with them
+	starts at its day and the steps carry the rest it recreates. `steps`
+	(from `simulate`) widen `end` to the last block a run-aware Change or End
+	reaches (plan 2026-11-03-001 U1). Wider is safe -- a false conflict costs a resubmit, a
 	missed one applies over HR's edit."""
 	windows = {}
 
@@ -406,6 +464,8 @@ def affected_window(ops, steps=None):
 			last = _date(op.get("to_date"))
 		elif op.get("action") == CHANGE:
 			last = None
+		elif op.get("action") in (SWAP_DAY, CLEAR_DAY):
+			last = None if steps is None else day
 		else:
 			last = day
 		widen(op.get("employee"), day, last)

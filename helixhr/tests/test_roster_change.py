@@ -1253,6 +1253,97 @@ class TestWeeklyOffsMissing(RosterApprovalTestCase):
 		)
 
 
+def swap_day(employee, day, shift_type=LATE_SHIFT, assignment=None):
+	return {
+		"employee": employee,
+		"action": "Swap Day",
+		"shift_type": shift_type,
+		"from_date": day,
+		"assignment": assignment,
+	}
+
+
+def clear_day(employee, day, assignment=None):
+	return {"employee": employee, "action": "Clear Day", "from_date": day, "assignment": assignment}
+
+
+class TestOneDayOps(RosterApprovalTestCase):
+	"""Plan 2026-11-05-001 U4: Swap Day and Clear Day through save, submit
+	and approval, as real HRMS writes. Wed 12 March 2031 is the usual day."""
+
+	def test_a_swap_day_approves_as_the_old_shift_around_one_day_of_another(self):
+		report = self.report("swap")
+		seeded = seed_assignment(report, "2031-03-03")
+		self.as_manager()
+		draft = save_roster_draft([swap_day(report, "2031-03-12", assignment=seeded.name)])["draft"]
+		self.assertEqual(draft["problems"], [])
+		self.assertEqual(
+			[(b["shift_type"], b["start_date"], b["end_date"]) for b in draft["preview"][report]],
+			[
+				(PORTAL_SHIFT_TYPE, "2031-03-03", "2031-03-11"),
+				(LATE_SHIFT, "2031-03-12", "2031-03-12"),
+				(PORTAL_SHIFT_TYPE, "2031-03-13", None),
+			],
+		)
+		(row,) = draft["rows"]
+		self.assertEqual((row["action"], row["to_date"], len(row["blocks"])), ("Swap Day", None, 2))
+		frappe.set_user("Administrator")
+
+		(name,) = self.submit([swap_day(report, "2031-03-12", assignment=seeded.name)])
+		self.assertEqual(self.decide(HR_IN_SCOPE, name)["state"], "Approved")
+		self.assertEqual(
+			coverage(report),
+			[
+				(PORTAL_SHIFT_TYPE, "2031-03-03", "2031-03-11"),
+				(LATE_SHIFT, "2031-03-12", "2031-03-12"),
+				(PORTAL_SHIFT_TYPE, "2031-03-13", None),
+			],
+		)
+
+	def test_on_a_start_date_the_cancel_runs_before_the_creates(self):
+		"""KTD4, D = S: HRMS would refuse a create overlapping the block
+		still submitted, so the cancel must come first."""
+		cleared, swapped = self.report("clear-start"), self.report("swap-start")
+		open_ended = seed_assignment(cleared, "2031-03-10")
+		bounded = seed_assignment(swapped, "2031-03-10", "2031-03-14")
+		(name,) = self.submit([clear_day(cleared, "2031-03-10"), swap_day(swapped, "2031-03-10")])
+		self.assertEqual(self.decide(HR_IN_SCOPE, name)["state"], "Approved")
+		self.assertEqual(coverage(cleared), [(PORTAL_SHIFT_TYPE, "2031-03-11", None)])
+		self.assertEqual(
+			coverage(swapped),
+			[(LATE_SHIFT, "2031-03-10", "2031-03-10"), (PORTAL_SHIFT_TYPE, "2031-03-11", "2031-03-14")],
+		)
+		for seeded in (open_ended, bounded):
+			self.assertEqual(frappe.db.get_value("Shift Assignment", seeded.name, "docstatus"), 2)
+
+	def test_a_clear_day_with_no_shift_is_refused_naming_the_person(self):
+		report = self.report("clear-none")
+		seed_assignment(report, "2031-03-13")
+		self.as_manager()
+		message = self.refused([clear_day(report, "2031-03-12")])
+		self.assertIn(self.employee_name(report), message)
+		self.assertIn("no shift on that date", message)
+		self.assertFalse(frappe.db.exists(DOCTYPE, {"employee": self.manager, "status": "Draft"}))
+
+	def test_a_one_day_op_today_is_refused(self):
+		report = self.report("clear-today")
+		seed_assignment(report, "2031-03-03")
+		self.as_manager()
+		self.assertIn("tomorrow at the earliest", self.refused([clear_day(report, "2031-03-05")]))
+		self.assertIn("tomorrow at the earliest", self.refused([swap_day(report, "2031-03-04")]))
+
+	def test_hr_editing_the_assignment_after_submit_returns_it(self):
+		report = self.report("swap-conflict")
+		seeded = seed_assignment(report, "2031-03-03")
+		(name,) = self.submit([swap_day(report, "2031-03-12")])
+		frappe.db.set_value("Shift Assignment", seeded.name, "end_date", "2031-03-20")
+
+		result = self.decide(HR_IN_SCOPE, name)
+		self.assertTrue(result["returned"])
+		self.assertEqual([item["employee"] for item in result["reasons"]], [report])
+		self.assertEqual(coverage(report), [(PORTAL_SHIFT_TYPE, "2031-03-03", "2031-03-20")])
+
+
 class TestDraftToken(RosterChangeTestCase):
 	def test_a_stale_token_is_refused_and_a_matching_one_saves(self):
 		report = self.report("token")
@@ -1397,3 +1488,20 @@ class TestBulk(RosterChangeTestCase):
 		self.assertIsNone(result["draft"])
 		self.assertEqual(sorted(item["employee"] for item in result["skipped"]), sorted(people))
 		self.assertTrue(all("tomorrow at the earliest" in item["reason"] for item in result["skipped"]))
+
+	def test_clear_day_for_the_whole_team_skips_who_has_no_shift_that_day(self):
+		"""Plan 2026-11-05-001 KTD7."""
+		covered, also, idle = self.team("clear-a", "clear-b", "clear-c")
+		seed_assignment(covered, "2031-01-01")
+		seed_assignment(also, "2031-03-10", "2031-03-12")
+		result = self.bulk({"action": "Clear Day", "from_date": "2031-03-12"}, whole_team=1)
+
+		self.assertEqual(result["added"], 2)
+		blocks = {
+			row["employee"]: [(b["start_date"], b["end_date"]) for b in row["blocks"]]
+			for row in result["draft"]["rows"]
+		}
+		self.assertEqual(blocks, {covered: [("2031-03-13", None)], also: []})
+		(skip,) = result["skipped"]
+		self.assertEqual(skip["employee"], idle)
+		self.assertIn("no shift on that date", skip["reason"])

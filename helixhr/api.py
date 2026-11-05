@@ -107,11 +107,13 @@ from helixhr.roster_ops import ASSIGN as ROSTER_OP_ASSIGN
 from helixhr.roster_ops import BAD_DATE as _ROSTER_BAD_DATE
 from helixhr.roster_ops import CHANGE as ROSTER_OP_CHANGE
 from helixhr.roster_ops import CHANGE_ON_START as _ROSTER_CHANGE_ON_START
+from helixhr.roster_ops import CLEAR_DAY as ROSTER_OP_CLEAR_DAY
 from helixhr.roster_ops import END as ROSTER_OP_END
 from helixhr.roster_ops import END_BEFORE_START as _ROSTER_END_BEFORE_START
 from helixhr.roster_ops import NO_SHIFT_ON_DATE as _ROSTER_NO_SHIFT_ON_DATE
 from helixhr.roster_ops import NO_SHIFT_TYPE as _ROSTER_NO_SHIFT_TYPE
 from helixhr.roster_ops import OVERLAP as _ROSTER_OVERLAP
+from helixhr.roster_ops import SWAP_DAY as ROSTER_OP_SWAP_DAY
 from helixhr.roster_ops import affected_window, op_date, read_coverage, simulate, snapshot_key
 from helixhr.tasks import (
 	LEAVING_DOCTYPE,
@@ -17040,6 +17042,9 @@ _ROSTER_OP_FIELDS = {
 	ROSTER_OP_ASSIGN: ("shift_type", "from_date", "to_date"),
 	ROSTER_OP_CHANGE: ("shift_type", "from_date", "assignment"),
 	ROSTER_OP_END: ("to_date", "assignment"),
+	# Plan 2026-11-05-001 U4 / KTD4: one-day operations act on `from_date`.
+	ROSTER_OP_SWAP_DAY: ("shift_type", "from_date", "assignment"),
+	ROSTER_OP_CLEAR_DAY: ("from_date", "assignment"),
 }
 _ROSTER_ALL_OP_FIELDS = ("shift_type", "from_date", "to_date", "assignment")
 # Plan 2026-11-03-001 KTD6 / A6: HRMS writes (create / end / cancel steps)
