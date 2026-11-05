@@ -1621,6 +1621,68 @@ class TestOneDayOps(RosterApprovalTestCase):
 		self.assertEqual(coverage(report), [(PORTAL_SHIFT_TYPE, "2031-03-03", "2031-03-20")])
 
 
+class TestOneDayOnDraftLine(RosterApprovalTestCase):
+	"""Plan 2026-11-06-002 U5 / R6, KTD7: a one-day change on a day only the
+	draft gives a shift -- no live assignment, `assignment` null -- targets the
+	simulated `new-...` block and approves exactly as previewed. Mon 10 - Fri
+	28 March 2031, both skips, on the holidays-only list (Wed 19 a holiday)."""
+
+	LINE = ("2031-03-10", "2031-03-28")
+
+	def approved_as_previewed(self, key, day_op):
+		report = self.report(key)
+		ensure_holidays_only_list(report)
+		ops = [skip_assign(report, *self.LINE), day_op(report)]
+		self.as_manager()
+		draft = save_roster_draft(ops)["draft"]
+		frappe.set_user("Administrator")
+		self.assertEqual((draft["problems"], draft["notes"]), ([], []))
+		# `coverage` reads oldest first; the preview lists blocks as made.
+		preview = sorted(
+			((b["shift_type"], b["start_date"], b["end_date"]) for b in draft["preview"][report]),
+			key=lambda block: block[1],
+		)
+		(name,) = self.submit(ops)
+		self.assertEqual(self.decide(HR_IN_SCOPE, name)["state"], "Approved")
+		self.assertEqual(coverage(report), preview)
+		return report, preview
+
+	def test_a_clear_day_leaves_that_day_out_and_approves_as_previewed(self):
+		_, preview = self.approved_as_previewed("draft-clear", lambda r: clear_day(r, "2031-03-14"))
+		self.assertEqual(
+			preview,
+			[
+				(PORTAL_SHIFT_TYPE, "2031-03-10", "2031-03-13"),
+				(PORTAL_SHIFT_TYPE, "2031-03-17", "2031-03-18"),
+				(PORTAL_SHIFT_TYPE, "2031-03-20", "2031-03-21"),
+				(PORTAL_SHIFT_TYPE, "2031-03-24", "2031-03-28"),
+			],
+		)
+
+	def test_a_swap_day_is_one_day_of_another_shift_and_the_line_resumes(self):
+		_, preview = self.approved_as_previewed("draft-swap", lambda r: swap_day(r, "2031-03-12"))
+		self.assertEqual(
+			preview[:3],
+			[
+				(PORTAL_SHIFT_TYPE, "2031-03-10", "2031-03-11"),
+				(LATE_SHIFT, "2031-03-12", "2031-03-12"),
+				(PORTAL_SHIFT_TYPE, "2031-03-13", "2031-03-14"),
+			],
+		)
+
+	def test_a_clear_on_the_lines_first_day_cancels_that_block_and_creates_its_tail(self):
+		"""2026-11-05-001 KTD4 on a `new-...` block: the cleared first day's
+		block is created then cancelled at approval (deferred: folding it into
+		the line's own creates)."""
+		report, preview = self.approved_as_previewed("draft-first", lambda r: clear_day(r, "2031-03-10"))
+		self.assertEqual(preview[0], (PORTAL_SHIFT_TYPE, "2031-03-11", "2031-03-14"))
+		self.assertTrue(
+			frappe.db.exists(
+				"Shift Assignment", {"employee": report, "start_date": "2031-03-10", "docstatus": 2}
+			)
+		)
+
+
 class TestDraftToken(RosterChangeTestCase):
 	def test_a_stale_token_is_refused_and_a_matching_one_saves(self):
 		report = self.report("token")

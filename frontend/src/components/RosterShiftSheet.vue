@@ -1,10 +1,10 @@
 <script setup>
-import { ref, computed, watch } from 'vue'
+import { ref, computed, watch, nextTick, useId } from 'vue'
 import { createResource, Dialog, FormControl, Button } from 'frappe-ui'
 import { FALLBACK_ERROR, toPlainMessage } from '@/lib/errorMap'
 import { addCalendarDays, formatDate, formatDateRange } from '@/lib/dates'
 import { shiftHours } from '@/lib/roster'
-import { blocksLabel, opLabel, skipsOffDays } from '@/lib/rosterRequests'
+import { blocksLabel, isOneDayOp, lineCovers, opLabel, skipFlags } from '@/lib/rosterRequests'
 import { session } from '@/lib/session'
 import SegmentedChips from '@/components/SegmentedChips.vue'
 import RosterPeoplePicker from '@/components/RosterPeoplePicker.vue'
@@ -33,6 +33,14 @@ import RosterPeoplePicker from '@/components/RosterPeoplePicker.vue'
 // assigned cell ("Swap Day" / "Clear Day": the usual shift carries on the
 // next day) and, on an empty cell, "Just this day": an Assign with To = From
 // and no skip (KTD5). HR's own sheet is unchanged.
+//
+// Plan 2026-11-06-002 U4 / U5. Two skips, Skip weekends and Skip holidays,
+// each on by default and each with its own helper text. A day the draft
+// already changes routes per the plan's flowchart (KTD9): a one-day change
+// offers its own Edit / Remove; a day the draft gives a shift offers the
+// one-day changes for that date ("No shift that day" saves on one press);
+// an emptied day offers the whole line only. "Edit whole line" and "Remove
+// whole line" carry the line's one-day changes along (KTD8).
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
   /** `{ employee, employee_name }` of the row. */
@@ -44,13 +52,17 @@ const props = defineProps({
   today: { type: String, default: '' },
   /** 'hr' writes the roster; 'propose' adds to the manager's draft. */
   mode: { type: String, default: 'hr' },
-  /** Propose mode: `{ index, op, label }` when the draft already changes
-   * this cell (`rosterRequests.cellProposal` plus its operation). */
+  /** Propose mode: `{ index, op, label, shift_type, blocks, line }` when the
+   * draft already changes this cell (`rosterRequests.cellProposal` plus its
+   * operation). `line` is the whole line under the day, `{ index, op,
+   * blocks, dependents: [{ index, op }] }`, or null (a one-day change on a
+   * live shift). */
   proposal: { type: Object, default: null },
   /** Propose mode: `async (op, index)` -- `index` null appends. Throws an
    * Error whose message is the refusal to show. */
   proposeChange: { type: Function, default: null },
-  /** Propose mode: `async (index)`, throwing the same way. */
+  /** Propose mode: `async (index | index[])` -- several go in one save --
+   * throwing the same way. */
   removeChange: { type: Function, default: null },
   /** Propose mode: `async (op, { whole_team } | { employees })`, throwing
    * the same way. */
@@ -70,12 +82,43 @@ const proposing = computed(() => props.mode === 'propose')
 // form only after Edit.
 const editing = ref(false)
 const showsProposal = computed(() => proposing.value && !!props.proposal && !editing.value)
+// Plan 2026-11-06-002 U5: what the form edits -- 'op' the proposal's own
+// change, 'line' the whole line under the day, 'day' a new one-day change on
+// this date (appended, `assignment` null: KTD7).
+const editTarget = ref('op')
+const addingDay = computed(() => proposing.value && editing.value && editTarget.value === 'day')
+const line = computed(() => props.proposal?.line || null)
 // The operation being edited, whatever cell it was opened from: an Assign
 // edits as an Assign even on a day that has a shift today.
-const editedOp = computed(() => (proposing.value && editing.value ? props.proposal?.op || null : null))
-const assigned = computed(() =>
-  editedOp.value ? editedOp.value.action !== 'Assign' : !!props.cell?.assignment,
+const editedOp = computed(() => {
+  if (!proposing.value || !editing.value || addingDay.value) return null
+  return (editTarget.value === 'line' ? line.value?.op : props.proposal?.op) || null
+})
+const editedIndex = computed(() => (editTarget.value === 'line' ? line.value?.index : props.proposal?.index) ?? null)
+// KTD8: the one-day changes an edited line must still cover.
+const editedDependents = computed(() =>
+  line.value && editedIndex.value === line.value.index ? line.value.dependents || [] : [],
 )
+const assigned = computed(() =>
+  editedOp.value ? editedOp.value.action !== 'Assign' : addingDay.value || !!props.cell?.assignment,
+)
+// KTD9: a one-day change edits its shift only (Swap or Clear), on its own day
+// when opened from that day; the draft bar's Edit can still move the date.
+const editsOneDay = computed(() => isOneDayOp(editedOp.value))
+const dayFixed = computed(() => addingDay.value || (editsOneDay.value && !props.startEditing))
+
+// The summary's routes (the plan's flowchart).
+const dayChange = computed(() => isOneDayOp(props.proposal?.op))
+const offersDayActions = computed(() => !dayChange.value && !!line.value && !!props.proposal?.shift_type)
+/** "no shift on 14 Mar 2031; Night on 21 Mar 2031 only": what Remove whole
+ * line takes with it. */
+const alsoRemoves = computed(() =>
+  (line.value?.dependents || []).map((item) => opLabel(item.op).replace(/^No shift/, 'no shift')).join('; '),
+)
+const alsoRemovesId = useId()
+const weekendsHelpId = useId()
+const holidaysHelpId = useId()
+const summaryEl = ref(null)
 
 // 'end' | 'change' | 'cancel' (HR) | 'swap' | 'clear' (propose) for an
 // assigned cell; unused for an empty one.
@@ -87,7 +130,9 @@ const onDate = ref('')
 const confirmCancel = ref(false)
 const error = ref('')
 const sending = ref(false)
-const skip = ref(true)
+// Plan 2026-11-06-002 R3: each skip on its own, both on for a new Assign.
+const skipWeekends = ref(true)
+const skipHolidays = ref(true)
 // Propose mode, an empty cell: one day only, To follows From.
 const oneDay = ref(false)
 // 'one' | 'team' | 'pick', and the picked ids for 'pick'.
@@ -105,8 +150,23 @@ const firstDay = computed(() => {
   return date && date > tomorrow ? date : tomorrow
 })
 
+// The shift the day has without a one-day change: the draft's on a day it
+// gives a shift, else the line's or the live one.
+const usualShift = computed(() => {
+  const proposal = props.proposal
+  if (proposal && !isOneDayOp(proposal.op)) return proposal.shift_type || ''
+  return proposal?.line?.op?.shift_type || props.cell?.shift_type || ''
+})
+// A swap to the shift the day already has is refused (SAME_SHIFT): start the
+// picker on another one.
+function avoidUsualShift() {
+  if (shiftType.value !== usualShift.value) return
+  shiftType.value = props.shiftTypes.find((shift) => shift.name !== usualShift.value)?.name || shiftType.value
+}
+
 function reset() {
   editing.value = proposing.value && props.startEditing && !!props.proposal
+  editTarget.value = 'op'
   applyTo.value = 'one'
   picked.value = []
   fill()
@@ -117,14 +177,19 @@ const SHEET_ACTION = { End: 'end', Change: 'change', 'Swap Day': 'swap', 'Clear 
 
 function fill() {
   const op = editedOp.value
-  action.value = op ? SHEET_ACTION[op.action] || 'change' : proposing.value ? 'change' : 'end'
+  action.value = addingDay.value ? 'swap' : op ? SHEET_ACTION[op.action] || 'change' : proposing.value ? 'change' : 'end'
   shiftType.value = op?.shift_type || props.shiftTypes[0]?.name || ''
+  if (action.value === 'swap') avoidUsualShift()
   fromDate.value = op?.action === 'Assign' ? op.from_date : firstDay.value
   toDate.value = op?.action === 'Assign' ? op.to_date || '' : ''
   onDate.value = op ? (op.action === 'End' ? op.to_date : op.from_date) || firstDay.value : firstDay.value
-  // R1: on by default for a new Assign; an edit keeps the row's own setting.
-  skip.value = op ? skipsOffDays(op) : true
-  oneDay.value = op?.action === 'Assign' && !!op.to_date && op.to_date === op.from_date && !skip.value
+  // R3: both on by default for a new Assign; an edit keeps the row's own
+  // settings (a legacy row reads as both).
+  const flags = op ? skipFlags(op) : { weekends: true, holidays: true }
+  skipWeekends.value = flags.weekends
+  skipHolidays.value = flags.holidays
+  oneDay.value =
+    op?.action === 'Assign' && !!op.to_date && op.to_date === op.from_date && !flags.weekends && !flags.holidays
   confirmCancel.value = false
   error.value = ''
   refusedKey.value = ''
@@ -135,18 +200,29 @@ watch(
   { immediate: true },
 )
 
-function startEdit() {
+/** From the summary: edit 'op' or 'line', or add a one-day change ('day'). */
+function startEdit(which = 'op') {
+  editTarget.value = which
   editing.value = true
   fill()
 }
+function startDay() {
+  startEdit('day')
+  nextTick(() => document.getElementById('roster-shift-type')?.focus())
+}
+/** The form's Back: the summary again, focus on its first action. */
+function back() {
+  editing.value = false
+  editTarget.value = 'op'
+  error.value = ''
+  refusedKey.value = ''
+  nextTick(() => summaryEl.value?.querySelector('button:not([disabled])')?.focus())
+}
+
 watch(action, (value) => {
   error.value = ''
   confirmCancel.value = false
-  // A swap to the shift the day already has is refused (SAME_SHIFT): start
-  // the picker on another one.
-  if (value === 'swap' && shiftType.value === props.cell?.shift_type) {
-    shiftType.value = props.shiftTypes.find((shift) => shift.name !== props.cell.shift_type)?.name || shiftType.value
-  }
+  if (value === 'swap') avoidUsualShift()
 })
 // Turning "Just this day" off leaves no end date behind.
 function toggleOneDay() {
@@ -174,7 +250,10 @@ const PROPOSE_ACTIONS = [
   { value: 'clear', label: 'No shift that day' },
   { value: 'end', label: 'End it' },
 ]
-const ACTIONS = computed(() => (proposing.value ? PROPOSE_ACTIONS : HR_ACTIONS))
+const ACTIONS = computed(() => {
+  if (!proposing.value) return HR_ACTIONS
+  return editsOneDay.value ? PROPOSE_ACTIONS.filter((item) => ONE_DAY_ACTIONS.includes(item.value)) : PROPOSE_ACTIONS
+})
 
 /** The date this write takes effect on, for the today warning. */
 const editedDate = computed(() => {
@@ -198,14 +277,14 @@ const title = computed(() => {
   const who = props.person?.employee_name || ''
   const when = props.cell?.date ? formatDate(props.cell.date) : ''
   if (proposing.value) {
-    if (props.proposal) return `Proposed change · ${who}`
+    if (props.proposal && !addingDay.value) return `Proposed change · ${who}`
     return assigned.value ? `Propose a change · ${who}, ${when}` : `Propose a shift · ${who}, ${when}`
   }
   return assigned.value ? `${who}'s shift` : `Assign a shift · ${who}, ${when}`
 })
 
 const assignment = computed(() => {
-  if (!assigned.value || !props.cell?.assignment) return ''
+  if (!assigned.value || !props.cell?.assignment || addingDay.value) return ''
   const range = props.cell.assignment_end
     ? formatDateRange(props.cell.assignment_start, props.cell.assignment_end)
     : `From ${formatDate(props.cell.assignment_start)}, no end date`
@@ -221,9 +300,23 @@ const cancel = createResource({ url: 'helixhr.api.cancel_shift_assignment', meth
 const showsSkip = computed(() => proposing.value && !assigned.value && !!endDate.value && !oneDay.value)
 const showsApplyTo = computed(() => proposing.value && !editing.value && !!props.proposeBulk)
 const bulk = computed(() => showsApplyTo.value && applyTo.value !== 'one')
-const editedBlocks = computed(() => (editing.value ? blocksLabel(props.proposal?.blocks) : ''))
+const editedBlocks = computed(() =>
+  editing.value ? blocksLabel(editTarget.value === 'line' ? line.value?.blocks : props.proposal?.blocks) : '',
+)
 const formKey = computed(() =>
-  JSON.stringify([action.value, shiftType.value, fromDate.value, toDate.value, onDate.value, skip.value, oneDay.value, applyTo.value, picked.value]),
+  JSON.stringify([
+    editTarget.value,
+    action.value,
+    shiftType.value,
+    fromDate.value,
+    toDate.value,
+    onDate.value,
+    skipWeekends.value,
+    skipHolidays.value,
+    oneDay.value,
+    applyTo.value,
+    picked.value,
+  ]),
 )
 
 const canSubmit = computed(() => {
@@ -237,7 +330,7 @@ const canSubmit = computed(() => {
 })
 
 const submitLabel = computed(() => {
-  if (proposing.value && editing.value) return 'Save change'
+  if (proposing.value && editing.value && !addingDay.value) return 'Save change'
   if (bulk.value) return applyTo.value === 'team' ? 'Add for the whole team' : `Add for ${picked.value.length} ${picked.value.length === 1 ? 'person' : 'people'}`
   if (proposing.value) return 'Add to request'
   if (!assigned.value) return 'Assign shift'
@@ -272,10 +365,15 @@ function proposedOp() {
       shift_type: shiftType.value,
       from_date: fromDate.value,
       to_date: endDate.value || null,
-      skip_off_days: showsSkip.value && skip.value ? 1 : 0,
+      // Plan 2026-11-06-002 KTD5: both flags, never `skip_off_days`, so a
+      // weekends-only choice survives.
+      skip_weekends: showsSkip.value && skipWeekends.value ? 1 : 0,
+      skip_holidays: showsSkip.value && skipHolidays.value ? 1 : 0,
     }
   }
-  const target = editedOp.value ? editedOp.value.assignment : props.cell.assignment
+  // KTD7: a new one-day change names no assignment; the server finds the
+  // block covering the day in the draft.
+  const target = editedOp.value ? editedOp.value.assignment : addingDay.value ? null : props.cell.assignment
   if (action.value === 'end') return { ...base, action: 'End', to_date: onDate.value, assignment: target }
   if (action.value === 'swap') {
     return { ...base, action: 'Swap Day', shift_type: shiftType.value, from_date: onDate.value, assignment: target }
@@ -304,6 +402,28 @@ function remove() {
   return proposeOrRemove(() => props.removeChange(props.proposal.index))
 }
 
+/** KTD8: the line and its one-day changes, in one save. */
+function removeLine() {
+  if (sending.value || !line.value) return
+  const indexes = [line.value.index, ...(line.value.dependents || []).map((item) => item.index)]
+  return proposeOrRemove(() => props.removeChange(indexes))
+}
+
+/** "No shift that day" from the summary: one press, it is a draft and
+ * removable (U5). The clicked day, or tomorrow at the earliest. */
+function clearDay() {
+  if (sending.value) return
+  const op = {
+    employee: props.person.employee,
+    action: 'Clear Day',
+    shift_type: null,
+    from_date: firstDay.value,
+    to_date: null,
+    assignment: null,
+  }
+  return proposeOrRemove(() => props.proposeChange(op, null))
+}
+
 function submit() {
   if (!canSubmit.value) return
   if (bulk.value) {
@@ -314,8 +434,17 @@ function submit() {
     return proposeOrRemove(() => props.proposeBulk(op, target))
   }
   if (proposing.value) {
-    const index = editing.value ? props.proposal?.index ?? null : null
-    return proposeOrRemove(() => props.proposeChange(proposedOp(), index))
+    const op = proposedOp()
+    // KTD8: refused here, nothing saved, rather than the whole draft refused
+    // at save with a one-day change left on no shift.
+    const left = editedDependents.value.find((item) => !lineCovers(op, item.op.from_date))
+    if (left) {
+      error.value = `Remove the one-day change on ${formatDate(left.op.from_date)} first.`
+      refusedKey.value = formKey.value
+      return
+    }
+    const index = editing.value && !addingDay.value ? editedIndex.value : null
+    return proposeOrRemove(() => props.proposeChange(op, index))
   }
   if (!assigned.value) {
     return run(() =>
@@ -352,9 +481,10 @@ function submit() {
   >
     <template #body-content>
       <!-- Propose mode, a cell the draft already changes: what is proposed,
-           then Edit or Remove. -->
+           then what can be done with it (plan 2026-11-06-002 U5 routing). -->
       <div
         v-if="showsProposal"
+        ref="summaryEl"
         class="space-y-4"
         data-testid="roster-sheet"
       >
@@ -368,6 +498,13 @@ function submit() {
           >
             {{ opLabel(proposal.op) }}
           </p>
+          <p
+            v-if="line && line.index !== proposal.index"
+            class="mt-1 text-ink-gray-7"
+            data-testid="roster-whole-line"
+          >
+            Whole line: {{ opLabel(line.op) }}
+          </p>
         </div>
         <p class="text-sm text-ink-gray-6">
           In your draft. Nothing changes until HR approves it.
@@ -379,41 +516,97 @@ function submit() {
           Change or remove it from the list in the draft bar.
         </p>
         <p
+          v-if="alsoRemoves"
+          :id="alsoRemovesId"
+          class="text-sm text-ink-gray-6"
+          data-testid="roster-also-removes"
+        >
+          Remove whole line also removes: {{ alsoRemoves }}.
+        </p>
+        <p
           v-if="error"
           class="text-sm text-ink-red-4"
           role="alert"
         >
           {{ error }}
         </p>
-        <div class="sticky bottom-0 -mx-1 flex flex-wrap items-center gap-2 border-t border-outline-gray-1 bg-surface-white px-1 py-3">
-          <Button
-            v-if="proposal.index >= 0"
-            variant="solid"
-            theme="blue"
-            type="button"
-            :disabled="sending"
-            @click="startEdit"
+        <div class="sticky bottom-0 -mx-1 space-y-2 border-t border-outline-gray-1 bg-surface-white px-1 py-3">
+          <!-- This day: its own one-day change, or one to add (KTD9). -->
+          <div
+            v-if="(dayChange && proposal.index >= 0) || offersDayActions"
+            class="flex flex-wrap items-center gap-2"
           >
-            Edit
-          </Button>
-          <Button
-            v-if="proposal.index >= 0"
-            variant="subtle"
-            theme="red"
-            type="button"
-            :loading="sending"
-            :disabled="sending"
-            @click="remove"
-          >
-            Remove
-          </Button>
-          <Button
-            variant="subtle"
-            type="button"
-            @click="open = false"
-          >
-            Close
-          </Button>
+            <template v-if="dayChange">
+              <Button
+                variant="solid"
+                theme="blue"
+                type="button"
+                :disabled="sending"
+                @click="startEdit('op')"
+              >
+                Edit
+              </Button>
+              <Button
+                variant="subtle"
+                theme="red"
+                type="button"
+                :loading="sending"
+                :disabled="sending"
+                @click="remove"
+              >
+                Remove
+              </Button>
+            </template>
+            <template v-else>
+              <Button
+                variant="solid"
+                theme="blue"
+                type="button"
+                :disabled="sending"
+                @click="startDay"
+              >
+                Different shift for one day
+              </Button>
+              <Button
+                variant="subtle"
+                type="button"
+                :loading="sending"
+                :disabled="sending"
+                @click="clearDay"
+              >
+                No shift that day
+              </Button>
+            </template>
+          </div>
+          <div class="flex flex-wrap items-center gap-2">
+            <template v-if="line">
+              <Button
+                variant="subtle"
+                type="button"
+                :disabled="sending"
+                @click="startEdit('line')"
+              >
+                Edit whole line
+              </Button>
+              <Button
+                variant="subtle"
+                theme="red"
+                type="button"
+                :disabled="sending"
+                :aria-describedby="alsoRemoves ? alsoRemovesId : undefined"
+                @click="removeLine"
+              >
+                Remove whole line
+              </Button>
+            </template>
+            <Button
+              variant="subtle"
+              type="button"
+              @click="open = false"
+            >
+              Close
+            </Button>
+          </div>
         </div>
       </div>
       <form
@@ -444,7 +637,7 @@ function submit() {
           </div>
         </dl>
 
-        <fieldset v-if="assigned">
+        <fieldset v-if="assigned && !addingDay">
           <legend class="label mb-2">
             What to do
           </legend>
@@ -530,18 +723,50 @@ function submit() {
           v-if="showsSkip"
           class="space-y-1"
         >
-          <label class="flex min-h-11 cursor-pointer items-center gap-2 text-sm text-ink-gray-8">
-            <input
-              v-model="skip"
-              type="checkbox"
-              role="switch"
-              class="size-5 shrink-0"
-              :aria-checked="skip ? 'true' : 'false'"
-              :disabled="sending"
-              data-testid="roster-skip-off-days"
+          <!-- Plan 2026-11-06-002 U4: each skip on its own, each saying what
+               it skips. -->
+          <div>
+            <label class="flex min-h-11 cursor-pointer items-center gap-2 text-sm text-ink-gray-8">
+              <input
+                v-model="skipWeekends"
+                type="checkbox"
+                role="switch"
+                class="size-5 shrink-0"
+                :aria-checked="skipWeekends ? 'true' : 'false'"
+                :aria-describedby="weekendsHelpId"
+                :disabled="sending"
+                data-testid="roster-skip-weekends"
+              >
+              Skip weekends
+            </label>
+            <p
+              :id="weekendsHelpId"
+              class="-mt-2 pl-7 text-xs text-ink-gray-6"
             >
-            Skip weekly offs and holidays
-          </label>
+              Saturday and Sunday, unless their holiday list sets weekly offs
+            </p>
+          </div>
+          <div>
+            <label class="flex min-h-11 cursor-pointer items-center gap-2 text-sm text-ink-gray-8">
+              <input
+                v-model="skipHolidays"
+                type="checkbox"
+                role="switch"
+                class="size-5 shrink-0"
+                :aria-checked="skipHolidays ? 'true' : 'false'"
+                :aria-describedby="holidaysHelpId"
+                :disabled="sending"
+                data-testid="roster-skip-holidays"
+              >
+              Skip holidays
+            </label>
+            <p
+              :id="holidaysHelpId"
+              class="-mt-2 pl-7 text-xs text-ink-gray-6"
+            >
+              Public holidays on their holiday list
+            </p>
+          </div>
           <p
             class="text-xs text-ink-gray-6"
             aria-live="polite"
@@ -553,7 +778,7 @@ function submit() {
             <template v-else-if="editedBlocks">
               Saved as {{ editedBlocks }}.
             </template>
-            <template v-else-if="skip">
+            <template v-else-if="skipWeekends || skipHolidays">
               One shift per run of working days. Your draft lists each one once it is saved.
             </template>
             <template v-else>
@@ -609,7 +834,23 @@ function submit() {
           required
         />
         <template v-if="oneDayAction">
+          <!-- KTD9: opened from a day, the change stays on that day. -->
+          <dl
+            v-if="dayFixed"
+            class="flex justify-between gap-3 text-sm"
+          >
+            <dt class="text-ink-gray-6">
+              Day
+            </dt>
+            <dd
+              class="text-ink-gray-9"
+              data-testid="roster-fixed-day"
+            >
+              {{ formatDate(onDate) }}
+            </dd>
+          </dl>
           <FormControl
+            v-else
             v-model="onDate"
             type="date"
             label="Day"
@@ -617,7 +858,7 @@ function submit() {
           />
           <p class="-mt-2 text-xs text-ink-gray-5">
             {{ action === 'swap' ? 'Only this day changes.' : 'No shift this day.' }} The usual shift continues
-            the next day. Tomorrow at the earliest.
+            the next day.{{ dayFixed ? '' : ' Tomorrow at the earliest.' }}
           </p>
         </template>
 
@@ -673,6 +914,16 @@ function submit() {
             :disabled="!canSubmit"
           >
             {{ confirmCancel ? 'Yes, cancel it' : submitLabel }}
+          </Button>
+          <!-- U5: a form opened from the summary goes back to it. -->
+          <Button
+            v-if="proposing && proposal && editing && !startEditing"
+            variant="subtle"
+            type="button"
+            :disabled="sending"
+            @click="back"
+          >
+            Back
           </Button>
           <Button
             variant="subtle"

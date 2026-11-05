@@ -6,7 +6,7 @@
 // the detail was read, so HR knows before pressing Approve that it would come
 // back. Every word about a rule is the server's.
 import { formatDate, formatDateRange } from '@/lib/dates'
-import { changeAndBlockCount, opLabel, reasonLines, skipsOffDays } from '@/lib/rosterRequests'
+import { changeAndBlockCount, opLabel, reasonLines, skipLabel } from '@/lib/rosterRequests'
 
 defineProps({
   /** `get_approval_detail` for kind `roster`. */
@@ -96,10 +96,11 @@ function rangeLabel(row) {
           :key="op.index"
         >
           {{ opLabel(op) }}
+          <!-- Plan 2026-11-06-002 U4: which skip, weekends and / or holidays. -->
           <span
-            v-if="skipsOffDays(op)"
-            class="ml-1 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-medium text-ink-gray-7"
-          >Skips days off<template v-if="op.blocks?.length"> · {{ op.blocks.length === 1 ? '1 shift' : `${op.blocks.length} shifts` }}</template></span>
+            v-if="skipLabel(op)"
+            class="ml-1 inline-block rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-medium text-ink-gray-7 first-letter:uppercase"
+          >{{ skipLabel(op) }}<template v-if="op.blocks?.length"> · {{ op.blocks.length === 1 ? '1 shift' : `${op.blocks.length} shifts` }}</template></span>
         </li>
       </ol>
       <!-- Before and after only while it is waiting: once decided, the

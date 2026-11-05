@@ -7,10 +7,11 @@
 //
 // Plan 2026-11-03-001 U4 / R6, R7: each change has Edit (the page opens the
 // sheet on it); Discard is "Clear all", still asking once; a change that
-// skips days off lists the shifts the server split it into.
+// skips days off lists the shifts the server split it into. Plan
+// 2026-11-06-002 U4: the pill names which skip (weekends, holidays, both).
 import { ref, computed, watch, useId } from 'vue'
 import { Button } from 'frappe-ui'
-import { blocksLabel, draftSummary, opLabel, skipsOffDays } from '@/lib/rosterRequests'
+import { blocksLabel, draftSummary, opLabel, skipLabel } from '@/lib/rosterRequests'
 
 const props = defineProps({
   /** The draft's rows, in order (`employee_name` plus the operation). */
@@ -118,11 +119,12 @@ function discard() {
             <span class="font-medium text-ink-gray-9">{{ row.employee_name || row.employee }}</span>
             · {{ opLabel(row) }}
             <span
-              v-if="skipsOffDays(row)"
-              class="ml-1 rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-medium text-ink-gray-7"
-            >Skips days off</span>
+              v-if="skipLabel(row)"
+              class="ml-1 inline-block rounded-full bg-surface-gray-2 px-2 py-0.5 text-xs font-medium text-ink-gray-7 first-letter:uppercase"
+              data-testid="roster-draft-skip"
+            >{{ skipLabel(row) }}</span>
             <span
-              v-if="skipsOffDays(row) && row.blocks?.length"
+              v-if="skipLabel(row) && row.blocks?.length"
               class="block text-xs text-ink-gray-6"
               data-testid="roster-draft-blocks"
             >{{ blocksLabel(row.blocks) }}</span>
