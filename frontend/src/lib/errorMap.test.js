@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { toPlainLeaveError, toPlainMessage } from './errorMap'
+import { FALLBACK_ERROR, toPlainLeaveError, toPlainMessage } from './errorMap'
 
 function err(message) {
   return { messages: [message] }
@@ -178,5 +178,88 @@ describe('toPlainMessage', () => {
 
   it('has an answer for nothing at all', () => {
     expect(toPlainMessage(null)).toBe('')
+  })
+})
+
+// Plan 2026-11-06-001. For a leave type with allow_negative and no
+// allocation, HRMS msgprints an orange "Warning: Insufficient leave balance"
+// before the checks that really throw, so every refusal reaches the portal
+// as [warning, real throw]. The throw is the sentence the person needs.
+describe('the balance warning never hides the real refusal', () => {
+  const WARNING =
+    'Warning: Insufficient leave balance for Leave Type <strong>IN-Work From Home</strong>.'
+  const ATTENDANCE_SENTENCE =
+    "Attendance is already marked for these dates, so this leave can't go ahead. Withdraw or reject it."
+  const OVERLAP_SENTENCE = 'You already have a leave request that overlaps these dates.'
+
+  function plain(messages) {
+    const out = toPlainLeaveError({ messages })
+    expect(out).not.toMatch(/you do not have enough/i)
+    return out
+  }
+
+  it('shows the backdate rule, not the warning', () => {
+    expect(
+      plain([WARNING, 'Leave can start no earlier than 2026-11-03. For older dates, ask HR.']),
+    ).toBe('Leave can start no earlier than 2026-11-03. For older dates, ask HR.')
+  })
+
+  it('shows the overlap, not the warning', () => {
+    expect(
+      plain([
+        WARNING,
+        'Employee NP0097 has already applied for IN-Work From Home between 2026-10-27 and 2026-10-27 : <a href="x">HR-LAP-2026-00129</a>',
+      ]),
+    ).toBe(OVERLAP_SENTENCE)
+  })
+
+  it('shows the attendance refusal, not the warning', () => {
+    expect(
+      plain([
+        WARNING,
+        'Attendance for employee NP0096 is already marked for the following dates: <br><ul><li><a href="x">04-11-2026</a></li></ul>',
+      ]),
+    ).toBe(ATTENDANCE_SENTENCE)
+  })
+
+  it('skips a lowercase warning too', () => {
+    expect(plain(['warning: something non-fatal', 'Pick a leave type first.'])).toBe(
+      'Pick a leave type first.',
+    )
+  })
+
+  it('answers with something readable when only the warning arrived', () => {
+    const out = plain([WARNING])
+    expect(out).toBeTruthy()
+    expect(out).not.toMatch(/ \./)
+  })
+
+  it('still maps a real balance throw, and drops the trailing full stop from the name', () => {
+    expect(
+      toPlainLeaveError(err('Insufficient leave balance for Leave Type <b>Casual Leave</b>')),
+    ).toBe('You do not have enough Casual Leave for these dates.')
+    expect(
+      toPlainLeaveError(
+        err('Insufficient leave balance for Leave Type <strong>Casual Leave</strong>.'),
+      ),
+    ).toBe('You do not have enough Casual Leave for these dates.')
+  })
+
+  it('maps the overlap and attendance refusals on their own', () => {
+    expect(
+      plain([
+        'Employee NP0097 has already applied for Casual Leave between 2026-10-27 and 2026-10-28 : <a href="x">HR-LAP-1</a>',
+      ]),
+    ).toBe(OVERLAP_SENTENCE)
+    expect(
+      plain([
+        'Attendance for employee NP0096 is already marked for the following dates: <ul><li>2026-11-04</li></ul>',
+      ]),
+    ).toBe(ATTENDANCE_SENTENCE)
+  })
+
+  it('falls back to the error message when there are no messages', () => {
+    expect(toPlainLeaveError({ messages: [], message: 'Some error' })).toBe('Some error')
+    expect(toPlainLeaveError(null)).toBe(FALLBACK_ERROR)
   })
 })
