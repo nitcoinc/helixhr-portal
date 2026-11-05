@@ -42,6 +42,7 @@ from helixhr.tests.utils import (
 	OTHER_MANAGER_USER,
 	PORTAL_SHIFT_TYPE,
 	TEST_COMPANY,
+	ensure_test_email_account,
 	ensure_test_shift_type,
 	make_assignment,
 	make_test_employee_and_manager,
@@ -435,6 +436,10 @@ class TestAutoWithdraw(RosterChangeTestCase):
 class TestNotifications(RosterChangeTestCase):
 	def setUp(self):
 		super().setUp()
+		# A return emails the manager; with no default outgoing account that
+		# send logs a message, which the no-leak assertions would read as
+		# HRMS's refusal escaping. Owned here, not left to class order.
+		ensure_test_email_account()
 		for user, company in ((HR_IN_SCOPE, TEST_COMPANY), (HR_OUT_OF_SCOPE, self.other_company)):
 			make_test_user(user, company, create_user_permission=0)
 			remove_assignment(user, "HR Manager")
@@ -551,6 +556,10 @@ class RosterApprovalTestCase(RosterChangeTestCase):
 
 	def setUp(self):
 		super().setUp()
+		# A return emails the manager; with no default outgoing account that
+		# send logs a message, which the no-leak assertions would read as
+		# HRMS's refusal escaping. Owned here, not left to class order.
+		ensure_test_email_account()
 		for user, company in ((HR_IN_SCOPE, TEST_COMPANY), (HR_OUT_OF_SCOPE, self.other_company)):
 			make_test_user(user, company, create_user_permission=0)
 			frappe.db.delete("User Permission", {"user": user, "allow": "Employee"})

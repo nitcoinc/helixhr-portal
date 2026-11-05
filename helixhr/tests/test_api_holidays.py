@@ -3,7 +3,11 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_days, date_diff, get_year_ending, get_year_start, getdate, today
 
 from helixhr.api import get_my_holidays
-from helixhr.tests.utils import EMPLOYEE_USER, make_test_employee_and_manager
+from helixhr.tests.utils import (
+	EMPLOYEE_USER,
+	ensure_holiday_list_assignment,
+	make_test_employee_and_manager,
+)
 
 # P3-U3. Deliberately years nothing else on the bench touches. The shared
 # `_Test Holiday List` is assigned to the test company from the *current*
@@ -209,6 +213,12 @@ class TestHelixHRHolidays(IntegrationTestCase):
 		# the first one (`resolve_holiday_list_assignment`), and this page
 		# mirrors HRMS, so the year resolves to that list -- the one leave and
 		# attendance use for those dates too.
+		# The company assignment is this test's own row: other suites create
+		# it without committing, so whether it survives to here depended on
+		# class order (CI run 42081975744).
+		frappe.set_user("Administrator")
+		ensure_holiday_list_assignment(self.company)
+		frappe.set_user(EMPLOYEE_USER)
 		payload = get_my_holidays(PAST_YEAR)
 		self.assertTrue(payload["known"])
 		self.assertTrue(payload["holiday_list"])
