@@ -16774,7 +16774,11 @@ def get_roster_week(week_start=None, mode="mine", search=None, start=0):
 	rows = []
 	for row in employees:
 		default = times.get(row.default_shift) if row.default_shift else None
-		kinds = _holiday_kinds(row.name, monday, sunday, holiday_cache)[1] or {}
+		# Plan 2026-11-06-002 R11: the skip's own rule, so a day it left free
+		# reads "Off" -- Saturday and Sunday too when the list has no weekly offs.
+		off = _roster_off_sets(row.name, monday, sunday, holiday_cache)
+		holidays = off["holidays"]["dates"] if off["holidays"] else []
+		weekends = off["weekends"]["dates"] if off["weekends"] else []
 		rows.append(
 			{
 				"employee": row.name,
@@ -16793,10 +16797,10 @@ def get_roster_week(week_start=None, mode="mine", search=None, start=0):
 				),
 				"cells": cells[row.name],
 				"leaves": leaves.get(row.name, []),
-				# Named holidays only; `off_days` adds weekly offs, so a day a
+				# Named holidays only; `off_days` adds weekends, so a day a
 				# skip left free reads "Off", not "no shift" (plan 2026-11-03-001 R10).
-				"holidays": sorted(day for day, kind in kinds.items() if kind != "weekly_off"),
-				"off_days": sorted(kinds),
+				"holidays": holidays,
+				"off_days": sorted({*holidays, *weekends}),
 				"pending_request": pending.get(row.name),
 			}
 		)
@@ -17084,10 +17088,14 @@ def _roster_draft_ops(rows):
 			value = str(row.get(field) or "").strip() if field in keep else ""
 			op[field] = value or None
 		# Plan 2026-11-03-001 KTD1: kept only on an Assign with an end date;
-		# a garbage value (`_flag` -> None) counts as off.
-		op["skip_off_days"] = int(
-			action == ROSTER_OP_ASSIGN and bool(op["to_date"]) and bool(_flag(row.get("skip_off_days")))
-		)
+		# a garbage value (`_flag` -> None) counts as off. Plan 2026-11-06-002
+		# KTD5: an old-build tab sends `skip_off_days` alone, meaning both
+		# skips; either new key present wins over it.
+		ranged = action == ROSTER_OP_ASSIGN and bool(op["to_date"])
+		legacy = "skip_weekends" not in row and "skip_holidays" not in row
+		for field in ("skip_weekends", "skip_holidays"):
+			op[field] = int(ranged and bool(_flag(row.get("skip_off_days" if legacy else field))))
+		op["skip_off_days"] = _both_skips(op)
 		ops.append(op)
 	return ops
 
@@ -17099,8 +17107,14 @@ def _roster_note(note):
 	return text
 
 
+def _both_skips(op):
+	"""Plan 2026-11-06-002 KTD5: `skip_off_days` is 1 iff both skips are, so
+	a tab on the old build round-trips a draft without clearing them."""
+	return int(bool(op["skip_weekends"] and op["skip_holidays"]))
+
+
 def _request_ops(doc):
-	return [
+	ops = [
 		{
 			"employee": row.employee,
 			"action": row.action,
@@ -17108,19 +17122,22 @@ def _request_ops(doc):
 			"from_date": str(getdate(row.from_date)) if row.from_date else None,
 			"to_date": str(getdate(row.to_date)) if row.to_date else None,
 			"assignment": row.assignment,
-			"skip_off_days": cint(row.skip_off_days),
+			"skip_weekends": cint(row.skip_weekends),
+			"skip_holidays": cint(row.skip_holidays),
 		}
 		for row in doc.rows
 	]
+	for op in ops:
+		op["skip_off_days"] = _both_skips(op)
+	return ops
 
 
 def _roster_off_days(employees, ops, coverage, cache=None):
-	"""`{employee: {from, to, dates} | None}` for `roster_ops.simulate`
-	(plan 2026-11-03-001 KTD4, A3). Each person's lookup runs from their
-	earliest operation date to the last date their operations or their
-	bounded shifts reach -- never open-ended. Days past the end of the
-	holiday list in force are left unknown, so a skip over them is refused
-	and a run stops there. None: no list resolves at all."""
+	"""`{employee: {weekends, holidays} | None}` for `roster_ops.simulate`
+	(plan 2026-11-03-001 KTD4, A3; plan 2026-11-06-002 KTD2). Each person's
+	lookup runs from their earliest operation date to the last date their
+	operations or their bounded shifts reach -- never open-ended. None: the
+	person has no dated operation."""
 	cache = {} if cache is None else cache
 	result = {}
 	for employee in employees:
@@ -17134,47 +17151,77 @@ def _roster_off_days(employees, ops, coverage, cache=None):
 		ends += [
 			a["end_date"] for a in coverage.get(employee, []) if a["end_date"] and a["end_date"] >= start
 		]
-		result[employee] = _known_off_days(employee, start, max(ends), cache)
+		result[employee] = _roster_off_sets(employee, start, max(ends), cache)
 	return result
 
 
-def _known_off_days(employee, start, end, cache):
+def _roster_off_sets(employee, start, end, cache):
+	"""Plan 2026-11-06-002 KTD1, KTD2: the person's weekends and holidays
+	across `start`..`end` as `{weekends, holidays}`, each `{from, to, dates}`
+	known from `start` through `to`, or None when unknown from `start`. The
+	one rule the roster skip (`_roster_off_days`) and the grid's "Off"
+	(`get_roster_week`, R11) share.
+
+	Per holiday-list span: weekends are the list's weekly-off rows when the
+	whole list has any (`has_weekly_offs`), else Saturday and Sunday; with
+	no list, Saturday and Sunday. Holidays are the list's other rows; None
+	with no list. Days past the end of a list in force are unknown -- for
+	weekends only when that list has weekly-off rows, whose pattern can't be
+	extended safely (KTD1)."""
+	start, end = getdate(start), getdate(end)
 	spans = _holiday_list_spans(employee, start, end)
 	if not spans:
-		return None
-	known_end = end
+		return {"weekends": _known_days(start, end, _sat_sun(start, end)), "holidays": None}
+	kinds = _holiday_dates_by_span(spans, cache)
+	holidays_end = weekends_end = end
+	weekends = []
 	for span in spans:
-		key = ("list", span["holiday_list"])
-		if key not in cache:
-			cache[key] = frappe.db.get_value(
-				"Holiday List", span["holiday_list"], ["from_date", "to_date"], as_dict=True
+		name, first, last = span["holiday_list"], getdate(span["from_date"]), getdate(span["to_date"])
+		if ("list", name) not in cache:
+			cache[("list", name)] = frappe.db.get_value(
+				"Holiday List", name, ["from_date", "to_date"], as_dict=True
 			)
-		bounds = cache[key]
-		if not bounds or getdate(bounds.from_date) > getdate(span["from_date"]):
-			known_end = add_days(span["from_date"], -1)
-			break
-		if getdate(bounds.to_date) < getdate(span["to_date"]):
-			known_end = getdate(bounds.to_date)
-			break
-	known_end = getdate(known_end)
-	if known_end < start:
+		if ("weekly_offs", name) not in cache:
+			cache[("weekly_offs", name)] = has_weekly_offs(name)
+		bounds, listed = cache[("list", name)], cache[("weekly_offs", name)]
+		if listed:
+			weekends += [
+				day for day, kind in kinds.items() if kind == "weekly_off" and str(first) <= day <= str(last)
+			]
+		else:
+			weekends += _sat_sun(first, last)
+		# Past (or before) the list's own period its rows say nothing.
+		cut = None
+		if not bounds or getdate(bounds.from_date) > first:
+			cut = getdate(add_days(first, -1))
+		elif getdate(bounds.to_date) < last:
+			cut = getdate(bounds.to_date)
+		if cut:
+			holidays_end = min(holidays_end, cut)
+			if listed:
+				weekends_end = min(weekends_end, cut)
+	holidays = [day for day, kind in kinds.items() if kind == "holiday"]
+	return {
+		"weekends": _known_days(start, weekends_end, weekends),
+		"holidays": _known_days(start, holidays_end, holidays),
+	}
+
+
+def _sat_sun(start, end):
+	days = (getdate(add_days(start, n)) for n in range(date_diff(end, start) + 1))
+	return [str(day) for day in days if day.weekday() >= 5]
+
+
+def _known_days(start, end, dates):
+	"""`{from, to, dates}` over `start`..`end` (`dates` clipped to it), or
+	None when `end` is before `start` -- nothing known."""
+	if end < start:
 		return None
-	clipped = [
-		{**span, "to_date": min(getdate(span["to_date"]), known_end)}
-		for span in spans
-		if getdate(span["from_date"]) <= known_end
-	]
-	off = {"from": str(start), "to": str(known_end), "dates": sorted(_holiday_dates_by_span(clipped, cache))}
-	# Plan 2026-11-05-001 A1: a list with no weekly-off rows at all (the
-	# whole list, not this range) holds holidays only, so its non-holiday
-	# days are not known working days. Flagged when any span's list is one.
-	for span in clipped:
-		key = ("weekly_offs", span["holiday_list"])
-		if key not in cache:
-			cache[key] = has_weekly_offs(span["holiday_list"])
-		if not cache[key]:
-			off["weekly_offs_missing"] = 1
-	return off
+	return {
+		"from": str(start),
+		"to": str(end),
+		"dates": sorted(day for day in dates if str(start) <= day <= str(end)),
+	}
 
 
 def _review_roster_ops(me, ops):

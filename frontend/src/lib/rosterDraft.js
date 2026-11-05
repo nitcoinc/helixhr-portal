@@ -31,9 +31,6 @@ export const SAME_SHIFT = 'They already have that shift on that day.'
 // Plan 2026-11-03-001 U1: skipping a person's weekly offs and holidays.
 export const SKIP_MAX_DAYS = 92
 export const NO_WORKING_DAYS = 'No working days in that range.'
-export const OFF_DAYS_UNKNOWN =
-  "Their weekly offs and holidays can't be worked out for those dates. " +
-  'Turn off skipping weekly offs and holidays, or ask HR to set up their holiday list.'
 export const SKIP_SPAN = 'Skipping weekly offs and holidays works on at most 92 days at a time.'
 // Plan 2026-11-04-001 U2 / KTD5: non-blocking notes on a run-aware Change / End.
 export const RUN_STOPPED_UNKNOWN =
@@ -42,10 +39,13 @@ export const RUN_STOPPED_UNKNOWN =
 export const RUN_OFF_DAYS_UNKNOWN =
   "Only the shift on that date was updated: their weekly offs and holidays can't be worked out, " +
   'so later shifts were left as they are. Check the rest of the run.'
-// Plan 2026-11-05-001 A1: a skip on a holiday list with no weekly-off rows.
-export const WEEKLY_OFFS_NOT_SET =
-  'Only holidays were skipped: their holiday list has no weekly offs, so weekends were kept. ' +
-  "If they don't work weekends, ask HR to add weekly offs to their holiday list."
+// Plan 2026-11-06-002 U3: each skip refuses on its own when its days can't be told.
+export const WEEKENDS_UNKNOWN =
+  "Their weekends can't be worked out for those dates. " +
+  'Untick Skip weekends, or ask HR to set up their holiday list.'
+export const HOLIDAYS_UNKNOWN =
+  "Their holidays can't be worked out for those dates. " +
+  'Untick Skip holidays, or ask HR to set up their holiday list.'
 // Plan 2026-11-05-001 A2: a run-aware Change / End stopping at a one-day gap.
 export const RUN_SPLIT =
   'Later shifts were left as they are: the same shift starts again after a one-day change. ' +
@@ -93,28 +93,36 @@ function findTarget(rows, key, day) {
   return named ?? rows.find((a) => overlaps(a, day, day)) ?? null
 }
 
-// `{ from, to, dates: Set, weeklyOffsMissing }`, or null (cannot tell). A
-// day outside `from`..`to` is unknown too (`roster_ops._off_days`).
-function normalizeOff(value) {
+// `{ from, to, dates: Set }`, or null (cannot tell). A day outside
+// `from`..`to` is unknown too (`roster_ops._known_set`).
+function knownSet(value) {
   if (!value) return null
   const from = isoDate(value.from)
   const to = isoDate(value.to)
   if (!from || !to) return null
-  return {
-    from,
-    to,
-    dates: new Set((value.dates ?? []).map(isoDate).filter(Boolean)),
-    weeklyOffsMissing: !!value.weekly_offs_missing,
-  }
+  return { from, to, dates: new Set((value.dates ?? []).map(isoDate).filter(Boolean)) }
 }
 
-/** true / false, or null when `off` cannot tell for `day`. With weekly offs
- * missing (plan 2026-11-05-001 A1) only holidays are known: any other day
- * is null, not a working day. */
+// `{ weekends, holidays }`, each a known set or null (plan 2026-11-06-002
+// KTD2); null when neither can tell (`roster_ops._off_days`).
+function normalizeOff(value) {
+  if (!value) return null
+  const off = { weekends: knownSet(value.weekends), holidays: knownSet(value.holidays) }
+  return off.weekends || off.holidays ? off : null
+}
+
+const covers = (known, start, end) => !!known && known.from <= start && end <= known.to
+
+/** true / false, or null when `off` cannot tell for `day` (plan
+ * 2026-11-06-002 KTD3): off when either known set has it, working only when
+ * both are known there and neither has it. */
 function isOff(off, day) {
-  if (!off || day < off.from || day > off.to) return null
-  if (off.dates.has(day)) return true
-  return off.weeklyOffsMissing ? null : false
+  if (!off) return null
+  const states = [off.weekends, off.holidays].map((known) =>
+    covers(known, day, day) ? known.dates.has(day) : null,
+  )
+  if (states.includes(true)) return true
+  return states.includes(null) ? null : false
 }
 
 // The block right after `block` in its run: the next one by date, same
@@ -187,11 +195,12 @@ function resolve(rows, key, day, off) {
   return [named, false]
 }
 
-function workingSpans(day, end, off) {
+// The contiguous runs of days in `day`..`end` not in `skipped`.
+function workingSpans(day, end, skipped) {
   const spans = []
   let start = null
   for (; day <= end; day = addDays(day, 1)) {
-    if (off.dates.has(day)) {
+    if (skipped.has(day)) {
       if (start) spans.push([start, dayBefore(day)])
       start = null
     } else if (!start) start = day
@@ -232,15 +241,23 @@ function apply(rows, op, index, off, runAware, notes) {
     if (op.to_date && !end) return fail(BAD_DATE)
     if (end && end < day) return fail(END_BEFORE_START)
     let spans = [[day, end]]
-    // 0 / 1 from the server or `rosterRequests.toOp`; not parsed again here.
-    if (runAware && end && op.skip_off_days) {
+    // Plan 2026-11-06-002 U3: each skip skips its own set and refuses when
+    // that set can't be told for any day of the range. The flags are 0 / 1
+    // from the server or `rosterRequests.toOp`; not parsed again here.
+    const ticked = [
+      ['weekends', op.skip_weekends, WEEKENDS_UNKNOWN],
+      ['holidays', op.skip_holidays, HOLIDAYS_UNKNOWN],
+    ].filter(([, flag]) => flag)
+    if (runAware && end && ticked.length) {
       if (daysBetween(day, end) + 1 > SKIP_MAX_DAYS) return fail(SKIP_SPAN)
-      if (!off || day < off.from || end > off.to) return fail(OFF_DAYS_UNKNOWN)
-      spans = workingSpans(day, end, off)
+      const skipped = new Set()
+      for (const [part, , refusal] of ticked) {
+        const known = off ? off[part] : null
+        if (!covers(known, day, end)) return fail(refusal)
+        known.dates.forEach((date) => skipped.add(date))
+      }
+      spans = workingSpans(day, end, skipped)
       if (!spans.length) return fail(NO_WORKING_DAYS)
-      // Plan 2026-11-05-001 A1: holidays skipped, weekends kept; a note, not
-      // a refusal. `simulate` drops it if refused below.
-      if (off.weeklyOffsMissing) notes.push(WEEKLY_OFFS_NOT_SET)
     }
     if (rows.some((a) => spans.some(([start, last]) => overlaps(a, start, last)))) return fail(OVERLAP)
     return [null, spans.map(([start, last]) => newBlock(op.shift_type, start, last))]
@@ -321,14 +338,13 @@ function apply(rows, op, index, off, runAware, notes) {
  * problems, steps }`, each problem `{ index, employee, message }` and
  * `steps[index]` the create / end / cancel steps that operation took. A
  * refused operation changes nothing and the rest still run. `offDays`
- * (`{ employee: { from, to, dates } | null }`) turns on skip expansion and
+ * (`{ employee: { weekends, holidays } | null }`, each set `{ from, to,
+ * dates } | null`, plan 2026-11-06-002 KTD2) turns on skip expansion and
  * run-aware Change / End; omitted, the legacy single-block rules apply
  * (`roster_ops.simulate`). `notes`, when an array, collects `{ index,
  * employee, message }` for a run-aware Change / End that may have stopped
- * short on unknown off days or at a one-day change (plan 2026-11-05-001 A2),
- * or a skip that kept weekends because the list
- * has no weekly offs (`weekly_offs_missing`, plan 2026-11-05-001 A1); notes
- * never refuse and are not steps. */
+ * short on unknown off days or at a one-day change (plan 2026-11-05-001 A2);
+ * notes never refuse and are not steps. */
 export function simulate(coverage, ops, offDays = null, notes = null) {
   const result = {}
   for (const [employee, rows] of Object.entries(coverage ?? {})) {

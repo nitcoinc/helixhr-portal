@@ -143,3 +143,6 @@ helixhr.patches.v1_0.migrate_access_assignments
 # Plan 2026-11-03-001 U8 (R19): mask bank and ID values in existing Employee
 # Version rows; new ones are masked by the Version before_insert hook. Idempotent.
 helixhr.patches.v1_0.mask_employee_identifier_history
+# Plan 2026-11-06-002 U1 (KTD5, R8): a roster change row saved with the one
+# "skip weekly offs and holidays" flag gets both new skips. Idempotent.
+helixhr.patches.v1_0.split_roster_skip_flags
