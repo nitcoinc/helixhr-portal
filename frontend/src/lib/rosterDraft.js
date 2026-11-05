@@ -37,6 +37,10 @@ export const RUN_STOPPED_UNKNOWN =
 export const RUN_OFF_DAYS_UNKNOWN =
   "Only the shift on that date was updated: their weekly offs and holidays can't be worked out, " +
   'so later shifts were left as they are. Check the rest of the run.'
+// Plan 2026-11-05-001 A1: a skip on a holiday list with no weekly-off rows.
+export const WEEKLY_OFFS_NOT_SET =
+  'Only holidays were skipped: their holiday list has no weekly offs, so weekends were kept. ' +
+  "If they don't work weekends, ask HR to add weekly offs to their holiday list."
 
 /** `value` when it is a real ISO calendar date, otherwise null. */
 function isoDate(value) {
@@ -79,20 +83,28 @@ function findTarget(rows, key, day) {
   return named ?? rows.find((a) => overlaps(a, day, day)) ?? null
 }
 
-// `{ from, to, dates: Set }`, or null (cannot tell). A day outside
-// `from`..`to` is unknown too (`roster_ops._off_days`).
+// `{ from, to, dates: Set, weeklyOffsMissing }`, or null (cannot tell). A
+// day outside `from`..`to` is unknown too (`roster_ops._off_days`).
 function normalizeOff(value) {
   if (!value) return null
   const from = isoDate(value.from)
   const to = isoDate(value.to)
   if (!from || !to) return null
-  return { from, to, dates: new Set((value.dates ?? []).map(isoDate).filter(Boolean)) }
+  return {
+    from,
+    to,
+    dates: new Set((value.dates ?? []).map(isoDate).filter(Boolean)),
+    weeklyOffsMissing: !!value.weekly_offs_missing,
+  }
 }
 
-/** true / false, or null when `off` cannot tell for `day`. */
+/** true / false, or null when `off` cannot tell for `day`. With weekly offs
+ * missing (plan 2026-11-05-001 A1) only holidays are known: any other day
+ * is null, not a working day. */
 function isOff(off, day) {
   if (!off || day < off.from || day > off.to) return null
-  return off.dates.has(day)
+  if (off.dates.has(day)) return true
+  return off.weeklyOffsMissing ? null : false
 }
 
 // The block right after `block` in its run: the next one by date, same
@@ -193,6 +205,9 @@ function apply(rows, op, index, off, runAware, notes) {
       if (!off || day < off.from || end > off.to) return fail(OFF_DAYS_UNKNOWN)
       spans = workingSpans(day, end, off)
       if (!spans.length) return fail(NO_WORKING_DAYS)
+      // Plan 2026-11-05-001 A1: holidays skipped, weekends kept; a note, not
+      // a refusal. `simulate` drops it if refused below.
+      if (off.weeklyOffsMissing) notes.push(WEEKLY_OFFS_NOT_SET)
     }
     if (rows.some((a) => spans.some(([start, last]) => overlaps(a, start, last)))) return fail(OVERLAP)
     return [null, spans.map(([start, last]) => newBlock(op.shift_type, start, last))]
@@ -255,7 +270,9 @@ function apply(rows, op, index, off, runAware, notes) {
  * run-aware Change / End; omitted, the legacy single-block rules apply
  * (`roster_ops.simulate`). `notes`, when an array, collects `{ index,
  * employee, message }` for a run-aware Change / End that may have stopped
- * short on unknown off days; notes never refuse and are not steps. */
+ * short on unknown off days, or a skip that kept weekends because the list
+ * has no weekly offs (`weekly_offs_missing`, plan 2026-11-05-001 A1); notes
+ * never refuse and are not steps. */
 export function simulate(coverage, ops, offDays = null, notes = null) {
   const result = {}
   for (const [employee, rows] of Object.entries(coverage ?? {})) {

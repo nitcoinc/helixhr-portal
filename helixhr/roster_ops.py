@@ -61,6 +61,11 @@ RUN_OFF_DAYS_UNKNOWN = (
 	"Only the shift on that date was updated: their weekly offs and holidays can't be worked out, "
 	"so later shifts were left as they are. Check the rest of the run."
 )
+# Plan 2026-11-05-001 A1: a skip on a holiday list with no weekly-off rows.
+WEEKLY_OFFS_NOT_SET = (
+	"Only holidays were skipped: their holiday list has no weekly offs, so weekends were kept. "
+	"If they don't work weekends, ask HR to add weekly offs to their holiday list."
+)
 
 
 def _date(value):
@@ -102,21 +107,30 @@ def _target(rows, key, day):
 
 
 def _off_days(value):
-	"""`{from, to, dates}` with dates parsed, or None (cannot tell). A day
-	outside `from`..`to` is unknown too."""
+	"""`{from, to, dates, weekly_offs_missing}` with dates parsed, or None
+	(cannot tell). A day outside `from`..`to` is unknown too."""
 	if not value:
 		return None
 	start, end = _date(value.get("from")), _date(value.get("to"))
 	if not start or not end:
 		return None
-	return {"from": start, "to": end, "dates": {day for day in map(_date, value.get("dates") or ()) if day}}
+	return {
+		"from": start,
+		"to": end,
+		"dates": {day for day in map(_date, value.get("dates") or ()) if day},
+		"weekly_offs_missing": bool(value.get("weekly_offs_missing")),
+	}
 
 
 def _is_off(off, day):
-	"""True / False, or None when `off` cannot tell for `day`."""
+	"""True / False, or None when `off` cannot tell for `day`. With weekly
+	offs missing (plan 2026-11-05-001 A1) only holidays are known: any
+	other day is None, not a working day."""
 	if off is None or not off["from"] <= day <= off["to"]:
 		return None
-	return day in off["dates"]
+	if day in off["dates"]:
+		return True
+	return None if off["weekly_offs_missing"] else False
 
 
 def _next_in_run(rows, block, off):
@@ -213,7 +227,7 @@ def _apply(rows, op, index, off, run_aware, notes):
 	"""Apply `op` to one employee's `rows` in place. Returns `(message,
 	steps)`: why not (rows untouched), or the primitive steps it took.
 	A run-aware Change / End that may stop short appends its KTD5 note
-	sentence to `notes`."""
+	sentence to `notes`, as does a skip that kept weekends (A1)."""
 	action = op.get("action")
 	employee = op.get("employee")
 	if action not in ACTIONS:
@@ -251,6 +265,10 @@ def _apply(rows, op, index, off, run_aware, notes):
 			spans = _working_spans(day, end, off)
 			if not spans:
 				return NO_WORKING_DAYS, []
+			if off["weekly_offs_missing"]:
+				# Plan 2026-11-05-001 A1: holidays skipped, weekends kept; a
+				# note, not a refusal. `simulate` drops it if refused below.
+				notes.append(WEEKLY_OFFS_NOT_SET)
 		if any(_overlaps(a, start, last) for a in rows for start, last in spans):
 			return OVERLAP, []
 		return None, [new_block(op["shift_type"], start, last) for start, last in spans]
@@ -325,10 +343,15 @@ def simulate(coverage, ops, off_days=None, notes=None):
 	mode a request sent before the skip feature keeps (A1): skip ignored,
 	Change / End on the one covering block.
 
+	An entry may carry `weekly_offs_missing: 1` (plan 2026-11-05-001 A1):
+	its list has no weekly-off rows, so a skip splits at holidays only and
+	notes it, and a run stops at any non-holiday gap day.
+
 	`notes`, when a list, collects `{index, employee, message}` for a
 	run-aware Change / End that may have stopped short because off days are
-	unknown (plan 2026-11-04-001 KTD4, KTD5). Notes never refuse and are not
-	steps; legacy mode emits none."""
+	unknown (plan 2026-11-04-001 KTD4, KTD5), or a skip that kept weekends
+	(plan 2026-11-05-001 A1). Notes never refuse and are not steps; legacy
+	mode emits none."""
 	result = {
 		employee: [
 			{

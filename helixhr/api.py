@@ -17150,7 +17150,22 @@ def _known_off_days(employee, start, end, cache):
 		for span in spans
 		if getdate(span["from_date"]) <= known_end
 	]
-	return {"from": str(start), "to": str(known_end), "dates": sorted(_holiday_dates_by_span(clipped, cache))}
+	off = {"from": str(start), "to": str(known_end), "dates": sorted(_holiday_dates_by_span(clipped, cache))}
+	# Plan 2026-11-05-001 A1: a list with no weekly-off rows at all (the
+	# whole list, not this range) holds holidays only, so its non-holiday
+	# days are not known working days. Flagged when any span's list is one.
+	for span in clipped:
+		key = ("weekly_offs", span["holiday_list"])
+		if key not in cache:
+			cache[key] = bool(
+				frappe.db.exists(
+					"Holiday",
+					{"parent": span["holiday_list"], "parenttype": "Holiday List", "weekly_off": 1},
+				)
+			)
+		if not cache[key]:
+			off["weekly_offs_missing"] = 1
+	return off
 
 
 def _review_roster_ops(me, ops):

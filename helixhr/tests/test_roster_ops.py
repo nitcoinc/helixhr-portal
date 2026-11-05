@@ -21,6 +21,7 @@ from helixhr.roster_ops import (
 	RUN_OFF_DAYS_UNKNOWN,
 	RUN_STOPPED_UNKNOWN,
 	SKIP_SPAN,
+	WEEKLY_OFFS_NOT_SET,
 	affected_window,
 	op_date,
 	simulate,
@@ -732,6 +733,98 @@ CASES = [
 		"expect": {"E1": [["SA-1", "Day", "2026-11-02", "2026-11-04"]]},
 		"problems": [],
 		"notes": [],
+	},
+	# Plan 2026-11-05-001 A1: a holiday list with no weekly-off rows.
+	{
+		"name": "skip: a list without weekly offs skips only holidays, with a note",
+		"coverage": {},
+		"off_days": {
+			"E1": {
+				"from": "2026-11-01",
+				"to": "2026-12-31",
+				"dates": ["2026-11-12"],
+				"weekly_offs_missing": 1,
+			}
+		},
+		"ops": [
+			{
+				"employee": "E1",
+				"action": "Assign",
+				"shift_type": "Day",
+				"from_date": "2026-11-02",
+				"to_date": "2026-11-15",
+				"skip_off_days": 1,
+			}
+		],
+		"expect": {
+			"E1": [
+				["new-0-0", "Day", "2026-11-02", "2026-11-11"],
+				["new-0-1", "Day", "2026-11-13", "2026-11-15"],
+			]
+		},
+		"problems": [],
+		"notes": [[0, WEEKLY_OFFS_NOT_SET]],
+	},
+	{
+		"name": "skip off: a list without weekly offs is one block, no note",
+		"coverage": {},
+		"off_days": {
+			"E1": {
+				"from": "2026-11-01",
+				"to": "2026-12-31",
+				"dates": ["2026-11-12"],
+				"weekly_offs_missing": 1,
+			}
+		},
+		"ops": [
+			{
+				"employee": "E1",
+				"action": "Assign",
+				"shift_type": "Day",
+				"from_date": "2026-11-02",
+				"to_date": "2026-11-15",
+			}
+		],
+		"expect": {"E1": [["new-0-0", "Day", "2026-11-02", "2026-11-15"]]},
+		"problems": [],
+		"notes": [],
+	},
+	{
+		"name": "run: without weekly offs a holiday gap joins the run and a weekend gap stops it",
+		"coverage": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-11"],
+				["SA-2", "Day", "2026-11-13", "2026-11-13"],
+				["SA-3", "Day", "2026-11-16", "2026-11-20"],
+			]
+		},
+		"off_days": {
+			"E1": {
+				"from": "2026-11-01",
+				"to": "2026-12-31",
+				"dates": ["2026-11-12"],
+				"weekly_offs_missing": 1,
+			}
+		},
+		"ops": [
+			{
+				"employee": "E1",
+				"action": "Change",
+				"shift_type": "Night",
+				"from_date": "2026-11-04",
+				"assignment": "SA-1",
+			}
+		],
+		"expect": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-03"],
+				["SA-3", "Day", "2026-11-16", "2026-11-20"],
+				["new-0-0", "Night", "2026-11-04", "2026-11-11"],
+				["new-0-1", "Night", "2026-11-13", "2026-11-13"],
+			]
+		},
+		"problems": [],
+		"notes": [[0, RUN_STOPPED_UNKNOWN]],
 	},
 ]
 
