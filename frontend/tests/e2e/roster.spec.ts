@@ -783,6 +783,16 @@ test.describe('manager roster requests', () => {
     await sheet.getByRole('button', { name: 'Close' }).click()
     await expect(sheet).toBeHidden()
 
+    // The draft bar's Remove on the line names what goes with it first.
+    const bar = page.getByTestId('roster-draft-bar')
+    await bar.getByRole('button', { name: 'Show changes' }).click()
+    await bar.getByRole('button', { name: /^Remove change 1:/ }).click()
+    const confirm = bar.getByTestId('roster-draft-remove-confirm')
+    await expect(confirm).toContainText('Also removes:')
+    await expect(confirm).toContainText('no shift on')
+    await expect(confirm).toContainText(`${SWING} on`)
+    expect(await draftRows(page)).toHaveLength(3)
+
     // Remove whole line: the line and both of its day changes, in one save.
     await cell(colleague, 1).getByRole('button').click()
     const also = sheet.getByTestId('roster-also-removes')

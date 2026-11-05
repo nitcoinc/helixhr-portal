@@ -165,7 +165,7 @@ export function opIndexForCell(ops, employee, cell, { lines = false } = {}) {
     const op = ops[index]
     if (op.employee !== employee) continue
     const sameAssignment = !op.assignment || op.assignment === cell.assignment
-    if (op.action === ASSIGN && op.from_date <= date && (!op.to_date || date <= op.to_date)) return index
+    if (op.action === ASSIGN && lineCovers(op, date)) return index
     if (op.action === CHANGE && sameAssignment && op.from_date <= date) return index
     if (op.action === END && sameAssignment && op.to_date < date) return index
     if (!lines && isOneDayOp(op) && op.from_date === date) return index
@@ -195,6 +195,12 @@ export function dayOpsOnLine(ops, index) {
     }
   })
   return found
+}
+
+/** KTD8: line `index` with the one-day changes it carries -- what Remove
+ * whole line drops, from the sheet or the draft bar, in one save. */
+export function withDayOps(ops, index) {
+  return [index, ...dayOpsOnLine(ops, index)]
 }
 
 /**

@@ -109,7 +109,12 @@ const dayFixed = computed(() => addingDay.value || (editsOneDay.value && !props.
 
 // The summary's routes (the plan's flowchart).
 const dayChange = computed(() => isOneDayOp(props.proposal?.op))
-const offersDayActions = computed(() => !dayChange.value && !!line.value && !!props.proposal?.shift_type)
+// A change starts tomorrow at the earliest (R13): a day that is today or past
+// offers the whole-line actions only, never a one-day change moved elsewhere.
+const dayAhead = computed(() => !props.today || (props.cell?.date || '') > props.today)
+const offersDayActions = computed(
+  () => !dayChange.value && !!line.value && !!props.proposal?.shift_type && dayAhead.value,
+)
 /** "no shift on 14 Mar 2031; Night on 21 Mar 2031 only": what Remove whole
  * line takes with it. */
 const alsoRemoves = computed(() =>
@@ -382,7 +387,7 @@ function proposedOp() {
   return { ...base, action: 'Change', shift_type: shiftType.value, from_date: onDate.value, assignment: target }
 }
 
-async function proposeOrRemove(write) {
+async function proposeOrRemove(write, explain = (message) => message) {
   error.value = ''
   refusedKey.value = ''
   sending.value = true
@@ -390,7 +395,7 @@ async function proposeOrRemove(write) {
     await write()
     open.value = false
   } catch (e) {
-    error.value = e?.message || FALLBACK_ERROR
+    error.value = explain(e?.message || FALLBACK_ERROR)
     refusedKey.value = formKey.value
   } finally {
     sending.value = false
@@ -410,18 +415,27 @@ function removeLine() {
 }
 
 /** "No shift that day" from the summary: one press, it is a draft and
- * removable (U5). The clicked day, or tomorrow at the earliest. */
+ * removable (U5). Offered only on a day after today, so it is that day. */
 function clearDay() {
   if (sending.value) return
   const op = {
     employee: props.person.employee,
     action: 'Clear Day',
     shift_type: null,
-    from_date: firstDay.value,
+    from_date: props.cell.date,
     to_date: null,
     assignment: null,
   }
   return proposeOrRemove(() => props.proposeChange(op, null))
+}
+
+/** R12: an edited line can still strand a one-day change inside its dates
+ * -- a skip now drops that day, or the line takes the swap's own shift. The
+ * server's sentence names neither, so the sheet names the days. */
+function explainLineEdit(message) {
+  const days = editedDependents.value.map((item) => formatDate(item.op.from_date))
+  if (!days.length || !/no shift on that date|already have that shift/i.test(message)) return message
+  return `${message} Your one-day change on ${days.join(', ')} no longer fits this line: remove it first.`
 }
 
 function submit() {
@@ -444,7 +458,7 @@ function submit() {
       return
     }
     const index = editing.value && !addingDay.value ? editedIndex.value : null
-    return proposeOrRemove(() => props.proposeChange(op, index))
+    return proposeOrRemove(() => props.proposeChange(op, index), explainLineEdit)
   }
   if (!assigned.value) {
     return run(() =>

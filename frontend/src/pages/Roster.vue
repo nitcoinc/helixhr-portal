@@ -23,6 +23,7 @@ import {
   isOneDayOp,
   opIndexForCell,
   submittedMessage,
+  withDayOps,
 } from '@/lib/rosterRequests'
 import { opDate } from '@/lib/rosterDraft'
 import { FALLBACK_ERROR, toPlainMessage } from '@/lib/errorMap'
@@ -366,8 +367,8 @@ function proposeChange(op, index) {
 /** Remove one change, or several in one save (plan 2026-11-06-002 KTD8:
  * a whole line with its one-day changes, so the save never sees the line
  * gone and its days left behind). */
-function removeChange(index) {
-  const drop = new Set([].concat(index))
+function removeChange(indexes) {
+  const drop = new Set([].concat(indexes))
   return saveOps((current) => current.filter((_, position) => !drop.has(position)))
 }
 
@@ -1055,7 +1056,7 @@ const scopeLine = computed(() => {
       :submitting="submitting"
       :submit-error="submitError"
       @edit="editFromBar"
-      @remove="(index) => fromBar(() => removeChange([index, ...dayOpsOnLine(ops, index)]))"
+      @remove="(index) => fromBar(() => removeChange(withDayOps(ops, index)))"
       @discard="fromBar(() => saveOps(() => []))"
       @submit="submitDraft"
       @save-note="saveNote"

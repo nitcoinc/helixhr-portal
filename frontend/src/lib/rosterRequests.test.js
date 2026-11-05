@@ -9,6 +9,7 @@ import {
   coverageFromRows,
   draftOps,
   dayOpsOnLine,
+  withDayOps,
   draftSummary,
   isOneDayOp,
   lineCovers,
@@ -409,6 +410,11 @@ describe('one-day changes on a draft line', () => {
     expect(dayOpsOnLine(ops, 3)).toEqual([4])
     expect(dayOpsOnLine(ops, 1)).toEqual([])
     expect(dayOpsOnLine(ops, 9)).toEqual([])
+  })
+
+  it('withDayOps is the line first, then its one-day changes', () => {
+    expect(withDayOps([line, day('Clear Day', '2031-03-14'), day('Swap Day', '2031-03-21', 'Night')], 0)).toEqual([0, 1, 2])
+    expect(withDayOps([line], 0)).toEqual([0])
   })
 
   it('a Change carries no one-day changes: the live shift still holds those days', () => {

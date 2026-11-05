@@ -11,7 +11,7 @@
 // 2026-11-06-002 U4: the pill names which skip (weekends, holidays, both).
 import { ref, computed, watch, useId } from 'vue'
 import { Button } from 'frappe-ui'
-import { blocksLabel, draftSummary, opLabel, skipLabel } from '@/lib/rosterRequests'
+import { blocksLabel, dayOpsOnLine, draftSummary, opLabel, skipLabel } from '@/lib/rosterRequests'
 
 const props = defineProps({
   /** The draft's rows, in order (`employee_name` plus the operation). */
@@ -37,12 +37,32 @@ const listId = useId()
 const noteId = useId()
 const expanded = ref(false)
 const confirmDiscard = ref(false)
+// Plan 2026-11-06-002 R12: Remove on a line that carries one-day changes
+// takes them along, so the first press names them and the second removes.
+const confirmRemove = ref(null)
 watch(
   () => props.rows.length,
   (count) => {
     if (!count) confirmDiscard.value = false
+    confirmRemove.value = null
   },
 )
+
+/** "no shift on 14 Mar 2031; Night on 21 Mar 2031 only", or ''. */
+function carried(index) {
+  return dayOpsOnLine(props.rows, index)
+    .map((position) => opLabel(props.rows[position]).replace(/^No shift/, 'no shift'))
+    .join('; ')
+}
+
+function remove(index) {
+  if (carried(index) && confirmRemove.value !== index) {
+    confirmRemove.value = index
+    return
+  }
+  confirmRemove.value = null
+  emit('remove', index)
+}
 
 const summary = computed(() => draftSummary(props.rows))
 const busy = computed(() => props.saving || props.submitting)
@@ -135,6 +155,12 @@ function discard() {
               role="status"
               data-testid="roster-draft-note"
             >{{ item.message }}</span>
+            <span
+              v-if="confirmRemove === index"
+              class="mt-0.5 block text-xs text-ink-red-4"
+              role="alert"
+              data-testid="roster-draft-remove-confirm"
+            >Also removes: {{ carried(index) }}. Press Remove again to remove them all.</span>
           </span>
           <button
             type="button"
@@ -151,7 +177,7 @@ function discard() {
             class="inline-flex min-h-11 shrink-0 cursor-pointer items-center rounded px-2 text-sm font-medium text-ink-red-4 hover:bg-surface-gray-2 disabled:cursor-not-allowed disabled:opacity-50"
             :aria-label="`Remove change ${index + 1}: ${row.employee_name || row.employee}, ${opLabel(row)}`"
             :disabled="busy"
-            @click="emit('remove', index)"
+            @click="remove(index)"
           >
             Remove
           </button>
