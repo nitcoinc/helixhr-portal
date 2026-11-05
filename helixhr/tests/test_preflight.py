@@ -1174,6 +1174,7 @@ class TestPreflightHolidayWeeklyOffs(IntegrationTestCase):
 		result = self.check(raises=True)
 		self.assertEqual(result["status"], preflight.PASS)
 		self.assertIn("no holiday list in use", result["detail"])
+		self.assertIn("skipped", result["detail"])
 
 	def test_the_check_is_registered(self):
 		self.assertIn(preflight.check_holiday_list_weekly_offs, preflight.CHECKS)

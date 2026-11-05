@@ -185,7 +185,12 @@ def _run_note(rows, block, off):
 	swapped = None
 	if following and following["shift_type"] != block["shift_type"]:
 		swapped = following["start_date"]
-		if swapped != following["end_date"] or swapped != block["end_date"] + timedelta(days=1):
+		gap = (swapped - block["end_date"]).days
+		# Only known off days may sit between the run and the one-day block,
+		# so a swap on the Monday after a weekend still counts.
+		if swapped != following["end_date"] or any(
+			_is_off(off, block["end_date"] + timedelta(days=n)) is not True for n in range(1, gap)
+		):
 			return None
 		following = _following(rows, swapped)
 	if not following or following["shift_type"] != block["shift_type"]:
@@ -406,8 +411,8 @@ def simulate(coverage, ops, off_days=None, notes=None):
 	`notes`, when a list, collects `{index, employee, message}` for a
 	run-aware Change / End that may have stopped short because off days are
 	unknown (plan 2026-11-04-001 KTD4, KTD5) or at a one-day change (plan
-	2026-11-05-001 A2), or a skip that kept weekends (A1). Notes never refuse and are not steps; legacy
-	mode emits none."""
+	2026-11-05-001 A2), or a skip that kept weekends (A1). Notes never
+	refuse and are not steps; legacy mode emits none."""
 	result = {
 		employee: [
 			{

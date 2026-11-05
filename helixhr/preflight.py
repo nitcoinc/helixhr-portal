@@ -1380,30 +1380,27 @@ def check_holiday_list_weekly_offs():
 	Lists are resolved over today .. today + SKIP_MAX_DAYS, the furthest a
 	skip reaches, so next year's list is checked before leads plan into it.
 	"""
-	from helixhr.api import _holiday_list_spans
+	from helixhr.api import _holiday_list_spans, has_weekly_offs
 	from helixhr.roster_ops import SKIP_MAX_DAYS
 
 	start = getdate()
 	end = add_days(start, SKIP_MAX_DAYS)
-	in_use = set()
+	in_use, unresolved = set(), 0
 	for employee in frappe.get_all("Employee", filters={"status": "Active"}, pluck="name", limit=2000):
 		try:
 			in_use.update(span["holiday_list"] for span in _holiday_list_spans(employee, start, end))
 		except Exception:
 			# `check_holiday_list_coverage` reports a resolver that throws; this
 			# check must never be the thing that stops the preflight run.
-			continue
+			unresolved += 1
+	skipped = f"; {unresolved} employee(s) skipped, their list did not resolve" if unresolved else ""
 	if not in_use:
-		return _result("Holiday list weekly offs", PASS, "no holiday list in use")
+		return _result("Holiday list weekly offs", PASS, f"no holiday list in use{skipped}")
 
-	missing = sorted(
-		name
-		for name in in_use
-		if not frappe.db.exists("Holiday", {"parent": name, "parenttype": "Holiday List", "weekly_off": 1})
-	)
+	missing = sorted(name for name in in_use if not has_weekly_offs(name))
 	if not missing:
 		return _result(
-			"Holiday list weekly offs", PASS, f"{len(in_use)} holiday list(s) in use have weekly offs"
+			"Holiday list weekly offs", PASS, f"{len(in_use)} holiday list(s) in use have weekly offs{skipped}"
 		)
 	return _result(
 		"Holiday list weekly offs",
@@ -1411,7 +1408,7 @@ def check_holiday_list_weekly_offs():
 		f"{len(missing)} holiday list(s) in use have no weekly-off rows: {_listed(missing)} "
 		"-- skipping weekly offs and holidays keeps weekends for their people. In the Holiday List, "
 		"pick the Weekly Off day and press Add to Holidays; a company that works 7 days can leave "
-		"it and turn skipping off",
+		f"it and turn skipping off{skipped}",
 	)
 
 

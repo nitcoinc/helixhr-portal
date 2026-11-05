@@ -147,7 +147,12 @@ function runNote(rows, block, off) {
   let swapped = null
   if (following && following.shift_type !== block.shift_type) {
     swapped = following.start_date
-    if (swapped !== following.end_date || swapped !== addDays(block.end_date, 1)) return null
+    if (swapped !== following.end_date) return null
+    // Only known off days may sit between the run and the one-day block,
+    // so a swap on the Monday after a weekend still counts.
+    for (let day = addDays(block.end_date, 1); day < swapped; day = addDays(day, 1)) {
+      if (isOff(off, day) !== true) return null
+    }
     following = followingAfter(rows, swapped)
   }
   if (!following || following.shift_type !== block.shift_type) return null

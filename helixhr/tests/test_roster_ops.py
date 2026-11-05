@@ -1205,6 +1205,32 @@ CASES = [
 		"notes": [[0, RUN_SPLIT]],
 	},
 	{
+		"name": "run split: a swap on the Monday after a weekend still notes it",
+		"coverage": {
+			"E1": [["SA-1", "Day", "2026-11-02", "2026-11-06"], ["SA-2", "Day", "2026-11-09", "2026-11-13"]]
+		},
+		"off_days": {"E1": {"from": "2026-11-01", "to": "2026-12-31", "dates": WEEKENDS}},
+		"ops": [
+			{
+				"employee": "E1",
+				"action": "Swap Day",
+				"shift_type": "Night",
+				"from_date": "2026-11-09",
+				"assignment": "SA-2",
+			},
+			{"employee": "E1", "action": "End", "to_date": "2026-11-04", "assignment": "SA-1"},
+		],
+		"expect": {
+			"E1": [
+				["SA-1", "Day", "2026-11-02", "2026-11-04"],
+				["new-0-0", "Night", "2026-11-09", "2026-11-09"],
+				["new-0-1", "Day", "2026-11-10", "2026-11-13"],
+			]
+		},
+		"problems": [],
+		"notes": [[1, RUN_SPLIT]],
+	},
+	{
 		"name": "run split: no note when the same shift resumes after two working days",
 		"coverage": {
 			"E1": [["SA-1", "Day", "2026-11-02", "2026-11-03"], ["SA-2", "Day", "2026-11-06", "2026-11-13"]]

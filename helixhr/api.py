@@ -12016,6 +12016,15 @@ def _holiday_list_spans(employee, start, end):
 	return []
 
 
+def has_weekly_offs(holiday_list):
+	"""Whether `holiday_list` holds any weekly-off Holiday row. HRMS writes
+	them only when HR presses "Add to Holidays", so a list of public
+	holidays alone has none (plan 2026-11-05-001 A1). Also read by preflight."""
+	return bool(
+		frappe.db.exists("Holiday", {"parent": holiday_list, "parenttype": "Holiday List", "weekly_off": 1})
+	)
+
+
 def _holiday_list_at(spans, on):
 	for span in spans:
 		if getdate(span["from_date"]) <= getdate(on) <= getdate(span["to_date"]):
@@ -17162,12 +17171,7 @@ def _known_off_days(employee, start, end, cache):
 	for span in clipped:
 		key = ("weekly_offs", span["holiday_list"])
 		if key not in cache:
-			cache[key] = bool(
-				frappe.db.exists(
-					"Holiday",
-					{"parent": span["holiday_list"], "parenttype": "Holiday List", "weekly_off": 1},
-				)
-			)
+			cache[key] = has_weekly_offs(span["holiday_list"])
 		if not cache[key]:
 			off["weekly_offs_missing"] = 1
 	return off
