@@ -57,10 +57,6 @@ SAME_SHIFT = "They already have that shift on that day."
 # Plan 2026-11-03-001 U1: skipping a person's weekly offs and holidays.
 SKIP_MAX_DAYS = 92
 NO_WORKING_DAYS = "No working days in that range."
-OFF_DAYS_UNKNOWN = (
-	"Their weekly offs and holidays can't be worked out for those dates. "
-	"Turn off skipping weekly offs and holidays, or ask HR to set up their holiday list."
-)
 SKIP_SPAN = "Skipping weekly offs and holidays works on at most 92 days at a time."
 # Plan 2026-11-04-001 U2 / KTD5: non-blocking notes on a run-aware Change / End.
 RUN_STOPPED_UNKNOWN = (
@@ -71,10 +67,14 @@ RUN_OFF_DAYS_UNKNOWN = (
 	"Only the shift on that date was updated: their weekly offs and holidays can't be worked out, "
 	"so later shifts were left as they are. Check the rest of the run."
 )
-# Plan 2026-11-05-001 A1: a skip on a holiday list with no weekly-off rows.
-WEEKLY_OFFS_NOT_SET = (
-	"Only holidays were skipped: their holiday list has no weekly offs, so weekends were kept. "
-	"If they don't work weekends, ask HR to add weekly offs to their holiday list."
+# Plan 2026-11-06-002 U3: each skip refuses on its own when its days can't be told.
+WEEKENDS_UNKNOWN = (
+	"Their weekends can't be worked out for those dates. "
+	"Untick Skip weekends, or ask HR to set up their holiday list."
+)
+HOLIDAYS_UNKNOWN = (
+	"Their holidays can't be worked out for those dates. "
+	"Untick Skip holidays, or ask HR to set up their holiday list."
 )
 # Plan 2026-11-05-001 A2: a run-aware Change / End stopping at a one-day gap.
 RUN_SPLIT = (
@@ -121,31 +121,43 @@ def _target(rows, key, day):
 	return named or next((a for a in rows if _overlaps(a, day, day)), None)
 
 
-def _off_days(value):
-	"""`{from, to, dates, weekly_offs_missing}` with dates parsed, or None
-	(cannot tell). A day outside `from`..`to` is unknown too."""
+def _known_set(value):
+	"""`{from, to, dates}` with dates parsed, or None (cannot tell). A day
+	outside `from`..`to` is unknown too."""
 	if not value:
 		return None
 	start, end = _date(value.get("from")), _date(value.get("to"))
 	if not start or not end:
 		return None
-	return {
-		"from": start,
-		"to": end,
-		"dates": {day for day in map(_date, value.get("dates") or ()) if day},
-		"weekly_offs_missing": bool(value.get("weekly_offs_missing")),
-	}
+	return {"from": start, "to": end, "dates": {day for day in map(_date, value.get("dates") or ()) if day}}
+
+
+def _off_days(value):
+	"""`{weekends, holidays}`, each a parsed known set or None (plan
+	2026-11-06-002 KTD2); None when neither can tell."""
+	if not value:
+		return None
+	off = {part: _known_set(value.get(part)) for part in ("weekends", "holidays")}
+	return off if off["weekends"] or off["holidays"] else None
+
+
+def _covers(known, start, end):
+	return known is not None and known["from"] <= start and end <= known["to"]
 
 
 def _is_off(off, day):
-	"""True / False, or None when `off` cannot tell for `day`. With weekly
-	offs missing (plan 2026-11-05-001 A1) only holidays are known: any
-	other day is None, not a working day."""
-	if off is None or not off["from"] <= day <= off["to"]:
+	"""True / False, or None when `off` cannot tell for `day` (plan
+	2026-11-06-002 KTD3): off when either known set has it, working only
+	when both are known there and neither has it."""
+	if off is None:
 		return None
-	if day in off["dates"]:
+	states = [
+		day in known["dates"] if _covers(known, day, day) else None
+		for known in (off["weekends"], off["holidays"])
+	]
+	if True in states:
 		return True
-	return None if off["weekly_offs_missing"] else False
+	return None if None in states else False
 
 
 def _next_in_run(rows, block, off):
@@ -233,11 +245,11 @@ def _resolve(rows, key, day, off):
 	return named, False
 
 
-def _working_spans(day, end, off):
-	"""The contiguous runs of working days in `day`..`end`."""
+def _working_spans(day, end, skipped):
+	"""The contiguous runs of days in `day`..`end` not in `skipped`."""
 	spans, start = [], None
 	while day <= end:
-		if day in off["dates"]:
+		if day in skipped:
 			if start:
 				spans.append((start, day - timedelta(days=1)))
 				start = None
@@ -265,7 +277,7 @@ def _apply(rows, op, index, off, run_aware, notes):
 	"""Apply `op` to one employee's `rows` in place. Returns `(message,
 	steps)`: why not (rows untouched), or the primitive steps it took.
 	A run-aware Change / End that may stop short appends its KTD5 note
-	sentence to `notes`, as does a skip that kept weekends (A1)."""
+	sentence to `notes`."""
 	action = op.get("action")
 	employee = op.get("employee")
 	if action not in ACTIONS:
@@ -294,19 +306,29 @@ def _apply(rows, op, index, off, run_aware, notes):
 		if end and end < day:
 			return END_BEFORE_START, []
 		spans = [(day, end)]
-		# `skip_off_days` arrives as 0 / 1 (`api._roster_draft_ops`, `cint` on rows).
-		if run_aware and end and op.get("skip_off_days"):
+		# Plan 2026-11-06-002 U3: each skip skips its own set and refuses when
+		# that set can't be told for any day of the range. The flags arrive as
+		# 0 / 1 (`api._roster_draft_ops`, `cint` on rows).
+		ticked = [
+			(part, refusal)
+			for part, flag, refusal in (
+				("weekends", "skip_weekends", WEEKENDS_UNKNOWN),
+				("holidays", "skip_holidays", HOLIDAYS_UNKNOWN),
+			)
+			if op.get(flag)
+		]
+		if run_aware and end and ticked:
 			if (end - day).days + 1 > SKIP_MAX_DAYS:
 				return SKIP_SPAN, []
-			if off is None or not (off["from"] <= day and end <= off["to"]):
-				return OFF_DAYS_UNKNOWN, []
-			spans = _working_spans(day, end, off)
+			skipped = set()
+			for part, refusal in ticked:
+				known = off[part] if off else None
+				if not _covers(known, day, end):
+					return refusal, []
+				skipped |= known["dates"]
+			spans = _working_spans(day, end, skipped)
 			if not spans:
 				return NO_WORKING_DAYS, []
-			if off["weekly_offs_missing"]:
-				# Plan 2026-11-05-001 A1: holidays skipped, weekends kept; a
-				# note, not a refusal. `simulate` drops it if refused below.
-				notes.append(WEEKLY_OFFS_NOT_SET)
 		if any(_overlaps(a, start, last) for a in rows for start, last in spans):
 			return OVERLAP, []
 		return None, [new_block(op["shift_type"], start, last) for start, last in spans]
@@ -397,22 +419,20 @@ def simulate(coverage, ops, off_days=None, notes=None):
 	2026-11-03-001 KTD2). A refused operation changes nothing and the rest
 	still run.
 
-	`off_days` is `{employee: {from, to, dates} | None}` (plan 2026-11-03-001
-	KTD3, KTD4): it turns on skip expansion and run-aware Change / End. A
-	missing or None entry, or a day outside `from`..`to`, is "cannot tell":
-	a skip is refused and a run stops there. `off_days=None` is the legacy
-	mode a request sent before the skip feature keeps (A1): skip ignored,
-	Change / End on the one covering block.
-
-	An entry may carry `weekly_offs_missing: 1` (plan 2026-11-05-001 A1):
-	its list has no weekly-off rows, so a skip splits at holidays only and
-	notes it, and a run stops at any non-holiday gap day.
+	`off_days` is `{employee: {weekends, holidays} | None}`, each set
+	`{from, to, dates} | None` (plan 2026-11-03-001 KTD3, KTD4; plan
+	2026-11-06-002 KTD2): it turns on skip expansion and run-aware Change /
+	End. A missing or None set, or a day outside its `from`..`to`, is
+	"cannot tell": a skip ticking that set is refused, and a run stops at a
+	day neither set marks off unless both know it (KTD3). `off_days=None`
+	is the legacy mode a request sent before the skip feature keeps (A1):
+	skip ignored, Change / End on the one covering block.
 
 	`notes`, when a list, collects `{index, employee, message}` for a
 	run-aware Change / End that may have stopped short because off days are
 	unknown (plan 2026-11-04-001 KTD4, KTD5) or at a one-day change (plan
-	2026-11-05-001 A2), or a skip that kept weekends (A1). Notes never
-	refuse and are not steps; legacy mode emits none."""
+	2026-11-05-001 A2). Notes never refuse and are not steps; legacy mode
+	emits none."""
 	result = {
 		employee: [
 			{

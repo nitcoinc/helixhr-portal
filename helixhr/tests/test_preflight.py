@@ -1119,12 +1119,16 @@ class TestPreflightHolidayCoverage(IntegrationTestCase):
 		return names
 
 class TestPreflightHolidayWeeklyOffs(IntegrationTestCase):
-	"""Plan 2026-11-05-001 U2: holiday lists in use with no weekly-off rows.
+	"""Plan 2026-11-05-001 U2 / 2026-11-06-002 U6: holiday lists in use with
+	no weekly-off rows, or rows that stop before the list ends.
 	`_holiday_list_spans` is patched so the verdict depends on the lists
 	built here, not on which lists this site's employees resolve."""
 
-	def holiday_list(self, name, weekly_off):
+	def holiday_list(self, name, weekly_off, last="2031-12-27"):
+		"""A 2031 list; with `weekly_off`, Saturday rows from 4 Jan to `last`
+		(both Saturdays) -- the last row is what the partial check reads."""
 		if not frappe.db.exists("Holiday List", name):
+			days = ["2031-01-04", last] if weekly_off else ["2031-01-04"]
 			frappe.get_doc(
 				{
 					"doctype": "Holiday List",
@@ -1132,7 +1136,8 @@ class TestPreflightHolidayWeeklyOffs(IntegrationTestCase):
 					"from_date": "2031-01-01",
 					"to_date": "2031-12-31",
 					"holidays": [
-						{"holiday_date": "2031-01-04", "description": "Saturday", "weekly_off": weekly_off}
+						{"holiday_date": day, "description": "Saturday", "weekly_off": weekly_off}
+						for day in dict.fromkeys(days)
 					],
 				}
 			).insert(ignore_permissions=True)
@@ -1163,7 +1168,21 @@ class TestPreflightHolidayWeeklyOffs(IntegrationTestCase):
 		self.assertIn(holidays_only, result["detail"])
 		self.assertNotIn(with_offs, result["detail"])
 		self.assertIn("Add to Holidays", result["detail"])
-		self.assertIn("turn skipping off", result["detail"])
+		self.assertIn("Saturday and Sunday", result["detail"])
+		self.assertIn("untick Skip weekends", result["detail"])
+
+	def test_it_warns_when_weekly_offs_stop_before_the_list_ends(self):
+		"""Plan 2026-11-06-002 U6: rows to June on a list to December keep the
+		later weekends as working days."""
+		partial = self.holiday_list("_Test U6 Weekly Offs To June", 1, last="2031-06-28")
+		full = self.holiday_list("_Test U2 Weekly Offs", 1)
+
+		result = self.check(partial, full)
+
+		self.assertEqual(result["status"], preflight.WARN)
+		self.assertIn(partial, result["detail"])
+		self.assertNotIn(full, result["detail"])
+		self.assertIn("stop before the list ends", result["detail"])
 
 	def test_lists_nobody_resolves_are_ignored(self):
 		self.holiday_list("_Test U2 Holidays Only", 0)

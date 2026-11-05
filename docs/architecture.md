@@ -2698,18 +2698,22 @@ literal case table in both test suites keeps them equal.
   larger and no search is typed, it says "Showing N of M. To change
   everyone, choose Whole team above."
 
-### Roster: lists with no weekly offs, one-day changes (plan 2026-11-05-001)
+### Roster: weekend and holiday skips, one-day changes (plans 2026-11-05-001, 2026-11-06-002)
 
-- **Lists with no weekly-off rows.** HRMS writes weekly offs as Holiday rows
-  (`weekly_off = 1`) only when HR presses "Add to Holidays"; a list holding
-  public holidays only is common. `_known_off_days` flags such a list
-  (`weekly_offs_missing: 1`, the whole list, any span) and the simulator then
-  splits a skip at holidays only, keeps weekends, and adds the note
-  `WEEKLY_OFFS_NOT_SET` -- a note, not a refusal, so sites that work weekends
-  keep the skip. Run-aware Change / End treat that list's non-holiday gap days
-  as unknown, so a run stops there with the existing run note. The list's own
-  "Weekly Off" field is never read: it only feeds the button. Preflight
-  "Holiday list weekly offs" warns for each list in use over the next 92 days.
+- **Weekends and holidays, two skips (plan 2026-11-06-002, supersedes the A1
+  note).** Rows carry `skip_weekends` and `skip_holidays` (Assign with an end
+  date only; `skip_off_days` stays read-only for history, and payloads echo it
+  as 1 when both are on so an old-build tab keeps them). `_roster_off_sets` is
+  the one rule the skip and the grid's "Off" share: weekends are the list's
+  `weekly_off = 1` rows when the whole list has any, else Saturday and Sunday
+  -- also with no list, and past the end of a list with none; holidays are the
+  list's other rows, unknown with no list or past its end. A ticked set that
+  is unknown for any day refuses (`WEEKENDS_UNKNOWN` / `HOLIDAYS_UNKNOWN`).
+  Run-aware Change / End count a day off when either set has it. The list's
+  own "Weekly Off" field is never read: it only feeds the button. Preflight
+  "Holiday list weekly offs" warns for lists in use with no weekly-off rows or
+  rows that stop before the list ends. A request sent under the old rule is
+  returned at approval if its steps now differ.
 - **Swap Day / Clear Day.** Row actions "Swap Day" (`shift_type`,
   `from_date`, `assignment`) and "Clear Day" (`from_date`, `assignment`) act on
   the block covering the date only, never a run: end it the day before (or
@@ -2727,6 +2731,16 @@ literal case table in both test suites keeps them equal.
   "Different shift for one day", "No shift that day" and "End it"; an empty
   cell has "Just this day" (To = From, no skip). HR's direct-edit sheet is
   unchanged.
+- **Draft days (plan 2026-11-06-002 U5).** A day the draft gives a shift
+  offers the same two one-day actions, appended with `assignment: null` so
+  they land on whichever draft block covers the date, plus "Edit whole line"
+  / "Remove whole line". Removing an Assign line also removes the person's
+  one-day changes dated inside it, in one save (the draft re-simulates whole,
+  so a stranded one would refuse it); editing it refuses in the sheet while a
+  one-day change would fall outside. A day with a one-day change offers that
+  change's Edit / Remove; a day an End empties offers the whole-line actions
+  only. Approval runs the create then the end / cancel through the existing
+  `new-...` key map.
 
 ### Who decided a leave (U11-U13, KTD14-KTD15)
 

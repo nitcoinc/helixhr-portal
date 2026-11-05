@@ -324,10 +324,11 @@ test.describe('manager roster requests', () => {
     await expect(colleague.getByRole('button', { name: new RegExp(proposed) })).toHaveCount(3)
     await expect(report.getByRole('button', { name: /Proposed: no shift/ })).toHaveCount(3)
 
-    // A proposed day opens on its change, with Edit and Remove.
+    // A proposed day opens on its change, with the whole line's Edit and
+    // Remove (plan 2026-11-06-002 U5).
     await cell(colleague, 1).getByRole('button').click()
     await expect(sheet).toContainText(proposed)
-    await expect(sheet.getByRole('button', { name: 'Remove' })).toBeVisible()
+    await expect(sheet.getByRole('button', { name: 'Remove whole line' })).toBeVisible()
     await sheet.getByRole('button', { name: 'Close' }).click()
     await expect(sheet).toBeHidden()
 
@@ -400,8 +401,11 @@ test.describe('manager roster requests', () => {
     const monday = await sheet.getByLabel('From').inputValue()
     await page.locator('#roster-shift-type').selectOption(SHIFT)
     await sheet.getByLabel('To (optional)').fill(addDays(monday, 13))
-    const skip = sheet.getByTestId('roster-skip-off-days')
-    await expect(skip).toBeChecked()
+    // Plan 2026-11-06-002 U4: two skips, both on for a new ranged Assign.
+    const weekends = sheet.getByTestId('roster-skip-weekends')
+    const holidays = sheet.getByTestId('roster-skip-holidays')
+    await expect(weekends).toBeChecked()
+    await expect(holidays).toBeChecked()
     await expect(sheet.getByTestId('roster-skip-summary')).toContainText('run of working days')
     await sheet.getByRole('button', { name: 'Add to request' }).click()
     await expect(sheet).toBeHidden()
@@ -421,7 +425,8 @@ test.describe('manager roster requests', () => {
     await edit.click()
     await expect(sheet).toBeVisible()
     await expect(sheet.getByRole('group', { name: 'Apply to' })).toHaveCount(0)
-    await expect(skip).toBeChecked()
+    await expect(weekends).toBeChecked()
+    await expect(holidays).toBeChecked()
     await expect(sheet.getByTestId('roster-skip-summary')).toContainText('Saved as 2 shifts')
     await sheet.getByLabel('To (optional)').fill(addDays(monday, 8))
     await sheet.getByRole('button', { name: 'Save change' }).click()
@@ -429,7 +434,7 @@ test.describe('manager roster requests', () => {
     await expect(edit).toBeFocused()
     await expect(page.getByTestId('roster-draft-item')).toHaveCount(1)
     await expect(bar.getByTestId('roster-draft-blocks')).toContainText('2 shifts')
-    await expect(page.getByTestId('roster-draft-item')).toContainText('Skips days off')
+    await expect(page.getByTestId('roster-draft-skip')).toHaveText('skips weekends and holidays')
 
     // Clear all asks once, then empties the draft.
     await page.getByTestId('roster-discard').click()
@@ -524,6 +529,8 @@ test.describe('manager roster requests', () => {
       from_date: string | null
       to_date: string | null
       skip_off_days: number
+      skip_weekends: number
+      skip_holidays: number
     }[]
   }
 
@@ -624,13 +631,14 @@ test.describe('manager roster requests', () => {
     const tuesday = await sheet.getByLabel('From').inputValue()
     await page.locator('#roster-shift-type').selectOption(SHIFT)
     await sheet.getByLabel('To (optional)').fill(addDays(tuesday, 3))
-    await expect(sheet.getByTestId('roster-skip-off-days')).toBeVisible()
+    await expect(sheet.getByTestId('roster-skip-weekends')).toBeVisible()
 
     const oneDay = sheet.getByTestId('roster-one-day')
     await oneDay.check()
     await expect(oneDay).toHaveAttribute('aria-checked', 'true')
     await expect(sheet.getByLabel('To (optional)')).toHaveCount(0)
-    await expect(sheet.getByTestId('roster-skip-off-days')).toHaveCount(0)
+    await expect(sheet.getByTestId('roster-skip-weekends')).toHaveCount(0)
+    await expect(sheet.getByTestId('roster-skip-holidays')).toHaveCount(0)
     await expect(sheet).toContainText('One day only. The shift ends the same day.')
     // Off again: To comes back empty.
     await oneDay.uncheck()
@@ -641,11 +649,160 @@ test.describe('manager roster requests', () => {
     await expect(sheet).toBeHidden()
 
     const rows = await draftRows(page)
-    expect(rows.map((r) => [r.action, r.from_date, r.to_date, r.skip_off_days])).toEqual([
-      ['Assign', tuesday, tuesday, 0],
+    expect(rows.map((r) => [r.action, r.from_date, r.to_date, r.skip_weekends, r.skip_holidays])).toEqual([
+      ['Assign', tuesday, tuesday, 0, 0],
     ])
     await expect(cell(colleague, 1)).toContainText(`Proposed: ${SHIFT}`)
     for (const index of [0, 2, 3]) await expect(cell(colleague, index)).not.toContainText('Proposed')
+  })
+
+  // Plan 2026-11-06-002 U4: each skip on its own, each with its own help.
+  test('a ranged assign shows two skips; unticking weekends saves holidays only', async ({ page }) => {
+    await teamNextWeek(page)
+    const colleague = row(page, COLLEAGUE)
+    await cell(colleague, 0).getByRole('button').click()
+    const sheet = page.getByTestId('roster-sheet')
+    const monday = await sheet.getByLabel('From').inputValue()
+    await page.locator('#roster-shift-type').selectOption(SHIFT)
+    await sheet.getByLabel('To (optional)').fill(addDays(monday, 13))
+    const weekends = sheet.getByRole('switch', { name: 'Skip weekends' })
+    const holidays = sheet.getByRole('switch', { name: 'Skip holidays' })
+    await expect(weekends).toBeChecked()
+    await expect(holidays).toBeChecked()
+    await expect(weekends).toHaveAccessibleDescription('Saturday and Sunday, unless their holiday list sets weekly offs')
+    await expect(holidays).toHaveAccessibleDescription('Public holidays on their holiday list')
+    await weekends.uncheck()
+    await expect(holidays).toBeChecked()
+    await sheet.getByRole('button', { name: 'Add to request' }).click()
+    await expect(sheet).toBeHidden()
+
+    const rows = await draftRows(page)
+    expect(rows.map((r) => [r.action, r.skip_weekends, r.skip_holidays, r.skip_off_days])).toEqual([
+      ['Assign', 0, 1, 0],
+    ])
+    await page.getByTestId('roster-draft-bar').getByRole('button', { name: 'Show changes' }).click()
+    await expect(page.getByTestId('roster-draft-skip')).toHaveText('skips holidays')
+    // The weekend is worked: Saturday is proposed too.
+    await expect(cell(colleague, 5)).toContainText(`Proposed: ${SHIFT}`)
+    // An edit keeps the row's own ticks, and a re-save keeps weekends-only
+    // rows from collapsing (a note save re-sends every row).
+    await page.getByLabel('Note to HR (optional)').fill('Cover')
+    await page.getByLabel('Note to HR (optional)').blur()
+    await expect.poll(async () => (await draftRows(page)).map((r) => [r.skip_weekends, r.skip_holidays])).toEqual([[0, 1]])
+    await page.getByRole('button', { name: new RegExp(`^Edit change 1: ${COLLEAGUE}`) }).click()
+    await expect(weekends).not.toBeChecked()
+    await expect(holidays).toBeChecked()
+  })
+
+  // Plan 2026-11-06-002 U5: the user's case -- a drafted fortnight, then one
+  // day changed on its own before sending to HR.
+  test('a day of a drafted line takes its own change; whole-line edit and remove carry it', async ({
+    page,
+    baseURL,
+  }) => {
+    test.setTimeout(90000)
+    await ensureSwingShift(baseURL!)
+    await teamNextWeek(page)
+    const colleague = row(page, COLLEAGUE)
+    const sheet = page.getByTestId('roster-sheet')
+
+    await cell(colleague, 0).getByRole('button').click()
+    const monday = await sheet.getByLabel('From').inputValue()
+    await page.locator('#roster-shift-type').selectOption(SHIFT)
+    await sheet.getByLabel('To (optional)').fill(addDays(monday, 13))
+    await sheet.getByRole('button', { name: 'Add to request' }).click()
+    await expect(sheet).toBeHidden()
+    for (const index of [0, 1, 2, 3, 4]) await expect(cell(colleague, index)).toContainText(`Proposed: ${SHIFT}`)
+    const wednesday = addDays(monday, 2)
+    const thursday = addDays(monday, 3)
+
+    // Wednesday: the day's own actions next to the whole line's.
+    const wed = cell(colleague, 2).getByRole('button')
+    await wed.click()
+    await expect(sheet).toBeVisible()
+    for (const name of ['Different shift for one day', 'No shift that day', 'Edit whole line', 'Remove whole line']) {
+      await expect(sheet.getByRole('button', { name, exact: true })).toBeVisible()
+    }
+    // One press, and only that day changes.
+    await sheet.getByRole('button', { name: 'No shift that day', exact: true }).click()
+    await expect(sheet).toBeHidden()
+    await expect(wed).toBeFocused()
+    await expect(cell(colleague, 2)).toContainText('Proposed: no shift')
+    for (const index of [0, 1, 3, 4]) await expect(cell(colleague, index)).toContainText(`Proposed: ${SHIFT}`)
+    let rows = await draftRows(page)
+    expect(rows.map((r) => [r.action, r.from_date, r.to_date])).toEqual([
+      ['Assign', monday, addDays(monday, 13)],
+      ['Clear Day', wednesday, null],
+    ])
+
+    // The changed day opens on its own change; Remove puts the line's day back.
+    await wed.click()
+    await expect(sheet.getByRole('button', { name: 'Edit', exact: true })).toBeVisible()
+    await expect(sheet.getByRole('button', { name: 'Edit whole line' })).toBeVisible()
+    await expect(sheet.getByTestId('roster-also-removes')).toContainText('no shift on')
+    await sheet.getByRole('button', { name: 'Remove', exact: true }).click()
+    await expect(sheet).toBeHidden()
+    await expect(cell(colleague, 2)).toContainText(`Proposed: ${SHIFT}`)
+    expect((await draftRows(page)).map((r) => r.action)).toEqual(['Assign'])
+
+    // Thursday: a different shift for that day. Back returns to the summary;
+    // the picker never starts on the line's own shift.
+    const thu = cell(colleague, 3).getByRole('button')
+    await thu.click()
+    await sheet.getByRole('button', { name: 'Different shift for one day', exact: true }).click()
+    const picker = page.locator('#roster-shift-type')
+    await expect(picker).toBeFocused()
+    await expect(picker).not.toHaveValue(SHIFT)
+    await expect(sheet.getByTestId('roster-fixed-day')).toBeVisible()
+    await expect(sheet.getByRole('group', { name: 'Apply to' })).toHaveCount(0)
+    await sheet.getByRole('button', { name: 'Back' }).click()
+    await expect(sheet.getByRole('button', { name: 'Remove whole line' })).toBeVisible()
+    await sheet.getByRole('button', { name: 'Different shift for one day', exact: true }).click()
+    await picker.selectOption(SWING)
+    await sheet.getByRole('button', { name: 'Add to request' }).click()
+    await expect(sheet).toBeHidden()
+    await expect(cell(colleague, 3)).toContainText(`Proposed: ${SWING}`)
+    await wed.click()
+    await sheet.getByRole('button', { name: 'No shift that day', exact: true }).click()
+    await expect(sheet).toBeHidden()
+    rows = await draftRows(page)
+    expect(rows.map((r) => [r.action, r.shift_type || null, r.from_date])).toEqual([
+      ['Assign', SHIFT, monday],
+      ['Swap Day', SWING, thursday],
+      ['Clear Day', null, wednesday],
+    ])
+
+    // Edit whole line to end Tuesday: refused here, naming a day, nothing saved.
+    await cell(colleague, 1).getByRole('button').click()
+    await sheet.getByRole('button', { name: 'Edit whole line' }).click()
+    await sheet.getByLabel('To (optional)').fill(addDays(monday, 1))
+    await sheet.getByRole('button', { name: 'Save change' }).click()
+    await expect(sheet.getByRole('alert')).toHaveText(/^Remove the one-day change on .+ first\.$/)
+    await expect(sheet.getByRole('button', { name: 'Save change' })).toBeDisabled()
+    expect((await draftRows(page)).map((r) => r.to_date)).toEqual([addDays(monday, 13), null, null])
+    await sheet.getByRole('button', { name: 'Close' }).click()
+    await expect(sheet).toBeHidden()
+
+    // The draft bar's Remove on the line names what goes with it first.
+    const bar = page.getByTestId('roster-draft-bar')
+    await bar.getByRole('button', { name: 'Show changes' }).click()
+    await bar.getByRole('button', { name: /^Remove change 1:/ }).click()
+    const confirm = bar.getByTestId('roster-draft-remove-confirm')
+    await expect(confirm).toContainText('Also removes:')
+    await expect(confirm).toContainText('no shift on')
+    await expect(confirm).toContainText(`${SWING} on`)
+    expect(await draftRows(page)).toHaveLength(3)
+
+    // Remove whole line: the line and both of its day changes, in one save.
+    await cell(colleague, 1).getByRole('button').click()
+    const also = sheet.getByTestId('roster-also-removes')
+    await expect(also).toContainText('no shift on')
+    await expect(also).toContainText(`${SWING} on`)
+    await sheet.getByRole('button', { name: 'Remove whole line' }).click()
+    await expect(sheet).toBeHidden()
+    await expect(page.getByTestId('roster-draft-bar')).toHaveCount(0)
+    expect(await draftRows(page)).toEqual([])
+    await expect(page.locator('[data-proposed]')).toHaveCount(0)
   })
 
   test('at phone width the four actions on a shift all show', async ({ page, baseURL }) => {

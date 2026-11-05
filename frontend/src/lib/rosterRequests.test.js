@@ -8,12 +8,17 @@ import {
   checkProposal,
   coverageFromRows,
   draftOps,
+  dayOpsOnLine,
+  withDayOps,
   draftSummary,
+  isOneDayOp,
+  lineCovers,
   opIndexForCell,
   opLabel,
   reasonLines,
   returnedNotice,
-  skipsOffDays,
+  skipFlags,
+  skipLabel,
   submittedMessage,
   toOp,
 } from './rosterRequests'
@@ -44,7 +49,7 @@ const change = (employee, from, assignment = 'SA-1', shift = 'Late') => ({
 })
 
 describe('toOp / draftOps', () => {
-  it('keeps the six operation fields, blanks as null, and the skip flag as 0 / 1', () => {
+  it('keeps the six operation fields, blanks as null, and both skip flags as 0 / 1', () => {
     expect(toOp({ employee: 'E1', action: 'End', to_date: '2026-11-05', employee_name: 'Asha', extra: 1 })).toEqual({
       employee: 'E1',
       action: 'End',
@@ -52,10 +57,27 @@ describe('toOp / draftOps', () => {
       from_date: null,
       to_date: '2026-11-05',
       assignment: null,
-      skip_off_days: 0,
+      skip_weekends: 0,
+      skip_holidays: 0,
     })
-    expect(toOp({ ...assign('E1', '2026-11-02', '2026-11-27'), skip_off_days: 1 }).skip_off_days).toBe(1)
-    expect(toOp({ ...assign('E1', '2026-11-02', '2026-11-27'), skip_off_days: true }).skip_off_days).toBe(1)
+  })
+  // Plan 2026-11-06-002 U4 / KTD5.
+  it('reads a legacy skip_off_days as both skips, and new keys as given', () => {
+    const ranged = assign('E1', '2026-11-02', '2026-11-27')
+    const flags = (row) => [toOp(row).skip_weekends, toOp(row).skip_holidays]
+    expect(flags({ ...ranged, skip_off_days: 1 })).toEqual([1, 1])
+    expect(flags({ ...ranged, skip_off_days: true })).toEqual([1, 1])
+    expect(flags({ ...ranged, skip_weekends: 1 })).toEqual([1, 0])
+    expect(flags({ ...ranged, skip_holidays: '1' })).toEqual([0, 1])
+    // A new key present wins over the legacy one.
+    expect(flags({ ...ranged, skip_off_days: 1, skip_weekends: 0, skip_holidays: 0 })).toEqual([0, 0])
+    expect(flags({ ...change('E1', '2026-11-05'), skip_weekends: 1, skip_holidays: 1 })).toEqual([0, 0])
+    expect(flags({ ...assign('E1', '2026-11-02', null), skip_off_days: 1 })).toEqual([0, 0])
+  })
+  it('keeps a weekends-only row weekends-only through a re-save', () => {
+    // The server's row echoes skip_off_days = 0 for weekends only.
+    const saved = { ...assign('E1', '2026-11-02', '2026-11-27'), skip_weekends: 1, skip_holidays: 0, skip_off_days: 0 }
+    expect(draftOps({ rows: [saved] })[0]).toMatchObject({ skip_weekends: 1, skip_holidays: 0 })
   })
   it('is empty with no draft', () => {
     expect(draftOps(null)).toEqual([])
@@ -189,10 +211,21 @@ describe('skip rows', () => {
   const skip = (from, to) => ({ ...assign('E1', from, to), skip_off_days: 1 })
 
   it('only an Assign with an end date skips', () => {
-    expect(skipsOffDays(skip('2026-11-02', '2026-11-13'))).toBe(true)
-    expect(skipsOffDays({ ...skip('2026-11-02', null) })).toBe(false)
-    expect(skipsOffDays({ ...change('E1', '2026-11-05'), skip_off_days: 1 })).toBe(false)
-    expect(skipsOffDays(assign('E1', '2026-11-02', '2026-11-13'))).toBe(false)
+    expect(skipFlags(skip('2026-11-02', '2026-11-13'))).toEqual({ weekends: true, holidays: true })
+    expect(skipFlags({ ...skip('2026-11-02', null) })).toEqual({ weekends: false, holidays: false })
+    expect(skipFlags({ ...change('E1', '2026-11-05'), skip_off_days: 1 })).toEqual({ weekends: false, holidays: false })
+    expect(skipFlags(assign('E1', '2026-11-02', '2026-11-13'))).toEqual({ weekends: false, holidays: false })
+  })
+
+  // Plan 2026-11-06-002 U4: the label names which skip.
+  it('words each skip combination, and none when neither', () => {
+    const ranged = assign('E1', '2026-11-02', '2026-11-13')
+    expect(skipLabel({ ...ranged, skip_weekends: 1, skip_holidays: 1 })).toBe('skips weekends and holidays')
+    expect(skipLabel({ ...ranged, skip_weekends: 1, skip_holidays: 0 })).toBe('skips weekends')
+    expect(skipLabel({ ...ranged, skip_weekends: 0, skip_holidays: 1 })).toBe('skips holidays')
+    expect(skipLabel({ ...ranged, skip_weekends: 0, skip_holidays: 0 })).toBe('')
+    expect(skipLabel(skip('2026-11-02', '2026-11-13'))).toBe('skips weekends and holidays')
+    expect(skipLabel(ranged)).toBe('')
   })
 
   it('words one block and several', () => {
@@ -252,8 +285,8 @@ describe('one-day rows', () => {
   it('words a swap and a clear, and neither skips', () => {
     expect(opLabel(swap('E1', '2026-11-10'))).toBe(`Night on ${formatDate('2026-11-10')} only`)
     expect(opLabel(clear('E1', '2026-11-10'))).toBe(`No shift on ${formatDate('2026-11-10')}`)
-    expect(skipsOffDays({ ...swap('E1', '2026-11-10'), skip_off_days: 1 })).toBe(false)
-    expect(skipsOffDays({ ...clear('E1', '2026-11-10'), skip_off_days: 1 })).toBe(false)
+    expect(skipLabel({ ...swap('E1', '2026-11-10'), skip_off_days: 1 })).toBe('')
+    expect(skipLabel({ ...clear('E1', '2026-11-10'), skip_off_days: 1 })).toBe('')
   })
 
   it('a one-day row writes its own day only', () => {
@@ -292,5 +325,110 @@ describe('one-day rows', () => {
     expect(cellProposal(ops, preview, 'E1', { date: '2026-11-08', shift_type: null, assignment: null })).toMatchObject({
       label: 'Proposed: Day',
     })
+  })
+})
+
+// Plan 2026-11-06-002 U5: one-day changes on days only the draft gives a
+// shift. Assign Morning Mon 3 - Fri 28 Mar 2031, both skips; no live shift.
+describe('one-day changes on a draft line', () => {
+  const line = { ...assign('E1', '2031-03-03', '2031-03-28', 'Morning'), skip_weekends: 1, skip_holidays: 1 }
+  const day = (action, date, shift = null) => ({
+    employee: 'E1',
+    action,
+    shift_type: shift,
+    from_date: date,
+    to_date: null,
+    assignment: null,
+  })
+  const empty = (date) => ({ date, shift_type: null, assignment: null })
+  // The server's simulated weeks: Mon-Fri blocks, Fri 14 cut out.
+  const preview = {
+    E1: [
+      { key: 'new-0-0', shift_type: 'Morning', start_date: '2031-03-03', end_date: '2031-03-07' },
+      { key: 'new-0-1', shift_type: 'Morning', start_date: '2031-03-10', end_date: '2031-03-13' },
+      { key: 'new-0-3', shift_type: 'Morning', start_date: '2031-03-17', end_date: '2031-03-21' },
+      { key: 'new-0-4', shift_type: 'Morning', start_date: '2031-03-24', end_date: '2031-03-28' },
+    ],
+  }
+
+  it('a cleared day reads as proposed with its own index, with no live or covering shift', () => {
+    const ops = [line, day('Clear Day', '2031-03-14')]
+    expect(cellProposal(ops, preview, 'E1', empty('2031-03-14'))).toEqual({
+      index: 1,
+      shift_type: null,
+      label: 'Proposed: no shift',
+    })
+    expect(cellProposal(ops, preview, 'E1', empty('2031-03-13'))).toMatchObject({ index: 0, shift_type: 'Morning' })
+    // A skipped weekend stays a plain day.
+    expect(cellProposal(ops, preview, 'E1', empty('2031-03-15'))).toBeNull()
+  })
+
+  it('a swapped day names the swap and its index; the line goes on', () => {
+    const ops = [line, day('Swap Day', '2031-03-14', 'Night')]
+    const swapped = {
+      E1: [...preview.E1, { key: 'new-1-0', shift_type: 'Night', start_date: '2031-03-14', end_date: '2031-03-14' }],
+    }
+    expect(cellProposal(ops, swapped, 'E1', empty('2031-03-14'))).toEqual({
+      index: 1,
+      shift_type: 'Night',
+      label: 'Proposed: Night',
+    })
+    expect(cellProposal(ops, swapped, 'E1', empty('2031-03-17'))).toMatchObject({ index: 0, shift_type: 'Morning' })
+  })
+
+  it('finds the whole line under a one-day change', () => {
+    const ops = [line, day('Clear Day', '2031-03-14')]
+    expect(opIndexForCell(ops, 'E1', empty('2031-03-14'))).toBe(1)
+    expect(opIndexForCell(ops, 'E1', empty('2031-03-14'), { lines: true })).toBe(0)
+    expect(opIndexForCell([day('Clear Day', '2031-03-14')], 'E1', empty('2031-03-14'), { lines: true })).toBe(-1)
+  })
+
+  it('a day a draft End empties is the End\'s, never a one-day change (whole-line actions only)', () => {
+    const live = (date) => ({ date, shift_type: 'Day', assignment: 'SA-1' })
+    const ops = [end('E1', '2031-03-20')]
+    const ended = { E1: [{ key: 'SA-1', shift_type: 'Day', start_date: '2031-01-01', end_date: '2031-03-20' }] }
+    expect(cellProposal(ops, ended, 'E1', live('2031-03-21'))).toEqual({
+      index: 0,
+      shift_type: null,
+      label: 'Proposed: no shift',
+    })
+    expect(isOneDayOp(ops[0])).toBe(false)
+    expect(isOneDayOp(day('Swap Day', '2031-03-14', 'Night'))).toBe(true)
+  })
+
+  it('lists the one-day changes a line carries, not another line\'s', () => {
+    const other = { ...assign('E1', '2031-03-31', '2031-04-04', 'Morning') }
+    const ops = [
+      line,
+      day('Clear Day', '2031-03-14'),
+      day('Swap Day', '2031-03-21', 'Night'),
+      other,
+      day('Clear Day', '2031-03-31'),
+      { ...day('Clear Day', '2031-03-17'), employee: 'E2' },
+    ]
+    expect(dayOpsOnLine(ops, 0)).toEqual([1, 2])
+    expect(dayOpsOnLine(ops, 3)).toEqual([4])
+    expect(dayOpsOnLine(ops, 1)).toEqual([])
+    expect(dayOpsOnLine(ops, 9)).toEqual([])
+  })
+
+  it('withDayOps is the line first, then its one-day changes', () => {
+    expect(withDayOps([line, day('Clear Day', '2031-03-14'), day('Swap Day', '2031-03-21', 'Night')], 0)).toEqual([0, 1, 2])
+    expect(withDayOps([line], 0)).toEqual([0])
+  })
+
+  it('a Change carries no one-day changes: the live shift still holds those days', () => {
+    const change = { employee: 'E1', action: 'Change', shift_type: 'Night', from_date: '2031-03-10', to_date: null, assignment: 'HR-SA-1' }
+    expect(dayOpsOnLine([change, day('Clear Day', '2031-03-14')], 0)).toEqual([])
+  })
+
+  it('a line covers its own From..To; a Change from its date on', () => {
+    expect(lineCovers(line, '2031-03-03')).toBe(true)
+    expect(lineCovers(line, '2031-03-28')).toBe(true)
+    expect(lineCovers(line, '2031-03-29')).toBe(false)
+    expect(lineCovers({ ...line, to_date: '2031-03-10' }, '2031-03-14')).toBe(false)
+    expect(lineCovers(assign('E1', '2031-03-03', null), '2031-12-31')).toBe(true)
+    expect(lineCovers(change('E1', '2031-03-10', null), '2031-03-14')).toBe(true)
+    expect(lineCovers(end('E1', '2031-03-10'), '2031-03-14')).toBe(false)
   })
 })

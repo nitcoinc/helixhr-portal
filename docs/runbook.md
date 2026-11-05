@@ -1017,10 +1017,12 @@ the skip feature (snapshot without `v: 2`) keep the single-block rules. A reques
 "shifts changed after this request was sent" may now mean the recomputed create / end / cancel
 steps differ from the stored ones (holiday list edited, for example), not only coverage.
 
-**"Skip weekly offs and holidays" kept the weekends** (plan 2026-11-05-001). The person's holiday
-list has no weekly-off rows: HRMS stores weekly offs as Holiday rows only after HR presses "Add to
-Holidays". The draft shows "Only holidays were skipped ..." and preflight "Holiday list weekly
-offs" names the list. Check a site from `bench --site <site> console`:
+**Roster skip: which days are weekends** (plan 2026-11-06-002). "Skip weekends" uses the person's
+holiday-list weekly-off rows when the list has any, else Saturday and Sunday; "Skip holidays" uses
+the list's other rows. HRMS stores weekly offs as Holiday rows only after HR presses "Add to
+Holidays", so a list of public holidays alone gets Saturday + Sunday. Preflight "Holiday list
+weekly offs" names lists with no weekly-off rows or rows that stop before the list ends. Check a
+site from `bench --site <site> console`:
 
 ```python
 from frappe.utils import today
@@ -1028,13 +1030,19 @@ from hrms.utils.holiday_list import get_holiday_list_for_employee as hl_for
 used = {}
 for e in frappe.get_all("Employee", filters={"status": "Active"}, pluck="name"): hl = hl_for(e, raise_exception=False, as_on=today()) or "(none)"; used[hl] = used.get(hl, 0) + 1
 
-for hl, n in used.items(): print(hl, n, "employees, weekly_off rows:", frappe.db.count("Holiday", {"parent": hl, "weekly_off": 1}))
+for hl, n in used.items(): print(hl, n, "employees, weekly_off rows:", frappe.db.count("Holiday", {"parent": hl, "weekly_off": 1}), "list:", frappe.db.get_value("Holiday List", hl, ["from_date", "to_date"]))
 ```
 
-Fix in Desk: Holiday List -> pick the Weekly Off day -> Add to Holidays (once per weekly off day),
-then re-save the draft. A company that works 7 days leaves the list and turns skipping off. One-day
-"No shift that day" leaves no assignment, so a punch that day falls back to `default_shift`, as
-skipped days do.
+- Weekends skipped on a 6-day or weekend-working site: the lead unticks Skip weekends, or HR adds
+  the right weekly-off rows (Holiday List -> Weekly Off -> Add to Holidays, once per day off) for
+  the whole period.
+- Weekends kept after some month: the list's weekly-off rows stop early; add them to the end.
+- "Their weekends/holidays can't be worked out": no list, or the range runs past the list's end.
+- A pending request comes back "days off or shifts changed after this request was sent" after this
+  change or a holiday-list edit: the lead reopens and resends.
+
+One-day "No shift that day" leaves no assignment, so a punch that day falls back to
+`default_shift`, as skipped days do.
 
 ## Bank and ID history is masked, and fills need a password
 

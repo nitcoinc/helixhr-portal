@@ -12,6 +12,8 @@
   "from_date",
   "to_date",
   "skip_off_days",
+  "skip_weekends",
+  "skip_holidays",
   "assignment"
  ],
  "fields": [
@@ -60,10 +62,26 @@
   },
   {
    "default": "0",
-   "description": "Assign with an end date only: one Shift Assignment per run of working days, leaving the person's weekly offs and holidays out.",
+   "description": "Before plan 2026-11-06-002: both skips together.",
    "fieldname": "skip_off_days",
    "fieldtype": "Check",
-   "label": "Skip weekly offs and holidays"
+   "hidden": 1,
+   "label": "Skip weekly offs and holidays",
+   "read_only": 1
+  },
+  {
+   "default": "0",
+   "description": "Assign with an end date only: leaves out the person's weekly-off rows, or Saturday and Sunday when their holiday list has none.",
+   "fieldname": "skip_weekends",
+   "fieldtype": "Check",
+   "label": "Skip weekends"
+  },
+  {
+   "default": "0",
+   "description": "Assign with an end date only: leaves out the public holidays on the person's holiday list.",
+   "fieldname": "skip_holidays",
+   "fieldtype": "Check",
+   "label": "Skip holidays"
   },
   {
    "description": "Only for an assignment that existed at submit. An operation on one created earlier in this request finds it by employee and date.",
@@ -74,7 +92,7 @@
   }
  ],
  "istable": 1,
- "modified": "2026-11-05 00:00:00.000000",
+ "modified": "2026-11-06 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "HelixHR",
  "name": "HelixHR Roster Change Row",

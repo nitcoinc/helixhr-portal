@@ -10,21 +10,45 @@ import { ASSIGN, CHANGE, CLEAR_DAY, END, SWAP_DAY, opDate, simulate } from './ro
 const OP_FIELDS = ['employee', 'action', 'shift_type', 'from_date', 'to_date', 'assignment']
 
 const isSkip = (value) => value === 1 || value === true || value === '1'
+const ONE_DAY = [SWAP_DAY, CLEAR_DAY]
 
-/** One draft row as `save_roster_draft` takes it: the six operation fields,
- * blanks as null, plus `skip_off_days` as 0 / 1 (plan 2026-11-03-001 R6:
- * an edit keeps it). */
-export function toOp(row) {
+/** Whether `op` is a one-day change (Swap Day / Clear Day). */
+export const isOneDayOp = (op) => ONE_DAY.includes(op?.action)
+
+/** Which days an operation skips, `{ weekends, holidays }`: only an Assign
+ * with an end date can (the server clears the flags elsewhere). Plan
+ * 2026-11-06-002 KTD5: a row with neither new key is from before the split,
+ * and its `skip_off_days` means both. */
+export function skipFlags(op) {
+  if (op?.action !== ASSIGN || !op.to_date) return { weekends: false, holidays: false }
+  const legacy = !('skip_weekends' in op) && !('skip_holidays' in op)
   return {
-    ...Object.fromEntries(OP_FIELDS.map((field) => [field, row?.[field] || null])),
-    skip_off_days: isSkip(row?.skip_off_days) ? 1 : 0,
+    weekends: isSkip(legacy ? op.skip_off_days : op.skip_weekends),
+    holidays: isSkip(legacy ? op.skip_off_days : op.skip_holidays),
   }
 }
 
-/** Whether an operation skips weekly offs and holidays: only an Assign with
- * an end date can (the server clears the flag elsewhere). */
-export function skipsOffDays(op) {
-  return op?.action === ASSIGN && !!op.to_date && isSkip(op.skip_off_days)
+/** The skip in words for a label or pill: "skips weekends and holidays",
+ * "skips weekends", "skips holidays", or '' (plan 2026-11-06-002 U4). */
+export function skipLabel(op) {
+  const { weekends, holidays } = skipFlags(op)
+  if (weekends && holidays) return 'skips weekends and holidays'
+  if (weekends) return 'skips weekends'
+  return holidays ? 'skips holidays' : ''
+}
+
+/** One draft row as `save_roster_draft` takes it: the six operation fields,
+ * blanks as null, plus both skip flags as 0 / 1 (plan 2026-11-03-001 R6: an
+ * edit keeps them). Both are always sent, so a re-save never falls back to
+ * the legacy `skip_off_days`, which would turn a weekends-only row into
+ * neither (plan 2026-11-06-002 KTD5). */
+export function toOp(row) {
+  const { weekends, holidays } = skipFlags(row)
+  return {
+    ...Object.fromEntries(OP_FIELDS.map((field) => [field, row?.[field] || null])),
+    skip_weekends: weekends ? 1 : 0,
+    skip_holidays: holidays ? 1 : 0,
+  }
 }
 
 /** The shifts the server says one draft row creates, in words: "2 shifts:
@@ -113,7 +137,7 @@ export function checkProposal({ ops, index, coverage, today, name }) {
   if (day && today && day <= today) return `${who}: a change can start tomorrow at the earliest.`
   // A skip is expanded by the server alone (A11): checked as one block here
   // it could refuse an overlap that falls only on an off day.
-  if (skipsOffDays(op)) return ''
+  if (skipLabel(op)) return ''
   const positions = []
   const mine = []
   ops.forEach((candidate, position) => {
@@ -132,19 +156,51 @@ function covers(item, date) {
 
 /** The index of the last operation that writes `cell`'s day for `employee`,
  * or -1. An End writes the days after its date; a Change and an End only
- * touch the assignment they name; a Swap Day or Clear Day writes its one day. */
-export function opIndexForCell(ops, employee, cell) {
+ * touch the assignment they name; a Swap Day or Clear Day writes its one day.
+ * `lines` skips the one-day changes: the whole line under them (plan
+ * 2026-11-06-002 U5). */
+export function opIndexForCell(ops, employee, cell, { lines = false } = {}) {
   const date = cell?.date
   for (let index = (ops || []).length - 1; index >= 0; index--) {
     const op = ops[index]
     if (op.employee !== employee) continue
     const sameAssignment = !op.assignment || op.assignment === cell.assignment
-    if (op.action === ASSIGN && op.from_date <= date && (!op.to_date || date <= op.to_date)) return index
+    if (op.action === ASSIGN && lineCovers(op, date)) return index
     if (op.action === CHANGE && sameAssignment && op.from_date <= date) return index
     if (op.action === END && sameAssignment && op.to_date < date) return index
-    if ((op.action === SWAP_DAY || op.action === CLEAR_DAY) && op.from_date === date) return index
+    if (!lines && isOneDayOp(op) && op.from_date === date) return index
   }
   return -1
+}
+
+/** Whether a line (an Assign, or a Change from its date on) reaches `date`.
+ * Nothing else is a line a one-day change can sit on. */
+export function lineCovers(op, date) {
+  if (op?.action === ASSIGN) return op.from_date <= date && (!op.to_date || date <= op.to_date)
+  if (op?.action === CHANGE) return op.from_date <= date
+  return false
+}
+
+/** Plan 2026-11-06-002 KTD8: the indexes of the person's one-day changes
+ * dated within line `index`'s From..To -- what removing the line takes with
+ * it, and what editing it must keep covered. Only an Assign: removing a
+ * Change leaves the live shift under its days, so their changes still hold. */
+export function dayOpsOnLine(ops, index) {
+  const line = ops?.[index]
+  const found = []
+  if (line?.action !== ASSIGN) return found
+  ;(ops || []).forEach((op, position) => {
+    if (position !== index && op.employee === line?.employee && isOneDayOp(op) && lineCovers(line, op.from_date)) {
+      found.push(position)
+    }
+  })
+  return found
+}
+
+/** KTD8: line `index` with the one-day changes it carries -- what Remove
+ * whole line drops, from the sheet or the draft bar, in one save. */
+export function withDayOps(ops, index) {
+  return [index, ...dayOpsOnLine(ops, index)]
 }
 
 /**
@@ -165,6 +221,14 @@ export function cellProposal(ops, preview, employee, cell) {
     .filter(Boolean)
     .sort()[0]
   if (!first || cell.date < first) return null
+  const index = opIndexForCell(ops, employee, cell)
+  // Plan 2026-11-06-002 U5 / R7: a one-day change is the day's proposal
+  // whatever the coverage, so a cleared day on a draft-only line (no live
+  // shift, no covering block) still reads as proposed and opens on it.
+  if (isOneDayOp(ops[index])) {
+    const shift = ops[index].action === SWAP_DAY ? ops[index].shift_type : null
+    return { index, shift_type: shift, label: shift ? `Proposed: ${shift}` : 'Proposed: no shift' }
+  }
   const covering = rows.find((item) => covers(item, cell.date))
   let shift
   // Plan 2026-11-05-001 A3: a new block with the shift the day already has
@@ -174,7 +238,7 @@ export function cellProposal(ops, preview, employee, cell) {
   else if (!covering && cell.assignment) shift = null
   else return null
   return {
-    index: opIndexForCell(ops, employee, cell),
+    index,
     shift_type: shift,
     label: shift ? `Proposed: ${shift}` : 'Proposed: no shift',
   }

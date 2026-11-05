@@ -926,8 +926,9 @@ SKIP_LIST = "_Test Roster Skip List 2031"
 
 def ensure_skip_list(employee):
 	"""A 2031 holiday list with every Saturday and Sunday a weekly off,
-	assigned to `employee` alone. Idempotent: the list and the assignment
-	persist across runs; tests add and remove their own extra holidays."""
+	assigned to `employee` alone from 1 Jan. Idempotent: the list and the
+	assignment persist across runs; tests add and remove their own extra
+	holidays."""
 	if not frappe.db.exists("Holiday List", SKIP_LIST):
 		holiday_list = frappe.get_doc(
 			{
@@ -972,8 +973,13 @@ def add_holiday(test, holiday_date):
 	)
 
 
-def skip_assign(employee, from_date, to_date, shift_type=PORTAL_SHIFT_TYPE):
-	return {**assign(employee, from_date, to_date, shift_type), "skip_off_days": 1}
+def skip_assign(employee, from_date, to_date, shift_type=PORTAL_SHIFT_TYPE, weekends=1, holidays=1):
+	"""Plan 2026-11-06-002: an Assign with each skip set as the sheet sends it."""
+	return {
+		**assign(employee, from_date, to_date, shift_type),
+		"skip_weekends": weekends,
+		"skip_holidays": holidays,
+	}
 
 
 # Mon 10 - Fri 28 March 2031: three working weeks.
@@ -991,7 +997,7 @@ class TestSkipOffDays(RosterApprovalTestCase):
 		self.as_manager()
 		draft = save_roster_draft([skip_assign(report, "2031-03-10", "2031-03-28")])["draft"]
 		(row,) = draft["rows"]
-		self.assertEqual(row["skip_off_days"], 1)
+		self.assertEqual((row["skip_weekends"], row["skip_holidays"], row["skip_off_days"]), (1, 1, 1))
 		self.assertEqual([(b["start_date"], b["end_date"]) for b in row["blocks"]], SKIP_BLOCKS)
 		self.assertEqual(draft["block_count"], 3)
 		self.assertEqual(
@@ -1001,27 +1007,42 @@ class TestSkipOffDays(RosterApprovalTestCase):
 	def test_skip_is_kept_only_on_an_assign_with_an_end_date(self):
 		report = self.skipper("skip-open")
 		seed_assignment(report, "2031-03-10", "2031-03-31")
+		both = {"skip_weekends": 1, "skip_holidays": 1}
 		self.as_manager()
 		draft = save_roster_draft(
 			[
-				{**assign(report, "2031-04-01"), "skip_off_days": 1},
-				{**end_op(report, "2031-03-20"), "skip_off_days": 1},
+				{**assign(report, "2031-04-01"), **both},
+				{**end_op(report, "2031-03-20"), **both},
 			]
 		)
 		rows = frappe.get_doc(DOCTYPE, draft["draft"]["name"]).rows
-		self.assertEqual([row.skip_off_days for row in rows], [0, 0])
+		self.assertEqual(
+			[(row.skip_weekends, row.skip_holidays, row.skip_off_days) for row in rows], [(0, 0, 0)] * 2
+		)
+		# Every other action drops them too (plan 2026-11-06-002 U1).
+		ops = api._roster_draft_ops(
+			[
+				{**change_op("E1", "2031-03-12"), **both},
+				{**swap_day("E1", "2031-03-12"), **both},
+				{**clear_day("E1", "2031-03-12"), **both},
+			]
+		)
+		self.assertEqual(
+			[(op["skip_weekends"], op["skip_holidays"], op["skip_off_days"]) for op in ops], [(0, 0, 0)] * 3
+		)
 
-	def test_skip_flag_is_read_by_flag_and_garbage_counts_as_off(self):
+	def test_skip_flags_are_read_by_flag_and_garbage_counts_as_off(self):
 		# `api._flag` (frappe `sbool`): 1 / "1" / "true" / True on; 0 / "false"
 		# off; anything else, "yes" included, is neither and counts as off.
-		def kept(value):
-			row = {**assign("E1", "2031-03-10", "2031-03-28"), "skip_off_days": value}
-			return api._roster_draft_ops([row])[0]["skip_off_days"]
+		def kept(field, value):
+			row = {**assign("E1", "2031-03-10", "2031-03-28"), field: value}
+			return api._roster_draft_ops([row])[0][field]
 
-		for value in (1, "1", "true", "True", True):
-			self.assertEqual(kept(value), 1, value)
-		for value in (0, "0", "false", False, "yes", None, "junk", " 1 "):
-			self.assertEqual(kept(value), 0, value)
+		for field in ("skip_weekends", "skip_holidays", "skip_off_days"):
+			for value in (1, "1", "true", "True", True):
+				self.assertEqual(kept(field, value), 1, (field, value))
+			for value in (0, "0", "false", False, "yes", None, "junk", " 1 "):
+				self.assertEqual(kept(field, value), 0, (field, value))
 
 	def test_unknown_off_days_refuse_the_skip_naming_the_person(self):
 		report = self.report("skip-nolist")
@@ -1031,8 +1052,15 @@ class TestSkipOffDays(RosterApprovalTestCase):
 			api, "_holiday_list_spans", side_effect=lambda e, *a: [] if e == report else real(e, *a)
 		):
 			message = self.refused([skip_assign(report, "2031-03-10", "2031-03-28")])
+			# Plan 2026-11-06-002 R4: with no list, weekends are still Saturday
+			# and Sunday; only Skip holidays refuses.
+			weekends = save_roster_draft([skip_assign(report, "2031-03-10", "2031-03-28", holidays=0)])
 		self.assertIn(self.employee_name(report), message)
 		self.assertIn("can't be worked out", message)
+		self.assertIn("Untick Skip holidays", message)
+		self.assertEqual(
+			[(b["start_date"], b["end_date"]) for b in weekends["draft"]["rows"][0]["blocks"]], SKIP_BLOCKS
+		)
 		# Without the skip it is one ordinary block.
 		draft = save_roster_draft([assign(report, "2031-03-10", "2031-03-28")])["draft"]
 		self.assertEqual(draft["block_count"], 1)
@@ -1042,6 +1070,9 @@ class TestSkipOffDays(RosterApprovalTestCase):
 		self.as_manager()
 		message = self.refused([skip_assign(report, "2031-12-29", "2032-01-09")])
 		self.assertIn("can't be worked out", message)
+		# Its weekly-off rows can't be extended past its end (plan 2026-11-06-002 KTD1).
+		message = self.refused([skip_assign(report, "2031-12-29", "2032-01-09", holidays=0)])
+		self.assertIn("Untick Skip weekends", message)
 
 	def test_approve_applies_one_shift_assignment_per_block(self):
 		report = self.skipper("skip-apply")
@@ -1099,9 +1130,11 @@ class TestSkipOffDays(RosterApprovalTestCase):
 		self.assertEqual(frappe.db.count("Shift Assignment", {"employee": report, "docstatus": 2}), 1)
 
 	def test_a_change_with_unknown_off_days_saves_with_a_note_naming_the_person(self):
-		# Plan 2026-11-04-001 U2 / R4, R5: one block changed, a note, no refusal.
+		# Plan 2026-11-04-001 U2 / R4, R5: the run stops short, a note, no
+		# refusal. With no list the weekend is known (plan 2026-11-06-002
+		# KTD3), so the run stops at the unknown Wednesday, not the weekend.
 		report = self.report("skip-note")
-		for start, end in SKIP_BLOCKS:
+		for start, end in BOTH_SKIPS_BLOCKS:
 			seed_assignment(report, start, end)
 		real = api._holiday_list_spans
 		self.as_manager()
@@ -1114,10 +1147,11 @@ class TestSkipOffDays(RosterApprovalTestCase):
 		self.assertEqual((note["index"], note["employee"]), (0, report))
 		self.assertIn(self.employee_name(report), note["message"])
 		self.assertIn("can't be worked out", note["message"])
-		self.assertEqual(draft["block_count"], 1)
+		self.assertEqual(draft["block_count"], 2)
 
 		# Known off days follow the whole run: no note.
 		ensure_skip_list(report)
+		add_holiday(self, "2031-03-19")
 		draft = save_roster_draft([change_op(report, "2031-03-12")])["draft"]
 		self.assertEqual((draft["notes"], draft["block_count"]), ([], 3))
 
@@ -1129,7 +1163,10 @@ class TestSkipOffDays(RosterApprovalTestCase):
 		snapshot = json.loads(frappe.db.get_value(DOCTYPE, name, "snapshot"))
 		frappe.db.set_value(DOCTYPE, name, "snapshot", json.dumps(snapshot["coverage"]), update_modified=False)
 		frappe.db.set_value(
-			"HelixHR Roster Change Row", {"parent": name}, "skip_off_days", 1, update_modified=False
+			"HelixHR Roster Change Row",
+			{"parent": name},
+			{"skip_weekends": 1, "skip_holidays": 1},
+			update_modified=False,
 		)
 
 		self.assertEqual(self.decide(HR_IN_SCOPE, name)["state"], "Approved")
@@ -1150,10 +1187,11 @@ class TestSkipOffDays(RosterApprovalTestCase):
 		self.assertEqual(row["holidays"], [])
 
 
-# --- Plan 2026-11-05-001 U1 / A1: a holiday list with no weekly-off rows -----
+# --- Plan 2026-11-06-002 U1 - U3: Skip weekends and Skip holidays ------------
 
 HOLIDAYS_ONLY_LIST = "_Test Roster Holidays Only 2031"
 HOLIDAYS_ONLY_DAY = "2031-03-19"  # a Wednesday
+SUNDAY_LIST = "_Test Roster Sunday Off 2031"
 
 
 def ensure_holidays_only_list(employee, from_date="2031-01-01"):
@@ -1173,16 +1211,40 @@ def ensure_holidays_only_list(employee, from_date="2031-01-01"):
 				],
 			}
 		).insert(ignore_permissions=True)
+	assign_holiday_list(employee, HOLIDAYS_ONLY_LIST, from_date)
+
+
+def ensure_sunday_list(employee, from_date):
+	"""A 2031 holiday list whose only weekly offs are Sundays (a six-day
+	week), assigned to `employee` from `from_date`. Idempotent."""
+	if not frappe.db.exists("Holiday List", SUNDAY_LIST):
+		holiday_list = frappe.get_doc(
+			{
+				"doctype": "Holiday List",
+				"holiday_list_name": SUNDAY_LIST,
+				"from_date": "2031-01-01",
+				"to_date": "2031-12-31",
+			}
+		)
+		day = frappe.utils.getdate("2031-01-05")  # the first Sunday
+		while day.year == 2031:
+			holiday_list.append("holidays", {"holiday_date": day, "description": "Sunday", "weekly_off": 1})
+			day += timedelta(days=7)
+		holiday_list.insert(ignore_permissions=True)
+	assign_holiday_list(employee, SUNDAY_LIST, from_date)
+
+
+def assign_holiday_list(employee, holiday_list, from_date):
 	if not frappe.db.exists(
 		"Holiday List Assignment",
-		{"assigned_to": employee, "holiday_list": HOLIDAYS_ONLY_LIST, "docstatus": 1},
+		{"assigned_to": employee, "holiday_list": holiday_list, "from_date": from_date, "docstatus": 1},
 	):
 		assignment = frappe.get_doc(
 			{
 				"doctype": "Holiday List Assignment",
 				"applicable_for": "Employee",
 				"assigned_to": employee,
-				"holiday_list": HOLIDAYS_ONLY_LIST,
+				"holiday_list": holiday_list,
 				"from_date": from_date,
 			}
 		)
@@ -1190,34 +1252,54 @@ def ensure_holidays_only_list(employee, from_date="2031-01-01"):
 		assignment.submit()
 
 
-# Mon 10 - Sun 23 March 2031 split only at the Wednesday holiday.
+def blocks_of(draft):
+	return [(b["start_date"], b["end_date"]) for b in draft["rows"][0]["blocks"]]
+
+
+# Mon 10 - Sun 23 March 2031 on the holidays-only list, per tick.
+BOTH_SKIPS_BLOCKS = [("2031-03-10", "2031-03-14"), ("2031-03-17", "2031-03-18"), ("2031-03-20", "2031-03-21")]
+WEEKENDS_ONLY_BLOCKS = [("2031-03-10", "2031-03-14"), ("2031-03-17", "2031-03-21")]
 HOLIDAYS_ONLY_BLOCKS = [("2031-03-10", "2031-03-18"), ("2031-03-20", "2031-03-23")]
 
 
-class TestWeeklyOffsMissing(RosterApprovalTestCase):
-	"""Mon 10 - Sun 23 March 2031, skip on: only the Wednesday holiday is
-	skipped, the weekend stays, and the draft carries a note."""
+class TestSeparateSkips(RosterApprovalTestCase):
+	"""Mon 10 - Sun 23 March 2031 on a list with no weekly-off rows (the Dev
+	shape): Saturday and Sunday are the weekend (KTD1), each tick skips its
+	own set and nothing carries a note (KTD4). Supersedes plan 2026-11-05-001
+	A1, which kept the weekends with a note."""
 
 	def holidays_only(self, key):
 		report = self.report(key)
 		ensure_holidays_only_list(report)
 		return report
 
-	def test_skip_splits_only_at_holidays_with_a_note_naming_the_person(self):
+	def test_each_tick_skips_its_own_days_with_no_note(self):
 		report = self.holidays_only("wo-skip")
 		self.as_manager()
-		draft = save_roster_draft([skip_assign(report, "2031-03-10", "2031-03-23")])["draft"]
-		self.assertEqual(draft["problems"], [])
-		(row,) = draft["rows"]
-		self.assertEqual([(b["start_date"], b["end_date"]) for b in row["blocks"]], HOLIDAYS_ONLY_BLOCKS)
-		(note,) = draft["notes"]
-		self.assertEqual((note["index"], note["employee"]), (0, report))
-		self.assertIn(self.employee_name(report), note["message"])
-		self.assertIn("weekends were kept", note["message"])
+		for (weekends, holidays), expected in (
+			((1, 1), BOTH_SKIPS_BLOCKS),
+			((1, 0), WEEKENDS_ONLY_BLOCKS),
+			((0, 1), HOLIDAYS_ONLY_BLOCKS),
+			((0, 0), [("2031-03-10", "2031-03-23")]),
+		):
+			with self.subTest(weekends=weekends, holidays=holidays):
+				draft = save_roster_draft(
+					[skip_assign(report, "2031-03-10", "2031-03-23", weekends=weekends, holidays=holidays)]
+				)["draft"]
+				self.assertEqual((draft["problems"], draft["notes"]), ([], []))
+				self.assertEqual(blocks_of(draft), expected)
+				(row,) = draft["rows"]
+				self.assertEqual(
+					(row["skip_weekends"], row["skip_holidays"], row["skip_off_days"]),
+					(weekends, holidays, int(weekends and holidays)),
+				)
 
-		# Without the skip: one block, no note.
-		draft = save_roster_draft([assign(report, "2031-03-10", "2031-03-23")])["draft"]
-		self.assertEqual((draft["block_count"], draft["notes"]), (1, []))
+	def test_a_sunday_only_list_keeps_saturdays(self):
+		report = self.report("two-skips-sunday")
+		ensure_sunday_list(report, "2031-01-01")
+		self.as_manager()
+		draft = save_roster_draft([skip_assign(report, "2031-03-10", "2031-03-23", holidays=0)])["draft"]
+		self.assertEqual(blocks_of(draft), [("2031-03-10", "2031-03-15"), ("2031-03-17", "2031-03-22")])
 
 	def test_a_list_with_weekly_offs_gets_no_note(self):
 		report = self.report("wo-known")
@@ -1226,40 +1308,226 @@ class TestWeeklyOffsMissing(RosterApprovalTestCase):
 		draft = save_roster_draft([skip_assign(report, "2031-03-10", "2031-03-23")])["draft"]
 		self.assertEqual((draft["block_count"], draft["notes"]), (2, []))
 
-	def test_a_second_span_on_a_list_without_weekly_offs_sets_the_flag(self):
-		report = self.report("wo-two-spans")
-		ensure_skip_list(report)
-		ensure_holidays_only_list(report, from_date="2031-03-17")
-		off = api._known_off_days(
-			report, frappe.utils.getdate("2031-03-10"), frappe.utils.getdate("2031-03-23"), {}
-		)
-		self.assertEqual(off["weekly_offs_missing"], 1)
-		self.assertEqual(off["dates"], ["2031-03-15", "2031-03-16", HOLIDAYS_ONLY_DAY])
-		# Only the list with weekly offs in range: no flag.
-		off = api._known_off_days(
-			report, frappe.utils.getdate("2031-03-03"), frappe.utils.getdate("2031-03-14"), {}
-		)
-		self.assertNotIn("weekly_offs_missing", off)
-
-	def test_a_run_aware_change_stops_at_the_weekend_with_a_note(self):
+	def test_a_run_aware_change_walks_the_weekend(self):
+		# KTD3: the weekend is known now, so the whole run changes.
 		report = self.holidays_only("wo-run")
 		for start, end in (("2031-03-10", "2031-03-14"), ("2031-03-17", "2031-03-21")):
 			seed_assignment(report, start, end)
 		self.as_manager()
 		draft = save_roster_draft([change_op(report, "2031-03-12")])["draft"]
-		self.assertEqual((draft["problems"], draft["block_count"]), ([], 1))
-		(note,) = draft["notes"]
-		self.assertIn("can't be worked out", note["message"])
+		self.assertEqual((draft["problems"], draft["notes"], draft["block_count"]), ([], [], 2))
 
-	def test_a_pending_skip_request_still_approves_as_previewed(self):
-		"""A1: a v2 request on such a list approves unchanged -- the steps
-		approval recomputes match the stored ones."""
+	def test_a_skip_request_approves_as_previewed(self):
 		report = self.holidays_only("wo-approve")
+		self.as_manager()
+		preview = save_roster_draft([skip_assign(report, "2031-03-10", "2031-03-23")])["draft"]["preview"]
+		frappe.set_user("Administrator")
 		(name,) = self.submit([skip_assign(report, "2031-03-10", "2031-03-23")])
 		self.assertEqual(self.decide(HR_IN_SCOPE, name)["state"], "Approved")
 		self.assertEqual(
-			coverage(report), [(PORTAL_SHIFT_TYPE, start, end) for start, end in HOLIDAYS_ONLY_BLOCKS]
+			coverage(report), [(PORTAL_SHIFT_TYPE, start, end) for start, end in BOTH_SKIPS_BLOCKS]
 		)
+		self.assertEqual(
+			coverage(report),
+			[(item["shift_type"], item["start_date"], item["end_date"]) for item in preview[report]],
+		)
+
+	def test_a_request_sent_under_the_old_rule_is_returned_not_applied_differently(self):
+		"""R8 / KTD6: a pending request whose stored steps kept the weekends
+		(plan 2026-11-05-001 A1) re-simulates differently and is returned."""
+		report = self.holidays_only("wo-pending")
+		(name,) = self.submit([skip_assign(report, "2031-03-10", "2031-03-23")])
+		snapshot = json.loads(frappe.db.get_value(DOCTYPE, name, "snapshot"))
+		snapshot["steps"] = [
+			[
+				{
+					"action": "create",
+					"employee": report,
+					"key": f"new-0-{index}",
+					"shift_type": PORTAL_SHIFT_TYPE,
+					"start_date": start,
+					"end_date": end,
+				}
+				for index, (start, end) in enumerate(HOLIDAYS_ONLY_BLOCKS)
+			]
+		]
+		frappe.db.set_value(DOCTYPE, name, "snapshot", json.dumps(snapshot), update_modified=False)
+
+		result = self.decide(HR_IN_SCOPE, name)
+		self.assertTrue(result["returned"])
+		self.assertIn("days off", result["reasons"][0]["message"])
+		self.assertEqual(coverage(report), [])
+
+
+class TestSplitSkipFlags(RosterChangeTestCase):
+	"""Plan 2026-11-06-002 U1 / KTD5, R8: the two flags on the row, the
+	legacy one read from an old-build tab, and the patch."""
+
+	def test_each_flag_is_stored_as_sent(self):
+		report = self.report("flags-stored")
+		self.as_manager()
+		draft = save_roster_draft([skip_assign(report, "2031-03-10", "2031-03-28", holidays=0)])["draft"]
+		(row,) = frappe.get_doc(DOCTYPE, draft["name"]).rows
+		self.assertEqual((row.skip_weekends, row.skip_holidays, row.skip_off_days), (1, 0, 0))
+
+	def test_a_legacy_flag_means_both_unless_a_new_key_is_present(self):
+		ranged = assign("E1", "2031-03-10", "2031-03-28")
+
+		def flags(**extra):
+			(op,) = api._roster_draft_ops([{**ranged, **extra}])
+			return op["skip_weekends"], op["skip_holidays"], op["skip_off_days"]
+
+		self.assertEqual(flags(skip_off_days=1), (1, 1, 1))
+		self.assertEqual(flags(skip_off_days=0), (0, 0, 0))
+		# Either new key present: the new keys win, the absent one is off.
+		self.assertEqual(flags(skip_off_days=1, skip_weekends=0), (0, 0, 0))
+		self.assertEqual(flags(skip_off_days=1, skip_holidays=1), (0, 1, 0))
+
+	def test_an_old_build_tab_round_trips_a_draft_without_clearing_the_flags(self):
+		report = self.report("flags-old-tab")
+		ensure_holidays_only_list(report)
+		self.as_manager()
+		draft = save_roster_draft([skip_assign(report, "2031-03-10", "2031-03-28")])["draft"]
+		# The old build's `toOp` keeps only these keys.
+		old_fields = (
+			"employee",
+			"action",
+			"shift_type",
+			"from_date",
+			"to_date",
+			"assignment",
+			"skip_off_days",
+		)
+		echoed = [{field: row[field] for field in old_fields} for row in draft["rows"]]
+		self.assertEqual(echoed[0]["skip_off_days"], 1)
+		draft = save_roster_draft(echoed, expected_modified=draft["modified"])["draft"]
+		(row,) = frappe.get_doc(DOCTYPE, draft["name"]).rows
+		self.assertEqual((row.skip_weekends, row.skip_holidays), (1, 1))
+
+	def test_the_patch_copies_the_legacy_flag_into_both_once(self):
+		from helixhr.patches.v1_0 import split_roster_skip_flags
+
+		legacy, plain = self.report("flags-patch-1"), self.report("flags-patch-2")
+		self.as_manager()
+		draft = save_roster_draft(
+			[assign(legacy, "2031-03-10", "2031-03-28"), assign(plain, "2031-03-10", "2031-03-28")]
+		)["draft"]
+		frappe.set_user("Administrator")
+		rows = {row.employee: row.name for row in frappe.get_doc(DOCTYPE, draft["name"]).rows}
+		frappe.db.set_value(
+			"HelixHR Roster Change Row",
+			rows[legacy],
+			{"skip_off_days": 1, "skip_weekends": 0, "skip_holidays": 0},
+			update_modified=False,
+		)
+
+		def stored():
+			return {
+				employee: frappe.db.get_value(
+					"HelixHR Roster Change Row", name, ["skip_off_days", "skip_weekends", "skip_holidays"]
+				)
+				for employee, name in rows.items()
+			}
+
+		split_roster_skip_flags.execute()
+		self.assertEqual(stored(), {legacy: (1, 1, 1), plain: (0, 0, 0)})
+		split_roster_skip_flags.execute()
+		self.assertEqual(stored(), {legacy: (1, 1, 1), plain: (0, 0, 0)})
+
+
+def off_sets(employee, start, end):
+	return api._roster_off_sets(employee, frappe.utils.getdate(start), frappe.utils.getdate(end), {})
+
+
+def known(start, end, dates):
+	return {"from": start, "to": end, "dates": dates}
+
+
+class TestRosterOffSets(RosterChangeTestCase):
+	"""Plan 2026-11-06-002 U2 / KTD1, KTD2: the weekend and holiday sets
+	the skip and the grid share. Mon 10 - Sun 23 March 2031 unless stated."""
+
+	def test_a_list_with_weekly_offs_gives_its_rows_and_its_holiday(self):
+		report = self.report("sets-weekly-offs")
+		ensure_skip_list(report)
+		add_holiday(self, HOLIDAYS_ONLY_DAY)
+		off = off_sets(report, "2031-03-10", "2031-03-23")
+		self.assertEqual(
+			off["weekends"],
+			known("2031-03-10", "2031-03-23", ["2031-03-15", "2031-03-16", "2031-03-22", "2031-03-23"]),
+		)
+		self.assertEqual(off["holidays"], known("2031-03-10", "2031-03-23", [HOLIDAYS_ONLY_DAY]))
+
+	def test_a_sunday_only_list_leaves_saturdays_working(self):
+		report = self.report("sets-sunday")
+		ensure_sunday_list(report, "2031-01-01")
+		off = off_sets(report, "2031-03-10", "2031-03-23")
+		self.assertEqual(off["weekends"]["dates"], ["2031-03-16", "2031-03-23"])
+
+	def test_a_holidays_only_list_gives_saturday_and_sunday(self):
+		report = self.report("sets-holidays-only")
+		ensure_holidays_only_list(report)
+		off = off_sets(report, "2031-03-10", "2031-03-23")
+		self.assertEqual(
+			off["weekends"],
+			known("2031-03-10", "2031-03-23", ["2031-03-15", "2031-03-16", "2031-03-22", "2031-03-23"]),
+		)
+		self.assertEqual(off["holidays"], known("2031-03-10", "2031-03-23", [HOLIDAYS_ONLY_DAY]))
+
+	def test_no_list_gives_saturday_and_sunday_and_unknown_holidays(self):
+		report = self.report("sets-no-list")
+		with patch.object(api, "_holiday_list_spans", return_value=[]):
+			off = off_sets(report, "2031-03-10", "2031-03-23")
+		self.assertEqual(
+			off,
+			{
+				"weekends": known(
+					"2031-03-10", "2031-03-23", ["2031-03-15", "2031-03-16", "2031-03-22", "2031-03-23"]
+				),
+				"holidays": None,
+			},
+		)
+
+	def test_a_range_crossing_into_a_weekly_off_list_switches_rule_at_the_split(self):
+		report = self.report("sets-cross")
+		ensure_holidays_only_list(report)
+		ensure_sunday_list(report, "2031-03-17")
+		off = off_sets(report, "2031-03-10", "2031-03-23")
+		# Sat + Sun before the 17th, the Sunday rows after.
+		self.assertEqual(
+			off["weekends"], known("2031-03-10", "2031-03-23", ["2031-03-15", "2031-03-16", "2031-03-23"])
+		)
+		self.assertEqual(off["holidays"], known("2031-03-10", "2031-03-23", []))
+
+	def test_past_the_end_of_a_holidays_only_list_weekends_go_on(self):
+		report = self.report("sets-past-holidays-only")
+		ensure_holidays_only_list(report)
+		off = off_sets(report, "2031-12-22", "2032-01-11")
+		self.assertEqual(
+			off["weekends"],
+			known(
+				"2031-12-22",
+				"2032-01-11",
+				["2031-12-27", "2031-12-28", "2032-01-03", "2032-01-04", "2032-01-10", "2032-01-11"],
+			),
+		)
+		self.assertEqual(off["holidays"], known("2031-12-22", "2031-12-31", []))
+
+	def test_past_the_end_of_a_weekly_off_list_both_stop(self):
+		report = self.report("sets-past-weekly-offs")
+		ensure_skip_list(report)
+		off = off_sets(report, "2031-12-22", "2032-01-11")
+		self.assertEqual(off["weekends"], known("2031-12-22", "2031-12-31", ["2031-12-27", "2031-12-28"]))
+		self.assertEqual(off["holidays"], known("2031-12-22", "2031-12-31", []))
+
+	def test_the_week_payload_marks_saturday_and_sunday_off_on_a_holidays_only_list(self):
+		# R11: the grid reads "Off" on the days the skip leaves free.
+		report = self.report("sets-week")
+		ensure_holidays_only_list(report)
+		self.as_manager()
+		row = row_for(get_roster_week("2031-03-17", mode="team"), report)
+		self.assertEqual(row["off_days"], [HOLIDAYS_ONLY_DAY, "2031-03-22", "2031-03-23"])
+		self.assertEqual(row["holidays"], [HOLIDAYS_ONLY_DAY])
 
 
 def swap_day(employee, day, shift_type=LATE_SHIFT, assignment=None):
@@ -1351,6 +1619,68 @@ class TestOneDayOps(RosterApprovalTestCase):
 		self.assertTrue(result["returned"])
 		self.assertEqual([item["employee"] for item in result["reasons"]], [report])
 		self.assertEqual(coverage(report), [(PORTAL_SHIFT_TYPE, "2031-03-03", "2031-03-20")])
+
+
+class TestOneDayOnDraftLine(RosterApprovalTestCase):
+	"""Plan 2026-11-06-002 U5 / R6, KTD7: a one-day change on a day only the
+	draft gives a shift -- no live assignment, `assignment` null -- targets the
+	simulated `new-...` block and approves exactly as previewed. Mon 10 - Fri
+	28 March 2031, both skips, on the holidays-only list (Wed 19 a holiday)."""
+
+	LINE = ("2031-03-10", "2031-03-28")
+
+	def approved_as_previewed(self, key, day_op):
+		report = self.report(key)
+		ensure_holidays_only_list(report)
+		ops = [skip_assign(report, *self.LINE), day_op(report)]
+		self.as_manager()
+		draft = save_roster_draft(ops)["draft"]
+		frappe.set_user("Administrator")
+		self.assertEqual((draft["problems"], draft["notes"]), ([], []))
+		# `coverage` reads oldest first; the preview lists blocks as made.
+		preview = sorted(
+			((b["shift_type"], b["start_date"], b["end_date"]) for b in draft["preview"][report]),
+			key=lambda block: block[1],
+		)
+		(name,) = self.submit(ops)
+		self.assertEqual(self.decide(HR_IN_SCOPE, name)["state"], "Approved")
+		self.assertEqual(coverage(report), preview)
+		return report, preview
+
+	def test_a_clear_day_leaves_that_day_out_and_approves_as_previewed(self):
+		_, preview = self.approved_as_previewed("draft-clear", lambda r: clear_day(r, "2031-03-14"))
+		self.assertEqual(
+			preview,
+			[
+				(PORTAL_SHIFT_TYPE, "2031-03-10", "2031-03-13"),
+				(PORTAL_SHIFT_TYPE, "2031-03-17", "2031-03-18"),
+				(PORTAL_SHIFT_TYPE, "2031-03-20", "2031-03-21"),
+				(PORTAL_SHIFT_TYPE, "2031-03-24", "2031-03-28"),
+			],
+		)
+
+	def test_a_swap_day_is_one_day_of_another_shift_and_the_line_resumes(self):
+		_, preview = self.approved_as_previewed("draft-swap", lambda r: swap_day(r, "2031-03-12"))
+		self.assertEqual(
+			preview[:3],
+			[
+				(PORTAL_SHIFT_TYPE, "2031-03-10", "2031-03-11"),
+				(LATE_SHIFT, "2031-03-12", "2031-03-12"),
+				(PORTAL_SHIFT_TYPE, "2031-03-13", "2031-03-14"),
+			],
+		)
+
+	def test_a_clear_on_the_lines_first_day_cancels_that_block_and_creates_its_tail(self):
+		"""2026-11-05-001 KTD4 on a `new-...` block: the cleared first day's
+		block is created then cancelled at approval (deferred: folding it into
+		the line's own creates)."""
+		report, preview = self.approved_as_previewed("draft-first", lambda r: clear_day(r, "2031-03-10"))
+		self.assertEqual(preview[0], (PORTAL_SHIFT_TYPE, "2031-03-11", "2031-03-14"))
+		self.assertTrue(
+			frappe.db.exists(
+				"Shift Assignment", {"employee": report, "start_date": "2031-03-10", "docstatus": 2}
+			)
+		)
 
 
 class TestDraftToken(RosterChangeTestCase):

@@ -14,7 +14,17 @@ import { session } from '@/lib/session'
 import { addCalendarDays, dateTileParts, formatDateRange, mondayOf, today } from '@/lib/dates'
 import { offFirst } from '@/lib/lists'
 import { isEmptyWeek, leaveLabel, rosterModes, shiftHours } from '@/lib/roster'
-import { cellProposal, checkProposal, coverageFromRows, draftOps, submittedMessage } from '@/lib/rosterRequests'
+import {
+  cellProposal,
+  checkProposal,
+  coverageFromRows,
+  dayOpsOnLine,
+  draftOps,
+  isOneDayOp,
+  opIndexForCell,
+  submittedMessage,
+  withDayOps,
+} from '@/lib/rosterRequests'
 import { opDate } from '@/lib/rosterDraft'
 import { FALLBACK_ERROR, toPlainMessage } from '@/lib/errorMap'
 import { notify } from '@/lib/notify'
@@ -354,8 +364,12 @@ function proposeChange(op, index) {
   })
 }
 
-function removeChange(index) {
-  return saveOps((current) => current.filter((_, position) => position !== index))
+/** Remove one change, or several in one save (plan 2026-11-06-002 KTD8:
+ * a whole line with its one-day changes, so the save never sees the line
+ * gone and its days left behind). */
+function removeChange(indexes) {
+  const drop = new Set([].concat(indexes))
+  return saveOps((current) => current.filter((_, position) => !drop.has(position)))
 }
 
 async function fromBar(write) {
@@ -425,16 +439,26 @@ const selected = ref(null)
 // back to it -- after the refetch, which re-renders the cell.
 let returnKey = ''
 
+/** Plan 2026-11-06-002 U5: the whole line at `index` -- its operation, the
+ * shifts it made, and the one-day changes that sit on it (KTD8) -- or null. */
+function lineAt(index) {
+  const op = ops.value[index]
+  if (!op || isOneDayOp(op)) return null
+  const dependents = dayOpsOnLine(ops.value, index).map((position) => ({ index: position, op: ops.value[position] }))
+  return { index, op, blocks: draftRows.value[index]?.blocks || [], dependents }
+}
+
 function openCell(row, cell, layout) {
   if (!clickable(row)) return
   returnKey = `${row.employee}|${cell.date}|${layout}`
   const proposal = canRequest.value ? proposalAt(row, cell) : null
+  const op = proposal ? ops.value[proposal.index] || null : null
+  // A one-day change sits on a line (or on a live shift, with no line).
+  const line = !op ? null : isOneDayOp(op) ? lineAt(opIndexForCell(ops.value, row.employee, cell, { lines: true })) : lineAt(proposal.index)
   selected.value = {
     person: { employee: row.employee, employee_name: row.employee_name },
     cell,
-    proposal: proposal
-      ? { ...proposal, op: ops.value[proposal.index] || null, blocks: draftRows.value[proposal.index]?.blocks || [] }
-      : null,
+    proposal: proposal ? { ...proposal, op, blocks: draftRows.value[proposal.index]?.blocks || [], line } : null,
     edit: false,
   }
   sheetOpen.value = true
@@ -449,7 +473,7 @@ function editFromBar(index) {
   selected.value = {
     person: { employee: op.employee, employee_name: row.employee_name || op.employee },
     cell: { date: opDate(op) || '' },
-    proposal: { index, op, label: 'Proposed change', blocks: row.blocks || [] },
+    proposal: { index, op, label: 'Proposed change', blocks: row.blocks || [], line: lineAt(index) },
     edit: true,
   }
   sheetOpen.value = true
@@ -1032,7 +1056,7 @@ const scopeLine = computed(() => {
       :submitting="submitting"
       :submit-error="submitError"
       @edit="editFromBar"
-      @remove="(index) => fromBar(() => removeChange(index))"
+      @remove="(index) => fromBar(() => removeChange(withDayOps(ops, index)))"
       @discard="fromBar(() => saveOps(() => []))"
       @submit="submitDraft"
       @save-note="saveNote"

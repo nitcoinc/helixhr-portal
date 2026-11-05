@@ -1372,10 +1372,14 @@ def check_holiday_list_coverage():
 
 
 def check_holiday_list_weekly_offs():
-	"""Plan 2026-11-05-001 U2 / A4: a holiday list in use with no weekly-off
-	rows. The roster's "Skip weekly offs and holidays" then skips holidays
-	only and keeps weekends (with a note to the lead), because HRMS writes
-	weekly offs as Holiday rows only when HR presses "Add to Holidays".
+	"""Plan 2026-11-05-001 U2 / A4, reworded by plan 2026-11-06-002 U6: a
+	holiday list in use whose weekly offs are missing or stop early. HRMS
+	writes weekly offs as Holiday rows only when HR presses "Add to
+	Holidays", and leave and attendance count any other day as a working
+	day. The roster's Skip weekends treats a list with no weekly-off rows as
+	Saturday and Sunday (KTD1); one whose rows stop more than a week before
+	its end keeps the weekends after them, as a list with weekly offs is
+	never extended.
 
 	Lists are resolved over today .. today + SKIP_MAX_DAYS, the furthest a
 	skip reaches, so next year's list is checked before leads plan into it.
@@ -1398,17 +1402,41 @@ def check_holiday_list_weekly_offs():
 		return _result("Holiday list weekly offs", PASS, f"no holiday list in use{skipped}")
 
 	missing = sorted(name for name in in_use if not has_weekly_offs(name))
-	if not missing:
+	partial = []
+	for name in sorted(set(in_use) - set(missing)):
+		last = frappe.get_all(
+			"Holiday",
+			filters={"parent": name, "parenttype": "Holiday List", "weekly_off": 1},
+			pluck="holiday_date",
+			order_by="holiday_date desc",
+			limit=1,
+			ignore_permissions=True,
+		)
+		last = last[0] if last else None
+		ends = frappe.db.get_value("Holiday List", name, "to_date")
+		if last and ends and getdate(last) < add_days(getdate(ends), -7):
+			partial.append(name)
+	if not missing and not partial:
 		return _result(
 			"Holiday list weekly offs", PASS, f"{len(in_use)} holiday list(s) in use have weekly offs{skipped}"
+		)
+	parts = []
+	if missing:
+		parts.append(
+			f"{len(missing)} holiday list(s) in use have no weekly-off rows: {_listed(missing)} -- the roster "
+			"treats Saturday and Sunday as their weekend, while leave and attendance count those days as "
+			"working days"
+		)
+	if partial:
+		parts.append(
+			f"{len(partial)} holiday list(s) have weekly-off rows that stop before the list ends: "
+			f"{_listed(partial)} -- weekends after the last row are kept as working days"
 		)
 	return _result(
 		"Holiday list weekly offs",
 		WARN,
-		f"{len(missing)} holiday list(s) in use have no weekly-off rows: {_listed(missing)} "
-		"-- skipping weekly offs and holidays keeps weekends for their people. In the Holiday List, "
-		"pick the Weekly Off day and press Add to Holidays; a company that works 7 days can leave "
-		f"it and turn skipping off{skipped}",
+		"; ".join(parts) + ". In the Holiday List, pick the Weekly Off day and press Add to Holidays for "
+		f"the whole period; a site that works weekends can leave it, and leads untick Skip weekends{skipped}",
 	)
 
 
