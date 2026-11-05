@@ -1118,6 +1118,67 @@ class TestPreflightHolidayCoverage(IntegrationTestCase):
 				names.append(row)
 		return names
 
+class TestPreflightHolidayWeeklyOffs(IntegrationTestCase):
+	"""Plan 2026-11-05-001 U2: holiday lists in use with no weekly-off rows.
+	`_holiday_list_spans` is patched so the verdict depends on the lists
+	built here, not on which lists this site's employees resolve."""
+
+	def holiday_list(self, name, weekly_off):
+		if not frappe.db.exists("Holiday List", name):
+			frappe.get_doc(
+				{
+					"doctype": "Holiday List",
+					"holiday_list_name": name,
+					"from_date": "2031-01-01",
+					"to_date": "2031-12-31",
+					"holidays": [
+						{"holiday_date": "2031-01-04", "description": "Saturday", "weekly_off": weekly_off}
+					],
+				}
+			).insert(ignore_permissions=True)
+		return name
+
+	def check(self, *names, raises=False):
+		spans = [{"holiday_list": name} for name in names]
+
+		def resolve(employee, start, end):
+			if raises:
+				raise frappe.ValidationError("resolver broke")
+			return spans
+
+		with patch("helixhr.api._holiday_list_spans", side_effect=resolve):
+			return preflight.check_holiday_list_weekly_offs()
+
+	def test_it_passes_when_every_list_in_use_has_weekly_offs(self):
+		result = self.check(self.holiday_list("_Test U2 Weekly Offs", 1))
+		self.assertEqual(result["status"], preflight.PASS)
+
+	def test_it_warns_naming_a_list_with_only_public_holidays(self):
+		with_offs = self.holiday_list("_Test U2 Weekly Offs", 1)
+		holidays_only = self.holiday_list("_Test U2 Holidays Only", 0)
+
+		result = self.check(with_offs, holidays_only)
+
+		self.assertEqual(result["status"], preflight.WARN)
+		self.assertIn(holidays_only, result["detail"])
+		self.assertNotIn(with_offs, result["detail"])
+		self.assertIn("Add to Holidays", result["detail"])
+		self.assertIn("turn skipping off", result["detail"])
+
+	def test_lists_nobody_resolves_are_ignored(self):
+		self.holiday_list("_Test U2 Holidays Only", 0)
+		result = self.check(self.holiday_list("_Test U2 Weekly Offs", 1))
+		self.assertEqual(result["status"], preflight.PASS)
+
+	def test_a_resolver_that_throws_does_not_break_the_run(self):
+		result = self.check(raises=True)
+		self.assertEqual(result["status"], preflight.PASS)
+		self.assertIn("no holiday list in use", result["detail"])
+
+	def test_the_check_is_registered(self):
+		self.assertIn(preflight.check_holiday_list_weekly_offs, preflight.CHECKS)
+
+
 class TestPreflightProfileChangeFields(IntegrationTestCase):
 	"""Fix plan 2026-11-04-001 U4: the Bank & IDs allow-list against the
 	Employee meta. `has_field` is patched so the verdict does not depend on

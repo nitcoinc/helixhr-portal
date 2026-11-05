@@ -39,7 +39,7 @@ scoped to their own Employee record has no HR queue (P4-R11).
 import os
 
 import frappe
-from frappe.utils import cint, flt, getdate
+from frappe.utils import add_days, cint, flt, getdate
 
 from helixhr.patches.v1_0.apply_permission_deltas import DELTAS
 from helixhr.utils import (
@@ -1371,6 +1371,50 @@ def check_holiday_list_coverage():
 	)
 
 
+def check_holiday_list_weekly_offs():
+	"""Plan 2026-11-05-001 U2 / A4: a holiday list in use with no weekly-off
+	rows. The roster's "Skip weekly offs and holidays" then skips holidays
+	only and keeps weekends (with a note to the lead), because HRMS writes
+	weekly offs as Holiday rows only when HR presses "Add to Holidays".
+
+	Lists are resolved over today .. today + SKIP_MAX_DAYS, the furthest a
+	skip reaches, so next year's list is checked before leads plan into it.
+	"""
+	from helixhr.api import _holiday_list_spans
+	from helixhr.roster_ops import SKIP_MAX_DAYS
+
+	start = getdate()
+	end = add_days(start, SKIP_MAX_DAYS)
+	in_use = set()
+	for employee in frappe.get_all("Employee", filters={"status": "Active"}, pluck="name", limit=2000):
+		try:
+			in_use.update(span["holiday_list"] for span in _holiday_list_spans(employee, start, end))
+		except Exception:
+			# `check_holiday_list_coverage` reports a resolver that throws; this
+			# check must never be the thing that stops the preflight run.
+			continue
+	if not in_use:
+		return _result("Holiday list weekly offs", PASS, "no holiday list in use")
+
+	missing = sorted(
+		name
+		for name in in_use
+		if not frappe.db.exists("Holiday", {"parent": name, "parenttype": "Holiday List", "weekly_off": 1})
+	)
+	if not missing:
+		return _result(
+			"Holiday list weekly offs", PASS, f"{len(in_use)} holiday list(s) in use have weekly offs"
+		)
+	return _result(
+		"Holiday list weekly offs",
+		WARN,
+		f"{len(missing)} holiday list(s) in use have no weekly-off rows: {_listed(missing)} "
+		"-- skipping weekly offs and holidays keeps weekends for their people. In the Holiday List, "
+		"pick the Weekly Off day and press Add to Holidays; a company that works 7 days can leave "
+		"it and turn skipping off",
+	)
+
+
 # --- celebration reminders and mail (P4-U6, P4-R18) ------------------------
 
 
@@ -2136,6 +2180,7 @@ CHECKS = [
 	check_shift_types,
 	check_checkin_location_retention,
 	check_holiday_list_coverage,
+	check_holiday_list_weekly_offs,
 	check_celebration_reminders,
 	check_cross_company_mailboxes,
 	check_outgoing_email,
