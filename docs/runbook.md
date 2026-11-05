@@ -1017,6 +1017,25 @@ the skip feature (snapshot without `v: 2`) keep the single-block rules. A reques
 "shifts changed after this request was sent" may now mean the recomputed create / end / cancel
 steps differ from the stored ones (holiday list edited, for example), not only coverage.
 
+**"Skip weekly offs and holidays" kept the weekends** (plan 2026-11-05-001). The person's holiday
+list has no weekly-off rows: HRMS stores weekly offs as Holiday rows only after HR presses "Add to
+Holidays". The draft shows "Only holidays were skipped ..." and preflight "Holiday list weekly
+offs" names the list. Check a site from `bench --site <site> console`:
+
+```python
+from frappe.utils import today
+from hrms.utils.holiday_list import get_holiday_list_for_employee as hl_for
+used = {}
+for e in frappe.get_all("Employee", filters={"status": "Active"}, pluck="name"): hl = hl_for(e, raise_exception=False, as_on=today()) or "(none)"; used[hl] = used.get(hl, 0) + 1
+
+for hl, n in used.items(): print(hl, n, "employees, weekly_off rows:", frappe.db.count("Holiday", {"parent": hl, "weekly_off": 1}))
+```
+
+Fix in Desk: Holiday List -> pick the Weekly Off day -> Add to Holidays (once per weekly off day),
+then re-save the draft. A company that works 7 days leaves the list and turns skipping off. One-day
+"No shift that day" leaves no assignment, so a punch that day falls back to `default_shift`, as
+skipped days do.
+
 ## Bank and ID history is masked, and fills need a password
 
 `events.version_before_insert` masks bank and ID values in every new Employee Version; patch

@@ -2698,6 +2698,36 @@ literal case table in both test suites keeps them equal.
   larger and no search is typed, it says "Showing N of M. To change
   everyone, choose Whole team above."
 
+### Roster: lists with no weekly offs, one-day changes (plan 2026-11-05-001)
+
+- **Lists with no weekly-off rows.** HRMS writes weekly offs as Holiday rows
+  (`weekly_off = 1`) only when HR presses "Add to Holidays"; a list holding
+  public holidays only is common. `_known_off_days` flags such a list
+  (`weekly_offs_missing: 1`, the whole list, any span) and the simulator then
+  splits a skip at holidays only, keeps weekends, and adds the note
+  `WEEKLY_OFFS_NOT_SET` -- a note, not a refusal, so sites that work weekends
+  keep the skip. Run-aware Change / End treat that list's non-holiday gap days
+  as unknown, so a run stops there with the existing run note. The list's own
+  "Weekly Off" field is never read: it only feeds the button. Preflight
+  "Holiday list weekly offs" warns for each list in use over the next 92 days.
+- **Swap Day / Clear Day.** Row actions "Swap Day" (`shift_type`,
+  `from_date`, `assignment`) and "Clear Day" (`from_date`, `assignment`) act on
+  the block covering the date only, never a run: end it the day before (or
+  cancel it when the date is its start), create the one-day shift (Swap),
+  then recreate the old shift from the next day to its old end (open stays
+  open). No covering block refuses `NO_SHIFT_ON_DATE`; a swap to the same shift
+  refuses `SAME_SHIFT`. They are built from create / end / cancel, so
+  approval and the step comparison are unchanged. Recreated blocks carry the
+  shift type only, as other created blocks do.
+- **Run split note.** A run-aware Change / End whose run ends where the same
+  shift resumes after exactly one working day (empty, or one one-day block of
+  another shift) notes `RUN_SPLIT`, so a later End after a one-day change does
+  not silently leave the rest running.
+- **Sheet.** In a lead's draft, an assigned cell offers "Change shift",
+  "Different shift for one day", "No shift that day" and "End it"; an empty
+  cell has "Just this day" (To = From, no skip). HR's direct-edit sheet is
+  unchanged.
+
 ### Who decided a leave (U11-U13, KTD14-KTD15)
 
 `Leave Application.helixhr_decided_by` and `helixhr_decided_as_hr` (permlevel 1) are stamped in
