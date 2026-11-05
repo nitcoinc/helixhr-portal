@@ -5,7 +5,7 @@
 // approval (`helixhr.api._review_roster_ops`); nothing here decides.
 
 import { formatDate, formatDateRange } from './dates'
-import { ASSIGN, CHANGE, END, opDate, simulate } from './rosterDraft'
+import { ASSIGN, CHANGE, CLEAR_DAY, END, SWAP_DAY, opDate, simulate } from './rosterDraft'
 
 const OP_FIELDS = ['employee', 'action', 'shift_type', 'from_date', 'to_date', 'assignment']
 
@@ -62,7 +62,8 @@ export function draftSummary(ops) {
 }
 
 /** One operation in words, without the person: "Assign Night from 2 Nov to
- * 4 Nov", "Change to Night from 5 Nov", "End the shift after 6 Nov". */
+ * 4 Nov", "Change to Night from 5 Nov", "End the shift after 6 Nov",
+ * "Night on 10 Nov only", "No shift on 10 Nov" (plan 2026-11-05-001 U5). */
 export function opLabel(op) {
   if (op?.action === ASSIGN) {
     const until = op.to_date ? ` to ${formatDate(op.to_date)}` : ', no end date'
@@ -70,6 +71,8 @@ export function opLabel(op) {
   }
   if (op?.action === CHANGE) return `Change to ${op.shift_type} from ${formatDate(op.from_date)}`
   if (op?.action === END) return `End the shift after ${formatDate(op.to_date)}`
+  if (op?.action === SWAP_DAY) return `${op.shift_type} on ${formatDate(op.from_date)} only`
+  if (op?.action === CLEAR_DAY) return `No shift on ${formatDate(op.from_date)}`
   return op?.action || ''
 }
 
@@ -129,7 +132,7 @@ function covers(item, date) {
 
 /** The index of the last operation that writes `cell`'s day for `employee`,
  * or -1. An End writes the days after its date; a Change and an End only
- * touch the assignment they name. */
+ * touch the assignment they name; a Swap Day or Clear Day writes its one day. */
 export function opIndexForCell(ops, employee, cell) {
   const date = cell?.date
   for (let index = (ops || []).length - 1; index >= 0; index--) {
@@ -139,6 +142,7 @@ export function opIndexForCell(ops, employee, cell) {
     if (op.action === ASSIGN && op.from_date <= date && (!op.to_date || date <= op.to_date)) return index
     if (op.action === CHANGE && sameAssignment && op.from_date <= date) return index
     if (op.action === END && sameAssignment && op.to_date < date) return index
+    if ((op.action === SWAP_DAY || op.action === CLEAR_DAY) && op.from_date === date) return index
   }
   return -1
 }
@@ -163,7 +167,10 @@ export function cellProposal(ops, preview, employee, cell) {
   if (!first || cell.date < first) return null
   const covering = rows.find((item) => covers(item, cell.date))
   let shift
-  if (covering && String(covering.key).startsWith('new-')) shift = covering.shift_type
+  // Plan 2026-11-05-001 A3: a new block with the shift the day already has
+  // (the tail a one-day change recreates) changes nothing on that day.
+  const same = covering && cell.assignment && covering.shift_type === cell.shift_type
+  if (covering && String(covering.key).startsWith('new-') && !same) shift = covering.shift_type
   else if (!covering && cell.assignment) shift = null
   else return null
   return {

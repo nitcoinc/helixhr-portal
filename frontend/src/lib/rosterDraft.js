@@ -11,7 +11,10 @@
 export const ASSIGN = 'Assign'
 export const CHANGE = 'Change'
 export const END = 'End'
-const ACTIONS = [ASSIGN, CHANGE, END]
+// Plan 2026-11-05-001 KTD4: one-day operations, built from the same steps.
+export const SWAP_DAY = 'Swap Day'
+export const CLEAR_DAY = 'Clear Day'
+const ACTIONS = [ASSIGN, CHANGE, END, SWAP_DAY, CLEAR_DAY]
 
 export const OVERLAP =
   'This person already has a shift on some of those dates. End or change that one first.'
@@ -22,7 +25,9 @@ export const AFTER_END = 'That date is after this shift ends.'
 export const NO_SHIFT_TYPE = 'Choose a shift.'
 export const BAD_DATE = 'Give a valid date.'
 export const NO_SHIFT_ON_DATE = 'This person has no shift on that date to change or end.'
-export const BAD_ACTION = 'Choose assign, change or end.'
+export const BAD_ACTION = 'Choose assign, change, end, swap day or clear day.'
+// Plan 2026-11-05-001 A2: a Swap Day to the shift the day already has.
+export const SAME_SHIFT = 'They already have that shift on that day.'
 // Plan 2026-11-03-001 U1: skipping a person's weekly offs and holidays.
 export const SKIP_MAX_DAYS = 92
 export const NO_WORKING_DAYS = 'No working days in that range.'
@@ -37,6 +42,14 @@ export const RUN_STOPPED_UNKNOWN =
 export const RUN_OFF_DAYS_UNKNOWN =
   "Only the shift on that date was updated: their weekly offs and holidays can't be worked out, " +
   'so later shifts were left as they are. Check the rest of the run.'
+// Plan 2026-11-05-001 A1: a skip on a holiday list with no weekly-off rows.
+export const WEEKLY_OFFS_NOT_SET =
+  'Only holidays were skipped: their holiday list has no weekly offs, so weekends were kept. ' +
+  "If they don't work weekends, ask HR to add weekly offs to their holiday list."
+// Plan 2026-11-05-001 A2: a run-aware Change / End stopping at a one-day gap.
+export const RUN_SPLIT =
+  'Later shifts were left as they are: the same shift starts again after a one-day change. ' +
+  'Check the rest of the run.'
 
 /** `value` when it is a real ISO calendar date, otherwise null. */
 function isoDate(value) {
@@ -59,7 +72,8 @@ function daysBetween(start, end) {
   return Math.round((Date.parse(`${end}T00:00:00Z`) - Date.parse(`${start}T00:00:00Z`)) / 86400000)
 }
 
-/** The date an operation acts on: `to_date` for End, `from_date` otherwise. */
+/** The date an operation acts on: `to_date` for End, `from_date` otherwise
+ * (Swap Day and Clear Day included). */
 export function opDate(op) {
   return isoDate(op.action === END ? op.to_date : op.from_date)
 }
@@ -79,20 +93,28 @@ function findTarget(rows, key, day) {
   return named ?? rows.find((a) => overlaps(a, day, day)) ?? null
 }
 
-// `{ from, to, dates: Set }`, or null (cannot tell). A day outside
-// `from`..`to` is unknown too (`roster_ops._off_days`).
+// `{ from, to, dates: Set, weeklyOffsMissing }`, or null (cannot tell). A
+// day outside `from`..`to` is unknown too (`roster_ops._off_days`).
 function normalizeOff(value) {
   if (!value) return null
   const from = isoDate(value.from)
   const to = isoDate(value.to)
   if (!from || !to) return null
-  return { from, to, dates: new Set((value.dates ?? []).map(isoDate).filter(Boolean)) }
+  return {
+    from,
+    to,
+    dates: new Set((value.dates ?? []).map(isoDate).filter(Boolean)),
+    weeklyOffsMissing: !!value.weekly_offs_missing,
+  }
 }
 
-/** true / false, or null when `off` cannot tell for `day`. */
+/** true / false, or null when `off` cannot tell for `day`. With weekly offs
+ * missing (plan 2026-11-05-001 A1) only holidays are known: any other day
+ * is null, not a working day. */
 function isOff(off, day) {
   if (!off || day < off.from || day > off.to) return null
-  return off.dates.has(day)
+  if (off.dates.has(day)) return true
+  return off.weeklyOffsMissing ? null : false
 }
 
 // The block right after `block` in its run: the next one by date, same
@@ -109,20 +131,43 @@ function nextInRun(rows, block, off) {
   return following
 }
 
+// The first block starting after `day`, or null.
+function followingAfter(rows, day) {
+  const later = rows.filter((a) => a.start_date > day)
+  return later.length ? later.reduce((min, a) => (a.start_date < min.start_date ? a : min)) : null
+}
+
 // Why the run ending at `block` may stop short, or null; a working day or
-// another shift type is a normal break (`roster_ops._run_note`).
+// another shift type is a normal break -- except the one-day split (plan
+// 2026-11-05-001 A2): the same shift resumes after exactly one working day,
+// empty or one one-day block of another shift (`roster_ops._run_note`).
 function runNote(rows, block, off) {
   if (block.end_date === null) return null
-  const later = rows.filter((a) => a.start_date > block.end_date)
-  if (!later.length) return null
-  const following = later.reduce((min, a) => (a.start_date < min.start_date ? a : min))
-  if (following.shift_type !== block.shift_type) return null
-  if (!off) return RUN_OFF_DAYS_UNKNOWN
-  for (let day = addDays(block.end_date, 1); day < following.start_date; day = addDays(day, 1)) {
-    const state = isOff(off, day)
-    if (state !== true) return state === null ? RUN_STOPPED_UNKNOWN : null
+  let following = followingAfter(rows, block.end_date)
+  let swapped = null
+  if (following && following.shift_type !== block.shift_type) {
+    swapped = following.start_date
+    if (swapped !== following.end_date) return null
+    // Only known off days may sit between the run and the one-day block,
+    // so a swap on the Monday after a weekend still counts.
+    for (let day = addDays(block.end_date, 1); day < swapped; day = addDays(day, 1)) {
+      if (isOff(off, day) !== true) return null
+    }
+    following = followingAfter(rows, swapped)
   }
-  return null
+  if (!following || following.shift_type !== block.shift_type) return null
+  if (!off) return RUN_OFF_DAYS_UNKNOWN
+  let working = false
+  for (let day = addDays(block.end_date, 1); day < following.start_date; day = addDays(day, 1)) {
+    const state = day === swapped ? false : isOff(off, day)
+    if (state === null && !working) return RUN_STOPPED_UNKNOWN
+    if (state !== true) {
+      // A second working (or unknown) day is a normal break.
+      if (working) return null
+      working = true
+    }
+  }
+  return working ? RUN_SPLIT : null
 }
 
 const hasPreviousInRun = (rows, block, off) =>
@@ -171,7 +216,7 @@ const fail = (message) => [message, []]
 function apply(rows, op, index, off, runAware, notes) {
   const employee = op.employee
   if (!ACTIONS.includes(op.action)) return fail(BAD_ACTION)
-  if (op.action !== END && !op.shift_type) return fail(NO_SHIFT_TYPE)
+  if (op.action !== END && op.action !== CLEAR_DAY && !op.shift_type) return fail(NO_SHIFT_TYPE)
   const day = opDate(op)
   if (!day) return fail(BAD_DATE)
   let counter = 0
@@ -193,9 +238,34 @@ function apply(rows, op, index, off, runAware, notes) {
       if (!off || day < off.from || end > off.to) return fail(OFF_DAYS_UNKNOWN)
       spans = workingSpans(day, end, off)
       if (!spans.length) return fail(NO_WORKING_DAYS)
+      // Plan 2026-11-05-001 A1: holidays skipped, weekends kept; a note, not
+      // a refusal. `simulate` drops it if refused below.
+      if (off.weeklyOffsMissing) notes.push(WEEKLY_OFFS_NOT_SET)
     }
     if (rows.some((a) => spans.some(([start, last]) => overlaps(a, start, last)))) return fail(OVERLAP)
     return [null, spans.map(([start, last]) => newBlock(op.shift_type, start, last))]
+  }
+
+  if (op.action === SWAP_DAY || op.action === CLEAR_DAY) {
+    // Plan 2026-11-05-001 KTD4 / A2: the block covering `day` only, never a
+    // run; cancel / end first, then the creates.
+    const named = op.assignment ? rows.find((a) => a.key === op.assignment) : null
+    const target =
+      (named && overlaps(named, day, day) ? named : null) ?? rows.find((a) => overlaps(a, day, day))
+    if (!target) return fail(NO_SHIFT_ON_DATE)
+    if (op.action === SWAP_DAY && op.shift_type === target.shift_type) return fail(SAME_SHIFT)
+    const oldEnd = target.end_date
+    const steps = []
+    if (day === target.start_date) {
+      remove(target)
+      steps.push(step('cancel', employee, target))
+    } else {
+      target.end_date = dayBefore(day)
+      steps.push(step('end', employee, target, target.end_date))
+    }
+    if (op.action === SWAP_DAY) steps.push(newBlock(op.shift_type, day, day))
+    if (oldEnd === null || oldEnd > day) steps.push(newBlock(target.shift_type, addDays(day, 1), oldEnd))
+    return [null, steps]
   }
 
   const [target, viaGap] = off
@@ -255,7 +325,10 @@ function apply(rows, op, index, off, runAware, notes) {
  * run-aware Change / End; omitted, the legacy single-block rules apply
  * (`roster_ops.simulate`). `notes`, when an array, collects `{ index,
  * employee, message }` for a run-aware Change / End that may have stopped
- * short on unknown off days; notes never refuse and are not steps. */
+ * short on unknown off days or at a one-day change (plan 2026-11-05-001 A2),
+ * or a skip that kept weekends because the list
+ * has no weekly offs (`weekly_offs_missing`, plan 2026-11-05-001 A1); notes
+ * never refuse and are not steps. */
 export function simulate(coverage, ops, offDays = null, notes = null) {
   const result = {}
   for (const [employee, rows] of Object.entries(coverage ?? {})) {

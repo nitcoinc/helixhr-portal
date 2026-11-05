@@ -228,3 +228,69 @@ describe('skip rows', () => {
     expect(checkProposal({ ops, index: 0, coverage, today: '2026-11-02', name: 'Asha' })).toMatch(/tomorrow/)
   })
 })
+
+// Plan 2026-11-05-001 U5 / A3: one-day changes on an assigned cell.
+describe('one-day rows', () => {
+  const swap = (employee, date, shift = 'Night', assignment = 'SA-1') => ({
+    employee,
+    action: 'Swap Day',
+    shift_type: shift,
+    from_date: date,
+    to_date: null,
+    assignment,
+  })
+  const clear = (employee, date, assignment = 'SA-1') => ({
+    employee,
+    action: 'Clear Day',
+    shift_type: null,
+    from_date: date,
+    to_date: null,
+    assignment,
+  })
+  const live = (date) => ({ date, shift_type: 'Day', assignment: 'SA-1' })
+
+  it('words a swap and a clear, and neither skips', () => {
+    expect(opLabel(swap('E1', '2026-11-10'))).toBe(`Night on ${formatDate('2026-11-10')} only`)
+    expect(opLabel(clear('E1', '2026-11-10'))).toBe(`No shift on ${formatDate('2026-11-10')}`)
+    expect(skipsOffDays({ ...swap('E1', '2026-11-10'), skip_off_days: 1 })).toBe(false)
+    expect(skipsOffDays({ ...clear('E1', '2026-11-10'), skip_off_days: 1 })).toBe(false)
+  })
+
+  it('a one-day row writes its own day only', () => {
+    const ops = [clear('E1', '2026-11-04'), swap('E1', '2026-11-06')]
+    expect(opIndexForCell(ops, 'E1', live('2026-11-04'))).toBe(0)
+    expect(opIndexForCell(ops, 'E1', live('2026-11-06'))).toBe(1)
+    expect(opIndexForCell(ops, 'E1', live('2026-11-05'))).toBe(-1)
+    expect(opIndexForCell(ops, 'E1', live('2026-11-07'))).toBe(-1)
+  })
+
+  it('marks the changed days, not the recreated tail with the same shift', () => {
+    // Clear Wed 4 and Swap Fri 6 on an open-ended Day shift: the simulated
+    // coverage has new blocks of Day for Thu 5 and from Sat 7.
+    const ops = [clear('E1', '2026-11-04'), swap('E1', '2026-11-06')]
+    const preview = {
+      E1: [
+        { key: 'SA-1', shift_type: 'Day', start_date: '2026-10-01', end_date: '2026-11-03' },
+        { key: 'new-0-1', shift_type: 'Day', start_date: '2026-11-05', end_date: '2026-11-05' },
+        { key: 'new-1-2', shift_type: 'Night', start_date: '2026-11-06', end_date: '2026-11-06' },
+        { key: 'new-1-3', shift_type: 'Day', start_date: '2026-11-07', end_date: null },
+      ],
+    }
+    expect(cellProposal(ops, preview, 'E1', live('2026-11-04'))).toEqual({
+      index: 0,
+      shift_type: null,
+      label: 'Proposed: no shift',
+    })
+    expect(cellProposal(ops, preview, 'E1', live('2026-11-05'))).toBeNull()
+    expect(cellProposal(ops, preview, 'E1', live('2026-11-06'))).toEqual({
+      index: 1,
+      shift_type: 'Night',
+      label: 'Proposed: Night',
+    })
+    expect(cellProposal(ops, preview, 'E1', live('2026-11-08'))).toBeNull()
+    // An empty day getting a new block is still a proposal.
+    expect(cellProposal(ops, preview, 'E1', { date: '2026-11-08', shift_type: null, assignment: null })).toMatchObject({
+      label: 'Proposed: Day',
+    })
+  })
+})

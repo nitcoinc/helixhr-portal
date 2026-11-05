@@ -493,6 +493,178 @@ test.describe('manager roster requests', () => {
     await expect(notice).toHaveCount(0)
   })
 
+  // Plan 2026-11-05-001 U5. One-day changes on the report's open-ended
+  // shift, and a one-day shift for the colleague, who has none next week.
+  // Swap Day needs a second shift; its name sorts after SHIFT so every
+  // sheet still opens on SHIFT.
+  const SWING = '_Test Portal Swing Shift'
+  async function ensureSwingShift(baseURL: string) {
+    const api = await request.newContext({ baseURL, extraHTTPHeaders: { Host: SITE_HOST } })
+    await api.post('/api/method/login', { form: { usr: 'Administrator', pwd: 'admin' } })
+    const found = await api.get(
+      '/api/method/frappe.client.get_count?doctype=Shift%20Type&filters=' +
+        encodeURIComponent(JSON.stringify({ name: SWING })),
+    )
+    if (!(await found.json()).message) {
+      const made = await api.post('/api/method/frappe.client.insert', {
+        data: {
+          doc: JSON.stringify({ doctype: 'Shift Type', __newname: SWING, start_time: '14:00:00', end_time: '22:00:00' }),
+        },
+      })
+      expect(made.ok(), await made.text()).toBeTruthy()
+    }
+    await api.dispose()
+  }
+
+  async function draftRows(page: Page) {
+    const response = await page.request.get('/api/method/helixhr.api.get_roster_draft')
+    return ((await response.json()).message.draft?.rows || []) as {
+      action: string
+      shift_type: string | null
+      from_date: string | null
+      to_date: string | null
+      skip_off_days: number
+    }[]
+  }
+
+  test('one-day changes: no shift one day, a different shift another, and the rest untouched', async ({
+    page,
+    baseURL,
+  }) => {
+    await ensureSwingShift(baseURL!)
+    const reportName = await employeeName(baseURL!)
+    await teamNextWeek(page)
+    const report = row(page, reportName)
+    await expect(report.getByText(SHIFT)).toHaveCount(7)
+    const sheet = page.getByTestId('roster-sheet')
+
+    // Wednesday: no shift that day, from the keyboard.
+    await cell(report, 2).getByRole('button').click()
+    await expect(sheet).toBeVisible()
+    const chip = sheet.getByRole('button', { name: 'No shift that day' })
+    await chip.focus()
+    await page.keyboard.press('Enter')
+    await expect(chip).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.locator('#roster-shift-type')).toHaveCount(0)
+    const wednesday = await sheet.getByLabel(/^Day/).inputValue()
+    await expect(sheet).toContainText('The usual shift continues the next day.')
+    await sheet.getByRole('button', { name: 'Add to request' }).click()
+    await expect(sheet).toBeHidden()
+    await expect(page.getByTestId('roster-draft-summary')).toHaveText('1 change for 1 person')
+    await expect(cell(report, 2)).toContainText('Proposed: no shift')
+    for (const index of [0, 1, 3, 4, 5, 6]) await expect(cell(report, index)).not.toContainText('Proposed')
+
+    // Friday: a second one-day change on the same row, a different shift.
+    await cell(report, 4).getByRole('button').click()
+    await expect(sheet).toBeVisible()
+    await sheet.getByRole('button', { name: 'Different shift for one day' }).click()
+    await page.locator('#roster-shift-type').selectOption(SWING)
+    const friday = await sheet.getByLabel(/^Day/).inputValue()
+    await sheet.getByRole('button', { name: 'Add to request' }).click()
+    await expect(sheet).toBeHidden()
+    await expect(page.getByTestId('roster-draft-summary')).toHaveText('2 changes for 1 person')
+    await expect(cell(report, 4)).toContainText(`Proposed: ${SWING}`)
+    await expect(cell(report, 2)).toContainText('Proposed: no shift')
+    for (const index of [0, 1, 3, 5, 6]) await expect(cell(report, index)).not.toContainText('Proposed')
+
+    const rows = await draftRows(page)
+    expect(rows.map((r) => [r.action, r.shift_type || null, r.from_date])).toEqual([
+      ['Clear Day', null, wednesday],
+      ['Swap Day', SWING, friday],
+    ])
+    const bar = page.getByTestId('roster-draft-bar')
+    await bar.getByRole('button', { name: 'Show changes' }).click()
+    const items = page.getByTestId('roster-draft-item')
+    await expect(items.nth(0)).toContainText(/No shift on \S/)
+    await expect(items.nth(1)).toContainText(new RegExp(`${SWING} on .+ only`))
+
+    await page.getByTestId('roster-submit').click()
+    await expect(page.getByTestId('toast').getByText('Sent to HR for approval')).toBeVisible()
+    expect((await latestRequest(page)).status).toBe('Pending')
+  })
+
+  test('editing a saved no-shift day keeps it a no-shift day', async ({ page, baseURL }) => {
+    const reportName = await employeeName(baseURL!)
+    await teamNextWeek(page)
+    const report = row(page, reportName)
+    const sheet = page.getByTestId('roster-sheet')
+
+    await cell(report, 2).getByRole('button').click()
+    await sheet.getByRole('button', { name: 'No shift that day' }).click()
+    const wednesday = await sheet.getByLabel(/^Day/).inputValue()
+    await sheet.getByRole('button', { name: 'Add to request' }).click()
+    await expect(sheet).toBeHidden()
+
+    const bar = page.getByTestId('roster-draft-bar')
+    await bar.getByRole('button', { name: 'Show changes' }).click()
+    await bar.getByRole('button', { name: new RegExp(`^Edit change 1: ${reportName}, No shift on`) }).click()
+    await expect(sheet).toBeVisible()
+    await expect(sheet.getByRole('button', { name: 'No shift that day' })).toHaveAttribute('aria-pressed', 'true')
+    await expect(sheet.getByLabel(/^Day/)).toHaveValue(wednesday)
+    const thursday = addDays(wednesday, 1)
+    await sheet.getByLabel(/^Day/).fill(thursday)
+    await sheet.getByRole('button', { name: 'Save change' }).click()
+    await expect(sheet).toBeHidden()
+
+    const rows = await draftRows(page)
+    expect(rows.map((r) => [r.action, r.from_date])).toEqual([['Clear Day', thursday]])
+    await expect(page.getByTestId('roster-draft-item')).toHaveCount(1)
+    await expect(page.getByTestId('roster-draft-item')).toContainText('No shift on')
+    await expect(cell(report, 3)).toContainText('Proposed: no shift')
+    await expect(cell(report, 2)).not.toContainText('Proposed')
+  })
+
+  test('an empty day takes a one-day shift with no skip', async ({ page }) => {
+    await teamNextWeek(page)
+    const colleague = row(page, COLLEAGUE)
+    const sheet = page.getByTestId('roster-sheet')
+
+    await cell(colleague, 1).getByRole('button').click()
+    await expect(sheet).toBeVisible()
+    const tuesday = await sheet.getByLabel('From').inputValue()
+    await page.locator('#roster-shift-type').selectOption(SHIFT)
+    await sheet.getByLabel('To (optional)').fill(addDays(tuesday, 3))
+    await expect(sheet.getByTestId('roster-skip-off-days')).toBeVisible()
+
+    const oneDay = sheet.getByTestId('roster-one-day')
+    await oneDay.check()
+    await expect(oneDay).toHaveAttribute('aria-checked', 'true')
+    await expect(sheet.getByLabel('To (optional)')).toHaveCount(0)
+    await expect(sheet.getByTestId('roster-skip-off-days')).toHaveCount(0)
+    await expect(sheet).toContainText('One day only. The shift ends the same day.')
+    // Off again: To comes back empty.
+    await oneDay.uncheck()
+    await expect(sheet.getByLabel('To (optional)')).toHaveValue('')
+    await oneDay.check()
+    await expect(sheet.getByLabel(/^Day/)).toHaveValue(tuesday)
+    await sheet.getByRole('button', { name: 'Add to request' }).click()
+    await expect(sheet).toBeHidden()
+
+    const rows = await draftRows(page)
+    expect(rows.map((r) => [r.action, r.from_date, r.to_date, r.skip_off_days])).toEqual([
+      ['Assign', tuesday, tuesday, 0],
+    ])
+    await expect(cell(colleague, 1)).toContainText(`Proposed: ${SHIFT}`)
+    for (const index of [0, 2, 3]) await expect(cell(colleague, index)).not.toContainText('Proposed')
+  })
+
+  test('at phone width the four actions on a shift all show', async ({ page, baseURL }) => {
+    const reportName = await employeeName(baseURL!)
+    await page.setViewportSize({ width: 375, height: 812 })
+    await teamNextWeek(page)
+    await page.getByRole('button', { name: `Propose a change to ${reportName}'s shift on Monday` }).click()
+    const sheet = page.getByTestId('roster-sheet')
+    await expect(sheet).toBeVisible()
+    const group = sheet.getByRole('group', { name: new RegExp(`^What to do with ${reportName}'s shift on `) })
+    for (const name of ['Change shift', 'Different shift for one day', 'No shift that day', 'End it']) {
+      await expect(group.getByRole('button', { name })).toBeInViewport({ ratio: 1 })
+    }
+    const overflow = await page.evaluate(
+      () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+    )
+    expect(overflow).toBeLessThanOrEqual(0)
+  })
+
   test('at phone width the sheet and the draft bar fit with no sideways scroll', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 })
     await teamNextWeek(page)

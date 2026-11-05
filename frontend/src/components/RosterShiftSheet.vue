@@ -28,6 +28,11 @@ import RosterPeoplePicker from '@/components/RosterPeoplePicker.vue'
 // splits it (A11 -- the browser never does) and the draft bar shows the
 // shifts it made. "Apply to" sends one operation for the whole team or a
 // pick through `proposeBulk`; editing a draft row hides it (A10).
+//
+// Plan 2026-11-05-001 U5 / A3. Propose mode adds the one-day changes on an
+// assigned cell ("Swap Day" / "Clear Day": the usual shift carries on the
+// next day) and, on an empty cell, "Just this day": an Assign with To = From
+// and no skip (KTD5). HR's own sheet is unchanged.
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
   /** `{ employee, employee_name }` of the row. */
@@ -72,7 +77,8 @@ const assigned = computed(() =>
   editedOp.value ? editedOp.value.action !== 'Assign' : !!props.cell?.assignment,
 )
 
-// 'end' | 'change' | 'cancel' for an assigned cell; unused for an empty one.
+// 'end' | 'change' | 'cancel' (HR) | 'swap' | 'clear' (propose) for an
+// assigned cell; unused for an empty one.
 const action = ref('end')
 const shiftType = ref('')
 const fromDate = ref('')
@@ -82,6 +88,8 @@ const confirmCancel = ref(false)
 const error = ref('')
 const sending = ref(false)
 const skip = ref(true)
+// Propose mode, an empty cell: one day only, To follows From.
+const oneDay = ref(false)
 // 'one' | 'team' | 'pick', and the picked ids for 'pick'.
 const applyTo = ref('one')
 const picked = ref([])
@@ -104,15 +112,19 @@ function reset() {
   fill()
 }
 
+// A saved row's action as the sheet's chip.
+const SHEET_ACTION = { End: 'end', Change: 'change', 'Swap Day': 'swap', 'Clear Day': 'clear' }
+
 function fill() {
   const op = editedOp.value
-  action.value = op ? (op.action === 'End' ? 'end' : 'change') : proposing.value ? 'change' : 'end'
+  action.value = op ? SHEET_ACTION[op.action] || 'change' : proposing.value ? 'change' : 'end'
   shiftType.value = op?.shift_type || props.shiftTypes[0]?.name || ''
   fromDate.value = op?.action === 'Assign' ? op.from_date : firstDay.value
   toDate.value = op?.action === 'Assign' ? op.to_date || '' : ''
   onDate.value = op ? (op.action === 'End' ? op.to_date : op.from_date) || firstDay.value : firstDay.value
   // R1: on by default for a new Assign; an edit keeps the row's own setting.
   skip.value = op ? skipsOffDays(op) : true
+  oneDay.value = op?.action === 'Assign' && !!op.to_date && op.to_date === op.from_date && !skip.value
   confirmCancel.value = false
   error.value = ''
   refusedKey.value = ''
@@ -127,10 +139,23 @@ function startEdit() {
   editing.value = true
   fill()
 }
-watch(action, () => {
+watch(action, (value) => {
   error.value = ''
   confirmCancel.value = false
+  // A swap to the shift the day already has is refused (SAME_SHIFT): start
+  // the picker on another one.
+  if (value === 'swap' && shiftType.value === props.cell?.shift_type) {
+    shiftType.value = props.shiftTypes.find((shift) => shift.name !== props.cell.shift_type)?.name || shiftType.value
+  }
 })
+// Turning "Just this day" off leaves no end date behind.
+function toggleOneDay() {
+  toDate.value = ''
+}
+/** The Assign's end date: From itself for "Just this day". */
+const endDate = computed(() => (oneDay.value ? fromDate.value : toDate.value))
+const ONE_DAY_ACTIONS = ['swap', 'clear']
+const oneDayAction = computed(() => assigned.value && ONE_DAY_ACTIONS.includes(action.value))
 
 const HR_ACTIONS = [
   { value: 'end', label: 'End it' },
@@ -145,6 +170,8 @@ const APPLY_TO = [
 ]
 const PROPOSE_ACTIONS = [
   { value: 'change', label: 'Change shift' },
+  { value: 'swap', label: 'Different shift for one day' },
+  { value: 'clear', label: 'No shift that day' },
   { value: 'end', label: 'End it' },
 ]
 const ACTIONS = computed(() => (proposing.value ? PROPOSE_ACTIONS : HR_ACTIONS))
@@ -172,7 +199,7 @@ const title = computed(() => {
   const when = props.cell?.date ? formatDate(props.cell.date) : ''
   if (proposing.value) {
     if (props.proposal) return `Proposed change · ${who}`
-    return assigned.value ? `Propose a change · ${who}` : `Propose a shift · ${who}, ${when}`
+    return assigned.value ? `Propose a change · ${who}, ${when}` : `Propose a shift · ${who}, ${when}`
   }
   return assigned.value ? `${who}'s shift` : `Assign a shift · ${who}, ${when}`
 })
@@ -191,12 +218,12 @@ const change = createResource({ url: 'helixhr.api.change_shift_assignment', meth
 const cancel = createResource({ url: 'helixhr.api.cancel_shift_assignment', method: 'POST' })
 
 // Only a new Assign with an end date can skip (R2).
-const showsSkip = computed(() => proposing.value && !assigned.value && !!toDate.value)
+const showsSkip = computed(() => proposing.value && !assigned.value && !!endDate.value && !oneDay.value)
 const showsApplyTo = computed(() => proposing.value && !editing.value && !!props.proposeBulk)
 const bulk = computed(() => showsApplyTo.value && applyTo.value !== 'one')
 const editedBlocks = computed(() => (editing.value ? blocksLabel(props.proposal?.blocks) : ''))
 const formKey = computed(() =>
-  JSON.stringify([action.value, shiftType.value, fromDate.value, toDate.value, onDate.value, skip.value, applyTo.value, picked.value]),
+  JSON.stringify([action.value, shiftType.value, fromDate.value, toDate.value, onDate.value, skip.value, oneDay.value, applyTo.value, picked.value]),
 )
 
 const canSubmit = computed(() => {
@@ -204,8 +231,8 @@ const canSubmit = computed(() => {
   if (refusedKey.value && refusedKey.value === formKey.value) return false
   if (bulk.value && applyTo.value === 'pick' && !picked.value.length) return false
   if (!assigned.value) return !!shiftType.value && !!fromDate.value
-  if (action.value === 'change') return !!shiftType.value && !!onDate.value
-  if (action.value === 'end') return !!onDate.value
+  if (action.value === 'change' || action.value === 'swap') return !!shiftType.value && !!onDate.value
+  if (action.value === 'end' || action.value === 'clear') return !!onDate.value
   return true
 })
 
@@ -244,12 +271,16 @@ function proposedOp() {
       action: 'Assign',
       shift_type: shiftType.value,
       from_date: fromDate.value,
-      to_date: toDate.value || null,
-      skip_off_days: toDate.value && skip.value ? 1 : 0,
+      to_date: endDate.value || null,
+      skip_off_days: showsSkip.value && skip.value ? 1 : 0,
     }
   }
   const target = editedOp.value ? editedOp.value.assignment : props.cell.assignment
   if (action.value === 'end') return { ...base, action: 'End', to_date: onDate.value, assignment: target }
+  if (action.value === 'swap') {
+    return { ...base, action: 'Swap Day', shift_type: shiftType.value, from_date: onDate.value, assignment: target }
+  }
+  if (action.value === 'clear') return { ...base, action: 'Clear Day', from_date: onDate.value, assignment: target }
   return { ...base, action: 'Change', shift_type: shiftType.value, from_date: onDate.value, assignment: target }
 }
 
@@ -417,9 +448,11 @@ function submit() {
           <legend class="label mb-2">
             What to do
           </legend>
+          <!-- Wraps: four chips do not fit one line of a small sheet. -->
           <SegmentedChips
             v-model="action"
-            label="What to do"
+            class="flex-wrap"
+            :label="`What to do with ${person?.employee_name || ''}'s shift on ${cell?.date ? formatDate(cell.date) : ''}`"
             :options="ACTIONS"
           />
         </fieldset>
@@ -427,14 +460,14 @@ function submit() {
         <!-- A native select, the same reason as Settings' route picker:
              FormControl's select is a combobox in this frappe-ui. -->
         <div
-          v-if="!assigned || action === 'change'"
+          v-if="!assigned || action === 'change' || action === 'swap'"
           class="space-y-1.5"
         >
           <label
             for="roster-shift-type"
             class="text-sm text-ink-gray-7"
           >
-            {{ assigned ? 'New shift' : 'Shift' }}
+            {{ !assigned ? 'Shift' : action === 'swap' ? 'Shift that day' : 'New shift' }}
           </label>
           <select
             id="roster-shift-type"
@@ -452,27 +485,45 @@ function submit() {
           </select>
         </div>
 
+        <label
+          v-if="proposing && !assigned"
+          class="flex min-h-11 cursor-pointer items-center gap-2 text-sm text-ink-gray-8"
+        >
+          <input
+            v-model="oneDay"
+            type="checkbox"
+            role="switch"
+            class="size-5 shrink-0"
+            :aria-checked="oneDay ? 'true' : 'false'"
+            :disabled="sending"
+            data-testid="roster-one-day"
+            @change="toggleOneDay"
+          >
+          Just this day
+        </label>
         <div
           v-if="!assigned"
-          class="grid grid-cols-2 gap-3"
+          class="grid gap-3"
+          :class="oneDay ? 'grid-cols-1' : 'grid-cols-2'"
         >
           <FormControl
             v-model="fromDate"
             type="date"
-            label="From"
+            :label="oneDay ? 'Day' : 'From'"
             required
           />
           <FormControl
+            v-if="!oneDay"
             v-model="toDate"
             type="date"
             label="To (optional)"
           />
         </div>
         <p
-          v-if="!assigned && !toDate"
+          v-if="!assigned && (oneDay || !toDate)"
           class="-mt-2 text-xs text-ink-gray-5"
         >
-          With no end date, the shift carries on until someone ends it.
+          {{ oneDay ? 'One day only. The shift ends the same day.' : 'With no end date, the shift carries on until someone ends it.' }}
         </p>
 
         <div
@@ -557,6 +608,18 @@ function submit() {
           label="New shift starts on"
           required
         />
+        <template v-if="oneDayAction">
+          <FormControl
+            v-model="onDate"
+            type="date"
+            label="Day"
+            required
+          />
+          <p class="-mt-2 text-xs text-ink-gray-5">
+            {{ action === 'swap' ? 'Only this day changes.' : 'No shift this day.' }} The usual shift continues
+            the next day. Tomorrow at the earliest.
+          </p>
+        </template>
 
         <p
           v-if="assigned && action === 'cancel'"

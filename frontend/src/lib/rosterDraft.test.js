@@ -9,8 +9,11 @@ import {
   OFF_DAYS_UNKNOWN,
   OVERLAP,
   RUN_OFF_DAYS_UNKNOWN,
+  RUN_SPLIT,
   RUN_STOPPED_UNKNOWN,
+  SAME_SHIFT,
   SKIP_SPAN,
+  WEEKLY_OFFS_NOT_SET,
   opDate,
   simulate,
 } from './rosterDraft'
@@ -673,6 +676,351 @@ const CASES = [
     problems: [],
     notes: []
   },
+  // Plan 2026-11-05-001 A1: a holiday list with no weekly-off rows.
+  {
+    name: 'skip: a list without weekly offs skips only holidays, with a note',
+    coverage: {},
+    off_days: {
+      E1: { from: '2026-11-01', to: '2026-12-31', dates: ['2026-11-12'], weekly_offs_missing: 1 }
+    },
+    ops: [
+      { employee: 'E1', action: 'Assign', shift_type: 'Day', from_date: '2026-11-02', to_date: '2026-11-15', skip_off_days: 1 }
+    ],
+    expect: {
+      E1: [
+        ['new-0-0', 'Day', '2026-11-02', '2026-11-11'],
+        ['new-0-1', 'Day', '2026-11-13', '2026-11-15']
+      ]
+    },
+    problems: [],
+    notes: [
+      [0, WEEKLY_OFFS_NOT_SET]
+    ]
+  },
+  {
+    name: 'skip off: a list without weekly offs is one block, no note',
+    coverage: {},
+    off_days: {
+      E1: { from: '2026-11-01', to: '2026-12-31', dates: ['2026-11-12'], weekly_offs_missing: 1 }
+    },
+    ops: [
+      { employee: 'E1', action: 'Assign', shift_type: 'Day', from_date: '2026-11-02', to_date: '2026-11-15' }
+    ],
+    expect: {
+      E1: [
+        ['new-0-0', 'Day', '2026-11-02', '2026-11-15']
+      ]
+    },
+    problems: [],
+    notes: []
+  },
+  {
+    name: 'run: without weekly offs a holiday gap joins the run and a weekend gap stops it',
+    coverage: {
+      E1: [
+        ['SA-1', 'Day', '2026-11-02', '2026-11-11'],
+        ['SA-2', 'Day', '2026-11-13', '2026-11-13'],
+        ['SA-3', 'Day', '2026-11-16', '2026-11-20']
+      ]
+    },
+    off_days: {
+      E1: { from: '2026-11-01', to: '2026-12-31', dates: ['2026-11-12'], weekly_offs_missing: 1 }
+    },
+    ops: [
+      { employee: 'E1', action: 'Change', shift_type: 'Night', from_date: '2026-11-04', assignment: 'SA-1' }
+    ],
+    expect: {
+      E1: [
+        ['SA-1', 'Day', '2026-11-02', '2026-11-03'],
+        ['SA-3', 'Day', '2026-11-16', '2026-11-20'],
+        ['new-0-0', 'Night', '2026-11-04', '2026-11-11'],
+        ['new-0-1', 'Night', '2026-11-13', '2026-11-13']
+      ]
+    },
+    problems: [],
+    notes: [
+      [0, RUN_STOPPED_UNKNOWN]
+    ]
+  },
+  // Plan 2026-11-05-001 U3 / KTD4: one-day Swap Day and Clear Day.
+  {
+    name: 'swap day: inside a block ends it, adds the day and the rest',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-13']] },
+    ops: [{ employee: 'E1', action: 'Swap Day', shift_type: 'Night', from_date: '2026-11-04', assignment: 'SA-1' }],
+    expect: {
+      E1: [
+        ['SA-1', 'Day', '2026-11-02', '2026-11-03'],
+        ['new-0-0', 'Night', '2026-11-04', '2026-11-04'],
+        ['new-0-1', 'Day', '2026-11-05', '2026-11-13'],
+      ],
+    },
+    problems: [],
+    steps: [
+      [
+        ['end', 'SA-1', 'Day', '2026-11-02', '2026-11-03'],
+        ['create', 'new-0-0', 'Night', '2026-11-04', '2026-11-04'],
+        ['create', 'new-0-1', 'Day', '2026-11-05', '2026-11-13'],
+      ],
+    ],
+  },
+  {
+    name: 'clear day: inside a block ends it and adds the rest',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-13']] },
+    ops: [{ employee: 'E1', action: 'Clear Day', from_date: '2026-11-04', assignment: 'SA-1' }],
+    expect: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-03'], ['new-0-0', 'Day', '2026-11-05', '2026-11-13']] },
+    problems: [],
+    steps: [
+      [['end', 'SA-1', 'Day', '2026-11-02', '2026-11-03'], ['create', 'new-0-0', 'Day', '2026-11-05', '2026-11-13']],
+    ],
+  },
+  {
+    name: 'swap day: on the first day cancels the block before the creates',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-04', '2026-11-13']] },
+    ops: [{ employee: 'E1', action: 'Swap Day', shift_type: 'Night', from_date: '2026-11-04', assignment: 'SA-1' }],
+    expect: {
+      E1: [['new-0-0', 'Night', '2026-11-04', '2026-11-04'], ['new-0-1', 'Day', '2026-11-05', '2026-11-13']],
+    },
+    problems: [],
+    steps: [
+      [
+        ['cancel', 'SA-1', 'Day', '2026-11-04', '2026-11-13'],
+        ['create', 'new-0-0', 'Night', '2026-11-04', '2026-11-04'],
+        ['create', 'new-0-1', 'Day', '2026-11-05', '2026-11-13'],
+      ],
+    ],
+  },
+  {
+    name: 'clear day: on the first day cancels the block and adds the rest',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-04', '2026-11-13']] },
+    ops: [{ employee: 'E1', action: 'Clear Day', from_date: '2026-11-04', assignment: 'SA-1' }],
+    expect: { E1: [['new-0-0', 'Day', '2026-11-05', '2026-11-13']] },
+    problems: [],
+    steps: [
+      [
+        ['cancel', 'SA-1', 'Day', '2026-11-04', '2026-11-13'],
+        ['create', 'new-0-0', 'Day', '2026-11-05', '2026-11-13'],
+      ],
+    ],
+  },
+  {
+    name: 'swap day: on the last day ends the block and adds the day',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-04']] },
+    ops: [{ employee: 'E1', action: 'Swap Day', shift_type: 'Night', from_date: '2026-11-04', assignment: 'SA-1' }],
+    expect: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-03'], ['new-0-0', 'Night', '2026-11-04', '2026-11-04']] },
+    problems: [],
+    steps: [
+      [
+        ['end', 'SA-1', 'Day', '2026-11-02', '2026-11-03'],
+        ['create', 'new-0-0', 'Night', '2026-11-04', '2026-11-04'],
+      ],
+    ],
+  },
+  {
+    name: 'clear day: on the last day only ends the block',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-04']] },
+    ops: [{ employee: 'E1', action: 'Clear Day', from_date: '2026-11-04', assignment: 'SA-1' }],
+    expect: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-03']] },
+    problems: [],
+    steps: [[['end', 'SA-1', 'Day', '2026-11-02', '2026-11-03']]],
+  },
+  {
+    name: 'swap day: a one-day block is cancelled and replaced',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-04', '2026-11-04']] },
+    ops: [{ employee: 'E1', action: 'Swap Day', shift_type: 'Night', from_date: '2026-11-04', assignment: 'SA-1' }],
+    expect: { E1: [['new-0-0', 'Night', '2026-11-04', '2026-11-04']] },
+    problems: [],
+    steps: [
+      [
+        ['cancel', 'SA-1', 'Day', '2026-11-04', '2026-11-04'],
+        ['create', 'new-0-0', 'Night', '2026-11-04', '2026-11-04'],
+      ],
+    ],
+  },
+  {
+    name: 'clear day: a one-day block is cancelled',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-04', '2026-11-04']] },
+    ops: [{ employee: 'E1', action: 'Clear Day', from_date: '2026-11-04', assignment: 'SA-1' }],
+    expect: {  },
+    problems: [],
+    steps: [[['cancel', 'SA-1', 'Day', '2026-11-04', '2026-11-04']]],
+  },
+  {
+    name: 'swap day: no shift on the date is refused, even when the assignment is named',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-05', '2026-11-13']] },
+    ops: [{ employee: 'E1', action: 'Swap Day', shift_type: 'Night', from_date: '2026-11-04', assignment: 'SA-1' }],
+    expect: { E1: [['SA-1', 'Day', '2026-11-05', '2026-11-13']] },
+    problems: [[0, NO_SHIFT_ON_DATE]],
+    steps: [[]],
+  },
+  {
+    name: 'clear day: no shift on the date is refused',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-05', '2026-11-13']] },
+    ops: [{ employee: 'E1', action: 'Clear Day', from_date: '2026-11-04' }],
+    expect: { E1: [['SA-1', 'Day', '2026-11-05', '2026-11-13']] },
+    problems: [[0, NO_SHIFT_ON_DATE]],
+    steps: [[]],
+  },
+  {
+    name: 'swap day: to the shift they already have is refused',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-13']] },
+    ops: [{ employee: 'E1', action: 'Swap Day', shift_type: 'Day', from_date: '2026-11-04', assignment: 'SA-1' }],
+    expect: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-13']] },
+    problems: [[0, SAME_SHIFT]],
+    steps: [[]],
+  },
+  {
+    name: 'clear day: inside an open-ended block, the rest stays open-ended',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-02', null]] },
+    ops: [{ employee: 'E1', action: 'Clear Day', from_date: '2026-11-04', assignment: 'SA-1' }],
+    expect: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-03'], ['new-0-0', 'Day', '2026-11-05', null]] },
+    problems: [],
+    steps: [[['end', 'SA-1', 'Day', '2026-11-02', '2026-11-03'], ['create', 'new-0-0', 'Day', '2026-11-05', null]]],
+  },
+  {
+    name: 'one-day: a clear after a swap acts on the rest the swap created',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-13']] },
+    ops: [
+      { employee: 'E1', action: 'Swap Day', shift_type: 'Night', from_date: '2026-11-03', assignment: 'SA-1' },
+      { employee: 'E1', action: 'Clear Day', from_date: '2026-11-05', assignment: 'SA-1' },
+    ],
+    expect: {
+      E1: [
+        ['SA-1', 'Day', '2026-11-02', '2026-11-02'],
+        ['new-0-0', 'Night', '2026-11-03', '2026-11-03'],
+        ['new-0-1', 'Day', '2026-11-04', '2026-11-04'],
+        ['new-1-0', 'Day', '2026-11-06', '2026-11-13'],
+      ],
+    },
+    problems: [],
+    steps: [
+      [
+        ['end', 'SA-1', 'Day', '2026-11-02', '2026-11-02'],
+        ['create', 'new-0-0', 'Night', '2026-11-03', '2026-11-03'],
+        ['create', 'new-0-1', 'Day', '2026-11-04', '2026-11-13'],
+      ],
+      [
+        ['end', 'new-0-1', 'Day', '2026-11-04', '2026-11-04'],
+        ['create', 'new-1-0', 'Day', '2026-11-06', '2026-11-13'],
+      ],
+    ],
+  },
+  {
+    name: 'one-day: a swap on a day already swapped replaces the one-day block',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-13']] },
+    ops: [
+      { employee: 'E1', action: 'Swap Day', shift_type: 'Night', from_date: '2026-11-04', assignment: 'SA-1' },
+      { employee: 'E1', action: 'Swap Day', shift_type: 'Late', from_date: '2026-11-04', assignment: 'SA-1' },
+    ],
+    expect: {
+      E1: [
+        ['SA-1', 'Day', '2026-11-02', '2026-11-03'],
+        ['new-0-1', 'Day', '2026-11-05', '2026-11-13'],
+        ['new-1-0', 'Late', '2026-11-04', '2026-11-04'],
+      ],
+    },
+    problems: [],
+    steps: [
+      [
+        ['end', 'SA-1', 'Day', '2026-11-02', '2026-11-03'],
+        ['create', 'new-0-0', 'Night', '2026-11-04', '2026-11-04'],
+        ['create', 'new-0-1', 'Day', '2026-11-05', '2026-11-13'],
+      ],
+      [
+        ['cancel', 'new-0-0', 'Night', '2026-11-04', '2026-11-04'],
+        ['create', 'new-1-0', 'Late', '2026-11-04', '2026-11-04'],
+      ],
+    ],
+  },
+  {
+    name: 'one-day: refusals change nothing and the rest still run',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-13']] },
+    ops: [
+      { employee: 'E1', action: 'Clear Day', from_date: '2026-11-20', assignment: 'SA-1' },
+      { employee: 'E1', action: 'Swap Day', shift_type: 'Day', from_date: '2026-11-04', assignment: 'SA-1' },
+      { employee: 'E1', action: 'Swap Day', from_date: '2026-11-04', assignment: 'SA-1' },
+      { employee: 'E1', action: 'Clear Day', from_date: '2026-11-04', assignment: 'SA-1' },
+    ],
+    expect: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-03'], ['new-3-0', 'Day', '2026-11-05', '2026-11-13']] },
+    problems: [[0, NO_SHIFT_ON_DATE], [1, SAME_SHIFT], [2, NO_SHIFT_TYPE]],
+    steps: [
+      [],
+      [],
+      [],
+      [['end', 'SA-1', 'Day', '2026-11-02', '2026-11-03'], ['create', 'new-3-0', 'Day', '2026-11-05', '2026-11-13']],
+    ],
+  },
+  // Plan 2026-11-05-001 A2: a run split by a one-day change gets a note.
+  {
+    name: 'run split: an end before a cleared day notes the run resumes after it',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-02', null]] },
+    off_days: { E1: { from: '2026-11-01', to: '2026-12-31', dates: WEEKENDS } },
+    ops: [
+      { employee: 'E1', action: 'Clear Day', from_date: '2026-11-04', assignment: 'SA-1' },
+      { employee: 'E1', action: 'End', to_date: '2026-11-02', assignment: 'SA-1' },
+    ],
+    expect: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-02'], ['new-0-0', 'Day', '2026-11-05', null]] },
+    problems: [],
+    notes: [[1, RUN_SPLIT]],
+    steps: [
+      [['end', 'SA-1', 'Day', '2026-11-02', '2026-11-03'], ['create', 'new-0-0', 'Day', '2026-11-05', null]],
+      [['end', 'SA-1', 'Day', '2026-11-02', '2026-11-02']],
+    ],
+  },
+  {
+    name: 'run split: a change before a swapped day notes the run resumes after it',
+    coverage: { E1: [['SA-1', 'Day', '2026-10-26', null]] },
+    off_days: { E1: { from: '2026-11-01', to: '2026-12-31', dates: WEEKENDS } },
+    ops: [
+      { employee: 'E1', action: 'Swap Day', shift_type: 'Night', from_date: '2026-11-04', assignment: 'SA-1' },
+      { employee: 'E1', action: 'Change', shift_type: 'Late', from_date: '2026-11-02', assignment: 'SA-1' },
+    ],
+    expect: {
+      E1: [
+        ['SA-1', 'Day', '2026-10-26', '2026-11-01'],
+        ['new-0-0', 'Night', '2026-11-04', '2026-11-04'],
+        ['new-0-1', 'Day', '2026-11-05', null],
+        ['new-1-0', 'Late', '2026-11-02', '2026-11-03'],
+      ],
+    },
+    problems: [],
+    notes: [[1, RUN_SPLIT]],
+  },
+  {
+    name: 'run split: one working day then a weekend still notes it',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-05'], ['SA-2', 'Day', '2026-11-09', '2026-11-13']] },
+    off_days: { E1: { from: '2026-11-01', to: '2026-12-31', dates: WEEKENDS } },
+    ops: [{ employee: 'E1', action: 'End', to_date: '2026-11-03', assignment: 'SA-1' }],
+    expect: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-03'], ['SA-2', 'Day', '2026-11-09', '2026-11-13']] },
+    problems: [],
+    notes: [[0, RUN_SPLIT]],
+  },
+  {
+    name: 'run split: a swap on the Monday after a weekend still notes it',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-06'], ['SA-2', 'Day', '2026-11-09', '2026-11-13']] },
+    off_days: { E1: { from: '2026-11-01', to: '2026-12-31', dates: WEEKENDS } },
+    ops: [
+      { employee: 'E1', action: 'Swap Day', shift_type: 'Night', from_date: '2026-11-09', assignment: 'SA-2' },
+      { employee: 'E1', action: 'End', to_date: '2026-11-04', assignment: 'SA-1' },
+    ],
+    expect: {
+      E1: [
+        ['SA-1', 'Day', '2026-11-02', '2026-11-04'],
+        ['new-0-0', 'Night', '2026-11-09', '2026-11-09'],
+        ['new-0-1', 'Day', '2026-11-10', '2026-11-13'],
+      ],
+    },
+    problems: [],
+    notes: [[1, RUN_SPLIT]],
+  },
+  {
+    name: 'run split: no note when the same shift resumes after two working days',
+    coverage: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-03'], ['SA-2', 'Day', '2026-11-06', '2026-11-13']] },
+    off_days: { E1: { from: '2026-11-01', to: '2026-12-31', dates: WEEKENDS } },
+    ops: [{ employee: 'E1', action: 'End', to_date: '2026-11-02', assignment: 'SA-1' }],
+    expect: { E1: [['SA-1', 'Day', '2026-11-02', '2026-11-02'], ['SA-2', 'Day', '2026-11-06', '2026-11-13']] },
+    problems: [],
+    notes: [],
+  },
 ]
 
 const coverageIn = (table) =>
@@ -719,6 +1067,20 @@ describe('simulate', () => {
     expect(coverageOut(coverage)).toEqual({ E1: [['new-0-0', 'Day', '2026-11-02', '2026-11-27']] })
   })
 
+  it('takes the same one-day steps in legacy mode (no off days)', () => {
+    // Plan 2026-11-05-001 U3: Swap Day and Clear Day never read off days.
+    const cases = CASES.filter((c) => c.ops.every((op) => ['Swap Day', 'Clear Day'].includes(op.action)))
+    expect(cases.length).toBeGreaterThan(0)
+    for (const c of cases) {
+      const { coverage, problems, steps } = simulate(coverageIn(c.coverage), c.ops)
+      expect(coverageOut(coverage)).toEqual(c.expect)
+      expect(problems.map((p) => [p.index, p.message])).toEqual(c.problems)
+      expect(
+        steps.map((opSteps) => opSteps.map((s) => [s.action, s.key, s.shift_type, s.start_date, s.end_date])),
+      ).toEqual(c.steps)
+    }
+  })
+
   it('does not mutate the input coverage', () => {
     const original = coverageIn({ E1: [['SA-1', 'Day', '2026-11-01', null]] })
     simulate(original, [{ employee: 'E1', action: 'End', to_date: '2026-11-30', assignment: 'SA-1' }])
@@ -744,6 +1106,8 @@ describe('opDate', () => {
   it('is the end date for End and the from date otherwise', () => {
     expect(opDate({ action: 'End', from_date: '2026-11-01', to_date: '2026-11-09' })).toBe('2026-11-09')
     expect(opDate({ action: 'Change', from_date: '2026-11-01' })).toBe('2026-11-01')
+    expect(opDate({ action: 'Clear Day', from_date: '2026-11-04', to_date: '2026-11-09' })).toBe('2026-11-04')
+    expect(opDate({ action: 'Swap Day', from_date: '2026-11-04' })).toBe('2026-11-04')
     expect(opDate({ action: 'Assign', from_date: '2026-02-30' })).toBeNull()
   })
 })
