@@ -11,13 +11,24 @@
 // drift.
 
 const PATTERNS = [
+  // `^(?!warning)`: HRMS also says this as a non-fatal orange *warning* for a
+  // leave type that allows a negative balance (plan 2026-11-06-001). Only the
+  // throw means the person is short. The name loses a trailing full stop,
+  // which `</strong>.` leaves behind once the tags are gone.
   {
-    test: /insufficient leave balance for leave type\s*:?\s*"?([^"<]+)"?/i,
-    message: (m) => `You do not have enough ${m[1].trim()} for these dates.`,
+    test: /^(?!\s*warning\b).*insufficient leave balance for leave type\s*:?\s*"?([^"<]+)"?/i,
+    message: (m) => `You do not have enough ${m[1].trim().replace(/\s*\.$/, '')} for these dates.`,
   },
   {
-    test: /leave application .*already exists|overlaps? with/i,
+    test: /leave application .*already exists|overlaps? with|has already applied for .* between/i,
     message: () => 'You already have a leave request that overlaps these dates.',
+  },
+  // HRMS `validate_attendance`: Present or Work From Home attendance already
+  // covers a day of this leave, typically from an approved Attendance Request.
+  {
+    test: /attendance for employee .* is already marked/i,
+    message: () =>
+      "Attendance is already marked for these dates, so this leave can't go ahead. Withdraw or reject it.",
   },
   {
     test: /application period cannot be across two allocation records/i,
@@ -158,11 +169,24 @@ function joinRows(rows) {
  * silently on Attendance requests (P3-U9). */
 export const FALLBACK_ERROR = 'Something went wrong. Please try again.'
 
+const WARNING = /^\s*warning\b/i
+
 /** Map a raw Frappe error (an Error thrown by apiRequest, with `.messages`
- * and/or `.message`) to one plain sentence. */
+ * and/or `.message`) to one plain sentence.
+ *
+ * `.messages` holds every message of the request in order, and frappe-ui
+ * drops each one's indicator on the way. A `frappe.throw` ends the request,
+ * so the refusal is the last message; anything before it was a msgprint.
+ * HRMS's "Warning: Insufficient leave balance" is one of those, and it comes
+ * first on every request for a leave type that allows a negative balance --
+ * reading `messages[0]` showed it in place of the real refusal (plan
+ * 2026-11-06-001). Warnings only speak when nothing else did. */
 export function toPlainLeaveError(error) {
-  const first = error?.messages?.[0]
-  const raw = toPlainMessage(first ?? error?.message ?? error ?? '')
+  const messages = (error?.messages ?? []).map(toPlainMessage).filter(Boolean)
+  const refusals = messages.filter((m) => !WARNING.test(m))
+  const chosen = refusals.at(-1) ?? messages.at(-1)
+  // `<b>X</b>.` strips to "X ." -- close the gap before punctuation.
+  const raw = (chosen ?? toPlainMessage(error?.message ?? error ?? '')).replace(/\s+([.,;:])/g, '$1')
   for (const { test, message } of PATTERNS) {
     const match = raw.match(test)
     if (match) return message(match)
